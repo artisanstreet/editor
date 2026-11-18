@@ -1,4 +1,6 @@
-use super::{ComposerAction, QUESTIONNAIRE_MAX_HEIGHT, questionnaire};
+use super::{
+    ComposerAction, ComposerFailure, QUESTIONNAIRE_MAX_HEIGHT, draft_error, questionnaire,
+};
 use crate::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
 use aqua_text::{SharedFonts, SharedRuns};
@@ -214,4 +216,27 @@ fn a_long_questionnaire_scrolls_and_leaves_the_prompt_on_screen() {
         )))
         .unwrap();
     assert!(tree.rect(card).unwrap().h <= QUESTIONNAIRE_MAX_HEIGHT);
+}
+
+#[test]
+fn a_composer_notice_explains_itself_and_can_be_dismissed() {
+    let mut mounted = Mounted::new(|dispatch| {
+        draft_error(
+            ArtisanTheme::resolved(),
+            ComposerFailure::Notice {
+                message: "A message can contain at most 8 images.",
+            },
+            dispatch,
+        )
+    });
+    assert!(
+        mounted
+            .said()
+            .iter()
+            .any(|text| text == "A message can contain at most 8 images.")
+    );
+    assert_eq!(
+        mounted.press("notice-dismiss"),
+        [ComposerAction::DismissNotice]
+    );
 }

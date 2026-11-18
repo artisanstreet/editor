@@ -130,3 +130,60 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
     assert!(owner.mention_pointer(Some(aqua_core::Point::new(12.0, 10.0))));
     assert_eq!(owner.controller.borrow().mentions.highlighted, 2);
 }
+
+#[test]
+fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
+    use editor_aqua::composer::view::ComposerAction;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let identity = Identity::generate("composer-notice").unwrap();
+    let print = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let host = HostId("composer-notice".into());
+    core.add_test_host(
+        &HostConfig {
+            id: host.clone(),
+            name: "Forge".into(),
+            address: "127.0.0.1:1".into(),
+            fingerprint: print,
+            kind: HostKind::Local,
+        },
+        client,
+    );
+    let mut sessions = DraftSessions::default();
+    let mut owner = ComposerOwner::new(
+        &core,
+        &mut sessions,
+        ComposerTarget::NewThread {
+            host: host.clone(),
+            project: None,
+        },
+        std::rc::Rc::new(|_| {}),
+    );
+    owner.controller.borrow_mut().notice =
+        Some("Couldn't stop the run: the host did not answer".into());
+    let said = |owner: &ComposerOwner, core: &Core| {
+        let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.set_viewport(700.0, 500.0, 1.0);
+        let shown = card(owner, core, &host);
+        app.mount(move |_| shown).unwrap();
+        app.build_frame().unwrap();
+        test_support::editor::ui::painted_texts(&app)
+    };
+    let shown = said(&owner, &core);
+    assert!(
+        shown
+            .iter()
+            .any(|text| text == "Couldn't stop the run: the host did not answer")
+    );
+    assert!(shown.iter().any(|text| text == "Dismiss"));
+    owner.dispatch_with_change(&mut core, ComposerAction::DismissNotice, None);
+    assert!(
+        !said(&owner, &core)
+            .iter()
+            .any(|text| text.starts_with("Couldn't stop the run"))
+    );
+}

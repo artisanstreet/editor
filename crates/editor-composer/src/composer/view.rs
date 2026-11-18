@@ -85,6 +85,7 @@ pub enum ComposerAction {
     LoadOtherDraft,
     RetryModelChoice,
     RetryThreadSettings,
+    DismissNotice,
     CloseNote,
     ClearGoal,
     Unpark,
@@ -901,6 +902,7 @@ pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Ele
 pub enum ComposerFailure<'a> {
     Draft { error: &'a str, conflict: bool },
     ModelChoice { error: &'a str },
+    Notice { message: &'a str },
 }
 
 pub fn draft_error(
@@ -950,6 +952,10 @@ pub fn draft_error(
                 "Retry",
                 ComposerAction::RetryModelChoice,
             ),
+        ),
+        ComposerFailure::Notice { message } => (
+            message,
+            choice("notice-dismiss", "Dismiss", ComposerAction::DismissNotice),
         ),
     };
     UiBox::new()
@@ -2328,6 +2334,12 @@ impl ComposerOwner {
             ComposerAction::RetryThreadSettings => {
                 effects.push(ComposerEffect::RetryThreadSettings)
             }
+            ComposerAction::DismissNotice => {
+                composer.notice = None;
+                if let Some(attachments) = &mut composer.attachments {
+                    attachments.notice = None;
+                }
+            }
             ComposerAction::CloseNote => {
                 composer
                     .strip
@@ -2691,6 +2703,24 @@ impl ComposerOwner {
                         Rc::clone(&self.dispatch),
                     )
                 })
+            })
+            .or_else(|| {
+                controller
+                    .notice
+                    .as_deref()
+                    .or_else(|| {
+                        controller
+                            .attachments
+                            .as_ref()
+                            .and_then(|attachments| attachments.notice.as_deref())
+                    })
+                    .map(|message| {
+                        draft_error(
+                            theme,
+                            ComposerFailure::Notice { message },
+                            Rc::clone(&self.dispatch),
+                        )
+                    })
             });
         composer_card(
             theme,
