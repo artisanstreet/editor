@@ -42,8 +42,8 @@ pub enum Action {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
-    pub session: u64,
-    pub action: Action,
+    pub(crate) session: u64,
+    pub(crate) action: Action,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,8 +55,8 @@ pub enum Effect {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
-    pub changed: bool,
-    pub effect: Effect,
+    pub(crate) changed: bool,
+    pub(crate) effect: Effect,
 }
 
 pub struct PaletteView {
@@ -66,7 +66,7 @@ pub struct PaletteView {
 }
 
 impl PaletteView {
-    pub fn new(emit: Rc<dyn Fn(Event)>) -> Self {
+    pub(crate) fn new(emit: Rc<dyn Fn(Event)>) -> Self {
         let session = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let active = Rc::new(Cell::new(true));
         let query = Rc::new(RefCell::new(Editor::new("", Mode::SingleLine)));
@@ -98,19 +98,19 @@ impl PaletteView {
         }
     }
 
-    pub fn session(&self) -> u64 {
+    pub(crate) fn session(&self) -> u64 {
         self.session
     }
 
-    pub fn close(&self) {
+    pub(crate) fn close(&self) {
         self.active.set(false);
     }
 
-    pub fn focus_query(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn focus_query(&self, app: &mut aqua::UiApp) -> bool {
         self.active.get() && app.focus_key(QUERY_KEY)
     }
 
-    pub fn sync_query(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_query(&self, app: &mut aqua::UiApp) -> bool {
         if !self.active.get() {
             return false;
         }
@@ -120,7 +120,7 @@ impl PaletteView {
             .is_some_and(|node| self.editor.sync(app.tree_mut(), node))
     }
 
-    pub fn dispatch(&self, palette: &mut Palette, event: Event) -> Outcome {
+    pub(crate) fn dispatch(&self, palette: &mut Palette, event: Event) -> Outcome {
         if !self.active.get() || event.session != self.session {
             return Outcome {
                 changed: false,
@@ -180,7 +180,7 @@ impl PaletteView {
         }
     }
 
-    pub fn content(
+    pub(crate) fn content(
         &self,
         palette: &Palette,
         theme: &ArtisanTheme,

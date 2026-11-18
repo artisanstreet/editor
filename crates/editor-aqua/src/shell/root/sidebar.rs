@@ -6,7 +6,7 @@ use aqua_ui::element::Element;
 use std::rc::Rc;
 
 impl RootViews {
-    pub(super) fn release_sidebar_views(&mut self, ui: &mut UiApp) {
+    fn release_sidebar_views(&mut self, ui: &mut UiApp) {
         self.sidebar_overlays.dispose(ui);
         if let Some(preview) = self.sidebar_drag.take() {
             preview.dispose(ui);
@@ -214,7 +214,7 @@ impl RootViews {
         (search, tree, overlay)
     }
 
-    pub(super) fn search_bar(
+    fn search_bar(
         &self,
         workspace: &crate::shell::workspace::Workspace,
         theme: &crate::ui::theme::ArtisanTheme,

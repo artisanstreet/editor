@@ -40,13 +40,13 @@ impl Notifications {
         self.marks.insert(host.id().clone(), baseline);
     }
 
-    pub fn sync_connection(&mut self, host: &impl NotificationHost) {
+    pub(crate) fn sync_connection(&mut self, host: &impl NotificationHost) {
         if !host.is_live() || !matches!(self.marks.get(host.id()), Some(Some(_))) {
             self.reset(host);
         }
     }
 
-    pub fn retain_hosts(&mut self, live: &[HostId]) -> Vec<String> {
+    pub(crate) fn retain_hosts(&mut self, live: &[HostId]) -> Vec<String> {
         self.marks.retain(|id, _| live.contains(id));
         let mut gone = Vec::new();
         self.posted.retain(|host, threads| {
@@ -59,7 +59,7 @@ impl Notifications {
         gone
     }
 
-    pub fn withdraw(&mut self, host: &impl NotificationHost) -> Vec<String> {
+    fn withdraw(&mut self, host: &impl NotificationHost) -> Vec<String> {
         let mut settled = Vec::new();
         if let Some(threads) = self.posted.get_mut(host.id()) {
             threads.retain(|thread| {
@@ -85,7 +85,7 @@ impl Notifications {
         }
     }
 
-    pub fn observe(
+    fn observe(
         &mut self,
         host: &impl NotificationHost,
         thread: &ThreadId,
@@ -170,7 +170,7 @@ pub fn tag(host: &HostId, thread: &ThreadId) -> String {
     format!("{host}|{}", thread.0)
 }
 
-pub fn parse_tag(tag: &str) -> Option<(HostId, ThreadId)> {
+pub(crate) fn parse_tag(tag: &str) -> Option<(HostId, ThreadId)> {
     let (host, thread) = tag.split_once('|')?;
     Some((HostId(host.to_owned()), ThreadId(thread.to_owned())))
 }

@@ -1,6 +1,6 @@
-pub const TILE: (f32, f32) = (84.0, 48.0);
+const TILE: (f32, f32) = (84.0, 48.0);
 pub const CELL: (f32, f32) = (12.0, 6.0);
-pub const COVERAGE: f32 = 0.46;
+pub(crate) const COVERAGE: f32 = 0.46;
 
 const CELLS: [(f32, f32); 26] = [
     (0.0, 0.0),
@@ -61,9 +61,9 @@ pub fn cells(width: f32, height: f32) -> Vec<Cell> {
     (0..rows)
         .flat_map(|row| (0..columns).map(move |column| (column, row)))
         .flat_map(|(column, row)| {
-            CELLS.iter().map(move |(x, y)| {
-                (column as f32 * TILE.0 + x, row as f32 * TILE.1 + y)
-            })
+            CELLS
+                .iter()
+                .map(move |(x, y)| (column as f32 * TILE.0 + x, row as f32 * TILE.1 + y))
         })
         .filter_map(|(x, y)| {
             let center = ((x + CELL.0 / 2.0) / width, (y + CELL.1 / 2.0) / height);

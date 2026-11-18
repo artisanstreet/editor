@@ -14,18 +14,18 @@ use artisan_api::{ItemId, ProjectId, ThreadId};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub const ROW: Row = Row::Heading;
-pub const HEIGHT: f32 = match ROW.height() {
+const ROW: Row = Row::Heading;
+pub(crate) const HEIGHT: f32 = match ROW.height() {
     Some(height) => height,
     None => 0.0,
 };
-pub const BAR_HEIGHT: f32 = HEIGHT + Space::S4.px();
+pub(crate) const BAR_HEIGHT: f32 = HEIGHT + Space::S4.px();
 pub const RADIUS: Radius = Radius::Panel;
 const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
 const PULSE_MS: u32 = 1_600;
 pub const OUTLINE_CHEVRON: &str = "artisan-thread-outline-chevron";
-pub const OUTLINE_EDGE: IconSize = IconSize::Md;
+const OUTLINE_EDGE: IconSize = IconSize::Md;
 
 pub use crate::ui::project_mark::Mark;
 
@@ -88,7 +88,10 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .children(tab.location.as_ref().map(|_| separator(theme)))
         .child(thread(theme, tab, reduced, Rc::clone(&emit)))
         .children(agents(theme, tab, &emit))
-        .children(tab.outline.map(|flip| outline(theme, flip, Rc::clone(&emit))))
+        .children(
+            tab.outline
+                .map(|flip| outline(theme, flip, Rc::clone(&emit))),
+        )
         .build();
     let row = RowItem::new(
         format!("artisan-tab-row-{}", tab.id),
@@ -195,7 +198,11 @@ fn frame(text: Text, fill: bool) -> Element {
 }
 
 fn separator(theme: &ArtisanTheme) -> Element {
-    words(TextRole::Label.text(theme, "/"), theme.colors.text_muted, false)
+    words(
+        TextRole::Label.text(theme, "/"),
+        theme.colors.text_muted,
+        false,
+    )
 }
 
 fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
@@ -206,10 +213,15 @@ fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)
             pulsing,
         ),
         false => title(
-            Link::new("artisan-thread-crumb", *theme, LinkTone::Crumb, tab.title.clone())
-                .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
-                .build()
-                .aria_label(format!("Open {}", tab.title)),
+            Link::new(
+                "artisan-thread-crumb",
+                *theme,
+                LinkTone::Crumb,
+                tab.title.clone(),
+            )
+            .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
+            .build()
+            .aria_label(format!("Open {}", tab.title)),
             pulsing,
         ),
     }
@@ -260,7 +272,7 @@ fn title(label: Element, pulsing: bool) -> Element {
 }
 
 #[must_use]
-pub fn flip(progress: f32) -> Transform2D {
+pub(crate) fn flip(progress: f32) -> Transform2D {
     let centre = OUTLINE_EDGE.px() / 2.0;
     Transform2D::translate(0.0, -centre)
         .then(Transform2D::scale(1.0, 2.0f32.mul_add(-progress, 1.0)))

@@ -15,8 +15,8 @@ use std::{
     rc::Rc,
 };
 
-pub const LEAD: &str = "artisan-titlebar-drag-lead";
-pub const WORDMARK: &str = "artisan-sidebar-wordmark";
+pub(crate) const LEAD: &str = "artisan-titlebar-drag-lead";
+pub(crate) const WORDMARK: &str = "artisan-sidebar-wordmark";
 const DRAG: &str = "artisan-titlebar-drag";
 const METER: &str = "artisan-titlebar-meter";
 const MIN: &str = "artisan-desktop-titlebar-minimize";
@@ -32,19 +32,19 @@ pub struct Titlebar {
 }
 
 impl Titlebar {
-    pub fn regions(&self) -> Option<DragRegions> {
+    pub(crate) fn regions(&self) -> Option<DragRegions> {
         self.regions.borrow().clone()
     }
 
-    pub fn take_actions(&self) -> VecDeque<CaptionControl> {
+    pub(crate) fn take_actions(&self) -> VecDeque<CaptionControl> {
         std::mem::take(&mut *self.actions.borrow_mut())
     }
 
-    pub fn take_changed(&self) -> bool {
+    pub(crate) fn take_changed(&self) -> bool {
         self.changed.replace(false)
     }
 
-    pub fn entry(&self, theme: ArtisanTheme, window: &ObservedWindowState) -> Element {
+    pub(crate) fn entry(&self, theme: ArtisanTheme, window: &ObservedWindowState) -> Element {
         let content = UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
@@ -56,7 +56,7 @@ impl Titlebar {
         self.measured(content, false, false, TITLEBAR_HEIGHT)
     }
 
-    pub fn workspace(
+    pub(crate) fn workspace(
         &self,
         theme: ArtisanTheme,
         window: &ObservedWindowState,

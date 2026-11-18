@@ -26,11 +26,11 @@ pub struct WordmarkLoader {
 }
 
 impl WordmarkLoader {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.mounted = None;
     }
 
-    pub fn build(
+    pub(crate) fn build(
         &mut self,
         theme: ArtisanTheme,
         now: Instant,
@@ -95,7 +95,7 @@ impl WordmarkLoader {
             .aria_label("Loading")
     }
 
-    pub fn deadline(&self, now: Instant, reduced_motion: bool) -> Option<Instant> {
+    pub(crate) fn deadline(&self, now: Instant, reduced_motion: bool) -> Option<Instant> {
         if reduced_motion {
             return None;
         }
@@ -104,7 +104,7 @@ impl WordmarkLoader {
             .filter(|deadline| *deadline > now)
     }
 
-    pub fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
+    pub(crate) fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
         !reduced_motion
             && self
                 .mounted
@@ -113,7 +113,7 @@ impl WordmarkLoader {
 }
 
 #[must_use]
-pub fn lost(status: &ConnectionStatus) -> Option<Element> {
+pub(crate) fn lost(status: &ConnectionStatus) -> Option<Element> {
     match status {
         ConnectionStatus::Live => None,
         ConnectionStatus::Connecting | ConnectionStatus::Offline { .. } => Some(
@@ -177,7 +177,7 @@ fn command_button(
 }
 
 impl ConnectionPresenter {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.owner = None;
         self.host = None;
         self.phase = None;
@@ -450,7 +450,7 @@ impl ConnectionPresenter {
         }
     }
 
-    pub fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
+    pub(crate) fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
         !reduced_motion
             && (self.mark.animating(now, false)
                 || self.phase.is_some_and(|(_, since)| {

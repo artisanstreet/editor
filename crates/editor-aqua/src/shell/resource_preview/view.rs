@@ -50,7 +50,11 @@ pub struct ViewState {
 }
 
 impl ViewState {
-    pub fn new(generation: u64, document: SelectionDocumentId, source: SelectionSourceId) -> Self {
+    pub(crate) fn new(
+        generation: u64,
+        document: SelectionDocumentId,
+        source: SelectionSourceId,
+    ) -> Self {
         Self {
             generation,
             document,
@@ -60,7 +64,7 @@ impl ViewState {
         }
     }
 
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         preview: &ResourcePreview,
         app: &mut aqua::UiApp,
@@ -97,11 +101,11 @@ impl ViewState {
         Ok(true)
     }
 
-    pub fn pending_jump(&self) -> Option<usize> {
+    pub(crate) fn pending_jump(&self) -> Option<usize> {
         self.jump
     }
 
-    pub fn sync_jump(&mut self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_jump(&mut self, app: &mut aqua::UiApp) -> bool {
         let Some(index) = self.jump else {
             return false;
         };
@@ -116,20 +120,20 @@ impl ViewState {
         true
     }
 
-    pub fn jumped(&mut self, index: usize) {
+    fn jumped(&mut self, index: usize) {
         if self.jump == Some(index) {
             self.jump = None;
         }
     }
 
-    pub fn release(&mut self, app: &mut aqua::UiApp) {
+    pub(crate) fn release(&mut self, app: &mut aqua::UiApp) {
         if self.prepared.take().is_some() {
             app.unregister_selection_source_in(self.document, self.source);
         }
         self.jump = None;
     }
 
-    pub fn content(
+    pub(crate) fn content(
         &self,
         preview: &ResourcePreview,
         theme: ArtisanTheme,
@@ -206,7 +210,7 @@ impl ViewState {
         Ok(body.build())
     }
 
-    pub fn dialog(
+    fn dialog(
         &self,
         preview: &ResourcePreview,
         theme: ArtisanTheme,

@@ -6,7 +6,7 @@ use aqua::{AppCtx, UiApp};
 use std::rc::Rc;
 
 impl RootViews {
-    pub fn replace_rows(
+    pub(crate) fn replace_rows(
         &mut self,
         rows: Option<Rc<crate::conversation::view::factory::RowFactory>>,
     ) {

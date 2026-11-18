@@ -21,20 +21,20 @@ type Recency = (Timestamp, HostId, ThreadId);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    pub label: String,
-    pub detail: String,
-    pub screen: Screen,
+    label: String,
+    detail: String,
+    screen: Screen,
 }
 
 pub struct HostSnapshot<'a> {
-    pub id: &'a HostId,
-    pub name: &'a str,
-    pub instance: HostInstance,
-    pub threads: &'a HashMap<ThreadId, Thread>,
-    pub projects: &'a BTreeMap<ProjectId, Project>,
+    pub(crate) id: &'a HostId,
+    pub(crate) name: &'a str,
+    pub(crate) instance: HostInstance,
+    pub(crate) threads: &'a HashMap<ThreadId, Thread>,
+    pub(crate) projects: &'a BTreeMap<ProjectId, Project>,
 }
 
-pub struct SearchHost {
+pub(crate) struct SearchHost {
     pub id: HostId,
     pub name: String,
     pub client: ForgeClient,
@@ -58,9 +58,9 @@ struct SearchResult {
 
 pub struct Palette {
     pub query: String,
-    pub highlighted: usize,
-    pub entries: Vec<Entry>,
-    pub search_error: Option<SearchProblem>,
+    highlighted: usize,
+    entries: Vec<Entry>,
+    search_error: Option<SearchProblem>,
     search: Option<Vec<SearchResult>>,
     pending: usize,
     generation: u64,
@@ -130,11 +130,11 @@ impl Default for Palette {
 }
 
 impl Palette {
-    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+    pub(crate) fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
     }
 
-    pub fn start_search(&mut self, query: String, hosts: Vec<SearchHost>) {
+    pub(crate) fn start_search(&mut self, query: String, hosts: Vec<SearchHost>) {
         self.query = query;
         self.generation = self.generation.wrapping_add(1);
         self.request = None;
@@ -186,7 +186,7 @@ impl Palette {
         ));
     }
 
-    pub fn drain(&mut self, core: &crate::core::Core) -> bool {
+    pub(crate) fn drain(&mut self, core: &crate::core::Core) -> bool {
         let mut changed = false;
         for update in self.delivery.drain() {
             if update.generation != self.generation
@@ -217,7 +217,7 @@ impl Palette {
     }
 
     #[must_use]
-    pub const fn searching(&self) -> bool {
+    const fn searching(&self) -> bool {
         self.pending > 0
     }
 
@@ -362,10 +362,10 @@ impl Palette {
         self.entries = entries;
     }
 
-    pub fn up(&mut self) {
+    fn up(&mut self) {
         self.highlighted = self.highlighted.saturating_sub(1);
     }
-    pub fn down(&mut self) {
+    fn down(&mut self) {
         self.highlighted = (self.highlighted + 1).min(self.entries.len().saturating_sub(1));
     }
     pub fn selected(&self) -> Option<&Screen> {

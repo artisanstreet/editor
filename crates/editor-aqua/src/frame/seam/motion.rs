@@ -75,7 +75,7 @@ impl Motion {
         self.target = Some(next);
     }
 
-    pub fn destination(&self) -> Option<Rect> {
+    pub(crate) fn destination(&self) -> Option<Rect> {
         let body = self.target?.body;
         Some(Rect::from_edges(
             self.left.target(),

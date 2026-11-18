@@ -1,5 +1,5 @@
 #[must_use]
-pub fn title_of(title: Option<&str>) -> String {
+pub(crate) fn title_of(title: Option<&str>) -> String {
     title
         .map(str::trim)
         .filter(|title| !title.is_empty())

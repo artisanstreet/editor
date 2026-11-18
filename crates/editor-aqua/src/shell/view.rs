@@ -17,7 +17,7 @@ const STRIP_PAD: Space = Space::S8;
 const CONVERSATION_WIDTH: f32 = 768.0;
 const FORGES_WIDTH: f32 = 560.0;
 
-pub struct WorkspaceElements {
+pub(crate) struct WorkspaceElements {
     pub body: Element,
     pub settings_dialog: Option<Element>,
     pub palette: Option<Element>,
@@ -120,7 +120,11 @@ pub fn settings_panel(
         .build()
 }
 
-pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceElements) -> Element {
+pub(crate) fn workspace(
+    workspace_key: u64,
+    theme: &ArtisanTheme,
+    elements: WorkspaceElements,
+) -> Element {
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -145,7 +149,7 @@ pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceEl
         .debug_selector("workspace-root")
 }
 
-pub struct ComposerParts {
+pub(crate) struct ComposerParts {
     pub nested: bool,
     pub placeholder: String,
     pub questionnaires: Option<Element>,
@@ -155,7 +159,7 @@ pub struct ComposerParts {
     pub shift: f32,
 }
 
-pub fn conversation_virtual(
+pub(crate) fn conversation_virtual(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
@@ -267,7 +271,7 @@ fn measured_composer(
         .with_key(crate::shell::composer_glide::DOCK_KEY))
 }
 
-pub fn conversation_body(
+pub(crate) fn conversation_body(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
@@ -300,7 +304,7 @@ pub fn conversation_body(
     ))
 }
 
-pub fn centered_body(content: Element) -> Element {
+pub(crate) fn centered_body(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -314,7 +318,7 @@ pub fn centered_body(content: Element) -> Element {
         .build()
 }
 
-pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
+pub(crate) fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
     let radius = concentric(Radius::Shell.px(), EDGE_INSET);
     let (top, bottom, corners) = match edge {
         crate::ui::scroll_edge::Edge::Top => (Some(EDGE_INSET), None, Corners::Top),
@@ -326,7 +330,7 @@ pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
         .with(&corners.style(radius))
 }
 
-pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
+pub(crate) fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
         .style(
@@ -343,7 +347,7 @@ pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
         .build()
 }
 
-pub fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> Element {
+pub(crate) fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> Element {
     let color = if error {
         theme.colors.destructive_text
     } else {
@@ -357,7 +361,7 @@ pub fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> E
     )
 }
 
-pub struct Sky {
+pub(crate) struct Sky {
     pub opacity: f32,
     pub transform: aqua_core::Transform2D,
 }
@@ -372,7 +376,7 @@ fn sky(
         .style(Style::new().opacity(look.opacity).transform(look.transform))
 }
 
-pub fn new_conversation(
+pub(crate) fn new_conversation(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
@@ -405,7 +409,7 @@ pub fn new_conversation(
         .with_key(crate::shell::composer_glide::STAGE_KEY))
 }
 
-pub fn under_setting_sky(
+pub(crate) fn under_setting_sky(
     theme: &ArtisanTheme,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     reduced_motion: bool,
@@ -429,7 +433,7 @@ pub fn under_setting_sky(
         .build()
 }
 
-pub fn centered_conversation(content: Element) -> Element {
+pub(crate) fn centered_conversation(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -450,7 +454,7 @@ pub fn centered_conversation(content: Element) -> Element {
         .build()
 }
 
-pub fn home(theme: &ArtisanTheme, forges: Element) -> Element {
+pub(crate) fn home(theme: &ArtisanTheme, forges: Element) -> Element {
     let content = UiBox::new()
         .layout("column")
         .spaced(Space::S8)

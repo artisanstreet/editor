@@ -371,7 +371,7 @@ pub fn prepare(path: &Path) -> Result<(), PrepareError> {
     clippy::print_stdout,
     reason = "the qualification CLI reports the restored seed to its caller on stdout"
 )]
-pub fn restore(path: &Path, expected_sha256: &str) -> Result<(), RestoreError> {
+pub(crate) fn restore(path: &Path, expected_sha256: &str) -> Result<(), RestoreError> {
     let record_path = || RestoreError::RecordPath {
         path: path.to_owned(),
     };

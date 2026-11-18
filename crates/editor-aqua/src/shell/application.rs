@@ -162,14 +162,6 @@ pub struct ShellApplication<V> {
 
 #[cfg(feature = "qualification")]
 impl ShellApplication<crate::shell::root::RootViews> {
-    pub fn arm_qualification_paint(&mut self, generation: u64) -> bool {
-        self.views.arm_qualification_paint(&self.shell, generation)
-    }
-
-    pub fn qualification_paint(&self) -> Option<crate::qualification::observation::Paint> {
-        self.views.qualification_paint(&self.shell)
-    }
-
     pub fn qualification_observation(
         &self,
     ) -> Option<crate::qualification::observation::Observation> {
@@ -282,7 +274,7 @@ impl<V: SectionViews> ShellApplication<V> {
         Self::from_shell(shell, initial, resources, views)
     }
 
-    pub fn opening(
+    pub(crate) fn opening(
         files: crate::core::EditorFiles,
         resources: ShellResources,
         views: V,
@@ -332,7 +324,7 @@ impl<V: SectionViews> ShellApplication<V> {
         self.render_tap.get_or_insert_with(Default::default).clone()
     }
 
-    pub fn fitting_launch_to_display(mut self) -> Self {
+    pub(crate) fn fitting_launch_to_display(mut self) -> Self {
         self.fit_launch = true;
         self
     }
@@ -1389,7 +1381,7 @@ pub(crate) struct Tm(
     crate::core::diagnostics::rebuild_stats::Span,
 );
 impl Tm {
-    pub(crate) fn threshold_ms() -> f64 {
+    fn threshold_ms() -> f64 {
         static VALUE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
         *VALUE.get_or_init(|| {
             std::env::var("AQUA_TM_MS")

@@ -4,8 +4,8 @@ use crate::core::{EditorFiles, HostId, IdentityError};
 use crate::qualification::fixture::PairingInput;
 use std::path::PathBuf;
 
-pub const CORE_URL: &str = "http://127.0.0.1:1";
-pub const ACCOUNT_ID: &str = "acct_capture0000000000000000";
+const CORE_URL: &str = "http://127.0.0.1:1";
+pub(crate) const ACCOUNT_ID: &str = "acct_capture0000000000000000";
 pub const MACHINE_ID: &str = "mch_capture0000000000000000";
 
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +51,10 @@ pub struct ForgeInvite {
     pub pairing: PairingInput,
 }
 
-pub fn join_forge(files: &EditorFiles, pairing: &PairingInput) -> Result<HostId, JoinForgeError> {
+pub(crate) fn join_forge(
+    files: &EditorFiles,
+    pairing: &PairingInput,
+) -> Result<HostId, JoinForgeError> {
     let host = HostId(MACHINE_ID.to_owned());
     join_forges(
         files,

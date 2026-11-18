@@ -30,12 +30,12 @@ impl Entry {
         }
     }
 
-    pub fn emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    fn emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
+    pub(crate) fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
         ctx.bind_mailbox(window, self.controller.wake_mailbox());
     }
 
@@ -163,11 +163,11 @@ impl Entry {
             )
     }
 
-    pub fn drain(&mut self, core: &mut Core) -> bool {
+    pub(crate) fn drain(&mut self, core: &mut Core) -> bool {
         self.controller.drain(core)
     }
 
-    pub fn view(
+    pub(crate) fn view(
         &self,
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
@@ -245,7 +245,7 @@ impl Entry {
         card::screen(theme, titlebar.entry(*theme, window), card)
     }
 
-    pub fn sync_editors(&self, ui: &mut aqua::UiApp) {
+    pub(crate) fn sync_editors(&self, ui: &mut aqua::UiApp) {
         if self.workspace.is_some() {
             return;
         }
@@ -294,7 +294,7 @@ impl Entry {
         }
     }
 
-    pub fn land(&mut self, core: &mut Core) {
+    pub(crate) fn land(&mut self, core: &mut Core) {
         if self.workspace.is_none() || self.landed {
             return;
         }
@@ -312,13 +312,13 @@ impl Entry {
         }
     }
 
-    pub fn finish_events(&mut self, core: &mut Core, ui: &mut aqua::UiApp) {
+    pub(crate) fn finish_events(&mut self, core: &mut Core, ui: &mut aqua::UiApp) {
         if let Some(workspace) = self.workspace_mut() {
             workspace.finish_events(core, ui);
         }
     }
 
-    pub fn handle_event(
+    pub(crate) fn handle_event(
         &mut self,
         core: &mut Core,
         event: &CoreEvent,

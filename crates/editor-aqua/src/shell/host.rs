@@ -8,30 +8,30 @@ use aqua::images::ImageAssets;
 use aqua::prelude::AquaWindowId;
 use artisan_api::ThreadId;
 
-pub const INTERFACE_LANGUAGE: &str = "en";
-pub const WINDOW_NAME: &str = "Artisan Editor";
+pub(crate) const INTERFACE_LANGUAGE: &str = "en";
+pub(crate) const WINDOW_NAME: &str = "Artisan Editor";
 
 pub struct Shell {
-    pub titlebar: crate::shell::titlebar::Titlebar,
+    pub(crate) titlebar: crate::shell::titlebar::Titlebar,
     pub core: Core,
     pub entry: Entry,
     pub preferences: Preferences,
-    pub audio: editor_audio::Player,
-    pub audio_assets: crate::ui::media::audio::AudioAssets,
-    pub models: crate::ui::media::model::load::ModelAssets,
-    pub meshes_supported: std::rc::Rc<std::cell::Cell<Option<bool>>>,
-    pub meshes_changed: std::cell::Cell<bool>,
+    pub(crate) audio: editor_audio::Player,
+    pub(crate) audio_assets: crate::ui::media::audio::AudioAssets,
+    pub(crate) models: crate::ui::media::model::load::ModelAssets,
+    pub(crate) meshes_supported: std::rc::Rc<std::cell::Cell<Option<bool>>>,
+    pub(crate) meshes_changed: std::cell::Cell<bool>,
     pub dialogs: crate::ui::dialogs::DialogRoutes,
-    pub live: crate::shell::live_throttle::LiveThrottle,
+    pub(crate) live: crate::shell::live_throttle::LiveThrottle,
     images: ImageAssets,
 }
 
 pub struct ShellUpdates {
-    pub notifications: Vec<NotificationEffects>,
-    pub preferences_changed: bool,
-    pub theme_transition: Option<bool>,
-    pub settings_platform_effects: Vec<crate::shell::workspace::SettingsPlatformEffect>,
-    pub causes: Invalidation,
+    pub(crate) notifications: Vec<NotificationEffects>,
+    pub(crate) preferences_changed: bool,
+    pub(crate) theme_transition: Option<bool>,
+    pub(crate) settings_platform_effects: Vec<crate::shell::workspace::SettingsPlatformEffect>,
+    pub(crate) causes: Invalidation,
 }
 
 impl Shell {
@@ -39,7 +39,7 @@ impl Shell {
         Self::opening(files, images, None)
     }
 
-    pub fn opening(
+    pub(crate) fn opening(
         files: EditorFiles,
         images: ImageAssets,
         link: Option<Screen>,
@@ -64,7 +64,7 @@ impl Shell {
     }
 
     #[cfg(feature = "qualification")]
-    pub fn for_qualification(core: Core, images: ImageAssets) -> (Self, ShellUpdates) {
+    pub(crate) fn for_qualification(core: Core, images: ImageAssets) -> (Self, ShellUpdates) {
         Self::from_core(core, images, None)
     }
 
@@ -111,7 +111,7 @@ impl Shell {
         &self.images
     }
 
-    pub fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
+    pub(crate) fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
         ctx.bind_mailbox(window, self.core.wake_mailbox());
         self.audio_assets.bind(ctx, window);
         self.models.bind(ctx, window);
@@ -185,7 +185,7 @@ impl Shell {
         }
     }
 
-    pub fn apply_preferences(
+    pub(crate) fn apply_preferences(
         &self,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
@@ -193,7 +193,7 @@ impl Shell {
         self.preferences.apply_window(ctx, window)
     }
 
-    pub fn drain(&mut self, window_active: bool, ui: &mut aqua::UiApp) -> ShellUpdates {
+    pub(crate) fn drain(&mut self, window_active: bool, ui: &mut aqua::UiApp) -> ShellUpdates {
         let mut notifications = Vec::new();
         let mut causes = Invalidation::default();
         let tm_a = crate::shell::application::Tm::new("sd.assets");
@@ -301,14 +301,14 @@ impl Shell {
         }
     }
 
-    pub fn open_palette(&mut self, ctx: &AppCtx<'_>, window: AquaWindowId) {
+    pub(crate) fn open_palette(&mut self, ctx: &AppCtx<'_>, window: AquaWindowId) {
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.open_palette(&self.core);
         }
         self.bind(ctx, window);
     }
 
-    pub fn open_reference(
+    pub(crate) fn open_reference(
         &mut self,
         ctx: &AppCtx<'_>,
         window: AquaWindowId,
@@ -322,7 +322,7 @@ impl Shell {
         self.bind(ctx, window);
     }
 
-    pub fn retry_reference(&mut self) -> bool {
+    pub(crate) fn retry_reference(&mut self) -> bool {
         let core = &self.core;
         self.entry
             .workspace_mut()
@@ -330,25 +330,25 @@ impl Shell {
             .is_some_and(|preview| preview.retry(core))
     }
 
-    pub fn dismiss_reference(&mut self) {
+    pub(crate) fn dismiss_reference(&mut self) {
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.dismiss_reference();
         }
     }
 
-    pub fn dismiss_palette(&mut self) {
+    pub(crate) fn dismiss_palette(&mut self) {
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.dismiss_palette();
         }
     }
 
-    pub fn new_thread(&mut self) {
+    pub(crate) fn new_thread(&mut self) {
         Workspace::new_thread(&mut self.core);
     }
-    pub fn go_back(&mut self) {
+    pub(crate) fn go_back(&mut self) {
         self.core.go_back();
     }
-    pub fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self) {
         Workspace::open_settings(&mut self.core);
     }
     pub fn navigate(&mut self, screen: Screen) {
@@ -389,19 +389,19 @@ impl ShellResources {
         Some(Self { ui, images })
     }
 
-    pub fn with_color_profile(self, profile: aqua_core::ColorProfile) -> Self {
+    pub(crate) fn with_color_profile(self, profile: aqua_core::ColorProfile) -> Self {
         Self {
             ui: aqua::UiApp::from_runtime(self.ui.into_runtime().with_color_profile(profile)),
             images: self.images,
         }
     }
 
-    pub fn into_managed(self) -> aqua::images::ManagedUiApp {
+    pub(crate) fn into_managed(self) -> aqua::images::ManagedUiApp {
         aqua::images::ManagedUiApp::new(self.ui, self.images)
     }
 }
 
-pub fn set_window_scale(ui: &mut aqua::UiApp, scale: f32) -> bool {
+pub(crate) fn set_window_scale(ui: &mut aqua::UiApp, scale: f32) -> bool {
     ui.tree_mut().set_gpui_layout_scale(Some(scale))
 }
 

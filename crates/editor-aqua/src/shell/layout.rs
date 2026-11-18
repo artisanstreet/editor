@@ -1,9 +1,9 @@
 pub use crate::ui::chrome::TITLEBAR_HEIGHT;
-pub const COLUMN_WIDTH: f32 = 327.0;
-pub const COLUMN_MIN_WIDTH: f32 = 240.0;
+const COLUMN_WIDTH: f32 = 327.0;
+const COLUMN_MIN_WIDTH: f32 = 240.0;
 pub const CHAT_MIN_WIDTH: f32 = 864.0;
-pub const MIN_WINDOW_WIDTH: f32 = 720.0;
-pub const MIN_WINDOW_HEIGHT: f32 = 480.0;
+pub(crate) const MIN_WINDOW_WIDTH: f32 = 720.0;
+pub(crate) const MIN_WINDOW_HEIGHT: f32 = 480.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -11,7 +11,7 @@ pub struct Size {
     pub height: f32,
 }
 
-pub fn launch_size(visible: Option<Size>) -> Size {
+pub(crate) fn launch_size(visible: Option<Size>) -> Size {
     let mut size = Size {
         width: 2.0_f32.mul_add(COLUMN_WIDTH, CHAT_MIN_WIDTH),
         height: 900.0,
@@ -23,17 +23,17 @@ pub fn launch_size(visible: Option<Size>) -> Size {
     size
 }
 
-pub fn settings_sidebar_width(window_width: f32) -> f32 {
+fn settings_sidebar_width(window_width: f32) -> f32 {
     (window_width - 520.0).clamp(COLUMN_MIN_WIDTH, COLUMN_WIDTH)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SettingsLayout {
-    pub size: Size,
-    pub navigation_width: f32,
+    pub(crate) size: Size,
+    pub(crate) navigation_width: f32,
 }
 
-pub fn settings_layout(window: Size) -> SettingsLayout {
+pub(crate) fn settings_layout(window: Size) -> SettingsLayout {
     let scale = (2.0_f32.mul_add(-24.0, window.width) / window.width)
         .min(2.0_f32.mul_add(-24.0, window.height) / window.height)
         .min(1100.0 / window.width)
@@ -53,21 +53,21 @@ pub fn settings_layout(window: Size) -> SettingsLayout {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EntryLayout {
-    pub width: f32,
-    pub max_height: f32,
+    width: f32,
+    max_height: f32,
 }
 
-pub const CONTROL_WIDTH: f32 = crate::ui::kit::control::caption::WIDTH;
-pub const CONTROL_GLYPH: f32 = crate::ui::kit::IconSize::Md.px();
-pub const CONTROLS_WIDTH: f32 = CONTROL_WIDTH * 3.0;
-pub const CONTROL_INSET_X: f32 = (CONTROL_WIDTH - CONTROL_GLYPH) / 2.0;
-pub const CONTROL_INK_INSET: f32 = CONTROL_GLYPH * 5.0 / 24.0;
+const CONTROL_WIDTH: f32 = crate::ui::kit::control::caption::WIDTH;
+const CONTROL_GLYPH: f32 = crate::ui::kit::IconSize::Md.px();
+const CONTROLS_WIDTH: f32 = CONTROL_WIDTH * 3.0;
+pub(crate) const CONTROL_INSET_X: f32 = (CONTROL_WIDTH - CONTROL_GLYPH) / 2.0;
+pub(crate) const CONTROL_INK_INSET: f32 = CONTROL_GLYPH * 5.0 / 24.0;
 
-pub fn meter_right(inspector: Option<f32>) -> f32 {
+pub(crate) fn meter_right(inspector: Option<f32>) -> f32 {
     inspector.unwrap_or(0.0).max(CONTROLS_WIDTH) + crate::ui::kit::Space::S12.px()
 }
 
-pub fn header_right_inset(meter_right: f32, has_meter: bool) -> f32 {
+pub(crate) fn header_right_inset(meter_right: f32, has_meter: bool) -> f32 {
     match has_meter {
         true => (meter_right + crate::ui::kit::Space::S24.px() - CONTROLS_WIDTH).max(0.0),
         false => 0.0,

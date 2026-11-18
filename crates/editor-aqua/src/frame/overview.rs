@@ -23,7 +23,7 @@ pub const AGENTS_KEY: &str = "artisan-overview-agents";
 const OUTER_WIDTH: f32 = WIDTH + 2.0 * Inset::Frame.px();
 
 #[must_use]
-pub fn fits(content_width: f32) -> bool {
+pub(crate) fn fits(content_width: f32) -> bool {
     content_width - crate::shell::layout::CHAT_MIN_WIDTH >= OUTER_WIDTH
 }
 
@@ -49,7 +49,7 @@ pub struct Overview {
 
 impl Overview {
     #[must_use]
-    pub fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
+    pub(crate) fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
         let host = inspector
             .open
             .as_ref()
@@ -173,12 +173,12 @@ pub fn card(
 }
 
 #[must_use]
-pub fn panel_height(viewport_height: f32) -> f32 {
+pub(crate) fn panel_height(viewport_height: f32) -> f32 {
     (viewport_height - crate::shell::layout::TITLEBAR_HEIGHT - 2.0 * Inset::Frame.px()).max(0.0)
 }
 
 #[must_use]
-pub fn panel(theme: &ArtisanTheme, inspector: Element) -> Element {
+pub(crate) fn panel(theme: &ArtisanTheme, inspector: Element) -> Element {
     frame(
         SURFACE
             .build(theme, vec![inspector])

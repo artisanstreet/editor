@@ -9,8 +9,8 @@ pub const COPY: &str = "link-failure-copy";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkFailure {
-    pub url: String,
-    pub cause: String,
+    url: String,
+    cause: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl LinkFailureDialog {
         effect
     }
 
-    pub fn close(&mut self, ui: &mut UiApp) {
+    pub(crate) fn close(&mut self, ui: &mut UiApp) {
         self.failure = None;
         if let Some(host) = self.host.take() {
             host.dispose(ui);

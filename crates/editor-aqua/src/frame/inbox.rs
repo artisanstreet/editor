@@ -11,7 +11,7 @@ use aqua::{Aqua, pct, px};
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
-pub fn view(
+pub(crate) fn view(
     sidebar: &Sidebar,
     core: &Core,
     mut theme: ArtisanTheme,

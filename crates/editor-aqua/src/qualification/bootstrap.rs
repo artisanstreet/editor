@@ -24,13 +24,13 @@ pub enum BootstrapError {
     Inputs(#[source] VerifyInputsError),
 }
 
-pub struct Bootstrap {
+pub(crate) struct Bootstrap {
     verified: VerifiedBootstrap,
     files: EditorFiles,
 }
 
 impl Bootstrap {
-    pub fn load(path: &Path) -> Result<Self, BootstrapError> {
+    pub(crate) fn load(path: &Path) -> Result<Self, BootstrapError> {
         let runtime = crate::core::runtime::runtime();
         let verified = runtime
             .block_on(VerifiedBootstrap::load(path))
@@ -65,7 +65,7 @@ impl Bootstrap {
         Ok(Self { verified, files })
     }
 
-    pub fn core(&self) -> Result<Core, OpenCoreError> {
+    pub(crate) fn core(&self) -> Result<Core, OpenCoreError> {
         let mut core = Core::for_tests(self.files.clone())?;
         core.navigate(Screen::Thread {
             host: self.verified.host().clone(),
@@ -74,12 +74,12 @@ impl Bootstrap {
         Ok(core)
     }
 
-    pub fn dimensions(&self) -> (f64, f64) {
+    pub(crate) fn dimensions(&self) -> (f64, f64) {
         let (width, height) = self.verified.dimensions();
         (f64::from(width), f64::from(height))
     }
 
-    pub fn editor_directory(&self) -> &Path {
+    pub(crate) fn editor_directory(&self) -> &Path {
         &self.files.dir
     }
 }

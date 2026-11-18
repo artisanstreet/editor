@@ -540,7 +540,7 @@ impl RootViews {
         Ok(center)
     }
 
-    pub fn conversation_callbacks(
+    fn conversation_callbacks(
         &self,
         scope: crate::conversation::presentation::PresentationScope,
     ) -> (

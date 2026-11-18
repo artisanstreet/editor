@@ -60,7 +60,7 @@ pub struct NativeNotifications {
 }
 
 impl NativeNotifications {
-    pub fn new() -> Result<Self, NotificationError> {
+    pub(crate) fn new() -> Result<Self, NotificationError> {
         let wake = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
         let sender = wake.sender();
         let responses = Arc::new(Mutex::new(VecDeque::from_iter(COLD_LAUNCH.get().cloned())));
@@ -82,7 +82,7 @@ impl NativeNotifications {
         })
     }
 
-    pub fn has_pending(&self) -> bool {
+    pub(crate) fn has_pending(&self) -> bool {
         !self
             .responses
             .lock()
@@ -90,11 +90,11 @@ impl NativeNotifications {
             .is_empty()
     }
 
-    pub fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
+    pub(crate) fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
         ctx.bind_mailbox(window, &self.wake);
     }
 
-    pub fn apply(
+    pub(crate) fn apply(
         &mut self,
         effects: NotificationEffects,
         shell: &Shell,
@@ -134,7 +134,7 @@ impl NativeNotifications {
         Ok(())
     }
 
-    pub fn drain(
+    pub(crate) fn drain(
         &mut self,
         shell: &mut Shell,
         ctx: &mut AppCtx<'_>,

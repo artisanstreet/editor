@@ -17,11 +17,11 @@ pub struct RepositoryContext {
 }
 
 impl RepositoryContext {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.selected = None;
     }
 
-    pub fn sync(&mut self, core: &mut Core) {
+    pub(crate) fn sync(&mut self, core: &mut Core) {
         let (host_id, thread, project) = match core.screen() {
             Screen::Thread { host, thread } => (Some(host.clone()), Some(thread.clone()), None),
             Screen::NewThread { host, project } => (Some(host.clone()), None, project.clone()),

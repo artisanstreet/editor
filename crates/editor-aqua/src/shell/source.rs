@@ -1,14 +1,12 @@
-use aqua::prelude::AquaWindowId;
 use aqua::AppCtx;
+use aqua::prelude::AquaWindowId;
 
 type SourceDialogResult = Result<Option<std::path::PathBuf>, String>;
 
 pub struct RowSourceDialogs {
     next: u64,
-    pending: std::collections::HashMap<
-        u64,
-        crate::conversation::view::row_sources::RowSourceExport,
-    >,
+    pending:
+        std::collections::HashMap<u64, crate::conversation::view::row_sources::RowSourceExport>,
     picked: crate::core::delivery::Delivery<(u64, SourceDialogResult)>,
 }
 
@@ -23,20 +21,20 @@ impl Default for RowSourceDialogs {
 }
 
 impl RowSourceDialogs {
-    pub fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
+    pub(crate) fn bind(&self, ctx: &AppCtx<'_>, window: AquaWindowId) {
         if let Some(mailbox) = self.picked.wake_mailbox() {
             ctx.bind_mailbox(window, mailbox);
         }
     }
 
-    pub fn retain(
+    pub(crate) fn retain(
         &mut self,
         mut current: impl FnMut(&crate::conversation::view::row_sources::RowSourceExport) -> bool,
     ) {
         self.pending.retain(|_, export| current(export));
     }
 
-    pub fn open(
+    pub(crate) fn open(
         &mut self,
         export: crate::conversation::view::row_sources::RowSourceExport,
         ctx: &mut AppCtx<'_>,
@@ -56,7 +54,7 @@ impl RowSourceDialogs {
         self.pending.insert(generation, export);
     }
 
-    pub fn drain(
+    pub(crate) fn drain(
         &mut self,
     ) -> Vec<(
         crate::conversation::view::row_sources::RowSourceExport,

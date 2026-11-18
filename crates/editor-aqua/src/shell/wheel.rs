@@ -3,9 +3,9 @@ use crate::ui::text::wheel_glide::{WheelGlide, WheelInput};
 use aqua::UiApp;
 use aqua_core::{InputEvent, NodeId, Point};
 
-pub const THREADS: &str = "sidebar-threads";
+pub(crate) const THREADS: &str = "sidebar-threads";
 pub use crate::ui::scroll::MODEL_MENU;
-pub const PROJECT_TREE: &str = "artisan-project-tree";
+const PROJECT_TREE: &str = "artisan-project-tree";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -60,7 +60,7 @@ pub fn repaint(ui: &mut UiApp, key: &str) -> bool {
 }
 
 #[must_use]
-pub fn viewport_height(ui: &UiApp, key: &str) -> Option<f32> {
+pub(crate) fn viewport_height(ui: &UiApp, key: &str) -> Option<f32> {
     keyed_node(ui, key)
         .and_then(|node| ui.tree().rect(node))
         .map(|rect| rect.h)
@@ -194,11 +194,14 @@ impl WheelGlides {
         }
     }
 
-    pub fn cancel_transcript(&mut self) {
+    pub(crate) fn cancel_transcript(&mut self) {
         self.transcript.cancel();
     }
 
     pub fn active(&self) -> bool {
-        self.transcript.active() || self.threads.active() || self.model.active() || self.tree.active()
+        self.transcript.active()
+            || self.threads.active()
+            || self.model.active()
+            || self.tree.active()
     }
 }

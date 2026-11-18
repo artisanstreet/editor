@@ -13,7 +13,14 @@ enum Family {
     Gecko,
 }
 
-const GECKO: [&str; 6] = ["firefox", "librewolf", "waterfox", "zen", "floorp", "mullvadbrowser"];
+const GECKO: [&str; 6] = [
+    "firefox",
+    "librewolf",
+    "waterfox",
+    "zen",
+    "floorp",
+    "mullvadbrowser",
+];
 const QUERY_LIMIT: usize = 2000;
 
 #[must_use]
@@ -79,7 +86,7 @@ impl Browser {
         }
     }
 
-    pub fn search(&self, text: &str) -> std::io::Result<()> {
+    pub(crate) fn search(&self, text: &str) -> std::io::Result<()> {
         std::process::Command::new(&self.program)
             .args(self.search_arguments(text))
             .spawn()
@@ -100,7 +107,7 @@ pub fn resolve(preferred: Option<&str>) -> Option<Browser> {
 }
 
 #[must_use]
-pub fn icon(program: &Path) -> Option<aqua::prelude::FileIcon> {
+pub(crate) fn icon(program: &Path) -> Option<aqua::prelude::FileIcon> {
     aqua::prelude::file_icon(program, 32)
 }
 

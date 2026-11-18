@@ -1,7 +1,7 @@
 use super::InstallError;
 use std::path::{Path, PathBuf};
 
-pub const FOLDER: &str = "Artisan Street";
+const FOLDER: &str = "Artisan Street";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
@@ -22,7 +22,7 @@ pub fn entry(carries_installer: bool, runs_installed: bool, arguments: &[String]
 }
 
 #[must_use]
-pub fn same_program(running: &Path, installed: &Path) -> bool {
+pub(crate) fn same_program(running: &Path, installed: &Path) -> bool {
     match (running.canonicalize(), installed.canonicalize()) {
         (Ok(running), Ok(installed)) => running == installed,
         _ => running.to_string_lossy().to_lowercase() == installed.to_string_lossy().to_lowercase(),
@@ -63,7 +63,7 @@ pub enum Machine {
 
 impl Machine {
     #[must_use]
-    pub fn title(&self) -> String {
+    pub(crate) fn title(&self) -> String {
         match self {
             Self::ThisPc => "This PC".to_owned(),
             Self::Wsl(distro) => format!("{distro} (WSL)"),
@@ -71,7 +71,7 @@ impl Machine {
     }
 
     #[must_use]
-    pub const fn detail(&self) -> &'static str {
+    pub(crate) const fn detail(&self) -> &'static str {
         match self {
             Self::ThisPc => "Agents work in Windows, on your files here.",
             Self::Wsl(_) => "Agents work inside this Linux distribution.",
@@ -196,7 +196,7 @@ pub enum InstallPlan {
 
 impl InstallPlan {
     #[must_use]
-    pub fn arguments(&self) -> Vec<String> {
+    fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
             "install".to_owned(),
             "--apply".to_owned(),
@@ -226,7 +226,7 @@ pub enum Job {
 
 impl Job {
     #[must_use]
-    pub fn plan(&self) -> InstallPlan {
+    fn plan(&self) -> InstallPlan {
         match self {
             Self::Fresh(choices) => choices.plan(),
             Self::Update { from } => InstallPlan::Update { from: from.clone() },
@@ -311,7 +311,7 @@ impl Setup {
     }
 
     #[must_use]
-    pub fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         &self.version
     }
 

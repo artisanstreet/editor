@@ -97,7 +97,7 @@ pub enum Cause {
 
 impl Cause {
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Sections => "sections",
             Self::Titlebar => "titlebar",
@@ -249,14 +249,14 @@ impl Invalidation {
         changed
     }
 
-    pub fn extend(&mut self, other: Self) {
+    pub(crate) fn extend(&mut self, other: Self) {
         for cause in other.causes {
             self.note(cause, true);
         }
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.causes.is_empty()
     }
 
@@ -271,7 +271,7 @@ impl Invalidation {
     }
 
     #[must_use]
-    pub fn labels(&self) -> Vec<&'static str> {
+    pub(crate) fn labels(&self) -> Vec<&'static str> {
         self.causes.iter().map(|cause| cause.label()).collect()
     }
 }

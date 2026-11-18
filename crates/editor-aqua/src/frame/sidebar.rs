@@ -1,8 +1,8 @@
-use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
-use crate::ui::chrome::menu::{self, Effect, Menu};
 use crate::frame::scramble::Rows;
 use crate::frame::view::{INK_X, WORDMARK_INK_LEFT, WORDMARK_WIDTH};
 use crate::frame::wordmark::Wordmark;
+use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
+use crate::ui::chrome::menu::{self, Effect, Menu};
 use artisan_api::{ProjectId, ThreadId};
 use std::collections::VecDeque;
 use std::{cell::RefCell, rc::Rc, time::Duration, time::Instant};
@@ -129,16 +129,16 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn search(&self, now: Instant) -> f32 {
+    pub(crate) fn search(&self, now: Instant) -> f32 {
         self.search.value(now, self.search_motion)
     }
 
     #[must_use]
-    pub fn searching(&self) -> bool {
+    pub(crate) fn searching(&self) -> bool {
         self.search.target() > 0.5 || self.search.running()
     }
 
-    pub fn take_search_focus(&mut self) -> bool {
+    pub(crate) fn take_search_focus(&mut self) -> bool {
         std::mem::take(&mut self.focus_search)
     }
 
@@ -158,20 +158,20 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn wordmark(&self, now: Instant) -> Rows {
+    pub(crate) fn wordmark(&self, now: Instant) -> Rows {
         self.wordmark.shown(now)
     }
 
     #[must_use]
-    pub const fn menu(&self) -> &Menu {
+    pub(crate) const fn menu(&self) -> &Menu {
         &self.menu
     }
 
-    pub fn take_effects(&mut self) -> Vec<Effect> {
+    pub(crate) fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
 
-    pub fn refresh_due(&mut self, now: Instant) -> bool {
+    pub(crate) fn refresh_due(&mut self, now: Instant) -> bool {
         let due = self
             .refreshed
             .is_none_or(|last| now.saturating_duration_since(last) >= REFRESH);
@@ -181,7 +181,7 @@ impl Sidebar {
         due
     }
 
-    pub fn take_commands(&mut self) -> Vec<Command> {
+    pub(crate) fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.commands)
     }
 
@@ -211,12 +211,12 @@ impl Sidebar {
             || self.menu.animating()
     }
 
-    pub fn resizing(&self) -> bool {
+    pub(crate) fn resizing(&self) -> bool {
         self.width.running()
     }
 
     #[must_use]
-    pub const fn deadline(&self) -> Option<Instant> {
+    pub(crate) const fn deadline(&self) -> Option<Instant> {
         self.wordmark.deadline()
     }
 

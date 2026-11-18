@@ -795,7 +795,7 @@ pub fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize().map(strip_verbatim)
 }
 
-pub fn marked_directory(path: &Path) -> Result<PathBuf, MarkerError> {
+pub(crate) fn marked_directory(path: &Path) -> Result<PathBuf, MarkerError> {
     if !path.is_absolute() {
         return Err(MarkerError::Relative {
             path: path.to_owned(),
@@ -966,7 +966,7 @@ impl VerifiedBootstrap {
         })
     }
 
-    pub fn verify_inputs(&self) -> Result<(), VerifyInputsError> {
+    pub(crate) fn verify_inputs(&self) -> Result<(), VerifyInputsError> {
         self.fixture
             .verify_unchanged(&self.inputs.fixture)
             .map_err(VerifyInputsError::Fixture)?;
@@ -990,26 +990,21 @@ impl VerifiedBootstrap {
     }
 
     #[must_use]
-    pub const fn host(&self) -> &HostId {
+    pub(crate) const fn host(&self) -> &HostId {
         &self.host
     }
 
     #[must_use]
-    pub const fn thread(&self) -> &ThreadId {
+    pub(crate) const fn thread(&self) -> &ThreadId {
         &self.thread
     }
 
     #[must_use]
-    pub const fn dimensions(&self) -> (f32, f32) {
+    pub(crate) const fn dimensions(&self) -> (f32, f32) {
         self.dimensions
     }
 
-    #[must_use]
-    pub const fn snapshot(&self) -> &StoreSnapshot {
-        &self.snapshot
-    }
-
-    pub async fn pairing_input(&self) -> Result<PairingInput, PairingError> {
+    pub(crate) async fn pairing_input(&self) -> Result<PairingInput, PairingError> {
         self.server.pairing_input().await
     }
 
@@ -1289,7 +1284,7 @@ impl ImmutableFixture {
         Ok(Self { input, fixture })
     }
 
-    pub fn sha256(&self) -> String {
+    pub(crate) fn sha256(&self) -> String {
         hex::encode(Sha256::digest(&self.input))
     }
 
@@ -1559,10 +1554,7 @@ pub struct StoreSnapshot {
 }
 
 impl StoreSnapshot {
-    pub async fn capture(
-        store: &forge_store::Store,
-        fixture: &Fixture,
-    ) -> Result<Self, SnapshotError> {
+    async fn capture(store: &forge_store::Store, fixture: &Fixture) -> Result<Self, SnapshotError> {
         tokio::time::timeout(SNAPSHOT_TIMEOUT, Self::capture_retry(store, fixture))
             .await
             .map_err(|_elapsed| SnapshotError::TimedOut)?

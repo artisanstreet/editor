@@ -8,11 +8,11 @@ use artisan_paths::{App, RootError};
 pub use install::InstallError;
 use model::{Entry, Existing, Setup};
 pub(crate) use payload::open_notices;
-pub use payload::{OpenNoticesError, StageError, WriteNoticesError};
+pub use payload::{StageError, WriteNoticesError};
 use std::path::PathBuf;
 pub use window::SetupWindowError;
 
-pub enum Outcome {
+pub(crate) enum Outcome {
     OpenEditor,
     Finished,
 }
@@ -69,7 +69,7 @@ fn open_installed(arguments: &[String]) -> Result<(), BeginError> {
     Ok(())
 }
 
-pub fn begin() -> Result<Outcome, BeginError> {
+pub(crate) fn begin() -> Result<Outcome, BeginError> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let running = std::env::current_exe().map_err(BeginError::CurrentExe)?;
     let runs_installed = App::Editor

@@ -1,17 +1,17 @@
-pub const GLYPHS: [char; 14] = [
+const GLYPHS: [char; 14] = [
     'A', 'C', 'D', 'E', 'G', 'L', 'N', 'O', 'P', 'R', 'S', 'T', 'U', 'Z',
 ];
-pub const STAGGER_MS: f64 = 18.0;
-pub const SETTLE_MS: f64 = 170.0;
-pub const TICK_MS: f64 = 34.0;
+const STAGGER_MS: f64 = 18.0;
+const SETTLE_MS: f64 = 170.0;
+const TICK_MS: f64 = 34.0;
 
 pub type Row = Vec<Option<char>>;
 pub type Rows = Vec<Row>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
-    pub from: Option<char>,
-    pub to: Option<char>,
+    from: Option<char>,
+    to: Option<char>,
 }
 
 #[must_use]
@@ -52,7 +52,7 @@ pub fn cells_between(shown: &Rows, target: &[&str]) -> Vec<Vec<Cell>> {
 }
 
 #[must_use]
-pub fn glyph_at(index: usize, tick: u32) -> char {
+fn glyph_at(index: usize, tick: u32) -> char {
     let position = u32::try_from(index + 1).unwrap_or(u32::MAX);
     let mixed = position
         .wrapping_mul(2_654_435_761)
@@ -61,7 +61,7 @@ pub fn glyph_at(index: usize, tick: u32) -> char {
 }
 
 #[must_use]
-pub fn cell_char(cell: Cell, index: usize, elapsed_ms: f64) -> Option<char> {
+fn cell_char(cell: Cell, index: usize, elapsed_ms: f64) -> Option<char> {
     let local = (index as f64).mul_add(-STAGGER_MS, elapsed_ms);
     match local {
         local if local < 0.0 => cell.from,

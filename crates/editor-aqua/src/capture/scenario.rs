@@ -111,7 +111,7 @@ fn settings_page(name: &str) -> Result<SettingsPage, RouteError> {
     })
 }
 
-pub struct Scenario {
+pub(crate) struct Scenario {
     pub host: HostId,
     pub fixture: Fixture,
     forge: Option<ForgeServer>,
@@ -132,7 +132,7 @@ impl Scenario {
         Ok((scenario, core))
     }
 
-    pub fn serve(
+    pub(crate) fn serve(
         fixture_path: &Path,
         root: &Path,
         editor_dir: &Path,
@@ -237,7 +237,7 @@ impl Scenario {
         })
     }
 
-    pub fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         if let Some(server) = self.forge.take() {
             if let Err(error) = crate::core::runtime::runtime().block_on(server.shutdown()) {
                 tracing::warn!(

@@ -21,7 +21,7 @@ use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 use std::{rc::Rc, sync::Arc, time::Instant};
 
-pub const WIDTH: f32 = 400.0;
+pub(crate) const WIDTH: f32 = 400.0;
 const CARD: Surface = Surface::Card;
 const INNER: Surface = Surface::Inset;
 const FIELD: Surface = Surface::Field;
@@ -68,7 +68,7 @@ pub fn card(theme: &ArtisanTheme, props: Props<'_>) -> Element {
 }
 
 #[must_use]
-pub fn header(align: AlignItems, children: Vec<Element>) -> Element {
+pub(crate) fn header(align: AlignItems, children: Vec<Element>) -> Element {
     UiBox::new()
         .layout("row")
         .padded(Space::S16)
@@ -83,7 +83,7 @@ pub fn header(align: AlignItems, children: Vec<Element>) -> Element {
 }
 
 #[must_use]
-pub fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Element {
+pub(crate) fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Element {
     let stack = UiBox::new()
         .layout("column")
         .spaced(Space::from(CARD_GAP))
@@ -94,7 +94,7 @@ pub fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Ele
 }
 
 #[must_use]
-pub fn body(content: Vec<Element>) -> UiBox {
+pub(crate) fn body(content: Vec<Element>) -> UiBox {
     UiBox::new()
         .layout("column")
         .padded(PAGE_PAD)
@@ -102,7 +102,7 @@ pub fn body(content: Vec<Element>) -> UiBox {
 }
 
 #[must_use]
-pub fn wordmark(theme: &ArtisanTheme) -> Element {
+pub(crate) fn wordmark(theme: &ArtisanTheme) -> Element {
     let source: Arc<str> = editor_assets::get(AssetId::ARTISAN_WORDMARK_STACKED)
         .source
         .into();
@@ -403,7 +403,7 @@ fn field(
 }
 
 #[must_use]
-pub fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Element {
+pub(crate) fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Element {
     let content = UiBox::new()
         .layout("column")
         .style(
@@ -503,12 +503,12 @@ fn continue_key(
 }
 
 #[must_use]
-pub const fn key_lip(size: KeySize) -> f32 {
+pub(crate) const fn key_lip(size: KeySize) -> f32 {
     size.edge() * 8.0 / 45.0
 }
 
 #[must_use]
-pub fn field_key(
+pub(crate) fn field_key(
     theme: &ArtisanTheme,
     key: &'static str,
     label: &'static str,
@@ -771,7 +771,7 @@ fn linked(
 }
 
 #[must_use]
-pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element {
+pub(crate) fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element {
     UiBox::new()
         .layout("column")
         .style(

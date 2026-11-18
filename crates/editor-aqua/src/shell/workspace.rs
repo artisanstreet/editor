@@ -48,7 +48,7 @@ pub enum SidePanel {
 
 impl SidePanel {
     #[must_use]
-    pub const fn toggled(self) -> Self {
+    pub(crate) const fn toggled(self) -> Self {
         match self {
             Self::Overview => Self::Inspector,
             Self::Inspector => Self::Overview,
@@ -58,11 +58,11 @@ impl SidePanel {
 
 pub struct Workspace {
     pub selections: crate::shell::selection::SelectionScope,
-    pub inspector: crate::inspector::InspectorOwner,
-    pub conversation_selection: crate::conversation::presentation::SelectionOwners,
+    pub(crate) inspector: crate::inspector::InspectorOwner,
+    pub(crate) conversation_selection: crate::conversation::presentation::SelectionOwners,
     pub markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
-    pub status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
-    pub images: Rc<crate::ui::media::image::Images>,
+    pub(crate) status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
+    pub(crate) images: Rc<crate::ui::media::image::Images>,
     code_actions: Rc<RefCell<VecDeque<crate::conversation::presentation::ScopedCodeAction>>>,
     code_frame_pending: bool,
     code_deadline: Option<aqua::Instant>,
@@ -70,9 +70,9 @@ pub struct Workspace {
     terminal_dialog: Option<crate::ui::dialog::DialogHost>,
     terminal_content: Option<aqua_ui::element::Element>,
     terminal_dismissed: Rc<Cell<bool>>,
-    pub sidebar: crate::sidebar::controller::Sidebar,
-    pub settings_sidebar: crate::sidebar::controller::Sidebar,
-    pub usage: crate::sidebar::usage::controller::UsagePage,
+    pub(crate) sidebar: crate::sidebar::controller::Sidebar,
+    pub(crate) settings_sidebar: crate::sidebar::controller::Sidebar,
+    pub(crate) usage: crate::sidebar::usage::controller::UsagePage,
     usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage::view::Action>>>,
     pub conversation: crate::conversation::controller::Conversation,
     pub composer: Option<crate::composer::view::ComposerOwner>,
@@ -101,11 +101,11 @@ pub struct Workspace {
     question_option_detail: Option<((u64, u64), crate::shell::source::SourceView)>,
     question_option_detail_actions:
         Rc<RefCell<VecDeque<((u64, u64), crate::sources::ContentAction)>>>,
-    pub marketplace: crate::marketplace::controller::MarketplaceController,
+    pub(crate) marketplace: crate::marketplace::controller::MarketplaceController,
     marketplace_focus_pending: bool,
     marketplace_reveal_pending: bool,
-    pub settings: crate::settings::controller::SettingsController,
-    pub home: crate::settings::controller::SettingsController,
+    pub(crate) settings: crate::settings::controller::SettingsController,
+    pub(crate) home: crate::settings::controller::SettingsController,
     home_actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     sidebar_actions: Rc<RefCell<VecDeque<crate::sidebar::view::ViewAction>>>,
     settings_sidebar_actions: Rc<RefCell<VecDeque<crate::sidebar::view::ViewAction>>>,
@@ -113,11 +113,11 @@ pub struct Workspace {
     settings_actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     theme_transition: Option<bool>,
     settings_platform_effects: Vec<SettingsPlatformEffect>,
-    pub palette: Option<Palette>,
-    pub resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
+    pub(crate) palette: Option<Palette>,
+    pub(crate) resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
     resource_preview_generation: u64,
-    pub side_panel: SidePanel,
-    pub failure: Option<String>,
+    pub(crate) side_panel: SidePanel,
+    pub(crate) failure: Option<String>,
     notifications: Notifications,
     repository: crate::shell::repository::RepositoryContext,
     start_pending: bool,
@@ -211,7 +211,7 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
-    pub fn retire(&mut self) -> NotificationEffects {
+    pub(crate) fn retire(&mut self) -> NotificationEffects {
         NotificationEffects {
             withdraw: self.notifications.retain_hosts(&[]),
             show: Vec::new(),
@@ -349,7 +349,7 @@ impl Workspace {
         }
     }
 
-    pub fn handle_domain_event(
+    pub(crate) fn handle_domain_event(
         &mut self,
         core: &mut Core,
         event: &CoreEvent,
@@ -390,7 +390,7 @@ impl Workspace {
         self.sync_question_pages(core);
     }
 
-    pub fn dispose_composer_popups(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn dispose_composer_popups(&mut self, ui: &mut aqua::UiApp) {
         for tooltip in self.retiring_tooltips.drain(..) {
             tooltip.dispose(ui);
         }
@@ -404,7 +404,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_composer_tooltip(
+    pub(crate) fn sync_composer_tooltip(
         &mut self,
         ui: &mut aqua::UiApp,
         theme: crate::ui::theme::ArtisanTheme,
@@ -474,14 +474,14 @@ impl Workspace {
         changed
     }
 
-    pub fn code_action_emit(
+    pub(crate) fn code_action_emit(
         &self,
     ) -> Rc<dyn Fn(crate::conversation::presentation::ScopedCodeAction)> {
         let actions = Rc::clone(&self.code_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn drain_code_actions(
+    pub(crate) fn drain_code_actions(
         &mut self,
         core: &Core,
         ctx: &mut aqua::AppCtx<'_>,
@@ -544,7 +544,7 @@ impl Workspace {
         ctx.request_animation_deadline(window, at);
     }
 
-    pub fn take_code_frame(&mut self, now: aqua::Instant) -> bool {
+    pub(crate) fn take_code_frame(&mut self, now: aqua::Instant) -> bool {
         let due = self.code_deadline.is_some_and(|at| now >= at);
         if due {
             self.code_deadline = None;
@@ -552,7 +552,7 @@ impl Workspace {
         std::mem::take(&mut self.code_frame_pending) || due
     }
 
-    pub fn sync_composer_popups(
+    pub(crate) fn sync_composer_popups(
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
@@ -662,7 +662,7 @@ impl Workspace {
     }
 
     #[must_use]
-    pub fn inspector_emit(&self) -> Rc<dyn Fn(crate::inspector::InspectorAction)> {
+    pub(crate) fn inspector_emit(&self) -> Rc<dyn Fn(crate::inspector::InspectorAction)> {
         let actions = Rc::clone(&self.inspector_actions);
         let scope = self.inspector.scope();
         Rc::new(move |action| {
@@ -672,7 +672,7 @@ impl Workspace {
         })
     }
 
-    pub fn inspector_panel(
+    pub(crate) fn inspector_panel(
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
@@ -695,7 +695,7 @@ impl Workspace {
         Ok(elements.panel)
     }
 
-    pub fn sync_terminal_dialog(
+    pub(crate) fn sync_terminal_dialog(
         &mut self,
         ui: &mut aqua::UiApp,
         theme: crate::ui::theme::ArtisanTheme,
@@ -740,7 +740,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_terminal_input(&mut self, ui: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_terminal_input(&mut self, ui: &mut aqua::UiApp) -> bool {
         if let Some(dialog) = &self.terminal_dialog {
             dialog.sync(ui);
         }
@@ -751,7 +751,7 @@ impl Workspace {
         false
     }
 
-    pub fn dispose_terminal_dialog(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn dispose_terminal_dialog(&mut self, ui: &mut aqua::UiApp) {
         if let Some(dialog) = self.terminal_dialog.take() {
             dialog.dispose(ui);
         }
@@ -760,7 +760,7 @@ impl Workspace {
         self.inspector.close_terminal(ui);
     }
 
-    pub fn drain_inspector(
+    pub(crate) fn drain_inspector(
         &mut self,
         core: &mut Core,
         routes: &crate::ui::dialogs::DialogRoutes,
@@ -837,11 +837,11 @@ impl Workspace {
         }
     }
 
-    pub fn take_composer_actions(&mut self) -> VecDeque<crate::composer::view::ComposerAction> {
+    fn take_composer_actions(&mut self) -> VecDeque<crate::composer::view::ComposerAction> {
         std::mem::take(&mut *self.composer_actions.borrow_mut())
     }
 
-    pub fn refresh_composer_mentions(
+    pub(crate) fn refresh_composer_mentions(
         &mut self,
         core: &mut Core,
         theme: &crate::ui::theme::ArtisanTheme,
@@ -864,7 +864,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_question_pages(&mut self, core: &Core) {
+    fn sync_question_pages(&mut self, core: &Core) {
         if let Some(owner) = &self.composer {
             let mut composer = owner.controller.borrow_mut();
             if crate::conversation::adapter::sync_questionnaires(
@@ -925,7 +925,7 @@ impl Workspace {
         }
     }
 
-    pub fn composer_image(
+    pub(crate) fn composer_image(
         &self,
         key: u64,
     ) -> Option<(
@@ -952,11 +952,11 @@ impl Workspace {
         ))
     }
 
-    pub fn take_composer_effects(&mut self) -> Vec<crate::composer::view::ComposerEffect> {
+    pub(crate) fn take_composer_effects(&mut self) -> Vec<crate::composer::view::ComposerEffect> {
         std::mem::take(&mut self.composer_effects)
     }
 
-    pub fn dispatch_composer_actions(&mut self, core: &mut Core) -> bool {
+    fn dispatch_composer_actions(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         for action in self.take_composer_actions() {
             self.sync_question_pages(core);
@@ -978,7 +978,7 @@ impl Workspace {
         changed
     }
 
-    pub fn handle_question_option(
+    fn handle_question_option(
         &mut self,
         core: &mut Core,
         action: crate::conversation::questions::OptionAction,
@@ -1011,7 +1011,7 @@ impl Workspace {
                     .map(|browser| browser.borrow().view_state())
     }
 
-    pub fn question_source_view(
+    fn question_source_view(
         &mut self,
         ui: &mut aqua::UiApp,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1073,12 +1073,12 @@ impl Workspace {
             .map(Some)
     }
 
-    pub const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
+    pub(crate) const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
         self.sent_new_thread.take()
     }
 
     #[must_use]
-    pub fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
+    pub(crate) fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
         self.composer
             .as_ref()
             .and_then(|owner| {
@@ -1095,7 +1095,7 @@ impl Workspace {
             .unwrap_or(crate::composer::draft_session::Posting::Idle)
     }
 
-    pub fn composer_content(
+    pub(crate) fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1219,7 +1219,7 @@ impl Workspace {
         Ok((questionnaires, attachments))
     }
 
-    pub fn bind_question_source(
+    pub(crate) fn bind_question_source(
         &self,
         ctx: &aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
@@ -1247,7 +1247,7 @@ impl Workspace {
         }
     }
 
-    pub fn drain_question_source(
+    pub(crate) fn drain_question_source(
         &mut self,
         core: &Core,
         routes: &crate::ui::dialogs::DialogRoutes,
@@ -1289,14 +1289,14 @@ impl Workspace {
         changed
     }
 
-    pub fn release_question_source(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn release_question_source(&mut self, ui: &mut aqua::UiApp) {
         if let Some((_, service)) = self.question_source.take() {
             service.release(ui);
         }
         self.question_source_actions.borrow_mut().clear();
     }
 
-    pub fn release_question_options(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn release_question_options(&mut self, ui: &mut aqua::UiApp) {
         if let Some((_, service)) = self.question_option_detail.take() {
             service.release(ui);
         }
@@ -1307,7 +1307,7 @@ impl Workspace {
         );
     }
 
-    pub fn question_option_emit(&self) -> Rc<dyn Fn(crate::conversation::questions::OptionAction)> {
+    fn question_option_emit(&self) -> Rc<dyn Fn(crate::conversation::questions::OptionAction)> {
         let actions = Rc::clone(&self.question_option_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
@@ -1321,12 +1321,12 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage::view::Action)> {
+    fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage::view::Action)> {
         let actions = Rc::clone(&self.usage_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn sidebar_view(
+    pub(crate) fn sidebar_view(
         &self,
         core: &Core,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1354,7 +1354,7 @@ impl Workspace {
         )
     }
 
-    pub fn usage_view(
+    pub(crate) fn usage_view(
         &self,
         core: &Core,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1375,12 +1375,12 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn home_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    fn home_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.home_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn home_view(
+    pub(crate) fn home_view(
         &self,
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
@@ -1391,12 +1391,12 @@ impl Workspace {
         )
     }
 
-    pub fn settings_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    pub(crate) fn settings_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.settings_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn dispatch_sidebar_actions(&mut self, core: &mut Core) -> bool {
+    pub(crate) fn dispatch_sidebar_actions(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         let sidebar = std::mem::take(&mut *self.sidebar_actions.borrow_mut());
         for action in sidebar {
@@ -1477,7 +1477,7 @@ impl Workspace {
         changed
     }
 
-    pub fn take_settings_platform_effects(&mut self) -> Vec<SettingsPlatformEffect> {
+    pub(crate) fn take_settings_platform_effects(&mut self) -> Vec<SettingsPlatformEffect> {
         std::mem::take(&mut self.settings_platform_effects)
     }
 
@@ -1515,7 +1515,7 @@ impl Workspace {
         }
     }
 
-    pub fn drain_domains(
+    pub(crate) fn drain_domains(
         &mut self,
         core: &mut Core,
         assets: &aqua::images::ImageAssets,
@@ -1592,7 +1592,7 @@ impl Workspace {
         causes
     }
 
-    pub fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {
+    pub(crate) fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {
         if self.composer_editor_dirty {
             if let Some(owner) = &self.composer {
                 if let Some(key) = owner.editor.text_key() {
@@ -1616,7 +1616,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_marketplace_ui(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn sync_marketplace_ui(&mut self, ui: &mut aqua::UiApp) {
         self.marketplace_focus_pending |= self.marketplace.take_focus_request();
         if self.marketplace_focus_pending && ui.focus_key("marketplace-search") {
             self.marketplace_focus_pending = false;
@@ -1632,7 +1632,7 @@ impl Workspace {
         }
     }
 
-    pub fn marketplace_view(
+    pub(crate) fn marketplace_view(
         &self,
         core: &Core,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1640,7 +1640,7 @@ impl Workspace {
         crate::marketplace::view::build(&self.marketplace, core, theme, self.marketplace_emit())
     }
 
-    pub fn settings_view(
+    pub(crate) fn settings_view(
         &self,
         core: &Core,
         theme: crate::ui::theme::ArtisanTheme,
@@ -1659,7 +1659,7 @@ impl Workspace {
         )
     }
 
-    pub fn open_reference(
+    pub(crate) fn open_reference(
         &mut self,
         core: &Core,
         path: String,
@@ -1676,33 +1676,33 @@ impl Workspace {
         ));
     }
 
-    pub fn dismiss_reference(&mut self) {
+    pub(crate) fn dismiss_reference(&mut self) {
         self.resource_preview = None;
         self.resource_preview_generation = self.resource_preview_generation.wrapping_add(1);
     }
 
-    pub fn resource_preview_generation(&self) -> u64 {
+    pub(crate) fn resource_preview_generation(&self) -> u64 {
         self.resource_preview_generation
     }
 
-    pub fn drain_reference(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_reference(&mut self, core: &Core) -> bool {
         self.resource_preview
             .as_mut()
             .is_some_and(|preview| preview.drain(core))
     }
 
-    pub fn open_palette(&mut self, core: &Core) {
+    pub(crate) fn open_palette(&mut self, core: &Core) {
         if self.palette.is_none() {
             self.palette = Some(Palette::default());
             self.refresh_palette(core);
         }
     }
 
-    pub fn dismiss_palette(&mut self) {
+    pub(crate) fn dismiss_palette(&mut self) {
         self.palette = None;
     }
 
-    pub fn search_palette(&mut self, core: &Core, query: String) {
+    pub(crate) fn search_palette(&mut self, core: &Core, query: String) {
         if let Some(palette) = &mut self.palette {
             let hosts = core
                 .hosts()
@@ -1719,7 +1719,7 @@ impl Workspace {
         self.refresh_palette(core);
     }
 
-    pub fn drain_palette(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_palette(&mut self, core: &Core) -> bool {
         let changed = self
             .palette
             .as_mut()
@@ -1730,7 +1730,7 @@ impl Workspace {
         changed
     }
 
-    pub fn refresh_palette(&mut self, core: &Core) {
+    fn refresh_palette(&mut self, core: &Core) {
         if let Some(palette) = &mut self.palette {
             let active = core.active_host().map(|host| &host.id);
             let hosts: Vec<_> = core
@@ -1747,7 +1747,7 @@ impl Workspace {
         }
     }
 
-    pub fn new_thread(core: &mut Core) {
+    pub(crate) fn new_thread(core: &mut Core) {
         let screen = core
             .active_host()
             .map(|host| Screen::NewThread {
@@ -1758,7 +1758,7 @@ impl Workspace {
         core.navigate(screen);
     }
 
-    pub fn open_settings(core: &mut Core) {
+    pub(crate) fn open_settings(core: &mut Core) {
         core.navigate(Screen::Settings(SettingsPage::General));
     }
 }

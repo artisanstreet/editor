@@ -45,7 +45,7 @@ fn open(data: &Path) -> LogFile {
     }
 }
 
-pub fn init(data: &Path) -> Result<RecentLines, SubscribeError> {
+pub(crate) fn init(data: &Path) -> Result<RecentLines, SubscribeError> {
     match open(data) {
         LogFile::Usual(file) => {
             diagnostics::subscribe(DEFAULT_FILTER, std::io::stderr.and(Mutex::new(file)))

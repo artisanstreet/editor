@@ -12,25 +12,24 @@ use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use std::rc::Rc;
 
-pub const SHEET_PADDING: f32 = Space::S12.px();
+pub(crate) const SHEET_PADDING: f32 = Space::S12.px();
 pub const SIDEBAR: &str = "artisan-frame-sidebar";
 const TREE_GAP: f32 = Space::S24.px();
-pub const WORDMARK_FAMILY: &str = "Sigurd";
-pub const WORDMARK_SIZE: f32 = 32.8;
-pub const WORDMARK_WIDTH: f32 = 1.45 * WORDMARK_SIZE;
-pub const WORDMARK_TRACKING: f32 = -0.05;
-const WORDMARK_HEIGHT: f32 =
-    WORDMARK_SIZE * (LINE_HEIGHTS[0] + LINE_HEIGHTS[1] + LINE_HEIGHTS[2]);
-pub const INK_X: f32 = CONTROL_INSET_X + CONTROL_INK_INSET;
-pub const FOOTER_LEFT: f32 = INK_X - AVATAR_INSET;
+const WORDMARK_FAMILY: &str = "Sigurd";
+const WORDMARK_SIZE: f32 = 32.8;
+pub(crate) const WORDMARK_WIDTH: f32 = 1.45 * WORDMARK_SIZE;
+const WORDMARK_TRACKING: f32 = -0.05;
+const WORDMARK_HEIGHT: f32 = WORDMARK_SIZE * (LINE_HEIGHTS[0] + LINE_HEIGHTS[1] + LINE_HEIGHTS[2]);
+pub(crate) const INK_X: f32 = CONTROL_INSET_X + CONTROL_INK_INSET;
+pub(crate) const FOOTER_LEFT: f32 = INK_X - AVATAR_INSET;
 const WORDMARK_ASCENT: f32 = 0.74;
 const WORDMARK_CONTENT: f32 = 0.972;
 const WORDMARK_APEX: f32 = 0.729;
-pub const WORDMARK_INK_LEFT: f32 = 0.7;
+pub(crate) const WORDMARK_INK_LEFT: f32 = 0.7;
 const WORDMARK_INK_RISE: f32 =
     WORDMARK_SIZE * (WORDMARK_APEX - (LINE_HEIGHTS[0] - WORDMARK_CONTENT) / 2.0 - WORDMARK_ASCENT);
 
-pub struct Sidebar {
+pub(crate) struct Sidebar {
     pub width: f32,
     pub open: bool,
     pub wordmark: Rows,
@@ -41,7 +40,7 @@ pub struct Sidebar {
 }
 
 #[must_use]
-pub fn body(
+pub(crate) fn body(
     theme: &ArtisanTheme,
     titlebar: Element,
     sidebar: Sidebar,
@@ -79,7 +78,7 @@ pub fn body(
 }
 
 #[must_use]
-pub fn search_anchor() -> crate::frame::search::Anchor {
+pub(crate) fn search_anchor() -> crate::frame::search::Anchor {
     let rail = crate::frame::search::rail_width();
     let left = (COLLAPSED_WIDTH - rail) / 2.0;
     crate::frame::search::Anchor {
@@ -105,7 +104,7 @@ fn placed(child: Element, left: f32, top: f32, right: f32, bottom: f32) -> Eleme
         .build()
 }
 
-pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
+pub(crate) fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
     let mark = wordmark(theme, &sidebar);
     let mark_top = TITLEBAR_HEIGHT + WORDMARK_INK_RISE;
     let footer_height = match sidebar.footer {
@@ -152,9 +151,9 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
                 .height(footer_height)
                 .style(Style::new().flex_shrink(0.0))
                 .children(
-                    sidebar
-                        .footer
-                        .map(|footer| placed(footer, FOOTER_LEFT, 0.0, SHEET_PADDING, SHEET_PADDING)),
+                    sidebar.footer.map(|footer| {
+                        placed(footer, FOOTER_LEFT, 0.0, SHEET_PADDING, SHEET_PADDING)
+                    }),
                 )
                 .build(),
         )

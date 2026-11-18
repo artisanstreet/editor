@@ -58,26 +58,26 @@ impl SelectionAllocator {
 }
 
 pub struct SelectionScope {
-    pub key: u64,
-    pub inspector: crate::inspector::SourceIds,
+    pub(crate) key: u64,
+    pub(crate) inspector: crate::inspector::SourceIds,
     pub conversation: SelectionDocumentId,
-    pub question: (SelectionDocumentId, SelectionSourceId),
-    pub question_options: (SelectionDocumentId, SelectionSourceId),
-    pub question_option_detail: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) question: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) question_options: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) question_option_detail: (SelectionDocumentId, SelectionSourceId),
     allocator: SelectionAllocator,
 }
 
 impl SelectionScope {
-    pub fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
+    pub(crate) fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
         let allocator = self.allocator.clone();
         Rc::new(move || SelectionSourceId(allocator.next()))
     }
 
-    pub fn next_source(&self) -> SelectionSourceId {
+    pub(crate) fn next_source(&self) -> SelectionSourceId {
         SelectionSourceId(self.allocator.next())
     }
 
-    pub fn next_document(&self) -> SelectionDocumentId {
+    pub(crate) fn next_document(&self) -> SelectionDocumentId {
         SelectionDocumentId(self.allocator.next())
     }
 }

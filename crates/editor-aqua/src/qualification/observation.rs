@@ -5,17 +5,17 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct NativeState {
-    pub completed_frame: u64,
-    pub page_loaded: bool,
-    pub page_in_flight: bool,
-    pub load_error: Option<String>,
-    pub row_count: usize,
-    pub measured_row_count: usize,
-    pub landing: bool,
+    completed_frame: u64,
+    page_loaded: bool,
+    page_in_flight: bool,
+    load_error: Option<String>,
+    row_count: usize,
+    measured_row_count: usize,
+    landing: bool,
 }
 
 impl NativeState {
-    pub fn observe(shell: &crate::shell::host::Shell, completed_frame: u64) -> Option<Self> {
+    fn observe(shell: &crate::shell::host::Shell, completed_frame: u64) -> Option<Self> {
         let conversation = &shell.entry.workspace()?.conversation;
         let view = conversation.view.as_ref();
         Some(Self {
@@ -47,7 +47,7 @@ pub enum RecordStateError {
     },
 }
 
-pub fn record_native_state(
+pub(crate) fn record_native_state(
     shell: &crate::shell::host::Shell,
     completed_frame: u64,
 ) -> Result<(), RecordStateError> {
@@ -164,7 +164,7 @@ impl PaintCollector {
     }
 }
 
-pub fn rect_bits(bounds: Rect) -> [u32; 4] {
+pub(crate) fn rect_bits(bounds: Rect) -> [u32; 4] {
     [
         bounds.x.to_bits(),
         bounds.y.to_bits(),

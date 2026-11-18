@@ -72,10 +72,13 @@ impl Mask {
 }
 
 #[must_use]
-pub fn grid(box_width: f32, box_height: f32, params: Params) -> (u32, u32) {
+fn grid(box_width: f32, box_height: f32, params: Params) -> (u32, u32) {
     let resolution = params.max_resolution.max(64.0);
     let sample = params.pixel_size.max(0.5);
-    let sampled = ((box_width / sample).max(1.0), (box_height / sample).max(1.0));
+    let sampled = (
+        (box_width / sample).max(1.0),
+        (box_height / sample).max(1.0),
+    );
     let reduction = 1.0_f32
         .min(resolution / sampled.0)
         .min(resolution * 1.5 / sampled.1);
@@ -89,11 +92,19 @@ pub fn grid(box_width: f32, box_height: f32, params: Params) -> (u32, u32) {
 pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Params) -> Mask {
     let (width, height) = grid(box_width, box_height, params);
     let scale = (width as f32 / source.width() as f32).min(height as f32 / source.height() as f32);
-    let drawn = (source.width() as f32 * scale, source.height() as f32 * scale);
+    let drawn = (
+        source.width() as f32 * scale,
+        source.height() as f32 * scale,
+    );
     let top = height as f32 - drawn.1;
     let fade_right = params.fade_right.clamp(0.0, 1.0);
     Mask::from_fn(width, height, |x, y| {
-        let Some([r, g, b, a]) = area(source, (x as f32) / scale, (y as f32 - top) / scale, 1.0 / scale) else {
+        let Some([r, g, b, a]) = area(
+            source,
+            (x as f32) / scale,
+            (y as f32 - top) / scale,
+            1.0 / scale,
+        ) else {
             return false;
         };
         let luminance = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
@@ -102,7 +113,8 @@ pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Param
             true => 1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0),
             false => 1.0,
         };
-        let adjusted = ((luminance * params.brightness - 0.5) * params.contrast + 0.5).clamp(0.0, 1.0) * fade;
+        let adjusted =
+            ((luminance * params.brightness - 0.5) * params.contrast + 0.5).clamp(0.0, 1.0) * fade;
         adjusted > threshold + params.threshold_bias && a > 0.0
     })
 }
@@ -126,7 +138,11 @@ pub fn paint(mask: &Mask, paint: Paint) -> RgbaImage {
 fn area(source: Source<'_>, left: f32, top: f32, span: f32) -> Option<[f32; 4]> {
     let right = left + span;
     let bottom = top + span;
-    if right <= 0.0 || bottom <= 0.0 || left >= source.width() as f32 || top >= source.height() as f32 {
+    if right <= 0.0
+        || bottom <= 0.0
+        || left >= source.width() as f32
+        || top >= source.height() as f32
+    {
         return None;
     }
     let columns = (left.max(0.0).floor() as u32)..(right.min(source.width() as f32).ceil() as u32);

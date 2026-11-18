@@ -62,7 +62,7 @@ pub use editor_conversation as conversation;
 pub use editor_core as core;
 pub mod frame;
 pub use editor_inspector as inspector;
-pub mod logging;
+mod logging;
 pub use editor_marketplace as marketplace;
 #[cfg(feature = "qualification")]
 pub mod qualification;

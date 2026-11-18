@@ -100,7 +100,7 @@ fn serve(fixture: PathBuf, editor_dir: PathBuf) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn run_from_environment() -> Result<bool, CliError> {
+pub(crate) fn run_from_environment() -> Result<bool, CliError> {
     if let Some(editor_dir) = variable("ARTISAN_AQUA_SERVE_EDITOR_DIR") {
         serve(fixture("serve")?, PathBuf::from(editor_dir))?;
         return Ok(true);

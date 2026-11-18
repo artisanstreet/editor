@@ -74,7 +74,7 @@ impl Default for Avatar {
 
 impl Avatar {
     #[must_use]
-    pub fn mailbox(&self) -> Option<&Mailbox<()>> {
+    pub(crate) fn mailbox(&self) -> Option<&Mailbox<()>> {
         self.delivery.wake_mailbox()
     }
 

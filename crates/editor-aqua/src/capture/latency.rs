@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-pub async fn proxy(target: SocketAddr, delay: Duration) -> std::io::Result<SocketAddr> {
+pub(crate) async fn proxy(target: SocketAddr, delay: Duration) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move {

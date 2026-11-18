@@ -13,7 +13,7 @@ impl RootViews {
         }
     }
 
-    pub(super) fn follow_tail_early(
+    fn follow_tail_early(
         &mut self,
         conversation: &mut crate::conversation::controller::Conversation,
         ui: &mut UiApp,

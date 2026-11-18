@@ -21,7 +21,7 @@ pub struct LineWindow {
 
 impl PreviewText {
     #[must_use]
-    pub fn new(text: String, target_line: usize) -> Self {
+    fn new(text: String, target_line: usize) -> Self {
         let total_lines = text.lines().count();
         let window = NonZeroUsize::new(total_lines).map(|total_lines| {
             let start_line = target_line
@@ -51,17 +51,17 @@ impl PreviewText {
     }
 
     #[must_use]
-    pub fn full(&self) -> &Arc<str> {
+    fn full(&self) -> &Arc<str> {
         &self.full
     }
 
     #[must_use]
-    pub const fn window(&self) -> Option<&LineWindow> {
+    const fn window(&self) -> Option<&LineWindow> {
         self.window.as_ref()
     }
 
     #[must_use]
-    pub fn note(&self) -> String {
+    fn note(&self) -> String {
         match &self.window {
             None => "This file is empty.".to_owned(),
             Some(window) => format!(
@@ -76,32 +76,27 @@ impl PreviewText {
 
 impl LineWindow {
     #[must_use]
-    pub fn text(&self) -> &Arc<str> {
+    fn text(&self) -> &Arc<str> {
         &self.text
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.ranges.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
-    }
-
-    #[must_use]
-    pub const fn start_line(&self) -> usize {
+    const fn start_line(&self) -> usize {
         self.start_line
     }
 
     #[must_use]
-    pub fn range(&self, index: usize) -> Range<usize> {
+    fn range(&self, index: usize) -> Range<usize> {
         self.ranges[index].clone()
     }
 
     #[must_use]
-    pub fn line(&self, index: usize) -> &str {
+    fn line(&self, index: usize) -> &str {
         &self.text[self.range(index)]
     }
 }
@@ -131,7 +126,7 @@ pub enum PreviewError {
 
 impl PreviewError {
     #[must_use]
-    pub const fn retryable(&self) -> bool {
+    const fn retryable(&self) -> bool {
         match self {
             Self::Read { .. } | Self::HostGone { .. } => true,
             Self::Unpaired { .. } | Self::NotText { .. } => false,
@@ -147,8 +142,8 @@ type PreviewSource = (
 );
 
 pub struct ResourcePreview {
-    pub path: String,
-    pub target_line: usize,
+    pub(crate) path: String,
+    target_line: usize,
     pub content: Option<Result<PreviewText, PreviewError>>,
     delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
     request: Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -207,7 +202,7 @@ impl ResourcePreview {
         ));
     }
 
-    pub fn retry(&mut self, core: &crate::core::Core) -> bool {
+    pub(crate) fn retry(&mut self, core: &crate::core::Core) -> bool {
         if !self
             .content
             .as_ref()

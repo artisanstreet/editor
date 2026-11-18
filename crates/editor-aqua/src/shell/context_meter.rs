@@ -1,12 +1,12 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextReading {
-    pub model_name: String,
-    pub context_tokens: u64,
-    pub window_tokens: u64,
+    model_name: String,
+    context_tokens: u64,
+    window_tokens: u64,
 }
 
 impl ContextReading {
-    pub fn new(model_name: String, context_tokens: u64, window_tokens: u64) -> Option<Self> {
+    fn new(model_name: String, context_tokens: u64, window_tokens: u64) -> Option<Self> {
         (window_tokens > 0).then_some(Self {
             model_name,
             context_tokens,
@@ -14,44 +14,20 @@ impl ContextReading {
         })
     }
 
-    pub fn percent(&self) -> f64 {
+    pub(crate) fn percent(&self) -> f64 {
         (self.context_tokens as f64 / self.window_tokens as f64 * 100.0).clamp(0.0, 100.0)
     }
 
-    pub fn percent_sentence(&self) -> String {
+    pub(crate) fn percent_sentence(&self) -> String {
         format!(
             "The context window for {} is {}% full.",
             self.model_name,
             self.percent().round()
         )
     }
-
-    pub fn capacity_sentence(&self) -> String {
-        format!(
-            "{} has a context window of {} tokens.",
-            self.model_name,
-            compact_tokens(self.window_tokens)
-        )
-    }
 }
 
-pub fn compact_tokens(count: u64) -> String {
-    let value = count as f64;
-    let (scaled, suffix) = if value >= 999_500.0 {
-        (value / 1e6, "M")
-    } else if value >= 999.5 {
-        (value / 1e3, "K")
-    } else {
-        (value, "")
-    };
-    let digits = match scaled < 10.0 && !suffix.is_empty() {
-        true => 1,
-        false => 0,
-    };
-    format!("{}{suffix}", editor_ui::locale::trimmed(scaled, digits))
-}
-
-pub fn reading(
+pub(crate) fn reading(
     host: &crate::core::HostData,
     thread: &artisan_api::ThreadId,
     agent: Option<Option<(u64, Option<String>)>>,

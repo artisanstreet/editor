@@ -8,12 +8,12 @@ use aqua::images::{ImageAssets, ImageHandle};
 use model::{EmailProblem, Feedback, Link, Page, Provider};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration, time::Instant};
 
-pub const EMAIL_PAGE: &str = "artisan-sign-in-page-email";
-pub const CODE_PAGE: &str = "artisan-sign-in-page-code";
-pub const EMAIL_FEEDBACK: &str = "artisan-sign-in-feedback-email";
-pub const CODE_FEEDBACK: &str = "artisan-sign-in-feedback-code";
-pub const ART_BOX: (f32, f32) = (240.0, 96.0);
-pub const ART_PARAMS: dither::Params = dither::Params {
+pub(crate) const EMAIL_PAGE: &str = "artisan-sign-in-page-email";
+pub(crate) const CODE_PAGE: &str = "artisan-sign-in-page-code";
+pub(crate) const EMAIL_FEEDBACK: &str = "artisan-sign-in-feedback-email";
+pub(crate) const CODE_FEEDBACK: &str = "artisan-sign-in-feedback-code";
+const ART_BOX: (f32, f32) = (240.0, 96.0);
+const ART_PARAMS: dither::Params = dither::Params {
     pixel_size: 0.5,
     contrast: 1.15,
     brightness: 1.25,
@@ -21,26 +21,26 @@ pub const ART_PARAMS: dither::Params = dither::Params {
     max_resolution: 1024.0,
     fade_right: 0.3,
 };
-pub const ART_PAINT: dither::Paint = dither::Paint {
+const ART_PAINT: dither::Paint = dither::Paint {
     rgb: [165, 172, 178],
     opacity: 0.7,
     fade_in_left: 0.3,
 };
 
 const SMOOTH_OUT: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
-pub const PAGE: Transition = Transition {
+pub(crate) const PAGE: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: SMOOTH_OUT,
 };
-pub const RESIZE: Transition = Transition {
+const RESIZE: Transition = Transition {
     duration: Duration::from_millis(300),
     easing: SMOOTH_OUT,
 };
-pub const SWAP: Transition = Transition {
+pub(crate) const SWAP: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: CubicBezier::new(0.42, 0.0, 0.58, 1.0),
 };
-pub const REVEAL: Transition = Transition {
+pub(crate) const REVEAL: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: SMOOTH_OUT,
 };
@@ -62,25 +62,25 @@ pub enum Slot {
 }
 
 pub struct Motion {
-    pub page: Glide,
-    pub height: Option<Glide>,
-    pub busy: Glide,
-    pub email_feedback: Glide,
-    pub code_feedback: Glide,
+    page: Glide,
+    height: Option<Glide>,
+    busy: Glide,
+    email_feedback: Glide,
+    code_feedback: Glide,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sizes {
-    pub email_page: f32,
-    pub code_page: f32,
-    pub email_feedback: f32,
-    pub code_feedback: f32,
+    pub(crate) email_page: f32,
+    pub(crate) code_page: f32,
+    pub(crate) email_feedback: f32,
+    pub(crate) code_feedback: f32,
 }
 
 pub struct SignIn {
-    pub problem: Option<EmailProblem>,
+    pub(crate) problem: Option<EmailProblem>,
     pub reduced: bool,
-    pub motion: Motion,
+    motion: Motion,
     shown: Page,
     sizes: Option<Sizes>,
     last: (Feedback, Feedback),
@@ -116,16 +116,16 @@ impl SignIn {
         Rc::new(move |event| events.borrow_mut().push_back(event))
     }
 
-    pub fn take_events(&self) -> Vec<Event> {
+    pub(crate) fn take_events(&self) -> Vec<Event> {
         self.events.borrow_mut().drain(..).collect()
     }
 
     #[must_use]
-    pub fn art(&self) -> Option<Arc<ImageHandle>> {
+    pub(crate) fn art(&self) -> Option<Arc<ImageHandle>> {
         self.art.clone()
     }
 
-    pub fn ensure_art(&mut self, assets: &ImageAssets) {
+    pub(crate) fn ensure_art(&mut self, assets: &ImageAssets) {
         if self.art.is_some() {
             return;
         }
@@ -146,12 +146,12 @@ impl SignIn {
     }
 
     #[must_use]
-    pub fn height(&self, now: Instant) -> Option<f32> {
+    fn height(&self, now: Instant) -> Option<f32> {
         self.motion.height.map(|height| height.value(now, RESIZE))
     }
 
     #[must_use]
-    pub const fn last(&self, slot: Slot) -> &Feedback {
+    const fn last(&self, slot: Slot) -> &Feedback {
         match slot {
             Slot::Email => &self.last.0,
             Slot::Code => &self.last.1,
@@ -159,7 +159,7 @@ impl SignIn {
     }
 
     #[must_use]
-    pub fn feedback_height(&self, slot: Slot) -> f32 {
+    fn feedback_height(&self, slot: Slot) -> f32 {
         self.sizes.map_or(0.0, |sizes| match slot {
             Slot::Email => sizes.email_feedback,
             Slot::Code => sizes.code_feedback,
@@ -220,7 +220,7 @@ impl SignIn {
         changed
     }
 
-    pub fn measure(&mut self, sizes: Sizes, now: Instant, reduced: bool) -> bool {
+    pub(crate) fn measure(&mut self, sizes: Sizes, now: Instant, reduced: bool) -> bool {
         let close = |a: f32, b: f32| (a - b).abs() < 0.5;
         if self.sizes.is_some_and(|known| {
             close(known.email_page, sizes.email_page)

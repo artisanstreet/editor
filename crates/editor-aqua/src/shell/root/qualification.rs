@@ -3,32 +3,6 @@ use crate::shell::host::Shell;
 use aqua::UiApp;
 
 impl RootViews {
-    pub fn arm_qualification_paint(&mut self, shell: &Shell, generation: u64) -> bool {
-        let scope = shell.entry.workspace().and_then(|workspace| {
-            crate::conversation::presentation::PresentationScope::capture(
-                &workspace.conversation,
-                &shell.core,
-            )
-        });
-        self.qualification_paint.arm(
-            scope,
-            generation,
-            self.observations.qualification_paint_serial(),
-        )
-    }
-
-    pub fn qualification_paint(
-        &self,
-        shell: &Shell,
-    ) -> Option<crate::qualification::observation::Paint> {
-        let workspace = shell.entry.workspace()?;
-        let scope = crate::conversation::presentation::PresentationScope::capture(
-            &workspace.conversation,
-            &shell.core,
-        )?;
-        self.qualification_paint.current(&scope)
-    }
-
     pub fn qualification_observation(
         &self,
         shell: &Shell,

@@ -14,10 +14,14 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub const ACTIVE: &str = "artisan-active-thread-tab";
-pub const SHEET: &str = "artisan-thread-sheet";
+pub(crate) const ACTIVE: &str = "artisan-active-thread-tab";
+pub(crate) const SHEET: &str = "artisan-thread-sheet";
 
-pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced: bool) -> Element {
+pub(crate) fn surface(
+    theme: ArtisanTheme,
+    motion: Rc<RefCell<motion::Motion>>,
+    reduced: bool,
+) -> Element {
     let geometry = Rc::new(Cell::new(None));
     let measured = Rc::clone(&geometry);
     let targeting = Rc::clone(&motion);

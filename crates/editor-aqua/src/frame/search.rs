@@ -14,10 +14,10 @@ use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub const OVERLAY: &str = "artisan-frame-search-overlay";
+pub(crate) const OVERLAY: &str = "artisan-frame-search-overlay";
 pub const QUERY: &str = "sidebar-thread-search";
 const SCOPE: &str = "artisan-frame-search-scope";
-pub const RAIL_KEY: KeySize = KeySize::Md;
+const RAIL_KEY: KeySize = KeySize::Md;
 const BAR: KeySize = KeySize::Lg;
 const BLUR: f32 = 4.0;
 const RISE: f32 = 8.0;
@@ -26,7 +26,7 @@ const RESULTS_DELAY: f32 = 0.3;
 const BAR_FADE: f32 = 0.4;
 
 #[must_use]
-pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> Element {
+pub(crate) fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> Element {
     let content = UiBox::new()
         .layout("row")
         .spaced(Space::S8)
@@ -69,7 +69,7 @@ fn new_thread_key(theme: &ArtisanTheme, emit: Rc<dyn Fn(Event)>) -> Element {
     clippy::disallowed_methods,
     reason = "the search glyph pads only its right side, by the key's lip, so it centres on the key face"
 )]
-pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
+pub(crate) fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     let edge = RAIL_KEY.edge();
     let lip = key_lip(RAIL_KEY);
     let search = Rc::clone(emit);
@@ -126,7 +126,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
 }
 
 #[must_use]
-pub const fn rail_width() -> f32 {
+pub(crate) const fn rail_width() -> f32 {
     2.0 * RAIL_KEY.edge() + key_lip(RAIL_KEY)
 }
 
