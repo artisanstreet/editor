@@ -1,0 +1,58 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the command to wait for approval\", |view|\n{ view.find(Role::Button, \"Approve\").is_some() })"
+---
+Button "Hide sidebar"
+  Label "A"
+  Label "R"
+  Label "T"
+  Label "I"
+  Label "S"
+  Label "A"
+  Label "N"
+TextInput "Search threads"
+Button "New thread"
+List
+  ListItem
+    Group "Project"
+      Label "Project"
+  ListItem
+    Button "Echo" [selected]
+      Label "Echo"
+Button "Search threads"
+Button "New thread"
+Button "Test" [collapsed]
+  Label "Test"
+Group "Project / Echo"
+  Group "Project / Echo"
+    Button "New thread in Project"
+      Label "Project"
+    Label "/"
+    Label "Echo"
+Button "Minimize window"
+Button "Maximize window"
+Button "Close window"
+List
+  ListItem
+    Label "Echo hello"
+  ListItem
+    Label "Working for [duration]"
+  ListItem
+    Label "I'll run the shell command first."
+  ListItem
+    Label "Approval requested"
+    Label "$ "
+    Label "echo hello"
+    Button "Approve"
+      Label "Approve"
+    Button "Always allow"
+      Label "Always allow"
+    Button "Deny"
+      Label "Deny"
+  ListItem
+    Label "Waiting for you"
+ComboBox "No model" [collapsed]
+  Label "No model"
+ScrollView
+  TextInput "Make anything" [focused]
+Button "Stop"

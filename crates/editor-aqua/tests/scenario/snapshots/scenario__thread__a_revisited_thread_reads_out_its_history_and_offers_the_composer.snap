@@ -1,0 +1,45 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.shows(\"It turns text into tokens.\")"
+---
+Group [focused]
+  Button "Hide sidebar"
+    Label "A"
+    Label "R"
+    Label "T"
+    Label "I"
+    Label "S"
+    Label "A"
+    Label "N"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting" [selected]
+        Label "Greeting"
+  Button "Search threads"
+  Button "New thread"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Greeting"
+    Group "Project / Greeting"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Greeting"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Label "What does the parser do?"
+    ListItem
+      Label "It turns text into tokens."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Ask about anything"
+  Button "Send message" [disabled]

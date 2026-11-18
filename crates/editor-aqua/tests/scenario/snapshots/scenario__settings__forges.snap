@@ -1,0 +1,42 @@
+---
+source: crates/editor-aqua/tests/scenario/settings.rs
+expression: "editor.settle_part(\"the Forges page\", Role::Dialog, Some(\"Settings\"), |view|\nview.shows(\"The account's Forges this Editor has open.\") &&\nview.shows(\"Connected\"))"
+---
+Dialog "Settings"
+  ScrollView
+    Group "Editor"
+      Label "Editor"
+    Button "General" [collapsed]
+      Label "General"
+    Button "Account"
+      Label "Account"
+    Button "Forges" [selected, focused]
+      Label "Forges"
+    Button "About"
+      Label "About"
+    Group "Forge"
+      Label "Forge"
+    Button "Threads" [collapsed]
+      Label "Threads"
+    Button "Extensions" [collapsed]
+      Label "Extensions"
+    Group "Engines"
+      Label "Engines"
+    Button "Claude Code" [collapsed]
+      Label "Claude Code"
+      Label "Sign in"
+    Button "Codex" [collapsed]
+      Label "Codex"
+      Label "Install"
+    Button "OpenCode" [collapsed]
+      Label "OpenCode"
+      Label "Install"
+  Button "Close settings"
+  ScrollView
+    Label "Forges"
+    Label "The account's Forges this Editor has open."
+    Label "Open Forges"
+    Group "Forge"
+      Label "Forge"
+      Label "Forge 0.0.0"
+      Label "Connected"

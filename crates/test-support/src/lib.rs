@@ -15,6 +15,8 @@ pub mod items;
 pub mod net;
 #[cfg(feature = "replay")]
 pub mod replay;
+#[cfg(feature = "scenario")]
+pub mod scenario;
 #[cfg(feature = "sse")]
 pub mod sse;
 #[cfg(feature = "transcript")]

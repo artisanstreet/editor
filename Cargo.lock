@@ -1619,6 +1619,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
+ "insta",
  "palette",
  "rusqlite",
  "rustls",
@@ -5305,8 +5306,12 @@ dependencies = [
 name = "test-support"
 version = "0.0.0"
 dependencies = [
+ "accesskit_consumer",
  "aqua",
+ "aqua-a11y-uia",
  "aqua-core",
+ "aqua-protocol",
+ "aqua-runtime",
  "aqua-text",
  "aqua-ui",
  "artisan-api",
@@ -5317,6 +5322,7 @@ dependencies = [
  "editor-core",
  "editor-ui",
  "forge-engines",
+ "forge-runs",
  "futures",
  "serde",
  "serde_json",

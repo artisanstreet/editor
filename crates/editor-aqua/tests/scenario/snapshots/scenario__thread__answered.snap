@@ -1,0 +1,47 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the approved turn to finish\", |view|\n{\n    view.shows(\"It printed hello.\") &&\n    view.find(Role::Button, \"Approve\").is_none() &&\n    view.find(Role::Button, \"Stop\").is_none()\n})"
+---
+Button "Hide sidebar"
+  Label "A"
+  Label "R"
+  Label "T"
+  Label "I"
+  Label "S"
+  Label "A"
+  Label "N"
+TextInput "Search threads"
+Button "New thread"
+List
+  ListItem
+    Group "Project"
+      Label "Project"
+  ListItem
+    Button "Echo" [selected]
+      Label "Echo"
+Button "Search threads"
+Button "New thread"
+Button "Test" [collapsed]
+  Label "Test"
+Group "Project / Echo"
+  Group "Project / Echo"
+    Button "New thread in Project"
+      Label "Project"
+    Label "/"
+    Label "Echo"
+Button "Minimize window"
+Button "Maximize window"
+Button "Close window"
+List [focused]
+  ListItem
+    Label "Echo hello"
+  ListItem
+    Button "Show work"
+      Label "Worked for [duration]"
+  ListItem
+    Label "It printed hello."
+ComboBox "No model" [collapsed]
+  Label "No model"
+ScrollView
+  TextInput "Make anything"
+Button "Send message" [disabled]

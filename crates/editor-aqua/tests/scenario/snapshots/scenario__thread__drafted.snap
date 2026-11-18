@@ -1,0 +1,40 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the draft to enable Send\", |view|\n{\n    view.find(Role::Button, \"Send message\").is_some_and(|send| !send.disabled)\n})"
+---
+Button "Hide sidebar"
+  Label "A"
+  Label "R"
+  Label "T"
+  Label "I"
+  Label "S"
+  Label "A"
+  Label "N"
+TextInput "Search threads"
+Button "New thread"
+List
+  ListItem
+    Group "Project"
+      Label "Project"
+  ListItem
+    Button "Greeting" [selected]
+      Label "Greeting"
+Button "Search threads"
+Button "New thread"
+Button "Test" [collapsed]
+  Label "Test"
+Group "Project / Greeting"
+  Group "Project / Greeting"
+    Button "New thread in Project"
+      Label "Project"
+    Label "/"
+    Label "Greeting"
+Button "Minimize window"
+Button "Maximize window"
+Button "Close window"
+Label "No messages yet."
+ComboBox "No model" [collapsed]
+  Label "No model"
+ScrollView
+  TextInput "Ask about anything" value="Say hello" [focused]
+Button "Send message"

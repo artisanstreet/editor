@@ -1,0 +1,11 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle_on(\"the reply to finish\", |view|\n{\n    view.shows(\"Hello from the replay.\") &&\n    view.find(Role::Button, \"Stop\").is_none()\n}, |view| view.part_showing(Role::List, \"Hello from the replay.\"))"
+---
+List
+  ListItem
+    Label "Say hello"
+  ListItem
+    Label "Thought for [duration]"
+  ListItem
+    Label "Hello from the replay."

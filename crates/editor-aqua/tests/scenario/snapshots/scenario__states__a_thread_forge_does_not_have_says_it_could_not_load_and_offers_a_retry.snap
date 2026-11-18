@@ -1,0 +1,38 @@
+---
+source: crates/editor-aqua/tests/scenario/states.rs
+expression: "editor.settle(\"the load failure\", |view|\n{\n    view.shows(\"Couldn't load this thread\") &&\n    view.find(Role::Button, \"Try again\").is_some()\n})"
+---
+Group [focused]
+  Button "Hide sidebar"
+    Label "A"
+    Label "R"
+    Label "T"
+    Label "I"
+    Label "S"
+    Label "A"
+    Label "N"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting"
+        Label "Greeting"
+  Button "Search threads"
+  Button "New thread"
+  Button "Test" [collapsed]
+    Label "Test"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  Label "No messages yet."
+  Label "Couldn't load this thread: load thread missing from mch_capture0000000000000000: GET /threads/missing: Forge did not answer: Forge answered 404 Not Found: thread missing not found"
+  Button "Try again"
+    Label "Try again"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Ask about anything"
+  Button "Send message" [disabled]

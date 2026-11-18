@@ -1,0 +1,11 @@
+---
+source: crates/editor-aqua/tests/scenario/palette.rs
+expression: "editor.settle_part(\"the palette to narrow to the typed thread\", Role::Dialog,\nSome(\"Search threads and commands\"), |view|\n{\n    view.part(Role::Dialog,\n    Some(\"Search threads and commands\")).is_some_and(|palette|\n    {\n        palette.contains(\"Parser rewrite\") && !palette.contains(\"Greeting\") &&\n        !palette.contains(\"Searching threads\")\n    })\n})"
+---
+Dialog "Search threads and commands"
+  Label "Search threads and commands"
+  Button "Close"
+  TextInput "Search threads and commands" value="Parser" [focused]
+  Button "Parser rewrite" [selected]
+    Label "Parser rewrite"
+    Label "Forge"

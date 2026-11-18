@@ -1,0 +1,87 @@
+---
+source: crates/editor-aqua/tests/scenario/settings.rs
+expression: "editor.settle_part(\"settings to open on General\", Role::Dialog,\nSome(\"Settings\"), |view|\nview.shows(\"How this Editor behaves on this device.\"))"
+---
+Dialog "Settings"
+  ScrollView
+    Group "Editor"
+      Label "Editor"
+    Button "General" [expanded]
+      Label "General"
+    Button "Appearance"
+      Label "Appearance"
+    Button "Text Streaming"
+      Label "Text Streaming"
+    Button "Notifications"
+      Label "Notifications"
+    Button "Performance"
+      Label "Performance"
+    Button "Account"
+      Label "Account"
+    Button "Forges"
+      Label "Forges"
+    Button "About"
+      Label "About"
+    Group "Forge"
+      Label "Forge"
+    Button "Threads" [collapsed]
+      Label "Threads"
+    Button "Extensions" [collapsed]
+      Label "Extensions"
+    Group "Engines"
+      Label "Engines"
+    Button "Claude Code" [collapsed]
+      Label "Claude Code"
+      Label "Sign in"
+    Button "Codex" [collapsed]
+      Label "Codex"
+      Label "Install"
+    Button "OpenCode" [collapsed]
+      Label "OpenCode"
+      Label "Install"
+  Button "Close settings"
+  ScrollView
+    Label "General"
+    Label "How this Editor behaves on this device."
+    Label "Appearance"
+    Group "Dark mode"
+      Label "Dark mode"
+      Label "Whether to draw Artisan Editor in a dark theme."
+      Switch "switch dark mode" [checked]
+    Group "Fonts"
+      Label "Fonts"
+      Label "Choose the fonts Artisan Editor uses."
+      ComboBox "Fonts" value="Spline" [collapsed]
+        Label "Spline"
+    Group "Outline text rendering"
+      Label "Outline text rendering"
+      Label "Unhinted grayscale glyphs with no gamma or contrast correction, so letters keep their designed shapes. Turn off if text looks too soft or thin."
+      Switch "switch outline text" [checked]
+    Group "Show all models"
+      Label "Show all models"
+      Label "List every Claude and Codex model in the model picker, not only the latest of each class."
+      Switch "switch show all models" [unchecked]
+    Group "Hide bad model options"
+      Label "Hide bad model options"
+      Label "Hide Max and Ultra for Claude and Codex, plus Light and Extra High for Opus 5.5. Your current selection is kept."
+      Switch "Hide bad model options" [checked]
+    Label "Text Streaming"
+    Group "Text Streaming"
+      Label "Text Streaming"
+      Label "Smooth fades new text in briefly as it arrives. Swift shows it immediately without reveal animation."
+      ComboBox "Text Streaming" value="Smooth" [collapsed]
+        Label "Smooth"
+    Label "Notifications"
+    Group "Notify me"
+      Label "Notify me"
+      Label "Uses your system's notifications to tell you when a thread finishes, needs attention or fails."
+      Switch "switch notify" [checked]
+    Label "Performance"
+    Group "Lower refresh rate"
+      Label "Lower refresh rate"
+      Label "Caps animation and scrolling at 60 frames per second to save power."
+      Switch "lower refresh rate" [unchecked]
+    Group "Match monitor refresh rate"
+      Label "Match monitor refresh rate"
+      Label "Synchronizes presentation to the current monitor. With both limits off, rendering is uncapped."
+      Switch "match monitor refresh rate" [checked]
