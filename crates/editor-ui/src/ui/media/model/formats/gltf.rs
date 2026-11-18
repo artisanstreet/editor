@@ -6,6 +6,7 @@ use gltf::{Semantic, buffer::Source, mesh::Mode};
 use std::borrow::Cow;
 
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+const OVER_BUDGET: &str = "glTF buffers exceed the 64 MiB preview budget";
 const MAX_ACCESSOR_ELEMENTS: usize = MAX_TRIANGLES * 3;
 const MAX_NODE_VISITS: usize = 4096;
 
@@ -41,7 +42,7 @@ pub(in super::super) fn parse(bytes: &[u8], mesh: &mut MeshBuilder) -> Result<()
             .checked_add(buffer.length())
             .ok_or("glTF buffer size overflow")?;
         if retained > MAX_BUFFER_BYTES {
-            return Err("glTF buffers exceed the64 MiB preview budget".into());
+            return Err(OVER_BUDGET.into());
         }
         let data = match buffer.source() {
             Source::Bin => {
@@ -75,7 +76,7 @@ pub(in super::super) fn parse(bytes: &[u8], mesh: &mut MeshBuilder) -> Result<()
             .checked_add(data.len() - buffer.length())
             .ok_or("glTF buffer size overflow")?;
         if retained > MAX_BUFFER_BYTES {
-            return Err("glTF buffers exceed the64 MiB preview budget".into());
+            return Err(OVER_BUDGET.into());
         }
         buffers.push(data);
     }
