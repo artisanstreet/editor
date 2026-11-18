@@ -1,6 +1,6 @@
 {
   "idle_wakeups_per_ten_minutes": {
-    "limit": 400,
-    "reason": "coordination polling is gone (step 4.1); measured 331 in ten idle minutes, about one wakeup every two seconds from timers still being traced down, and the budget only allows it to shrink"
+    "limit": 30,
+    "reason": "no timer fires in ten idle minutes: MCP servers are probed when a turn starts, engine usage is re-read only when a reading falls due (never without an installed engine), parked turns sleep until the earliest due time, and the hourly source/blob collection and inactive-thread sweep fall outside the window; measured 5 to 18, all late completions of startup work (store reads, engine reconciling, trace pruning) landing after the measurement starts, so any new timer of 20 s or shorter breaks the budget"
   }
 }
