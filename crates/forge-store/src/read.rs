@@ -703,12 +703,6 @@ pub fn changes_since(
 /// query is indexed by thread and kind, so it is computed per request.
 pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
     use artisan_api::{InspectorSummary, InspectorTerminal, InspectorWorkflow};
-    #[derive(serde::Deserialize)]
-    struct WorkflowRow {
-        id: artisan_api::ItemId,
-        status: artisan_api::Status,
-        input: Option<artisan_api::TextContent>,
-    }
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     let revision = conn.query_row(
@@ -729,22 +723,11 @@ pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::In
          WHERE thread_id=?1 AND status IN ('running','awaiting_user') AND json_extract(body,'$.kind.tool.kind')='shell' ORDER BY position DESC",
          [thread.as_str()])?;
     let agents = live_agents(conn, thread)?;
-    let workflows: Vec<InspectorWorkflow> = many::<WorkflowRow>(conn,
-        "SELECT json_object('id',id,'status',status,'input',json(body->'$.kind.tool.input')) FROM items
+    let workflows: Vec<InspectorWorkflow> = many(conn,
+        "SELECT json_object('id',id,'status',status,'name',json_extract(body,'$.kind.tool.name')) FROM items
          WHERE thread_id=?1 AND status IN ('running','awaiting_user')
-            AND json_extract(body,'$.kind.tool.kind')='other'
-            AND json_extract(body,'$.kind.tool.name')='Workflow' ORDER BY position DESC",
-        [thread.as_str()])?
-    .into_iter()
-    .map(|row| InspectorWorkflow {
-        id: row.id,
-        name: match row.input {
-            Some(artisan_api::TextContent::Inline(input)) => workflow_name(&input),
-            _ => None,
-        },
-        status: row.status,
-    })
-    .collect();
+            AND json_extract(body,'$.kind.tool.kind')='workflow' ORDER BY position DESC",
+        [thread.as_str()])?;
     let plan = current_plan(conn, thread)?;
     let goal = current_goal(conn, thread)?;
     let questions = many(conn,
@@ -830,27 +813,6 @@ fn current_goal(conn: &Connection, thread: &ThreadId) -> Result<Option<artisan_a
             Ok(artisan_api::ThreadGoal { objective, summary, state })
         }))
     }).transpose()
-}
-
-/// A Claude workflow's name: a saved one's, else the `name` in its script's
-/// `meta`.
-fn workflow_name(input: &str) -> Option<String> {
-    let input: serde_json::Value = serde_json::from_str(input).ok()?;
-    if let Some(name) = input["name"].as_str() {
-        return Some(name.to_owned());
-    }
-    let script = input["script"].as_str()?;
-    let meta = &script[script.find("meta")?..];
-    let rest = meta[meta.find("name")? + 4..]
-        .trim_start()
-        .strip_prefix(':')?
-        .trim_start();
-    let quote = rest
-        .chars()
-        .next()
-        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
-    let name = &rest[1..];
-    Some(name[..name.find(quote)?].to_owned())
 }
 
 /// The user's own messages in `thread`, in order, each labelled by its first

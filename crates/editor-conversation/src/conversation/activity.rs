@@ -87,7 +87,7 @@ pub fn category(item: &Item) -> Option<ActivityCategory> {
             },
             ToolKind::Mcp { .. } => C::Integration,
             ToolKind::AgentMessage { .. } => C::Message,
-            ToolKind::Agents { .. } | ToolKind::Other { .. } => C::Tool,
+            ToolKind::Agents { .. } | ToolKind::Workflow { .. } | ToolKind::Other { .. } => C::Tool,
         }),
         ItemKind::UserMessage { .. }
         | ItemKind::AssistantMessage { .. }
@@ -342,6 +342,19 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
                     ),
                 }
             }
+            ToolKind::Workflow { name, input } => (
+                "Workflow".to_owned(),
+                title
+                    .clone()
+                    .or_else(|| name.clone())
+                    .or_else(|| {
+                        input
+                            .as_ref()
+                            .and_then(|input| first_field(input.inline()?))
+                    })
+                    .map(|text| first_line(&text))
+                    .unwrap_or_default(),
+            ),
             ToolKind::Other { name, input } => (
                 sentence(&words(name)),
                 title

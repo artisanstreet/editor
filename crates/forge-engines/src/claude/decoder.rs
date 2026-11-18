@@ -1384,6 +1384,7 @@ fn approval_request(kind: &ToolKind, name: &str, reason: Option<&str>) -> Approv
         | ToolKind::WebSearch { .. }
         | ToolKind::Mcp { .. }
         | ToolKind::ViewImage { .. }
+        | ToolKind::Workflow { .. }
         | ToolKind::Other { .. } => ApprovalRequest::Action {
             description: (reason.map_or_else(|| format!("Use {name}"), str::to_owned)).into(),
         },

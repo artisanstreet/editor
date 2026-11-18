@@ -120,6 +120,10 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             background: true,
             watch: true,
         },
+        "Workflow" => ToolKind::Workflow {
+            name: workflow_name(input),
+            input: (!input.is_null()).then(|| input.to_string().into()),
+        },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());
             match name
@@ -138,6 +142,24 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             }
         }
     })
+}
+
+fn workflow_name(input: &Value) -> Option<String> {
+    if let Some(name) = str_at(input, "name") {
+        return Some(name.to_owned());
+    }
+    let script = str_at(input, "script")?;
+    let meta = &script[script.find("meta")?..];
+    let rest = meta[meta.find("name")? + 4..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
+    let name = &rest[1..];
+    Some(name[..name.find(quote)?].to_owned())
 }
 
 pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {

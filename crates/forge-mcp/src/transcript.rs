@@ -328,6 +328,15 @@ async fn tool_summary(store: &Store, tool: &ToolKind, options: &Options) -> Resu
                 None => String::new(),
             }
         ),
+        ToolKind::Workflow { name, input } => format!(
+            "Workflow{}{}\n",
+            name.as_ref()
+                .map_or_else(String::new, |name| format!(" {name}")),
+            match input {
+                Some(input) => format!(" {}", text(store, input, options).await?),
+                None => String::new(),
+            }
+        ),
         ToolKind::Other { name, input } => format!(
             "{name}{}\n",
             match input {

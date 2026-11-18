@@ -1273,13 +1273,9 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
     let mut workflow = message(&thread, "workflow", "");
     workflow.status = Status::Running;
     workflow.kind = ItemKind::Tool {
-        tool: ToolKind::Other {
-            name: "Workflow".into(),
-            input: Some(
-                serde_json::json!({"script": "export const meta = { name: 'review-changes' }"})
-                    .to_string()
-                    .into(),
-            ),
+        tool: ToolKind::Workflow {
+            name: Some("review-changes".into()),
+            input: None,
         },
         title: None,
         output: None,

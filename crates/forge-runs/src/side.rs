@@ -133,7 +133,7 @@ fn weigh(kind: &ItemKind, status: Status) -> f32 {
                     }
                 }
                 // Side effects nobody can see from here.
-                ToolKind::Mcp { .. } | ToolKind::Other { .. } => 1.0,
+                ToolKind::Mcp { .. } | ToolKind::Workflow { .. } | ToolKind::Other { .. } => 1.0,
                 ToolKind::Read { .. }
                 | ToolKind::Search { .. }
                 | ToolKind::WebFetch { .. }

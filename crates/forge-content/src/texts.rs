@@ -29,7 +29,7 @@ macro_rules! item_texts {
                 match tool {
                     ToolKind::AgentMessage { text, .. } => $visit(text)?,
                     ToolKind::Shell { command, .. } => $visit(command)?,
-                    ToolKind::Mcp { input, .. } | ToolKind::Other { input, .. } => {
+                    ToolKind::Mcp { input, .. } | ToolKind::Workflow { input, .. } | ToolKind::Other { input, .. } => {
                         for text in input { $visit(text)?; }
                     }
                     ToolKind::Edit { changes: Collection::Inline(changes) } => {

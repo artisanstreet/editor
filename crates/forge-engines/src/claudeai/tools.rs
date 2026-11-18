@@ -585,6 +585,7 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
                     | ToolKind::WebFetch { .. }
                     | ToolKind::WebSearch { .. }
                     | ToolKind::ViewImage { .. }
+                    | ToolKind::Workflow { .. }
                     | ToolKind::Other { .. } => {}
                 }
                 ItemKind::Tool {

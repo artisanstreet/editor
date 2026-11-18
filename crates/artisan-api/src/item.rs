@@ -258,6 +258,11 @@ pub enum ToolKind {
     ViewImage {
         path: String,
     },
+    Workflow {
+        name: Option<String>,
+        #[serde(default)]
+        input: Option<TextContent>,
+    },
     Other {
         name: String,
         #[serde(default)]

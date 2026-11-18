@@ -431,7 +431,9 @@ fn move_door(
             engine.close_stdin("what held input open after the result was answered");
         }
         (Door::HeldForBackground, Moved::Result(_)) => {
-            engine.note(&format!("result; input stays open for background work ({jobs})"));
+            engine.note(&format!(
+                "result; input stays open for background work ({jobs})"
+            ));
         }
         (Door::HeldForBackground, Moved::Frame | Moved::Grace) if from == Door::Settling => {
             engine.note("background work started again; input stays open");
@@ -538,8 +540,12 @@ fn launch_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf
     }
     let mut settings = serde_json::Map::new();
     match config.speed.as_deref() {
-        Some(crate::catalog::CLAUDE_FAST) => { settings.insert("fastMode".into(), json!(true)); }
-        Some(crate::catalog::STANDARD_SPEED) => { settings.insert("fastMode".into(), json!(false)); }
+        Some(crate::catalog::CLAUDE_FAST) => {
+            settings.insert("fastMode".into(), json!(true));
+        }
+        Some(crate::catalog::STANDARD_SPEED) => {
+            settings.insert("fastMode".into(), json!(false));
+        }
         _ => {}
     }
     if !settings.is_empty() {
@@ -587,7 +593,11 @@ fn title_from_transcript(path: &Path) -> Option<String> {
 fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
     config
         .compaction_window_override()
-        .or_else(|| config.context_window_override().filter(|tokens| *tokens == 500_000))
+        .or_else(|| {
+            config
+                .context_window_override()
+                .filter(|tokens| *tokens == 500_000)
+        })
         .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }
 
@@ -606,6 +616,10 @@ mod door_tests;
 #[cfg(test)]
 #[path = "../tests/claude/reply.rs"]
 mod reply_tests;
+
+#[cfg(test)]
+#[path = "../tests/claude/tools.rs"]
+mod tools_tests;
 
 #[cfg(test)]
 mod tests {

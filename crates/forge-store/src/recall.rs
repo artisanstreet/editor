@@ -203,6 +203,12 @@ fn push_tool(
                 push(text, &text_of(conn, input)?);
             }
         }
+        ToolKind::Workflow { name, input } => {
+            push(text, name.as_deref().unwrap_or("Workflow"));
+            if let Some(input) = input {
+                push(text, &text_of(conn, input)?);
+            }
+        }
         ToolKind::Other { name, input } => {
             push(text, name);
             if let Some(input) = input {
