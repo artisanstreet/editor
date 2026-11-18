@@ -10,11 +10,13 @@ use aqua_ui::{
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
 };
 
-use super::Palette;
+use super::{Palette, SearchProblem};
 use crate::{
-    core::Screen,
+    core::{Screen, SettingsPage},
     ui::{
-        kit::{Density, Row, RowItem, Space, Spaced, Surface, TextRole},
+        kit::{
+            Button, ButtonSize, ButtonTone, Density, Row, RowItem, Space, Spaced, Surface, TextRole,
+        },
         text::{
             Editor, Mode,
             mount::{EditorController, EditorEvent},
@@ -34,6 +36,7 @@ pub enum Action {
     Down,
     Submit,
     Select(Screen),
+    RetrySearch,
     Dismiss,
 }
 
@@ -166,6 +169,10 @@ impl PaletteView {
                 changed: true,
                 effect: Effect::Close(Some(screen)),
             },
+            Action::RetrySearch => Outcome {
+                changed: true,
+                effect: Effect::Search(palette.query.clone()),
+            },
             Action::Dismiss => Outcome {
                 changed: true,
                 effect: Effect::Close(None),
@@ -188,8 +195,48 @@ impl PaletteView {
             false,
         );
         let mut content = UiBox::new().layout("column").spaced(Space::S4).child(query);
-        if let Some(error) = &palette.search_error {
-            content = content.child(TextRole::Caption.text(theme, error.clone()).build());
+        if let Some(problem) = palette.search_error {
+            let callback = guarded(self.session, &self.active, emit.clone());
+            let (text, label, action) = match problem {
+                SearchProblem::NoForge => (
+                    "Connect to a Forge to search older threads.".to_owned(),
+                    "Forges",
+                    Action::Select(Screen::Settings(SettingsPage::Hosts)),
+                ),
+                SearchProblem::Unreachable(1) => (
+                    "Search couldn't reach 1 Forge.".to_owned(),
+                    "Retry",
+                    Action::RetrySearch,
+                ),
+                SearchProblem::Unreachable(count) => (
+                    format!("Search couldn't reach {count} Forges."),
+                    "Retry",
+                    Action::RetrySearch,
+                ),
+            };
+            content = content.child(
+                crate::ui::page::notice(theme, text)
+                    .action(
+                        Button::text(
+                            "command-palette-search-action",
+                            *theme,
+                            ButtonTone::Neutral,
+                            label,
+                        )
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| callback(action.clone()))
+                        .build(),
+                    )
+                    .build(),
+            );
+        }
+        if palette.searching() {
+            content = content.child(caption(theme, "Searching threads…".to_owned()));
+        } else if palette.entries.is_empty() && !palette.query.trim().is_empty() {
+            content = content.child(caption(
+                theme,
+                format!("Nothing matches “{}”.", palette.query.trim()),
+            ));
         }
         for (index, entry) in palette.entries.iter().enumerate() {
             let screen = entry.screen.clone();
@@ -250,6 +297,13 @@ fn row(theme: &ArtisanTheme, index: usize, entry: &super::Entry, selected: bool)
         .detail(entry.detail.clone()),
     };
     row.selected(selected)
+}
+
+fn caption(theme: &ArtisanTheme, text: String) -> Element {
+    TextRole::Caption
+        .text(theme, text)
+        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+        .build()
 }
 
 fn guarded(

@@ -9,6 +9,13 @@ use std::{
 use tokio_util::task::AbortOnDropHandle;
 
 const SHOWN: usize = 12;
+const THREAD_FLOOR: usize = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchProblem {
+    NoForge,
+    Unreachable(usize),
+}
 
 type Recency = (Timestamp, HostId, ThreadId);
 
@@ -53,8 +60,9 @@ pub struct Palette {
     pub query: String,
     pub highlighted: usize,
     pub entries: Vec<Entry>,
-    pub search_error: Option<String>,
+    pub search_error: Option<SearchProblem>,
     search: Option<Vec<SearchResult>>,
+    pending: usize,
     generation: u64,
     request: Option<AbortOnDropHandle<()>>,
     delivery: crate::core::delivery::Delivery<SearchUpdate>,
@@ -92,6 +100,17 @@ fn insert_thread(
     entries.truncate(limit);
 }
 
+fn allocate(commands: Vec<Entry>, threads: Vec<Entry>) -> Vec<Entry> {
+    let thread_room = threads
+        .len()
+        .min(SHOWN.saturating_sub(commands.len()).max(THREAD_FLOOR));
+    commands
+        .into_iter()
+        .take(SHOWN - thread_room)
+        .chain(threads.into_iter().take(thread_room))
+        .collect()
+}
+
 const SEARCH_MAILBOX: NonZeroUsize = NonZeroUsize::new(64).expect("invariant: 64 is nonzero");
 
 impl Default for Palette {
@@ -102,6 +121,7 @@ impl Default for Palette {
             entries: Vec::new(),
             search_error: None,
             search: None,
+            pending: 0,
             generation: 0,
             request: None,
             delivery: crate::core::delivery::Delivery::new(SEARCH_MAILBOX),
@@ -120,14 +140,16 @@ impl Palette {
         self.request = None;
         self.search = None;
         self.search_error = None;
+        self.pending = 0;
         let query = self.query.trim().to_owned();
         if query.is_empty() {
             return;
         }
         if hosts.is_empty() {
-            self.search_error = Some("Connect to a Forge to search older threads.".into());
+            self.search_error = Some(SearchProblem::NoForge);
             return;
         }
+        self.pending = hosts.len();
         let generation = self.generation;
         let sender = self.delivery.sender();
         self.request = Some(AbortOnDropHandle::new(
@@ -181,6 +203,7 @@ impl Palette {
                     "thread search failed on a Forge"
                 );
             }
+            self.pending = self.pending.saturating_sub(1);
             let search = self.search.get_or_insert_with(Vec::new);
             search.push(SearchResult {
                 host: update.host,
@@ -193,15 +216,20 @@ impl Palette {
         changed
     }
 
+    #[must_use]
+    pub const fn searching(&self) -> bool {
+        self.pending > 0
+    }
+
     pub fn refresh(&mut self, active: Option<&HostId>, hosts: &[HostSnapshot<'_>]) {
         let selected = self
             .entries
             .get(self.highlighted)
             .map(|entry| entry.screen.clone());
         let query = self.query.trim().to_lowercase();
-        let mut entries = Vec::new();
+        let mut commands = Vec::new();
         if let Some(host) = active {
-            entries.push(Entry {
+            commands.push(Entry {
                 label: "New thread".into(),
                 detail: "Ctrl+N".into(),
                 screen: Screen::NewThread {
@@ -209,6 +237,18 @@ impl Palette {
                     project: None,
                 },
             });
+        }
+        for host in hosts {
+            if Some(host.id) != active {
+                commands.push(Entry {
+                    label: format!("Switch to {}", host.name),
+                    detail: "Host".into(),
+                    screen: Screen::NewThread {
+                        host: host.id.clone(),
+                        project: None,
+                    },
+                });
+            }
         }
         for (label, page) in [
             ("Settings", SettingsPage::General),
@@ -243,84 +283,69 @@ impl Palette {
             ("Global prompt", SettingsPage::GlobalPrompt),
             ("Skills and MCP servers", SettingsPage::Extensions),
         ] {
-            entries.push(Entry {
+            commands.push(Entry {
                 label: label.into(),
                 detail: "Settings".into(),
                 screen: Screen::Settings(page),
             });
         }
-        for host in hosts {
-            if Some(host.id) != active {
-                entries.push(Entry {
-                    label: format!("Switch to {}", host.name),
-                    detail: "Host".into(),
-                    screen: Screen::NewThread {
-                        host: host.id.clone(),
-                        project: None,
-                    },
-                });
-            }
-        }
-        entries.retain(|entry| {
+        commands.retain(|entry| {
             query.is_empty()
                 || entry.label.to_lowercase().contains(&query)
                 || entry.detail.to_lowercase().contains(&query)
         });
+        let mut threads = Vec::new();
         if let Some(search) = &mut self.search {
             search.retain(|result| {
                 hosts
                     .iter()
                     .any(|host| host.id == &result.host && host.instance == result.instance)
             });
-            let mut results = Vec::new();
+            let mut found = Vec::new();
             let mut failures = 0;
             for result in search {
                 match &result.result {
-                    Ok(threads) => {
-                        for thread in threads {
-                            insert_thread(&mut results, thread, &result.host, &result.name, SHOWN);
+                    Ok(found_threads) => {
+                        for thread in found_threads {
+                            insert_thread(&mut found, thread, &result.host, &result.name, SHOWN);
                         }
                     }
                     Err(_) => failures += 1,
                 }
             }
-            self.search_error =
-                (failures > 0).then(|| format!("Search could not reach {failures} Forge(s)."));
-            let additions: Vec<_> = results
-                .into_iter()
-                .map(|(_, entry)| entry)
-                .filter(|candidate| !entries.iter().any(|entry| entry.screen == candidate.screen))
-                .collect();
-            entries.extend(additions);
-            entries.truncate(SHOWN);
+            self.search_error = (failures > 0).then_some(SearchProblem::Unreachable(failures));
+            threads.extend(found.into_iter().map(|(_, entry)| entry));
         }
-        let room = SHOWN.saturating_sub(entries.len());
-        let mut recent = Vec::with_capacity(room + 1);
-        if room > 0 {
-            for host in hosts {
-                for thread in host
-                    .threads
-                    .values()
-                    .filter(|thread| !thread.archived && thread.parent_thread_id.is_none())
+        let mut recent = Vec::new();
+        for host in hosts {
+            for thread in host
+                .threads
+                .values()
+                .filter(|thread| !thread.archived && thread.parent_thread_id.is_none())
+            {
+                let label = thread.title.as_deref().unwrap_or("Untitled thread");
+                let detail = host
+                    .projects
+                    .get(&thread.project_id)
+                    .map_or("", |project| project.name.as_str());
+                if !query.is_empty()
+                    && !label.to_lowercase().contains(&query)
+                    && !detail.to_lowercase().contains(&query)
                 {
-                    if entries.iter().any(|entry| matches!(&entry.screen, Screen::Thread { host: id, thread: thread_id } if id == host.id && thread_id == &thread.id)) { continue; }
-                    let label = thread.title.as_deref().unwrap_or("Untitled thread");
-                    let detail = host
-                        .projects
-                        .get(&thread.project_id)
-                        .map_or("", |project| project.name.as_str());
-                    if !query.is_empty()
-                        && !label.to_lowercase().contains(&query)
-                        && !detail.to_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-                    insert_thread(&mut recent, thread, host.id, detail, room);
+                    continue;
                 }
+                insert_thread(&mut recent, thread, host.id, detail, SHOWN);
             }
         }
-        entries.extend(recent.into_iter().map(|(_, entry)| entry));
-        entries.truncate(SHOWN);
+        for (_, entry) in recent {
+            if !threads
+                .iter()
+                .any(|known: &Entry| known.screen == entry.screen)
+            {
+                threads.push(entry);
+            }
+        }
+        let entries = allocate(commands, threads);
         self.highlighted = selected
             .and_then(|screen| entries.iter().position(|entry| entry.screen == screen))
             .unwrap_or(0);
