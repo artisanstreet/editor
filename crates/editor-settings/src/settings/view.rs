@@ -193,7 +193,7 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::McpOpen(server) => _controller.open_mcp(server),
         ViewAction::McpRemove(server) => _controller.remove_mcp(core, server),
         ViewAction::McpSave => _controller.save_mcp(core),
-        ViewAction::McpCancel => _controller.extensions.cancel(),
+        ViewAction::McpCancel => _controller.cancel_mcp(),
         ViewAction::McpEdited
         | ViewAction::McpPresentationChanged
         | ViewAction::OpenUrl(_)

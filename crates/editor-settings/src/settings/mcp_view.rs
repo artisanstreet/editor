@@ -195,7 +195,7 @@ fn form(
             "mcp-cancel".into(),
             "Cancel",
             ButtonTone::Quiet,
-            false,
+            saving,
             ViewAction::McpCancel,
             emit,
         ));

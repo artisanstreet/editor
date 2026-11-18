@@ -631,3 +631,35 @@ fn switching_hosts_keeps_unsaved_global_instructions() {
         "Unsaved changes"
     );
 }
+
+#[test]
+fn an_mcp_form_that_is_saving_keeps_its_fields_and_cannot_be_dismissed() {
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::controller::SettingsController;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    add_host(&mut core, "mcp-forge");
+    core.navigate(Screen::Settings(SettingsPage::Extensions));
+    let mut settings = SettingsController::default();
+    settings.sync(&mut core);
+    settings.open_mcp(None);
+    settings.mcp_editors[0].borrow_mut().set_text("github");
+    settings.mcp_editors[1].borrow_mut().set_text("github-mcp");
+    settings.save_mcp(&core);
+    assert!(settings.extensions.saving);
+    assert!(
+        settings
+            .mcp_editors
+            .iter()
+            .all(|editor| editor.borrow().is_disabled()),
+        "typing into a form that is being saved would be thrown away"
+    );
+    settings.cancel_mcp();
+    assert!(
+        settings.extensions.editing.is_some(),
+        "Cancel cannot hide a save that keeps running"
+    );
+}

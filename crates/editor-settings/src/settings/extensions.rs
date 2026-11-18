@@ -115,6 +115,9 @@ impl ExtensionsForm {
     }
 
     pub fn cancel(&mut self) {
+        if self.saving {
+            return;
+        }
         self.generation += 1;
         self.saving = false;
         self.editing = None;

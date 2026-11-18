@@ -147,6 +147,7 @@ impl SettingsController {
         }
         self.engines.sync_host(host_name.clone());
         self.extensions.sync_host(host_name.clone());
+        self.lock_mcp_fields();
         let page = match core.screen() {
             Screen::Settings(page) => *page,
             _ => return,
@@ -338,6 +339,18 @@ impl SettingsController {
         ]) {
             editor.borrow_mut().set_text(text);
         }
+        self.lock_mcp_fields();
+    }
+
+    fn lock_mcp_fields(&self) {
+        for editor in &self.mcp_editors {
+            editor.borrow_mut().set_disabled(self.extensions.saving);
+        }
+    }
+
+    pub fn cancel_mcp(&mut self) {
+        self.extensions.cancel();
+        self.lock_mcp_fields();
     }
 
     pub fn save_mcp(&mut self, core: &Core) {
@@ -354,6 +367,7 @@ impl SettingsController {
         if let Some(request) = self.extensions.save() {
             self.mutate_mcp(core, request);
         }
+        self.lock_mcp_fields();
     }
 
     pub fn remove_mcp(&mut self, core: &Core, previous: artisan_api::McpServer) {
@@ -363,6 +377,7 @@ impl SettingsController {
         if let Some(request) = self.extensions.remove(previous) {
             self.mutate_mcp(core, request);
         }
+        self.lock_mcp_fields();
     }
 
     pub fn sign_in_mcp(&mut self, core: &mut Core, server: &str) {
@@ -636,7 +651,10 @@ impl SettingsController {
                     }
                 }
                 Completion::Archive(request, result) => self.archive.complete(&request, result),
-                Completion::Mcp(request, result) => self.extensions.complete(&request, result),
+                Completion::Mcp(request, result) => {
+                    self.extensions.complete(&request, result);
+                    self.lock_mcp_fields();
+                }
                 Completion::McpSignOut(server, result) => {
                     if self.extensions.host.as_deref() == Some(completion.host.0.as_str()) {
                         if let Err(error) = result {
