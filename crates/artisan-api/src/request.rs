@@ -1,31 +1,3 @@
-//! Request and response bodies. Routes:
-//!
-//! ```text
-//! GET    /state                              State
-//! GET    /events?since=N                     SSE of Envelope
-//! POST   /projects                           CreateProject → Project
-//! DELETE /projects/{id}
-//! GET    /projects/{id}/icon                 Option<BlobRef>
-//! GET    /projects/{id}/repository           Option<ProjectRepository>
-//! POST   /threads                            CreateThread → Thread
-//! PATCH  /threads/{id}                       UpdateThread → Thread
-//! GET    /threads/{id}/items?before|after&limit   ItemsPage
-//! GET    /threads/{id}/transcript?before|after&limit   ItemsPage: rows + work spans
-//! GET    /threads/{id}/work?after&before&limit   ItemsPage: work in a span, newest first
-//! POST   /threads/{id}/messages              SendMessage → Item
-//! POST   /threads/{id}/cancel
-//! POST   /threads/{id}/goal/clear
-//! POST   /items/{id}/answer                  Answer
-//! GET    /drafts/{scope}   PUT /drafts/{scope}   JSON value
-//! PUT    /blobs  (raw WebP bytes)            BlobRef
-//! GET    /blobs/{sha256}
-//! GET    /engines                            Vec<EngineStatus>
-//! POST   /engines/{engine}/install | /login | /logout | /refresh
-//! GET    /fs/list?path=                      DirListing
-//! GET    /skills/catalog | /prompt …         see `extensions`
-//! POST   /pair                               PairRequest → PairResponse (authorizes the TLS client certificate)
-//! ```
-
 use crate::{
     BlobHash, Decision, EngineConfig, EngineStatus, Item, ItemId, Project, ProjectId, Run, RunId,
     Seq, Thread, ThreadId,
