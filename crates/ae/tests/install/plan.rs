@@ -155,3 +155,12 @@ fn a_replacement_puts_every_new_file_in_place_and_drops_the_old_ones() {
     );
     assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
 }
+
+#[test]
+fn a_purge_that_leaves_no_capturing_app_removes_the_claude_ai_browser_profile() {
+    assert!(purges_claude_ai_browser(true, &[]));
+    assert!(purges_claude_ai_browser(true, &[App::Forge]));
+    assert!(!purges_claude_ai_browser(true, &[App::Editor]));
+    assert!(!purges_claude_ai_browser(true, &[App::Ae]));
+    assert!(!purges_claude_ai_browser(false, &[]));
+}

@@ -1152,6 +1152,10 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
     let installing = install_lock()?;
     chosen.sort();
     chosen.reverse();
+    let remaining: Vec<App> = App::ALL
+        .into_iter()
+        .filter(|app| !chosen.contains(app) && app.binary().is_ok_and(|binary| binary.is_file()))
+        .collect();
     let mut deferred = false;
     for app in chosen {
         deferred |= ui::task(
@@ -1161,6 +1165,13 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
         )?;
     }
     drop(installing);
+    if purges_claude_ai_browser(purge, &remaining) {
+        ui::task(
+            "Removing the claude.ai browser profile",
+            "Removed the claude.ai browser profile",
+            remove_claude_ai_browser,
+        )?;
+    }
     if !deferred {
         forget_empty_root()?;
     }
@@ -1194,6 +1205,17 @@ fn forget_empty_root() -> Result<()> {
         artisan_paths::forget_root().context("forget the install folder")?;
     }
     Ok(())
+}
+
+fn purges_claude_ai_browser(purge: bool, remaining: &[App]) -> bool {
+    purge
+        && !remaining
+            .iter()
+            .any(|app| matches!(app, App::Ae | App::Editor))
+}
+
+fn remove_claude_ai_browser() -> Result<()> {
+    sys::remove(&claude_ai_browser::profile_dir()?)
 }
 
 fn remove_app(app: App, purge: bool) -> Result<bool> {
