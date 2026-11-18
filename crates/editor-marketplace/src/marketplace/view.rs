@@ -426,7 +426,7 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
         return centered(muted(
             theme,
             TextRole::Label,
-            "Pair a host to see its skills.".to_owned(),
+            "Pair a Forge to see its skills.".to_owned(),
         ));
     }
     let mut body: Vec<Element> = Vec::new();

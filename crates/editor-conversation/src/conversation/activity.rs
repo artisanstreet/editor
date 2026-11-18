@@ -514,12 +514,7 @@ fn artisan(
             String::new(),
             false,
         ),
-        "harnesses" => (
-            "Listed harnesses",
-            "Listing harnesses",
-            String::new(),
-            false,
-        ),
+        "harnesses" => ("Listed engines", "Listing engines", String::new(), false),
         "agent_spawn" => ("Delegated", "Delegating", field("task"), false),
         "agent_wait" => ("Waited for", "Waiting for", agents(), false),
         "agent_message" => ("Messaged", "Messaging", agents(), false),
@@ -539,10 +534,10 @@ fn artisan(
             format!("{} to {}", words(&field("key")), field("value")),
             false,
         ),
-        "hosts_list" => ("Listed hosts", "Listing hosts", String::new(), false),
+        "hosts_list" => ("Listed Forges", "Listing Forges", String::new(), false),
         "host_add" => (
-            "Added a host",
-            "Adding a host",
+            "Added a Forge",
+            "Adding a Forge",
             [field("distro"), field("address")]
                 .into_iter()
                 .find(|text| !text.is_empty())
@@ -550,8 +545,8 @@ fn artisan(
             false,
         ),
         "host_remove" => (
-            "Removed the host",
-            "Removing the host",
+            "Removed the Forge",
+            "Removing the Forge",
             field("host"),
             false,
         ),

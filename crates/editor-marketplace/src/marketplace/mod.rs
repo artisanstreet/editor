@@ -373,7 +373,7 @@ pub fn entries(page: &Marketplace) -> Vec<Entry> {
             .partition(|item| !matches!(item, Item::Listing(_)));
         let local_count = local.len();
         if !local.is_empty() {
-            entries.push(Entry::Group("On this host".to_owned()));
+            entries.push(Entry::Group("On this Forge".to_owned()));
             group(&mut entries, local, selected);
         }
         match &page.listings {

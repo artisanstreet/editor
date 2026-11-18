@@ -199,7 +199,7 @@ fn spend_group(
     if explanation {
         column = column.child(text(
             theme,
-            "Priced by the engine for runs on this host.",
+            "Priced by the engine for runs on this Forge.",
             muted,
         ));
     }
@@ -341,7 +341,7 @@ pub fn build(
             page::header(
                 &theme,
                 "Usage",
-                "The limits and spend of every engine account on your hosts.",
+                "The limits and spend of every engine account on your Forges.",
             )
             .build(),
         );
@@ -384,7 +384,7 @@ pub fn build(
             )
         };
         let blocks = if accounts.is_empty() {
-            vec![note(theme, "No engine is signed in on this host.")]
+            vec![note(theme, "No engine is signed in on this Forge.")]
         } else {
             accounts
                 .into_iter()
@@ -403,7 +403,7 @@ pub fn build(
     if count == 0 {
         content = content.child(bands(
             theme,
-            vec![note(theme, "Pair a host to see its engines' usage.")],
+            vec![note(theme, "Pair a Forge to see its engines' usage.")],
         ));
     }
     Scroll::new()

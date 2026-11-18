@@ -169,7 +169,7 @@ pub const SETTINGS: &[SettingDecl] = &[
         kind: SettingKind::Bool,
         default: "true",
         label: "Summary titles",
-        description: "Name threads with the harness's generated summary. Off, a thread keeps the title from its first message.",
+        description: "Name threads with the engine's generated summary. Off, a thread keeps the title from its first message.",
         needs_approval: false,
     },
     SettingDecl {

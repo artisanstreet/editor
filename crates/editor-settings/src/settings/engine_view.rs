@@ -123,7 +123,7 @@ fn installation(
                 theme,
                 "Version",
                 format!(
-                    "Artisan installs and updates {} in its own home on this host.",
+                    "Artisan installs and updates {} in its own home on this Forge.",
                     engine.display_name()
                 ),
                 Some(control),
@@ -300,7 +300,7 @@ fn account(
         SignInState::SignedIn { .. } => blocks.push(ui::row(
             theme,
             "Sign out",
-            "Signs this host out of the account.",
+            "Signs this Forge out of the account.",
             Some(button(
                 theme,
                 format!("settings-engine-logout-{engine}"),
@@ -506,16 +506,16 @@ pub fn page(
         format!("{label} · {}", selected.label())
     };
     let description = if selected == selected.parent() {
-        format!("{label}'s installation and sign-in on this host.")
+        format!("{label}'s installation and sign-in on this Forge.")
     } else {
         page::description(selected).to_owned()
     };
     let mut content = ui::column().child(ui::header(theme, &title, &description));
     let Some(status) = host.engines.get(&engine) else {
         let note = if host.is_live() {
-            format!("This host reported no {label} engine.")
+            format!("This Forge reported no {label} engine.")
         } else {
-            "Waiting for the host to connect…".into()
+            "Waiting for the Forge to connect…".into()
         };
         return content
             .child(ui::text(theme, TextRole::Label, Ink::Muted, note))

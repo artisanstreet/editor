@@ -107,7 +107,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
-    /// Enroll this Forge machine into an AST account.
+    /// Enroll this Forge machine into an Artisan account.
     Account(account::AccountArgs),
     /// Forge's engines: list, install, sign in.
     Engine {

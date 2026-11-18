@@ -799,7 +799,7 @@ fn skills_section(theme: &ArtisanTheme, emit: Rc<dyn Fn(ViewAction)>) -> Element
         theme,
         "Skills",
         Some(
-            "Artisan's skills and your own reach every engine on this host; the Marketplace turns each on or off.",
+            "Artisan's skills and your own reach every engine on this Forge; the Marketplace turns each on or off.",
         ),
         None,
         action,

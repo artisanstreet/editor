@@ -318,7 +318,7 @@ pub fn section(
     ui::section(
         theme,
         "MCP servers",
-        Some("Tools every engine on this host can call."),
+        Some("Tools every engine on this Forge can call."),
         None,
         body.width(Length::Pct(100.0)).build(),
     )

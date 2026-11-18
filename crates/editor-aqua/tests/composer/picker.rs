@@ -85,7 +85,7 @@ fn axes_offer_only_concrete_choices_and_resolve_inherited_selections() {
                 .all(|option| !option.label.starts_with("Default"))
         );
         assert!(options.iter().all(|option| option.description.as_deref()
-            != Some("Use the harness default without pinning a value.")));
+            != Some("Use the engine default without pinning a value.")));
     }
     for (axis, expected, count) in [
         (Axis::Thinking, "Light", 3),

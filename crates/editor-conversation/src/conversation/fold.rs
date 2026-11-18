@@ -317,7 +317,7 @@ impl TextSection {
                 return Some("[This message is encrypted.]");
             }
             if description.is_empty() {
-                return Some("Task message not provided by the harness.");
+                return Some("Task message not provided by the engine.");
             }
         }
         if self == Self::AgentMessage

@@ -61,3 +61,16 @@ cargo run --manifest-path vendor/highlighting/validation/Cargo.toml --locked --r
 ```
 
 CI (`.github/workflows/ci.yml`) runs these checks plus the workspace-wide clippy and test jobs. Pull requests land only on green CI.
+
+## Terms in user-facing copy
+
+Every user-visible string, the README and the docs use one word per concept. Internal identifiers keep their names.
+
+| Term | Means | Not |
+| --- | --- | --- |
+| Forge | The server that runs engines and serves the Editor; settings that live there are "on this Forge". | host |
+| machine | The computer a Forge runs on; "Pair this machine" adds its Forge to the account. | host, device |
+| device | The computer the Editor runs on, for Editor-only settings. | machine |
+| Artisan account | The account you sign in to; it lists your Forges. | AST account |
+| engine | Claude Code, Codex or OpenCode. | harness |
+| Try again | The label of every recovery button. | Retry |

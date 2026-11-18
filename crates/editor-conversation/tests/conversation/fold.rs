@@ -78,7 +78,7 @@ fn missing_native_task_text_has_an_explanation() {
     let item = agent("reviewer", "".into(), None);
     assert_eq!(
         TextSection::AgentTask.inline_text(&item),
-        Some("Task message not provided by the harness.")
+        Some("Task message not provided by the engine.")
     );
 }
 

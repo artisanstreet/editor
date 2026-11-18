@@ -175,7 +175,7 @@ impl SettingsPage {
         match self {
             Self::General => "General",
             Self::Section(section) => section.label(),
-            Self::Hosts => "Hosts",
+            Self::Hosts => "Forges",
             Self::About => "About",
             Self::Account => "Account",
             Self::Threads => "Threads",
