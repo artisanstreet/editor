@@ -1,7 +1,10 @@
 use crate::core::runtime::runtime;
 use futures::future::BoxFuture;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use tokio_util::task::AbortOnDropHandle;
 
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
@@ -92,12 +95,12 @@ impl reqwest::dns::Resolve for PublicAddresses {
     }
 }
 
-pub fn client() -> Arc<MediaHttpClient> {
+static SHARED: LazyLock<Arc<MediaHttpClient>> = LazyLock::new(|| {
     let builder = || {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(None)
+            .pool_idle_timeout(Duration::from_secs(90))
             .timeout(Duration::from_secs(30))
     };
     Arc::new(MediaHttpClient {
@@ -108,6 +111,10 @@ pub fn client() -> Arc<MediaHttpClient> {
             .build()
             .expect("build public media redirect HTTP client"),
     })
+});
+
+pub fn client() -> Arc<MediaHttpClient> {
+    Arc::clone(&SHARED)
 }
 
 impl MediaHttpClient {

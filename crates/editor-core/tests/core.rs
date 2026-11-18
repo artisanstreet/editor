@@ -2,6 +2,8 @@
 mod hosts;
 #[path = "core/mcp_sign_in.rs"]
 mod mcp_sign_in;
+#[path = "core/media_http.rs"]
+mod media_http;
 #[path = "core/host/pages.rs"]
 mod pages;
 #[path = "core/host/preferences.rs"]
