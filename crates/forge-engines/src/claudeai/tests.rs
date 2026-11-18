@@ -748,6 +748,76 @@ async fn a_steer_during_the_tools_goes_with_their_results() {
 }
 
 #[tokio::test]
+async fn a_steer_s_image_is_uploaded_and_sent_with_it() {
+    let work = tempfile::tempdir().expect("a dir");
+    std::fs::write(work.path().join("a.txt"), "alpha\n").expect("a");
+    let screenshot = work.path().join("screenshot.png");
+    std::fs::write(&screenshot, b"png bytes").expect("an image");
+    let backend = script(vec![
+        calls(
+            "m1",
+            &[("toolu_a", "Read", json!({ "file_path": "a.txt" }))],
+        ),
+        answer("m2", "Fixed."),
+    ]);
+    let mut sent_steer = false;
+    let image = screenshot.clone();
+    let user: User = Box::new(move |event| {
+        if !sent_steer && matches!(event, EngineEvent::Item { key, .. } if key == "toolu_a") {
+            sent_steer = true;
+            return vec![Input::Steer(UserInput {
+                id: ItemId::new(),
+                text: "fix this".to_owned(),
+                images: vec![image.clone()],
+            })];
+        }
+        Vec::new()
+    });
+    let (outcome, _, _) = run(
+        Arc::clone(&backend),
+        turn(work.path(), None, Permissions::Auto),
+        user,
+    )
+    .await;
+    assert_eq!(outcome.status(), RunStatus::Done);
+    assert_eq!(*backend.uploads.lock().expect("lock"), vec![screenshot]);
+    let sent = backend.sent.lock().expect("lock").clone();
+    assert!(sent[1].prompt.contains("fix this"));
+    assert!(
+        sent[1].files.contains(&"file-1".to_owned()),
+        "the screenshot goes with the steer: {:?}",
+        sent[1].files
+    );
+}
+
+#[tokio::test]
+async fn a_failed_resumed_turn_keeps_the_saved_continuation() {
+    let work = tempfile::tempdir().expect("a dir");
+    let backend = script(vec![Reply::Refuses(Refusal::Challenge)]);
+    let (outcome, log, _) = run(
+        backend,
+        turn(work.path(), Some("claude.ai:conv-1/a0"), Permissions::Auto),
+        nobody(),
+    )
+    .await;
+    assert_ne!(outcome.status(), RunStatus::Done);
+    let replaced: Vec<_> = log
+        .iter()
+        .filter_map(|event| {
+            if let EngineEvent::Session { id } = event {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        replaced.is_empty(),
+        "the thread keeps following conv-1/a0: {replaced:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_gone_conversation_hands_the_message_back_for_a_fresh_session() {
     let work = tempfile::tempdir().expect("a dir");
     let backend = script(vec![Reply::Refuses(Refusal::ConversationGone)]);

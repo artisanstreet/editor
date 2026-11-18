@@ -184,25 +184,22 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
 /// The user's input while the turn runs: steers waiting to be sent, and
 /// what the access mode is now.
 struct Inbox {
-    steers: Vec<Steer>,
+    steers: Vec<crate::UserInput>,
     permissions: artisan_api::Permissions,
     open: bool,
 }
 
-/// A steer waiting to be sent: its id is acknowledged once it is.
-struct Steer {
-    id: ItemId,
+struct Steers {
     text: String,
+    ids: Vec<ItemId>,
+    images: Vec<std::path::PathBuf>,
 }
 
 impl Inbox {
     /// Takes in what does not answer anything the turn waits on.
     fn take(&mut self, input: Input) {
         match input {
-            Input::Steer(message) => self.steers.push(Steer {
-                id: message.id,
-                text: message.text,
-            }),
+            Input::Steer(message) => self.steers.push(message),
             Input::SetPermissions(permissions) => self.permissions = permissions,
             // Answers to nothing waiting; the goal is Codex's.
             Input::Answer { .. } | Input::ClearGoal => {}
@@ -220,19 +217,22 @@ impl Inbox {
         input
     }
 
-    /// The steers to send, with their ids to acknowledge once sent.
-    fn drain(&mut self) -> Option<(String, Vec<ItemId>)> {
+    fn drain(&mut self) -> Option<Steers> {
         if self.steers.is_empty() {
             return None;
         }
         let steers = std::mem::take(&mut self.steers);
         let ids = steers.iter().map(|steer| steer.id.clone()).collect();
+        let images = steers
+            .iter()
+            .flat_map(|steer| steer.images.iter().cloned())
+            .collect();
         let text = steers
             .into_iter()
             .map(|steer| steer.text)
             .collect::<Vec<_>>()
             .join("\n\n");
-        Some((text, ids))
+        Some(Steers { text, ids, images })
     }
 }
 
@@ -316,20 +316,22 @@ async fn drive_turn(
             Some((conversation, leaf)) => (conversation.to_owned(), Some(leaf.to_owned())),
             None => (id.to_owned(), None),
         });
-    let conversation = match &resumed {
-        Some((conversation, _)) => conversation.clone(),
-        None => match backend.create_conversation().await {
+    let conversation = if let Some((conversation, _)) = &resumed {
+        conversation.clone()
+    } else {
+        let created = match backend.create_conversation().await {
             Ok(conversation) => conversation,
             Err(error) => return refused(&error),
-        },
+        };
+        emit(
+            &io,
+            EngineEvent::Session {
+                id: format!("{}{created}", artisan_api::CLAUDE_AI_SESSION_PREFIX),
+            },
+        )
+        .await;
+        created
     };
-    emit(
-        &io,
-        EngineEvent::Session {
-            id: format!("{}{conversation}", artisan_api::CLAUDE_AI_SESSION_PREFIX),
-        },
-    )
-    .await;
 
     let mut files = Vec::new();
     for image in &turn.input.images {
@@ -482,11 +484,17 @@ async fn drive_turn(
         if calls.is_empty() {
             // The model answered. A steer that came meanwhile carries the
             // turn on.
-            if let Some((text, ids)) = inbox.drain() {
-                request.prompt = text;
+            if let Some(steers) = inbox.drain() {
+                request.prompt = steers.text;
                 request.tool_states = Vec::new();
                 request.files = Vec::new();
-                delivering = ids;
+                for image in &steers.images {
+                    match backend.upload(image).await {
+                        Ok(file) => request.files.push(file),
+                        Err(error) => return refused(&error),
+                    }
+                }
+                delivering = steers.ids;
                 continue;
             }
             return match decoder.stop() {
@@ -542,14 +550,20 @@ async fn drive_turn(
         request.tool_states = states;
         request.files = attached;
         // A steer that came while the tools ran goes with their results.
-        if let Some((text, ids)) = inbox.drain() {
+        if let Some(steers) = inbox.drain() {
             write!(
                 request.prompt,
                 "\n\nThe user wrote this while you worked:\n<user_message>\n{}\n</user_message>",
-                escape_framing(&text)
+                escape_framing(&steers.text)
             )
             .ok();
-            delivering = ids;
+            for image in &steers.images {
+                match backend.upload(image).await {
+                    Ok(file) => request.files.push(file),
+                    Err(error) => return refused(&error),
+                }
+            }
+            delivering = steers.ids;
         }
     }
     Outcome::failed("Claude.ai kept asking for tools without finishing the turn.")
