@@ -408,7 +408,7 @@ async fn drive_turn(
                     && error.refusal() == Some(&Refusal::ConversationGone)
                 {
                     tracing::info!(thread = %turn.thread_id, "the claude.ai conversation is gone; starting a new one");
-                    emit(&io, EngineEvent::Session { id: String::new() }).await;
+                    emit(&io, EngineEvent::SessionGone).await;
                     return Outcome::done();
                 }
                 return refused(&error);
@@ -1156,7 +1156,8 @@ impl Forwarded {
                 }
                 return None;
             }
-            EngineEvent::Model { .. }
+            EngineEvent::SessionGone
+            | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Live { .. }
             | EngineEvent::Usage(_)

@@ -58,6 +58,7 @@ impl Citations {
                         self.streams.remove(key);
                     }
                     EngineEvent::Session { .. }
+                    | EngineEvent::SessionGone
                     | EngineEvent::Model { .. }
                     | EngineEvent::Title { .. }
                     | EngineEvent::Item { .. }

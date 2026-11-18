@@ -111,6 +111,7 @@ async fn query(
                                 reply.usage = SideUsage { input: usage.input + usage.cache_read + usage.cache_write.unwrap_or(0), cached_input: usage.cache_read, output: usage.output + usage.reasoning };
                             }
                             EngineEvent::Session { .. }
+                        | EngineEvent::SessionGone
                         | EngineEvent::Model { .. }
                         | EngineEvent::Title { .. }
                         | EngineEvent::Item { .. }

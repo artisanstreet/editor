@@ -534,6 +534,68 @@ async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transport_switch_during_preparation_never_mixes_session_and_transport() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let asked = Arc::clone(&seen);
+    let fixture = fixture(Arc::new(move |turn, _io| {
+        let asked = Arc::clone(&asked);
+        Box::pin(async move {
+            asked
+                .lock()
+                .unwrap()
+                .push((turn.config.clone(), turn.session_id.clone()));
+            Outcome::done()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("first"))
+        .await
+        .unwrap();
+    let first = fixture.settled().await;
+    let owner = fixture.hub.clone();
+    let (held, acquired) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let guard = tokio::task::spawn_blocking(move || {
+        let _guard = owner.extensions().homes_lock().unwrap();
+        held.send(()).unwrap();
+        released.recv().unwrap();
+    });
+    acquired.await.unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("second"))
+        .await
+        .unwrap();
+    test_support::wait::eventually(
+        "the second run to begin",
+        Duration::from_secs(10),
+        || async {
+            fixture
+                .hub
+                .store()
+                .latest_run(&fixture.thread_id)
+                .await
+                .unwrap()
+                .is_some_and(|run| run.id != first[0].id)
+        },
+    )
+    .await;
+    turn_on_enhanced_claude(&fixture).await;
+    sign_in_to_claude_ai(&fixture);
+    release.send(()).unwrap();
+    guard.await.unwrap();
+    fixture.settled().await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        (transport_of(&seen[1].0), seen[1].1.as_deref()),
+        (None, Some("session")),
+        "the turn launches on the transport its session was chosen for"
+    );
+}
+
 /// A claude.ai conversation claude.ai deleted is not resumed: the engine
 /// clears the session and the message runs again on a fresh one.
 #[tokio::test(flavor = "multi_thread")]
@@ -560,7 +622,7 @@ async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
                 .await;
             } else if turn.session_id.is_some() {
                 // The conversation is gone: the message is not delivered.
-                io.emit(EngineEvent::Session { id: String::new() }).await;
+                io.emit(EngineEvent::SessionGone).await;
             } else {
                 io.emit(EngineEvent::InputAccepted {
                     id: turn.input.id.clone(),
@@ -5062,7 +5124,7 @@ async fn a_missing_session_summarizes_tool_history_with_correct_roles() {
         Arc::new(move |turn, io| {
             capture.lock().unwrap().push(turn.input.text);
             Box::pin(async move {
-                io.emit(EngineEvent::Session { id: String::new() }).await;
+                io.emit(EngineEvent::SessionGone).await;
                 io.emit(EngineEvent::Item {
                     key: "comment".into(),
                     parent: None,

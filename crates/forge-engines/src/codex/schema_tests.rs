@@ -223,6 +223,7 @@ fn complaints(events: &[EngineEvent]) -> Vec<String> {
                 ..
             } => message.inline().map(str::to_owned),
             EngineEvent::Session { .. }
+            | EngineEvent::SessionGone
             | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Item { .. }

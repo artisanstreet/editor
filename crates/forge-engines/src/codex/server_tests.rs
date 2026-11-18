@@ -121,7 +121,8 @@ fn session(events: &[EngineEvent]) -> String {
         .iter()
         .find_map(|event| match event {
             EngineEvent::Session { id } => Some(id.clone()),
-            EngineEvent::Model { .. }
+            EngineEvent::SessionGone
+            | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Item { .. }
             | EngineEvent::Image { .. }

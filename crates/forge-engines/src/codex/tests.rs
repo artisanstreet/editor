@@ -384,6 +384,7 @@ fn a_goal_is_shown_only_when_one_was_set() {
                     Some(format!("{state}: {text}"))
                 }
                 EngineEvent::Session { .. }
+                | EngineEvent::SessionGone
                 | EngineEvent::Model { .. }
                 | EngineEvent::Title { .. }
                 | EngineEvent::Item { .. }
@@ -573,6 +574,7 @@ fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
                 ..
             } => Some((key.as_str(), *status, text.inline().unwrap_or_default())),
             EngineEvent::Session { .. }
+            | EngineEvent::SessionGone
             | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Item { .. }

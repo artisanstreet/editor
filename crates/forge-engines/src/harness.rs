@@ -81,6 +81,7 @@ pub enum EngineEvent {
     Session {
         id: String,
     },
+    SessionGone,
     Model {
         id: String,
     },

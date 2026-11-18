@@ -73,6 +73,12 @@ pub(crate) enum DriveError {
     Begin(#[from] forge_store::BeginRunError),
     #[error(transparent)]
     Settle(#[from] forge_store::SettleRunError),
+    #[error("read the Claude transport for thread {thread}")]
+    Transport {
+        thread: ThreadId,
+        #[source]
+        source: forge_store::ReadSettingError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,11 +180,7 @@ pub(crate) async fn drive(
         Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
         None => None,
     };
-    // A session made on the other Claude transport cannot carry on: the
-    // run starts fresh, from the thread's history. An empty one is a
-    // session the engine said is gone.
-    let transport = claude_transport(hub, engine).await;
-    let session_id = carried_session(previous.as_ref(), engine, transport);
+    let (transport, session_id) = launch_choice(hub, thread_id, engine, previous.as_ref()).await?;
     let carried = session_id.as_ref().and(previous.as_ref());
     let usage = carried_usage(carried, &thread.config);
     let mut run = Run {
@@ -216,6 +218,7 @@ pub(crate) async fn drive(
             pending: &pending,
             carry_on,
             previous,
+            transport,
         },
         inbox,
         adapter_cancel.clone(),
@@ -264,6 +267,7 @@ struct Delivery<'a> {
     pending: &'a [artisan_api::Item],
     carry_on: Option<String>,
     previous: Option<Run>,
+    transport: Option<ClaudeTransport>,
 }
 
 /// What the engine reads to carry a stopped turn on. The user sees none of
@@ -382,6 +386,7 @@ async fn execute(
         pending,
         carry_on,
         previous,
+        transport,
     }: Delivery<'_>,
     mut inbox: mpsc::Receiver<Input>,
     cancel: CancellationToken,
@@ -447,7 +452,7 @@ async fn execute(
         }
         let initial_ids: Vec<_> = pending.iter().map(|item| item.id.clone()).collect();
         let initial_ack = input.id.clone();
-        let turn = prepare(
+        let turn = prepare_on(
             hub,
             thread,
             run.session_id.clone(),
@@ -456,6 +461,7 @@ async fn execute(
                 .binary
                 .as_ref()
                 .map(|lease| lease.path().to_path_buf()),
+            transport,
         )
         .await?;
         Ok::<_, ExecuteError>((turn, initial_ids, initial_ack))
@@ -651,6 +657,7 @@ impl Approvals {
             EngineEvent::Status { key, status } if *status != Status::AwaitingUser => (key, false),
             EngineEvent::Status { .. }
             | EngineEvent::Session { .. }
+            | EngineEvent::SessionGone
             | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Image { .. }
@@ -751,6 +758,18 @@ pub(crate) async fn prepare(
     input: UserInput,
     binary: Option<PathBuf>,
 ) -> Result<Turn, PrepareError> {
+    let transport = claude_transport(hub, thread.config.engine).await?;
+    prepare_on(hub, thread, session_id, input, binary, transport).await
+}
+
+async fn prepare_on(
+    hub: &Hub,
+    thread: &artisan_api::Thread,
+    session_id: Option<String>,
+    input: UserInput,
+    binary: Option<PathBuf>,
+    transport: Option<ClaudeTransport>,
+) -> Result<Turn, PrepareError> {
     let engine = thread.config.engine;
     let engines = hub.engines();
     let binary = binary.ok_or(PrepareError::NotInstalled { engine })?;
@@ -794,10 +813,7 @@ pub(crate) async fn prepare(
     let mut config = thread.config.clone();
     // The transport is the account's choice, not the thread's: every
     // Claude thread on this Forge follows the same one.
-    match claude_transport(hub, config.engine)
-        .await
-        .and_then(ClaudeTransport::option)
-    {
+    match transport.and_then(ClaudeTransport::option) {
         Some(option) => {
             config.options.insert(
                 "transport".to_owned(),
@@ -839,6 +855,22 @@ pub(crate) async fn prepare(
         launch,
         trace_dir: None,
     })
+}
+
+async fn launch_choice(
+    hub: &Hub,
+    thread_id: &ThreadId,
+    engine: EngineId,
+    previous: Option<&Run>,
+) -> Result<(Option<ClaudeTransport>, Option<String>), DriveError> {
+    let transport =
+        claude_transport(hub, engine)
+            .await
+            .map_err(|source| DriveError::Transport {
+                thread: thread_id.clone(),
+                source,
+            })?;
+    Ok((transport, carried_session(previous, engine, transport)))
 }
 
 /// The session a run carries on: the previous run's, when it was on the
@@ -892,25 +924,25 @@ impl ClaudeTransport {
     }
 }
 
-/// How the engine's turns run: `None` for engines with one way.
-async fn claude_transport(hub: &Hub, engine: EngineId) -> Option<ClaudeTransport> {
+async fn claude_transport(
+    hub: &Hub,
+    engine: EngineId,
+) -> Result<Option<ClaudeTransport>, forge_store::ReadSettingError> {
     if engine != EngineId::Claude {
-        return None;
+        return Ok(None);
     }
-    let setting = hub
-        .store()
-        .setting(artisan_api::TRANSPORT_KEY)
-        .await
-        .unwrap_or(None);
+    let setting = hub.store().setting(artisan_api::TRANSPORT_KEY).await?;
     if artisan_api::transport_of(setting.as_ref()) != artisan_api::CLAUDE_AI {
-        return Some(ClaudeTransport::Code);
+        return Ok(Some(ClaudeTransport::Code));
     }
     let home = hub.engines().home(engine);
-    Some(if forge_engines::claudeai::Session::path(&home).is_file() {
-        ClaudeTransport::Chat
-    } else {
-        ClaudeTransport::ChatSignedOut
-    })
+    Ok(Some(
+        if forge_engines::claudeai::Session::path(&home).is_file() {
+            ClaudeTransport::Chat
+        } else {
+            ClaudeTransport::ChatSignedOut
+        },
+    ))
 }
 
 /// Work of this run by adapter key.
@@ -1120,6 +1152,12 @@ async fn apply(
             {
                 let (thread, messages) = *title;
                 hub.start_title(thread, messages);
+            }
+        }
+        EngineEvent::SessionGone => {
+            if run.session_id.is_some() {
+                run.session_id = None;
+                *run = store.upsert_run(run.clone()).await?;
             }
         }
         EngineEvent::Model { id } => {

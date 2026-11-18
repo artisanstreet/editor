@@ -897,7 +897,7 @@ async fn a_gone_conversation_hands_the_message_back_for_a_fresh_session() {
     );
     assert!(
         log.iter()
-            .any(|event| matches!(event, EngineEvent::Session { id } if id.is_empty()))
+            .any(|event| matches!(event, EngineEvent::SessionGone))
     );
 }
 

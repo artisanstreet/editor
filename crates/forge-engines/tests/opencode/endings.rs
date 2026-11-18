@@ -21,6 +21,7 @@ fn status_of(events: &[EngineEvent], wanted: &str) -> Option<Status> {
         EngineEvent::Item { .. }
         | EngineEvent::Status { .. }
         | EngineEvent::Session { .. }
+        | EngineEvent::SessionGone
         | EngineEvent::Model { .. }
         | EngineEvent::Title { .. }
         | EngineEvent::Image { .. }

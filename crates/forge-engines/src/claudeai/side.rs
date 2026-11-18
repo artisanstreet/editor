@@ -203,6 +203,7 @@ async fn read_summary(
                     }
                 }
                 EngineEvent::Session { .. }
+                | EngineEvent::SessionGone
                 | EngineEvent::Model { .. }
                 | EngineEvent::Title { .. }
                 | EngineEvent::Item { .. }
