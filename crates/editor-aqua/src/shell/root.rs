@@ -2998,10 +2998,11 @@ impl SectionViews for RootViews {
                 if !workspace.conversation.host_is_current(&shell.core) {
                     self.replace_rows(None);
                     if let Screen::Thread { host, thread } = &screen {
-                        self.connection.hold(Some(crate::shell::connection::Owner::Thread(
-                            host.clone(),
-                            thread.clone(),
-                        )));
+                        self.connection
+                            .hold(Some(crate::shell::connection::Owner::Thread(
+                                host.clone(),
+                                thread.clone(),
+                            )));
                     }
                     connection_held = true;
                     view::centered_conversation(self.connection.waiting(theme, now, reduced))
@@ -3022,7 +3023,9 @@ impl SectionViews for RootViews {
             }
             Screen::NewThread { host, .. } => {
                 self.connection
-                    .hold(Some(crate::shell::connection::Owner::NewThread(host.clone())));
+                    .hold(Some(crate::shell::connection::Owner::NewThread(
+                        host.clone(),
+                    )));
                 connection_held = true;
                 let host = shell
                     .core
@@ -3255,10 +3258,7 @@ impl SectionViews for RootViews {
             None => (None, Vec::new()),
         };
         let (search, tree, overlay) = self.search_parts(workspace, &theme, tree, now);
-        let overview = match (
-            overview_shown(&screen, card_width),
-            workspace.side_panel,
-        ) {
+        let overview = match (overview_shown(&screen, card_width), workspace.side_panel) {
             (false, _) => None,
             (true, crate::shell::workspace::SidePanel::Overview) => crate::frame::overview::card(
                 &theme,
@@ -3313,9 +3313,7 @@ impl SectionViews for RootViews {
                     .child(
                         aqua::Aqua::Box()
                             .layout("column")
-                            .styles([aqua::Aqua::Style()
-                                .flex_grow(1.0)
-                                .min_width(aqua::pct(0.0))])
+                            .styles([aqua::Aqua::Style().flex_grow(1.0).min_width(aqua::pct(0.0))])
                             .child(center)
                             .build(),
                     )

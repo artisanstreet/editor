@@ -301,7 +301,9 @@ fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
         view.drain(&core)
     });
     let refused = copied.write(&core, |_| {
-        Err(std::io::Error::other("the clipboard is locked by another app"))
+        Err(std::io::Error::other(
+            "the clipboard is locked by another app",
+        ))
     });
     assert_eq!(refused, Copied::Failed);
     let rendered = content_view(
@@ -313,8 +315,10 @@ fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
     );
     let app = test_support::editor::ui::mounted(600.0, 400.0, rendered.element);
     assert!(
-        test_support::editor::ui::painted_texts(&app).iter().any(|text| text
-            == "Couldn't copy source to the clipboard: the clipboard is locked by another app"),
+        test_support::editor::ui::painted_texts(&app)
+            .iter()
+            .any(|text| text
+                == "Couldn't copy source to the clipboard: the clipboard is locked by another app"),
         "the source view tells the user the copy failed"
     );
     view.copy(&core);

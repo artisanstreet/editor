@@ -657,12 +657,10 @@ impl SeedSnapshot {
             clear_leftover(&staging)?;
             return Err(RestoreSnapshotError::Copy(error));
         }
-        std::fs::rename(&logical_path, &previous).map_err(|source| {
-            RestoreSnapshotError::Swap {
-                from: logical_path.clone(),
-                to: previous.clone(),
-                source,
-            }
+        std::fs::rename(&logical_path, &previous).map_err(|source| RestoreSnapshotError::Swap {
+            from: logical_path.clone(),
+            to: previous.clone(),
+            source,
         })?;
         if let Err(failed) = std::fs::rename(&staging, &logical_path) {
             return Err(match std::fs::rename(&previous, &logical_path) {

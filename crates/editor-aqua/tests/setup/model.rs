@@ -237,7 +237,10 @@ fn a_failed_install_can_go_back_and_change_what_was_chosen() {
         Some(Effect::FindDistros),
         "going back looks for distributions again"
     );
-    assert_eq!(choices(&setup).selected(), &Machine::Wsl("Debian".to_owned()));
+    assert_eq!(
+        choices(&setup).selected(),
+        &Machine::Wsl("Debian".to_owned())
+    );
     assert_eq!(choices(&setup).discovery(), &Discovery::Searching);
     setup.apply(Event::DistrosFound(words(&["Debian"])));
     setup.apply(Event::Chose(Choice::Selected(0)));

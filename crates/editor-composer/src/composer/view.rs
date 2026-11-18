@@ -2436,8 +2436,7 @@ impl ComposerOwner {
         let controller = self.controller.borrow();
         let picker = &controller.picker;
         let current = controller.effective_config(host);
-        let engines =
-            super::picker::offered_engines(host);
+        let engines = super::picker::offered_engines(host);
         let layout = ListLayout::new(&picker.models);
         let items = model_menu_items(host, picker, current.clone());
         let pane = picker

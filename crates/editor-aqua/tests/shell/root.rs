@@ -400,7 +400,11 @@ fn every_workspace_route_mounts_its_screen() {
         let mut palette = editor_aqua::shell::palette::Palette::default();
         palette.query = query.into();
         palette.refresh(Some(&host.id), &[]);
-        assert_eq!(palette.selected(), Some(&screen), "the palette offers {query}");
+        assert_eq!(
+            palette.selected(),
+            Some(&screen),
+            "the palette offers {query}"
+        );
         shell.navigate(screen.clone());
         rebuild(&mut root, &mut shell, &mut resources.ui, &window);
         assert!(
@@ -445,7 +449,10 @@ fn ctrl_b_collapses_the_rendered_sidebar() {
     );
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
     let collapsed = keyed(&resources.ui, sidebar).unwrap().w;
-    assert!(collapsed < open, "Ctrl+B narrows the sidebar from {open} to {collapsed}");
+    assert!(
+        collapsed < open,
+        "Ctrl+B narrows the sidebar from {open} to {collapsed}"
+    );
     press(
         &mut root,
         &mut shell,
@@ -554,7 +561,10 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
     root.advance_glides(&mut shell, &mut resources.ui);
 
     let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
-    conversation.jump(&shell.core, editor_aqua::conversation::viewport::Jump::Latest);
+    conversation.jump(
+        &shell.core,
+        editor_aqua::conversation::viewport::Jump::Latest,
+    );
     root.advance_glides(&mut shell, &mut resources.ui);
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
     root.advance_glides(&mut shell, &mut resources.ui);

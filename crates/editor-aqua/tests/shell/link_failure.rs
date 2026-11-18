@@ -17,7 +17,10 @@ fn a_link_the_browser_cannot_open_offers_its_url_to_copy() {
             .debug_selector("workspace-root"),
     );
     let mut failure = LinkFailureDialog::default();
-    failure.show(URL.into(), &std::io::Error::other("no browser is registered"));
+    failure.show(
+        URL.into(),
+        &std::io::Error::other("no browser is registered"),
+    );
     failure.mount(&mut ui, ArtisanTheme::resolved());
     ui.build_frame().unwrap();
     let texts = painted_texts(&ui);

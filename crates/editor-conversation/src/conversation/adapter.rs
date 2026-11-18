@@ -304,14 +304,16 @@ pub fn resolve_scroll(
         ScrollAction::End | ScrollAction::Tail => {
             ScrollResolution::Ready(ScrollDirective::FollowEnd)
         }
-        ScrollAction::To(position) => conversation.jump_row(*position).map_or(
-            ScrollResolution::AwaitingRows,
-            |index| ScrollResolution::Ready(ScrollDirective::ToRow { index, animate }),
-        ),
-        ScrollAction::Row(key) => conversation.row_position(key).map_or(
-            ScrollResolution::Cancelled,
-            |index| ScrollResolution::Ready(ScrollDirective::ToRow { index, animate }),
-        ),
+        ScrollAction::To(position) => conversation
+            .jump_row(*position)
+            .map_or(ScrollResolution::AwaitingRows, |index| {
+                ScrollResolution::Ready(ScrollDirective::ToRow { index, animate })
+            }),
+        ScrollAction::Row(key) => conversation
+            .row_position(key)
+            .map_or(ScrollResolution::Cancelled, |index| {
+                ScrollResolution::Ready(ScrollDirective::ToRow { index, animate })
+            }),
     }
 }
 

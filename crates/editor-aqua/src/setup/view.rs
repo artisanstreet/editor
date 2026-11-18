@@ -204,8 +204,10 @@ fn discovery(theme: &ArtisanTheme, props: &Props<'_>, discovery: &Discovery) -> 
                         UiBox::new()
                             .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                             .child(colored(
-                                TextRole::Caption
-                                    .text(theme, format!("Couldn't list WSL distributions: {reason}")),
+                                TextRole::Caption.text(
+                                    theme,
+                                    format!("Couldn't list WSL distributions: {reason}"),
+                                ),
                                 tint(theme, Tone::Danger),
                             ))
                             .build(),
@@ -331,7 +333,11 @@ fn working(theme: &ArtisanTheme, props: &Props<'_>, job: &Job, line: &str) -> El
         Job::Fresh(_) => "Installing…",
         Job::Update { .. } => "Updating…",
     };
-    let detail = if line.is_empty() { "Getting ready" } else { line };
+    let detail = if line.is_empty() {
+        "Getting ready"
+    } else {
+        line
+    };
     progress(theme, props, title, detail)
 }
 

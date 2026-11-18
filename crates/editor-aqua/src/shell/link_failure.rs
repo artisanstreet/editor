@@ -103,7 +103,10 @@ fn content(
         .spaced(Space::S8)
         .child(
             TextRole::Label
-                .text(&theme, format!("The browser didn't start: {}.", failure.cause))
+                .text(
+                    &theme,
+                    format!("The browser didn't start: {}.", failure.cause),
+                )
                 .wrap(true)
                 .build(),
         )

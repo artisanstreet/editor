@@ -445,8 +445,10 @@ fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder
         let before = TreeManifest::capture_stable(&forge).unwrap();
         let restored = snapshot.restore_after_all_forge_handles_closed(&snapshot_dir, &forge);
         let after = TreeManifest::capture_stable(&forge).unwrap();
-        for leftover in [forge.join("zz-locked"), directory.path().join("forge.previous/zz-locked")]
-        {
+        for leftover in [
+            forge.join("zz-locked"),
+            directory.path().join("forge.previous/zz-locked"),
+        ] {
             if leftover.exists() {
                 std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
                     .unwrap();

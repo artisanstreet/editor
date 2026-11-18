@@ -72,7 +72,9 @@ fn find_distros(sender: Sender<Event>) {
     std::thread::spawn(move || {
         let found = crate::core::runtime::runtime().block_on(crate::core::hosts::wsl_state());
         let event = match found {
-            Ok(distros) => Event::DistrosFound(distros.into_iter().map(|distro| distro.name).collect()),
+            Ok(distros) => {
+                Event::DistrosFound(distros.into_iter().map(|distro| distro.name).collect())
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %::diagnostics::chain(&error),

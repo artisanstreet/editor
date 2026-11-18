@@ -322,7 +322,10 @@ impl Setup {
 
     #[must_use]
     pub const fn busy(&self) -> bool {
-        matches!(self.state, State::Installing { .. } | State::Cancelling { .. })
+        matches!(
+            self.state,
+            State::Installing { .. } | State::Cancelling { .. }
+        )
     }
 
     #[must_use]
@@ -372,7 +375,13 @@ impl Setup {
                 let job = job.clone();
                 Some(self.install(job))
             }
-            (State::Failed { job: Job::Fresh(choices), .. }, Event::Chose(Choice::Back)) => {
+            (
+                State::Failed {
+                    job: Job::Fresh(choices),
+                    ..
+                },
+                Event::Chose(Choice::Back),
+            ) => {
                 let mut choices = choices.clone();
                 choices.discovery = Discovery::Searching;
                 self.state = State::Choosing(choices);

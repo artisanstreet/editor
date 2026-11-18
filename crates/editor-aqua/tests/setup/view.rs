@@ -189,7 +189,11 @@ fn a_failed_install_offers_a_way_back_to_the_choices() {
     assert_eq!(*heard.borrow(), [Choice::Back]);
     setup.apply(Event::Chose(Choice::Back));
     let (app, _) = shown(&setup);
-    assert!(texts(&app).iter().any(|text| text == "Where should agents work?"));
+    assert!(
+        texts(&app)
+            .iter()
+            .any(|text| text == "Where should agents work?")
+    );
 }
 
 #[test]
@@ -219,5 +223,9 @@ fn closing_mid_install_says_the_installer_is_stopping() {
     setup.apply(Event::Chose(Choice::Started));
     setup.apply(Event::CloseRequested);
     let (app, _) = shown(&setup);
-    assert!(texts(&app).iter().any(|text| text == "Stopping the installer…"));
+    assert!(
+        texts(&app)
+            .iter()
+            .any(|text| text == "Stopping the installer…")
+    );
 }

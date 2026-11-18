@@ -166,7 +166,11 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
     };
     let engines = &mut core.host_mut(&host).unwrap().engines;
     for engine in [
-        status(EngineId::Claude, InstallState::Absent, SignInState::SignedOut),
+        status(
+            EngineId::Claude,
+            InstallState::Absent,
+            SignInState::SignedOut,
+        ),
         status(EngineId::Codex, installed(), SignInState::SignedOut),
         status(
             EngineId::OpenCode,
