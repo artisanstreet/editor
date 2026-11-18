@@ -109,7 +109,7 @@ impl RunOutcome {
 
 impl RunState {
     #[must_use]
-    pub const fn status(&self) -> RunStatus {
+    const fn status(&self) -> RunStatus {
         match self {
             Self::Running => RunStatus::Running,
             Self::Finished { outcome, .. } => outcome.status(),
@@ -117,7 +117,7 @@ impl RunState {
     }
 
     #[must_use]
-    pub fn error(&self) -> Option<&str> {
+    fn error(&self) -> Option<&str> {
         match self {
             Self::Running => None,
             Self::Finished { error, .. } => error.as_deref(),
@@ -125,7 +125,7 @@ impl RunState {
     }
 
     #[must_use]
-    pub const fn ended_at(&self) -> Option<Timestamp> {
+    const fn ended_at(&self) -> Option<Timestamp> {
         match self {
             Self::Running => None,
             Self::Finished { ended_at, .. } => Some(*ended_at),

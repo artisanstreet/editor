@@ -18,7 +18,7 @@ pub enum ModelCustomizationsError {
     ExecutionDomain { rule: String },
 }
 
-pub fn validate_model_customizations(
+pub(crate) fn validate_model_customizations(
     rules: &[ModelCustomization],
 ) -> Result<(), ModelCustomizationsError> {
     if rules.len() > 1024 {

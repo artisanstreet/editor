@@ -227,7 +227,7 @@ pub enum MessageDirection {
 
 impl MessageDirection {
     #[must_use]
-    pub fn is_sent(&self) -> bool {
+    fn is_sent(&self) -> bool {
         *self == Self::Sent
     }
 }

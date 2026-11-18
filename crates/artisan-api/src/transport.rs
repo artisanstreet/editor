@@ -49,7 +49,7 @@ impl ClaudeAiSession {
     }
 }
 
-pub const CLAUDE_AI_SESSION_COOKIES: [&str; 2] = ["sessionKey", "sessionKeyV3"];
+const CLAUDE_AI_SESSION_COOKIES: [&str; 2] = ["sessionKey", "sessionKeyV3"];
 
 impl std::fmt::Debug for ClaudeAiSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

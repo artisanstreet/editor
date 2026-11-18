@@ -11,9 +11,9 @@ use std::sync::Arc;
 #[derive(Debug, thiserror::Error)]
 #[error("generate a self-signed certificate for {name}")]
 pub struct GenerateIdentityError {
-    pub name: String,
+    name: String,
     #[source]
-    pub source: rcgen::Error,
+    source: rcgen::Error,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -105,7 +105,7 @@ pub fn fingerprint(certificate_der: &[u8]) -> String {
 
 #[derive(Debug, thiserror::Error)]
 #[error("decode the certificate's base64")]
-pub struct DecodeCertificateError(#[source] pub base64::DecodeError);
+pub struct DecodeCertificateError(#[source] base64::DecodeError);
 
 pub fn fingerprint_of(certificate: &str) -> Result<String, DecodeCertificateError> {
     Ok(fingerprint(

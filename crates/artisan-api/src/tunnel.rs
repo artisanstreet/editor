@@ -87,21 +87,21 @@ impl TunnelResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelChunk {
-    pub transfer: String,
-    pub index: u32,
-    pub total: u32,
-    pub total_bytes: u64,
-    pub bytes_b64u: String,
+    pub(crate) transfer: String,
+    pub(crate) index: u32,
+    pub(crate) total: u32,
+    pub(crate) total_bytes: u64,
+    pub(crate) bytes_b64u: String,
 }
 
-pub const CHUNK_RAW_BYTES: usize = 40 * 1024;
+pub(crate) const CHUNK_RAW_BYTES: usize = 40 * 1024;
 pub const TUNNEL_PLAINTEXT_BUDGET: usize = 60_000;
 pub const TUNNEL_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 const MESSAGE_ENVELOPE_BYTES: u64 = 64 * 1024;
 pub const TRANSFER_MAX_BYTES: u64 =
     (TUNNEL_BODY_MAX_BYTES as u64).div_ceil(3) * 4 + MESSAGE_ENVELOPE_BYTES;
 pub const REASSEMBLY_MAX_BYTES_PER_CONN: u64 = 64 * 1024 * 1024;
-pub const TRANSFER_MAX_PARTS: u32 = 1094;
+pub(crate) const TRANSFER_MAX_PARTS: u32 = 1094;
 const _: () = assert!(
     TRANSFER_MAX_PARTS as u64 == TRANSFER_MAX_BYTES.div_ceil(CHUNK_RAW_BYTES as u64),
     "TRANSFER_MAX_PARTS must be the div_ceil part count"
@@ -110,7 +110,7 @@ const _: () = assert!(
     TRANSFER_MAX_BYTES <= REASSEMBLY_MAX_BYTES_PER_CONN,
     "a connection must hold one transfer of the largest body"
 );
-pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
+pub(crate) const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
 
 #[must_use]
 pub const fn chunk_count(bytes: usize) -> usize {
@@ -142,7 +142,7 @@ pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {
         .collect()
 }
 
-pub fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeError> {
+pub(crate) fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeError> {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(chunk.bytes_b64u.as_bytes())
@@ -176,5 +176,3 @@ pub const STREAM_EVENT_KEY: &str = "$event";
 
 pub const METHOD_SUBSCRIBE: &str = "SUBSCRIBE";
 pub const METHOD_UNSUBSCRIBE: &str = "UNSUBSCRIBE";
-
-pub const STREAM_QUEUE_ENVELOPES: usize = 256;
