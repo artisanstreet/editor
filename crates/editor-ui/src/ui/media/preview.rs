@@ -17,18 +17,18 @@ use aqua_ui::{
 };
 
 use super::{
-    image::Images,
+    image::{ImageError, ImageLoader, Images, cache_key},
     source::{MediaFetcher, MediaSource},
 };
-use editor_core::{Core, HostId, HostInstance};
 use crate::ui::{
     kit::{
-        Finish, IconButton, IconButtonSize, Media as MediaKind, Space, Surface, TextRole,
-        control::icon_button::CORNER_INSET,
+        Button, ButtonSize, ButtonTone, Finish, IconButton, IconButtonSize, Media as MediaKind,
+        Space, Spaced, Surface, TextRole, control::icon_button::CORNER_INSET,
     },
     motion::MotionCurve,
     theme::{ArtisanTheme, Opacity},
 };
+use editor_core::{Core, HostId, HostInstance};
 
 const FRAME: Surface = Surface::Media(MediaKind::Frame);
 
@@ -54,17 +54,35 @@ pub enum Effect {
 pub enum Action {
     Close,
     Navigate(bool),
-    Press { at: aqua_core::Point, picture: bool },
-    Drag { at: aqua_core::Point, viewport: Size },
-    Release { at: aqua_core::Point },
-    Zoom { at: aqua_core::Point, delta: f32, viewport: Size },
+    Press {
+        at: aqua_core::Point,
+        picture: bool,
+    },
+    Drag {
+        at: aqua_core::Point,
+        viewport: Size,
+    },
+    Release {
+        at: aqua_core::Point,
+    },
+    Zoom {
+        at: aqua_core::Point,
+        delta: f32,
+        viewport: Size,
+    },
     CycleFocus(bool),
+    Retry,
 }
 
 #[derive(Clone, Copy)]
 enum Press {
-    Backdrop { at: aqua_core::Point },
-    Picture { at: aqua_core::Point, pan: aqua_core::Point },
+    Backdrop {
+        at: aqua_core::Point,
+    },
+    Picture {
+        at: aqua_core::Point,
+        pan: aqua_core::Point,
+    },
 }
 
 const MAX_ZOOM: f32 = 8.0;
@@ -89,7 +107,7 @@ pub struct Preview {
     instance: HostInstance,
     content: Content,
     image: Option<ImageHandle>,
-    failed: bool,
+    failure: Option<ImageError>,
     outgoing: Option<(ImageHandle, Instant, bool)>,
     started: Instant,
     slide_started: Option<Instant>,
@@ -127,7 +145,7 @@ impl Preview {
                 index,
             },
             image: Some(image),
-            failed: false,
+            failure: None,
             outgoing: None,
             started: now,
             slide_started: None,
@@ -157,7 +175,7 @@ impl Preview {
             instance,
             content: Content::ReadyOnly,
             image: Some(image),
-            failed: false,
+            failure: None,
             outgoing: None,
             started: now,
             slide_started: None,
@@ -252,14 +270,11 @@ impl Preview {
         ) {
             Some(Ok(image)) => {
                 self.image = Some(image);
-                self.failed = false;
+                self.failure = None;
                 true
             }
-            Some(Err(_)) if !self.failed => {
-                self.failed = true;
-                true
-            }
-            _ => false,
+            Some(Err(error)) => self.failure.replace(error) != Some(error),
+            None => false,
         }
     }
 
@@ -352,7 +367,28 @@ impl Preview {
                 true
             }
             Action::CycleFocus(_) => false,
+            Action::Retry => self.retry(core),
         }
+    }
+
+    fn retry(&mut self, core: &Core) -> bool {
+        let Content::Gallery {
+            fetcher,
+            sources,
+            index,
+            ..
+        } = &self.content
+        else {
+            return false;
+        };
+        if !self.failure.is_some_and(ImageError::retryable) {
+            return false;
+        }
+        let key = cache_key(fetcher, &sources[*index], &format!("image-{index}"));
+        fetcher.resources().forget::<ImageLoader>(&key);
+        self.failure = None;
+        self.refresh(core);
+        true
     }
 
     fn clamped(&self, pan: aqua_core::Point, viewport: Size) -> aqua_core::Point {
@@ -387,7 +423,7 @@ impl Preview {
         } else {
             self.image.take().map(|image| (image, now, forward))
         };
-        self.failed = false;
+        self.failure = None;
         self.slide_started = Some(now);
         true
     }
@@ -527,19 +563,24 @@ impl Preview {
                         .align(aqua_ui::AlignItems::CENTER)
                         .justify(aqua_ui::JustifyContent::CENTER),
                 )
+                .layout("column")
+                .spaced(Space::S8)
                 .child(
                     TextRole::Label
                         .text(
                             &theme,
-                            if self.failed {
-                                "Couldn't load image"
-                            } else {
-                                "Loading image…"
-                            },
+                            self.failure.map_or("Loading image…", ImageError::summary),
                         )
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                    .build(),
+                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                        .build(),
                 )
+                .children(self.failure.filter(|error| error.retryable()).map(|_| {
+                    let retry = Rc::clone(&emit);
+                    Button::text("image-preview-retry", theme, ButtonTone::Neutral, "Retry")
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| retry(Action::Retry))
+                        .build()
+                }))
                 .build()
         });
         if let Some((image, started, forward)) = &self.outgoing {
@@ -705,12 +746,13 @@ impl Preview {
                             .justify(aqua_ui::JustifyContent::CENTER),
                     )
                     .child(
-                        TextRole::Caption.text(
-                            &theme,
-                            format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
-                        )
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .build(),
+                        TextRole::Caption
+                            .text(
+                                &theme,
+                                format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
+                            )
+                            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                            .build(),
                     )
                     .build(),
             );
@@ -756,26 +798,26 @@ impl Preview {
             viewport,
         )
         .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input {
-                    let action = match key.key {
-                        Key::Named(NamedKey::Escape) => Some(Action::Close),
-                        Key::Named(NamedKey::Left) => Some(Action::Navigate(false)),
-                        Key::Named(NamedKey::Right) => Some(Action::Navigate(true)),
-                        Key::Named(NamedKey::Tab) => Some(Action::CycleFocus(
-                            key.modifiers.contains(aqua_core::Modifiers::SHIFT),
-                        )),
-                        _ => None,
+            if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input {
+                let action = match key.key {
+                    Key::Named(NamedKey::Escape) => Some(Action::Close),
+                    Key::Named(NamedKey::Left) => Some(Action::Navigate(false)),
+                    Key::Named(NamedKey::Right) => Some(Action::Navigate(true)),
+                    Key::Named(NamedKey::Tab) => Some(Action::CycleFocus(
+                        key.modifiers.contains(aqua_core::Modifiers::SHIFT),
+                    )),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    keys(action);
+                    return InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::handled()
                     };
-                    if let Some(action) = action {
-                        keys(action);
-                        return InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::handled()
-                        };
-                    }
                 }
-                InputResponse::default()
-            })
+            }
+            InputResponse::default()
+        })
     }
 }
 

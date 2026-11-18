@@ -1,11 +1,11 @@
 use super::AudioBlock;
 use crate::ui::kit::Space;
-use crate::ui::kit::{Corner, IconSize, TextRole};
+use crate::ui::kit::{Button, ButtonSize, ButtonTone, Corner, IconSize, TextRole};
 
 const PLAY: f32 = 28.0;
 use crate::ui::media::{
     audio::{AudioAssets, AudioLoadError},
-    source::{MediaFetcher, MediaSource, Parsed},
+    source::{MediaFetcher, MediaLoadError, MediaSource, Parsed},
 };
 use crate::ui::rich::narrative::callout::GlyphFactory;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
@@ -247,18 +247,40 @@ impl AudioBlock {
             });
             let name = track.shown_name();
             let result = match assets.request(fetcher, &track.src, &row_id, waiter, wake) {
-                None => Err("Loading…".to_owned()),
+                None => Err(("Loading…".to_owned(), false)),
                 Some(Err(AudioLoadError::Remote)) => {
-                    Err("Only local audio files play here".to_owned())
+                    Err(("Only local audio files play here".to_owned(), false))
                 }
-                Some(Err(error)) => Err(format!("Couldn't load {}: {error}", track.src.trim())),
+                Some(Err(error)) => Err((
+                    format!("Couldn't load {}: {error}", track.src.trim()),
+                    matches!(error, AudioLoadError::Load(MediaLoadError::Fetch(_))),
+                )),
                 Some(Ok(bytes)) => track_path(&track.src, fetcher, &row_id)
                     .map(|path| (path, bytes))
-                    .ok_or_else(|| format!("Couldn't load {}", track.src.trim())),
+                    .ok_or_else(|| (format!("Couldn't load {}", track.src.trim()), false)),
             };
             let (path, bytes) = match result {
                 Ok(playable) => playable,
-                Err(message) => {
+                Err((message, retryable)) => {
+                    let retry = retryable.then(|| {
+                        let assets = assets.clone();
+                        let fetcher = fetcher.cloned();
+                        let source = track.src.clone();
+                        let part = row_id.clone();
+                        let invalidate = Rc::clone(&invalidate);
+                        Button::text(
+                            format!("{row_id}-retry"),
+                            theme,
+                            ButtonTone::Neutral,
+                            "Retry",
+                        )
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| {
+                            assets.forget(fetcher.as_ref(), &source, &part);
+                            invalidate();
+                        })
+                        .build()
+                    });
                     state.tick(&row_id, false);
                     root = root.child(
                         row()
@@ -285,6 +307,7 @@ impl AudioBlock {
                                 theme.colors.text_muted,
                                 false,
                             ))
+                            .children(retry)
                             .build(),
                     );
                     continue;
@@ -563,3 +586,7 @@ impl AudioFixture {
         track_path(&source, None, "test")
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/media/audio.rs"]
+mod tests;

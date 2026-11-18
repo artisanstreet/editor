@@ -16,6 +16,30 @@ pub enum ImageError {
     Decode,
 }
 
+impl ImageError {
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::NeedsConsent => "Remote image",
+            Self::Load(MediaLoadError::Invalid) => "Not a valid image path",
+            Self::Load(MediaLoadError::TooLarge) => "Too large to preview",
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Missing)) => "File not found",
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreachable)) => {
+                "The host didn't answer"
+            }
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreadable)) => {
+                "Couldn't read the file"
+            }
+            Self::Decode => "Not a supported image",
+        }
+    }
+
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Load(MediaLoadError::Fetch(_)) | Self::Decode)
+    }
+}
+
 pub struct ImageLoader;
 
 impl ResourceLoader for ImageLoader {

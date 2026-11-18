@@ -91,9 +91,7 @@ impl AudioAssets {
             (Parsed::File { .. }, None) => return Some(Err(AudioLoadError::NoHost)),
             (Parsed::File { .. } | Parsed::Data(_), _) => {}
         }
-        let immutable = matches!(source.parsed(), Parsed::Data(_));
-        let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
-        let key = Owned::new(owner, source.parsed().clone());
+        let key = Self::key(fetcher, source, part);
         let cache = fetcher.map_or(&self.fallback, MediaFetcher::resources);
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
         let source_bytes = match source.parsed() {
@@ -139,6 +137,17 @@ impl AudioAssets {
                 None
             }
         }
+    }
+    fn key(fetcher: Option<&MediaFetcher>, source: &MediaSource, part: &str) -> Owned<Parsed> {
+        let immutable = matches!(source.parsed(), Parsed::Data(_));
+        let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
+        Owned::new(owner, source.parsed().clone())
+    }
+    pub fn forget(&self, fetcher: Option<&MediaFetcher>, source: &MediaSource, part: &str) {
+        let key = Self::key(fetcher, source, part);
+        fetcher
+            .map_or(&self.fallback, MediaFetcher::resources)
+            .forget::<Loader>(&key);
     }
     pub fn drain(&self) -> bool {
         self.mailbox.borrow_mut().drain();

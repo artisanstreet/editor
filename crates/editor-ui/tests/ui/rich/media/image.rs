@@ -101,3 +101,58 @@ fn a_new_item_revision_fetches_fresh_image_pixels() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use std::cell::RefCell;
+    let fetcher = MediaFetcher::new("test", |_| {
+        Box::pin(async { Err(crate::ui::media::source::MediaFailure::Unreachable) })
+    })
+    .owned_by(&[1], 1);
+    let block: ImageBlock = serde_json::from_str(r#"{"src":"chart.png","alt":"Chart"}"#).unwrap();
+    let loader = Images::new();
+    let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
+    let mut state = ImageState::new(&block, fetcher, loader.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(state.loaded[0], Loaded::Failed(_)) {
+        loader.drain(&assets);
+        state.refresh();
+        assert!(
+            Instant::now() < deadline,
+            "the fetch fails within the deadline"
+        );
+        std::thread::yield_now();
+    }
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&actions);
+    let view = state
+        .view(
+            &block,
+            ArtisanTheme::resolved(),
+            "gallery",
+            400.0,
+            Rc::new(move |action| sink.borrow_mut().push(action)),
+        )
+        .unwrap();
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| view).unwrap();
+    app.set_viewport(500.0, 400.0, 1.0);
+    app.build_frame().unwrap();
+    let semantics = app.tree().emit_semantics();
+    assert!(
+        semantics
+            .iter()
+            .any(|node| node.role == Role::Button && node.label == "Retry")
+    );
+    assert!(app.focus_key("gallery-retry-0"));
+    let enter = KeyEvent {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(enter));
+    app.handle_input(&InputEvent::KeyUp(enter));
+    assert!(matches!(actions.borrow().as_slice(), [Action::Retry(0)]));
+}

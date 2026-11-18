@@ -62,7 +62,10 @@ fn navigation_and_swipes_obey_boundaries_and_dismissal_rules() {
     let now = Instant::now();
     assert!(!preview.dispatch(6, Action::Navigate(true), &core, now, false));
     assert!(!preview.dispatch(7, Action::Navigate(false), &core, now, false));
-    let viewport = Size { w: 1000.0, h: 800.0 };
+    let viewport = Size {
+        w: 1000.0,
+        h: 800.0,
+    };
     let point = |x: f32, y: f32| aqua_core::Point { x, y };
     let act = |preview: &mut Preview, action| preview.dispatch(7, action, &core, now, false);
     assert!(!act(
@@ -362,4 +365,67 @@ fn ready_only_preview_rejects_replaced_host_and_stale_actions() {
     core.host_mut(&config.id).unwrap().test_stop_connection();
     assert!(!preview.is_live(&core));
     assert!(!preview.dispatch(11, Action::Close, &core, Instant::now(), false));
+}
+
+#[test]
+fn a_failed_preview_names_the_cause_and_retries_the_fetch() {
+    use aqua::UiApp;
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use std::cell::RefCell;
+
+    let (_directory, core, _config, assets, mut preview) = fixture();
+    let now = Instant::now();
+    assert!(preview.dispatch(7, Action::Navigate(true), &core, now, true));
+    let Content::Gallery { loader, .. } = &preview.content else {
+        unreachable!("the fixture opens a gallery")
+    };
+    let loader = loader.clone();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while preview.failure.is_none() {
+        loader.drain(&assets);
+        preview.refresh(&core);
+        assert!(Instant::now() < deadline, "the missing file fails in time");
+        std::thread::yield_now();
+    }
+    let texts = |preview: &Preview, actions: &Rc<RefCell<Vec<Action>>>| {
+        let sink = Rc::clone(actions);
+        let view = preview.view(
+            ArtisanTheme::resolved(),
+            Size { w: 800.0, h: 600.0 },
+            now,
+            true,
+            Rc::new(move |_, action| sink.borrow_mut().push(action)),
+        );
+        let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.mount(|_| view).unwrap();
+        app.set_viewport(800.0, 600.0, 1.0);
+        app.build_frame().unwrap();
+        let said: Vec<String> = app
+            .tree()
+            .traverse()
+            .into_iter()
+            .filter_map(|node| match &app.tree().get(node)?.kind {
+                aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        (app, said)
+    };
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let (mut app, said) = texts(&preview, &actions);
+    assert!(said.iter().any(|text| text == "File not found"));
+    assert!(said.iter().any(|text| text == "Retry"));
+    assert!(app.focus_key("image-preview-retry"));
+    let enter = KeyEvent {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(enter));
+    app.handle_input(&InputEvent::KeyUp(enter));
+    assert_eq!(actions.borrow().as_slice(), &[Action::Retry]);
+    assert!(preview.dispatch(7, Action::Retry, &core, now, true));
+    let (_app, said) = texts(&preview, &actions);
+    assert!(said.iter().any(|text| text == "Loading image…"));
 }

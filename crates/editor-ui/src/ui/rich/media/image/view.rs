@@ -1,4 +1,6 @@
-use crate::ui::kit::{IconSize, Media as Framing, Space, Spaced, Surface, TextRole};
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, IconSize, Media as Framing, Space, Spaced, Surface, TextRole,
+};
 use std::{
     cell::Cell,
     num::NonZeroUsize,
@@ -123,10 +125,7 @@ impl ImageState {
         let Some(source) = self.sources.get(index) else {
             return false;
         };
-        if !matches!(
-            self.loaded[index],
-            Loaded::Failed(ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode)
-        ) {
+        if !matches!(self.loaded[index], Loaded::Failed(error) if error.retryable()) {
             return false;
         }
         let key = cache_key(&self.fetcher, source, &format!("image-{index}"));
@@ -178,10 +177,24 @@ impl ImageState {
                     .filter(|alt| !alt.trim().is_empty())
                     .unwrap_or_else(|| picture.src.raw());
                 let path = picture.src.raw().to_owned();
+                let slot = index;
+                let retry =
+                    matches!(loaded, Loaded::Failed(error) if error.retryable()).then(|| {
+                        let retry = Rc::clone(&emit);
+                        Button::text(
+                            format!("{id}-retry-{index}"),
+                            theme,
+                            ButtonTone::Neutral,
+                            "Retry",
+                        )
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| retry(Action::Retry(slot)))
+                        .build()
+                    });
                 let mut frame = Surface::Media(Framing::Frame)
                     .build(
                         &theme,
-                        vec![content(loaded, &theme, &path, shown_width, height)],
+                        vec![content(loaded, &theme, &path, shown_width, height, retry)],
                     )
                     .style(
                         Style::new()
@@ -192,7 +205,6 @@ impl ImageState {
                     .role(aqua_core::Role::Image)
                     .aria_label(alt.to_owned());
                 let copied = Rc::clone(&emit);
-                let slot = index;
                 frame = frame.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
                     if let RoutedInput::Native(InputEvent::PointerDown(
                         pointer,
@@ -293,25 +305,7 @@ impl ImageState {
                     Loaded::Failed(
                         ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode,
                     ) => {
-                        let retry = Rc::clone(&emit);
-                        frame = frame.cursor(aqua_core::CursorIcon::Pointer).on_input(
-                            InputKind::PointerUp,
-                            EventPhase::Bubble,
-                            move |event| {
-                                if matches!(
-                                    &event.input,
-                                    RoutedInput::Native(InputEvent::PointerUp(
-                                        _,
-                                        PointerButton::Primary
-                                    ))
-                                ) {
-                                    retry(Action::Retry(slot));
-                                    InputResponse::handled()
-                                } else {
-                                    InputResponse::default()
-                                }
-                            },
-                        );
+                        frame = frame.role(aqua_core::Role::Group);
                     }
                     Loaded::Loading
                     | Loaded::Failed(ImageError::Load(
@@ -366,6 +360,7 @@ fn content(
     source: &str,
     width: f32,
     height: f32,
+    retry: Option<aqua_ui::element::Element>,
 ) -> aqua_ui::element::Element {
     match image {
         Loaded::Ready(image) => UiBox::new()
@@ -422,33 +417,15 @@ fn content(
                     .build()
             };
             if let Loaded::Failed(error) = image {
-                let title = match error {
-                    ImageError::NeedsConsent => "Remote image",
-                    ImageError::Load(MediaLoadError::Invalid) => "Not a valid image path",
-                    ImageError::Load(MediaLoadError::TooLarge) => "Too large to preview",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Missing,
-                    )) => "File not found",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Unreachable,
-                    )) => "The host didn't answer",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Unreadable,
-                    )) => "Couldn't read the file",
-                    ImageError::Decode => "Not a supported image",
-                };
+                let title = error.summary();
                 let (icon, hint) = match error {
                     ImageError::NeedsConsent => (
                         editor_assets::AssetId::TABLER_WORLD,
                         Some("Load remote images"),
                     ),
-                    ImageError::Load(MediaLoadError::Invalid | MediaLoadError::TooLarge) => {
-                        (editor_assets::AssetId::TABLER_FILE_OFF, None)
-                    }
-                    ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode => (
-                        editor_assets::AssetId::TABLER_FILE_OFF,
-                        Some("Click to retry"),
-                    ),
+                    ImageError::Load(MediaLoadError::Invalid | MediaLoadError::TooLarge)
+                    | ImageError::Load(MediaLoadError::Fetch(_))
+                    | ImageError::Decode => (editor_assets::AssetId::TABLER_FILE_OFF, None),
                 };
                 panel = panel
                     .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
@@ -457,6 +434,7 @@ fn content(
                 if let Some(hint) = hint {
                     panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
                 }
+                panel = panel.children(retry);
             } else {
                 panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
             }

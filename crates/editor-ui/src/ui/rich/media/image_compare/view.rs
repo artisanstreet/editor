@@ -12,9 +12,11 @@ use aqua_core::{InputEvent, Key, NamedKey, PointerButton};
 use aqua_ui::input::{CaptureRequest, FocusRequest, InputKind, InputResponse, RoutedInput};
 
 use super::{ImageCompare, Mode};
-use crate::ui::kit::{IconSize, Media, Space, Spaced, Surface, TextRole};
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, IconSize, Media, Space, Spaced, Surface, TextRole,
+};
 use crate::ui::media::{
-    image::{ImageError, Images},
+    image::{ImageError, ImageLoader, Images, cache_key},
     source::{MediaFailure, MediaFetcher, MediaLoadError, MediaSource},
 };
 
@@ -36,6 +38,10 @@ pub(crate) enum Failure {
 }
 
 impl Failure {
+    const fn retryable(self) -> bool {
+        matches!(self, Self::Fetch(_) | Self::Undecodable)
+    }
+
     fn title(self) -> &'static str {
         match self {
             Self::NeedsConsent => "Remote image",
@@ -62,6 +68,7 @@ pub(crate) enum Action {
     Move { x: f32, width: f32 },
     Release,
     Key { key: Key, shift: bool },
+    Retry(Side),
 }
 
 pub(crate) struct CompareState {
@@ -113,6 +120,44 @@ impl CompareState {
         }
     }
 
+    const fn part(side: Side) -> &'static str {
+        match side {
+            Side::Before => "before",
+            Side::After => "after",
+        }
+    }
+
+    fn source(&self, side: Side) -> &MediaSource {
+        match side {
+            Side::Before => &self.before,
+            Side::After => &self.after,
+        }
+    }
+
+    fn failure(&self, side: Side) -> Option<Failure> {
+        match &self.images[Self::index(side)] {
+            ImageState::Loading => None,
+            ImageState::Failed(failure) => Some(*failure),
+            ImageState::Decoding(image) => match image.status() {
+                ImageStatus::Ready { .. } | ImageStatus::Pending => None,
+                ImageStatus::Failed(_) | ImageStatus::Cancelled => Some(Failure::Undecodable),
+            },
+        }
+    }
+
+    fn retry(&mut self, side: Side) -> bool {
+        if !self.failure(side).is_some_and(Failure::retryable) {
+            return false;
+        }
+        let key = cache_key(&self.fetcher, self.source(side), Self::part(side));
+        self.fetcher.resources().forget::<ImageLoader>(&key);
+        let index = Self::index(side);
+        self.images[index] = ImageState::Loading;
+        self.observed[index] = None;
+        self.refresh();
+        true
+    }
+
     pub(crate) fn refresh(&mut self) -> bool {
         self.wake.drain();
         let mut changed = false;
@@ -126,10 +171,7 @@ impl CompareState {
             let wake: aqua::mailbox::Wake = Arc::new(move || {
                 let _ = sender.send(());
             });
-            let part = match side {
-                Side::Before => "before",
-                Side::After => "after",
-            };
+            let part = Self::part(side);
             let result =
                 self.loader
                     .request(&self.fetcher, source, part, self.waiters[index], wake);
@@ -221,6 +263,7 @@ impl CompareState {
             return true;
         }
         match action {
+            Action::Retry(side) => self.retry(side),
             Action::Mode(index) => {
                 let Some(mode) = Mode::ALL.get(index).copied() else {
                     return false;
@@ -307,13 +350,7 @@ impl CompareState {
                     &theme,
                     half,
                     aspect,
-                    image_layer(
-                        &self.images[0],
-                        &theme,
-                        self.before.raw(),
-                        half,
-                        half / aspect,
-                    ),
+                    self.layer(Side::Before, &theme, id, half, half / aspect, &emit),
                     vec![corner(&theme, before_label.clone(), true, false, half)],
                     consent.clone(),
                 ))
@@ -321,13 +358,7 @@ impl CompareState {
                     &theme,
                     half,
                     aspect,
-                    image_layer(
-                        &self.images[1],
-                        &theme,
-                        self.after.raw(),
-                        half,
-                        half / aspect,
-                    ),
+                    self.layer(Side::After, &theme, id, half, half / aspect, &emit),
                     vec![corner(&theme, after_label.clone(), true, false, half)],
                     consent,
                 ))
@@ -338,26 +369,14 @@ impl CompareState {
             let mut layers = Vec::new();
             match self.mode {
                 Mode::Slider => {
-                    layers.push(image_layer(
-                        &self.images[1],
-                        &theme,
-                        self.after.raw(),
-                        width,
-                        height,
-                    ));
+                    layers.push(self.layer(Side::After, &theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width * self.split)
                             .height(height)
                             .clip(true)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(image_layer(
-                                &self.images[0],
-                                &theme,
-                                self.before.raw(),
-                                width,
-                                height,
-                            ))
+                            .child(self.layer(Side::Before, &theme, id, width, height, &emit))
                             .build(),
                     );
                     layers.push(corner(&theme, before_label, true, self.dragging, width));
@@ -365,35 +384,23 @@ impl CompareState {
                     layers.extend(divider(&theme, self.split, width, height));
                 }
                 Mode::Toggle => {
-                    let (image, source, label, left) = if self.showing_after {
-                        (&self.images[1], self.after.raw(), after_label, false)
+                    let (side, label, left) = if self.showing_after {
+                        (Side::After, after_label, false)
                     } else {
-                        (&self.images[0], self.before.raw(), before_label, true)
+                        (Side::Before, before_label, true)
                     };
-                    layers.push(image_layer(image, &theme, source, width, height));
+                    layers.push(self.layer(side, &theme, id, width, height, &emit));
                     layers.push(corner(&theme, label, left, false, width));
                 }
                 Mode::Blend => {
-                    layers.push(image_layer(
-                        &self.images[0],
-                        &theme,
-                        self.before.raw(),
-                        width,
-                        height,
-                    ));
+                    layers.push(self.layer(Side::Before, &theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width)
                             .height(height)
                             .opacity(self.split)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(image_layer(
-                                &self.images[1],
-                                &theme,
-                                self.after.raw(),
-                                width,
-                                height,
-                            ))
+                            .child(self.layer(Side::After, &theme, id, width, height, &emit))
                             .build(),
                     );
                     let text = format!(
@@ -492,12 +499,70 @@ fn frame_size(images: &[ImageState; 2], hint: super::super::SizeHint) -> (f32, f
     )
 }
 
+impl CompareState {
+    fn layer(
+        &self,
+        side: Side,
+        theme: &crate::ui::theme::ArtisanTheme,
+        id: &str,
+        width: f32,
+        height: f32,
+        emit: &Rc<dyn Fn(Action)>,
+    ) -> aqua_ui::element::Element {
+        let retry = self
+            .failure(side)
+            .filter(|failure| failure.retryable())
+            .map(|_| {
+                let retry = Rc::clone(emit);
+                let part = Self::part(side);
+                aqua_ui::element::Box::new()
+                    .child(
+                        Button::text(
+                            format!("{id}-retry-{part}"),
+                            *theme,
+                            ButtonTone::Neutral,
+                            "Retry",
+                        )
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| retry(Action::Retry(side)))
+                        .build(),
+                    )
+                    .build()
+                    .on_input(
+                        InputKind::PointerDown,
+                        aqua_ui::input::EventPhase::Bubble,
+                        |_| InputResponse {
+                            stop_propagation: true,
+                            ..InputResponse::default()
+                        },
+                    )
+                    .on_input(
+                        InputKind::KeyDown,
+                        aqua_ui::input::EventPhase::Bubble,
+                        |_| InputResponse {
+                            stop_propagation: true,
+                            ..InputResponse::default()
+                        },
+                    )
+            });
+        image_layer(
+            &self.images[Self::index(side)],
+            theme,
+            self.source(side).raw(),
+            width,
+            height,
+            retry,
+        )
+    }
+}
+
 fn image_layer(
     image: &ImageState,
     theme: &crate::ui::theme::ArtisanTheme,
     source: &str,
     width: f32,
     height: f32,
+    retry: Option<aqua_ui::element::Element>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems, JustifyContent,
@@ -553,11 +618,9 @@ fn image_layer(
                 editor_assets::AssetId::TABLER_WORLD,
                 Some("Load remote images"),
             ),
-            Failure::Invalid | Failure::TooLarge => (editor_assets::AssetId::TABLER_FILE_OFF, None),
-            Failure::Fetch(_) | Failure::Undecodable => (
-                editor_assets::AssetId::TABLER_FILE_OFF,
-                Some("Click to retry"),
-            ),
+            Failure::Invalid | Failure::TooLarge | Failure::Fetch(_) | Failure::Undecodable => {
+                (editor_assets::AssetId::TABLER_FILE_OFF, None)
+            }
         };
         panel = panel
             .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
@@ -566,6 +629,7 @@ fn image_layer(
         if let Some(hint) = hint {
             panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
         }
+        panel = panel.children(retry);
     } else {
         panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
     }
