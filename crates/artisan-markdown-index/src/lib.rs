@@ -222,20 +222,30 @@ fn resolve_text<'a>(
 ) -> Result<pulldown_cmark::CowStr<'a>, MarkdownIndexError> {
     let value = match text {
         Text::Range(range) => source
-            .get(
-                range
-                    .start
-                    .checked_sub(origin)
-                    .ok_or(MarkdownIndexError::IncompleteRange)?
-                    ..range
-                        .end
-                        .checked_sub(origin)
-                        .ok_or(MarkdownIndexError::IncompleteRange)?,
-            )
+            .get(local_range(range, source, origin)?)
             .ok_or(MarkdownIndexError::IncompleteRange)?,
         Text::Decoded(value) => value.as_ref(),
     };
     Ok(value.into())
+}
+
+fn local_range(
+    range: &Range<usize>,
+    source: &str,
+    origin: usize,
+) -> Result<Range<usize>, MarkdownIndexError> {
+    let start = range
+        .start
+        .checked_sub(origin)
+        .ok_or(MarkdownIndexError::IncompleteRange)?;
+    let end = range
+        .end
+        .checked_sub(origin)
+        .ok_or(MarkdownIndexError::IncompleteRange)?;
+    match source.get(start..end) {
+        Some(_) => Ok(start..end),
+        None => Err(MarkdownIndexError::IncompleteRange),
+    }
 }
 
 #[expect(
@@ -351,22 +361,16 @@ impl LeafRecord {
         }
         for event in &leaf.events {
             let value = match &event.token {
+                Token::Structural(
+                    Event::Text(_) | Event::Code(_) | Event::Html(_) | Event::InlineHtml(_),
+                ) => return Err(MarkdownIndexError::InvalidShape),
                 Token::Structural(event) => event.clone(),
                 Token::Text(value) => Event::Text(resolve_text(value, exact, origin)?),
                 Token::Code(value) => Event::Code(resolve_text(value, exact, origin)?),
                 Token::Html(value) => Event::Html(resolve_text(value, exact, origin)?),
                 Token::InlineHtml(value) => Event::InlineHtml(resolve_text(value, exact, origin)?),
             };
-            let range = event
-                .range
-                .start
-                .checked_sub(origin)
-                .ok_or(MarkdownIndexError::IncompleteRange)?
-                ..event
-                    .range
-                    .end
-                    .checked_sub(origin)
-                    .ok_or(MarkdownIndexError::IncompleteRange)?;
+            let range = local_range(&event.range, exact, origin)?;
             events.push((value.into_static(), range));
         }
         if matches!(leaf.kind, Kind::TableRow { .. }) {

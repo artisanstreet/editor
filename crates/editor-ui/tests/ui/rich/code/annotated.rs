@@ -41,3 +41,16 @@ fn replacing_model_resets_hover_even_with_equal_content() {
     assert!(state.update_model(&replacement));
     assert_eq!(state.active(), None);
 }
+
+#[test]
+fn relative_notes_on_an_excerpt_at_the_last_line_number_land_on_their_lines() {
+    let model: AnnotatedCode = serde_json::from_value(serde_json::json!({
+        "code": "one\ntwo",
+        "start_line": u32::MAX,
+        "notes": [{"lines": 2, "text": "second"}]
+    }))
+    .unwrap();
+    assert_eq!(model.0.number(0), u32::MAX - 1);
+    assert_eq!(model.0.number(1), u32::MAX);
+    assert_eq!(model.0.owner, vec![None, Some(0)]);
+}

@@ -12,7 +12,12 @@ use artisan_api::{
 use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
 use editor_ui::text::editor::{Editor, ListKey, Mode};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 #[derive(Clone, Copy)]
 enum TurnAction {
@@ -82,9 +87,36 @@ pub struct DraftBody {
 pub struct DraftFile {
     #[serde(skip)]
     pub key: u64,
-    pub path: PathBuf,
+    pub path: DraftPath,
     #[serde(default)]
     pub folder: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DraftPath(String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{} is not a Unicode path, so it cannot be linked in a message", .path.display())]
+pub struct NonUnicodePath {
+    pub path: PathBuf,
+}
+
+impl DraftPath {
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl TryFrom<PathBuf> for DraftPath {
+    type Error = NonUnicodePath;
+
+    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        match path.into_os_string().into_string() {
+            Ok(path) => Ok(Self(path)),
+            Err(path) => Err(NonUnicodePath { path: path.into() }),
+        }
+    }
 }
 
 pub struct Composer {
@@ -567,9 +599,18 @@ impl Composer {
                     |name| name.to_string_lossy().into_owned(),
                 );
                 self.add_image(Source::Path(path), name);
-            } else if let Some(existing) = self.files.iter().find(|file| file.path == path) {
-                self.file_shake = Some((existing.key, std::time::Instant::now()));
             } else {
+                let path = match DraftPath::try_from(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.notice = Some(error.to_string());
+                        continue;
+                    }
+                };
+                if let Some(existing) = self.files.iter().find(|file| file.path == path) {
+                    self.file_shake = Some((existing.key, std::time::Instant::now()));
+                    continue;
+                }
                 if self.files.len() >= 32 {
                     self.notice = Some("A message can link at most 32 files.".into());
                     return;
@@ -1026,15 +1067,15 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
         .iter()
         .map(|file| {
             let slash = if file.folder { "/" } else { "" };
-            let name = file
-                .path
+            let path = file.path.as_path();
+            let name = path
                 .file_name()
                 .map_or_else(
-                    || file.path.display().to_string(),
+                    || path.display().to_string(),
                     |name| name.to_string_lossy().into_owned(),
                 )
                 .replace(['[', ']'], "");
-            format!("[{name}{slash}](<{}>)", file.path.display())
+            format!("[{name}{slash}](<{}>)", path.display())
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1116,3 +1157,4 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     config.effort = None;
     Some(config)
 }
+

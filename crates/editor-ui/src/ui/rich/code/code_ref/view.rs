@@ -36,7 +36,7 @@ impl CodeRefBlock {
         let action = OpenReference {
             scope,
             path: reference.path.clone(),
-            line: reference.start,
+            line: reference.lines.map(|lines| lines.start),
         };
         let path = Button::new(
             format!("{id}-path"),
@@ -88,7 +88,7 @@ fn text_style(theme: &ArtisanTheme, mono: bool) -> TextStyle {
 
 fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
     let count = block.lines.len();
-    let start = block.reference.start.unwrap_or(1);
+    let start = block.reference.lines.map_or(1, |lines| lines.start);
     let largest = start.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     let gutter = f32::from(u16::try_from(largest.max(1).ilog10() + 1).unwrap_or(u16::MAX))
         .mul_add(Space::S8.px(), Space::S8.px());

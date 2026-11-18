@@ -1260,7 +1260,7 @@ impl ComposerRest {
             files: composer
                 .files
                 .iter()
-                .map(|file| (file.key, file.path.clone(), file.folder))
+                .map(|file| (file.key, file.path.as_path().to_path_buf(), file.folder))
                 .collect(),
             file_shake: composer.file_shake,
             notice: composer.notice.clone(),
@@ -2733,8 +2733,9 @@ pub fn attachments(
     }
     for file in &controller.files {
         let key = file.key;
-        let name = file.path.file_name().map_or_else(
-            || file.path.display().to_string(),
+        let path = file.path.as_path();
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
         let glyph = if file.folder {

@@ -90,9 +90,9 @@ impl From<Spec> for AnnotatedCode {
         }
         let lines = code_lines(&spec.code);
         let width = excerpt_width(&lines);
-        let start = spec.start_line.max(1);
         let count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-        let last = start.saturating_add(count.saturating_sub(1));
+        let start = spec.start_line.clamp(1, u32::MAX - count.saturating_sub(1));
+        let last = start + count.saturating_sub(1);
         let notes: Vec<Note> = spec
             .notes
             .into_iter()
@@ -101,10 +101,9 @@ impl From<Spec> for AnnotatedCode {
                 let mut span = note.lines;
                 let outside = span.end < start || span.start > last;
                 if outside && start > 1 && span.start >= 1 && span.end <= count {
-                    span = LineSpan {
-                        start: span.start + start - 1,
-                        end: span.end + start - 1,
-                    };
+                    span = span.offset(start - 1).expect(
+                        "invariant: a relative note ends within the excerpt, whose last line fits in u32",
+                    );
                 }
                 Note {
                     span,

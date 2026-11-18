@@ -100,46 +100,63 @@ pub(crate) fn with_unit(value: &str, unit: Option<&str>) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodeRef {
     pub(crate) path: String,
-    pub(crate) start: Option<u32>,
-    pub(crate) end: Option<u32>,
+    pub(crate) lines: Option<LineSpan>,
+}
+
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum CodeRefError {
+    #[error("a code reference needs a file path before its line numbers")]
+    EmptyPath,
+    #[error("code reference lines start at 1")]
+    LineZero,
 }
 
 impl CodeRef {
-    pub(crate) fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Result<Self, CodeRefError> {
         let text = text.trim();
-        let parsed = text.rsplit_once(':').and_then(|(path, lines)| {
-            let (start, end) = match lines.split_once('-') {
-                Some((start, end)) => (start.parse().ok()?, Some(end.parse().ok()?)),
-                None => (lines.parse().ok()?, None),
+        let numbered = text.rsplit_once(':').and_then(|(path, lines)| {
+            let (start, end): (u32, u32) = match lines.split_once('-') {
+                Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+                None => {
+                    let line = lines.parse().ok()?;
+                    (line, line)
+                }
             };
             Some((path, start, end))
         });
-        match parsed {
-            Some((path, start, end)) => Self {
-                path: String::from(path.to_owned()),
-                start: Some(start),
-                end,
-            },
-            None => Self {
-                path: String::from(text.to_owned()),
-                start: None,
-                end: None,
-            },
+        let (path, lines) = match numbered {
+            Some((_, 0, _) | (_, _, 0)) => return Err(CodeRefError::LineZero),
+            Some((path, start, end)) => (
+                path,
+                Some(LineSpan {
+                    start: start.min(end),
+                    end: start.max(end),
+                }),
+            ),
+            None => (text, None),
+        };
+        match path.trim() {
+            "" => Err(CodeRefError::EmptyPath),
+            _ => Ok(Self {
+                path: path.to_owned(),
+                lines,
+            }),
         }
     }
 
     pub(crate) fn display(&self) -> String {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) => format!("{}:{start}-{end}", self.path),
-            (Some(start), None) => format!("{}:{start}", self.path),
-            _ => self.path.to_string(),
+        match self.lines {
+            Some(LineSpan { start, end }) if start == end => format!("{}:{start}", self.path),
+            Some(LineSpan { start, end }) => format!("{}:{start}-{end}", self.path),
+            None => self.path.clone(),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for CodeRef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(|text| Self::parse(&text))
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 
@@ -152,6 +169,13 @@ pub(crate) struct LineSpan {
 impl LineSpan {
     pub(crate) fn contains(self, line: u32) -> bool {
         (self.start..=self.end).contains(&line)
+    }
+
+    pub(crate) fn offset(self, by: u32) -> Option<Self> {
+        Some(Self {
+            start: self.start.checked_add(by)?,
+            end: self.end.checked_add(by)?,
+        })
     }
 }
 

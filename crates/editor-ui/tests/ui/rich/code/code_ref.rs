@@ -21,6 +21,26 @@ fn copy_preserves_the_original_excerpt_and_falls_back_to_reference() {
 }
 
 #[test]
+fn references_without_a_path_or_with_line_zero_are_rejected_and_reversed_ranges_read_forward() {
+    for invalid in [
+        r#"{"ref":":7"}"#,
+        r#"{"ref":"  "}"#,
+        r#"{"ref":"src/a.rs:0"}"#,
+        r#"{"ref":"src/a.rs:0-4"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<CodeRefBlock>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(block(r#"{"ref":"src/a.rs:9-3"}"#).copy(), "src/a.rs:3-9");
+    assert_eq!(
+        block(r#"{"ref":"C:\\src\\a.rs:4-4"}"#).copy(),
+        "C:\\src\\a.rs:4"
+    );
+}
+
+#[test]
 fn clicking_path_dispatches_original_reference_with_captured_scope() {
     let value = block(r#"{"ref":"src/x.rs:7-9","excerpt":"one\ntwo"}"#);
     let directory = tempfile::tempdir().unwrap();

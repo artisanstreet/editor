@@ -723,12 +723,15 @@ fn program_forms(words: &[String]) -> Vec<Vec<String>> {
 /// A program's bare name: `/usr/bin/rm` and `C:\bin\rm.exe` are `rm`.
 fn program_name(program: &str) -> String {
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let name = if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &name[..name.len() - 4]
-    } else {
-        name
-    };
-    name.to_owned()
+    let split = name
+        .len()
+        .checked_sub(4)
+        .filter(|cut| *cut > 0)
+        .and_then(|cut| Some((name.get(..cut)?, name.get(cut..)?)));
+    match split {
+        Some((stem, extension)) if extension.eq_ignore_ascii_case(".exe") => stem.to_owned(),
+        Some(_) | None => name.to_owned(),
+    }
 }
 
 /// The command a wrapper runs, its own options skipped.
@@ -1458,6 +1461,23 @@ mod tests {
         );
         assert!(matches!(
             rules.verdict(&call("WebFetch", json!({"url": "https://evil.example/x"}))),
+            Some(Verdict::Deny(_))
+        ));
+    }
+
+    #[test]
+    fn unicode_program_names_are_checked_without_panicking() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let rules = rules(
+            home.path(),
+            project.path(),
+            "[]",
+            "[]",
+            r#"["Bash(éaaa:*)"]"#,
+        );
+        assert!(matches!(
+            rules.verdict(&call("Bash", json!({"command": "/usr/bin/éaaa --now"}))),
             Some(Verdict::Deny(_))
         ));
     }

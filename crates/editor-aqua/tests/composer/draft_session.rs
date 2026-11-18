@@ -372,7 +372,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             .borrow()
             .files
             .iter()
-            .map(|file| file.path.clone())
+            .map(|file| file.path.as_path().to_path_buf())
             .collect::<Vec<_>>(),
         paths
     );
@@ -437,7 +437,23 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     current.remove_file(removed);
     current.remove_file(removed);
     assert_eq!(current.files.len(), 1);
-    assert_eq!(current.files[0].path, second_file);
+    assert_eq!(current.files[0].path.as_path(), second_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let non_unicode = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/draft-\xff.txt".to_vec(),
+        ));
+        current.add_paths(vec![non_unicode]);
+        assert_eq!(current.files.len(), 1);
+        assert!(
+            current
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("is not a Unicode path"))
+        );
+        current.save();
+    }
 }
 
 #[test]

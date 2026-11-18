@@ -708,3 +708,30 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     owner.release("row");
     assert!(render(&presenter, &owner).is_err());
 }
+
+fn tampered_record(token: serde_json::Value) -> artisan_markdown_index::LeafRecord {
+    let mut record =
+        serde_json::to_value(artisan_markdown_index::LeafRecord::literal(0..1)).unwrap();
+    record["leaf"]["events"] = serde_json::json!([
+        { "token": token, "range": { "start": 0, "end": 2 } }
+    ]);
+    serde_json::from_value(record).unwrap()
+}
+
+#[test]
+fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting() {
+    let engine = MarkdownEngine::new().unwrap();
+    for token in [
+        serde_json::json!({ "Structural": { "Html": "<" } }),
+        serde_json::json!({ "Html": { "Range": { "start": 0, "end": 1 } } }),
+    ] {
+        let result = normalize_record(&tampered_record(token), 0, "<", &engine);
+        assert!(
+            matches!(
+                result,
+                Err(crate::ui::markdown::MarkdownIndexError::Index(_))
+            ),
+            "{result:?}"
+        );
+    }
+}
