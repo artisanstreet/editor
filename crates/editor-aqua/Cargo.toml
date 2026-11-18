@@ -35,6 +35,8 @@ aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-protocol = { workspace = true }
 aqua-text = { workspace = true }
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
 aqua-ui = { workspace = true }
 aqua-reactive = { workspace = true }
 aqua-runtime = { workspace = true, optional = true }

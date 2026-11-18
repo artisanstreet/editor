@@ -6,6 +6,9 @@ use crate::sidebar::list::HitRow;
 use aqua::UiApp;
 use aqua_core::NodeId;
 use aqua_ui::tree::NodeKind;
+use icu_casemap::CaseMapper;
+use icu_normalizer::DecomposingNormalizerBorrowed;
+use icu_normalizer::properties::CanonicalCombiningClassMapBorrowed;
 use std::time::{Duration, Instant};
 
 const PATIENCE: Duration = Duration::from_secs(8);
@@ -45,34 +48,68 @@ impl Reveal {
     }
 }
 
-fn fold(needle: &str) -> String {
-    needle.chars().flat_map(char::to_lowercase).collect()
+fn fold(text: &str) -> String {
+    let folded = CaseMapper::new().fold_string(text);
+    DecomposingNormalizerBorrowed::new_nfd()
+        .normalize(&folded)
+        .into_owned()
 }
 
 pub fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
     find_folded(text, &fold(needle))
 }
 
-fn find_folded(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
-    text.char_indices().find_map(|(start, _)| {
-        folded_match(text.get(start..)?, needle).map(|end| start..start + end)
-    })
+struct Folded {
+    text: String,
+    clusters: Vec<(usize, usize)>,
 }
 
-fn folded_match(text: &str, needle: &str) -> Option<usize> {
-    let mut wanted = needle.chars().peekable();
-    wanted.peek()?;
-    for (offset, character) in text.char_indices() {
-        for lower in character.to_lowercase() {
-            if wanted.next() != Some(lower) {
-                return None;
-            }
+impl Folded {
+    fn new(text: &str) -> Self {
+        let classes = CanonicalCombiningClassMapBorrowed::new();
+        let mut starts: Vec<usize> = text
+            .char_indices()
+            .filter(|(offset, character)| *offset == 0 || classes.get_u8(*character) == 0)
+            .map(|(offset, _)| offset)
+            .collect();
+        starts.push(text.len());
+        let mut folded = String::with_capacity(text.len());
+        let mut clusters = Vec::with_capacity(starts.len());
+        for pair in starts.windows(2) {
+            let [start, end] = *pair else {
+                unreachable!("invariant: windows(2) yields pairs");
+            };
+            clusters.push((folded.len(), start));
+            folded.push_str(&fold(&text[start..end]));
         }
-        if wanted.peek().is_none() {
-            return Some(offset + character.len_utf8());
+        clusters.push((folded.len(), text.len()));
+        Self {
+            text: folded,
+            clusters,
         }
     }
-    None
+
+    fn original(&self, folded: usize) -> Option<usize> {
+        match self.clusters.binary_search_by_key(&folded, |(at, _)| *at) {
+            Ok(index) => self.clusters.get(index).map(|(_, original)| *original),
+            Err(_inside_a_cluster) => None,
+        }
+    }
+}
+
+fn find_folded(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let folded = Folded::new(text);
+    folded.clusters.iter().find_map(|(at, start)| {
+        folded
+            .text
+            .get(*at..)
+            .filter(|rest| rest.starts_with(needle))
+            .and_then(|_| folded.original(at + needle.len()))
+            .map(|end| *start..end)
+    })
 }
 
 pub fn estimated_row(rows: &[usize], depth: (u32, u32)) -> Option<usize> {

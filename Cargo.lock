@@ -1637,6 +1637,8 @@ dependencies = [
  "forge-store",
  "futures",
  "hex",
+ "icu_casemap",
+ "icu_normalizer",
  "image",
  "insta",
  "palette",
