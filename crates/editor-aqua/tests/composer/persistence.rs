@@ -11,6 +11,17 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 async fn server() -> (TcpListener, TlsAcceptor, ForgeClient) {
+    let (listener, acceptor, pin) = pinned_server().await;
+    let client = ForgeClient::new(
+        &listener.local_addr().unwrap().to_string(),
+        &pin,
+        &Identity::generate("synthetic-draft-editor").unwrap(),
+    )
+    .unwrap();
+    (listener, acceptor, client)
+}
+
+async fn pinned_server() -> (TcpListener, TlsAcceptor, String) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let identity = Identity::generate("synthetic-draft-forge").unwrap();
     let certificate = identity.certificate_der().unwrap();
@@ -21,19 +32,26 @@ async fn server() -> (TcpListener, TlsAcceptor, ForgeClient) {
         .with_no_client_auth()
         .with_single_cert(vec![certificate], identity.key_der().unwrap())
         .unwrap();
-    let client = ForgeClient::new(
-        &listener.local_addr().unwrap().to_string(),
-        &pin,
-        &Identity::generate("synthetic-draft-editor").unwrap(),
-    )
-    .unwrap();
-    (listener, TlsAcceptor::from(Arc::new(config)), client)
+    (listener, TlsAcceptor::from(Arc::new(config)), pin)
 }
 
 async fn request(
     listener: &TcpListener,
     acceptor: &TlsAcceptor,
 ) -> (TlsStream<TcpStream>, String, Value) {
+    let (socket, route, body) = request_bytes(listener, acceptor).await;
+    let body = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (socket, route, body)
+}
+
+async fn request_bytes(
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (TlsStream<TcpStream>, String, Vec<u8>) {
     let (socket, _) = listener.accept().await.unwrap();
     let mut socket = acceptor.accept(socket).await.unwrap();
     let mut headers = Vec::new();
@@ -50,15 +68,23 @@ async fn request(
                 .then(|| value.trim().parse::<usize>().unwrap())
         })
         .unwrap_or(0);
-    assert!(length < 64 * 1024);
+    assert!(length < 1024 * 1024);
     let mut body = vec![0; length];
     socket.read_exact(&mut body).await.unwrap();
-    let body = if body.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&body).unwrap()
-    };
     (socket, headers.lines().next().unwrap().to_owned(), body)
+}
+
+async fn composer_request(
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (TlsStream<TcpStream>, String, Value) {
+    loop {
+        let (socket, route, body) = request(listener, acceptor).await;
+        if route.contains(" /drafts/") || route.starts_with("POST /threads") {
+            return (socket, route, body);
+        }
+        drop(socket);
+    }
 }
 
 async fn respond(socket: &mut TlsStream<TcpStream>, body: Value) {
@@ -482,7 +508,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
             drain_pending(Duration::ZERO).await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
-                timed_out: 1
+                timed_out: 1,
             }
         );
         let mut bytes = [0; 1024];
@@ -533,8 +559,105 @@ fn process_exit_reports_a_rejected_draft_write() {
             shutdown.await,
             ShutdownOutcome::Incomplete {
                 failed: 1,
-                timed_out: 0
+                timed_out: 0,
             }
         );
+    });
+}
+
+#[test]
+fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+
+    let (directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let identity = Identity::generate("failed-send").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let host = HostId("failed-send".into());
+        core.add_test_host(
+            &HostConfig {
+                id: host.clone(),
+                name: "Forge".into(),
+                address: address.clone(),
+                fingerprint: pin.clone(),
+                kind: HostKind::Local,
+            },
+            ForgeClient::new(&address, &pin, &identity).unwrap(),
+        );
+        let mut sessions = DraftSessions::default();
+        let mut composer = Composer::new(
+            &core,
+            &mut sessions,
+            ComposerTarget::NewThread {
+                host: host.clone(),
+                project: Some(artisan_api::ProjectId::from("project")),
+            },
+        );
+        let mut changed = composer.session.as_ref().unwrap().subscribe();
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        while !composer
+            .session
+            .as_ref()
+            .unwrap()
+            .read(|state| state.loaded)
+        {
+            changed.changed().await.unwrap();
+        }
+        composer.sync(&core);
+
+        let prompt = "p".repeat(64 * 1024 - 8);
+        composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
+        composer.editor.borrow_mut().set_text(&prompt);
+        composer.edited();
+        assert!(composer.send(core.host(&host).unwrap()));
+        composer.editor.borrow_mut().set_text("the follow-up");
+        composer.edited();
+
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("PUT /drafts/"), "{route}");
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert_eq!(route, "POST /threads HTTP/1.1");
+        respond_status(
+            &mut socket,
+            "500 Internal Server Error",
+            json!({"error": {"code": "internal", "message": "send rejected"}}),
+        )
+        .await;
+        drop(socket);
+        while !composer
+            .session
+            .as_ref()
+            .unwrap()
+            .read(|state| state.send_failed())
+        {
+            changed.changed().await.unwrap();
+        }
+        composer.sync(&core);
+
+        assert_eq!(
+            composer.editor.borrow().text(),
+            prompt,
+            "the prompt that failed to send comes back whole"
+        );
+        let saved = composer
+            .session
+            .as_ref()
+            .unwrap()
+            .read(|state| state.body.clone());
+        assert_eq!(
+            saved["follow_ups"][0]["text"], "the follow-up",
+            "what was typed while sending is kept beside it"
+        );
+        drop(directory);
     });
 }

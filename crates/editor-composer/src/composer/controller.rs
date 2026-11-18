@@ -75,6 +75,8 @@ pub struct DraftBody {
     pub config: Option<EngineConfig>,
     #[serde(default)]
     pub project: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<Self>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DraftFile {
@@ -102,6 +104,7 @@ pub struct Composer {
     pub file_shake: Option<(u64, std::time::Instant)>,
     pub cleared: Option<std::time::Instant>,
     outbox: Outbox,
+    parked: Vec<DraftBody>,
     pub notice: Option<String>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
@@ -159,6 +162,7 @@ impl Composer {
             restore_revision: Some(0),
             cleared: None,
             outbox: Outbox::Idle,
+            parked: Vec::new(),
         }
     }
 
@@ -176,6 +180,8 @@ impl Composer {
         if let Some(session) = &self.session {
             session.flush();
         }
+        self.parked.clear();
+        self.outbox = Outbox::Idle;
         self.questionnaire = QuestionnairePanel::default();
         self.strip = super::goal_strip::StripState::default();
         self.mentions = Mentions::default();
@@ -642,6 +648,7 @@ impl Composer {
             files: self.files.clone(),
             config: self.config.clone(),
             project: self.project.clone(),
+            follow_ups: self.parked.clone(),
         }
     }
 
@@ -655,6 +662,7 @@ impl Composer {
             && body.files.is_empty()
             && body.config.is_none()
             && body.project.is_none()
+            && body.follow_ups.is_empty()
         {
             serde_json::Value::Null
         } else {
@@ -689,9 +697,11 @@ impl Composer {
                         self.cleared = Some(std::time::Instant::now());
                     }
                     self.outbox = Outbox::Idle;
+                    self.bring_back_follow_up();
                 }
                 SessionEvent::Reloaded => {
                     self.outbox = Outbox::Idle;
+                    self.parked.clear();
                     self.editor.borrow_mut().set_text("");
                     if let Some(attachments) = &mut self.attachments {
                         attachments.clear();
@@ -739,6 +749,7 @@ impl Composer {
     }
 
     fn restore_body(&mut self, body: DraftBody) {
+        self.parked = body.follow_ups;
         if !self.questionnaire.restore_aside_text(&body.text) {
             self.editor.borrow_mut().set_text(&body.text);
         }
@@ -761,20 +772,35 @@ impl Composer {
     }
 
     fn restore_sent(&mut self, sent: DraftBody) {
-        if self.input_empty() {
-            self.restore_body(sent);
+        let mut parked = std::mem::take(&mut self.parked);
+        if !self.input_empty() {
+            parked.push(DraftBody {
+                follow_ups: Vec::new(),
+                ..self.draft_body()
+            });
+            self.notice = Some(
+                "What you typed while sending is kept and comes back once this message is sent."
+                    .into(),
+            );
+        }
+        self.clear_input();
+        self.restore_body(DraftBody {
+            follow_ups: parked,
+            ..sent
+        });
+        self.edited();
+    }
+
+    fn bring_back_follow_up(&mut self) {
+        if self.parked.is_empty() || !self.input_empty() {
             return;
         }
-        let typed = self.draft_body();
-        let body = DraftBody {
-            text: format!("{}\n\n{}", sent.text, typed.text),
-            images: sent.images.into_iter().chain(typed.images).collect(),
-            files: sent.files.into_iter().chain(typed.files).collect(),
-            config: sent.config.or(typed.config),
-            project: sent.project.or(typed.project),
-        };
-        self.clear_input();
-        self.restore_body(body);
+        let mut parked = std::mem::take(&mut self.parked);
+        let next = parked.remove(0);
+        self.restore_body(DraftBody {
+            follow_ups: parked,
+            ..next
+        });
         self.edited();
     }
 
