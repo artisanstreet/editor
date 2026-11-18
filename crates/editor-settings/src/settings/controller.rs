@@ -1,4 +1,4 @@
-use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc};
 
 use artisan_api::{EngineCommand, EngineId, GlobalPrompt};
 use serde_json::Value;
@@ -46,6 +46,7 @@ pub struct SettingsController {
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
     pub editor_setting_error: Option<String>,
+    parked_prompts: HashMap<String, (PromptForm, String)>,
     setting_writes: SettingWrites,
     completion: Delivery<HostCompletion>,
     tasks: Vec<tokio_util::task::AbortOnDropHandle<()>>,
@@ -80,6 +81,7 @@ impl Default for SettingsController {
             prompt: PromptForm::default(),
             prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Document))),
             editor_setting_error: None,
+            parked_prompts: HashMap::new(),
             setting_writes: SettingWrites::default(),
             completion: Delivery::new(NonZeroUsize::new(64).unwrap()),
             tasks: Vec::new(),
@@ -131,6 +133,7 @@ impl SettingsController {
         let instance = core.active_host().map(|host| host.instance());
         if self.active_instance != instance {
             self.active_instance = instance;
+            self.park_prompt();
             self.engines.sync_host(None);
             self.extensions.sync_host(None);
             self.archive.sync(None);
@@ -139,6 +142,9 @@ impl SettingsController {
         }
         let host = core.active_host().map(|host| host.id.clone());
         let host_name = host.as_ref().map(|host| host.0.clone());
+        if self.prompt.host != host_name {
+            self.park_prompt();
+        }
         self.engines.sync_host(host_name.clone());
         self.extensions.sync_host(host_name.clone());
         let page = match core.screen() {
@@ -161,8 +167,14 @@ impl SettingsController {
         if page != SettingsPage::GlobalPrompt {
             return;
         }
-        if self.prompt.sync_host(host_name) {
-            self.prompt_editor.borrow_mut().set_text("");
+        if self.prompt.sync_host(host_name.clone()) {
+            match host_name.and_then(|name| self.parked_prompts.remove(&name)) {
+                Some((form, text)) => {
+                    self.prompt = form;
+                    self.prompt_editor.borrow_mut().set_text(&text);
+                }
+                None => self.prompt_editor.borrow_mut().set_text(""),
+            }
         }
         if let Some(host) = host.as_ref().and_then(|id| core.host_mut(id)) {
             if let Some(prompt) = host.global_prompt.as_ref() {
@@ -175,6 +187,20 @@ impl SettingsController {
             }
         }
         self.reported_prompt_dirty = self.prompt_editor.borrow().text() != self.prompt.saved;
+    }
+
+    fn park_prompt(&mut self) {
+        let Some(host) = self.prompt.host.clone() else {
+            return;
+        };
+        self.parked_prompts.remove(&host);
+        let text = self.prompt_editor.borrow().text().to_owned();
+        if !self.prompt.loaded || text == self.prompt.saved {
+            return;
+        }
+        let mut form = self.prompt.clone();
+        form.park();
+        self.parked_prompts.insert(host, (form, text));
     }
 
     pub fn set_editor_setting(&mut self, core: &mut Core, key: &'static str, value: Value) {

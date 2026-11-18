@@ -26,6 +26,11 @@ impl PromptForm {
         self.edit_revision = self.edit_revision.wrapping_add(1);
     }
 
+    pub fn park(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = false;
+    }
+
     pub fn sync_host(&mut self, host: Option<String>) -> bool {
         let Some(host) = host else {
             self.host = None;

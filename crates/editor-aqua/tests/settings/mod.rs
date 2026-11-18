@@ -576,3 +576,58 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
         "a failure never overwrites a value Forge reported since"
     );
 }
+
+#[test]
+fn switching_hosts_keeps_unsaved_global_instructions() {
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::controller::SettingsController;
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let first = add_host(&mut core, "first-forge");
+    let second = add_host(&mut core, "second-forge");
+    for (id, text) in [(&first, "first saved"), (&second, "second saved")] {
+        core.host_mut(id).unwrap().global_prompt = Some(Arc::new(GlobalPrompt {
+            version: 3,
+            text: text.into(),
+            candidates: Vec::new(),
+            engines: Vec::new(),
+        }));
+    }
+    let mut settings = SettingsController::default();
+    let open_prompt =
+        |core: &mut Core, settings: &mut SettingsController, host: &editor_aqua::core::HostId| {
+            core.navigate(Screen::NewThread {
+                host: host.clone(),
+                project: None,
+            });
+            settings.sync(core);
+            core.navigate(Screen::Settings(SettingsPage::GlobalPrompt));
+            settings.sync(core);
+        };
+    open_prompt(&mut core, &mut settings, &first);
+    assert_eq!(settings.prompt_editor.borrow().text(), "first saved");
+    settings
+        .prompt_editor
+        .borrow_mut()
+        .set_text("first, edited but not saved");
+    settings.prompt.changed();
+
+    open_prompt(&mut core, &mut settings, &second);
+    assert_eq!(settings.prompt_editor.borrow().text(), "second saved");
+
+    open_prompt(&mut core, &mut settings, &first);
+    assert_eq!(
+        settings.prompt_editor.borrow().text(),
+        "first, edited but not saved"
+    );
+    assert_eq!(
+        settings
+            .prompt
+            .status(settings.prompt_editor.borrow().text()),
+        "Unsaved changes"
+    );
+}
