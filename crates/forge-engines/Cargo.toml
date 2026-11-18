@@ -9,6 +9,10 @@ description = "Engine adapters: run Claude, Codex, OpenCode, Grok and Cursor and
 [lib]
 doctest = false
 
+[[example]]
+name = "fake_engine"
+path = "tests/fakes/engine/main.rs"
+
 [features]
 default = []
 

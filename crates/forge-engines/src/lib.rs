@@ -35,6 +35,9 @@ mod compaction;
 mod customise;
 mod engines;
 mod expansion;
+#[cfg(test)]
+#[path = "../tests/fakes/support.rs"]
+mod fake_engine;
 mod harness;
 mod install;
 mod manager;

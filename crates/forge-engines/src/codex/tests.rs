@@ -604,45 +604,29 @@ fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
         EngineEvent::Item { key, .. } | EngineEvent::Status { key, .. } if key == "dropped")));
 }
 
-/// Naming must not resume the source: a resume would move the shared
-/// app-server's event ownership away from its still-running turn.
-#[cfg(unix)]
 #[tokio::test]
 async fn generated_title_is_written_to_codex_without_resuming_or_prompting() {
-    use crate::{Harness as _, Launch, Turn, UserInput};
+    use crate::{Harness as _, Turn, UserInput};
     use artisan_api::{EngineConfig, EngineId, ThreadId};
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("codex");
-    std::fs::write(
-        &binary,
-        r"#!/usr/bin/env python3
-import json,pathlib,sys
-for line in sys.stdin:
-    request=json.loads(line)
-    method=request.get('method')
-    if method=='initialize':
-        print(json.dumps({'id':request['id'],'result':{}}),flush=True)
-    elif method=='initialized': pass
-    elif method=='thread/name/set':
-        assert request['params']=={'threadId':'working-session','name':'Fix sidebar titles'},request
-        pathlib.Path('named').write_text(json.dumps(request['params']))
-        print(json.dumps({'id':request['id'],'result':{}}),flush=True)
-    else: raise AssertionError(method)
-",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let (spawns, input) = (path("spawns"), path("input"));
     let turn = Turn {
         thread_id: ThreadId::new(),
         engine: EngineId::Codex,
-        binary,
+        binary: crate::fake_engine::binary(),
         home: dir.path().join("home"),
         cwd: dir.path().to_owned(),
         config: EngineConfig::new(EngineId::Codex),
         session_id: Some("working-session".to_owned()),
         input: UserInput::default(),
-        launch: Launch::default(),
+        launch: crate::fake_engine::launch(
+            "codex-app-server",
+            &[
+                ("ARTISAN_TEST_SPAWNS", &spawns),
+                ("ARTISAN_TEST_INPUT", &input),
+            ],
+        ),
         trace_dir: None,
     };
     super::CodexHarness
@@ -656,4 +640,14 @@ for line in sys.stdin:
         named,
         json!({ "threadId": "working-session", "name": "Fix sidebar titles" })
     );
+    let methods: Vec<String> = std::fs::read_to_string(&input)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(methods, ["initialize", "initialized", "thread/name/set"]);
 }

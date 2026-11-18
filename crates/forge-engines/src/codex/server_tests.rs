@@ -1,6 +1,5 @@
 use crate::{EngineEvent, Harness, Input, Launch, RunIo, Turn, UserInput};
 use artisan_api::{Answer, Decision, EngineConfig, EngineId, Status, ThreadId};
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -12,128 +11,46 @@ mod actor;
 #[path = "../../tests/codex/cancellation.rs"]
 mod cancellation;
 
-const FAKE: &str = r#"#!/usr/bin/env bash
-if [ "$2" != -c ] || [ "$3" != thread_unload_delay_secs=0 ]; then exit 1; fi
-echo $$ >> "$ARTISAN_TEST_SPAWNS"
-threads=0
-turns=0
-declare -A locks
-load_thread() {
-  if [ -z "${locks[$thread]}" ]; then
-    exec {fd}> "$ARTISAN_TEST_SPAWNS-$thread.lock"
-    if ! flock -n "$fd"; then
-      printf '{"id":%s,"error":{"code":-32000,"message":"already has an active writer"}}\n' "$id"
-      exec {fd}>&-
-      return 1
-    fi
-    locks[$thread]=$fd
-  fi
-  printf '{"id":%s,"result":{"thread":{"id":"%s"},"model":"fake-model"}}\n' "$id" "$thread"
-}
-
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$ARTISAN_TEST_INPUT"
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
-  thread=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p')
-  if [ -z "$method" ] && [ "$id" = 900 ] && [ -z "$answered" ]; then
-    answered=1
-    case "$line" in *'"accept"'*) word=approved ;; *) word=refused ;; esac
-    printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-ask","text":"ask on %s was %s","phase":"final_answer"},"threadId":"%s","turnId":"%s"}}\n' "$ask_thread" "$word" "$ask_thread" "$ask_turn"
-    printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","items":[],"status":"completed","error":null}}}\n' "$ask_thread" "$ask_turn"
-  fi
-  case "$method" in
-    initialize) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
-    thread/start)
-      threads=$((threads + 1))
-      thread="thread-$$-$threads"
-      load_thread ;;
-    thread/resume) load_thread ;;
-    thread/unsubscribe)
-      if [ -n "$ARTISAN_TEST_STALL_RELEASE" ]; then continue; fi
-      printf '{"id":%s,"result":{"status":"unsubscribed"}}\n' "$id"
-      sleep 0.1
-      fd=${locks[$thread]}
-      if [ -n "$fd" ]; then exec {fd}>&-; unset 'locks[$thread]'; fi
-      printf '{"method":"thread/closed","params":{"threadId":"%s"}}\n' "$thread" ;;
-    turn/steer) printf '{"id":%s,"error":{"code":-32600,"message":"no active turn to steer"}}\n' "$id" ;;
-    turn/start)
-      turns=$((turns + 1))
-      turn="turn-$turns"
-      text=$(printf '%s' "$line" | sed -E -n 's/.*"text":"(([^"\\]|\\.)*)".*/\1/p')
-      printf '{"id":%s,"result":{"turn":{"id":"%s"}}}\n' "$id" "$turn"
-      if [ "$text" = jam ]; then sleep 30; continue; fi
-      if [ "$text" = ask ]; then
-        ask_thread=$thread
-        ask_turn=$turn
-        (
-          for fd in "${locks[@]}"; do exec {fd}>&-; done
-          sleep 0.5
-          printf '{"id":900,"method":"item/commandExecution/requestApproval","params":{"threadId":"%s","turnId":"%s","itemId":"cmd-1","command":"ls"}}\n' "$thread" "$turn"
-        ) &
-        continue
-      fi
-      (
-        for fd in "${locks[@]}"; do exec {fd}>&-; done
-        sleep 0.3
-        if [ "$text" = slow ]; then sleep 1.5; fi
-        if [ "$text" = spawn ]; then
-          printf '{"method":"thread/started","params":{"thread":{"id":"child-%s","parentThreadId":"%s","agentNickname":"Helper"}}}\n' "$thread" "$thread"
-          printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
-        fi
-        if [ "$text" = activity ] || [ "$text" = activity-followup ]; then
-          activity_kind=started
-          if [ "$text" = activity-followup ]; then activity_kind=interacted; fi
-          printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
-          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"spawn-%s","kind":"%s","agentThreadId":"child-%s","agentPath":"/root/worker","model":"worker-model"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$activity_kind" "$thread" "$thread" "$turn"
-          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"done-%s","kind":"completed","agentThreadId":"child-%s","agentPath":"/root/worker"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$thread" "$thread" "$turn"
-        fi
-        printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-%s","text":"reply on %s to %s","phase":"final_answer"},"threadId":"%s","turnId":"%s"}}\n' "$turn" "$thread" "$text" "$thread" "$turn"
-        printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","items":[],"status":"completed","error":null}}}\n' "$thread" "$turn"
-      ) &
-      ;;
-  esac
-done
-"#;
-
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    binary: PathBuf,
+    env: Vec<(String, String)>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let tools = std::process::Command::new("bash")
-            .args([
-                "-c",
-                "declare -A probe && command -v flock && command -v sed",
-            ])
-            .output()
-            .expect("bash runs the fake Codex app-server");
-        assert!(
-            tools.status.success(),
-            "the fake Codex app-server needs bash 4 associative arrays, flock and sed"
-        );
+        Self::with(&[])
+    }
+
+    fn with(env: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        let binary = root.join("codex");
-        std::fs::write(&binary, FAKE).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let env = [
+            ("ARTISAN_TEST_SPAWNS".to_owned(), path("spawns")),
+            ("ARTISAN_TEST_INPUT".to_owned(), path("input")),
+        ]
+        .into_iter()
+        .chain(
+            env.iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        )
+        .collect();
         Self {
             _dir: dir,
             root,
-            binary,
+            env,
         }
     }
 
     fn turn(&self, text: &str, session: Option<&str>) -> Turn {
-        let path = |name: &str| self.root.join(name).to_string_lossy().into_owned();
+        let mut launch = crate::fake_engine::launch("codex-app-server", &[]);
+        launch.env.extend(self.env.iter().cloned());
         Turn {
             trace_dir: None,
             thread_id: ThreadId::new(),
             engine: EngineId::Codex,
-            binary: self.binary.clone(),
+            binary: crate::fake_engine::binary(),
             home: self.root.join("home"),
             cwd: self.root.clone(),
             config: EngineConfig::new(EngineId::Codex),
@@ -142,13 +59,7 @@ impl Fixture {
                 text: text.to_owned(),
                 ..UserInput::default()
             },
-            launch: Launch {
-                env: vec![
-                    ("ARTISAN_TEST_SPAWNS".into(), path("spawns")),
-                    ("ARTISAN_TEST_INPUT".into(), path("input")),
-                ],
-                ..Launch::default()
-            },
+            launch,
         }
     }
 

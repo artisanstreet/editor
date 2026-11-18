@@ -2,12 +2,10 @@ use super::*;
 
 #[tokio::test]
 async fn cancellation_during_turn_start_waits_for_its_id_and_interrupts_it() {
-    let fixture = Fixture::new();
-    let script = FAKE.replace(
-        "    turn/start)",
-        "    turn/interrupt)\n      printf '{\"id\":%s,\"result\":{}}\\n' \"$id\"\n      printf '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"%s\",\"turn\":{\"id\":\"%s\",\"items\":[],\"status\":\"interrupted\",\"error\":null}}}\\n' \"$thread\" \"$turn\" ;;\n    turn/start)\n      touch \"$ARTISAN_TEST_INPUT.starting\"\n      sleep 0.2",
-    );
-    std::fs::write(&fixture.binary, script).unwrap();
+    let fixture = Fixture::with(&[
+        ("ARTISAN_TEST_START_DELAY_MS", "200"),
+        ("ARTISAN_TEST_INTERRUPT_DELAY_MS", "0"),
+    ]);
     let (_, inbox) = mpsc::channel(8);
     let (events, _received) = mpsc::channel(1024);
     let cancel = CancellationToken::new();
@@ -48,12 +46,7 @@ async fn cancellation_during_turn_start_waits_for_its_id_and_interrupts_it() {
 
 #[tokio::test]
 async fn an_unconfirmed_interrupt_fails_and_unsubscribes_instead_of_claiming_cancellation() {
-    let fixture = Fixture::new();
-    let script = FAKE.replace(
-        "        if [ \"$text\" = slow ]; then sleep 1.5; fi",
-        "        if [ \"$text\" = slow ]; then sleep 30; fi",
-    );
-    std::fs::write(&fixture.binary, script).unwrap();
+    let fixture = Fixture::with(&[("ARTISAN_TEST_SLOW_MS", "30000")]);
     let (_peer_inputs, peer_inbox) = mpsc::channel(8);
     let (peer_events, _peer_received) = mpsc::channel(1024);
     let peer = tokio::spawn(super::super::CodexHarness.run(
@@ -105,16 +98,11 @@ async fn an_unconfirmed_interrupt_fails_and_unsubscribes_instead_of_claiming_can
 
 #[tokio::test]
 async fn a_deferred_interrupt_receives_its_full_confirmation_grace() {
-    let fixture = Fixture::new();
-    let script = FAKE.replace(
-        "    turn/start)",
-        "    turn/interrupt)\n      sleep 2\n      printf '{\"id\":%s,\"result\":{}}\\n' \"$id\"\n      printf '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"%s\",\"turn\":{\"id\":\"%s\",\"items\":[],\"status\":\"interrupted\",\"error\":null}}}\\n' \"$thread\" \"$turn\" ;;\n    turn/start)\n      touch \"$ARTISAN_TEST_INPUT.starting\"\n      sleep 4",
-    );
-    let script = script.replace(
-        "        if [ \"$text\" = slow ]; then sleep 1.5; fi",
-        "        if [ \"$text\" = slow ]; then sleep 30; fi",
-    );
-    std::fs::write(&fixture.binary, script).unwrap();
+    let fixture = Fixture::with(&[
+        ("ARTISAN_TEST_START_DELAY_MS", "4000"),
+        ("ARTISAN_TEST_INTERRUPT_DELAY_MS", "2000"),
+        ("ARTISAN_TEST_SLOW_MS", "30000"),
+    ]);
     let (_, inbox) = mpsc::channel(8);
     let (events, _received) = mpsc::channel(1024);
     let cancel = CancellationToken::new();

@@ -9,7 +9,6 @@ mod protocol;
 mod schema_tests;
 mod server;
 #[cfg(test)]
-#[cfg(target_os = "linux")]
 mod server_tests;
 mod side;
 #[cfg(test)]
