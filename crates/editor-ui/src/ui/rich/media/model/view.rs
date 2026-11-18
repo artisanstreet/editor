@@ -47,6 +47,7 @@ pub(crate) struct ModelServices {
     pub placeholder: PlaceholderFactory,
     pub toolbar: ToolbarFactory,
     pub copy: CopyFactory,
+    pub focus_ring: Style,
     pub invalidate: Rc<dyn Fn()>,
 }
 
@@ -510,6 +511,7 @@ impl ModelBlock {
         let canvas = drawing
             .with_key(format!("{id}-frame"))
             .focusable(true)
+            .focus_visible_style(services.focus_ring.clone())
             .aria_label(self.display_name())
             .cursor(if dragging {
                 aqua_core::CursorIcon::Grabbing

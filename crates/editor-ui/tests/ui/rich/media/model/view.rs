@@ -185,3 +185,71 @@ fn releasing_a_view_cancels_its_queued_software_render_and_frees_the_model() {
     drop(busy);
     assert!(state.0.borrow_mut().delivery.drain().is_empty());
 }
+
+#[test]
+fn the_model_viewport_shows_a_focus_ring_when_tab_reaches_it() {
+    use aqua_core::{InputEvent, KeyEvent};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use aqua_ui::tree::hash_key;
+    let block: ModelBlock = serde_json::from_str(
+        r#"{"src":"data:text/plain,v%200%200%200%0Av%201%200%200%0Av%200%201%200%0Af%201%202%203%0A","format":"obj"}"#,
+    )
+    .unwrap();
+    let assets = ModelAssets::new();
+    let services = crate::ui::rich::media::model::services(
+        "model",
+        crate::ui::theme::ArtisanTheme::resolved(),
+        assets.clone(),
+        Rc::new(|| Some(RendererCapability::Software)),
+        Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build()),
+        Rc::new(|_| {}),
+        Rc::new(Cell::new(false)),
+        Rc::new(|| {}),
+    );
+    let state = ModelState::default();
+    let frame = hash_key(aqua_ui::element::Key::from("model-frame"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut app = loop {
+        assets.drain();
+        let element = block.view("model", 400.0, 1.0, None, state.clone(), &services);
+        let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.mount(move |_| element).unwrap();
+        app.set_viewport(600.0, 600.0, 1.0);
+        app.build_frame().unwrap();
+        if app.tree().sole_node_with_key(frame).is_some() {
+            break app;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the model loads in time"
+        );
+        std::thread::yield_now();
+    };
+    let viewport = app.tree().sole_node_with_key(frame).unwrap();
+    let painted = |app: &mut aqua::UiApp| {
+        app.tree_mut()
+            .emit_scene()
+            .into_iter()
+            .filter(|(owner, _)| *owner == viewport)
+            .count()
+    };
+    let resting = painted(&mut app);
+    let tab = KeyEvent {
+        key: Key::Named(NamedKey::Tab),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    for _ in 0..8 {
+        if app.tree().focused() == Some(viewport) {
+            break;
+        }
+        app.handle_input(&InputEvent::KeyDown(tab));
+        app.handle_input(&InputEvent::KeyUp(tab));
+    }
+    assert_eq!(app.tree().focused(), Some(viewport));
+    app.build_frame().unwrap();
+    assert!(
+        painted(&mut app) > resting,
+        "keyboard focus paints an indicator around the viewport"
+    );
+}

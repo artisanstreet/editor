@@ -294,6 +294,7 @@ pub(crate) fn services(
         placeholder,
         toolbar,
         copy,
+        focus_ring: crate::ui::kit::control::focus_ring(&theme),
         invalidate,
     }
 }

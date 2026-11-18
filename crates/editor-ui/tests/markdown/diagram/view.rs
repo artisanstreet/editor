@@ -215,3 +215,53 @@ fn the_viewport_describes_the_parsed_nodes_and_links() {
         "{description}"
     );
 }
+
+#[test]
+fn the_viewport_shows_a_focus_ring_when_tab_reaches_it() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    let diagram = Arc::new(crate::ui::markdown::diagram::render("flowchart LR\nA --> B").unwrap());
+    let state = Rc::new(RefCell::new(DiagramState::new()));
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let element = view(
+        &ArtisanTheme::resolved(),
+        "diagram",
+        &diagram,
+        &state,
+        &invalidate,
+    );
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(move |_| element).unwrap();
+    app.set_viewport(600.0, 600.0, 1.0);
+    app.build_frame().unwrap();
+    let viewport = app
+        .tree()
+        .sole_node_with_key(hash_key(aqua_ui::element::Key::from("diagram-viewport")))
+        .unwrap();
+    let painted = |app: &mut aqua::UiApp| {
+        app.tree_mut()
+            .emit_scene()
+            .into_iter()
+            .filter(|(owner, _)| *owner == viewport)
+            .count()
+    };
+    let resting = painted(&mut app);
+    let tab = KeyEvent {
+        key: Key::Named(NamedKey::Tab),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    for _ in 0..8 {
+        if app.tree().focused() == Some(viewport) {
+            break;
+        }
+        app.handle_input(&InputEvent::KeyDown(tab));
+        app.handle_input(&InputEvent::KeyUp(tab));
+    }
+    assert_eq!(app.tree().focused(), Some(viewport));
+    app.build_frame().unwrap();
+    assert!(
+        painted(&mut app) > resting,
+        "keyboard focus paints an indicator around the viewport"
+    );
+}

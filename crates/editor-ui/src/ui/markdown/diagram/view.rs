@@ -1,4 +1,5 @@
 use crate::ui::kit::TextRole;
+use crate::ui::kit::control::focus_ring;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -182,6 +183,7 @@ pub(crate) fn view(
         .build()
         .with_key(format!("{id}-viewport"))
         .focusable(true)
+        .focus_visible_style(focus_ring(theme))
         .aria_label("Mermaid diagram")
         .aria_description(match diagram.summary.is_empty() {
             true => INSTRUCTIONS.to_owned(),
