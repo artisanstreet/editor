@@ -248,7 +248,10 @@ fn print(report: &Value, distro: Option<&str>) {
             forge["log"].as_str().unwrap_or("unknown")
         );
         match forge["devices"].as_u64() {
-            Some(devices) => println!("           {devices} paired device(s)"),
+            Some(devices) => println!(
+                "           {}",
+                crate::ui::count(devices, "paired device", "paired devices")
+            ),
             None => println!("           paired devices unknown"),
         }
         let engines: Vec<String> = forge["engines"]

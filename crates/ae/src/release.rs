@@ -221,7 +221,7 @@ pub enum DownloadError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("{location} is larger than the {limit} bytes it may be")]
+    #[error("{location} is larger than the {} it may be", crate::ui::count(*limit, "byte", "bytes"))]
     TooLarge { location: String, limit: u64 },
     #[error("downloading {location} took longer than {after:?}")]
     TimedOut { location: String, after: Duration },

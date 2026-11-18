@@ -71,7 +71,7 @@ pub enum OperationLockError {
 pub enum NotReadyError {
     #[error("Forge (pid {pid}) exited while starting{log}")]
     Exited { pid: u32, log: String },
-    #[error("Forge (pid {pid}) made no progress starting for {} seconds{log}", STALL_DEADLINE.as_secs())]
+    #[error("Forge (pid {pid}) made no progress starting for {}{log}", crate::ui::count(STALL_DEADLINE.as_secs(), "second", "seconds"))]
     Stalled { pid: u32, log: String },
 }
 
@@ -141,7 +141,7 @@ pub enum StopError {
     },
     #[error("Forge (pid {pid}) didn't stop even when forced")]
     Survived { pid: u32 },
-    #[error("Forge (pid {pid}) didn't stop within {} seconds", STOP_DEADLINE.as_secs())]
+    #[error("Forge (pid {pid}) didn't stop within {}", crate::ui::count(STOP_DEADLINE.as_secs(), "second", "seconds"))]
     TimedOut { pid: u32 },
     #[error("clear what the stopped Forge left")]
     Clear(#[source] RemoveError),

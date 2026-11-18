@@ -16,7 +16,7 @@ pub enum BoundedRunError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{program} didn't finish within {} seconds", after.as_secs())]
+    #[error("{program} didn't finish within {}", crate::ui::count(after.as_secs(), "second", "seconds"))]
     TimedOut { program: String, after: Duration },
 }
 

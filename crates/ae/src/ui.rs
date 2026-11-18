@@ -1,6 +1,11 @@
 use std::fmt::Display;
 use std::io::IsTerminal;
 
+pub fn count(amount: u64, one: &str, many: &str) -> String {
+    let noun = if amount == 1 { one } else { many };
+    format!("{amount} {noun}")
+}
+
 pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }

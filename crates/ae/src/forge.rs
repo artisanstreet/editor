@@ -387,11 +387,15 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
 }
 
 pub fn ago(now: Timestamp, at: Timestamp) -> String {
-    let seconds = (now - at).max(0) / 1000;
+    let seconds = ((now - at).max(0) / 1000).unsigned_abs();
     match seconds {
         0..60 => "just now".to_owned(),
         60..3600 => format!("{} min ago", seconds / 60),
         3600..86_400 => format!("{} h ago", seconds / 3600),
-        _ => format!("{} days ago", seconds / 86_400),
+        _ => format!("{} ago", ui::count(seconds / 86_400, "day", "days")),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/forge/ago.rs"]
+mod ago_tests;
