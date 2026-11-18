@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use writer::{Durability, Job, Tx, Writer};
 
 pub use blobs::{
@@ -125,6 +125,7 @@ const WRITER_CACHE_KIB: i64 = 32 * 1024;
 const WAL_BACKSTOP_PAGES: i64 = 16 * 1024;
 const CHECKPOINT_AFTER_COMMITS: u64 = 512;
 const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
+const CHECKPOINT_RETRY: Duration = Duration::from_secs(1);
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
@@ -267,18 +268,16 @@ struct Inner {
     writer: std::thread::JoinHandle<()>,
     #[cfg(feature = "qualification")]
     checkpointer: std::thread::JoinHandle<()>,
-    #[cfg_attr(
-        not(feature = "qualification"),
-        expect(dead_code, reason = "dropping it stops the checkpointer")
-    )]
-    checkpoints: std::sync::mpsc::Sender<()>,
     jobs: mpsc::Sender<Job>,
     queued_write_bytes: Arc<Semaphore>,
     events: feed::Feed,
     local_live: feed::Feed,
+    coordination: watch::Sender<()>,
     revocations: broadcast::Sender<DeviceId>,
     head: Arc<AtomicU64>,
     live_revision: AtomicU64,
+    reads: AtomicU64,
+    commits: Arc<AtomicU64>,
     readers: Mutex<Vec<Connection>>,
     read_slots: Arc<Semaphore>,
     scan_slots: Arc<Semaphore>,
@@ -534,12 +533,16 @@ impl Store {
         let head = Arc::new(AtomicU64::new(0));
         let hot = Arc::new(hot::HotPages::default());
         let commits = Arc::new(AtomicU64::new(0));
+        let (committed, wakes) = std::sync::mpsc::sync_channel(1);
         let mut writer = Writer::new(
             conn,
             Arc::clone(&head),
             recover.then(|| events.clone()),
             Arc::clone(&hot),
-            Arc::clone(&commits),
+            writer::Commits {
+                count: Arc::clone(&commits),
+                committed,
+            },
         )
         .map_err(prepare)?;
         if recover {
@@ -559,11 +562,13 @@ impl Store {
         #[cfg(not(feature = "qualification"))]
         drop(writer_thread);
 
-        let (checkpoints, stopped) = std::sync::mpsc::channel();
         let checkpoint_conn = open_database(&database).map_err(prepare)?;
         let checkpointer_thread = std::thread::Builder::new()
             .name("forge-store-checkpoint".into())
-            .spawn(move || checkpoint_when_due(&checkpoint_conn, &commits, &stopped))
+            .spawn({
+                let commits = Arc::clone(&commits);
+                move || checkpoint_when_due(&checkpoint_conn, &commits, &wakes)
+            })
             .map_err(|source| OpenStoreError::Spawn {
                 thread: "checkpointer",
                 source,
@@ -579,14 +584,16 @@ impl Store {
                 writer: writer_thread,
                 #[cfg(feature = "qualification")]
                 checkpointer: checkpointer_thread,
-                checkpoints,
                 jobs,
                 queued_write_bytes: Arc::new(Semaphore::new(WRITE_QUEUE_BYTES)),
                 events,
                 local_live: feed::Feed::new(CHANGES),
+                coordination: watch::Sender::new(()),
                 revocations: broadcast::channel(64).0,
                 head,
                 live_revision: AtomicU64::new(0),
+                reads: AtomicU64::new(0),
+                commits,
                 readers: Mutex::new(vec![first_reader]),
                 read_slots: Arc::new(Semaphore::new(READ_SLOTS)),
                 scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
@@ -612,7 +619,6 @@ impl Store {
         let Inner {
             jobs,
             writer,
-            checkpoints,
             checkpointer,
             readers,
             devices,
@@ -624,7 +630,6 @@ impl Store {
         writer
             .join()
             .map_err(|_panic| ShutdownError::WriterPanicked)?;
-        drop(checkpoints);
         checkpointer
             .join()
             .map_err(|_panic| ShutdownError::CheckpointerPanicked)?;
@@ -670,6 +675,25 @@ impl Store {
     }
 
     #[must_use]
+    pub fn watch_coordination(&self) -> watch::Receiver<()> {
+        self.inner.coordination.subscribe()
+    }
+
+    pub(crate) fn coordination_changed(&self) {
+        self.inner.coordination.send_replace(());
+    }
+
+    #[must_use]
+    pub fn reads(&self) -> u64 {
+        self.inner.reads.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn commits(&self) -> u64 {
+        self.inner.commits.load(Ordering::Acquire)
+    }
+
+    #[must_use]
     pub fn queued_write_bytes(&self) -> usize {
         WRITE_QUEUE_BYTES - self.inner.queued_write_bytes.available_permits()
     }
@@ -696,6 +720,9 @@ impl Store {
             .map_err(failed)?;
         if let Some(changes) = changes {
             self.inner.hot.committed(&changes);
+            if !changes.is_empty() {
+                self.coordination_changed();
+            }
             for envelope in changes {
                 if let Some(seq) = envelope.seq {
                     *cursor = (*cursor).max(seq);
@@ -705,6 +732,7 @@ impl Store {
         } else {
             *cursor = self.read(read::max_seq).await.map_err(failed)?;
             self.inner.hot.reset();
+            self.coordination_changed();
             self.relay_live(Event::Reset);
         }
         self.inner.head.fetch_max(*cursor, Ordering::AcqRel);
@@ -772,7 +800,12 @@ impl Store {
         self.write_with(Durability::Acknowledged, bytes, job).await
     }
 
-    async fn write_with<R, E, F>(&self, durability: Durability, bytes: usize, job: F) -> Result<R, E>
+    async fn write_with<R, E, F>(
+        &self,
+        durability: Durability,
+        bytes: usize,
+        job: F,
+    ) -> Result<R, E>
     where
         R: Send + 'static,
         E: From<StorageError> + Send + 'static,
@@ -844,6 +877,7 @@ impl Store {
         E: From<StorageError> + Send + 'static,
         F: FnOnce(&Connection) -> Result<R, E> + Send + 'static,
     {
+        self.inner.reads.fetch_add(1, Ordering::AcqRel);
         let inner = Arc::clone(&self.inner);
         let asked = std::time::Instant::now();
         let slot = Arc::clone(slots)
@@ -898,22 +932,28 @@ impl Inner {
 fn checkpoint_when_due(
     conn: &Connection,
     commits: &AtomicU64,
-    stopped: &std::sync::mpsc::Receiver<()>,
+    wakes: &std::sync::mpsc::Receiver<()>,
 ) {
+    use std::sync::mpsc::RecvTimeoutError;
     let mut checkpointed = commits.load(Ordering::Acquire);
     let mut waiting_since = None;
-    while matches!(
-        stopped.recv_timeout(Duration::from_secs(1)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ) {
+    loop {
         let committed = commits.load(Ordering::Acquire);
         let pending = committed.saturating_sub(checkpointed);
         if pending == 0 {
+            waiting_since = None;
+            if wakes.recv().is_err() {
+                return;
+            }
             continue;
         }
         let since = *waiting_since.get_or_insert_with(std::time::Instant::now);
-        if pending < CHECKPOINT_AFTER_COMMITS && since.elapsed() < CHECKPOINT_AFTER {
-            continue;
+        let due_in = CHECKPOINT_AFTER.saturating_sub(since.elapsed());
+        if pending < CHECKPOINT_AFTER_COMMITS && !due_in.is_zero() {
+            match wakes.recv_timeout(due_in) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         }
         let progress = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((
@@ -926,6 +966,7 @@ fn checkpoint_when_due(
             Ok((0, log_frames, checkpointed_frames)) if checkpointed_frames >= log_frames => {
                 checkpointed = committed;
                 waiting_since = None;
+                continue;
             }
             Ok((busy, log_frames, checkpointed_frames)) => tracing::debug!(
                 busy,
@@ -935,6 +976,12 @@ fn checkpoint_when_due(
                 "store checkpoint was partial; it stays pending"
             ),
             Err(error) => tracing::warn!(pending, "checkpoint the store: {error}"),
+        }
+        if matches!(
+            wakes.recv_timeout(CHECKPOINT_RETRY),
+            Err(RecvTimeoutError::Disconnected)
+        ) {
+            return;
         }
     }
 }

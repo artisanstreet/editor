@@ -715,6 +715,7 @@ impl Store {
             Ok(record)
         })
         .await
+        .inspect(|_| self.coordination_changed())
         .map_err(|cause| CoordinationPutError {
             caller: putting,
             cause: Box::new(cause),
@@ -867,6 +868,7 @@ impl Store {
             Ok(record)
         })
         .await
+        .inspect(|_| self.coordination_changed())
         .map_err(|cause| CoordinationUpdateError {
             id: record_id,
             caller: updating,

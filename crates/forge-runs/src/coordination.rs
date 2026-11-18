@@ -157,28 +157,51 @@ impl Hub {
     pub(crate) fn start_coordination(&self) {
         let hub = self.clone();
         self.inner.tasks.spawn(async move {
+            let mut changed = hub.store().watch_coordination();
+            let mut overlap = hub.generation().map(crate::runtime::Generation::watch);
             let mut deferred = Deferred::default();
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                changed.borrow_and_update();
+                if hub
+                    .generation()
+                    .is_none_or(crate::runtime::Generation::accepting)
+                {
+                    hub.deliver_coordination(&mut deferred).await;
+                }
+                let retry = deferred.next_retry();
                 tokio::select! {
                     () = hub.inner.shutdown.cancelled() => break,
-                    _tick = interval.tick() => {
-                        if hub.generation().is_some_and(|generation| !generation.accepting()) { continue; }
-                        if let Err(error) = hub.deliver_work_watches().await {
-                            tracing::warn!("coordination watches: {}", diagnostics::chain(&error));
-                        }
-                        if let Err(error) = hub.deliver_coordination_receipts(&mut deferred).await {
-                            tracing::warn!("coordination receipts: {}", diagnostics::chain(&error));
-                        }
-                    }
+                    changed = changed.changed() => if changed.is_err() { break },
+                    () = overlap_changed(overlap.as_mut()) => {}
+                    () = until(retry) => {}
                 }
             }
         });
     }
 
-    async fn deliver_work_watches(&self) -> Result<(), CoordinationDeliveryError> {
+    async fn deliver_coordination(&self, deferred: &mut Deferred) {
+        let now = tokio::time::Instant::now();
+        deferred.pass = None;
+        if let Err(error) = self.deliver_work_watches(deferred, now).await {
+            tracing::warn!("coordination watches: {}", diagnostics::chain(&error));
+            deferred.pass_failed(now);
+        }
+        if let Err(error) = self.deliver_coordination_receipts(deferred, now).await {
+            tracing::warn!("coordination receipts: {}", diagnostics::chain(&error));
+            deferred.pass_failed(now);
+        }
+        deferred.forget_settled(now);
+    }
+
+    async fn deliver_work_watches(
+        &self,
+        deferred: &mut Deferred,
+        now: tokio::time::Instant,
+    ) -> Result<(), CoordinationDeliveryError> {
         for mut watch in self.store().coordination_watches().await? {
+            if deferred.waiting_on(&watch.id, now) {
+                continue;
+            }
             let Content::Watch {
                 target,
                 after_revision,
@@ -236,6 +259,7 @@ impl Hub {
                 continue;
             };
             let text = text.clone();
+            let (id, revision) = (watch.id.clone(), watch.revision);
             match self
                 .send_as_agent_with_id(
                     &watch.owner,
@@ -257,9 +281,11 @@ impl Hub {
                             },
                         )
                         .await?;
+                    deferred.delivered(&id);
                 }
                 Err(error) => {
-                    tracing::warn!(watch = %watch.id, "deliver coordination watch: {}", diagnostics::chain(&error));
+                    let retry = deferred.failed(&id, revision, now);
+                    tracing::warn!(watch = %id, revision, retry_in_s = retry.as_secs(), "deliver coordination watch: {}", diagnostics::chain(&error));
                 }
             }
         }
@@ -269,8 +295,8 @@ impl Hub {
     async fn deliver_coordination_receipts(
         &self,
         deferred: &mut Deferred,
+        now: tokio::time::Instant,
     ) -> Result<(), CoordinationDeliveryError> {
-        let now = tokio::time::Instant::now();
         for record in self
             .store()
             .coordination_receipts(deferred.waiting(now))
@@ -339,9 +365,30 @@ struct Retry {
     at: tokio::time::Instant,
 }
 
+async fn overlap_changed(
+    overlap: Option<&mut tokio::sync::watch::Receiver<crate::runtime::Overlap>>,
+) {
+    match overlap {
+        Some(overlap) => {
+            if overlap.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn until(retry: Option<tokio::time::Instant>) {
+    match retry {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 #[derive(Default)]
 struct Deferred {
     receipts: std::collections::HashMap<String, Retry>,
+    pass: Option<tokio::time::Instant>,
 }
 
 impl Deferred {
@@ -353,8 +400,28 @@ impl Deferred {
             .collect()
     }
 
+    fn waiting_on(&self, id: &str, now: tokio::time::Instant) -> bool {
+        self.receipts.get(id).is_some_and(|retry| retry.at > now)
+    }
+
     fn delivered(&mut self, id: &str) {
         self.receipts.remove(id);
+    }
+
+    fn pass_failed(&mut self, now: tokio::time::Instant) {
+        self.pass = Some(now + FIRST_RECEIPT_RETRY);
+    }
+
+    fn forget_settled(&mut self, now: tokio::time::Instant) {
+        self.receipts.retain(|_, retry| retry.at > now);
+    }
+
+    fn next_retry(&self) -> Option<tokio::time::Instant> {
+        self.receipts
+            .values()
+            .map(|retry| retry.at)
+            .chain(self.pass)
+            .min()
     }
 
     fn failed(&mut self, id: &str, revision: u64, now: tokio::time::Instant) -> Duration {

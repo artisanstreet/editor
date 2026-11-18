@@ -125,13 +125,30 @@ impl Durability {
     }
 }
 
+pub(crate) struct Commits {
+    pub(crate) count: Arc<AtomicU64>,
+    pub(crate) committed: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Commits {
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        match self.committed.try_send(()) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(())) => {
+                tracing::warn!("the store checkpointer has stopped; the WAL grows until restart");
+            }
+        }
+    }
+}
+
 pub struct Writer {
     conn: Connection,
     durability: Durability,
     head: Arc<AtomicU64>,
     events: Option<crate::feed::Feed>,
     hot: Arc<crate::hot::HotPages>,
-    commits: Arc<AtomicU64>,
+    commits: Commits,
 }
 
 impl Writer {
@@ -140,7 +157,7 @@ impl Writer {
         head: Arc<AtomicU64>,
         events: Option<crate::feed::Feed>,
         hot: Arc<crate::hot::HotPages>,
-        commits: Arc<AtomicU64>,
+        commits: Commits,
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
@@ -194,7 +211,7 @@ impl Writer {
         } = tx;
         events.sort_by_key(|envelope| envelope.seq);
         sql.commit().map_err(StorageError::from)?;
-        self.commits.fetch_add(1, Ordering::AcqRel);
+        self.commits.note();
         self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
         if let Some(feed) = &self.events {

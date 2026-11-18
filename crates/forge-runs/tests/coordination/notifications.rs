@@ -338,3 +338,26 @@ async fn a_receipt_that_cannot_be_delivered_does_not_hold_up_the_others() {
     )));
     fixture.hub.stop(Duration::from_secs(2)).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_forge_does_no_periodic_store_work() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let store = fixture.hub.store().clone();
+    let activity = || (store.reads(), store.commits());
+    let mut settled = activity();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        let now = activity();
+        if now == settled {
+            break;
+        }
+        settled = now;
+    }
+    tokio::time::sleep(Duration::from_hours(1)).await;
+    assert_eq!(
+        activity(),
+        settled,
+        "an idle Forge read or wrote its store with nothing to do"
+    );
+    fixture.hub.stop(Duration::from_secs(2)).await;
+}
