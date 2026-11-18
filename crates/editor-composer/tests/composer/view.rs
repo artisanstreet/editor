@@ -294,3 +294,42 @@ fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sig
     assert!(said.iter().any(|text| text == "Sign in to Codex"));
     assert!(!said.iter().any(|text| text.contains("no models")));
 }
+
+#[test]
+fn a_gated_engine_explains_itself_on_keyboard_focus_and_to_assistive_tech() {
+    use super::{engine_reason, engine_tab};
+    let signed_out = engine(
+        r#"{"state":"signed_out"}"#,
+        r#"{"state":"fresh","observed_at":0}"#,
+    );
+    let reason = engine_reason(&signed_out).expect("a signed-out engine is gated");
+    let shown = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&shown);
+    let mut mounted = Mounted::new(|dispatch| {
+        engine_tab(
+            ArtisanTheme::resolved(),
+            signed_out.engine,
+            None,
+            Some(reason.clone()),
+            Rc::new(move |visible| sink.borrow_mut().push(visible)),
+            &dispatch,
+        )
+    });
+    let tab = mounted
+        .app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .find(|node| node.label == "Codex")
+        .expect("the engine tab is named");
+    assert_eq!(tab.description.as_deref(), Some(reason.as_str()));
+    let key = KeyEvent {
+        key: Key::Named(NamedKey::Tab),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    mounted.app.handle_input(&InputEvent::KeyDown(key));
+    mounted.app.handle_input(&InputEvent::KeyUp(key));
+    assert_eq!(mounted.app.tree().focused(), Some(tab.node));
+    assert_eq!(shown.borrow().as_slice(), &[true]);
+}

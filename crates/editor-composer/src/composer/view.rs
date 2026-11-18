@@ -3230,61 +3230,81 @@ fn model_engine_bar(
     }
     for status in engines {
         let engine = status.engine;
-        let action = Rc::clone(dispatch);
         let tooltip_action = Rc::clone(dispatch);
         let tooltip_anchor = format!("composer-engine-{engine}");
-        let gated = super::picker::gate(status);
-        let reason = gated.map(|gate| {
-            use super::picker::Gate;
-            let name = engine.display_name();
-            match gate {
-                Gate::NotInstalled => format!("{name} isn't installed on this Forge."),
-                Gate::Installing => format!("Installing {name}…"),
-                Gate::InstallFailed => format!("Installing {name} failed."),
-                Gate::SignIn => format!("Sign in to {name} to use its models."),
-                Gate::SigningIn => format!("Signing in to {name}…"),
-                Gate::Checking => format!("Checking {name}…"),
-                Gate::NoModels => format!("{name} hasn't reported any models."),
-                Gate::DiscoveringModels | Gate::DiscoveryFailed => {
-                    status.discovery.description(artisan_api::now())
+        let reason = engine_reason(status);
+        let explain: Rc<dyn Fn(bool)> = Rc::new({
+            let reason = reason.clone();
+            move |shown| {
+                if let Some(reason) = &reason {
+                    tooltip_action(ComposerAction::TooltipHover {
+                        instance: tooltip_target.0,
+                        generation: tooltip_target.1,
+                        anchor: tooltip_anchor.clone(),
+                        content: Some(super::picker::TooltipContent {
+                            anchor: tooltip_anchor.clone(),
+                            advisory: None,
+                            text: reason.clone(),
+                            placement: super::picker::TooltipPlacement::Above,
+                        }),
+                        hovered: shown,
+                    });
                 }
             }
         });
-        let tab = IconButton::new(
-            format!("composer-engine-{engine}"),
-            theme,
-            engine_icon(&theme, engine),
-            engine.display_name(),
-            MODEL_ENGINE_TAB,
-            Finish::Plain,
-        )
-        .nested(Radius::Panel.px(), MODEL_PANE_INSET)
-        .selected(spied == Some(engine))
-        .on_activate(move |_| action(ComposerAction::JumpEngine(engine)))
-        .build()
-        .aria_selected(spied == Some(engine))
-        .on_hover_change(move |hovered| {
-            if let Some(reason) = &reason {
-                tooltip_action(ComposerAction::TooltipHover {
-                    instance: tooltip_target.0,
-                    generation: tooltip_target.1,
-                    anchor: tooltip_anchor.clone(),
-                    content: Some(super::picker::TooltipContent {
-                        anchor: tooltip_anchor.clone(),
-                        advisory: None,
-                        text: reason.clone(),
-                        placement: super::picker::TooltipPlacement::Above,
-                    }),
-                    hovered,
-                });
-            }
-        });
-        bar = bar.child(match gated {
-            Some(_) => tab.style(Style::new().opacity(Opacity::Unavailable.alpha())),
-            None => tab,
-        });
+        bar = bar.child(engine_tab(theme, engine, spied, reason, explain, dispatch));
     }
     bar.build()
+}
+
+fn engine_reason(status: &artisan_api::EngineStatus) -> Option<String> {
+    use super::picker::Gate;
+    let name = status.engine.display_name();
+    super::picker::gate(status).map(|gate| match gate {
+        Gate::NotInstalled => format!("{name} isn't installed on this Forge."),
+        Gate::Installing => format!("Installing {name}…"),
+        Gate::InstallFailed => format!("Installing {name} failed."),
+        Gate::SignIn => format!("Sign in to {name} to use its models."),
+        Gate::SigningIn => format!("Signing in to {name}…"),
+        Gate::Checking => format!("Checking {name}…"),
+        Gate::NoModels => format!("{name} hasn't reported any models."),
+        Gate::DiscoveringModels | Gate::DiscoveryFailed => {
+            status.discovery.description(artisan_api::now())
+        }
+    })
+}
+
+fn engine_tab(
+    theme: ArtisanTheme,
+    engine: artisan_api::EngineId,
+    spied: Option<artisan_api::EngineId>,
+    reason: Option<String>,
+    explain: Rc<dyn Fn(bool)>,
+    dispatch: &Dispatch,
+) -> Element {
+    let action = Rc::clone(dispatch);
+    let focus_explain = Rc::clone(&explain);
+    let tab = IconButton::new(
+        format!("composer-engine-{engine}"),
+        theme,
+        engine_icon(&theme, engine),
+        engine.display_name(),
+        MODEL_ENGINE_TAB,
+        Finish::Plain,
+    )
+    .nested(Radius::Panel.px(), MODEL_PANE_INSET)
+    .selected(spied == Some(engine))
+    .on_activate(move |_| action(ComposerAction::JumpEngine(engine)))
+    .build()
+    .aria_selected(spied == Some(engine))
+    .on_hover_change(move |hovered| explain(hovered))
+    .on_focus_change(move |focused| focus_explain(focused));
+    match reason {
+        Some(reason) => tab
+            .aria_description(reason)
+            .style(Style::new().opacity(Opacity::Unavailable.alpha())),
+        None => tab,
+    }
 }
 
 fn model_gate_row(
