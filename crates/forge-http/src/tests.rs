@@ -55,7 +55,7 @@ pub(crate) async fn paired(store: &Store, address: SocketAddr, name: &str) -> De
     editor
 }
 
-async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
+pub(crate) async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
     let dir = tempfile::tempdir().unwrap();
     let server = start(ServeConfig {
         data_dir: dir.path().join("forge"),
@@ -69,7 +69,7 @@ async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
     (dir, address, store)
 }
 
-async fn read_events(
+pub(crate) async fn read_events(
     response: reqwest::Response,
     what: &str,
     stop: impl Fn(&Envelope) -> bool,

@@ -1,4 +1,5 @@
 use crate::events::Cursor;
+use crate::tests::{forge, paired, read_events};
 use artisan_api::{Envelope, Event, ItemId, LiveCoverage, LiveTarget, ThreadId};
 
 fn live(text: &str, append: bool, total: u64, revision: u64) -> Envelope {
@@ -37,6 +38,27 @@ fn render(snapshot: &[Event], queued: &[Envelope], cursor: &mut Cursor) -> Strin
         }
     }
     rendered
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_ahead_of_the_forge_database_is_told_to_reset() {
+    let (_dir, address, store) = forge().await;
+    let editor = paired(&store, address, "laptop").await;
+    let ahead = store.head() + 1_000;
+    let response = editor
+        .http()
+        .get(editor.url(&format!("/events?since={ahead}")))
+        .send()
+        .await
+        .unwrap();
+    let events = read_events(
+        response,
+        "the reset for a cursor from a newer database",
+        |envelope| envelope.event == Event::Reset,
+    )
+    .await;
+    assert!(matches!(events[0].event, Event::Hello { .. }));
+    assert_eq!(events.len(), 2, "nothing is sent between Hello and Reset");
 }
 
 #[test]

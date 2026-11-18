@@ -673,6 +673,9 @@ pub fn changes_since(
             event,
         });
     }
+    if envelopes.is_empty() && since > max_seq(conn)? {
+        return Ok(None);
+    }
     Ok(Some(envelopes))
 }
 
