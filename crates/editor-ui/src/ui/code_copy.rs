@@ -16,9 +16,26 @@ use super::{asset::source_asset_glyph, button::Button, motion::MotionCurve, them
 const HOLD: Duration = Duration::from_millis(1_500);
 const SWAP: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct CopyRequest {
+    text: String,
+    controller: CodeCopyController,
+}
+
+impl CopyRequest {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn copied(&self, now: Instant) -> Instant {
+        self.controller.copied(now);
+        now + HOLD
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum CopyEffect {
-    Clipboard(String),
+    Clipboard(CopyRequest),
     RequestFrame,
     WakeAt(Instant),
 }
@@ -30,7 +47,7 @@ pub struct CopyFrame {
     pub wake_at: Option<Instant>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CodeCopyController {
     copied_at: Rc<Cell<Option<Instant>>>,
 }
@@ -131,11 +148,10 @@ impl CodeCopyButton {
         Button::icon(self.id, self.theme, AssetId::TABLER_COPY, "Copy code")
             .icon_slot(icon.build())
             .on_activate(move |_| {
-                let now = Instant::now();
-                controller.copied(now);
-                effect(CopyEffect::Clipboard(source.clone()));
-                effect(CopyEffect::RequestFrame);
-                effect(CopyEffect::WakeAt(now + HOLD));
+                effect(CopyEffect::Clipboard(CopyRequest {
+                    text: source.clone(),
+                    controller: controller.clone(),
+                }));
             })
             .build()
     }

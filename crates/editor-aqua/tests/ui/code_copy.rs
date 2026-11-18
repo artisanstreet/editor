@@ -41,3 +41,54 @@ fn reduced_motion_steps_and_schedules_only_hold_deadline() {
     assert_eq!(settled.progress, 0.0);
     assert!(!settled.animating && settled.wake_at.is_none());
 }
+
+#[test]
+fn copy_shows_the_checkmark_only_after_the_clipboard_accepts_the_code() {
+    use editor_aqua::ui::code_copy::{CodeCopyButton, CopyEffect};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::{cell::RefCell, rc::Rc};
+    let controller = CodeCopyController::default();
+    let effects = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&effects);
+    let button = CodeCopyButton::new(
+        "copy",
+        "cargo test",
+        ArtisanTheme::resolved(),
+        controller.clone(),
+        false,
+        move |effect| sink.borrow_mut().push(effect),
+    )
+    .build(Instant::now());
+    let mut app = test_support::editor::ui::mounted(200.0, 100.0, button);
+    test_support::editor::ui::click(&mut app, "copy");
+    let requests: Vec<_> = effects
+        .borrow()
+        .iter()
+        .filter_map(|effect| match effect {
+            CopyEffect::Clipboard(request) => Some(request.clone()),
+            CopyEffect::RequestFrame | CopyEffect::WakeAt(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .map(editor_aqua::ui::code_copy::CopyRequest::text)
+            .collect::<Vec<_>>(),
+        ["cargo test"]
+    );
+    let later = Instant::now() + Duration::from_millis(500);
+    assert_eq!(
+        controller.frame(later, false).progress,
+        0.0,
+        "no checkmark while the clipboard has not accepted the code"
+    );
+    let copied_at = Instant::now();
+    let deadline = requests[0].copied(copied_at);
+    assert_eq!(deadline, copied_at + Duration::from_millis(1_500));
+    assert_eq!(
+        controller
+            .frame(copied_at + Duration::from_millis(500), false)
+            .progress,
+        1.0
+    );
+}

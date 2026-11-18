@@ -468,21 +468,19 @@ impl Workspace {
                 continue;
             };
             match action {
-                CodeAction::Copy(CopyEffect::Clipboard(text)) => {
-                    if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy code");
+                CodeAction::Copy(CopyEffect::Clipboard(request)) => {
+                    match ctx.clipboard().set_text(request.text().to_owned()) {
+                        Ok(()) => {
+                            let deadline = request.copied(std::time::Instant::now());
+                            self.request_code_frame(ctx, window);
+                            self.wake_code_at(ctx, window, deadline);
+                        }
+                        Err(error) => tracing::warn!(%error, "could not copy code"),
                     }
                 }
-                CodeAction::Copy(CopyEffect::RequestFrame) => {
-                    self.code_frame_pending = true;
-                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
-                }
+                CodeAction::Copy(CopyEffect::RequestFrame) => self.request_code_frame(ctx, window),
                 CodeAction::Copy(CopyEffect::WakeAt(deadline)) => {
-                    let delay = deadline.saturating_duration_since(std::time::Instant::now());
-                    let at = ctx.now() + delay;
-                    self.code_deadline =
-                        Some(self.code_deadline.map_or(at, |previous| previous.min(at)));
-                    ctx.request_animation_deadline(window, at);
+                    self.wake_code_at(ctx, window, deadline);
                 }
                 CodeAction::Reference(reference) => {
                     let scope = reference
@@ -494,6 +492,27 @@ impl Workspace {
             }
         }
         changed
+    }
+
+    fn request_code_frame(
+        &mut self,
+        ctx: &mut aqua::AppCtx<'_>,
+        window: aqua::prelude::AquaWindowId,
+    ) {
+        self.code_frame_pending = true;
+        ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+    }
+
+    fn wake_code_at(
+        &mut self,
+        ctx: &mut aqua::AppCtx<'_>,
+        window: aqua::prelude::AquaWindowId,
+        deadline: std::time::Instant,
+    ) {
+        let delay = deadline.saturating_duration_since(std::time::Instant::now());
+        let at = ctx.now() + delay;
+        self.code_deadline = Some(self.code_deadline.map_or(at, |previous| previous.min(at)));
+        ctx.request_animation_deadline(window, at);
     }
 
     pub fn take_code_frame(&mut self, now: aqua::Instant) -> bool {
