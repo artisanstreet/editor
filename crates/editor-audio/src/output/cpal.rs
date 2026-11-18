@@ -1,8 +1,3 @@
-//! Output through `cpal`'s default device on Windows and macOS.
-//!
-//! The device keeps its own format; the callback resamples linearly from the
-//! track's rate and maps its one or two channels onto the device's.
-
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
@@ -11,13 +6,6 @@ use ::cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use super::{Command, Format, control, error_chain};
 use crate::state::Shared;
 
-/// Opens the default output device for the track of `generation` and drives
-/// it until the player drops the output.
-///
-/// # Errors
-///
-/// No output device exists, it refuses the stream, or a later play or pause
-/// fails.
 pub(super) fn run(
     shared: &Arc<Shared>,
     generation: u64,

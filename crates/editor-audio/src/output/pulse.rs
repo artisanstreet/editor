@@ -1,10 +1,3 @@
-//! Output through `PulseAudio`'s native protocol, spoken in pure Rust.
-//!
-//! This serves `PulseAudio` itself, `PipeWire`'s pulse server and `WSLg`'s
-//! `PulseServer`, without linking ALSA or any system library. The stream runs
-//! at the track's own rate and layout (the server resamples) with a ~100 ms
-//! buffer, so pause (cork), seek (flush) and the position stay responsive.
-
 use std::ffi::CString;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
@@ -22,20 +15,10 @@ use pulseaudio::{AsPlaybackSource as _, Client};
 use super::{Command, Format, control, error_chain};
 use crate::state::Shared;
 
-/// Bytes per sample of the `f32` stream.
 const SAMPLE_BYTES: usize = 4;
 
-/// The server-side buffer the stream aims for is a second divided by this:
-/// 100 ms.
 const BUFFER_DIVISOR: u32 = 10;
 
-/// Opens a playback stream for the track of `generation` and drives it until
-/// the player drops the output.
-///
-/// # Errors
-///
-/// No server is reachable, it refuses the connection or stream, or a later
-/// cork, uncork or flush fails.
 pub(super) fn run(
     shared: &Arc<Shared>,
     generation: u64,
@@ -85,7 +68,6 @@ pub(super) fn run(
         move |bytes: &mut [u8]| {
             let whole = bytes.len() / frame_bytes * frame_bytes;
             if whole == 0 {
-                // Returning 0 would end the stream for good; pad instead.
                 bytes.fill(0);
                 return bytes.len();
             }
@@ -128,15 +110,11 @@ pub(super) fn run(
         },
         || block_on(stream.flush()).map_err(stopped),
     );
-    // The stream's drop deletes it on the server; dropping the client first
-    // leaves the connection with no other handle, so it closes once the
-    // server acknowledges the delete.
     drop(client);
     drop(stream);
     result
 }
 
-/// Connects to the sound server of this session.
 fn connect() -> Result<Client, String> {
     let socket =
         server_socket().ok_or_else(|| "No audio output: PulseAudio is not running".to_owned())?;
@@ -160,8 +138,6 @@ fn connect() -> Result<Client, String> {
     })
 }
 
-/// The server's socket: `$PULSE_SERVER` when it names a local socket, then
-/// the session's runtime directory, then `WSLg`'s shared server.
 fn server_socket() -> Option<PathBuf> {
     let configured = std::env::var("PULSE_SERVER").ok().and_then(|server| {
         let path = server.strip_prefix("unix:").unwrap_or(&server);

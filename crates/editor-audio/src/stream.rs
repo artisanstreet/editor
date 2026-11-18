@@ -1,5 +1,3 @@
-//! Bounded decoder producer. The maintained decoder owns format/seek logic;
-//! the channel owns backpressure and keeps cancellation responsive while paused.
 use crate::decode::StreamDecoder;
 use crate::output::Output;
 use crate::state::Shared;
@@ -54,7 +52,6 @@ pub fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
         }
     };
     let (pcm, received) = bounded(QUEUE_CHUNKS);
-    // One wakeup is sufficient; pending seek position lives in the shared state.
     let (signal, commands) = bounded(1);
     let state = StreamState::new(received, signal, decoder.duration);
     {
@@ -126,7 +123,6 @@ fn produce(
         } else {
             PcmEvent::Data { epoch, samples }
         };
-        // A seek or stop interrupts a full queue. No polling heartbeat or busy wait.
         select! {
             send(pcm, event) -> result => { if result.is_err() { return; } ended = eof; }
             recv(commands) -> command => {

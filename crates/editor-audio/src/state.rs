@@ -1,10 +1,3 @@
-//! The shared playback state: the track, its decoded audio, and the cursor
-//! the output callback advances.
-//!
-//! Every transition lives here and touches no device, so the player's
-//! behaviour is testable without audio hardware. A generation counter makes a
-//! newer `play` or `stop` win over work still in flight for an older track.
-
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -15,32 +8,25 @@ use crate::output::{Format, Output};
 use crate::stream::{PcmEvent, StreamState};
 use crate::{PlaybackState, Snapshot};
 
-/// The state shared by the player, the decoder thread and the output.
 #[derive(Default)]
 pub struct Shared {
     inner: Mutex<Inner>,
 }
 
 impl Shared {
-    /// Locks the state. A panic elsewhere can't leave it inconsistent (every
-    /// transition is a few field writes), so a poisoned lock is still used.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// The state behind [`Shared`]'s lock.
 pub struct Inner {
-    /// Bumped by every `play` and `stop`; work tagged with an older value is stale.
     generation: u64,
     track: Option<PathBuf>,
     state: PlaybackState,
     audio: Option<Audio>,
     stream: Option<StreamState>,
     reset_phase: bool,
-    /// The next frame the output reads.
     cursor: usize,
-    /// The open output; dropping it ends the output thread and its stream.
     output: Option<Output>,
 }
 
@@ -64,8 +50,6 @@ impl Inner {
         self.generation == generation
     }
 
-    /// Drops the current track and starts loading `track`, returning the
-    /// generation its decode belongs to.
     pub(crate) fn begin(&mut self, track: PathBuf) -> u64 {
         self.reset();
         self.track = Some(track);
@@ -73,8 +57,6 @@ impl Inner {
         self.generation
     }
 
-    /// Takes a finished decode. Returns the output format to open when the
-    /// decode is still current and succeeded.
     pub(crate) fn loaded(
         &mut self,
         generation: u64,
@@ -120,13 +102,10 @@ impl Inner {
         stream.seek.take().map(|position| (stream.epoch, position))
     }
 
-    /// Keeps the output opened for the current track.
     pub(crate) fn attach(&mut self, output: Output) {
         self.output = Some(output);
     }
 
-    /// Fails the current track with `message`, unless `generation` is stale.
-    /// Releases the output.
     pub(crate) fn fail(&mut self, generation: u64, message: String) {
         if generation != self.generation || self.state == PlaybackState::Idle {
             return;
@@ -139,7 +118,6 @@ impl Inner {
         self.output = None;
     }
 
-    /// Holds a playing track at its position.
     pub(crate) fn pause(&mut self) {
         if self.state == PlaybackState::Loading {
             self.stop();
@@ -149,7 +127,6 @@ impl Inner {
         }
     }
 
-    /// Continues a paused track, or replays an ended one from the start.
     pub(crate) fn resume(&mut self) {
         match self.state {
             PlaybackState::Paused => {}
@@ -171,8 +148,6 @@ impl Inner {
         self.sync_output();
     }
 
-    /// Moves the playhead, clamped to the track's end. Seeking an ended track
-    /// back into it leaves it paused there.
     pub(crate) fn seek(&mut self, position: Duration) {
         if !matches!(
             self.state,
@@ -194,9 +169,7 @@ impl Inner {
             stream.ended = false;
             audio.samples.clear();
             self.cursor = 0;
-            // Older buffered chunks cannot satisfy a newer seek.
             while stream.pcm.try_recv().is_ok() {}
-            // A wakeup already queued covers this seek too.
             stream.signal.try_send(()).ok();
             if self.state == PlaybackState::Ended {
                 self.state = PlaybackState::Paused;
@@ -211,12 +184,10 @@ impl Inner {
         self.sync_output();
     }
 
-    /// Returns to idle and releases the output.
     pub(crate) fn stop(&mut self) {
         self.reset();
     }
 
-    /// The state as the UI sees it.
     pub(crate) fn snapshot(&self) -> Snapshot {
         Snapshot {
             track: self.track.clone(),
@@ -234,16 +205,11 @@ impl Inner {
         }
     }
 
-    /// Whether the output for `generation` should be running; `None` once it
-    /// is stale and should close.
     pub(crate) fn wants_running(&self, generation: u64) -> Option<bool> {
         (generation == self.generation && self.output.is_some())
             .then_some(self.state == PlaybackState::Playing)
     }
 
-    /// Fills `out` for the output of `generation`: the track's next samples
-    /// while playing (see [`mix::render_mapped`]), silence otherwise. Marks the
-    /// track ended once its last frame was read.
     #[cfg(any(test, all(unix, not(target_os = "macos"))))]
     pub(crate) fn fill(
         &mut self,
@@ -278,8 +244,6 @@ impl Inner {
             return;
         };
         let ended = if let Some(stream) = &mut self.stream {
-            // Two source frames permit interpolation. A wider resampling step
-            // may need more; the bounded producer queue caps this window.
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
