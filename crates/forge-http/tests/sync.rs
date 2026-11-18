@@ -143,3 +143,65 @@ async fn an_oversized_manifest_is_refused_before_it_is_read_whole() {
     );
     assert_eq!(hub.store().setting("global_prompt").await.unwrap(), None);
 }
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum StateRelease {
+    WhileWaiting,
+    AfterGivingUp,
+}
+
+#[cfg(unix)]
+#[test]
+fn other_work_runs_while_the_sync_state_is_slow_to_read() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let state = sync_state_path(dir.path());
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&state)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (opened_tx, opened) = tokio::sync::oneshot::channel();
+    let (release_tx, release) = std::sync::mpsc::channel::<()>();
+    let slow_disk = std::thread::spawn(move || {
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&state)
+            .unwrap();
+        opened_tx.send(()).unwrap();
+        let released = match release.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(()) => StateRelease::WhileWaiting,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StateRelease::AfterGivingUp,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                unreachable!("the test holds the release sender until it releases")
+            }
+        };
+        fifo.write_all(br#"{"applied":null,"claimed_mcp_servers":[]}"#)
+            .unwrap();
+        released
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (base, _stub, _server) = stub_server(false, None).await;
+        let data_dir = dir.path().to_path_buf();
+        let hub = test_hub(&data_dir);
+        let sync = tokio::spawn(async move {
+            sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, &data_dir).await
+        });
+        opened.await.unwrap();
+        tokio::spawn(async {}).await.unwrap();
+        release_tx.send(()).unwrap();
+        let outcome = sync.await.unwrap().unwrap();
+        assert!(
+            matches!(outcome, ConfigOutcome::Updated { .. }),
+            "{outcome:?}"
+        );
+    });
+    assert_eq!(slow_disk.join().unwrap(), StateRelease::WhileWaiting);
+}

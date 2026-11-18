@@ -111,6 +111,12 @@ pub enum SyncStateError {
         #[source]
         source: std::io::Error,
     },
+    #[error("the worker that reads and writes {} stopped", path.display())]
+    Worker {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
 }
 
 fn read_state(data_dir: &Path) -> Result<SyncFile, SyncStateError> {
@@ -122,6 +128,26 @@ fn read_state(data_dir: &Path) -> Result<SyncFile, SyncStateError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SyncFile::default()),
         Err(source) => Err(SyncStateError::Read { path, source }),
     }
+}
+
+async fn load_state(data_dir: &Path) -> Result<SyncFile, SyncStateError> {
+    let dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || read_state(&dir))
+        .await
+        .map_err(|source| SyncStateError::Worker {
+            path: sync_state_path(data_dir),
+            source,
+        })?
+}
+
+async fn save_state(data_dir: &Path, file: SyncFile) -> Result<(), SyncStateError> {
+    let dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || write_state(&dir, &file))
+        .await
+        .map_err(|source| SyncStateError::Worker {
+            path: sync_state_path(data_dir),
+            source,
+        })?
 }
 
 fn write_state(data_dir: &Path, file: &SyncFile) -> Result<(), SyncStateError> {
@@ -261,6 +287,8 @@ pub enum ApplyManifestError {
 pub enum InstallBundleError {
     #[error("stage a skill bundle")]
     Stage(#[source] std::io::Error),
+    #[error("the worker staging a skill bundle stopped")]
+    Worker(#[source] tokio::task::JoinError),
     #[error("the bundle has an unsafe path {path}")]
     UnsafePath { path: String },
     #[error("decode {path}")]
@@ -484,7 +512,7 @@ pub async fn sync_config(
         machine_id,
         secret,
     };
-    let file = read_state(data_dir)?;
+    let file = load_state(data_dir).await?;
     let latest_step = "fetch the latest config bundle";
     let mut request = core.get(latest_step, CONFIG_BUNDLES_LATEST_PATH)?;
     if let Some(etag) = file
@@ -611,7 +639,7 @@ pub async fn sync_config(
         }),
         claimed_mcp_servers,
     };
-    write_state(data_dir, &file)?;
+    save_state(data_dir, file.clone()).await?;
     let state = deliver_report(&core, data_dir, file).await?;
     Ok(ConfigOutcome::Updated { state, kept_local })
 }
@@ -649,7 +677,7 @@ async fn deliver_report(
         Ok(()) => {
             state.report = AppliedReport::Delivered;
             let delivered = state.clone();
-            write_state(data_dir, &file)?;
+            save_state(data_dir, file).await?;
             Ok(delivered)
         }
         Err(error) => {
@@ -731,6 +759,19 @@ async fn apply(
     let destinations = mcp_destinations(&manifest.mcp_servers)?;
     admit_bundles(manifest)?;
     let mut staged = Vec::new();
+    let applied = apply_staged(hub, manifest, destinations, data_dir, file, &mut staged).await;
+    drop(tokio::task::spawn_blocking(move || drop(staged)));
+    applied
+}
+
+async fn apply_staged(
+    hub: &forge_runs::Hub,
+    manifest: &EditorManifest,
+    destinations: Vec<artisan_api::McpServer>,
+    data_dir: &Path,
+    file: &SyncFile,
+    staged: &mut Vec<(String, tempfile::TempDir)>,
+) -> Result<Applied, ApplyManifestError> {
     for skill in &manifest.skills {
         if let Some(bundle) = &skill.bundle {
             let dir =
@@ -743,7 +784,7 @@ async fn apply(
             staged.push((skill.name.clone(), dir));
         }
     }
-    let mut changed = apply_skills(hub, &manifest.skills, &staged).await?;
+    let mut changed = apply_skills(hub, &manifest.skills, staged).await?;
     if let Some(text) = manifest.global_prompt.as_deref() {
         let store = hub.store();
         let current = store
@@ -851,7 +892,7 @@ fn catalog_entry<'a>(
 
 async fn stage_bundle(bundle: &SkillBundle) -> Result<tempfile::TempDir, InstallBundleError> {
     use base64::Engine as _;
-    let dir = tempfile::tempdir().map_err(InstallBundleError::Stage)?;
+    let mut files = Vec::with_capacity(bundle.files.len());
     for file in &bundle.files {
         let relative = Path::new(&file.path);
         if !relative
@@ -868,21 +909,27 @@ async fn stage_bundle(bundle: &SkillBundle) -> Result<tempfile::TempDir, Install
                 path: file.path.clone(),
                 source,
             })?;
-        let path = dir.path().join(relative);
+        files.push((file.path.clone(), bytes));
+    }
+    tokio::task::spawn_blocking(move || write_bundle(files))
+        .await
+        .map_err(InstallBundleError::Worker)?
+}
+
+fn write_bundle(files: Vec<(String, Vec<u8>)>) -> Result<tempfile::TempDir, InstallBundleError> {
+    let dir = tempfile::tempdir().map_err(InstallBundleError::Stage)?;
+    for (relative, bytes) in files {
+        let path = dir.path().join(&relative);
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|source| {
-                InstallBundleError::Folder {
-                    path: file.path.clone(),
-                    source,
-                }
-            })?;
-        }
-        tokio::fs::write(&path, bytes)
-            .await
-            .map_err(|source| InstallBundleError::Write {
-                path: file.path.clone(),
+            std::fs::create_dir_all(parent).map_err(|source| InstallBundleError::Folder {
+                path: relative.clone(),
                 source,
             })?;
+        }
+        std::fs::write(&path, bytes).map_err(|source| InstallBundleError::Write {
+            path: relative,
+            source,
+        })?;
     }
     Ok(dir)
 }
@@ -991,13 +1038,14 @@ async fn apply_mcp(
         .into_iter()
         .collect();
     if &claimed != synced_before {
-        write_state(
+        save_state(
             data_dir,
-            &SyncFile {
+            SyncFile {
                 applied: file.applied.clone(),
                 claimed_mcp_servers: claimed.clone(),
             },
         )
+        .await
         .map_err(|source| ApplyMcpError::Claim {
             servers: claimed,
             source,
