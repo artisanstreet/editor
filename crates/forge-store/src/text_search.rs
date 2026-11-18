@@ -96,12 +96,11 @@ fn first_match(searcher: &Searcher, needle: &Literal, text: &str) -> Option<(usi
 fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
     let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
     let line_end = text[end..].find('\n').map_or(text.len(), |at| end + at);
-    let before: Vec<(usize, char)> = text[line_start..start].char_indices().collect();
-    let from = before
-        .len()
-        .checked_sub(SNIPPET_BEFORE)
-        .filter(|skipped| *skipped > 0)
-        .map_or(line_start, |skipped| line_start + before[skipped].0);
+    let from = text[line_start..start]
+        .char_indices()
+        .rev()
+        .nth(SNIPPET_BEFORE - 1)
+        .map_or(line_start, |(at, _)| line_start + at);
     let lead = if from > line_start { "…" } else { "" };
     let body: String = text[from..line_end].chars().take(SNIPPET_CHARS).collect();
     let tail = if from + body.len() < line_end {
