@@ -217,7 +217,7 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
                     "collection-retry",
                     theme,
                     ButtonTone::Neutral,
-                    "Retry",
+                    "Try again",
                     move || action(CollectionAction::Retry),
                 )
                 .build(),

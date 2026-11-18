@@ -519,7 +519,7 @@ pub fn inspector_view(
                 TextRole::Label.text(&theme, error.clone())
             )]))
             .child(
-                Button::text("inspector-retry", theme, ButtonTone::Neutral, "Retry")
+                Button::text("inspector-retry", theme, ButtonTone::Neutral, "Try again")
                     .within(LIST)
                     .on_activate(move |_| retry(InspectorAction::Retry))
                     .build(),

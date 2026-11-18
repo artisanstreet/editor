@@ -878,7 +878,7 @@ fn prompt(
         actions = actions.child(ui::button(
             theme,
             "settings-global-prompt-retry",
-            "Retry",
+            "Try again",
             ButtonTone::Neutral,
             false,
             move || send(ViewAction::RetryPrompt),

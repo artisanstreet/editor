@@ -122,7 +122,7 @@ fn a_question_that_failed_to_load_can_still_be_dismissed_or_switched() {
         said.iter()
             .any(|text| text == "Couldn't load the question.")
     );
-    assert!(said.iter().any(|text| text == "Retry"));
+    assert!(said.iter().any(|text| text == "Try again"));
     assert!(said.iter().any(|text| text == "Question b?"));
     assert_eq!(
         mounted.press("composer-question-dismiss"),

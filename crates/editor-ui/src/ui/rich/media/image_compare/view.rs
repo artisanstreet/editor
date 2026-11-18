@@ -521,7 +521,7 @@ impl CompareState {
                             format!("{id}-retry-{part}"),
                             *theme,
                             ButtonTone::Neutral,
-                            "Retry",
+                            "Try again",
                         )
                         .size(ButtonSize::Sm)
                         .on_activate(move |_| retry(Action::Retry(side)))

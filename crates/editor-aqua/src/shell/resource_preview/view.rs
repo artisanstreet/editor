@@ -161,7 +161,7 @@ impl ViewState {
                 body = body.child(
                     crate::ui::page::notice(&theme, failure(error))
                         .action(
-                            Button::text("resource-retry", theme, ButtonTone::Neutral, "Retry")
+                            Button::text("resource-retry", theme, ButtonTone::Neutral, "Try again")
                                 .on_activate(move |_| retry(Action::Retry { generation }))
                                 .build(),
                         )
@@ -236,7 +236,7 @@ fn failure(error: &PreviewError) -> String {
         }
         PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.".to_owned(),
         PreviewError::HostGone { .. } => {
-            "The Forge holding this resource disconnected. Retry once it is back.".to_owned()
+            "The Forge holding this resource disconnected. Try again once it is back.".to_owned()
         }
     }
 }

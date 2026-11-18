@@ -185,7 +185,7 @@ impl ImageState {
                             format!("{id}-retry-{index}"),
                             theme,
                             ButtonTone::Neutral,
-                            "Retry",
+                            "Try again",
                         )
                         .size(ButtonSize::Sm)
                         .on_activate(move |_| retry(Action::Retry(slot)))

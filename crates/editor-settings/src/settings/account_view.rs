@@ -118,7 +118,7 @@ pub fn sign_in(
         }
         AccountPhase::Restoring => {
             body = body.child(text(theme, "This device's sign-in was saved by an earlier Editor. Checking it with the account service…", true))
-                .child(ui::actions().child(action("sign-in-retry", "Retry", ButtonTone::Neutral, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonTone::Neutral, false, ViewAction::AccountSignOut)).build());
+                .child(ui::actions().child(action("sign-in-retry", "Try again", ButtonTone::Neutral, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonTone::Neutral, false, ViewAction::AccountSignOut)).build());
         }
         AccountPhase::Pending { email, .. } => {
             body = body

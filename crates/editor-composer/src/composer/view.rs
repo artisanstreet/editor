@@ -498,10 +498,15 @@ pub fn questionnaire(
             if load_error.is_some() {
                 let action = Rc::clone(&dispatch);
                 loading = loading.child(
-                    Button::text("question-page-retry", theme, ButtonTone::Neutral, "Retry")
-                        .within(surface)
-                        .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
-                        .build(),
+                    Button::text(
+                        "question-page-retry",
+                        theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .within(surface)
+                    .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
+                    .build(),
                 );
             }
             loading.build()
@@ -730,7 +735,7 @@ fn question_card(
                     "composer-question-retry",
                     theme,
                     ButtonTone::Neutral,
-                    "Retry answer",
+                    "Send the answer again",
                 )
                 .within(surface)
                 .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
@@ -943,13 +948,13 @@ pub fn draft_error(
             conflict: false,
         } => (
             error,
-            choice("draft-retry", "Retry", ComposerAction::RetryDraft),
+            choice("draft-retry", "Try again", ComposerAction::RetryDraft),
         ),
         ComposerFailure::ModelChoice { error } => (
             error,
             choice(
                 "model-choice-retry",
-                "Retry",
+                "Try again",
                 ComposerAction::RetryModelChoice,
             ),
         ),

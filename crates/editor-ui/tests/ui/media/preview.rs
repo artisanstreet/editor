@@ -415,7 +415,7 @@ fn a_failed_preview_names_the_cause_and_retries_the_fetch() {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let (mut app, said) = texts(&preview, &actions);
     assert!(said.iter().any(|text| text == "File not found"));
-    assert!(said.iter().any(|text| text == "Retry"));
+    assert!(said.iter().any(|text| text == "Try again"));
     assert!(app.focus_key("image-preview-retry"));
     let enter = KeyEvent {
         key: Key::Named(NamedKey::Enter),

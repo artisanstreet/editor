@@ -920,7 +920,7 @@ impl RootViews {
                         "retry-thread",
                         theme,
                         crate::ui::kit::ButtonTone::Neutral,
-                        "Retry",
+                        "Try again",
                     )
                     .on_activate(move |_| {
                         actions
@@ -945,7 +945,7 @@ impl RootViews {
                     "retry-thread-controls",
                     theme,
                     crate::ui::kit::ButtonTone::Neutral,
-                    "Retry",
+                    "Try again",
                 )
                 .on_activate(move |_| {
                     actions

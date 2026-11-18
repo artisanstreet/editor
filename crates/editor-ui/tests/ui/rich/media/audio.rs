@@ -71,7 +71,7 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         );
         std::thread::yield_now();
     };
-    assert!(said(&app).iter().any(|text| text == "Retry"));
+    assert!(said(&app).iter().any(|text| text == "Try again"));
     reachable.store(true, Ordering::SeqCst);
     assert!(app.focus_key("audio-track-0-retry"));
     let enter = KeyEvent {

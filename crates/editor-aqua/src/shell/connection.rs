@@ -335,7 +335,7 @@ impl ConnectionPresenter {
                             "retry-forge",
                             theme,
                             ButtonTone::Primary,
-                            "Retry now",
+                            "Try again now",
                             &self.commands,
                             &identity,
                             Command::RetryNow,

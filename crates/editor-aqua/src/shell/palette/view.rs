@@ -205,12 +205,12 @@ impl PaletteView {
                 ),
                 SearchProblem::Unreachable(1) => (
                     "Search couldn't reach 1 Forge.".to_owned(),
-                    "Retry",
+                    "Try again",
                     Action::RetrySearch,
                 ),
                 SearchProblem::Unreachable(count) => (
                     format!("Search couldn't reach {count} Forges."),
-                    "Retry",
+                    "Try again",
                     Action::RetrySearch,
                 ),
             };

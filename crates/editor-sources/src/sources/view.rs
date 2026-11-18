@@ -35,6 +35,19 @@ pub(crate) fn stack() -> UiBox {
     UiBox::new().layout("column").spaced(Space::S4)
 }
 
+fn retry_button(theme: ArtisanTheme, action: Rc<dyn Fn(ContentAction)>) -> Element {
+    button(
+        "source-retry",
+        theme,
+        ButtonTone::Neutral,
+        "Try again",
+        move || {
+            action(ContentAction::Retry);
+        },
+    )
+    .build()
+}
+
 pub(crate) fn button(
     key: &str,
     theme: ArtisanTheme,
@@ -89,15 +102,9 @@ pub fn content_view(
             body = body.child(TextRole::Label.text(&theme, "Loading source…").build())
         }
         RangeState::Failed(error) => {
-            let callback = Rc::clone(&action);
             body = body
                 .child(TextRole::Label.text(&theme, error.clone()).build())
-                .child(
-                    button("source-retry", theme, ButtonTone::Neutral, "Retry", move || {
-                        callback(ContentAction::Retry)
-                    })
-                    .build(),
-                );
+                .child(retry_button(theme, Rc::clone(&action)));
         }
         RangeState::Ready(page) => {
             let start = page.start;

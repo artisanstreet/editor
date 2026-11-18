@@ -178,7 +178,7 @@ pub fn terminal_view(
         content = content
             .child(TextRole::Label.text(&theme, error.to_owned()).build())
             .child(
-                Button::text("terminal-retry", theme, ButtonTone::Neutral, "Retry")
+                Button::text("terminal-retry", theme, ButtonTone::Neutral, "Try again")
                     .within(WELL)
                     .on_activate(move |_| retry(TerminalAction::Retry))
                     .build(),

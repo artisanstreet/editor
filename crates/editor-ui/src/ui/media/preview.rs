@@ -576,10 +576,15 @@ impl Preview {
                 )
                 .children(self.failure.filter(|error| error.retryable()).map(|_| {
                     let retry = Rc::clone(&emit);
-                    Button::text("image-preview-retry", theme, ButtonTone::Neutral, "Retry")
-                        .size(ButtonSize::Sm)
-                        .on_activate(move |_| retry(Action::Retry))
-                        .build()
+                    Button::text(
+                        "image-preview-retry",
+                        theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .size(ButtonSize::Sm)
+                    .on_activate(move |_| retry(Action::Retry))
+                    .build()
                 }))
                 .build()
         });

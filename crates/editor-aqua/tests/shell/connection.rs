@@ -36,7 +36,7 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     let texts = test_support::editor::ui::painted_texts(&app);
     for expected in [
         "Last attempt: dns error: failed to lookup address",
-        "Retry now",
+        "Try again now",
         "Forges",
     ] {
         assert!(

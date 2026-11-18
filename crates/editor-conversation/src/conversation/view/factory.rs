@@ -1109,7 +1109,7 @@ impl RowFactory {
                     || format!("retry-image-{hash}"),
                     |index| format!("retry-sent-{}-{index}", item.id),
                 );
-                let retry = Button::text(retry_id, self.theme, ButtonTone::Neutral, "Retry")
+                let retry = Button::text(retry_id, self.theme, ButtonTone::Neutral, "Try again")
                     .on_activate(move |_| {
                         if active.get() {
                             emit(

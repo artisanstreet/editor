@@ -460,9 +460,14 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
     if state.retry {
         let emit = emit.clone();
         body.push(
-            Button::text("marketplace-retry", *theme, ButtonTone::Neutral, "Retry")
-                .on_activate(move |_| emit(ViewAction::Retry))
-                .build(),
+            Button::text(
+                "marketplace-retry",
+                *theme,
+                ButtonTone::Neutral,
+                "Try again",
+            )
+            .on_activate(move |_| emit(ViewAction::Retry))
+            .build(),
         );
     }
     if let Some(started) = state.loading_started.filter(|_| state.loading) {

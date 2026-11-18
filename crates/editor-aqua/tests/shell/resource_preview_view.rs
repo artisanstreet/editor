@@ -278,9 +278,8 @@ fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection()
     let mut app = test_support::editor::ui::mounted(800.0, 600.0, content);
     let said = test_support::editor::ui::painted_texts(&app);
     assert!(
-        said.iter()
-            .any(|text| text
-                == "The Forge holding this resource disconnected. Retry once it is back."),
+        said.iter().any(|text| text
+            == "The Forge holding this resource disconnected. Try again once it is back."),
         "{said:?}"
     );
     test_support::editor::ui::click(&mut app, "resource-retry");

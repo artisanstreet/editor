@@ -144,7 +144,7 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     assert!(
         semantics
             .iter()
-            .any(|node| node.role == Role::Button && node.label == "Retry")
+            .any(|node| node.role == Role::Button && node.label == "Try again")
     );
     assert!(app.focus_key("gallery-retry-0"));
     let enter = KeyEvent {

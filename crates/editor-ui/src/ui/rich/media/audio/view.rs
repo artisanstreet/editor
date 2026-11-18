@@ -272,7 +272,7 @@ impl AudioBlock {
                             format!("{row_id}-retry"),
                             theme,
                             ButtonTone::Neutral,
-                            "Retry",
+                            "Try again",
                         )
                         .size(ButtonSize::Sm)
                         .on_activate(move |_| {

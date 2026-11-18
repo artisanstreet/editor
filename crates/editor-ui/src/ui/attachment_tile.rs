@@ -181,7 +181,7 @@ impl AttachmentTile {
                 "retry",
                 theme,
                 AssetId::TABLER_REFRESH,
-                "Retry image preview",
+                "Load the image preview again",
                 IconButtonSize::Sm,
                 Finish::Plain,
             )

@@ -1111,7 +1111,7 @@ pub fn build(
                         "sidebar-metadata-retry",
                         theme,
                         ButtonTone::Neutral,
-                        "Retry project icons",
+                        "Load project icons again",
                     )
                     .on_activate(move |_| retry(ViewAction::RetryProjectIcons))
                     .build(),

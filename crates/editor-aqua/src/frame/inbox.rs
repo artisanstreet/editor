@@ -172,7 +172,7 @@ pub fn states(
                 .action(button(
                     "sidebar-search-retry",
                     theme,
-                    "Retry",
+                    "Try again",
                     ViewAction::Search,
                     emit,
                 ))
@@ -186,7 +186,7 @@ pub fn states(
                 .action(button(
                     "sidebar-threads-retry",
                     theme,
-                    "Retry",
+                    "Try again",
                     ViewAction::RetryThreads,
                     emit,
                 ))
@@ -199,7 +199,7 @@ pub fn states(
                 .action(button(
                     "sidebar-metadata-retry",
                     theme,
-                    "Retry",
+                    "Try again",
                     ViewAction::RetryProjectIcons,
                     emit,
                 ))
