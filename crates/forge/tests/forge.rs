@@ -1,9 +1,5 @@
-//! The `forge` binary as `ae forge start` and the NixOS service run it.
-
 use std::process::Command;
 
-/// Two Forges on one data folder would corrupt it: the second refuses, says
-/// why in its log, and exits.
 #[test]
 fn a_second_forge_on_the_same_data_exits_and_logs_why() {
     let dir = tempfile::tempdir().unwrap();

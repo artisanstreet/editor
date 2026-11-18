@@ -32,15 +32,23 @@ const LOG_LIMIT: diagnostics::Limit = diagnostics::Limit {
 #[derive(Parser)]
 #[command(name = "forge", version = LONG_VERSION, about = "Artisan Forge")]
 struct Cli {
-    /// The data folder (default: Forge's folder under Artisan Street).
-    #[arg(long, value_name = "DIR")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "The data folder (default: Forge's folder under Artisan Street)"
+    )]
     data: Option<PathBuf>,
-    /// Where to listen (default: `listen` in the data folder's config.json,
-    /// else 127.0.0.1:47900).
-    #[arg(long, value_name = "ADDRESS")]
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        help = "Where to listen (default: `listen` in the data folder's config.json, else 127.0.0.1:47900)"
+    )]
     listen: Option<SocketAddr>,
-    /// Append the log to this file instead of the terminal.
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Append the log to this file instead of the terminal"
+    )]
     log: Option<PathBuf>,
     #[arg(long, hide = true)]
     schema_version: bool,
