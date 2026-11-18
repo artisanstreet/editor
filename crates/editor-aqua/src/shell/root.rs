@@ -338,12 +338,8 @@ impl RootViews {
         use crate::conversation::view::row_sources::RowSourceEffect;
         match effect {
             RowSourceEffect::Clipboard(copied) => {
-                copied.write(&shell.core, |text| {
-                    if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy conversation source");
-                    }
-                });
-                false
+                copied.write(&shell.core, |text| ctx.clipboard().set_text(text))
+                    == crate::sources::Copied::Failed
             }
             RowSourceEffect::SavePath(export) => {
                 if !Self::source_export_is_current(shell, &export) {

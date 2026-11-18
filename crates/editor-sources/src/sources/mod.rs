@@ -10,7 +10,7 @@ pub use content::raw_rows;
 
 pub use controller::{
     CollectionBrowser, CollectionPreview, CollectionViewState, ContentText, ContentViewState,
-    CopiedSource, WindowViewState,
+    Copied, CopiedSource, WindowViewState,
 };
 
 pub use selection::{selection_source, source_slice};

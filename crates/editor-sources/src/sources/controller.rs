@@ -23,16 +23,46 @@ pub struct CopiedSource {
     text: String,
     host: HostId,
     instance: HostInstance,
+    failure: std::rc::Weak<std::cell::RefCell<Option<String>>>,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Copied {
+    Written,
+    Failed,
+    Abandoned,
+}
+
 impl CopiedSource {
-    pub fn write(self, core: &Core, write: impl FnOnce(String)) -> bool {
+    pub fn write<E: std::error::Error>(
+        self,
+        core: &Core,
+        write: impl FnOnce(String) -> Result<(), E>,
+    ) -> Copied {
         if core.host_if_instance(&self.host, self.instance).is_none() {
-            return false;
+            return Copied::Abandoned;
         }
-        write(self.text);
-        true
+        match write(self.text) {
+            Ok(()) => Copied::Written,
+            Err(error) => {
+                tracing::warn!(
+                    host = %self.host,
+                    error = %diagnostics::chain(&error),
+                    "could not put the copied source on the clipboard"
+                );
+                match self.failure.upgrade() {
+                    Some(failure) => {
+                        *failure.borrow_mut() = Some(format!(
+                            "Couldn't copy source to the clipboard: {}",
+                            diagnostics::chain(&error)
+                        ));
+                        Copied::Failed
+                    }
+                    None => Copied::Abandoned,
+                }
+            }
+        }
     }
 }
 
@@ -77,6 +107,7 @@ pub struct ContentText {
     pub rows: Vec<Range<usize>>,
     pub page: Option<Arc<ContentRange>>,
     pub error: Option<String>,
+    clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     client: ForgeClient,
     host: HostId,
     instance: HostInstance,
@@ -115,6 +146,7 @@ impl ContentText {
             rows: Vec::new(),
             page: None,
             error: None,
+            clipboard_failure: std::rc::Rc::default(),
             client,
             host,
             instance,
@@ -135,8 +167,19 @@ impl ContentText {
             source: self.window.source().clone(),
             window: window_view_state(&self.window),
             busy: self.busy(),
-            error: self.error.clone(),
+            error: self.shown_error(),
         }
+    }
+
+    pub fn shown_error(&self) -> Option<String> {
+        self.error
+            .clone()
+            .or_else(|| self.clipboard_failure.borrow().clone())
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+        self.clipboard_failure.borrow_mut().take();
     }
 
     pub fn window(&self) -> &ContentWindow {
@@ -180,7 +223,7 @@ impl ContentText {
     pub fn set_source(&mut self, source: ContentRef) {
         self.action.cancel();
         self.picking = None;
-        self.error = None;
+        self.clear_error();
         self.window.set_source(source);
         self.sync();
     }
@@ -223,7 +266,7 @@ impl ContentText {
         if !self.reconcile(core) || self.busy() {
             return;
         }
-        self.error = None;
+        self.clear_error();
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
@@ -239,7 +282,7 @@ impl ContentText {
         if !self.reconcile(core) || self.busy() {
             return None;
         }
-        self.error = None;
+        self.clear_error();
         self.picker_generation = self.picker_generation.wrapping_add(1);
         self.picking = Some(self.picker_generation);
         self.picking
@@ -270,7 +313,7 @@ impl ContentText {
         if !self.reconcile(core) || self.busy() {
             return;
         }
-        self.error = None;
+        self.clear_error();
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
@@ -298,6 +341,7 @@ impl ContentText {
                                 text,
                                 host: self.host.clone(),
                                 instance: self.instance,
+                                failure: std::rc::Rc::downgrade(&self.clipboard_failure),
                                 _permit: permit,
                             })
                         }

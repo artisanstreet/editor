@@ -173,8 +173,8 @@ pub fn content_view(
             )
             .build(),
     );
-    if let Some(error) = &view.error {
-        body = body.child(TextRole::Label.text(&theme, error.clone()).build());
+    if let Some(error) = view.shown_error() {
+        body = body.child(TextRole::Label.text(&theme, error).build());
     }
     ContentView {
         element: code_card(theme, body.build()),

@@ -281,3 +281,49 @@ fn collection_change_reporting_ignores_repeated_back_and_pending_request() {
         None
     ));
 }
+
+#[test]
+fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
+    use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
+    use editor_aqua::sources::{Copied, content_view};
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().to_owned(),
+    })
+    .unwrap();
+    let config = config();
+    core.add_test_host(&config, client(&core));
+    let mut view = ContentText::new(core.host(&config.id).unwrap(), ContentRef::from_text(""));
+    view.copy(&core);
+    let copied = test_support::wait::wait_for("the source copy", Duration::from_secs(15), || {
+        view.drain(&core)
+    });
+    let refused = copied.write(&core, |_| {
+        Err(std::io::Error::other("the clipboard is locked by another app"))
+    });
+    assert_eq!(refused, Copied::Failed);
+    let rendered = content_view(
+        &view,
+        ArtisanTheme::resolved(),
+        SelectionDocumentId(1),
+        SelectionSourceId(1),
+        std::rc::Rc::new(|_| {}),
+    );
+    let app = test_support::editor::ui::mounted(600.0, 400.0, rendered.element);
+    assert!(
+        test_support::editor::ui::painted_texts(&app).iter().any(|text| text
+            == "Couldn't copy source to the clipboard: the clipboard is locked by another app"),
+        "the source view tells the user the copy failed"
+    );
+    view.copy(&core);
+    let copied = test_support::wait::wait_for("the second copy", Duration::from_secs(15), || {
+        view.drain(&core)
+    });
+    assert_eq!(
+        copied.write(&core, |_| Ok::<(), std::io::Error>(())),
+        Copied::Written
+    );
+    assert_eq!(view.shown_error(), None);
+}

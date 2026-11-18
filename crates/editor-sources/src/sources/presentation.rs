@@ -81,11 +81,7 @@ impl SourceView {
         }
         let (changed, effect) = crate::sources::drain_content_changed(content, core);
         if let Some(ContentEffect::Clipboard(copied)) = effect {
-            copied.write(core, |text| {
-                if let Err(error) = ctx.clipboard().set_text(text) {
-                    tracing::warn!(%error, "could not copy source");
-                }
-            });
+            copied.write(core, |text| ctx.clipboard().set_text(text));
         }
         changed || content.view_state() != before
     }
