@@ -102,3 +102,25 @@ fn a_long_menu_exposes_its_scroll_range_to_assistive_tech() {
     assert!(scroll.y_max > 0.0, "options run past the menu's height");
     assert!(scroll.y.abs() < f64::EPSILON);
 }
+
+#[test]
+fn the_keyboard_highlighted_option_is_the_triggers_active_descendant() {
+    let state = Rc::new(RefCell::new(SelectState::new(Instant::now())));
+    arrow_down(&state, 2);
+    let mut app = mounted(
+        UiBox::new()
+            .layout("column")
+            .child(trigger(&state))
+            .child(menu(&state))
+            .build(),
+    );
+    assert!(app.focus_key(TRIGGER));
+    let option = node(&app, Role::Option, "Option 2");
+    let combo = app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .find(|node| node.role == Role::ComboBox)
+        .expect("the trigger is a combo box");
+    assert_eq!(combo.active_descendant, Some(option.node));
+}

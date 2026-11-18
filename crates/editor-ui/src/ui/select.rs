@@ -577,7 +577,11 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
                         }
                     });
             }
-            rows = rows.child(row.build().aria_selected(chosen).focusable(false));
+            let row = row.build().aria_selected(chosen).focusable(false);
+            rows = rows.child(match highlighted {
+                true => row.aria_active_descendant(),
+                false => row,
+            });
         }
         let scroll = Scroll::new()
             .layout("column")
