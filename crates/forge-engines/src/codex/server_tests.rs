@@ -56,6 +56,7 @@ while IFS= read -r line; do
       fd=${locks[$thread]}
       if [ -n "$fd" ]; then exec {fd}>&-; unset 'locks[$thread]'; fi
       printf '{"method":"thread/closed","params":{"threadId":"%s"}}\n' "$thread" ;;
+    turn/steer) printf '{"id":%s,"error":{"code":-32600,"message":"no active turn to steer"}}\n' "$id" ;;
     turn/start)
       turns=$((turns + 1))
       turn="turn-$turns"

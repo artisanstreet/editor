@@ -107,3 +107,30 @@ async fn a_stalled_handoff_does_not_hold_up_codex_threads_of_another_home() {
     handoff.abort();
     drop(busy);
 }
+
+#[tokio::test]
+async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
+    let fixture = Fixture::new();
+    let (outcome, _) =
+        run_steering(fixture.turn("slow", None), &["first steer", "second steer"]).await;
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let next_turn = fixture
+        .input()
+        .lines()
+        .rfind(|line| line.contains("\"turn/start\""))
+        .unwrap()
+        .to_owned();
+    let (first, second) = (
+        next_turn
+            .find("first steer")
+            .expect("the first steer is in the next turn"),
+        next_turn
+            .find("second steer")
+            .expect("the second steer is in the next turn"),
+    );
+    assert!(first < second, "{next_turn}");
+}

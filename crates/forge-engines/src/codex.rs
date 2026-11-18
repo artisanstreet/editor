@@ -138,6 +138,7 @@ impl Harness for CodexHarness {
                 decoder: Decoder::default(),
                 io,
                 queued: Vec::new(),
+                admitted: 0,
                 phase: Phase::Idle,
                 steering: HashMap::new(),
                 permissions: None,
@@ -216,7 +217,11 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Admission(u64);
+
 struct Queued {
+    admission: Admission,
     input: UserInput,
     acknowledge: bool,
 }
@@ -248,6 +253,7 @@ struct Run {
     decoder: Decoder,
     io: RunIo,
     queued: Vec<Queued>,
+    admitted: u64,
     phase: Phase,
     steering: HashMap<u64, Queued>,
     permissions: Option<Permissions>,
@@ -279,10 +285,7 @@ impl Run {
                 })
                 .await;
         }
-        self.queued.push(Queued {
-            input: turn.input.clone(),
-            acknowledge: true,
-        });
+        self.admit(turn.input.clone(), true);
         self.pump(turn)?;
         self.drive(turn).await
     }
@@ -380,14 +383,14 @@ impl Run {
             self.phase = Phase::Finished { outcome, nudge };
         }
         for text in self.decoder.take_messages() {
-            self.queued.push(Queued {
-                input: UserInput {
+            self.admit(
+                UserInput {
                     id: ItemId::default(),
                     text,
                     images: Vec::new(),
                 },
-                acknowledge: false,
-            });
+                false,
+            );
         }
         if self.idle() {
             while let Ok(input) = self.io.inbox.try_recv() {
@@ -475,16 +478,29 @@ impl Run {
         Ok(true)
     }
 
+    fn admit(&mut self, input: UserInput, acknowledge: bool) {
+        self.admitted += 1;
+        self.queued.push(Queued {
+            admission: Admission(self.admitted),
+            input,
+            acknowledge,
+        });
+    }
+
+    fn requeue(&mut self, queued: Queued) {
+        let at = self
+            .queued
+            .partition_point(|earlier| earlier.admission < queued.admission);
+        self.queued.insert(at, queued);
+    }
+
     fn idle(&self) -> bool {
         matches!(self.phase, Phase::Idle | Phase::Finished { .. }) && self.steering.is_empty()
     }
 
     async fn input(&mut self, input: Input) -> Result<(), RunError> {
         match input {
-            Input::Steer(input) => self.queued.push(Queued {
-                input,
-                acknowledge: true,
-            }),
+            Input::Steer(input) => self.admit(input, true),
             Input::Answer { key, answer } => {
                 let events = self.decoder.answer(&key, &answer);
                 self.emit(events).await;
@@ -596,7 +612,7 @@ impl Run {
                     }
                     Err(error) => {
                         tracing::debug!(item = %queued.input.id, %error, "Codex takes a rejected steer as the next turn");
-                        self.queued.insert(0, queued);
+                        self.requeue(queued);
                     }
                 }
             }
