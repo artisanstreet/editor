@@ -108,7 +108,11 @@ fn remove_every_inactive_thread(bencher: Bencher<'_, '_>) {
                     removed += batch.len();
                 }
             });
-            assert_eq!(removed, SINGLETONS + CHAIN);
+            assert_eq!(
+                removed,
+                SINGLETONS + CHAIN,
+                "bench: every inactive thread goes"
+            );
             (copy, store)
         });
 }

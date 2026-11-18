@@ -29,7 +29,7 @@ fn item(thread: &ThreadId, kind: ItemKind) -> NewItem {
     }
 }
 
-fn shell(thread: &ThreadId, output: String) -> NewItem {
+fn shell(thread: &ThreadId, output: &str) -> NewItem {
     item(
         thread,
         ItemKind::Tool {
@@ -40,7 +40,7 @@ fn shell(thread: &ThreadId, output: String) -> NewItem {
                 watch: false,
             },
             title: None,
-            output: Some(Output::from_text(&output)),
+            output: Some(Output::from_text(output)),
             exit_code: Some(0),
             approval: None,
         },
@@ -99,14 +99,14 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
             .collect::<Vec<_>>()
             .join("\n");
         store
-            .upsert_item(shell(&thread, long))
+            .upsert_item(shell(&thread, &long))
             .await
             .expect("bench: long output");
         for index in 0..ITEMS {
             let new = if index % 2 == 0 {
                 shell(
                     &thread,
-                    format!("Compiling crate {index}\nFinished build {index}: linker ok"),
+                    &format!("Compiling crate {index}\nFinished build {index}: linker ok"),
                 )
             } else {
                 item(

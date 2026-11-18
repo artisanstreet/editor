@@ -474,7 +474,6 @@ async fn a_thread_reopened_through_another_forge_generation_shows_its_writes() {
 }
 
 #[tokio::test]
-#[expect(clippy::unwrap_used, reason = "a failure fails the test")]
 async fn live_work_split_by_prompts_shares_one_page_budget() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
