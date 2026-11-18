@@ -26,7 +26,7 @@ pub enum Outcome {
 
 #[cfg(any(target_os = "linux", windows))]
 impl Outcome {
-    pub(crate) fn of<E: std::fmt::Display>(measure: &str, result: Result<(), E>) -> Self {
+    fn of<E: std::fmt::Display>(measure: &str, result: Result<(), E>) -> Self {
         match result {
             Ok(()) => Self::Applied(measure.to_owned()),
             Err(error) => Self::Skipped {
