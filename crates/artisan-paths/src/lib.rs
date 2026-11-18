@@ -13,6 +13,8 @@
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 
+pub mod private;
+
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 

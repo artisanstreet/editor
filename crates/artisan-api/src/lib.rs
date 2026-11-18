@@ -27,6 +27,7 @@ mod search;
 mod settings;
 mod source_index;
 mod thread;
+mod secret;
 mod tunnel;
 mod reassembly;
 #[cfg(feature = "tls")]
@@ -35,6 +36,7 @@ pub mod transport;
 
 pub use agent_names::*;
 pub use content::*;
+pub use secret::Secret;
 pub use engine::*;
 pub use model::*;
 pub use event::*;

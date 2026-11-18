@@ -166,6 +166,7 @@ socket2 = "=0.6.5"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
 thiserror = "=2.0.20"
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 tokio = { version = "=1.53.3", default-features = false }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.4"

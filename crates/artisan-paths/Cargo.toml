@@ -9,6 +9,9 @@ description = "Where Artisan's apps (ae, Forge, the Editor) are installed and ke
 [lib]
 doctest = false
 
+[dependencies]
+thiserror.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

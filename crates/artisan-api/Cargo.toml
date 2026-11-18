@@ -19,6 +19,7 @@ base64 = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 sha2.workspace = true
+zeroize.workspace = true
 hex.workspace = true
 
 [features]
