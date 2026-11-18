@@ -1,8 +1,154 @@
-use anyhow::{Context, Result};
-use artisan_account::{ChannelCtx, ClientFrame, NoiseChannel, Phase, ServerFrame};
+use artisan_account::{ChannelCtx, ClientFrame, NoiseChannel, NoiseError, Phase, ServerFrame};
 use futures::{SinkExt as _, StreamExt as _};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+type WsError = tokio_tungstenite::tungstenite::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum FrameError {
+    #[error("encode the Relay {frame} frame for channel {channel}")]
+    Encode {
+        channel: String,
+        frame: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("send the Relay {frame} frame for channel {channel}")]
+    Send {
+        channel: String,
+        frame: &'static str,
+        #[source]
+        source: Box<WsError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServeChannelError {
+    #[error("connect to Relay at {url}")]
+    Connect {
+        url: String,
+        #[source]
+        source: Box<WsError>,
+    },
+    #[error("encode the Relay {frame} frame")]
+    Encode {
+        frame: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("send the Relay {frame} frame")]
+    Send {
+        frame: &'static str,
+        #[source]
+        source: Box<WsError>,
+    },
+    #[error("read a Relay frame")]
+    Read(#[source] Box<WsError>),
+    #[error("read the Relay challenge nonce")]
+    ChallengeNonce(#[source] base64::DecodeError),
+    #[error("the Relay challenge nonce is {bytes} bytes, not 32")]
+    ChallengeLength { bytes: usize },
+    #[error("Relay refused the tunnel: {code} {message}")]
+    Refused { code: String, message: String },
+    #[error("draw the static key of channel {channel}")]
+    StaticKey {
+        channel: String,
+        #[source]
+        source: getrandom::Error,
+    },
+    #[error(transparent)]
+    Noise(#[from] NoiseError),
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ChannelError {
+    #[error("channel {channel} is not open")]
+    Unknown { channel: String },
+    #[error(transparent)]
+    Noise(#[from] NoiseError),
+    #[error("the grant on channel {channel} is not text")]
+    GrantText {
+        channel: String,
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    #[error("verify the grant on channel {channel}")]
+    Grant {
+        channel: String,
+        #[source]
+        source: crate::account_auth::VerifyGrantError,
+    },
+    #[error("read the cnf key of the grant on channel {channel}")]
+    Cnf {
+        channel: String,
+        #[source]
+        source: artisan_account::GrantError,
+    },
+    #[error("channel {channel} has no verified grant")]
+    Unverified { channel: String },
+    #[error("the grant on channel {channel} lacks the forge:execute scope")]
+    LacksExecuteScope { channel: String },
+    #[error("the grant on channel {channel} expired mid-channel")]
+    Expired { channel: String },
+    #[error(transparent)]
+    Reassembly(#[from] artisan_api::ReassemblyError),
+    #[error("encode a {what} for channel {channel}")]
+    Encode {
+        channel: String,
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("the send window and park queue of channel {channel} are full")]
+    WindowFull { channel: String },
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+}
+
+fn encode_frame(
+    channel: &str,
+    frame: &'static str,
+    value: &ClientFrame,
+) -> Result<String, FrameError> {
+    serde_json::to_string(value).map_err(|source| FrameError::Encode {
+        channel: channel.to_owned(),
+        frame,
+        source,
+    })
+}
+
+async fn send_text(
+    sink: &mut WsSink,
+    channel: &str,
+    frame: &'static str,
+    text: String,
+) -> Result<(), FrameError> {
+    sink.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+        .await
+        .map_err(|source| FrameError::Send {
+            channel: channel.to_owned(),
+            frame,
+            source: Box::new(source),
+        })
+}
+
+async fn send_connection_frame(
+    sink: &mut WsSink,
+    frame: &'static str,
+    value: &ClientFrame,
+) -> Result<(), ServeChannelError> {
+    let text = serde_json::to_string(value)
+        .map_err(|source| ServeChannelError::Encode { frame, source })?;
+    sink.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+        .await
+        .map_err(|source| ServeChannelError::Send {
+            frame,
+            source: Box::new(source),
+        })
+}
 
 struct Channel {
     noise: NoiseChannel,
@@ -163,11 +309,9 @@ fn b64u_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn b64u_decode(text: &str) -> Result<Vec<u8>> {
+fn b64u_decode(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(text.as_bytes())
-        .context("bad base64url body")
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text.as_bytes())
 }
 
 #[expect(
@@ -184,17 +328,24 @@ pub async fn serve_channel(
     machine: String,
     verifier: Arc<crate::account_auth::GrantVerifier>,
     app: crate::routes::App,
-) -> Result<()> {
+) -> Result<(), ServeChannelError> {
     use tokio_tungstenite::tungstenite::Message as Ws;
     let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
-        .with_context(|| format!("connect to Relay at {ws_url}"))?;
+        .map_err(|source| ServeChannelError::Connect {
+            url: ws_url.clone(),
+            source: Box::new(source),
+        })?;
     let (mut sink, mut source) = stream.split();
-    let hello = serde_json::to_string(&ClientFrame::Hello(artisan_account::HelloFrame {
-        v: 1,
-        grant: grant_jwt,
-    }))?;
-    sink.send(Ws::Text(hello.into())).await?;
+    send_connection_frame(
+        &mut sink,
+        "hello",
+        &ClientFrame::Hello(artisan_account::HelloFrame {
+            v: 1,
+            grant: grant_jwt,
+        }),
+    )
+    .await?;
     let mut channels: HashMap<String, Channel> = HashMap::new();
     let mut streams: HashMap<String, Stream> = HashMap::new();
     let mut reassembly = Reassembly::new();
@@ -206,12 +357,15 @@ pub async fn serve_channel(
         tokio::select! {
             message = source.next() => {
                 let Some(message) = message else { break };
-                let message = message.context("read Relay frame")?;
+                let message = message.map_err(|source| ServeChannelError::Read(Box::new(source)))?;
                 let text = match message {
                     Ws::Text(text) => text.to_string(),
                     Ws::Close(_) => break,
                     Ws::Ping(data) => {
-                        sink.send(Ws::Pong(data)).await?;
+                        sink.send(Ws::Pong(data)).await.map_err(|source| ServeChannelError::Send {
+                            frame: "pong",
+                            source: Box::new(source),
+                        })?;
                         continue;
                     }
                     Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => continue,
@@ -239,7 +393,7 @@ pub async fn serve_channel(
                 if let Outgoing::Close { reason } = outgoing(&name, &msg, &channels, now_sec()) {
                     close_channel(&name, reason, &mut channels, &mut streams, &mut reassembly, &mut windows, &mut sink).await?;
                 } else if let Err(error) = handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await {
-                    tracing::debug!(channel = %name, "Relay channel failed: {error:#}");
+                    tracing::debug!(channel = %name, error = diagnostics::chain(&error), "Relay channel failed");
                     close_channel(&name, "channel-failed", &mut channels, &mut streams, &mut reassembly, &mut windows, &mut sink).await?;
                 }
             }
@@ -272,15 +426,11 @@ async fn handle_server_text(
     windows: &mut HashMap<String, SendWindow>,
     relay_recv_seq: &mut HashMap<String, u64>,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
-) -> Result<()> {
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    let frame = match serde_json::from_str(text)
-        .map_err(anyhow::Error::from)
-        .and_then(|value| artisan_account::read_server_frame(value).map_err(anyhow::Error::from))
-    {
+) -> Result<(), ServeChannelError> {
+    let frame = match serde_json::from_str(text).and_then(artisan_account::read_server_frame) {
         Ok(frame) => frame,
         Err(error) => {
-            tracing::debug!("skipped a Relay frame: {error:#}");
+            tracing::debug!(error = %error, "skipped a Relay frame");
             return Ok(());
         }
     };
@@ -289,28 +439,35 @@ async fn handle_server_text(
             use base64::Engine as _;
             let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(challenge.nonce.as_bytes())
-                .context("read the Relay challenge")?;
-            let nonce: [u8; 32] = nonce
-                .try_into()
-                .map_err(|_nonce| anyhow::anyhow!("bad challenge nonce"))?;
+                .map_err(ServeChannelError::ChallengeNonce)?;
+            let nonce = <[u8; 32]>::try_from(nonce.as_slice())
+                .map_err(|_length| ServeChannelError::ChallengeLength { bytes: nonce.len() })?;
             let signature = artisan_account::pop_sign(cnf_secret, &nonce, grant_jti);
-            let authenticate = serde_json::to_string(&ClientFrame::Authenticate(
-                artisan_account::AuthenticateFrame {
+            send_connection_frame(
+                sink,
+                "authenticate",
+                &ClientFrame::Authenticate(artisan_account::AuthenticateFrame {
                     v: 1,
                     jti: grant_jti.to_owned(),
                     sig: b64u_encode(&signature),
-                },
-            ))?;
-            sink.send(Ws::Text(authenticate.into())).await?;
+                }),
+            )
+            .await?;
         }
         ServerFrame::Ready(_) | ServerFrame::Presence(_) => {}
         ServerFrame::Ping(ping) => {
-            let reply = ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t });
-            sink.send(Ws::Text(serde_json::to_string(&reply)?.into()))
-                .await?;
+            send_connection_frame(
+                sink,
+                "pong",
+                &ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t }),
+            )
+            .await?;
         }
         ServerFrame::Error(error) => {
-            anyhow::bail!("Relay refused the tunnel: {} {}", error.code, error.message);
+            return Err(ServeChannelError::Refused {
+                code: error.code,
+                message: error.message,
+            });
         }
         ServerFrame::ChannelOpened(opened) => {
             let name = opened.channel;
@@ -319,7 +476,7 @@ async fn handle_server_text(
                 machine: machine.to_owned(),
                 channel: name.clone(),
             };
-            let static_secret = fresh_static()?;
+            let static_secret = fresh_static(&name)?;
             let noise = NoiseChannel::responder(&static_secret, None, ctx)?;
             channels.insert(
                 name.clone(),
@@ -351,12 +508,16 @@ async fn handle_server_text(
                 return Ok(());
             }
             relay_recv_seq.insert(name.clone(), expected.saturating_add(1));
-            let Ok(raw) = b64u_decode(&data.body) else {
-                close_channel(
-                    &name, "bad-body", channels, streams, reassembly, windows, sink,
-                )
-                .await?;
-                return Ok(());
+            let raw = match b64u_decode(&data.body) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::debug!(channel = %name, error = %error, "Relay data is not base64url");
+                    close_channel(
+                        &name, "bad-body", channels, streams, reassembly, windows, sink,
+                    )
+                    .await?;
+                    return Ok(());
+                }
             };
             let outcome = handle_channel_bytes(
                 &name,
@@ -373,7 +534,7 @@ async fn handle_server_text(
             )
             .await;
             if let Err(error) = outcome {
-                tracing::debug!(channel = %name, "Relay channel failed: {error:#}");
+                tracing::debug!(channel = %name, error = diagnostics::chain(&error), "Relay channel failed");
                 close_channel(
                     &name,
                     "channel-failed",
@@ -410,25 +571,29 @@ async fn close_channel(
     reassembly: &mut Reassembly,
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
-    use tokio_tungstenite::tungstenite::Message as Ws;
+) -> Result<(), FrameError> {
     channels.remove(name);
     streams.remove(name);
     reassembly.drop_channel(name);
     windows.remove(name);
-    let close = serde_json::to_string(&ClientFrame::Close(artisan_account::CloseFrame {
-        v: 1,
-        channel: name.to_owned(),
-        reason: Some(reason.to_owned()),
-    }))?;
-    sink.send(Ws::Text(close.into()))
-        .await
-        .context("send Relay close")
+    let close = encode_frame(
+        name,
+        "close",
+        &ClientFrame::Close(artisan_account::CloseFrame {
+            v: 1,
+            channel: name.to_owned(),
+            reason: Some(reason.to_owned()),
+        }),
+    )?;
+    send_text(sink, name, "close", close).await
 }
 
-fn fresh_static() -> Result<[u8; 32]> {
+fn fresh_static(channel: &str) -> Result<[u8; 32], ServeChannelError> {
     let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret).map_err(|_rand| anyhow::anyhow!("random static failed"))?;
+    getrandom::fill(&mut secret).map_err(|source| ServeChannelError::StaticKey {
+        channel: channel.to_owned(),
+        source,
+    })?;
     Ok(secret)
 }
 
@@ -448,9 +613,11 @@ async fn handle_channel_bytes(
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
-) -> Result<()> {
+) -> Result<(), ChannelError> {
     let Some(channel) = channels.get_mut(name) else {
-        anyhow::bail!("unknown channel");
+        return Err(ChannelError::Unknown {
+            channel: name.to_owned(),
+        });
     };
     if channel.noise.phase() == Phase::Handshake {
         channel.noise.receive_handshake_message(raw)?;
@@ -462,12 +629,21 @@ async fn handle_channel_bytes(
     }
     if channel.noise.phase() == Phase::Confirm {
         let confirm = channel.noise.receive_initiator_confirm(raw)?;
-        let jwt = std::str::from_utf8(&confirm.jwt).context("grant is not text")?;
+        let jwt = std::str::from_utf8(&confirm.jwt).map_err(|source| ChannelError::GrantText {
+            channel: name.to_owned(),
+            source,
+        })?;
         let claims = verifier
             .verify_channel_grant(jwt, &channel.account, &channel.machine, now_sec(), false)
-            .await?;
-        let cnf = artisan_account::cnf_public_key(&claims)
-            .map_err(|_cnf| anyhow::anyhow!("bad grant cnf"))?;
+            .await
+            .map_err(|source| ChannelError::Grant {
+                channel: name.to_owned(),
+                source,
+            })?;
+        let cnf = artisan_account::cnf_public_key(&claims).map_err(|source| ChannelError::Cnf {
+            channel: name.to_owned(),
+            source,
+        })?;
         channel.noise.accept_initiator_confirm(&cnf, &confirm)?;
         channel.claims = Some(claims);
         let reply = channel.noise.emit_responder_confirm(forge_cnf_secret)?;
@@ -475,12 +651,23 @@ async fn handle_channel_bytes(
         return Ok(());
     }
     let plaintext = channel.noise.receive_data(raw)?;
+    let channel_name = || name.to_owned();
     match channel_authorization(channel.claims.as_ref(), now_sec()) {
-        ChannelAuthorization::Unverified => anyhow::bail!("no verified grant on this channel"),
-        ChannelAuthorization::LacksExecuteScope => {
-            anyhow::bail!("grant lacks the forge:execute scope")
+        ChannelAuthorization::Unverified => {
+            return Err(ChannelError::Unverified {
+                channel: channel_name(),
+            });
         }
-        ChannelAuthorization::Expired => anyhow::bail!("grant expired mid-channel"),
+        ChannelAuthorization::LacksExecuteScope => {
+            return Err(ChannelError::LacksExecuteScope {
+                channel: channel_name(),
+            });
+        }
+        ChannelAuthorization::Expired => {
+            return Err(ChannelError::Expired {
+                channel: channel_name(),
+            });
+        }
         ChannelAuthorization::Granted => {}
     }
     if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
@@ -519,7 +706,7 @@ async fn dispatch_app_bytes(
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
-) -> Result<()> {
+) -> Result<(), ChannelError> {
     let request: Result<artisan_api::TunnelRequest, _> = serde_json::from_slice(plaintext);
     let Ok(request) = request else {
         let response =
@@ -560,7 +747,13 @@ async fn dispatch_app_bytes(
             let name = name.to_owned();
             tokio::spawn(async move {
                 let response = dispatch_request(&request, &router, &claims).await;
-                tx.send((name, StreamMsg::Response(response))).await.ok();
+                if tx
+                    .send((name.clone(), StreamMsg::Response(response)))
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(channel = %name, request = %request.id, "the Relay connection closed before the response");
+                }
             });
         }
     }
@@ -580,7 +773,7 @@ async fn subscribe(
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
-) -> Result<()> {
+) -> Result<(), ChannelError> {
     let Some(since) = crate::events::Since::from_events_path(&request.path) else {
         let response = artisan_api::TunnelResponse::error(&request.id, 400, "bad subscribe path");
         send_response(name, &response, channels, windows, sink).await?;
@@ -621,10 +814,11 @@ async fn subscribe(
         serde_json::json!({"$stream": {"stream": stream_id}}),
     );
     send_response(name, &response, channels, windows, sink).await?;
+    let pumped = stream_id.clone();
     let pump = tokio::spawn(async move {
-        crate::events::forward(&pump_app, &since, &sender)
-            .await
-            .ok();
+        if let Err(error) = crate::events::forward(&pump_app, &since, &sender).await {
+            tracing::debug!(channel = %pumped, error = diagnostics::chain(&error), "tunneled event stream ended");
+        }
     });
     let pump = tokio_util::task::AbortOnDropHandle::new(pump);
     let forwarder = tokio::spawn(forward_stream(
@@ -669,7 +863,9 @@ async fn forward_stream(
             return;
         }
     };
-    tx.send((name, end)).await.ok();
+    if tx.send((name.clone(), end)).await.is_err() {
+        tracing::debug!(channel = %name, "the Relay connection closed before the stream's end");
+    }
 }
 
 fn next_transfer_id() -> u64 {
@@ -685,17 +881,27 @@ async fn handle_stream_msg(
     streams: &mut HashMap<String, Stream>,
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
+) -> Result<(), ChannelError> {
     if !channels.contains_key(name) {
         streams.remove(name);
         return Ok(());
     }
+    let encoded = |what| {
+        move |source| ChannelError::Encode {
+            channel: name.to_owned(),
+            what,
+            source,
+        }
+    };
     let bytes = match msg {
         StreamMsg::Frame(bytes) => bytes,
-        StreamMsg::Response(response) => serde_json::to_vec(&response)?,
+        StreamMsg::Response(response) => {
+            serde_json::to_vec(&response).map_err(encoded("tunneled response"))?
+        }
         StreamMsg::End { reason } => {
             streams.remove(name);
-            serde_json::to_vec(&serde_json::json!({"$event": {"stream": name, "end": reason}}))?
+            serde_json::to_vec(&serde_json::json!({"$event": {"stream": name, "end": reason}}))
+                .map_err(encoded("stream end"))?
         }
         StreamMsg::Expired => {
             unreachable!("invariant: channel {name} closes on expiry before delivery")
@@ -710,15 +916,13 @@ async fn send_response(
     channels: &mut HashMap<String, Channel>,
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
-    send_payload(
-        name,
-        &serde_json::to_vec(response)?,
-        channels,
-        windows,
-        sink,
-    )
-    .await
+) -> Result<(), ChannelError> {
+    let bytes = serde_json::to_vec(response).map_err(|source| ChannelError::Encode {
+        channel: name.to_owned(),
+        what: "tunneled response",
+        source,
+    })?;
+    send_payload(name, &bytes, channels, windows, sink).await
 }
 
 async fn send_payload(
@@ -727,8 +931,12 @@ async fn send_payload(
     channels: &mut HashMap<String, Channel>,
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
-    let channel = channels.get_mut(name).context("unknown channel")?;
+) -> Result<(), ChannelError> {
+    let Some(channel) = channels.get_mut(name) else {
+        return Err(ChannelError::Unknown {
+            channel: name.to_owned(),
+        });
+    };
     if channel.noise.phase() != Phase::Open {
         return Ok(());
     }
@@ -738,7 +946,12 @@ async fn send_payload(
     }
     let transfer = format!("{name}:{}", next_transfer_id());
     for chunk in artisan_api::chunk_bytes(&transfer, bytes) {
-        let sealed = channel.noise.seal(&serde_json::to_vec(&chunk)?)?;
+        let chunk = serde_json::to_vec(&chunk).map_err(|source| ChannelError::Encode {
+            channel: name.to_owned(),
+            what: "tunnel chunk",
+            source,
+        })?;
+        let sealed = channel.noise.seal(&chunk)?;
         send_data(name, &sealed, windows, sink).await?;
     }
     Ok(())
@@ -749,14 +962,16 @@ async fn send_data(
     raw: &[u8],
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
+) -> Result<(), ChannelError> {
     let body = b64u_encode(raw);
     let window = windows
         .entry(name.to_owned())
         .or_insert_with(SendWindow::new);
     if window.should_park(body.len()) {
         if window.parked.len() >= SEND_PARKED_MAX {
-            anyhow::bail!("relay window full and park queue full");
+            return Err(ChannelError::WindowFull {
+                channel: name.to_owned(),
+            });
         }
         window.parked.push_back(body);
         return Ok(());
@@ -769,26 +984,22 @@ async fn send_data(
     Ok(())
 }
 
-async fn send_frame(name: &str, seq: u64, body: &str, sink: &mut WsSink) -> Result<()> {
-    use tokio_tungstenite::tungstenite::Message as Ws;
+async fn send_frame(name: &str, seq: u64, body: &str, sink: &mut WsSink) -> Result<(), FrameError> {
     let frame = artisan_account::DataFrame {
         v: 1,
         channel: name.to_owned(),
         seq,
         body: body.to_owned(),
     };
-    let text = serde_json::to_string(&ClientFrame::Data(frame))?;
-    sink.send(Ws::Text(text.into()))
-        .await
-        .context("send Relay data")?;
-    Ok(())
+    let text = encode_frame(name, "data", &ClientFrame::Data(frame))?;
+    send_text(sink, name, "data", text).await
 }
 
 async fn drain_parked(
     name: &str,
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
-) -> Result<()> {
+) -> Result<(), FrameError> {
     loop {
         let ready = windows.get(name).is_some_and(|window| {
             window
@@ -817,18 +1028,14 @@ async fn drain_parked(
     Ok(())
 }
 
-async fn send_ack(name: &str, seq: u64, sink: &mut WsSink) -> Result<()> {
-    use tokio_tungstenite::tungstenite::Message as Ws;
+async fn send_ack(name: &str, seq: u64, sink: &mut WsSink) -> Result<(), FrameError> {
     let frame = artisan_account::AckFrame {
         v: 1,
         channel: name.to_owned(),
         seq,
     };
-    let text = serde_json::to_string(&ClientFrame::Ack(frame))?;
-    sink.send(Ws::Text(text.into()))
-        .await
-        .context("send Relay ack")?;
-    Ok(())
+    let text = encode_frame(name, "ack", &ClientFrame::Ack(frame))?;
+    send_text(sink, name, "ack", text).await
 }
 
 async fn dispatch_request(

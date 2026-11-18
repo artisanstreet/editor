@@ -1,4 +1,3 @@
-use anyhow::{Context, Result, ensure};
 use artisan_api::Envelope;
 use axum::{
     Json, Router,
@@ -10,29 +9,54 @@ use axum::{
 };
 use forge_runs::{
     Hub,
-    runtime::{Command, Member, Overlap, PROTOCOL, Phase, Registry, Reply},
+    runtime::{
+        Command, Member, Overlap, PROTOCOL, Phase, Registry, RegistryFileError, Reply, ReplyFailure,
+    },
 };
 use futures::StreamExt as _;
 use std::{collections::HashSet, time::Duration};
 use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareGenerationError {
+    #[error("listen for generation control on loopback")]
+    Bind(#[source] std::io::Error),
+    #[error("read the generation control address")]
+    Address(#[source] std::io::Error),
+    #[error("draw the generation control token")]
+    Token(#[source] getrandom::Error),
+    #[error("register the generation serving {address}")]
+    Register {
+        address: std::net::SocketAddr,
+        #[source]
+        source: RegistryFileError,
+    },
+}
+
 pub async fn prepare(
     registry: &Registry,
     address: std::net::SocketAddr,
-) -> Result<(forge_runs::runtime::Generation, TcpListener)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+) -> Result<(forge_runs::runtime::Generation, TcpListener), PrepareGenerationError> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(PrepareGenerationError::Bind)?;
     let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret)?;
-    let generation = registry.register(Member {
-        id: String::new(),
-        control: format!("http://{}", listener.local_addr()?),
-        token: hex::encode(secret),
-        address,
-        pid: std::process::id(),
-        protocol: PROTOCOL,
-        schema: forge_store::Store::schema_version(),
-    })?;
+    getrandom::fill(&mut secret).map_err(PrepareGenerationError::Token)?;
+    let control = listener
+        .local_addr()
+        .map_err(PrepareGenerationError::Address)?;
+    let generation = registry
+        .register(Member {
+            id: String::new(),
+            control: format!("http://{control}"),
+            token: hex::encode(secret),
+            address,
+            pid: std::process::id(),
+            protocol: PROTOCOL,
+            schema: forge_store::Store::schema_version(),
+        })
+        .map_err(|source| PrepareGenerationError::Register { address, source })?;
     Ok((generation, listener))
 }
 
@@ -100,7 +124,7 @@ async fn control(
     };
     Json(match result {
         Ok(value) => Reply::Ok(value),
-        Err(error) => Reply::Error(format!("{error:#}")),
+        Err(error) => Reply::Error(ReplyFailure::Typed(error.failure())),
     })
     .into_response()
 }
@@ -151,7 +175,7 @@ pub fn start(
             .with_graceful_shutdown(server_stop.cancelled_owned())
             .await
         {
-            tracing::error!("generation control: {error:#}");
+            tracing::error!(error = %error, "generation control stopped");
         }
     });
     tasks.spawn(synchronize(hub.clone(), stop.clone(), tasks.clone()));
@@ -178,14 +202,30 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
             _tick = interval.tick() => {}
         }
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
-            tracing::warn!("synchronize generation store: {error:#}");
+            tracing::warn!(
+                generation = %generation.member.id,
+                error = diagnostics::chain(&error),
+                "synchronize generation store"
+            );
         }
         if let Err(error) = hub.follow_peers().await {
-            tracing::warn!("follow the other generations: {error:#}");
+            tracing::warn!(
+                generation = %generation.member.id,
+                error = diagnostics::chain(&error),
+                "follow the other generations"
+            );
         }
         hub.runtime_changed();
-        let Ok(members) = generation.registry.peers() else {
-            continue;
+        let members = match generation.registry.peers() {
+            Ok(members) => members,
+            Err(error) => {
+                tracing::debug!(
+                    generation = %generation.member.id,
+                    error = diagnostics::chain(&error),
+                    "list the generations to relay"
+                );
+                continue;
+            }
         };
         peers.retain(|id| members.iter().any(|member| member.id == *id));
         for member in members {
@@ -202,7 +242,7 @@ async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken) {
         tokio::select! {
             () = stop.cancelled() => break,
             result = relay(&hub, &member) => {
-                if let Err(error) = result { tracing::debug!(generation = %member.id, "live relay: {error:#}"); }
+                if let Err(error) = result { tracing::debug!(generation = %member.id, error = diagnostics::chain(&error), "live relay"); }
             }
         }
         tokio::select! {
@@ -284,31 +324,83 @@ async fn primary_services(
     }
 }
 
-async fn relay(hub: &Hub, member: &Member) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum RelayLiveError {
+    #[error("build the client that follows generation {generation}")]
+    Client {
+        generation: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("reach the live events of generation {generation}")]
+    Reach {
+        generation: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read the live events of generation {generation}")]
+    Read {
+        generation: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("a live frame of generation {generation} exceeds {bytes} bytes")]
+    FrameTooLarge { generation: String, bytes: usize },
+    #[error("decode a live event of generation {generation}")]
+    Decode {
+        generation: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+async fn relay(hub: &Hub, member: &Member) -> Result<(), RelayLiveError> {
+    let generation = || member.id.clone();
+    let reach = |source| RelayLiveError::Reach {
+        generation: generation(),
+        source,
+    };
     let response = reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(Duration::from_secs(2))
-        .build()?
+        .build()
+        .map_err(|source| RelayLiveError::Client {
+            generation: generation(),
+            source,
+        })?
         .get(format!("{}/live", member.control))
         .bearer_auth(&member.token)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(reach)?
+        .error_for_status()
+        .map_err(reach)?;
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
     hub.store().relay_live(artisan_api::Event::Reset);
     while let Some(chunk) = stream.next().await {
-        pending.extend_from_slice(&chunk?);
-        ensure!(
-            pending.len() <= 8 * 1024 * 1024,
-            "generation live frame exceeds budget"
-        );
+        pending.extend_from_slice(&chunk.map_err(|source| RelayLiveError::Read {
+            generation: generation(),
+            source,
+        })?);
+        if pending.len() > LIVE_FRAME_BYTES {
+            return Err(RelayLiveError::FrameTooLarge {
+                generation: generation(),
+                bytes: LIVE_FRAME_BYTES,
+            });
+        }
         while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-            let envelope: Envelope =
-                serde_json::from_slice(&pending[..end]).context("decode generation event")?;
+            let envelope: Envelope = serde_json::from_slice(&pending[..end]).map_err(|source| {
+                RelayLiveError::Decode {
+                    generation: generation(),
+                    source,
+                }
+            })?;
             hub.store().relay_live(envelope.event);
             pending.drain(..=end);
         }
     }
     Ok(())
 }
+
+const LIVE_FRAME_BYTES: usize = 8 * 1024 * 1024;

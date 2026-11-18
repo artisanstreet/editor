@@ -8,12 +8,12 @@ use artisan_api::{
 };
 use std::time::Duration;
 
-struct Device {
+pub(crate) struct Device {
     http: reqwest::Client,
     base: String,
 }
 
-fn device(forge_certificate: &str, address: SocketAddr) -> Device {
+pub(crate) fn device(forge_certificate: &str, address: SocketAddr) -> Device {
     let identity = Identity::generate("artisan-editor").unwrap();
     let config =
         tls::client_config(&identity, &tls::fingerprint_of(forge_certificate).unwrap()).unwrap();
@@ -28,9 +28,31 @@ fn device(forge_certificate: &str, address: SocketAddr) -> Device {
 }
 
 impl Device {
-    fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
+
+    pub(crate) const fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+}
+
+pub(crate) async fn paired(store: &Store, address: SocketAddr, name: &str) -> Device {
+    let invite = invite(store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: name.into(),
+    };
+    let paired = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert!(paired.status().is_success());
+    editor
 }
 
 async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
@@ -597,6 +619,76 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_editor_turns_computer_use_on_through_the_settings_route() {
+    let (_dir, address, store) = forge().await;
+    let editor = paired(&store, address, "computer use").await;
+    let on = editor
+        .http
+        .put(editor.url("/settings/computer_use"))
+        .json(&serde_json::json!(true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(on.status(), 204);
+    let state: State = editor
+        .http
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        state.settings.get("computer_use"),
+        Some(&serde_json::json!(true))
+    );
+    let garbled = editor
+        .http
+        .put(editor.url("/settings/computer_use"))
+        .json(&serde_json::json!("on"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(garbled.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_store_answers_content_reads_as_internal_while_bad_ranges_stay_client_errors() {
+    let (dir, address, store) = forge().await;
+    let editor = paired(&store, address, "broken store").await;
+    let source = artisan_api::ContentRef::from_text("a stored source").id;
+    let get = |path: String| {
+        let request = editor.http.get(editor.url(&path));
+        async move { request.send().await.unwrap() }
+    };
+    let bad_page = format!("/content/{source}/index?format=markdown&limit=0");
+    let rejected = get(bad_page.clone()).await;
+    assert_eq!(rejected.status(), 400);
+    let error: artisan_api::ApiError = rejected.json().await.unwrap();
+    assert_eq!(error.code, artisan_api::ErrorCode::BadRequest);
+    let disk = rusqlite::Connection::open(dir.path().join("forge").join("forge.sqlite3")).unwrap();
+    disk.execute_batch("ALTER TABLE content RENAME TO content_elsewhere")
+        .unwrap();
+    for path in [
+        format!("/content/{source}/index?format=markdown"),
+        format!("/content/{source}"),
+        format!("/content/{source}/records"),
+    ] {
+        let response = get(path.clone()).await;
+        let status = response.status();
+        let error: artisan_api::ApiError = response.json().await.unwrap();
+        assert_eq!(status, 500, "{path}: {}", error.message);
+        assert_eq!(error.code, artisan_api::ErrorCode::Internal, "{path}");
+    }
+    assert_eq!(get(bad_page).await.status(), 400);
+    assert_eq!(
+        get(format!("/content/{source}?limit=1")).await.status(),
+        400
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

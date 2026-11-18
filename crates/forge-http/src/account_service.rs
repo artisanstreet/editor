@@ -1,22 +1,13 @@
-//! What a Forge runs for its enrolled machine: config sync and the Relay
-//! connector. Enrollment is read once at startup; `ae account confirm`
-//! restarts a running Forge, so nothing here waits for it.
-
-use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
 
 const CONFIG_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(60);
-/// A connection that stayed up this long was healthy, so the next
-/// reconnect starts from the minimum backoff again.
 const RELAY_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.editor.artisan.st";
 
-/// `AST_RELAY_URL` when set and non-empty, the production Relay when unset,
-/// and `None` (connector off) when set but blank.
 fn relay_url() -> Option<String> {
     std::env::var("AST_RELAY_URL").map_or_else(
         |_| Some(DEFAULT_RELAY_URL.to_owned()),
@@ -24,7 +15,6 @@ fn relay_url() -> Option<String> {
     )
 }
 
-/// The issuer grants must carry: `AST_CORE_ISSUER`, else the Core base URL.
 fn core_issuer() -> String {
     std::env::var("AST_CORE_ISSUER")
         .ok()
@@ -43,7 +33,7 @@ pub async fn run(
         Ok(Some(identity)) => identity,
         Ok(None) => return,
         Err(error) => {
-            tracing::warn!("account services off: {error:#}");
+            tracing::warn!(error = diagnostics::chain(&error), "account services off");
             return;
         }
     };
@@ -72,8 +62,38 @@ pub async fn run(
     )
     .await
     {
-        tracing::warn!("Relay connector off: {error:#}");
+        tracing::warn!(
+            machine = %identity.machine_id,
+            error = diagnostics::chain(&error),
+            "Relay connector off"
+        );
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RelayLoopError {
+    #[error(transparent)]
+    Core(#[from] crate::core::BuildCoreClientError),
+    #[error(transparent)]
+    Verifier(#[from] crate::account_auth::BuildVerifierError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RelayTurnError {
+    #[error("issue a Relay grant for machine {machine}")]
+    Grant {
+        machine: String,
+        #[source]
+        source: crate::core::CoreCallError,
+    },
+    #[error("read the id of machine {machine}'s Relay grant")]
+    GrantId {
+        machine: String,
+        #[source]
+        source: artisan_account::UnverifiedGrantError,
+    },
+    #[error(transparent)]
+    Serve(#[from] crate::relay::ServeChannelError),
 }
 
 async fn relay_loop(
@@ -83,7 +103,7 @@ async fn relay_loop(
     secret: &[u8; 32],
     app: crate::routes::App,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
+) -> Result<(), RelayLoopError> {
     let core_base_url = crate::core::core_base_url(None);
     let client = crate::core::CoreClient::new(&core_base_url)?;
     let verifier = std::sync::Arc::new(crate::account_auth::GrantVerifier::new(
@@ -116,9 +136,17 @@ async fn relay_loop(
         }
         if let Err(error) = result {
             if failing {
-                tracing::debug!("Relay connection ended: {error:#}");
+                tracing::debug!(
+                    machine = machine_id,
+                    error = diagnostics::chain(&error),
+                    "Relay connection ended"
+                );
             } else {
-                tracing::warn!("Relay connection ended: {error:#}");
+                tracing::warn!(
+                    machine = machine_id,
+                    error = diagnostics::chain(&error),
+                    "Relay connection ended"
+                );
                 failing = true;
             }
         }
@@ -131,7 +159,6 @@ async fn relay_loop(
     Ok(())
 }
 
-/// One connection: a fresh machine grant, then serve until the socket ends.
 async fn relay_turn(
     client: &crate::core::CoreClient,
     ws_url: &str,
@@ -140,7 +167,7 @@ async fn relay_turn(
     secret: &[u8; 32],
     verifier: &std::sync::Arc<crate::account_auth::GrantVerifier>,
     app: &crate::routes::App,
-) -> Result<()> {
+) -> Result<(), RelayTurnError> {
     let issued = client
         .issue_machine_grant(
             machine_id,
@@ -151,8 +178,16 @@ async fn relay_turn(
             Some(machine_id),
         )
         .await
-        .context("issue a Relay grant")?;
-    let jti = artisan_account::unverified_jti(&issued.token).context("read the Relay grant id")?;
+        .map_err(|source| RelayTurnError::Grant {
+            machine: machine_id.to_owned(),
+            source,
+        })?;
+    let jti = artisan_account::unverified_jti(&issued.token).map_err(|source| {
+        RelayTurnError::GrantId {
+            machine: machine_id.to_owned(),
+            source,
+        }
+    })?;
     crate::relay::serve_channel(
         ws_url.to_owned(),
         issued.token,
@@ -164,5 +199,6 @@ async fn relay_turn(
         std::sync::Arc::clone(verifier),
         app.clone(),
     )
-    .await
+    .await?;
+    Ok(())
 }

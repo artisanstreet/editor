@@ -5,7 +5,7 @@ use artisan_api::{
 };
 use forge_engines::{EngineEvent, Harness, Input, LiveKind, Outcome, RunIo, Turn};
 use forge_runs::{
-    Hub,
+    ErrorClass, Hub,
     runtime::{self, Command, Registry},
 };
 use forge_store::Store;
@@ -127,7 +127,7 @@ async fn generation(
     registry: &Registry,
     name: &'static str,
     starts: Arc<AtomicUsize>,
-) -> Hub {
+) -> (Hub, std::net::SocketAddr) {
     let harness: Arc<dyn Harness> = Arc::new(Script { name, starts });
     let server = start_generation_with_harness(
         ServeConfig {
@@ -140,8 +140,9 @@ async fn generation(
     .await
     .unwrap();
     let hub = server.hub().clone();
+    let address = server.local_addr().unwrap();
     tokio::spawn(server.run());
-    hub
+    (hub, address)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -187,7 +188,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     let registry = Registry::open(data).unwrap();
     let old_starts = Arc::new(AtomicUsize::new(0));
     let new_starts = Arc::new(AtomicUsize::new(0));
-    let old = generation(data, &registry, "old", Arc::clone(&old_starts)).await;
+    let (old, _) = generation(data, &registry, "old", Arc::clone(&old_starts)).await;
     let old_member = old.generation().unwrap().member.clone();
     runtime::request(&old_member, &Command::Activate)
         .await
@@ -198,7 +199,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
         .unwrap();
     wait(&store, &threads[0], RunStatus::Running).await;
     let original = store.latest_run(&threads[0]).await.unwrap().unwrap();
-    let replacement = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
+    let (replacement, _) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
     let new_member = replacement.generation().unwrap().member.clone();
     assert_eq!(
         store.latest_run(&threads[0]).await.unwrap().unwrap().id,
@@ -279,11 +280,12 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
 }
 
 struct Overlap {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     store: Store,
     threads: Vec<ThreadId>,
     old: Hub,
     new: Hub,
+    new_address: std::net::SocketAddr,
     new_member: runtime::Member,
     new_starts: Arc<AtomicUsize>,
 }
@@ -324,7 +326,7 @@ async fn overlap(held: &[&str]) -> Overlap {
         );
     }
     let registry = Registry::open(data).unwrap();
-    let old = generation(data, &registry, "old", Arc::new(AtomicUsize::new(0))).await;
+    let (old, _) = generation(data, &registry, "old", Arc::new(AtomicUsize::new(0))).await;
     let old_member = old.generation().unwrap().member.clone();
     runtime::request(&old_member, &Command::Activate)
         .await
@@ -335,21 +337,122 @@ async fn overlap(held: &[&str]) -> Overlap {
         wait(&store, thread, RunStatus::Running).await;
     }
     let new_starts = Arc::new(AtomicUsize::new(0));
-    let new = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
+    let (new, new_address) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
     let new_member = new.generation().unwrap().member.clone();
     runtime::request(&new_member, &Command::Activate)
         .await
         .unwrap();
     registry.promote(&new_member).unwrap();
     Overlap {
-        _directory: directory,
+        directory,
         store,
         threads,
         old,
         new,
+        new_address,
         new_member,
         new_starts,
     }
+}
+
+async fn awaiting_question(store: &Store) -> artisan_api::PendingItem {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(item) = store.items_awaiting_user().await.unwrap().first() {
+                break item.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn overlapping(hub: &Hub) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !hub.generation().unwrap().overlapping() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_the_owning_generation_refuses_reaches_the_editor_as_a_conflict() {
+    let overlap = overlap(&["hold"]).await;
+    let question = awaiting_question(&overlap.store).await;
+    overlapping(&overlap.new).await;
+    let approval = artisan_api::Answer::Approval {
+        decision: artisan_api::Decision::AllowOnce,
+    };
+    let refused = overlap
+        .new
+        .answer(&question.id, approval.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, forge_runs::AnswerError::Peer { .. }),
+        "{}",
+        diagnostics::chain(&refused)
+    );
+    assert_eq!(refused.class(), ErrorClass::Conflict);
+    let editor = crate::tests::paired(&overlap.store, overlap.new_address, "routed answer").await;
+    let response = editor
+        .http()
+        .post(editor.url(&format!("/items/{}/answer", question.id)))
+        .json(&approval)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 409);
+    let body: artisan_api::ApiError = response.json().await.unwrap();
+    assert_eq!(
+        body.message,
+        format!("Item {} is not an approval request.", question.id)
+    );
+    runtime::request(&overlap.new_member, &Command::Stop)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_editor_reply_that_cannot_reach_the_other_generation_fails_instead_of_expiring() {
+    let overlap = overlap(&["hold"]).await;
+    overlapping(&overlap.new).await;
+    let editor = crate::tests::paired(&overlap.store, overlap.new_address, "editor reply").await;
+    let reply = artisan_api::EditorReply::Ok(serde_json::json!(null));
+    let unknown = editor
+        .http()
+        .post(editor.url("/editor/calls/no-such-call"))
+        .json(&reply)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 410);
+    let old = overlap.old.generation().unwrap().member.id.clone();
+    std::fs::write(
+        overlap
+            .directory
+            .path()
+            .join("runtime/generations")
+            .join(format!("{old}.json")),
+        "not a generation",
+    )
+    .unwrap();
+    let unreachable = editor
+        .http()
+        .post(editor.url("/editor/calls/no-such-call"))
+        .json(&reply)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unreachable.status(), 500);
+    let error: artisan_api::ApiError = unreachable.json().await.unwrap();
+    assert_eq!(error.code, artisan_api::ErrorCode::Internal);
+    runtime::request(&overlap.new_member, &Command::Stop)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,14 +1,9 @@
-//! `forge`: Artisan Forge. Serves its data folder to paired Editors until
-//! stopped. `ae forge start` runs it as a service; run by hand it logs to
-//! the terminal. On Windows it has no console (its autostart would open
-//! one), so it always logs to `forge.log` in its data folder.
 #![expect(
     clippy::print_stderr,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use anyhow::{Context, Result};
 use artisan_paths::App;
 use clap::Parser;
 #[cfg(unix)]
@@ -20,7 +15,6 @@ use std::path::PathBuf;
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
-/// `0.4.2 (abc1234, x86_64-unknown-linux-gnu)`
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -87,7 +81,7 @@ fn main() -> std::process::ExitCode {
     let recent = match init_tracing(cli.log.as_deref()) {
         Ok(recent) => recent,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!("error: {}", diagnostics::chain(&error));
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -112,14 +106,73 @@ fn main() -> std::process::ExitCode {
     match run(&cli, data_dir) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!("{error:#}");
-            eprintln!("error: {error:#}");
+            let chain = diagnostics::chain(&error);
+            tracing::error!(error = chain, "Forge stopped");
+            eprintln!("error: {chain}");
             std::process::ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: &Cli, data_dir: PathBuf) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum RunError {
+    #[error(transparent)]
+    Listen(#[from] forge_http::ConfiguredListenError),
+    #[error("start the async runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Start(#[from] forge_http::StartError),
+    #[error(transparent)]
+    Platform(#[from] PlatformError),
+}
+
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+enum PlatformError {
+    #[error("open the runtime registry in {}", data.display())]
+    Registry {
+        data: PathBuf,
+        #[source]
+        source: forge_runs::runtime::RegistryFileError,
+    },
+    #[error("a backend Forge needs --ready-file")]
+    NoReadyFile,
+    #[error("write the readiness file {}", path.display())]
+    Ready {
+        path: PathBuf,
+        #[source]
+        source: forge_runs::runtime::RegistryFileError,
+    },
+    #[error(transparent)]
+    Gateway(#[from] forge_http::upgrade::ServeError),
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, thiserror::Error)]
+enum PlatformError {
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {}", path.display())]
+    WritePid {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TracingError {
+    #[error(transparent)]
+    Open(#[from] diagnostics::OpenLogError),
+    #[error(transparent)]
+    Subscribe(#[from] diagnostics::SubscribeError),
+}
+
+fn run(cli: &Cli, data_dir: PathBuf) -> Result<(), RunError> {
     let listen = match cli.listen {
         Some(listen) => listen,
         None => forge_http::configured_listen(&data_dir)?,
@@ -156,33 +209,46 @@ fn run(cli: &Cli, data_dir: PathBuf) -> Result<()> {
         #[cfg(feature = "dhat-heap")]
         drop(profiler);
     };
-    let runtime = tokio::runtime::Runtime::new().context("start the async runtime")?;
+    let runtime = tokio::runtime::Runtime::new().map_err(RunError::Runtime)?;
     let config = forge_http::ServeConfig { data_dir, listen };
     #[cfg(unix)]
     {
         runtime.block_on(async move {
             if cli.backend {
-                let registry = forge_runs::runtime::Registry::open(&config.data_dir)?;
+                let registry =
+                    forge_runs::runtime::Registry::open(&config.data_dir).map_err(|source| {
+                        PlatformError::Registry {
+                            data: config.data_dir.clone(),
+                            source,
+                        }
+                    })?;
                 let server = forge_http::start_generation(config, registry).await?;
                 let ready = cli
                     .ready_file
                     .as_deref()
-                    .context("backend requires a readiness destination")?;
+                    .ok_or(PlatformError::NoReadyFile)?;
                 forge_http::upgrade::write(
                     ready,
                     &server
                         .hub()
                         .generation()
-                        .context("backend generation missing")?
+                        .expect("invariant: a backend Forge runs as a generation")
                         .member,
-                )?;
-                server.run_until(stop).await
+                )
+                .map_err(|source| PlatformError::Ready {
+                    path: ready.to_owned(),
+                    source,
+                })?;
+                server.run_until(stop).await;
+                Ok(())
             } else {
                 let log = cli
                     .log
                     .clone()
                     .map_or(Destination::Stderr, Destination::File);
-                forge_http::upgrade::serve(config, cli.handoff.clone(), log, stop).await
+                forge_http::upgrade::serve(config, cli.handoff.clone(), log, stop)
+                    .await
+                    .map_err(|error| PlatformError::from(error).into())
             }
         })
     }
@@ -196,14 +262,18 @@ fn run(cli: &Cli, data_dir: PathBuf) -> Result<()> {
 async fn serve_recorded(
     config: forge_http::ServeConfig,
     stop: impl Future<Output = ()>,
-) -> Result<()> {
+) -> Result<(), RunError> {
     let stop_file = config.data_dir.join("forge.stop");
     let pid_file = config.data_dir.join("forge.pid");
     let forge = forge_http::start(config).await?;
     remove_if_present(&stop_file)?;
-    std::fs::write(&pid_file, std::process::id().to_string())
-        .with_context(|| format!("write {}", pid_file.display()))?;
-    let outcome = forge
+    std::fs::write(&pid_file, std::process::id().to_string()).map_err(|source| {
+        PlatformError::WritePid {
+            path: pid_file.clone(),
+            source,
+        }
+    })?;
+    forge
         .run_until(async {
             tokio::select! {
                 () = stop => {},
@@ -212,15 +282,18 @@ async fn serve_recorded(
         })
         .await;
     remove_if_present(&pid_file)?;
-    outcome
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn remove_if_present(path: &std::path::Path) -> Result<()> {
+fn remove_if_present(path: &std::path::Path) -> Result<(), PlatformError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        Err(source) => Err(PlatformError::Remove {
+            path: path.to_owned(),
+            source,
+        }),
     }
 }
 
@@ -231,8 +304,6 @@ async fn stop_file_appears(path: &std::path::Path) {
     }
 }
 
-/// Resolves when the service manager or the terminal asks Forge to stop
-/// (SIGTERM, SIGINT, Ctrl+C), so live runs settle before it exits.
 async fn stop_requested() {
     #[cfg(unix)]
     {
@@ -261,7 +332,7 @@ async fn stop_requested() {
     tracing::info!("asked to stop");
 }
 
-fn init_tracing(log: Option<&std::path::Path>) -> Result<diagnostics::RecentLines> {
+fn init_tracing(log: Option<&std::path::Path>) -> Result<diagnostics::RecentLines, TracingError> {
     match log {
         Some(path) => {
             let file = diagnostics::log_file::open(path, LOG_LIMIT)?;

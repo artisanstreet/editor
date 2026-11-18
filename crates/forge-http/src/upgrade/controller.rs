@@ -1,5 +1,7 @@
+use super::process::{
+    CandidateError, HealthyError, InheritError, NotifyError, ReadyError, SpawnError,
+};
 use super::{Gateway, Outcome, Ready, Upgrade, process, read, write};
-use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     extract::State,
@@ -7,9 +9,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use forge_runs::runtime::{self, Command, PROTOCOL, Registry};
+use forge_runs::runtime::{self, Command, PROTOCOL, PeerError, Registry, RegistryFileError};
 use fs2::FileExt as _;
-use std::{fs::File, net::TcpListener as StdListener, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs::File, net::SocketAddr, net::TcpListener as StdListener, path::PathBuf, sync::Arc,
+    time::Duration,
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::Notify,
@@ -40,15 +45,16 @@ async fn health(State(service): State<Service>, headers: HeaderMap) -> Response 
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let mut gateway = service.gateway.clone();
-    if let Ok(Some(current)) = read::<Gateway>(&service.registry.root().join("gateway.json"))
-        && current.id == gateway.id
-    {
-        gateway = current;
+    match read::<Gateway>(&service.registry.root().join("gateway.json")) {
+        Ok(Some(current)) if current.id == gateway.id => gateway = current,
+        Ok(Some(_) | None) => {}
+        Err(error) => {
+            tracing::warn!(gateway = %gateway.id, error = diagnostics::chain(&error), "read the gateway record for a health check");
+        }
     }
-
     match process::healthy(&gateway.backend).await {
         Ok(()) => Json(Ready { gateway }).into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, diagnostics::chain(&error)).into_response(),
     }
 }
 
@@ -74,59 +80,181 @@ async fn upgrade(
     let result = replace(&service, upgrade).await;
     Json(match result {
         Ok(gateway) => Outcome::Ready(Box::new(gateway)),
-        Err(error) => Outcome::Error(format!("{error:#}")),
+        Err(error) => {
+            tracing::warn!(gateway = %service.gateway.id, error = diagnostics::chain(&error), "upgrade failed");
+            Outcome::Error(diagnostics::chain(&error))
+        }
     })
     .into_response()
 }
 
-async fn replace(service: &Service, upgrade: Upgrade) -> Result<Gateway> {
+#[derive(Debug, thiserror::Error)]
+pub enum ReplaceGatewayError {
+    #[error("take the upgrade lock")]
+    Lock(#[source] RegistryFileError),
+    #[error("another Forge upgrade is in progress")]
+    Busy,
+    #[error("read the active gateway record")]
+    Record(#[source] RegistryFileError),
+    #[error("the active gateway record is missing")]
+    RecordMissing,
+    #[error("gateway {gateway} was already replaced by {current}; retry the current gateway")]
+    Replaced { gateway: String, current: String },
+    #[error("hand the listener and lock of gateway {gateway} to the replacement")]
+    Handover {
+        gateway: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Candidate(#[from] CandidateError),
+    #[error("read the active generation")]
+    Active(#[source] RegistryFileError),
+    #[error("the active generation is missing")]
+    ActiveMissing,
+    #[error("commit replacement gateway {replacement}")]
+    Commit {
+        replacement: String,
+        #[source]
+        source: CommitError,
+    },
+    #[error("restore gateway {gateway} after replacement {replacement} failed to commit")]
+    Restore {
+        gateway: String,
+        replacement: String,
+        #[source]
+        source: RestoreError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CommitError {
+    #[error("activate generation {generation}")]
+    Activate {
+        generation: String,
+        #[source]
+        source: PeerError,
+    },
+    #[error(transparent)]
+    Notify(#[from] NotifyError),
+    #[error("record the replacement")]
+    Record(#[source] RegistryFileError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    #[error("promote generation {generation} again")]
+    Promote {
+        generation: String,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("record the previous gateway again")]
+    Record(#[source] RegistryFileError),
+    #[error(transparent)]
+    Notify(#[from] NotifyError),
+}
+
+async fn replace(service: &Service, upgrade: Upgrade) -> Result<Gateway, ReplaceGatewayError> {
     let _upgrade = service
         .registry
-        .upgrade_lock()?
-        .context("another Forge upgrade is in progress")?;
-    let current: Gateway = read(&service.registry.root().join("gateway.json"))?
-        .context("active gateway is missing")?;
-    ensure!(
-        current.id == service.gateway.id,
-        "this gateway was already replaced; retry the current gateway"
-    );
+        .upgrade_lock()
+        .map_err(ReplaceGatewayError::Lock)?
+        .ok_or(ReplaceGatewayError::Busy)?;
+    let current: Gateway = read(&service.registry.root().join("gateway.json"))
+        .map_err(ReplaceGatewayError::Record)?
+        .ok_or(ReplaceGatewayError::RecordMissing)?;
+    if current.id != service.gateway.id {
+        return Err(ReplaceGatewayError::Replaced {
+            gateway: service.gateway.id.clone(),
+            current: current.id,
+        });
+    }
+    let handover = |source| ReplaceGatewayError::Handover {
+        gateway: service.gateway.id.clone(),
+        source,
+    };
     let replacement = process::candidate(
         &service.registry,
         &service.data,
         &service.log,
         &upgrade.binary,
-        service.listener.try_clone()?,
-        service.lock.try_clone()?,
+        service.listener.try_clone().map_err(handover)?,
+        service.lock.try_clone().map_err(handover)?,
     )
     .await?;
     let previous = service
         .registry
-        .active()?
-        .context("active backend is missing")?;
-    let commit = async {
-        runtime::request(&replacement.backend, &Command::Activate).await?;
-        process::notify(replacement.pid)?;
-        write(&service.registry.root().join("gateway.json"), &replacement)?;
-        write(&service.data.join("forge.pid"), &replacement.pid)?;
-        service.registry.promote(&replacement.backend)?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = commit {
-        if let Err(reactivation) = runtime::request(&previous, &Command::Activate).await {
-            tracing::error!(generation = %previous.id, "hand new work back to the previous generation: {reactivation:#}");
+        .active()
+        .map_err(ReplaceGatewayError::Active)?
+        .ok_or(ReplaceGatewayError::ActiveMissing)?;
+    if let Err(failed) = commit(service, &replacement).await {
+        if let Err(source) = restore(service, &current, &previous, &replacement).await {
+            tracing::error!(
+                gateway = %current.id,
+                replacement = %replacement.id,
+                error = diagnostics::chain(&failed),
+                "replacement failed to commit"
+            );
+            return Err(ReplaceGatewayError::Restore {
+                gateway: current.id,
+                replacement: replacement.id,
+                source,
+            });
         }
-        service.registry.promote(&previous)?;
-        write(&service.registry.root().join("gateway.json"), &current)?;
-        write(&service.data.join("forge.pid"), &current.pid)?;
-        let restored = process::notify(current.pid);
-        super::stop_member(&replacement).await.ok();
-        restored?;
-        return Err(error);
+        return Err(ReplaceGatewayError::Commit {
+            replacement: replacement.id,
+            source: failed,
+        });
     }
-    runtime::request(&previous, &Command::Drain).await.ok();
+    if let Err(error) = runtime::request(&previous, &Command::Drain).await {
+        tracing::warn!(generation = %previous.id, error = diagnostics::chain(&error), "drain the previous generation");
+    }
     service.replaced.notify_one();
     Ok(replacement)
+}
+
+async fn commit(service: &Service, replacement: &Gateway) -> Result<(), CommitError> {
+    runtime::request(&replacement.backend, &Command::Activate)
+        .await
+        .map_err(|source| CommitError::Activate {
+            generation: replacement.backend.id.clone(),
+            source,
+        })?;
+    process::notify(replacement.pid)?;
+    write(&service.registry.root().join("gateway.json"), replacement)
+        .map_err(CommitError::Record)?;
+    write(&service.data.join("forge.pid"), &replacement.pid).map_err(CommitError::Record)?;
+    service
+        .registry
+        .promote(&replacement.backend)
+        .map_err(CommitError::Record)?;
+    Ok(())
+}
+
+async fn restore(
+    service: &Service,
+    current: &Gateway,
+    previous: &runtime::Member,
+    replacement: &Gateway,
+) -> Result<(), RestoreError> {
+    if let Err(error) = runtime::request(previous, &Command::Activate).await {
+        tracing::error!(generation = %previous.id, error = diagnostics::chain(&error), "hand new work back to the previous generation");
+    }
+    service
+        .registry
+        .promote(previous)
+        .map_err(|source| RestoreError::Promote {
+            generation: previous.id.clone(),
+            source,
+        })?;
+    write(&service.registry.root().join("gateway.json"), current).map_err(RestoreError::Record)?;
+    write(&service.data.join("forge.pid"), &current.pid).map_err(RestoreError::Record)?;
+    let restored = process::notify(current.pid);
+    if let Err(error) = super::stop_member(replacement).await {
+        tracing::warn!(gateway = %replacement.id, error = diagnostics::chain(&error), "stop the replacement gateway");
+    }
+    Ok(restored?)
 }
 
 struct Binding {
@@ -136,49 +264,122 @@ struct Binding {
     directory: PathBuf,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BindingError {
+    #[error("read the handoff {}", path.display())]
+    Handoff {
+        path: PathBuf,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("the handoff {} is missing or names no id", path.display())]
+    HandoffId { path: PathBuf },
+    #[error("the handoff {} has no folder", path.display())]
+    HandoffFolder { path: PathBuf },
+    #[error(transparent)]
+    Inherit(#[from] InheritError),
+    #[error("open the gateway lock {}", path.display())]
+    OpenLock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("another Forge gateway is running")]
+    Locked(#[source] std::io::Error),
+    #[error("list the generations")]
+    Peers(#[source] RegistryFileError),
+    #[error("retire the unused registry entries")]
+    Retire(#[source] RegistryFileError),
+    #[error(transparent)]
+    DataLock(#[from] crate::LockDataDirError),
+    #[error("migrate the store in {}", dir.display())]
+    Store {
+        dir: PathBuf,
+        #[source]
+        source: Box<forge_store::OpenStoreError>,
+    },
+    #[error("listen on {address}")]
+    Bind {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("make the listener on {address} non-blocking")]
+    NonBlocking {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create the binaries folder {}", path.display())]
+    Folder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 fn binding(
     config: &crate::ServeConfig,
     registry: &Registry,
     handoff: Option<PathBuf>,
-) -> Result<Binding> {
-    let (listener, lock, id, directory) = if let Some(handoff) = handoff {
-        let value: serde_json::Value =
-            read(&handoff)?.context("handoff configuration is missing")?;
-        let id = value["id"]
-            .as_str()
-            .context("handoff id missing")?
-            .to_owned();
-        let directory = handoff
-            .parent()
-            .context("handoff directory missing")?
-            .to_path_buf();
-        (
-            process::listener()?,
-            process::inherited_lock()?,
+) -> Result<Binding, BindingError> {
+    if let Some(handoff) = handoff {
+        let value: Option<serde_json::Value> =
+            read(&handoff).map_err(|source| BindingError::Handoff {
+                path: handoff.clone(),
+                source,
+            })?;
+        let Some(id) = value
+            .as_ref()
+            .and_then(|value| value["id"].as_str())
+            .map(str::to_owned)
+        else {
+            return Err(BindingError::HandoffId { path: handoff });
+        };
+        let Some(directory) = handoff.parent().map(std::path::Path::to_path_buf) else {
+            return Err(BindingError::HandoffFolder { path: handoff });
+        };
+        return Ok(Binding {
+            listener: process::listener()?,
+            lock: process::inherited_lock()?,
             id,
             directory,
-        )
-    } else {
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(registry.root().join("gateway.lock"))?;
-        lock.try_lock_exclusive()
-            .context("another Forge gateway is running")?;
-        if registry.peers()?.is_empty() {
-            registry.retire_unused()?;
-            let _exclusive = crate::lock_data_dir(&config.data_dir)?;
-            drop(forge_store::Store::open(&config.data_dir)?);
-        }
-        let listener = StdListener::bind(config.listen)?;
-        listener.set_nonblocking(true)?;
-        let id = artisan_api::ItemId::new().to_string();
-        let directory = registry.root().join("binaries").join(&id);
-        std::fs::create_dir(&directory)?;
-        (listener, lock, id, directory)
-    };
+        });
+    }
+    let lock_path = registry.root().join("gateway.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| BindingError::OpenLock {
+            path: lock_path,
+            source,
+        })?;
+    lock.try_lock_exclusive().map_err(BindingError::Locked)?;
+    if registry.peers().map_err(BindingError::Peers)?.is_empty() {
+        registry.retire_unused().map_err(BindingError::Retire)?;
+        let _exclusive = crate::lock_data_dir(&config.data_dir)?;
+        drop(
+            forge_store::Store::open(&config.data_dir).map_err(|source| BindingError::Store {
+                dir: config.data_dir.clone(),
+                source: Box::new(source),
+            })?,
+        );
+    }
+    let address = config.listen;
+    let listener =
+        StdListener::bind(address).map_err(|source| BindingError::Bind { address, source })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| BindingError::NonBlocking { address, source })?;
+    let id = artisan_api::ItemId::new().to_string();
+    let directory = registry.root().join("binaries").join(&id);
+    std::fs::create_dir(&directory).map_err(|source| BindingError::Folder {
+        path: directory.clone(),
+        source,
+    })?;
     Ok(Binding {
         listener,
         lock,
@@ -187,18 +388,173 @@ fn binding(
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    #[error("open the runtime registry in {}", data.display())]
+    Registry {
+        data: PathBuf,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("find this Forge executable")]
+    Binary(#[source] std::io::Error),
+    #[error(transparent)]
+    Binding(#[from] BindingError),
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+    #[error(transparent)]
+    Ready(#[from] ReadyError),
+    #[error(transparent)]
+    Healthy(#[from] HealthyError),
+    #[error("listen for gateway control on loopback")]
+    Control(#[source] std::io::Error),
+    #[error("draw the gateway token")]
+    Token(#[source] getrandom::Error),
+    #[error("read the address of gateway {gateway}")]
+    Address {
+        gateway: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("record gateway {gateway}")]
+    Record {
+        gateway: String,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("activate generation {generation}")]
+    Activate {
+        generation: String,
+        #[source]
+        source: PeerError,
+    },
+    #[error(transparent)]
+    Notify(#[from] NotifyError),
+    #[error("serve connections on gateway {gateway}")]
+    Listener {
+        gateway: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("accept a connection on gateway {gateway}")]
+    Accept {
+        gateway: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the maintenance of gateway {gateway} stopped")]
+    Maintenance {
+        gateway: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error(transparent)]
+    Drain(#[from] DrainError),
+    #[error("the control server of gateway {gateway} stopped")]
+    ControlTask {
+        gateway: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("serve the control endpoint of gateway {gateway}")]
+    ControlServe {
+        gateway: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectionError {
+    #[error("find the active generation")]
+    Active(#[source] RegistryFileError),
+    #[error("no generation is active")]
+    NoActive,
+    #[error("connect to generation {backend} at {address}")]
+    Connect {
+        backend: String,
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("forward a connection to generation {backend}")]
+    Forward {
+        backend: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+async fn forward(registry: Registry, mut client: TcpStream) -> Result<(), ConnectionError> {
+    let active = registry
+        .active()
+        .map_err(ConnectionError::Active)?
+        .ok_or(ConnectionError::NoActive)?;
+    let mut backend =
+        TcpStream::connect(active.address)
+            .await
+            .map_err(|source| ConnectionError::Connect {
+                backend: active.id.clone(),
+                address: active.address,
+                source,
+            })?;
+    tokio::io::copy_bidirectional(&mut client, &mut backend)
+        .await
+        .map_err(|source| ConnectionError::Forward {
+            backend: active.id,
+            source,
+        })?;
+    Ok(())
+}
+
+fn report(gateway: &str, finished: Result<Result<(), ConnectionError>, tokio::task::JoinError>) {
+    match finished {
+        Ok(Ok(())) => {}
+        Ok(Err(error @ ConnectionError::Forward { .. })) => {
+            tracing::debug!(
+                gateway,
+                error = diagnostics::chain(&error),
+                "gateway connection ended"
+            );
+        }
+        Ok(Err(
+            error @ (ConnectionError::Active(_)
+            | ConnectionError::NoActive
+            | ConnectionError::Connect { .. }),
+        )) => {
+            tracing::warn!(
+                gateway,
+                error = diagnostics::chain(&error),
+                "gateway connection failed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(gateway, error = %error, "gateway connection task stopped");
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one gateway lifetime from binding to drain"
+)]
 pub async fn serve(
     config: crate::ServeConfig,
     handoff: Option<PathBuf>,
     log: diagnostics::Destination,
     stop: impl Future<Output = ()>,
-) -> Result<()> {
+) -> Result<(), ServeError> {
     tokio::pin!(stop);
     if futures::poll!(&mut stop).is_ready() {
         return Ok(());
     }
-    let registry = Registry::open(&config.data_dir)?;
-    let binary = std::env::current_exe()?.canonicalize()?;
+    let registry = Registry::open(&config.data_dir).map_err(|source| ServeError::Registry {
+        data: config.data_dir.clone(),
+        source,
+    })?;
+    let binary = std::env::current_exe()
+        .and_then(|binary| binary.canonicalize())
+        .map_err(ServeError::Binary)?;
     let Binding {
         listener,
         lock,
@@ -214,20 +570,28 @@ pub async fn serve(
     let member = match process::ready(&mut backend, &directory.join("backend.json")).await {
         Ok(member) => member,
         Err(error) => {
-            process::terminate(&mut backend).ok();
-            return Err(error);
+            if let Err(stopped) = process::terminate(&mut backend) {
+                tracing::warn!(gateway = %id, error = diagnostics::chain(&stopped), "stop the backend that never became ready");
+            }
+            return Err(error.into());
         }
     };
     process::healthy(&member).await?;
-    let control = TcpListener::bind("127.0.0.1:0").await?;
+    let control = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(ServeError::Control)?;
     let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret)?;
+    getrandom::fill(&mut secret).map_err(ServeError::Token)?;
+    let address = |source| ServeError::Address {
+        gateway: id.clone(),
+        source,
+    };
     let gateway = Gateway {
         id: id.clone(),
         pid: std::process::id(),
-        control: format!("http://{}", control.local_addr()?),
+        control: format!("http://{}", control.local_addr().map_err(address)?),
         token: hex::encode(secret),
-        address: listener.local_addr()?,
+        address: listener.local_addr().map_err(address)?,
         binary,
         protocol: PROTOCOL,
         backend: member,
@@ -245,22 +609,38 @@ pub async fn serve(
         stop: stop_token.clone(),
     };
     let control_task = start_control(control, service.clone());
-    let inherited = directory.join("handoff.json").exists();
-    if inherited {
+    let record = |source| ServeError::Record {
+        gateway: id.clone(),
+        source,
+    };
+    if directory.join("handoff.json").exists() {
         write(
             &directory.join("ready.json"),
             &Ready {
                 gateway: gateway.clone(),
             },
-        )?;
+        )
+        .map_err(record)?;
     } else {
-        runtime::request(&gateway.backend, &Command::Activate).await?;
-        registry.promote(&gateway.backend)?;
-        write(&registry.root().join("gateway.json"), &gateway)?;
-        write(&config.data_dir.join("forge.pid"), &gateway.pid)?;
+        runtime::request(&gateway.backend, &Command::Activate)
+            .await
+            .map_err(|source| ServeError::Activate {
+                generation: gateway.backend.id.clone(),
+                source,
+            })?;
+        registry.promote(&gateway.backend).map_err(record)?;
+        write(&registry.root().join("gateway.json"), &gateway).map_err(record)?;
+        write(&config.data_dir.join("forge.pid"), &gateway.pid).map_err(record)?;
         process::notify(gateway.pid)?;
     }
-    let tcp = TcpListener::from_std(service.listener.try_clone()?)?;
+    let tcp = service
+        .listener
+        .try_clone()
+        .and_then(TcpListener::from_std)
+        .map_err(|source| ServeError::Listener {
+            gateway: id.clone(),
+            source,
+        })?;
     let maintenance_task = spawn_maintenance(service.clone(), stop_token.clone());
     backend.release();
     let mut connections = JoinSet::new();
@@ -270,22 +650,31 @@ pub async fn serve(
             ()=stop_token.cancelled()=>break false,
             ()=replaced.notified()=>break true,
             accepted=tcp.accept()=>{
-                let (mut client,_)=accepted?;let registry=registry.clone();
-                connections.spawn(async move {
-                    let active=registry.active()?.context("no active Forge generation")?;
-                    let mut backend=TcpStream::connect(active.address).await?;
-                    tokio::io::copy_bidirectional(&mut client,&mut backend).await?;
-                    anyhow::Ok(())
-                });
+                let (client, _) = accepted.map_err(|source| ServeError::Accept { gateway: id.clone(), source })?;
+                connections.spawn(forward(registry.clone(), client));
             }
-            Some(result)=connections.join_next(),if !connections.is_empty()=>{if let Err(error)=result {tracing::debug!("gateway connection: {error}");}}
+            Some(finished)=connections.join_next(),if !connections.is_empty()=>report(&id, finished),
         }
     };
     drop(tcp);
     stop_token.cancel();
-    maintenance_task.await?;
+    maintenance_task
+        .await
+        .map_err(|source| ServeError::Maintenance {
+            gateway: id.clone(),
+            source,
+        })?;
     drain(&service, replaced, &mut connections).await?;
-    control_task.await??;
+    control_task
+        .await
+        .map_err(|source| ServeError::ControlTask {
+            gateway: id.clone(),
+            source,
+        })?
+        .map_err(|source| ServeError::ControlServe {
+            gateway: id.clone(),
+            source,
+        })?;
     Ok(())
 }
 
@@ -300,7 +689,8 @@ fn spawn_maintenance(
                 tracing::warn!(
                     gateway = %maintenance.gateway.id,
                     backend = %maintenance.gateway.backend.id,
-                    "generation maintenance: {error:#}"
+                    error = diagnostics::chain(&error),
+                    "generation maintenance"
                 );
             }
         }
@@ -324,33 +714,66 @@ fn start_control(
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DrainError {
+    #[error("read the record of gateway {gateway}")]
+    Record {
+        gateway: String,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("list the generations gateway {gateway} drains")]
+    Peers {
+        gateway: String,
+        #[source]
+        source: RegistryFileError,
+    },
+}
+
+async fn request_logged(member: &runtime::Member, command: &Command) {
+    if let Err(error) = runtime::request(member, command).await {
+        tracing::debug!(generation = %member.id, error = diagnostics::chain(&error), "generation did not take the request");
+    }
+}
+
 async fn drain(
     service: &Service,
     replaced: bool,
-    connections: &mut JoinSet<Result<()>>,
-) -> Result<()> {
+    connections: &mut JoinSet<Result<(), ConnectionError>>,
+) -> Result<(), DrainError> {
+    let gateway = || service.gateway.id.clone();
+    let peers = |source| DrainError::Peers {
+        gateway: gateway(),
+        source,
+    };
     if !replaced {
-        if read::<Gateway>(&service.registry.root().join("gateway.json"))?
+        if read::<Gateway>(&service.registry.root().join("gateway.json"))
+            .map_err(|source| DrainError::Record {
+                gateway: gateway(),
+                source,
+            })?
             .is_some_and(|current| current.id == service.gateway.id)
         {
-            let peers = service.registry.peers()?;
-            for member in &peers {
-                runtime::request(member, &Command::Drain).await.ok();
+            let members = service.registry.peers().map_err(peers)?;
+            for member in &members {
+                request_logged(member, &Command::Drain).await;
             }
-            for member in &peers {
-                runtime::request(member, &Command::Stop).await.ok();
+            for member in &members {
+                request_logged(member, &Command::Stop).await;
             }
         } else {
-            runtime::request(&service.gateway.backend, &Command::Stop)
-                .await
-                .ok();
+            request_logged(&service.gateway.backend, &Command::Stop).await;
         }
     }
     while !connections.is_empty() {
         tokio::select! {
-            _result = connections.join_next() => {},
+            finished = connections.join_next() => {
+                if let Some(finished) = finished {
+                    report(&service.gateway.id, finished);
+                }
+            },
             () = tokio::time::sleep(Duration::from_millis(250)) => {
-                if !service.registry.peers()?.iter().any(|member| member.id == service.gateway.backend.id) {
+                if !service.registry.peers().map_err(peers)?.iter().any(|member| member.id == service.gateway.backend.id) {
                     connections.abort_all();
                 }
             }
@@ -359,20 +782,70 @@ async fn drain(
     Ok(())
 }
 
-async fn maintain(service: &Service) -> Result<()> {
-    if read::<Gateway>(&service.registry.root().join("gateway.json"))?
+#[derive(Debug, thiserror::Error)]
+pub enum MaintainError {
+    #[error("read the gateway record")]
+    Record(#[source] RegistryFileError),
+    #[error("take the upgrade lock")]
+    Lock(#[source] RegistryFileError),
+    #[error("list the generations")]
+    Peers(#[source] RegistryFileError),
+    #[error("read the active generation")]
+    Active(#[source] RegistryFileError),
+    #[error("the active generation is missing")]
+    ActiveMissing,
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+    #[error(transparent)]
+    Ready(#[from] ReadyError),
+    #[error(transparent)]
+    Healthy(#[from] HealthyError),
+    #[error("activate the restarted generation {generation}")]
+    Activate {
+        generation: String,
+        #[source]
+        source: PeerError,
+    },
+    #[error("record the restarted generation {generation}")]
+    Promote {
+        generation: String,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("prune {}", path.display())]
+    Prune {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read {} while pruning", path.display())]
+    PruneRead {
+        path: PathBuf,
+        #[source]
+        source: RegistryFileError,
+    },
+}
+
+async fn maintain(service: &Service) -> Result<(), MaintainError> {
+    if read::<Gateway>(&service.registry.root().join("gateway.json"))
+        .map_err(MaintainError::Record)?
         .is_none_or(|current| current.id != service.gateway.id)
     {
         return Ok(());
     }
-    let Some(_upgrade) = service.registry.upgrade_lock()? else {
+    let Some(_upgrade) = service
+        .registry
+        .upgrade_lock()
+        .map_err(MaintainError::Lock)?
+    else {
         return Ok(());
     };
-    let members = service.registry.peers()?;
+    let members = service.registry.peers().map_err(MaintainError::Peers)?;
     let active = service
         .registry
-        .active()?
-        .context("active generation missing")?;
+        .active()
+        .map_err(MaintainError::Active)?
+        .ok_or(MaintainError::ActiveMissing)?;
     if !members.iter().any(|member| member.id == active.id) {
         let ready = service
             .registry
@@ -382,13 +855,22 @@ async fn maintain(service: &Service) -> Result<()> {
             .join(format!("restart-{}.json", artisan_api::ItemId::new()));
         let mut child =
             process::spawn_backend(&service.gateway.binary, &service.data, &service.log, &ready)?;
-        let member = process::ready(&mut child, &ready).await?;
+        let member: runtime::Member = process::ready(&mut child, &ready).await?;
         process::healthy(&member).await?;
-        runtime::request(&member, &Command::Activate).await?;
-        service.registry.promote(&member)?;
+        runtime::request(&member, &Command::Activate)
+            .await
+            .map_err(|source| MaintainError::Activate {
+                generation: member.id.clone(),
+                source,
+            })?;
+        let promote = |source| MaintainError::Promote {
+            generation: member.id.clone(),
+            source,
+        };
+        service.registry.promote(&member).map_err(promote)?;
         let mut gateway = service.gateway.clone();
-        gateway.backend = member;
-        write(&service.registry.root().join("gateway.json"), &gateway)?;
+        gateway.backend = member.clone();
+        write(&service.registry.root().join("gateway.json"), &gateway).map_err(promote)?;
         child.release();
         return Ok(());
     }
@@ -396,30 +878,40 @@ async fn maintain(service: &Service) -> Result<()> {
         if member.id == active.id {
             continue;
         }
-        runtime::request(member, &Command::Drain).await.ok();
-        runtime::request(member, &Command::Retire).await.ok();
+        request_logged(member, &Command::Drain).await;
+        request_logged(member, &Command::Retire).await;
     }
-    prune(service, &members)?;
-    Ok(())
+    prune(service, &members)
 }
 
-fn prune(service: &Service, members: &[runtime::Member]) -> Result<()> {
+fn prune(service: &Service, members: &[runtime::Member]) -> Result<(), MaintainError> {
+    let failed = |path: &std::path::Path| {
+        let path = path.to_owned();
+        move |source| MaintainError::Prune { path, source }
+    };
+    let binaries = service.registry.root().join("binaries");
     let mut retired = Vec::new();
-    for entry in std::fs::read_dir(service.registry.root().join("binaries"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() || entry.file_name() == service.gateway.id.as_str() {
+    for entry in std::fs::read_dir(&binaries).map_err(failed(&binaries))? {
+        let entry = entry.map_err(failed(&binaries))?;
+        let directory = entry.path();
+        if !entry.file_type().map_err(failed(&directory))?.is_dir()
+            || entry.file_name() == service.gateway.id.as_str()
+        {
             continue;
         }
-        let directory = entry.path();
         let mut live = false;
-        for metadata in std::fs::read_dir(&directory)? {
-            let path = metadata?.path();
+        for metadata in std::fs::read_dir(&directory).map_err(failed(&directory))? {
+            let path = metadata.map_err(failed(&directory))?.path();
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
             if (name == "backend.json" || name.starts_with("restart-"))
-                && read::<runtime::Member>(&path)?
+                && read::<runtime::Member>(&path)
+                    .map_err(|source| MaintainError::PruneRead {
+                        path: path.clone(),
+                        source,
+                    })?
                     .is_some_and(|candidate| members.iter().any(|member| member.id == candidate.id))
             {
                 live = true;
@@ -427,12 +919,16 @@ fn prune(service: &Service, members: &[runtime::Member]) -> Result<()> {
             }
         }
         if !live {
-            retired.push((entry.metadata()?.modified()?, directory));
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .map_err(failed(&directory))?;
+            retired.push((modified, directory));
         }
     }
     retired.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, directory) in retired.into_iter().skip(2) {
-        std::fs::remove_dir_all(directory)?;
+        std::fs::remove_dir_all(&directory).map_err(failed(&directory))?;
     }
     Ok(())
 }

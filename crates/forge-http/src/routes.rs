@@ -1,12 +1,10 @@
-//! JSON routes. See `artisan_api::request` for the list.
-
 use crate::events;
 use crate::repository::{Icon, IconSource};
-use anyhow::Context as _;
 use artisan_api::{
-    Answer, ApiError, BlobHash, BlobRef, CreateProject, CreateThread, DirEntry, DirListing,
-    EngineId, EngineStatus, ErrorCode, Item, ItemId, ItemsPage, ItemsQuery, PairRequest,
-    PairResponse, Project, ProjectId, SendMessage, State, Thread, ThreadId, UpdateThread,
+    Answer, ApiError, BlobHash, BlobRef, ContentId, CreateProject, CreateThread, DirEntry,
+    DirListing, EngineId, EngineStatus, ErrorCode, Item, ItemId, ItemsPage, ItemsQuery,
+    PairRequest, PairResponse, Project, ProjectId, SendMessage, State, Thread, ThreadId,
+    UpdateThread,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State as AppState};
@@ -15,9 +13,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use forge_runs::Hub;
+use forge_runs::{ErrorClass, Hub};
 use serde::Deserialize;
 use sha2::Digest as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::CompressionLevel;
 use tower_http::compression::CompressionLayer;
@@ -34,15 +33,11 @@ pub struct App {
     pub icons: std::sync::Arc<crate::repository::Icons>,
 }
 
-/// The connection's client certificate (base64 DER).
 #[derive(Clone)]
 pub struct Client {
     pub certificate: forge_store::DeviceCertificate,
 }
 
-/// A Core-verified grant authorizing one tunneled channel. Inserted only
-/// by the Relay connector after independent JWT verification at channel
-/// confirmation; never accepted from the network directly.
 #[derive(Clone)]
 pub struct TunnelAuth {
     pub claims: artisan_account::GrantClaims,
@@ -130,9 +125,6 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// zstd for clients that ask for it: the Editor does on remote hosts, where
-/// item pages and content ranges shrink 3-9x. Small bodies, images and the
-/// event stream stay as they are.
 fn compression() -> CompressionLayer<impl Predicate> {
     CompressionLayer::new()
         .quality(CompressionLevel::Fastest)
@@ -144,9 +136,6 @@ fn compression() -> CompressionLayer<impl Predicate> {
         )
 }
 
-/// Devices pair with certificates; tunneled Relay calls instead carry a
-/// Core-verified grant (checked at channel confirmation). Both identify
-/// the caller; neither path weakens the other.
 async fn authorize(
     AppState(app): AppState<App>,
     client: Option<Extension<Client>>,
@@ -155,9 +144,6 @@ async fn authorize(
     next: Next,
 ) -> Response {
     if let Some(Extension(tunnel)) = tunnel {
-        // Verified at channel confirmation (signature, iss/aud, binding);
-        // re-check scope and expiry on every call. Core times are seconds;
-        // artisan_api::now() is millis.
         let now_sec = artisan_api::now().div_euclid(1000);
         let live = tunnel.claims.exp > now_sec
             && tunnel
@@ -180,7 +166,7 @@ async fn authorize(
         );
     }
     let Some(Extension(client)) = client else {
-        return internal(anyhow::anyhow!("missing client certificate"));
+        return Failure::from(Unauthorized::NoCertificate).into_response();
     };
     match app.hub.store().is_authorized(&client.certificate) {
         Ok(Some(device)) => {
@@ -192,149 +178,357 @@ async fn authorize(
             ErrorCode::Unauthorized,
             "this device is not paired with Forge",
         ),
-        Err(failure) => internal(anyhow::Error::new(failure)),
+        Err(failure) => Failure::from(failure).into_response(),
     }
 }
 
-pub struct Failure(anyhow::Error, StatusCode, ErrorCode);
+type Status = (StatusCode, ErrorCode);
 
-impl From<anyhow::Error> for Failure {
-    fn from(error: anyhow::Error) -> Self {
-        let (status, code) = classify(&error);
-        Self(error, status, code)
+const fn classified(class: ErrorClass) -> Status {
+    match class {
+        ErrorClass::NotFound => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+        ErrorClass::Conflict => (StatusCode::CONFLICT, ErrorCode::Conflict),
+        ErrorClass::BadRequest => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+        ErrorClass::Internal => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
     }
 }
 
-fn classify(error: &anyhow::Error) -> (StatusCode, ErrorCode) {
-    let not_found = (StatusCode::NOT_FOUND, ErrorCode::NotFound);
-    let conflict = (StatusCode::CONFLICT, ErrorCode::Conflict);
-    let bad_request = (StatusCode::BAD_REQUEST, ErrorCode::BadRequest);
-    let internal = (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal);
-    for cause in error.chain() {
-        if let Some(rejected) = cause.downcast_ref::<forge_store::CreateThreadError>() {
-            return match rejected {
-                forge_store::CreateThreadError::ProjectNotFound { .. }
-                | forge_store::CreateThreadError::ParentNotFound { .. } => not_found,
-                forge_store::CreateThreadError::ProjectRemoved { .. } => conflict,
-                forge_store::CreateThreadError::AgentWithoutParent { .. }
-                | forge_store::CreateThreadError::AgentNotInParent { .. }
-                | forge_store::CreateThreadError::InvalidConfig { .. } => bad_request,
-                forge_store::CreateThreadError::Storage { .. } => internal,
-            };
+const INTERNAL: Status = classified(ErrorClass::Internal);
+const BAD_REQUEST: Status = classified(ErrorClass::BadRequest);
+
+const fn rejected_unless_internal(class: ErrorClass) -> Status {
+    match class {
+        ErrorClass::Internal => INTERNAL,
+        ErrorClass::NotFound | ErrorClass::Conflict | ErrorClass::BadRequest => BAD_REQUEST,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Missing {
+    #[error("thread {0} not found")]
+    Thread(ThreadId),
+    #[error("project {0} not found")]
+    Project(ProjectId),
+    #[error("item {0} not found")]
+    Item(ItemId),
+    #[error("agent {0} not found")]
+    Agent(ItemId),
+    #[error("agent {agent} in thread {thread} not found")]
+    AgentInThread { thread: ThreadId, agent: ItemId },
+    #[error("text source {0} not found")]
+    TextSource(ContentId),
+    #[error("canonical collection {0} not found")]
+    Collection(ContentId),
+    #[error("blob {0} not found")]
+    Blob(BlobHash),
+    #[error("{path} not found")]
+    Resource { path: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Rejected {
+    #[error("{path} is not a directory on this host")]
+    NotADirectory { path: String },
+    #[error("invalid source identity or range limit for {content}")]
+    ContentQuery { content: ContentId },
+    #[error("invalid collection identity or range limit for {content}")]
+    CollectionQuery { content: ContentId },
+    #[error(
+        "setting {key} is {} or {}",
+        artisan_api::CLAUDE_CODE,
+        artisan_api::CLAUDE_AI
+    )]
+    Transport { key: String },
+    #[error(transparent)]
+    SettingValue(#[from] artisan_api::SettingValueError),
+    #[error("setting {key} is not one clients can change")]
+    UnknownSetting { key: String },
+    #[error("setting {key} is saved through {route}")]
+    OwnRoute { key: String, route: &'static str },
+    #[error("{engine} model {model} is unavailable")]
+    ModelUnavailable { engine: EngineId, model: String },
+    #[error("config for {sent} sent to {engine}")]
+    ConfigEngine { engine: EngineId, sent: EngineId },
+    #[error("the {engine} config names no model")]
+    ConfigWithoutModel { engine: EngineId },
+    #[error("only Claude signs in to claude.ai, not {engine}")]
+    ClaudeAiEngine { engine: EngineId },
+    #[error("host home directory unavailable; provide a path")]
+    NoHome,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Unauthorized {
+    #[error("the connection carries no client certificate")]
+    NoCertificate,
+    #[error("that pairing code is wrong or expired")]
+    PairCode,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ListDirectoryError {
+    #[error("wait for a directory listing slot")]
+    Slot(#[source] tokio::sync::AcquireError),
+    #[error("run the listing of {}", path.display())]
+    Task {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("list {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read an entry in {}", path.display())]
+    Entry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("inspect {entry}")]
+    Inspect {
+        entry: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the listing of {} exceeds 32768 entries or 4 MiB", path.display())]
+    TooLarge { path: PathBuf },
+}
+
+impl ListDirectoryError {
+    const fn status(&self) -> Status {
+        match self {
+            Self::Slot(_) | Self::Task { .. } => INTERNAL,
+            Self::Read { .. }
+            | Self::Entry { .. }
+            | Self::Inspect { .. }
+            | Self::TooLarge { .. } => BAD_REQUEST,
         }
-        if cause.is::<forge_store::ItemNotFound>() {
-            return not_found;
-        }
-    }
-    if forge_runs::refusal(error).is_some() {
-        conflict
-    } else {
-        internal
     }
 }
 
-macro_rules! store_failures {
-    ($($error:ident),* $(,)?) => {
+#[derive(Debug, thiserror::Error)]
+#[error("read blob {hash} at {}", path.display())]
+pub struct ReadBlobError {
+    hash: BlobHash,
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+const fn source_index_class(error: &forge_store::SourceIndexError) -> ErrorClass {
+    use forge_store::SourceIndexError as Index;
+    match error {
+        Index::InvalidIdentity { .. }
+        | Index::PageLimit { .. }
+        | Index::OffsetPastEnd { .. }
+        | Index::Markdown { .. }
+        | Index::MetadataTooLarge { .. } => ErrorClass::BadRequest,
+        Index::Content(content) => forge_runs::error::content(content),
+        Index::IdentityMismatch { .. }
+        | Index::MissingRecord { .. }
+        | Index::SelfOwned { .. }
+        | Index::TopologyGap { .. }
+        | Index::TopologyOrdinals { .. }
+        | Index::Storage(_) => ErrorClass::Internal,
+    }
+}
+
+const fn threads_page_status(failure: &forge_store::ThreadsPageFailure) -> Status {
+    match failure {
+        forge_store::ThreadsPageFailure::SearchTooLong { .. } => BAD_REQUEST,
+        forge_store::ThreadsPageFailure::Storage(_) => INTERNAL,
+    }
+}
+
+const fn sign_in_start(error: &forge_runs::McpSignInStartError) -> Status {
+    use forge_runs::McpSignInStartError as Start;
+    match error {
+        Start::Store(store) => classified(store.class()),
+        Start::UnknownServer { .. } => classified(ErrorClass::NotFound),
+        Start::NotHttp { .. }
+        | Start::Probe { .. }
+        | Start::Open { .. }
+        | Start::NeedsToken { .. }
+        | Start::Registration { .. }
+        | Start::Removed { .. }
+        | Start::Random { .. } => classified(ErrorClass::Conflict),
+    }
+}
+
+const fn sign_in_finish(error: &forge_runs::McpSignInFinishError) -> Status {
+    use forge_runs::McpSignInFinishError as Finish;
+    match error {
+        Finish::Store(store) => classified(store.class()),
+        Finish::Expired
+        | Finish::SignedOut { .. }
+        | Finish::Exchange { .. }
+        | Finish::Removed { .. } => classified(ErrorClass::Conflict),
+    }
+}
+
+const fn put_blob_status(failure: &forge_store::BlobFailure) -> Status {
+    use forge_store::BlobFailure as Blob;
+    match failure {
+        Blob::Rejected(_) => BAD_REQUEST,
+        Blob::TooManyPixels { .. }
+        | Blob::Image(_)
+        | Blob::WebPEncoder
+        | Blob::WebPEncode { .. }
+        | Blob::Io { .. }
+        | Blob::Storage(_) => INTERNAL,
+    }
+}
+
+macro_rules! route_errors {
+    ($($variant:ident($error:ty) => $status:expr,)*) => {
+        #[derive(Debug, thiserror::Error)]
+        pub enum RouteError {
+            $(
+                #[error(transparent)]
+                $variant(#[from] $error),
+            )*
+        }
+
+        impl RouteError {
+            fn status(&self) -> Status {
+                match self {
+                    $(Self::$variant(error) => {
+                        let status: fn(&$error) -> Status = $status;
+                        status(error)
+                    })*
+                }
+            }
+
+            fn inner(&self) -> &(dyn std::error::Error + 'static) {
+                match self {
+                    $(Self::$variant(error) => error,)*
+                }
+            }
+        }
+
         $(
-            impl From<forge_store::$error> for Failure {
-                fn from(error: forge_store::$error) -> Self {
-                    anyhow::Error::new(error).into()
+            impl From<$error> for Failure {
+                fn from(error: $error) -> Self {
+                    Self::new(RouteError::$variant(error))
                 }
             }
         )*
     };
 }
 
-store_failures!(
-    AwaitingItemsError,
-    CreateProjectError,
-    CreateThreadError,
-    InspectorError,
-    MarkUnreadError,
-    PairDeviceError,
-    PutBlobError,
-    ReadDraftError,
-    ReadItemError,
-    ReadProjectError,
-    ReadThreadError,
-    RemoveProjectError,
-    SetDefaultModelError,
-    SetDraftError,
-    SetModelConfigError,
-    SetModelGroupError,
-    SetSettingError,
-    SettleThreadError,
-    StateError,
-    TextSearchError,
-    TranscriptPageError,
-    TranscriptRowsError,
-    WorkPageError,
-);
-
-impl From<forge_runs::McpStoreError> for Failure {
-    fn from(error: forge_runs::McpStoreError) -> Self {
-        Self(
-            error.into(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-        )
-    }
+route_errors! {
+    Missing(Missing) => |_| classified(ErrorClass::NotFound),
+    Rejected(Rejected) => |_| BAD_REQUEST,
+    Unauthorized(Unauthorized) => |error| match error {
+        Unauthorized::NoCertificate => INTERNAL,
+        Unauthorized::PairCode => (StatusCode::UNAUTHORIZED, ErrorCode::Unauthorized),
+    },
+    ListDirectory(ListDirectoryError) => ListDirectoryError::status,
+    ReadBlob(ReadBlobError) => |_| INTERNAL,
+    Authorize(forge_store::AuthorizeError) => |_| INTERNAL,
+    AwaitingItems(forge_store::AwaitingItemsError) => |_| INTERNAL,
+    CreateProject(forge_store::CreateProjectError) => |error| classified(forge_runs::error::create_project(&error.cause)),
+    CreateThread(forge_store::CreateThreadError) => |error| classified(forge_runs::error::create_thread(error)),
+    Inspector(forge_store::InspectorError) => |error| classified(forge_runs::error::content(&error.cause)),
+    MarkUnread(forge_store::MarkUnreadError) => |error| classified(forge_runs::error::write(&error.cause)),
+    PairDevice(forge_store::PairDeviceError) => |_| INTERNAL,
+    PutBlob(forge_store::PutBlobError) => |error| put_blob_status(&error.cause),
+    ReadDraft(forge_store::ReadDraftError) => |_| INTERNAL,
+    ReadItem(forge_store::ReadItemError) => |_| INTERNAL,
+    ReadProject(forge_store::ReadProjectError) => |_| INTERNAL,
+    ReadThread(forge_store::ReadThreadError) => |_| INTERNAL,
+    RemoveProject(forge_store::RemoveProjectError) => |_| INTERNAL,
+    SetDefaultModel(forge_store::SetDefaultModelError) => |error| classified(forge_runs::error::setting(&error.cause)),
+    SetDraft(forge_store::SetDraftError) => |error| classified(forge_runs::error::setting(&error.cause)),
+    SetModelConfig(forge_store::SetModelConfigError) => |error| classified(forge_runs::error::setting(&error.cause)),
+    SetModelGroup(forge_store::SetModelGroupError) => |error| classified(forge_runs::error::write(&error.cause)),
+    SetSetting(forge_store::SetSettingError) => |error| classified(forge_runs::error::setting(&error.cause)),
+    SettleThread(forge_store::SettleThreadError) => |error| classified(forge_runs::error::write(&error.cause)),
+    State(forge_store::StateError) => |_| INTERNAL,
+    TextSearch(forge_store::TextSearchError) => |_| INTERNAL,
+    TranscriptPage(forge_store::TranscriptPageError) => |_| INTERNAL,
+    TranscriptRows(forge_store::TranscriptRowsError) => |_| INTERNAL,
+    WorkPage(forge_store::WorkPageError) => |_| INTERNAL,
+    ThreadsPage(forge_store::ThreadsPageError) => |error| threads_page_status(&error.cause),
+    ContentRange(forge_store::ContentRangeError) => |error| classified(forge_runs::error::content(&error.cause)),
+    CollectionRange(forge_store::CollectionRangeError) => |error| classified(forge_runs::error::content(&error.cause)),
+    SourceIndex(forge_store::SourceIndexPageError) => |error| classified(source_index_class(&error.cause)),
+    MutateMcp(forge_store::MutateMcpError) => |error| rejected_unless_internal(forge_runs::error::setting(&error.cause)),
+    AdoptSkill(forge_runs::AdoptSkillError) => |error| classified(error.class()),
+    DiscardSkill(forge_runs::DiscardSkillError) => |error| classified(error.class()),
+    EnabledSkills(forge_runs::EnabledSkillsError) => |error| classified(error.class()),
+    GlobalPrompt(forge_runs::GlobalPromptError) => |error| classified(error.class()),
+    MarketplaceInstall(forge_runs::MarketplaceInstallError) => |error| classified(error.class()),
+    MarketplaceSearch(forge_runs::MarketplaceSearchError) => |error| classified(error.class()),
+    ResolveGlobalPrompt(forge_runs::ResolveGlobalPromptError) => |error| classified(error.class()),
+    SaveGlobalPrompt(forge_runs::SaveGlobalPromptError) => |error| classified(error.class()),
+    SetSkillEnabled(forge_runs::SetSkillEnabledError) => |error| classified(error.class()),
+    SkillCatalog(forge_runs::SkillCatalogError) => |error| classified(error.class()),
+    Resource(forge_runs::resources::ResourceError) => |error| classified(error.class()),
+    McpStore(forge_runs::McpStoreError) => |error| classified(error.class()),
+    McpSignInStart(forge_runs::McpSignInStartError) => sign_in_start,
+    McpSignInFinish(forge_runs::McpSignInFinishError) => sign_in_finish,
+    Send(forge_runs::SendError) => |error| classified(error.class()),
+    Answer(forge_runs::AnswerError) => |error| classified(error.class()),
+    Continue(forge_runs::ContinueError) => |error| classified(error.class()),
+    Update(forge_runs::UpdateError) => |error| classified(error.class()),
+    ClearGoal(forge_runs::ClearGoalError) => |error| classified(error.class()),
+    Cancel(forge_runs::CancelError) => |error| classified(error.class()),
+    EditorReply(forge_runs::runtime::EditorReplyError) => |_| INTERNAL,
+    ValidateVersion(forge_engines::ValidateVersionError) => |_| BAD_REQUEST,
+    NotInstalled(forge_engines::NotInstalled) => |_| BAD_REQUEST,
+    SubmitCode(forge_engines::SubmitCodeError) => |_| BAD_REQUEST,
+    ClaudeAiSignIn(forge_engines::ClaudeAiSignInError) => |_| BAD_REQUEST,
+    ClaudeAiSignOut(forge_engines::claudeai::RemoveSessionError) => |_| BAD_REQUEST,
+    ListVersions(forge_engines::ListVersionsError) => |_| BAD_REQUEST,
 }
 
-impl From<forge_runs::McpSignInStartError> for Failure {
-    fn from(error: forge_runs::McpSignInStartError) -> Self {
-        match error {
-            forge_runs::McpSignInStartError::Store(store) => store.into(),
-            forge_runs::McpSignInStartError::UnknownServer { .. } => {
-                Self(error.into(), StatusCode::NOT_FOUND, ErrorCode::NotFound)
-            }
-            forge_runs::McpSignInStartError::NotHttp { .. }
-            | forge_runs::McpSignInStartError::Probe { .. }
-            | forge_runs::McpSignInStartError::Open { .. }
-            | forge_runs::McpSignInStartError::NeedsToken { .. }
-            | forge_runs::McpSignInStartError::Registration { .. }
-            | forge_runs::McpSignInStartError::Removed { .. }
-            | forge_runs::McpSignInStartError::Random { .. } => {
-                Self(error.into(), StatusCode::CONFLICT, ErrorCode::Conflict)
-            }
-        }
-    }
+pub struct Failure {
+    status: Status,
+    error: Box<RouteError>,
 }
 
-impl From<forge_runs::McpSignInFinishError> for Failure {
-    fn from(error: forge_runs::McpSignInFinishError) -> Self {
-        match error {
-            forge_runs::McpSignInFinishError::Store(store) => store.into(),
-            forge_runs::McpSignInFinishError::Expired
-            | forge_runs::McpSignInFinishError::SignedOut { .. }
-            | forge_runs::McpSignInFinishError::Exchange { .. }
-            | forge_runs::McpSignInFinishError::Removed { .. } => {
-                Self(error.into(), StatusCode::CONFLICT, ErrorCode::Conflict)
-            }
+impl Failure {
+    fn new(error: RouteError) -> Self {
+        Self {
+            status: error.status(),
+            error: Box::new(error),
         }
+    }
+
+    fn message(&self) -> String {
+        std::iter::successors(Some(self.error.inner()), |cause| cause.source())
+            .find_map(|cause| {
+                cause
+                    .downcast_ref::<forge_runs::Refused>()
+                    .map(|refused| refused.0.clone())
+                    .or_else(|| {
+                        cause
+                            .downcast_ref::<forge_runs::runtime::RemoteFailure>()
+                            .filter(|failure| failure.class != forge_runs::ErrorClass::Internal)
+                            .map(|failure| failure.message.clone())
+                    })
+            })
+            .unwrap_or_else(|| diagnostics::chain(&*self.error))
     }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        if self.1 == StatusCode::INTERNAL_SERVER_ERROR {
-            internal(self.0)
+        let (status, code) = self.status;
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            let mut response = error(status, code, &diagnostics::chain(&*self.error));
+            response
+                .extensions_mut()
+                .insert(InternalError(Arc::from(self.error)));
+            response
         } else {
-            error(self.1, self.2, &format!("{:#}", self.0))
+            error(status, code, &self.message())
         }
     }
-}
-
-fn not_found(what: impl std::fmt::Display) -> Failure {
-    Failure(
-        anyhow::anyhow!("{what} not found"),
-        StatusCode::NOT_FOUND,
-        ErrorCode::NotFound,
-    )
-}
-
-fn bad_request(error: impl Into<anyhow::Error>) -> Failure {
-    Failure(error.into(), StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
 }
 
 fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
@@ -348,23 +542,9 @@ fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
         .into_response()
 }
 
-/// A 500 carries its error to [`log_internal`], which knows the route.
-fn internal(failure: anyhow::Error) -> Response {
-    let mut response = error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        ErrorCode::Internal,
-        &format!("{failure:#}"),
-    );
-    response
-        .extensions_mut()
-        .insert(InternalError(Arc::new(failure)));
-    response
-}
-
 #[derive(Clone)]
-struct InternalError(Arc<anyhow::Error>);
+struct InternalError(Arc<RouteError>);
 
-/// Logs every internal failure with the request that met it; ids are in the path.
 async fn log_internal(request: Request, next: Next) -> Response {
     let span = tracing::info_span!(
         "request",
@@ -374,7 +554,7 @@ async fn log_internal(request: Request, next: Next) -> Response {
     async move {
         let response = next.run(request).await;
         if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
-            tracing::error!("request failed: {failure:#}");
+            tracing::error!(error = diagnostics::chain(&**failure), "request failed");
         }
         response
     }
@@ -406,7 +586,6 @@ async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
     }))
 }
 
-/// The user Forge runs as and its host's name, read once.
 fn account() -> artisan_api::Account {
     static ACCOUNT: std::sync::OnceLock<artisan_api::Account> = std::sync::OnceLock::new();
     ACCOUNT
@@ -426,9 +605,6 @@ fn account() -> artisan_api::Account {
             } else {
                 host
             };
-            // WSL sets this in every session's environment, so a Forge
-            // started from a shell has it; a systemd unit doesn't, and the
-            // Editor falls back to the default distribution.
             let wsl_distro = std::env::var("WSL_DISTRO_NAME")
                 .ok()
                 .map(|name| name.trim().to_owned())
@@ -448,10 +624,7 @@ async fn create_project(
 ) -> Result<Json<Project>> {
     let path = std::path::Path::new(&request.path);
     if !path.is_dir() {
-        return Err(bad_request(anyhow::anyhow!(
-            "{} is not a directory on this host",
-            request.path
-        )));
+        return Err(Rejected::NotADirectory { path: request.path }.into());
     }
     Ok(Json(app.hub.store().create_project(request).await?))
 }
@@ -465,11 +638,10 @@ async fn remove_project(
         .store()
         .remove_project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
+        .ok_or(Missing::Project(id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The project's own icon file, stored as a blob; `null` when it has none.
 async fn project_icon(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
@@ -487,7 +659,7 @@ async fn project_icon(
         .store()
         .project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
+        .ok_or_else(|| Missing::Project(id.clone()))?;
     let store = app.hub.store();
     for candidate in CANDIDATES {
         let path = std::path::Path::new(&project.path).join(candidate);
@@ -513,7 +685,7 @@ async fn project_icon(
         let icon = match store.put_image(bytes).await {
             Ok(blob) => Icon::Blob(blob),
             Err(error) => {
-                tracing::info!(project = %id, path = %path.display(), "unusable project icon: {error:#}");
+                tracing::info!(project = %id, path = %path.display(), error = diagnostics::chain(&error), "unusable project icon");
                 Icon::Unusable
             }
         };
@@ -524,7 +696,6 @@ async fn project_icon(
             return Ok(Json(Some(blob)));
         }
     }
-    // Else the repository owner's avatar, as its host shows it.
     let root = std::path::PathBuf::from(&project.path);
     let Some(bytes) = app.repositories.avatar(&root).await else {
         return Ok(Json(None));
@@ -536,7 +707,7 @@ async fn project_icon(
         let icon = match store.put_image(bytes).await {
             Ok(blob) => Icon::Blob(blob),
             Err(error) => {
-                tracing::info!(project = %id, "unusable repository avatar: {error:#}");
+                tracing::info!(project = %id, error = diagnostics::chain(&error), "unusable repository avatar");
                 Icon::Unusable
             }
         };
@@ -549,7 +720,6 @@ async fn project_icon(
     }))
 }
 
-/// The project's git branch and remote page; `null` outside a repository.
 async fn project_repository(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
@@ -560,13 +730,12 @@ async fn project_repository(
         .store()
         .project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
+        .ok_or(Missing::Project(id))?;
     let path = std::path::PathBuf::from(project.path);
     let repository = app.repositories.read(&path).await;
     Ok(Json(repository))
 }
 
-/// A thread the user starts names the project the next one starts in.
 async fn create_thread(
     AppState(app): AppState<App>,
     Json(request): Json<CreateThread>,
@@ -589,13 +758,7 @@ async fn threads_page(
     AppState(app): AppState<App>,
     Query(query): Query<artisan_api::ThreadsQuery>,
 ) -> Result<Json<artisan_api::ThreadsPage>> {
-    Ok(Json(
-        app.hub
-            .store()
-            .threads_page(query)
-            .await
-            .map_err(bad_request)?,
-    ))
+    Ok(Json(app.hub.store().threads_page(query).await?))
 }
 
 async fn thread(AppState(app): AppState<App>, Path(id): Path<ThreadId>) -> Result<Json<Thread>> {
@@ -604,7 +767,7 @@ async fn thread(AppState(app): AppState<App>, Path(id): Path<ThreadId>) -> Resul
         .thread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn update_thread(
@@ -614,9 +777,7 @@ async fn update_thread(
 ) -> Result<Json<Thread>> {
     let id = ThreadId(id);
     let thread = app.hub.update_thread(&id, update).await?;
-    Ok(Json(
-        thread.ok_or_else(|| not_found(format!("thread {id}")))?,
-    ))
+    Ok(Json(thread.ok_or(Missing::Thread(id))?))
 }
 
 async fn settle_thread(
@@ -629,7 +790,7 @@ async fn settle_thread(
         .settle_thread(&id, request.observed_seq)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn mark_unread(
@@ -641,7 +802,7 @@ async fn mark_unread(
         .mark_unread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn items(
@@ -695,9 +856,9 @@ async fn agent_items(
         .store()
         .item(&agent)
         .await?
-        .ok_or_else(|| not_found(format!("agent {agent}")))?;
+        .ok_or_else(|| Missing::Agent(agent.clone()))?;
     if owner.thread_id != thread || !matches!(owner.kind, artisan_api::ItemKind::Agent { .. }) {
-        return Err(not_found(format!("agent {agent} in thread {thread}")));
+        return Err(Missing::AgentInThread { thread, agent }.into());
     }
     Ok(Json(
         app.hub
@@ -716,21 +877,20 @@ async fn inspector(
 
 async fn source_index(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::SourceIndexQuery>,
 ) -> Result<Json<artisan_api::SourceIndexRange>> {
     app.hub
         .store()
         .source_index(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("text source"))
+        .ok_or_else(|| Missing::TextSource(id).into())
 }
 
 async fn content_range(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::ContentQuery>,
 ) -> Result<Json<artisan_api::ContentRange>> {
     if !id.is_valid()
@@ -738,22 +898,19 @@ async fn content_range(
             .limit
             .is_none_or(|limit| (4..=artisan_api::CONTENT_RANGE_BYTES).contains(&limit))
     {
-        return Err(bad_request(anyhow::anyhow!(
-            "invalid source identity or range limit"
-        )));
+        return Err(Rejected::ContentQuery { content: id }.into());
     }
     app.hub
         .store()
         .content_range(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("text source"))
+        .ok_or_else(|| Missing::TextSource(id).into())
 }
 
 async fn collection_range(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::CollectionQuery>,
 ) -> Result<Json<artisan_api::CollectionRange<serde_json::Value>>> {
     if !id.is_valid()
@@ -761,17 +918,14 @@ async fn collection_range(
             .limit
             .is_none_or(|limit| (1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit))
     {
-        return Err(bad_request(anyhow::anyhow!(
-            "invalid collection identity or range limit"
-        )));
+        return Err(Rejected::CollectionQuery { content: id }.into());
     }
     app.hub
         .store()
         .collection_range(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("canonical collection"))
+        .ok_or_else(|| Missing::Collection(id).into())
 }
 
 async fn item(AppState(app): AppState<App>, Path(id): Path<ItemId>) -> Result<Json<Item>> {
@@ -780,7 +934,7 @@ async fn item(AppState(app): AppState<App>, Path(id): Path<ItemId>) -> Result<Js
         .item(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("item {id}")))
+        .ok_or_else(|| Missing::Item(id).into())
 }
 
 #[derive(Deserialize)]
@@ -802,7 +956,7 @@ async fn resource(
         .store()
         .thread(&ThreadId(id.clone()))
         .await?
-        .ok_or_else(|| not_found(format!("thread {id}")))?;
+        .ok_or(Missing::Thread(ThreadId(id)))?;
     let written = Written {
         path: query.path,
         from_home: query.from_home,
@@ -812,9 +966,15 @@ async fn resource(
         .await
         .map(Bytes::from)
         .map_err(|error| match error {
-            ResourceError::Missing => not_found(written.path),
-            ResourceError::Refused(reason) => bad_request(anyhow::anyhow!(reason)),
-            ResourceError::Failed(error) => Failure::from(error),
+            ResourceError::Missing => Missing::Resource { path: written.path }.into(),
+            error @ (ResourceError::InvalidUrl { .. }
+            | ResourceError::OtherDistribution { .. }
+            | ResourceError::NoHome
+            | ResourceError::NotRegular { .. }
+            | ResourceError::Outside { .. }
+            | ResourceError::Read { .. }
+            | ResourceError::Folder(_)
+            | ResourceError::Task { .. }) => Failure::from(error),
         })
 }
 
@@ -823,22 +983,7 @@ async fn send_message(
     Path(id): Path<String>,
     Json(message): Json<SendMessage>,
 ) -> Result<Json<Item>> {
-    let id = ThreadId(id);
-    match app.hub.send_message(&id, message).await {
-        Ok(item) => Ok(Json(item)),
-        Err(error) => {
-            let rejected = error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<forge_store::SendRejected>());
-            if let Some(forge_store::SendRejected::ThreadNotFound(_)) = rejected {
-                Err(not_found(format!("thread {id}")))
-            } else if rejected.is_some() || forge_runs::refusal(&error).is_some() {
-                Err(bad_request(error))
-            } else {
-                Err(error.into())
-            }
-        }
-    }
+    Ok(Json(app.hub.send_message(&ThreadId(id), message).await?))
 }
 
 async fn cancel(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
@@ -846,35 +991,27 @@ async fn cancel(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Carries on the thread's stopped turn with no new message.
 async fn continue_turn(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
     app.hub.continue_turn(&ThreadId(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Clears the thread's goal.
 async fn clear_goal(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
     app.hub.clear_goal(&ThreadId(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// An Editor answers a call Forge made for an agent.
 async fn editor_reply(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
     Json(reply): Json<artisan_api::EditorReply>,
-) -> StatusCode {
-    if app
-        .hub
-        .answer_distributed_editor_call(&id, reply)
-        .await
-        .unwrap_or(false)
-    {
-        StatusCode::NO_CONTENT
-    } else {
-        // Another Editor answered first, or the call gave up waiting.
-        StatusCode::GONE
-    }
+) -> Result<StatusCode> {
+    Ok(
+        match app.hub.answer_distributed_editor_call(&id, reply).await? {
+            forge_runs::runtime::EditorCall::Answered => StatusCode::NO_CONTENT,
+            forge_runs::runtime::EditorCall::NotWaiting => StatusCode::GONE,
+        },
+    )
 }
 
 async fn answer(
@@ -886,9 +1023,6 @@ async fn answer(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Forge settings with structure are saved through their own validated
-/// routes; plain switches are saved here. An Editor keeps its own
-/// preferences on the device.
 async fn set_setting(
     AppState(app): AppState<App>,
     Path(key): Path<String>,
@@ -898,11 +1032,7 @@ async fn set_setting(
         let Some(transport) = value.as_str().filter(|transport| {
             [artisan_api::CLAUDE_CODE, artisan_api::CLAUDE_AI].contains(transport)
         }) else {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is {} or {}",
-                artisan_api::CLAUDE_CODE,
-                artisan_api::CLAUDE_AI
-            )));
+            return Err(Rejected::Transport { key }.into());
         };
         app.hub
             .store()
@@ -912,36 +1042,27 @@ async fn set_setting(
     }
     if key == artisan_api::THREAD_RETENTION_DAYS_KEY {
         artisan_api::setting_decl(&key)
-            .context("thread retention is declared")?
+            .expect("invariant: thread retention is a declared setting")
             .check(&value)
-            .map_err(|reason| bad_request(anyhow::anyhow!(reason)))?;
+            .map_err(Rejected::from)?;
         app.hub.store().set_setting(key, value).await?;
         let hub = app.hub.clone();
         app.tasks.spawn(async move {
             if let Err(error) = hub.remove_inactive_threads().await {
-                tracing::warn!("remove inactive threads: {error:#}");
+                tracing::warn!(
+                    error = diagnostics::chain(&error),
+                    "remove inactive threads"
+                );
             }
         });
         return Ok(StatusCode::NO_CONTENT);
     }
-    let switches = [
-        forge_runs::SUGGESTIONS_KEY,
-        forge_runs::YOU_SHOULD_KNOW_KEY,
-        forge_runs::SUMMARY_TITLES_KEY,
-        forge_store::CONTINUE_AFTER_RESTART_KEY,
-        forge_store::RETRY_WHEN_OVERLOADED_KEY,
-        forge_store::CONTINUE_AFTER_USAGE_LIMIT_KEY,
-    ];
-    if switches.contains(&key.as_str()) {
-        let Some(enabled) = value.as_bool() else {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is true or false"
-            )));
-        };
-        app.hub
-            .store()
-            .set_setting(key, serde_json::Value::Bool(enabled))
-            .await?;
+    if let Some(switch) = artisan_api::setting_decl(&key).filter(|decl| {
+        decl.owner == artisan_api::SettingOwner::Forge
+            && matches!(decl.kind, artisan_api::SettingKind::Bool)
+    }) {
+        switch.check(&value).map_err(Rejected::from)?;
+        app.hub.store().set_setting(key, value).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
     let route = match key.as_str() {
@@ -952,28 +1073,16 @@ async fn set_setting(
         artisan_api::MODEL_GROUPS_KEY => "PUT /engines/{engine}/model-groups",
         artisan_api::LAST_PROJECT_KEY => "POST /threads",
         "disabled_skills" => "POST /skills/{id}/{action}",
-        _ => {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is not one clients can change"
-            )));
-        }
+        _ => return Err(Rejected::UnknownSetting { key }.into()),
     };
-    Err(bad_request(anyhow::anyhow!(
-        "setting {key} is saved through {route}"
-    )))
+    Err(Rejected::OwnRoute { key, route }.into())
 }
 
 async fn mutate_mcp(
     AppState(app): AppState<App>,
     Json(mutation): Json<artisan_api::McpMutation>,
 ) -> Result<Json<Vec<artisan_api::McpServer>>> {
-    let servers = app
-        .hub
-        .store()
-        .mutate_mcp(mutation)
-        .await
-        .map_err(bad_request)?;
-    // The card shows whether a new or changed server needs a sign-in.
+    let servers = app.hub.store().mutate_mcp(mutation).await?;
     let hub = app.hub.clone();
     app.tasks.spawn(async move { hub.mcp().check_auth().await });
     Ok(Json(servers))
@@ -984,45 +1093,44 @@ async fn set_default_model(
     Path(engine): Path<EngineId>,
     Json(id): Json<String>,
 ) -> Result<Json<artisan_api::EngineConfig>> {
-    let model = app
-        .hub
+    let model = available_model(&app, engine, id)?;
+    Ok(Json(
+        app.hub.store().set_default_model(engine, model).await?,
+    ))
+}
+
+fn available_model(
+    app: &App,
+    engine: EngineId,
+    id: String,
+) -> std::result::Result<artisan_api::Model, Rejected> {
+    app.hub
         .engines()
         .status(engine)
         .models
         .iter()
         .find(|model| model.id == id)
         .cloned()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("model {id} is unavailable")))?;
-    Ok(Json(
-        app.hub.store().set_default_model(engine, model).await?,
-    ))
+        .ok_or(Rejected::ModelUnavailable { engine, model: id })
 }
 
-/// Remembers the config chosen for one of the engine's models.
 async fn set_model_config(
     AppState(app): AppState<App>,
     Path(engine): Path<EngineId>,
     Json(config): Json<artisan_api::EngineConfig>,
 ) -> Result<Json<artisan_api::EngineConfig>> {
     if config.engine != engine {
-        return Err(bad_request(anyhow::anyhow!(
-            "config for {} sent to {engine}",
-            config.engine
-        )));
+        return Err(Rejected::ConfigEngine {
+            engine,
+            sent: config.engine,
+        }
+        .into());
     }
     let id = config
         .model
         .clone()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("config names no model")))?;
-    let model = app
-        .hub
-        .engines()
-        .status(engine)
-        .models
-        .iter()
-        .find(|model| model.id == id)
-        .cloned()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("model {id} is unavailable")))?;
+        .ok_or(Rejected::ConfigWithoutModel { engine })?;
+    let model = available_model(&app, engine, id)?;
     Ok(Json(
         app.hub.store().set_model_config(config, &model).await?,
     ))
@@ -1053,30 +1161,18 @@ async fn set_draft(
 }
 
 async fn put_blob(AppState(app): AppState<App>, body: Bytes) -> Result<Json<artisan_api::BlobRef>> {
-    app.hub
-        .store()
-        .put_blob(body.to_vec())
-        .await
-        .map(Json)
-        .map_err(|error| {
-            if let forge_store::BlobFailure::Rejected(_) = *error.cause {
-                bad_request(error)
-            } else {
-                Failure::from(error)
-            }
-        })
+    Ok(Json(app.hub.store().put_blob(body.to_vec()).await?))
 }
 
 async fn get_blob(AppState(app): AppState<App>, Path(hash): Path<String>) -> Result<Response> {
     let hash = BlobHash(hash);
-    let path = app
-        .hub
-        .store()
-        .blob_path(&hash)
-        .ok_or_else(|| not_found(format!("blob {hash}")))?;
-    let bytes = tokio::fs::read(&path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
+    let Some(path) = app.hub.store().blob_path(&hash) else {
+        return Err(Missing::Blob(hash).into());
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(source) => return Err(ReadBlobError { hash, path, source }.into()),
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "image/webp"),
@@ -1096,7 +1192,6 @@ async fn engines(AppState(app): AppState<App>) -> Json<Vec<EngineStatus>> {
     )
 }
 
-/// Executes a typed engine command; required arguments belong to its variant.
 async fn engine_action(
     AppState(app): AppState<App>,
     Path(engine): Path<EngineId>,
@@ -1105,8 +1200,7 @@ async fn engine_action(
     use artisan_api::EngineCommand as Command;
     let engines = app.hub.engines().clone();
     if let Command::Use { version } = &command {
-        forge_engines::Engines::validate_version(engine, version)
-            .map_err(bad_request)?;
+        forge_engines::Engines::validate_version(engine, version)?;
     }
     match command {
         Command::Install {} | Command::Update {} | Command::Rollback {} | Command::Use { .. } => {
@@ -1136,10 +1230,10 @@ async fn engine_action(
                 match result {
                     Ok(()) => {
                         if let Err(error) = hub.extensions().reconcile_global_prompt().await {
-                            tracing::warn!(%engine, "reconcile prompt: {error:#}");
+                            tracing::warn!(%engine, error = diagnostics::chain(&error), "reconcile prompt");
                         }
                         if let Err(error) = hub.extensions().reconcile_skills().await {
-                            tracing::warn!(%engine, "reconcile skills: {error:#}");
+                            tracing::warn!(%engine, error = diagnostics::chain(&error), "reconcile skills");
                         }
                         engines.refresh(engine).await;
                     }
@@ -1149,44 +1243,25 @@ async fn engine_action(
                 }
             });
         }
-        Command::Login {} => engines
-            .login(engine)
-            .map_err(bad_request)?,
-        Command::LoginCode { code } => engines
-            .submit_login_code(engine, &code)
-            .await
-            .map_err(bad_request)?,
+        Command::Login {} => engines.login(engine)?,
+        Command::LoginCode { code } => engines.submit_login_code(engine, &code).await?,
         Command::CancelLogin {} => engines.cancel_login(engine),
-        Command::Logout {} => engines
-            .logout(engine)
-            .map_err(bad_request)?,
+        Command::Logout {} => engines.logout(engine)?,
         Command::ClaudeAiSignIn { session } => {
             if engine != EngineId::Claude {
-                return Err(bad_request(anyhow::anyhow!(
-                    "only Claude signs in to claude.ai"
-                )));
+                return Err(Rejected::ClaudeAiEngine { engine }.into());
             }
-            engines
-                .claude_ai_sign_in(session)
-                .await
-                .map_err(bad_request)?;
+            engines.claude_ai_sign_in(session).await?;
         }
         Command::ClaudeAiSignOut {} => {
             if engine != EngineId::Claude {
-                return Err(bad_request(anyhow::anyhow!(
-                    "only Claude signs in to claude.ai"
-                )));
+                return Err(Rejected::ClaudeAiEngine { engine }.into());
             }
-            engines
-                .claude_ai_sign_out()
-                .map_err(bad_request)?;
+            engines.claude_ai_sign_out()?;
         }
         Command::Refresh {} => engines.refresh(engine).await,
         Command::Versions {} => {
-            engines
-                .list_versions(engine)
-                .await
-                .map_err(bad_request)?;
+            engines.list_versions(engine).await?;
         }
     }
     Ok(Json(app.hub.engines().status(engine)))
@@ -1197,57 +1272,51 @@ struct ListQuery {
     path: Option<String>,
 }
 
-/// Directory listing for picking a project folder on this host.
 async fn list_dir(Query(query): Query<ListQuery>) -> Result<Json<DirListing>> {
     static READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
     let path = match query.path {
-        Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
-        _ => dirs::home_dir().ok_or_else(|| {
-            bad_request(anyhow::anyhow!(
-                "host home directory unavailable; provide a path"
-            ))
-        })?,
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => dirs::home_dir().ok_or(Rejected::NoHome)?,
     };
-    let permit = READS.acquire().await.map_err(|error| {
-        Failure(
-            error.into(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-        )
-    })?;
-    tokio::task::spawn_blocking(move || {
-        // Keep admission until the blocking job actually exits, including client cancellation.
+    let permit = READS.acquire().await.map_err(ListDirectoryError::Slot)?;
+    let listed = path.clone();
+    let listing = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        read_directory(&path).map(Json).map_err(bad_request)
+        read_directory(&listed)
     })
     .await
-    .map_err(|error| {
-        Failure(
-            error.into(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-        )
-    })?
+    .map_err(|source| ListDirectoryError::Task { path, source })??;
+    Ok(Json(listing))
 }
 
-fn read_directory(path: &std::path::Path) -> anyhow::Result<DirListing> {
-    let reader = std::fs::read_dir(path).with_context(|| format!("list {}", path.display()))?;
+fn read_directory(path: &std::path::Path) -> std::result::Result<DirListing, ListDirectoryError> {
+    let reader = std::fs::read_dir(path).map_err(|source| ListDirectoryError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
     let mut entries = Vec::new();
     let mut bytes = 0usize;
     for entry in reader {
-        let entry = entry.with_context(|| format!("read entry in {}", path.display()))?;
+        let entry = entry.map_err(|source| ListDirectoryError::Entry {
+            path: path.to_owned(),
+            source,
+        })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let entry_path = entry.path().to_string_lossy().into_owned();
         bytes = bytes
             .saturating_add(name.len())
             .saturating_add(entry_path.len());
-        anyhow::ensure!(
-            entries.len() < 32_768 && bytes <= 4 * 1024 * 1024,
-            "directory listing exceeds 32768 entries or 4 MiB"
-        );
+        if entries.len() >= 32_768 || bytes > 4 * 1024 * 1024 {
+            return Err(ListDirectoryError::TooLarge {
+                path: path.to_owned(),
+            });
+        }
         let is_dir = entry
             .file_type()
-            .with_context(|| format!("inspect {entry_path}"))?
+            .map_err(|source| ListDirectoryError::Inspect {
+                entry: entry_path.clone(),
+                source,
+            })?
             .is_dir();
         let sort_key = name.to_lowercase();
         entries.push((
@@ -1272,7 +1341,6 @@ fn read_directory(path: &std::path::Path) -> anyhow::Result<DirListing> {
     })
 }
 
-/// Authorizes the connection's certificate when the code is right.
 async fn pair(
     AppState(app): AppState<App>,
     Extension(client): Extension<Client>,
@@ -1287,11 +1355,7 @@ async fn pair(
         )
         .await?
     else {
-        return Err(Failure(
-            anyhow::anyhow!("that pairing code is wrong or expired"),
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-        ));
+        return Err(Unauthorized::PairCode.into());
     };
     Ok(Json(PairResponse { device_id }))
 }

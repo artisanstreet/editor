@@ -285,7 +285,9 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
-    forge_http::core::CoreClient::new(&forge_http::core::core_base_url(core))
+    Ok(forge_http::core::CoreClient::new(
+        &forge_http::core::core_base_url(core),
+    )?)
 }
 
 pub fn run(args: &AccountArgs) -> Result<()> {
@@ -350,9 +352,11 @@ fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) ->
         bail!("give this machine a label with --label");
     }
     let created = runtime()?.block_on(async {
-        client(core)?
-            .enroll_start(key.public(), &label, key.secret())
-            .await
+        Ok::<_, anyhow::Error>(
+            client(core)?
+                .enroll_start(key.public(), &label, key.secret())
+                .await?,
+        )
     })?;
     save_account(
         &path,
@@ -411,9 +415,11 @@ fn status(core: Option<&str>, json: bool) -> Result<()> {
         Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
     let status = runtime()?.block_on(async {
-        client(core)?
-            .enrollment_status(&enrollment_id, key.secret())
-            .await
+        Ok::<_, anyhow::Error>(
+            client(core)?
+                .enrollment_status(&enrollment_id, key.secret())
+                .await?,
+        )
     })?;
     if json {
         println!("{}", pending_report(&enrollment_id, &status));
@@ -454,9 +460,11 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
         Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
     let status = runtime()?.block_on(async {
-        client(core)?
-            .enrollment_status(&enrollment_id, key.secret())
-            .await
+        Ok::<_, anyhow::Error>(
+            client(core)?
+                .enrollment_status(&enrollment_id, key.secret())
+                .await?,
+        )
     })?;
     let account_id = status.account_id.clone().context(
         "the enrollment is not claimed yet; claim the code in a signed-in session first",
@@ -483,9 +491,11 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
         return Ok(());
     }
     let confirmed = runtime()?.block_on(async {
-        client(core)?
-            .confirm_enrollment(&enrollment_id, &account_id, key.public(), key.secret())
-            .await
+        Ok::<_, anyhow::Error>(
+            client(core)?
+                .confirm_enrollment(&enrollment_id, &account_id, key.public(), key.secret())
+                .await?,
+        )
     })?;
     let machine_id = confirmed.machine_id.clone();
     save_account(

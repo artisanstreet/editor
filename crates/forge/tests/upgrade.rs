@@ -174,7 +174,8 @@ async fn replacement_preserves_the_listening_port_and_serves_requests_during_gat
     }
     let replacement = replace.await.unwrap().unwrap_or_else(|error| {
         panic!(
-            "{error:#}: {}",
+            "{}: {}",
+            diagnostics::chain(&error),
             std::fs::read_to_string(directory.path().join("forge.log")).unwrap()
         )
     });
@@ -220,4 +221,46 @@ async fn rejected_candidate_leaves_the_original_generation_and_connections_servi
     assert_eq!(current.backend.id, original.backend.id);
     assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
     upgrade::stop(&running.data).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both_ids() {
+    let (directory, running, gateway) = start().await;
+    let active = running.data.join("runtime").join("active.json");
+    let mut unreachable: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    unreachable["id"] = serde_json::json!("unreachable-generation");
+    unreachable["address"] = serde_json::json!(closed.local_addr().unwrap());
+    drop(closed);
+    upgrade::write(&active, &unreachable).unwrap();
+    let _client = std::net::TcpStream::connect(gateway.address).unwrap();
+    let logged = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let log = std::fs::read_to_string(directory.path().join("forge.log")).unwrap();
+            if let Some(line) = log
+                .lines()
+                .find(|line| line.contains("unreachable-generation"))
+            {
+                break line.to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(logged.contains(&gateway.id), "{logged}");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let restored = forge_runs::runtime::read::<forge_runs::runtime::Member>(&active)
+                .unwrap()
+                .is_some_and(|member| member.id != "unreachable-generation");
+            if restored {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
 }

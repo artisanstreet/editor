@@ -22,7 +22,7 @@ struct Observation {
     avatar: Option<(Instant, Option<Vec<u8>>)>,
 }
 impl Repositories {
-    pub(crate) fn new() -> anyhow::Result<Self> {
+    pub(crate) fn new() -> Result<Self, reqwest::Error> {
         Ok(Self {
             entries: Mutex::new(HashMap::new()),
             slots: Semaphore::new(4),

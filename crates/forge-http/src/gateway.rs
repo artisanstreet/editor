@@ -1,9 +1,3 @@
-//! The MCP gateway: a plain-HTTP listener on loopback where the engines
-//! Forge runs reach Forge's own MCP servers, each at `/mcp/<server>/`. Each
-//! thread's address carries its credential, so the caller is known without
-//! a session.
-
-use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -18,12 +12,23 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Binds the gateway, tells `hub` its address, and serves until `shutdown`.
-pub async fn start(hub: &Hub, shutdown: CancellationToken, tasks: &TaskTracker) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum StartGatewayError {
+    #[error("listen for the MCP gateway on loopback")]
+    Bind(#[source] std::io::Error),
+    #[error("read the MCP gateway's address")]
+    Address(#[source] std::io::Error),
+}
+
+pub async fn start(
+    hub: &Hub,
+    shutdown: CancellationToken,
+    tasks: &TaskTracker,
+) -> Result<(), StartGatewayError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .context("listen for the MCP gateway on loopback")?;
-    let address = listener.local_addr()?;
+        .map_err(StartGatewayError::Bind)?;
+    let address = listener.local_addr().map_err(StartGatewayError::Address)?;
     let computer = ComputerMcp::for_host(hub);
     hub.set_gateway(format!("http://{address}/mcp/"), computer.is_some());
     let artisan = Served {
@@ -61,7 +66,6 @@ pub async fn start(hub: &Hub, shutdown: CancellationToken, tasks: &TaskTracker) 
     Ok(())
 }
 
-/// One of Forge's servers, with the hub that knows whose credential is whose.
 #[derive(Clone)]
 struct Served<T> {
     hub: Hub,
@@ -99,8 +103,6 @@ async fn serve<T: ToolSet + Clone + 'static>(
         )
 }
 
-/// The gateway answers every request in its response; it opens no stream
-/// and keeps no session to end.
 async fn no_stream() -> StatusCode {
     StatusCode::METHOD_NOT_ALLOWED
 }

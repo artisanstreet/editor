@@ -1,8 +1,3 @@
-//! `GET /events?since=N`: every stored change after N, then live changes.
-//!
-//! Subscribing before reading the backlog means nothing falls in between;
-//! Durable overlap is skipped by seq; memory-only overlap by publication revision.
-
 use crate::routes::App;
 use artisan_api::{DeviceId, Envelope, Event, LiveTarget, Seq};
 use axum::extract::{Extension, Query, State};
@@ -16,7 +11,6 @@ use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-/// More stored changes than this since the client's seq: it refetches `/state`.
 const BACKLOG_LIMIT: usize = 20_000;
 
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
@@ -32,12 +26,36 @@ struct Queue {
     sender: mpsc::Sender<Queued>,
     bytes: Arc<Semaphore>,
 }
+#[derive(Debug, thiserror::Error)]
+pub enum SinkError {
+    #[error("encode an event at seq {seq:?} for the stream")]
+    Encode {
+        seq: Option<Seq>,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("wait for room in the stream's byte budget")]
+    Budget(#[source] tokio::sync::AcquireError),
+    #[error("the stream's reader went away")]
+    Gone,
+    #[error(
+        "an event of {bytes} bytes at seq {seq:?} exceeds the stream's byte budget; the client resets"
+    )]
+    Oversized { seq: Option<Seq>, bytes: usize },
+}
+
 impl EnvelopeSink for Queue {
-    async fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
-        let data = serde_json::to_string(&envelope)?;
-        let oversized = data.len() > QUEUE_BYTES;
-        let data = if oversized {
-            serde_json::to_string(&Envelope {
+    async fn send(&self, envelope: Envelope) -> Result<(), SinkError> {
+        let encoded = |envelope: &Envelope| {
+            serde_json::to_string(envelope).map_err(|source| SinkError::Encode {
+                seq: envelope.seq,
+                source,
+            })
+        };
+        let data = encoded(&envelope)?;
+        let oversized = (data.len() > QUEUE_BYTES).then_some(data.len());
+        let data = if oversized.is_some() {
+            encoded(&Envelope {
                 seq: None,
                 live_revision: 0,
                 event: Event::Reset,
@@ -45,19 +63,50 @@ impl EnvelopeSink for Queue {
         } else {
             data
         };
+        let budget = u32::try_from(data.len())
+            .expect("invariant: a queued event fits the 8 MiB stream budget");
         let bytes = Arc::clone(&self.bytes)
-            .acquire_many_owned(u32::try_from(data.len())?)
-            .await?;
-        self.sender
-            .send(Queued {
-                seq: if oversized { None } else { envelope.seq },
-                data,
-                _bytes: bytes,
-            })
-            .await?;
-        anyhow::ensure!(!oversized, "event exceeds SSE byte budget; client reset");
-        Ok(())
+            .acquire_many_owned(budget)
+            .await
+            .map_err(SinkError::Budget)?;
+        let queued = Queued {
+            seq: if oversized.is_some() {
+                None
+            } else {
+                envelope.seq
+            },
+            data,
+            _bytes: bytes,
+        };
+        if self.sender.send(queued).await.is_err() {
+            return Err(SinkError::Gone);
+        }
+        match oversized {
+            Some(bytes) => Err(SinkError::Oversized {
+                seq: envelope.seq,
+                bytes,
+            }),
+            None => Ok(()),
+        }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ForwardError {
+    #[error("send the event stream's {step}")]
+    Send {
+        step: &'static str,
+        #[source]
+        source: SinkError,
+    },
+    #[error(transparent)]
+    Backlog(#[from] forge_store::ChangesSinceError),
+    #[error(transparent)]
+    Snapshot(#[from] forge_runs::runtime::SnapshotError),
+}
+
+fn sent(step: &'static str) -> impl FnOnce(SinkError) -> ForwardError {
+    move |source| ForwardError::Send { step, source }
 }
 
 #[derive(Deserialize)]
@@ -74,7 +123,6 @@ pub struct Since {
 }
 
 impl Since {
-    /// Reads `/events?since=…&summary=…&thread=…` from a tunneled path.
     pub(crate) fn from_events_path(path: &str) -> Option<Self> {
         let uri: axum::http::Uri = path.parse().ok()?;
         (uri.path() == "/events")
@@ -84,17 +132,16 @@ impl Since {
     }
 }
 
-/// Where `forward` puts envelopes: the SSE byte-budgeted queue, or a
-/// tunneled stream's channel.
 pub trait EnvelopeSink: Sync {
-    fn send(&self, envelope: Envelope) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn send(&self, envelope: Envelope) -> impl Future<Output = Result<(), SinkError>> + Send;
 }
 
 impl EnvelopeSink for tokio::sync::mpsc::Sender<Envelope> {
-    async fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
-        Self::send(self, envelope)
-            .await
-            .map_err(|error| anyhow::anyhow!("stream gone: {error}"))
+    async fn send(&self, envelope: Envelope) -> Result<(), SinkError> {
+        if Self::send(self, envelope).await.is_err() {
+            return Err(SinkError::Gone);
+        }
+        Ok(())
     }
 }
 
@@ -114,9 +161,8 @@ pub async fn stream(
     let tasks = app.tasks.clone();
     tasks.spawn(async move {
         let store = app.hub.store();
-        // Subscribe before rechecking to cover revoke between middleware and stream.
         let revocations = store.subscribe_revocations();
-        if store.is_authorized(&client.certificate).ok().flatten().is_none() {
+        if !still_authorized(store, &client.certificate) {
             stop.cancel();
             return;
         }
@@ -127,12 +173,12 @@ pub async fn stream(
             () = sender.sender.closed() => {},
             result = async {
                 if let Err(error) = store.touch_device(&device).await {
-                    tracing::warn!(%device, "recording when the device was last seen: {error:#}");
+                    tracing::warn!(%device, error = diagnostics::chain(&error), "recording when the device was last seen");
                 }
                 forward(&app, &scope, &sender).await
             } => {
                 if let Err(error) = result {
-                    tracing::debug!("event stream ended: {error:#}");
+                    tracing::debug!(%device, error = diagnostics::chain(&error), "event stream ended");
                 }
             },
         }
@@ -155,9 +201,15 @@ pub async fn stream(
     Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-/// Stored changes after `scope.since`, then the live snapshot, engine
-/// statuses and live changes, until the sink goes away or a Reset is sent.
-pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> anyhow::Result<()> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stream: backlog, live snapshot, engine statuses, then live changes"
+)]
+pub async fn forward(
+    app: &App,
+    scope: &Since,
+    sender: &impl EnvelopeSink,
+) -> Result<(), ForwardError> {
     let since = scope.since;
     let store = app.hub.store();
     let mut changes = store.subscribe();
@@ -170,7 +222,8 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
             forge_version: app.forge_version.clone(),
         },
     )
-    .await?;
+    .await
+    .map_err(sent("hello"))?;
     let mut last = since;
     let (mut completed_items, mut completed_runs) = (HashSet::new(), HashSet::new());
     if let Some(backlog) = store
@@ -202,11 +255,13 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
             }
             last = last.max(envelope.seq.unwrap_or(last));
             if let Some(envelope) = scoped(envelope, scope) {
-                sender.send(envelope).await?;
+                sender.send(envelope).await.map_err(sent("backlog"))?;
             }
         }
     } else {
-        send(sender, None, Event::Reset).await?;
+        send(sender, None, Event::Reset)
+            .await
+            .map_err(sent("reset"))?;
         return Ok(());
     }
     let live_revision =
@@ -215,7 +270,9 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
         last,
         live_revision,
     };
-    send_engine_statuses(app, sender).await?;
+    send_engine_statuses(app, sender)
+        .await
+        .map_err(sent("engine statuses"))?;
     loop {
         let change = changes.recv().await;
         match change {
@@ -225,8 +282,6 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
                 }
                 match &mut envelope.event {
                     Event::Engine { status } => *status = app.hub.engines().status(status.engine),
-                    // Queued pre-snapshot progress must never regress the scalar
-                    // installation state shown by the initial Engine snapshot.
                     Event::EngineInstall { engine, install } => {
                         *install = app.hub.engines().install_state(*engine);
                     }
@@ -245,15 +300,16 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
                 }
                 let reset = matches!(envelope.event, Event::Reset);
                 if let Some(envelope) = scoped(envelope, scope) {
-                    sender.send(envelope).await?;
+                    sender.send(envelope).await.map_err(sent("change"))?;
                 }
                 if reset {
                     return Ok(());
                 }
             }
-            // Fell behind: the client refetches the state and reconnects.
             Err(RecvError::Lagged(_)) => {
-                send(sender, None, Event::Reset).await?;
+                send(sender, None, Event::Reset)
+                    .await
+                    .map_err(sent("reset"))?;
                 return Ok(());
             }
             Err(RecvError::Closed) => return Ok(()),
@@ -261,15 +317,13 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
     }
 }
 
-/// Sends the live text of every run the backlog didn't see end; returns the
-/// snapshot's live revision.
 async fn send_live_snapshot(
     app: &App,
     scope: &Since,
     sender: &impl EnvelopeSink,
     completed_items: &HashSet<artisan_api::ItemId>,
     completed_runs: &HashSet<artisan_api::RunId>,
-) -> anyhow::Result<u64> {
+) -> Result<u64, ForwardError> {
     let (live_revision, snapshot) = app.hub.distributed_live_snapshot().await?;
     for event in snapshot {
         if let Event::Live { target, .. } = &event {
@@ -293,14 +347,13 @@ async fn send_live_snapshot(
             },
             scope,
         ) {
-            sender.send(envelope).await?;
+            sender.send(envelope).await.map_err(sent("live snapshot"))?;
         }
     }
     Ok(live_revision)
 }
 
-/// Sends every engine's current status.
-async fn send_engine_statuses(app: &App, sender: &impl EnvelopeSink) -> anyhow::Result<()> {
+async fn send_engine_statuses(app: &App, sender: &impl EnvelopeSink) -> Result<(), SinkError> {
     for engine in artisan_api::EngineId::ALL {
         send(
             sender,
@@ -368,7 +421,10 @@ fn still_authorized(
     match store.is_authorized(certificate) {
         Ok(device) => device.is_some(),
         Err(error) => {
-            tracing::warn!("rechecking an event stream's device: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "rechecking an event stream's device"
+            );
             false
         }
     }
@@ -405,15 +461,14 @@ fn scoped(mut envelope: Envelope, scope: &Since) -> Option<Envelope> {
     Some(envelope)
 }
 
-async fn send(sender: &impl EnvelopeSink, seq: Option<Seq>, event: Event) -> anyhow::Result<()> {
+async fn send(sender: &impl EnvelopeSink, seq: Option<Seq>, event: Event) -> Result<(), SinkError> {
     sender
         .send(Envelope {
             seq,
             live_revision: 0,
             event,
         })
-        .await?;
-    Ok(())
+        .await
 }
 
 #[cfg(test)]

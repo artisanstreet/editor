@@ -1,12 +1,3 @@
-//! Core HTTP client: the Forge as a machine calling its account authority.
-//!
-//! Real network client against the normative Core endpoints
-//! (`contracts.md` §3–§5): enrollment start/poll/confirm, machine grant
-//! issue, JWKS fetch. Every authenticated call signs the Core canonical
-//! request with the machine/enrollment private key. Base URL comes from
-//! `AST_CORE_BASE_URL` (default production `https://api.artisan.st`).
-
-use anyhow::{Context, Result};
 use artisan_account::{
     body_hash_hex, canonical_request, enrollment_confirm_body, enrollment_request_body,
     sign_enrollment_proof, sign_proof,
@@ -15,10 +6,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Where Core lives when nothing else is configured.
 pub const DEFAULT_CORE_BASE_URL: &str = "https://api.artisan.st";
 
-/// Base URL resolution: explicit argument, else `AST_CORE_BASE_URL`, else production.
 #[must_use]
 pub fn core_base_url(explicit: Option<&str>) -> String {
     explicit
@@ -37,13 +26,78 @@ pub(crate) fn now_sec() -> i64 {
     .unwrap_or(0)
 }
 
-fn nonce_b64u() -> Result<String> {
+#[derive(Debug, thiserror::Error)]
+#[error("build the Core HTTP client")]
+pub struct BuildCoreClientError(#[source] reqwest::Error);
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProofHeadersError {
+    #[error("draw the nonce of a machine proof")]
+    Nonce(#[source] getrandom::Error),
+    #[error("put the machine proof's {header} header on a request")]
+    Header {
+        header: &'static str,
+        #[source]
+        source: reqwest::header::InvalidHeaderValue,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoreCallError {
+    #[error("sign the Core {call} request")]
+    Proof {
+        call: &'static str,
+        #[source]
+        source: ProofHeadersError,
+    },
+    #[error("encode the Core {call} request")]
+    Encode {
+        call: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("reach Core for {call}")]
+    Reach {
+        call: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core answered {call} with {status}: {body}")]
+    Refused {
+        call: &'static str,
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("read Core's {status} refusal of {call}")]
+    ReadRefusal {
+        call: &'static str,
+        status: reqwest::StatusCode,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read Core's answer to {call}")]
+    Decode {
+        call: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+}
+
+fn nonce_b64u() -> Result<String, ProofHeadersError> {
     let mut raw = [0_u8; 16];
-    getrandom::fill(&mut raw).map_err(|_rand| anyhow::anyhow!("random nonce failed"))?;
+    getrandom::fill(&mut raw).map_err(ProofHeadersError::Nonce)?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
 }
 
-/// The client: machine identity + Core base URL. Clones cheaply.
+fn header(
+    header: &'static str,
+    value: &str,
+) -> Result<reqwest::header::HeaderValue, ProofHeadersError> {
+    value
+        .parse()
+        .map_err(|source| ProofHeadersError::Header { header, source })
+}
+
 #[derive(Clone, Debug)]
 pub struct CoreClient {
     http: reqwest::Client,
@@ -51,12 +105,12 @@ pub struct CoreClient {
 }
 
 impl CoreClient {
-    pub fn new(base_url: &str) -> Result<Self> {
+    pub fn new(base_url: &str) -> Result<Self, BuildCoreClientError> {
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .context("build the Core HTTP client")?,
+                .map_err(BuildCoreClientError)?,
             base_url: base_url.trim_end_matches('/').to_owned(),
         })
     }
@@ -65,7 +119,6 @@ impl CoreClient {
         format!("{}{path}", self.base_url)
     }
 
-    /// Machine-proof headers for an authenticated machine call.
     pub(crate) fn proof_headers(
         subject: &str,
         secret: &[u8; 32],
@@ -73,48 +126,62 @@ impl CoreClient {
         path_and_query: &str,
         body: &[u8],
         now: i64,
-    ) -> Result<reqwest::header::HeaderMap> {
+    ) -> Result<reqwest::header::HeaderMap, ProofHeadersError> {
         let nonce = nonce_b64u()?;
         let canonical =
             canonical_request(now, &nonce, method, path_and_query, &body_hash_hex(body));
         let signature = sign_proof(secret, &canonical);
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "X-AST-Machine",
-            subject.parse().context("machine subject header")?,
-        );
+        headers.insert("X-AST-Machine", header("X-AST-Machine", subject)?);
         headers.insert(
             "X-AST-Timestamp",
-            now.to_string().parse().context("timestamp header")?,
+            header("X-AST-Timestamp", &now.to_string())?,
         );
-        headers.insert("X-AST-Nonce", nonce.parse().context("nonce header")?);
+        headers.insert("X-AST-Nonce", header("X-AST-Nonce", &nonce)?);
         let authorization = format!(
             "AST-Machine {}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
         );
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            authorization.parse().context("signature header")?,
+            header("Authorization", &authorization)?,
         );
         Ok(headers)
     }
 
-    async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
-        if response.status().is_success() {
-            return Ok(response);
-        }
+    async fn answer<T: serde::de::DeserializeOwned>(
+        call: &'static str,
+        response: Result<reqwest::Response, reqwest::Error>,
+    ) -> Result<T, CoreCallError> {
+        let response = response.map_err(|source| CoreCallError::Reach { call, source })?;
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("Core answered {status}: {}", text.trim())
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|source| CoreCallError::ReadRefusal {
+                    call,
+                    status,
+                    source,
+                })?;
+            return Err(CoreCallError::Refused {
+                call,
+                status,
+                body: body.trim().to_owned(),
+            });
+        }
+        response
+            .json()
+            .await
+            .map_err(|source| CoreCallError::Decode { call, source })
     }
 
-    /// Start an enrollment: `POST /v1/machines/enrollments`.
     pub async fn enroll_start(
         &self,
         public: &[u8; 32],
         label: &str,
         secret: &[u8; 32],
-    ) -> Result<EnrollmentCreated> {
+    ) -> Result<EnrollmentCreated, CoreCallError> {
         use base64::Engine as _;
         let now = now_sec();
         let public_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public);
@@ -131,51 +198,33 @@ impl CoreClient {
             .post(self.url("/v1/machines/enrollments"))
             .json(&request)
             .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core enrollment answer")
+            .await;
+        Self::answer("enrollment start", response).await
     }
 
-    /// Poll an enrollment: `GET …/enrollments/{id}/status` with the
-    /// enrollment-key machine proof (`X-AST-Machine: enr_…`).
     pub async fn enrollment_status(
         &self,
         enrollment_id: &str,
         secret: &[u8; 32],
-    ) -> Result<artisan_account::PairStatus> {
+    ) -> Result<artisan_account::PairStatus, CoreCallError> {
+        let call = "enrollment status";
         let now = now_sec();
         let path = format!("/v1/machines/enrollments/{enrollment_id}/status");
-        let headers = Self::proof_headers(enrollment_id, secret, "GET", &path, b"", now)?;
-        let response = self
-            .http
-            .get(self.url(&path))
-            .headers(headers)
-            .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core status answer")
+        let headers = Self::proof_headers(enrollment_id, secret, "GET", &path, b"", now)
+            .map_err(|source| CoreCallError::Proof { call, source })?;
+        let response = self.http.get(self.url(&path)).headers(headers).send().await;
+        Self::answer(call, response).await
     }
 
-    /// Confirm an enrollment: `POST /v1/machines/enrollments/confirm` with
-    /// enrollment-key request authentication and a proof over the exact
-    /// account+key binding. The caller must have
-    /// shown `account_id` + verified email to the local operator first.
     pub async fn confirm_enrollment(
         &self,
         enrollment_id: &str,
         account_id: &str,
         public: &[u8; 32],
         secret: &[u8; 32],
-    ) -> Result<ConfirmedMachine> {
+    ) -> Result<ConfirmedMachine, CoreCallError> {
         use base64::Engine as _;
+        let call = "enrollment confirm";
         let public_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public);
         let body_text = enrollment_confirm_body(enrollment_id, account_id, &public_b64u);
         let confirmation = sign_enrollment_proof(secret, &body_text);
@@ -185,8 +234,10 @@ impl CoreClient {
             "confirmation": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(confirmation),
         });
         let path = "/v1/machines/enrollments/confirm";
-        let body = serde_json::to_vec(&request)?;
-        let headers = Self::proof_headers(enrollment_id, secret, "POST", path, &body, now_sec())?;
+        let body = serde_json::to_vec(&request)
+            .map_err(|source| CoreCallError::Encode { call, source })?;
+        let headers = Self::proof_headers(enrollment_id, secret, "POST", path, &body, now_sec())
+            .map_err(|source| CoreCallError::Proof { call, source })?;
         let response = self
             .http
             .post(self.url(path))
@@ -194,18 +245,10 @@ impl CoreClient {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core confirm answer")
+            .await;
+        Self::answer(call, response).await
     }
 
-    /// Issue a machine grant: `POST /v1/grants/issue` (unified endpoint;
-    /// machine proof auth via `X-AST-Machine`, so `cnf` defaults to the
-    /// enrolled key server-side and is omitted here).
     pub async fn issue_machine_grant(
         &self,
         machine_id: &str,
@@ -214,7 +257,8 @@ impl CoreClient {
         scope: &[&str],
         ttl_seconds: u32,
         target_machine_id: Option<&str>,
-    ) -> Result<GrantToken> {
+    ) -> Result<GrantToken, CoreCallError> {
+        let call = "grant issue";
         let now = now_sec();
         let path = "/v1/grants/issue";
         let mut request = serde_json::json!({
@@ -225,21 +269,18 @@ impl CoreClient {
         if let Some(target) = target_machine_id {
             request["targetMachineId"] = serde_json::Value::String(target.to_owned());
         }
-        let body = serde_json::to_vec(&request)?;
-        let headers = Self::proof_headers(machine_id, secret, "POST", path, &body, now)?;
+        let body = serde_json::to_vec(&request)
+            .map_err(|source| CoreCallError::Encode { call, source })?;
+        let headers = Self::proof_headers(machine_id, secret, "POST", path, &body, now)
+            .map_err(|source| CoreCallError::Proof { call, source })?;
         let response = self
             .http
             .post(self.url(path))
             .headers(headers)
             .json(&request)
             .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core grant answer")
+            .await;
+        Self::answer(call, response).await
     }
 }
 

@@ -2073,7 +2073,6 @@ dependencies = [
 name = "forge"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "artisan-paths",
  "build-info",
@@ -2085,7 +2084,9 @@ dependencies = [
  "forge-runs",
  "forge-store",
  "reqwest",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -2094,7 +2095,6 @@ dependencies = [
 name = "forge-computer"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "base64 0.22.1",
  "diagnostics",
@@ -2176,7 +2176,6 @@ dependencies = [
 name = "forge-http"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-account",
  "artisan-api",
  "axum",
@@ -2197,6 +2196,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "reqwest",
+ "rusqlite",
  "rustix",
  "rustls",
  "serde",
@@ -2232,7 +2232,6 @@ dependencies = [
 name = "forge-mcp"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "diagnostics",
  "forge-engines",
@@ -2251,7 +2250,6 @@ dependencies = [
 name = "forge-runs"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "axum",
  "diagnostics",

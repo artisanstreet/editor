@@ -1,8 +1,3 @@
-//! Account config sync, Forge ← Core: fetch the latest bundle, check the
-//! manifest bytes against `bundle.content_hash`, apply them through the Hub
-//! and report the result to Core.
-
-use anyhow::{Context, Result};
 use sha2::Digest as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -47,23 +42,248 @@ pub fn sync_state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ast_sync.json")
 }
 
-fn read_state(data_dir: &Path) -> Result<Option<ConfigState>> {
+#[derive(Debug, thiserror::Error)]
+pub enum SyncStateError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("encode {}", path.display())]
+    Encode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("replace {}", path.display())]
+    Replace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn read_state(data_dir: &Path) -> Result<Option<ConfigState>, SyncStateError> {
     let path = sync_state_path(data_dir);
     match std::fs::read(&path) {
-        Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?,
-        )),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|source| SyncStateError::Parse { path, source }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        Err(source) => Err(SyncStateError::Read { path, source }),
     }
 }
 
-fn write_state(data_dir: &Path, state: &ConfigState) -> Result<()> {
+fn write_state(data_dir: &Path, state: &ConfigState) -> Result<(), SyncStateError> {
     let path = sync_state_path(data_dir);
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
+    let bytes = serde_json::to_vec_pretty(state).map_err(|source| SyncStateError::Encode {
+        path: path.clone(),
+        source,
+    })?;
+    std::fs::write(&tmp, bytes).map_err(|source| SyncStateError::Write {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|source| SyncStateError::Replace { path, source })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncConfigError {
+    #[error(transparent)]
+    State(#[from] SyncStateError),
+    #[error("sign the request for {step}")]
+    Proof {
+        step: &'static str,
+        #[source]
+        source: crate::core::ProofHeadersError,
+    },
+    #[error("reach Core to {step}")]
+    Reach {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core refused to {step}")]
+    Refused {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read Core's answer to {step}")]
+    Read {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core answered 304 but this Forge has applied no bundle")]
+    NotModifiedWithoutBundle,
+    #[error("Core has no config bundle yet")]
+    NoBundle,
+    #[error("apply config bundle {bundle} version {version}")]
+    Apply {
+        bundle: String,
+        version: u64,
+        #[source]
+        source: Box<ApplyManifestError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReportError {
+    #[error("encode the {status} report of bundle {bundle}")]
+    Encode {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("sign the {status} report of bundle {bundle}")]
+    Proof {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: crate::core::ProofHeadersError,
+    },
+    #[error("reach Core with the {status} report of bundle {bundle}")]
+    Reach {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core refused the {status} report of bundle {bundle}")]
+    Refused {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyManifestError {
+    #[error("the manifest does not match the bundle hash {expected}")]
+    Hash { expected: String },
+    #[error("read the manifest")]
+    Parse(#[source] serde_json::Error),
+    #[error("unknown manifest format {format}")]
+    Format { format: String },
+    #[error("install skill {skill} from the bundle")]
+    InstallSkill {
+        skill: String,
+        #[source]
+        source: Box<InstallBundleError>,
+    },
+    #[error("read the skill catalog")]
+    Catalog(#[source] Box<forge_runs::SkillCatalogError>),
+    #[error("skill {skill} is not installed and the bundle carries none")]
+    SkillMissing { skill: String },
+    #[error("enable skill {skill}")]
+    EnableSkill {
+        skill: String,
+        #[source]
+        source: Box<forge_runs::SetSkillEnabledError>,
+    },
+    #[error("reconcile skills")]
+    ReconcileSkills(#[source] Box<forge_runs::ReconcileSkillsError>),
+    #[error("read the global prompt")]
+    ReadPrompt(#[source] forge_store::ReadSettingError),
+    #[error("read the global prompt's version")]
+    PromptVersion(#[source] forge_store::PromptVersionError),
+    #[error("save the global prompt")]
+    SavePrompt(#[source] forge_store::SavePromptError),
+    #[error("the global prompt changed while syncing (now version {latest})")]
+    PromptChanged { latest: u64 },
+    #[error("reconcile the global prompt")]
+    ReconcilePrompt(#[source] Box<forge_runs::GlobalPromptError>),
+    #[error(transparent)]
+    Mcp(#[from] ApplyMcpError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InstallBundleError {
+    #[error("stage a skill bundle")]
+    Stage(#[source] std::io::Error),
+    #[error("the bundle has an unsafe path {path}")]
+    UnsafePath { path: String },
+    #[error("decode {path}")]
+    Decode {
+        path: String,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("create the folder of {path}")]
+    Folder {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {path}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Install(Box<forge_runs::InstallSkillError>),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyMcpError {
+    #[error("read the MCP servers")]
+    Read(#[source] forge_store::ReadSettingError),
+    #[error("decode the MCP servers")]
+    Decode(#[source] serde_json::Error),
+    #[error("place MCP server {server}")]
+    Place {
+        server: String,
+        #[source]
+        source: forge_store::MutateMcpError,
+    },
+    #[error("remove MCP server {server}")]
+    Remove {
+        server: String,
+        #[source]
+        source: forge_store::MutateMcpError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MachineIdentityError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the machine secret in {}", path.display())]
+    Secret {
+        path: PathBuf,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("the machine secret in {} is {bytes} bytes, not 32", path.display())]
+    SecretLength { path: PathBuf, bytes: usize },
 }
 
 #[derive(serde::Deserialize)]
@@ -79,7 +299,6 @@ struct BundleLatest {
     bundle: Option<BundleInfo>,
 }
 
-/// Strict, so a Core shape change fails loudly instead of half-applying.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditorManifest {
@@ -107,8 +326,6 @@ struct ManifestMcpServer {
 #[derive(serde::Deserialize)]
 struct ManifestSkill {
     name: String,
-    /// Installed on machines that lack the skill; absent means the skill
-    /// must already be in the catalog.
     #[serde(default)]
     bundle: Option<SkillBundle>,
 }
@@ -118,15 +335,12 @@ struct SkillBundle {
     files: Vec<SkillBundleFile>,
 }
 
-/// Per-file hashes are not checked: the whole manifest is already checked
-/// against `bundle.content_hash`.
 #[derive(serde::Deserialize)]
 struct SkillBundleFile {
     path: String,
     content_base64: String,
 }
 
-/// Machine-proof requests to Core.
 struct Core<'a> {
     http: &'a reqwest::Client,
     base: &'a str,
@@ -135,7 +349,11 @@ struct Core<'a> {
 }
 
 impl Core<'_> {
-    fn get(&self, path: &str) -> Result<reqwest::RequestBuilder> {
+    fn get(
+        &self,
+        step: &'static str,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, SyncConfigError> {
         let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
@@ -143,19 +361,31 @@ impl Core<'_> {
             path,
             b"",
             now_sec(),
-        )?;
+        )
+        .map_err(|source| SyncConfigError::Proof { step, source })?;
         Ok(self
             .http
             .get(format!("{}{path}", self.base))
             .headers(headers))
     }
 
-    async fn report(&self, bundle_id: &str, status: &str, detail: &str) -> Result<()> {
+    async fn report(
+        &self,
+        bundle_id: &str,
+        status: &'static str,
+        detail: &str,
+    ) -> Result<(), ReportError> {
+        let bundle = || bundle_id.to_owned();
         let body = serde_json::to_vec(&serde_json::json!({
             "bundleId": bundle_id,
             "status": status,
             "detail": detail,
-        }))?;
+        }))
+        .map_err(|source| ReportError::Encode {
+            bundle: bundle(),
+            status,
+            source,
+        })?;
         let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
@@ -163,7 +393,12 @@ impl Core<'_> {
             CONFIG_STATE_PATH,
             &body,
             now_sec(),
-        )?;
+        )
+        .map_err(|source| ReportError::Proof {
+            bundle: bundle(),
+            status,
+            source,
+        })?;
         self.http
             .post(format!("{}{CONFIG_STATE_PATH}", self.base))
             .headers(headers)
@@ -171,13 +406,25 @@ impl Core<'_> {
             .body(body)
             .send()
             .await
-            .context("reach Core")?
+            .map_err(|source| ReportError::Reach {
+                bundle: bundle(),
+                status,
+                source,
+            })?
             .error_for_status()
-            .context("report the config bundle")?;
+            .map_err(|source| ReportError::Refused {
+                bundle: bundle(),
+                status,
+                source,
+            })?;
         Ok(())
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sync turn from fetching the bundle to reporting it"
+)]
 pub async fn sync_config(
     http: &reqwest::Client,
     core_base_url: &str,
@@ -185,7 +432,7 @@ pub async fn sync_config(
     secret: &[u8; 32],
     hub: &forge_runs::Hub,
     data_dir: &Path,
-) -> Result<ConfigOutcome> {
+) -> Result<ConfigOutcome, SyncConfigError> {
     let core = Core {
         http,
         base: core_base_url,
@@ -193,7 +440,8 @@ pub async fn sync_config(
         secret,
     };
     let previous = read_state(data_dir)?;
-    let mut request = core.get(CONFIG_BUNDLES_LATEST_PATH)?;
+    let latest_step = "fetch the latest config bundle";
+    let mut request = core.get(latest_step, CONFIG_BUNDLES_LATEST_PATH)?;
     if let Some(etag) = previous
         .as_ref()
         .map(|state| state.etag.as_str())
@@ -201,15 +449,24 @@ pub async fn sync_config(
     {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
-    let response = request.send().await.context("reach Core")?;
+    let response = request
+        .send()
+        .await
+        .map_err(|source| SyncConfigError::Reach {
+            step: latest_step,
+            source,
+        })?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         return previous
             .map(ConfigOutcome::Current)
-            .context("Core answered 304 but this Forge has applied no bundle");
+            .ok_or(SyncConfigError::NotModifiedWithoutBundle);
     }
     let response = response
         .error_for_status()
-        .context("fetch the latest config bundle")?;
+        .map_err(|source| SyncConfigError::Refused {
+            step: latest_step,
+            source,
+        })?;
     let etag = response
         .headers()
         .get(reqwest::header::ETAG)
@@ -219,27 +476,40 @@ pub async fn sync_config(
     let latest: BundleLatest = response
         .json()
         .await
-        .context("read the latest config bundle")?;
+        .map_err(|source| SyncConfigError::Read {
+            step: latest_step,
+            source,
+        })?;
     let Some(bundle) = latest.bundle else {
         return previous
             .map(ConfigOutcome::Current)
-            .context("Core has no config bundle yet");
+            .ok_or(SyncConfigError::NoBundle);
     };
     if let Some(current) = previous.as_ref().filter(|state| {
         (&state.bundle_id, &state.content_hash) == (&bundle.id, &bundle.content_hash)
     }) {
         return Ok(ConfigOutcome::Current(current.clone()));
     }
+    let manifest_step = "fetch the bundle's manifest";
     let bytes = core
-        .get(&config_manifest_path(bundle.version))?
+        .get(manifest_step, &config_manifest_path(bundle.version))?
         .send()
         .await
-        .context("reach Core")?
+        .map_err(|source| SyncConfigError::Reach {
+            step: manifest_step,
+            source,
+        })?
         .error_for_status()
-        .context("fetch the manifest")?
+        .map_err(|source| SyncConfigError::Refused {
+            step: manifest_step,
+            source,
+        })?
         .bytes()
         .await
-        .context("read the manifest")?;
+        .map_err(|source| SyncConfigError::Read {
+            step: manifest_step,
+            source,
+        })?;
     let synced_before = previous.map(|state| state.mcp_servers).unwrap_or_default();
     let applied = apply_manifest(hub, &bytes, &bundle.content_hash, &synced_before).await;
     let Applied {
@@ -248,14 +518,21 @@ pub async fn sync_config(
         kept_local,
     } = match applied {
         Ok(applied) => applied,
-        Err(error) => {
+        Err(source) => {
             if let Err(report) = core
-                .report(&bundle.id, "failed", &format!("{error:#}"))
+                .report(&bundle.id, "failed", &diagnostics::chain(&source))
                 .await
             {
-                tracing::debug!("{report:#}");
+                tracing::debug!(
+                    error = diagnostics::chain(&report),
+                    "report a failed config bundle"
+                );
             }
-            return Err(error).context("apply the config bundle");
+            return Err(SyncConfigError::Apply {
+                bundle: bundle.id,
+                version: bundle.version,
+                source: Box::new(source),
+            });
         }
     };
     let state = ConfigState {
@@ -271,8 +548,10 @@ pub async fn sync_config(
         .await
     {
         tracing::warn!(
-            "applied config bundle {} but could not tell Core: {error:#}",
-            state.version
+            bundle = %state.bundle_id,
+            version = state.version,
+            error = diagnostics::chain(&error),
+            "applied a config bundle but could not tell Core"
         );
     }
     Ok(ConfigOutcome::Updated { state, kept_local })
@@ -289,76 +568,90 @@ async fn apply_manifest(
     bytes: &[u8],
     content_hash: &str,
     synced_before: &[String],
-) -> Result<Applied> {
-    anyhow::ensure!(
-        hex::encode(sha2::Sha256::digest(bytes)) == content_hash,
-        "the manifest does not match the bundle hash"
-    );
-    let manifest: EditorManifest = serde_json::from_slice(bytes).context("read the manifest")?;
-    anyhow::ensure!(
-        manifest.format == MANIFEST_FORMAT,
-        "unknown manifest format {}",
-        manifest.format
-    );
+) -> Result<Applied, ApplyManifestError> {
+    if hex::encode(sha2::Sha256::digest(bytes)) != content_hash {
+        return Err(ApplyManifestError::Hash {
+            expected: content_hash.to_owned(),
+        });
+    }
+    let manifest: EditorManifest =
+        serde_json::from_slice(bytes).map_err(ApplyManifestError::Parse)?;
+    if manifest.format != MANIFEST_FORMAT {
+        return Err(ApplyManifestError::Format {
+            format: manifest.format,
+        });
+    }
     apply(hub, &manifest, synced_before).await
 }
 
-/// Skills go first, so a skill that cannot install leaves the prompt and
-/// the MCP servers as they were.
 async fn apply(
     hub: &forge_runs::Hub,
     manifest: &EditorManifest,
     synced_before: &[String],
-) -> Result<Applied> {
+) -> Result<Applied, ApplyManifestError> {
     let mut changed = Vec::new();
     for skill in &manifest.skills {
         if let Some(bundle) = &skill.bundle {
-            install_bundle(hub, &skill.name, bundle).await?;
+            install_bundle(hub, bundle).await.map_err(|source| {
+                ApplyManifestError::InstallSkill {
+                    skill: skill.name.clone(),
+                    source: Box::new(source),
+                }
+            })?;
             changed.push(format!("skill:{}", skill.name));
         }
     }
     if !manifest.skills.is_empty() {
-        let catalog = hub.extensions().skill_catalog().await?;
+        let catalog = hub
+            .extensions()
+            .skill_catalog()
+            .await
+            .map_err(|error| ApplyManifestError::Catalog(Box::new(error)))?;
         for skill in &manifest.skills {
             let suffix = format!(".{}", skill.name);
-            let entry = catalog
-                .iter()
-                .find(|entry| {
-                    [&entry.id, &entry.name].contains(&&skill.name) || entry.id.ends_with(&suffix)
-                })
-                .with_context(|| {
-                    format!(
-                        "skill {} is not installed and the bundle carries none",
-                        skill.name
-                    )
-                })?;
+            let Some(entry) = catalog.iter().find(|entry| {
+                [&entry.id, &entry.name].contains(&&skill.name) || entry.id.ends_with(&suffix)
+            }) else {
+                return Err(ApplyManifestError::SkillMissing {
+                    skill: skill.name.clone(),
+                });
+            };
             if !entry.enabled {
-                hub.extensions().set_skill_enabled(&entry.id, true).await?;
+                hub.extensions()
+                    .set_skill_enabled(&entry.id, true)
+                    .await
+                    .map_err(|source| ApplyManifestError::EnableSkill {
+                        skill: entry.id.clone(),
+                        source: Box::new(source),
+                    })?;
                 changed.push(format!("skill:{}", entry.id));
             }
         }
         hub.extensions()
             .reconcile_skills()
             .await
-            .context("reconcile skills")?;
+            .map_err(|error| ApplyManifestError::ReconcileSkills(Box::new(error)))?;
     }
     if let Some(text) = manifest.global_prompt.as_deref() {
         let store = hub.store();
-        let current = store.setting("global_prompt").await?;
+        let current = store
+            .setting("global_prompt")
+            .await
+            .map_err(ApplyManifestError::ReadPrompt)?;
         if current.as_ref().and_then(serde_json::Value::as_str) != Some(text) {
-            let base = store.prompt_version().await?;
+            let base = store
+                .prompt_version()
+                .await
+                .map_err(ApplyManifestError::PromptVersion)?;
             store
                 .save_prompt_version(base, text.to_owned())
-                .await?
-                .map_err(|latest| {
-                    anyhow::anyhow!(
-                        "the global prompt changed while syncing (now version {latest})"
-                    )
-                })?;
+                .await
+                .map_err(ApplyManifestError::SavePrompt)?
+                .map_err(|latest| ApplyManifestError::PromptChanged { latest })?;
             hub.extensions()
                 .reconcile_global_prompt()
                 .await
-                .context("reconcile the global prompt")?;
+                .map_err(|error| ApplyManifestError::ReconcilePrompt(Box::new(error)))?;
             changed.push("globalPrompt".to_owned());
         }
     }
@@ -372,31 +665,48 @@ async fn apply(
     })
 }
 
-async fn install_bundle(hub: &forge_runs::Hub, name: &str, bundle: &SkillBundle) -> Result<()> {
+async fn install_bundle(
+    hub: &forge_runs::Hub,
+    bundle: &SkillBundle,
+) -> Result<(), InstallBundleError> {
     use base64::Engine as _;
-    let dir = tempfile::tempdir().context("stage a skill bundle")?;
+    let dir = tempfile::tempdir().map_err(InstallBundleError::Stage)?;
     for file in &bundle.files {
         let relative = Path::new(&file.path);
-        anyhow::ensure!(
-            relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_))),
-            "skill {name} bundles an unsafe path {}",
-            file.path
-        );
+        if !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(InstallBundleError::UnsafePath {
+                path: file.path.clone(),
+            });
+        }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&file.content_base64)
-            .with_context(|| format!("decode {} in skill {name}", file.path))?;
+            .map_err(|source| InstallBundleError::Decode {
+                path: file.path.clone(),
+                source,
+            })?;
         let path = dir.path().join(relative);
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                InstallBundleError::Folder {
+                    path: file.path.clone(),
+                    source,
+                }
+            })?;
         }
-        tokio::fs::write(&path, bytes).await?;
+        tokio::fs::write(&path, bytes)
+            .await
+            .map_err(|source| InstallBundleError::Write {
+                path: file.path.clone(),
+                source,
+            })?;
     }
     hub.extensions()
         .install_skill(dir.path().to_path_buf(), true)
         .await
-        .with_context(|| format!("install skill {name}"))?;
+        .map_err(|error| InstallBundleError::Install(Box::new(error)))?;
     Ok(())
 }
 
@@ -404,12 +714,14 @@ async fn apply_mcp(
     store: &forge_store::Store,
     servers: &[ManifestMcpServer],
     synced_before: &[String],
-) -> Result<Applied> {
+) -> Result<Applied, ApplyMcpError> {
     let current: Vec<artisan_api::McpServer> = store
         .setting("mcp_servers")
-        .await?
+        .await
+        .map_err(ApplyMcpError::Read)?
         .map(serde_json::from_value)
-        .transpose()?
+        .transpose()
+        .map_err(ApplyMcpError::Decode)?
         .unwrap_or_default();
     let mut applied = Applied {
         changed: Vec::new(),
@@ -442,7 +754,11 @@ async fn apply_mcp(
                     previous: previous.cloned(),
                     server,
                 })
-                .await?;
+                .await
+                .map_err(|source| ApplyMcpError::Place {
+                    server: entry.name.clone(),
+                    source,
+                })?;
             applied.changed.push(format!("mcp:{}", entry.name));
         }
     }
@@ -455,7 +771,11 @@ async fn apply_mcp(
             .mutate_mcp(artisan_api::McpMutation::Remove {
                 previous: server.clone(),
             })
-            .await?;
+            .await
+            .map_err(|source| ApplyMcpError::Remove {
+                server: server.name.clone(),
+                source,
+            })?;
         applied.changed.push(format!("mcp-removed:{}", server.name));
     }
     Ok(applied)
@@ -491,8 +811,6 @@ fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpSe
     }
 }
 
-/// The machine identity `ae account enroll/confirm` wrote to
-/// `<data_dir>/ast_account.json`.
 #[derive(Clone, Debug)]
 pub struct MachineIdentity {
     pub machine_id: String,
@@ -500,8 +818,9 @@ pub struct MachineIdentity {
     pub secret: [u8; 32],
 }
 
-/// `None` when this Forge is not enrolled.
-pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>> {
+pub fn load_machine_identity(
+    data_dir: &Path,
+) -> Result<Option<MachineIdentity>, MachineIdentityError> {
     use base64::Engine as _;
     #[derive(serde::Deserialize)]
     struct AccountFile {
@@ -516,18 +835,26 @@ pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>>
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        Err(source) => return Err(MachineIdentityError::Read { path, source }),
     };
-    let file: AccountFile =
-        serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?;
+    let file: AccountFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(source) => return Err(MachineIdentityError::Parse { path, source }),
+    };
     let (Some(secret_b64u), Some(machine_id)) = (file.secret_b64u, file.machine_id) else {
         return Ok(None);
     };
-    let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(secret_b64u.as_bytes())
-        .context("read the machine secret")?
-        .try_into()
-        .map_err(|_bytes| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
+    let decoded =
+        match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(secret_b64u.as_bytes()) {
+            Ok(decoded) => decoded,
+            Err(source) => return Err(MachineIdentityError::Secret { path, source }),
+        };
+    let Ok(secret) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+        return Err(MachineIdentityError::SecretLength {
+            path,
+            bytes: decoded.len(),
+        });
+    };
     Ok(Some(MachineIdentity {
         machine_id,
         account_id: file.account_id,
@@ -535,8 +862,6 @@ pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>>
     }))
 }
 
-/// Syncs at startup and then every `interval`. Core has no push channel for
-/// config changes, so this is the one place sync polls.
 pub(crate) async fn run_config_loop(
     data_dir: PathBuf,
     hub: forge_runs::Hub,
@@ -551,7 +876,7 @@ pub(crate) async fn run_config_loop(
     {
         Ok(http) => http,
         Err(error) => {
-            tracing::warn!("config sync off: {error:#}");
+            tracing::warn!(error = %error, "config sync off");
             return;
         }
     };
@@ -579,10 +904,12 @@ pub(crate) async fn run_config_loop(
                     }
                 }
             }
-            Err(error) if failing => tracing::debug!("config sync failed: {error:#}"),
+            Err(error) if failing => {
+                tracing::debug!(error = diagnostics::chain(&error), "config sync failed");
+            }
             Err(error) => {
                 failing = true;
-                tracing::warn!("config sync failed: {error:#}");
+                tracing::warn!(error = diagnostics::chain(&error), "config sync failed");
             }
         }
         tokio::select! {

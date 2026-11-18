@@ -149,5 +149,6 @@ async fn main() -> Result<()> {
         serde_json::to_vec_pretty(&metadata)?,
     )?;
     println!("{metadata}");
-    server.run().await
+    server.run().await;
+    Ok(())
 }

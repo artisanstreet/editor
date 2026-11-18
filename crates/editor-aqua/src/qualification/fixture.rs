@@ -953,8 +953,8 @@ impl ForgeServer {
                 .run_until(async {
                     let _ = stopped.await;
                 })
-                .await
-                .map_err(ForgeFailure::from)
+                .await;
+            Ok::<(), ForgeFailure>(())
         });
         Ok(Self {
             store,
