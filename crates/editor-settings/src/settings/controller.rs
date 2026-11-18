@@ -10,7 +10,7 @@ use editor_ui::text::editor::{Editor, Mode};
 use super::archive::{ArchiveForm, ArchiveRequest};
 use super::engines::{EngineRequest, EnginesForm};
 use super::extensions::{ExtensionsForm, MutationRequest};
-use super::preferences::{SettingKey, SettingRequest, SettingWrites};
+use super::preferences::{SettingFailure, SettingKey, SettingRequest, SettingWrites};
 use super::prompt::{PromptForm, PromptRequest};
 
 struct HostCompletion {
@@ -320,6 +320,29 @@ impl SettingsController {
         if let Some(request) = self.setting_writes.begin(&mut host.settings, target, value) {
             self.send_setting(client, request);
         }
+    }
+
+    pub fn setting_failures(
+        &self,
+        host: &editor_core::HostData,
+    ) -> Vec<(SettingKey, SettingFailure)> {
+        self.setting_writes.failures_for(&host.id, host.instance())
+    }
+
+    pub fn retry_setting(&mut self, core: &mut Core, target: SettingKey) {
+        if let Some(failure) = self.setting_writes.failure(&target).cloned() {
+            self.set_host_setting_for(
+                core,
+                target.host,
+                target.instance,
+                target.key,
+                failure.value,
+            );
+        }
+    }
+
+    pub fn dismiss_setting_failure(&mut self, target: &SettingKey) {
+        self.setting_writes.dismiss(target);
     }
 
     fn send_setting(&mut self, client: editor_core::ForgeClient, request: SettingRequest) {
@@ -669,6 +692,7 @@ impl SettingsController {
                     if let Err(error) = &result {
                         tracing::warn!(
                             host = %request.target.host,
+                            instance = ?request.target.instance,
                             key = request.target.key,
                             %error,
                             "saving a Forge setting"

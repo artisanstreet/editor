@@ -15,6 +15,12 @@ pub struct SettingRequest {
     pub value: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingFailure {
+    pub value: Value,
+    pub cause: String,
+}
+
 struct KeyWrite {
     sent: Value,
     confirmed: Option<Value>,
@@ -24,6 +30,7 @@ struct KeyWrite {
 #[derive(Default)]
 pub struct SettingWrites {
     keys: HashMap<SettingKey, KeyWrite>,
+    failures: HashMap<SettingKey, SettingFailure>,
 }
 
 impl SettingWrites {
@@ -33,6 +40,7 @@ impl SettingWrites {
         target: SettingKey,
         value: Value,
     ) -> Option<SettingRequest> {
+        self.failures.remove(&target);
         let previous = settings.insert(target.key.to_owned(), value.clone());
         if let Some(write) = self.keys.get_mut(&target) {
             write.next = Some(value);
@@ -56,6 +64,21 @@ impl SettingWrites {
         result: &Result<(), String>,
     ) -> Option<SettingRequest> {
         let write = self.keys.remove(&request.target)?;
+        match result {
+            Ok(()) => {
+                self.failures.remove(&request.target);
+            }
+            Err(cause) if write.next.is_none() => {
+                self.failures.insert(
+                    request.target.clone(),
+                    SettingFailure {
+                        value: request.value.clone(),
+                        cause: cause.clone(),
+                    },
+                );
+            }
+            Err(_) => {}
+        }
         let confirmed = match result {
             Ok(()) => Some(write.sent.clone()),
             Err(_) => write.confirmed,
@@ -93,5 +116,30 @@ impl SettingWrites {
     pub fn retain_instances(&mut self, live: impl Fn(&HostId, HostInstance) -> bool) {
         self.keys
             .retain(|target, _| live(&target.host, target.instance));
+        self.failures
+            .retain(|target, _| live(&target.host, target.instance));
+    }
+
+    pub fn failure(&self, target: &SettingKey) -> Option<&SettingFailure> {
+        self.failures.get(target)
+    }
+
+    pub fn failures_for(
+        &self,
+        host: &HostId,
+        instance: HostInstance,
+    ) -> Vec<(SettingKey, SettingFailure)> {
+        let mut failures: Vec<_> = self
+            .failures
+            .iter()
+            .filter(|(target, _)| &target.host == host && target.instance == instance)
+            .map(|(target, failure)| (target.clone(), failure.clone()))
+            .collect();
+        failures.sort_by_key(|(target, _)| target.key);
+        failures
+    }
+
+    pub fn dismiss(&mut self, target: &SettingKey) -> bool {
+        self.failures.remove(target).is_some()
     }
 }

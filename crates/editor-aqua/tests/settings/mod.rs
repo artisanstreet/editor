@@ -726,3 +726,119 @@ fn about_page_opens_the_third_party_notices() {
         [ViewAction::OpenNotices]
     ));
 }
+
+fn silent_host(
+    core: &mut editor_aqua::core::Core,
+    id: &str,
+) -> (std::net::TcpListener, editor_aqua::core::HostId) {
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
+    let silent = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let identity = Identity::generate("settings-silent-host").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let config = HostConfig {
+        id: HostId(id.into()),
+        name: id.into(),
+        address: silent.local_addr().unwrap().to_string(),
+        fingerprint: fingerprint.clone(),
+        kind: HostKind::Local,
+    };
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    core.add_test_host(&config, client);
+    (silent, config.id)
+}
+
+fn render_settings(
+    controller: &editor_aqua::settings::controller::SettingsController,
+    core: &editor_aqua::core::Core,
+    emit: std::rc::Rc<dyn Fn(editor_aqua::settings::view::ViewAction)>,
+) -> aqua::UiApp {
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::settings::{about::BuildInfo, view::build};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    let view = build(
+        controller,
+        core,
+        ArtisanTheme::resolved(),
+        &BuildInfo::default(),
+        aqua_core::Size::new(900.0, 2400.0),
+        true,
+        emit,
+    );
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| view).unwrap();
+    app.set_viewport(900.0, 2400.0, 1.0);
+    app.build_frame().unwrap();
+    app
+}
+
+#[test]
+fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        preferences::{SettingKey, SettingRequest},
+        view::{ViewAction, dispatch},
+    };
+    use serde_json::json;
+    use std::{cell::RefCell, rc::Rc};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let (_silent, id) = silent_host(&mut core, "Desk");
+    core.navigate(Screen::Settings(SettingsPage::Threads));
+    let mut settings = SettingsController::default();
+    settings.sync(&mut core);
+    let target = SettingKey {
+        instance: core.host(&id).unwrap().instance(),
+        host: id.clone(),
+        key: "suggestions",
+    };
+    assert!(dispatch(
+        &mut settings,
+        &mut core,
+        ViewAction::SetHostSetting(id.clone(), target.instance, "suggestions", false)
+    ));
+    settings.complete_setting_for_tests(
+        SettingRequest {
+            target: target.clone(),
+            value: json!(false),
+        },
+        Err("the host did not answer".into()),
+    );
+    assert!(settings.drain(&mut core));
+    assert_ne!(
+        core.host(&id).unwrap().setting("suggestions"),
+        Some(&json!(false))
+    );
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    let mut app = render_settings(
+        &settings,
+        &core,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    let texts = test_support::editor::ui::painted_texts(&app);
+    assert!(
+        texts.iter().any(|text| text
+            == "Couldn't save “Suggest the next message” on Desk: the host did not answer"),
+        "{texts:?}"
+    );
+    test_support::editor::ui::click(&mut app, "settings-retry-suggestions");
+    let retry = actions.borrow_mut().pop().unwrap();
+    assert!(matches!(&retry, ViewAction::RetryHostSetting(key) if *key == target));
+    assert!(dispatch(&mut settings, &mut core, retry));
+    assert_eq!(
+        core.host(&id).unwrap().setting("suggestions"),
+        Some(&json!(false)),
+        "Try again sends the choice that failed"
+    );
+    let texts = test_support::editor::ui::painted_texts(&render_settings(
+        &settings,
+        &core,
+        Rc::new(|_| {}),
+    ));
+    assert!(!texts.iter().any(|text| text.starts_with("Couldn't save")));
+}

@@ -10,6 +10,7 @@ use super::{
     about::BuildInfo,
     controller::SettingsController,
     page,
+    preferences::SettingKey,
     ui::{self, Ink},
 };
 use editor_core::{ConnectionStatus, Core, HostData, Screen, SettingsPage, SettingsSection};
@@ -91,6 +92,8 @@ pub enum ViewAction {
         &'static str,
         bool,
     ),
+    RetryHostSetting(SettingKey),
+    DismissHostSetting(SettingKey),
 }
 
 const PAGE_WIDTH: f32 = 680.0;
@@ -254,6 +257,8 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         ViewAction::SetHostSetting(host, instance, key, enabled) => {
             controller.set_host_setting_for(core, host, instance, key, enabled.into())
         }
+        ViewAction::RetryHostSetting(target) => controller.retry_setting(core, target),
+        ViewAction::DismissHostSetting(target) => controller.dismiss_setting_failure(&target),
     }
     controller.reported_prompt_dirty =
         controller.prompt_editor.borrow().text() != controller.prompt.saved;
@@ -387,11 +392,20 @@ pub fn build(
             ))
             .build(),
     };
+    let host_failures = core
+        .active_host()
+        .and_then(|host| host_setting_failures(controller, host, &theme, &emit_for_error));
     let content = match (
         page.parent(),
         device_settings_error(controller, core, &theme, emit_for_error),
+        host_failures,
     ) {
-        (SettingsPage::General, Some(error)) => ui::column().child(error).child(content).build(),
+        (SettingsPage::General, Some(error), _) => ui::column().child(error).child(content).build(),
+        (
+            SettingsPage::Threads | SettingsPage::Extensions | SettingsPage::Engine(_),
+            _,
+            Some(failures),
+        ) => ui::column().child(failures).child(content).build(),
         _ => content,
     };
     Scroll::new()
@@ -420,6 +434,64 @@ pub fn build(
         )
         .build()
         .with_key(format!("settings-screen-{page:?}"))
+}
+
+fn setting_label(key: &'static str) -> &'static str {
+    match key {
+        artisan_api::TRANSPORT_KEY => "Claude connection",
+        artisan_api::THREAD_RETENTION_DAYS_KEY => "Delete inactive threads",
+        _ => artisan_api::setting_decl(key).map_or(key, |decl| decl.label),
+    }
+}
+
+fn host_setting_failures(
+    controller: &SettingsController,
+    host: &HostData,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Option<Element> {
+    let failures = controller.setting_failures(host);
+    if failures.is_empty() {
+        return None;
+    }
+    let mut stack = ui::stack(Space::S8);
+    for (target, failure) in failures {
+        let retry = emit.clone();
+        let dismiss = emit.clone();
+        let retried = target.clone();
+        stack = stack
+            .child(ui::callout(
+                theme,
+                Tone::Danger,
+                format!(
+                    "Couldn't save “{}” on {}: {}",
+                    setting_label(target.key),
+                    host.name,
+                    failure.cause
+                ),
+            ))
+            .child(
+                ui::actions()
+                    .child(ui::button(
+                        theme,
+                        format!("settings-dismiss-{}", target.key),
+                        "Dismiss",
+                        ButtonTone::Quiet,
+                        false,
+                        move || dismiss(ViewAction::DismissHostSetting(target.clone())),
+                    ))
+                    .child(ui::button(
+                        theme,
+                        format!("settings-retry-{}", retried.key),
+                        "Try again",
+                        ButtonTone::Neutral,
+                        false,
+                        move || retry(ViewAction::RetryHostSetting(retried.clone())),
+                    ))
+                    .build(),
+            );
+    }
+    Some(stack.build())
 }
 
 fn device_settings_error(
@@ -1253,6 +1325,7 @@ struct ViewSnapshot {
     device_settings: Vec<Option<serde_json::Value>>,
     device_settings_error: (bool, Option<String>),
     host_settings: Vec<Option<serde_json::Value>>,
+    setting_failures: Vec<(SettingKey, super::preferences::SettingFailure)>,
     host_instance: Option<editor_core::HostInstance>,
     archive_loading: Option<(bool, bool, bool, Option<String>)>,
     archive_restoring: std::collections::HashSet<artisan_api::ThreadId>,
@@ -1329,6 +1402,7 @@ impl ViewSnapshot {
                     })
                 })
                 .collect(),
+            setting_failures: host.map_or_else(Vec::new, |host| controller.setting_failures(host)),
             host_instance: host.map(|host| host.instance()),
             archive_loading: host.map(|host| {
                 let page = host.thread_page(true);
