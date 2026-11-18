@@ -293,13 +293,8 @@ impl HostData {
             if self.thread_pages.removed.contains(&id) {
                 continue;
             }
-            if self
-                .threads
-                .get(&id)
-                .is_none_or(|known| known.seq <= thread.seq)
-            {
-                self.threads.insert(id.clone(), thread);
-            }
+            self.accept_thread(thread);
+            let page = &mut self.thread_pages.pages[usize::from(archived)];
             if self.threads.get(&id).is_some_and(|thread| {
                 thread.archived == archived && thread.parent_thread_id.is_none()
             }) && !page.ids.contains(&id)
@@ -308,14 +303,9 @@ impl HostData {
             }
         }
         for run in result.runs {
-            if self
-                .runs
-                .get(&run.thread_id)
-                .is_none_or(|known| known.seq <= run.seq)
-            {
-                self.runs.insert(run.thread_id.clone(), run);
-            }
+            self.remember_run(run);
         }
+        let page = &mut self.thread_pages.pages[usize::from(archived)];
         if page.at_latest {
             for id in changed {
                 if self.threads.get(id).is_some_and(|thread| {
@@ -394,15 +384,8 @@ impl HostData {
         }
         self.thread_pages.direct.remove(&id);
         match result {
-            Ok(thread) if self.thread_pages.removed.contains(&id) => drop(thread),
             Ok(thread) => {
-                if self
-                    .threads
-                    .get(&id)
-                    .is_none_or(|old| old.seq <= thread.seq)
-                {
-                    self.threads.insert(id.clone(), thread);
-                }
+                self.accept_thread(thread);
             }
             Err(source) => {
                 let error = LoadThreadError {
@@ -427,18 +410,28 @@ impl HostData {
             .push(HostEvent::ThreadChanged { thread_id: id });
         true
     }
-    pub(super) fn remember_thread(&mut self, thread: Thread) {
-        let id = thread.id.clone();
-        if self
-            .threads
-            .get(&id)
-            .is_some_and(|old| old.seq > thread.seq)
+    pub(super) fn is_deleted(&self, id: &ThreadId) -> bool {
+        self.thread_pages.removed.contains(id)
+    }
+    fn accept_thread(&mut self, thread: Thread) -> bool {
+        if self.thread_pages.removed.contains(&thread.id)
+            || self
+                .threads
+                .get(&thread.id)
+                .is_some_and(|old| old.seq > thread.seq)
         {
-            return;
+            return false;
         }
+        self.threads.insert(thread.id.clone(), thread);
+        true
+    }
+    pub(super) fn remember_thread(&mut self, thread: Thread) -> bool {
+        let id = thread.id.clone();
         let index = usize::from(thread.archived);
         let top_level = thread.parent_thread_id.is_none();
-        self.threads.insert(id.clone(), thread);
+        if !self.accept_thread(thread) {
+            return false;
+        }
         for page in &mut self.thread_pages.pages {
             if let PageLoad::Loading { changed, .. } = &mut page.load {
                 changed.insert(id.clone());
@@ -463,6 +456,7 @@ impl HostData {
             });
         }
         self.prune_threads();
+        true
     }
     pub(super) fn forget_thread(&mut self, id: &ThreadId) {
         let pages = &mut self.thread_pages;
@@ -480,6 +474,7 @@ impl HostData {
         pages.removed.insert(id.clone());
         self.threads.remove(id);
         self.runs.remove(id);
+        self.stopping.remove(id);
         self.read_acks.remove(id);
     }
     pub(super) fn prune_threads(&mut self) {

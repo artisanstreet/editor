@@ -671,8 +671,21 @@ impl HostData {
         self.pending_events.push(HostEvent::Changed);
     }
 
-    fn remember_run(&mut self, run: Run) {
+    pub(super) fn remember_run(&mut self, run: Run) -> bool {
         let thread = run.thread_id.clone();
+        if self.is_deleted(&thread) {
+            return false;
+        }
+        let stale = self.runs.get(&thread).is_some_and(|known| {
+            if known.id == run.id {
+                known.seq > run.seq
+            } else {
+                known.started_at > run.started_at
+            }
+        });
+        if stale {
+            return false;
+        }
         let run = match self.stopping.get(&thread).cloned() {
             Some(stopping) => match stopping.hold(run) {
                 stopping::Held::Stopping(held) => held,
@@ -684,12 +697,8 @@ impl HostData {
             },
             None => run,
         };
-        match self.runs.get(&run.thread_id) {
-            Some(known) if known.id != run.id && known.started_at > run.started_at => {}
-            _ => {
-                self.runs.insert(run.thread_id.clone(), run);
-            }
-        }
+        self.runs.insert(thread, run);
+        true
     }
     pub fn invalidate_catalog(&mut self) {
         self.catalog_load = ProjectionLoad::default();
@@ -1165,12 +1174,7 @@ impl HostData {
                     {
                         self.read_acks.remove(&id);
                     }
-                    if self
-                        .threads
-                        .get(&id)
-                        .is_none_or(|old| old.seq <= thread.seq)
-                    {
-                        self.remember_thread(thread);
+                    if self.remember_thread(thread) {
                         events.push(HostEvent::ThreadChanged { thread_id: id });
                     }
                     self.pump_read_acks();
@@ -1328,8 +1332,9 @@ impl HostData {
             }
             Event::Thread { thread } => {
                 let thread_id = thread.id.clone();
-                self.remember_thread(thread);
-                events.push(HostEvent::ThreadChanged { thread_id });
+                if self.remember_thread(thread) {
+                    events.push(HostEvent::ThreadChanged { thread_id });
+                }
             }
             Event::ThreadRemoved { thread_id } => {
                 self.forget_thread(&thread_id);

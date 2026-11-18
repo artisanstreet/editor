@@ -285,3 +285,167 @@ fn archived_threads_land_only_in_the_archive_and_older_pages_append() {
         "the archive page was never asked for"
     );
 }
+
+fn run(thread: &str, seq: u64, state: artisan_api::RunState) -> artisan_api::Run {
+    artisan_api::Run {
+        config: None,
+        id: artisan_api::RunId("run".into()),
+        thread_id: ThreadId(thread.into()),
+        engine: artisan_api::EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state,
+        usage: artisan_api::Usage::default(),
+        session_id: None,
+        seq,
+        started_at: 1,
+        continuation: None,
+    }
+}
+
+fn done() -> artisan_api::RunState {
+    artisan_api::RunState::Finished {
+        outcome: artisan_api::RunOutcome::Done,
+        error: None,
+        ended_at: 2,
+    }
+}
+
+impl Silent {
+    fn send(&self, deliver: impl AsyncFnOnce(&editor_core::host::TestHostTransitions)) {
+        let sender = self
+            .core
+            .host(&self.host)
+            .expect("host")
+            .test_transition_sender();
+        runtime().block_on(deliver(&sender));
+    }
+
+    fn drain_until(&mut self, what: &str, mut done: impl FnMut(&editor_core::HostData) -> bool) {
+        let host = self.host.clone();
+        wait_until(what, Duration::from_secs(10), || {
+            self.core.drain_with(|_, _| {});
+            done(self.core.host(&host).expect("host"))
+        });
+    }
+
+    fn working(&self, thread: &str) -> bool {
+        self.core
+            .host(&self.host)
+            .expect("host")
+            .is_working(&ThreadId(thread.into()))
+    }
+}
+
+#[test]
+fn a_page_loaded_during_a_stop_keeps_the_run_stopped() {
+    let mut forge = silent_host();
+    forge.send(async |sender| {
+        sender
+            .event(Event::Thread {
+                thread: thread("busy", 1, 1, false),
+            })
+            .await;
+        sender
+            .event(Event::Run {
+                run: run("busy", 2, artisan_api::RunState::Running),
+            })
+            .await;
+    });
+    forge.drain_until("the run arrives", |host| {
+        host.runs.contains_key(&ThreadId("busy".into()))
+    });
+    forge
+        .core
+        .host_mut(&forge.host)
+        .expect("host")
+        .stop_optimistically(&ThreadId("busy".into()));
+    assert!(!forge.working("busy"), "Stop shows the run stopped at once");
+    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
+    forge.send(async |sender| {
+        sender
+            .thread_page(
+                false,
+                ThreadPageDirection::Latest,
+                0,
+                generation,
+                ThreadsPage {
+                    runs: vec![run("busy", 2, artisan_api::RunState::Running)],
+                    ..page(vec![thread("busy", 1, 1, false)])
+                },
+            )
+            .await;
+    });
+    forge.settle(false);
+    assert!(
+        !forge.working("busy"),
+        "a page that left Forge before the stop does not bring the run back"
+    );
+}
+
+#[test]
+fn a_page_loaded_before_a_delete_does_not_bring_back_its_running_run() {
+    let mut forge = silent_host();
+    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
+    forge.send(async |sender| {
+        sender
+            .event(Event::ThreadRemoved {
+                thread_id: ThreadId("deleted".into()),
+            })
+            .await;
+        sender
+            .thread_page(
+                false,
+                ThreadPageDirection::Latest,
+                0,
+                generation,
+                ThreadsPage {
+                    runs: vec![run("deleted", 2, artisan_api::RunState::Running)],
+                    ..page(vec![thread("deleted", 1, 1, false)])
+                },
+            )
+            .await;
+    });
+    forge.settle(false);
+    assert!(!forge.working("deleted"));
+    assert!(
+        !forge
+            .core
+            .host(&forge.host)
+            .expect("host")
+            .runs
+            .contains_key(&ThreadId("deleted".into())),
+        "the deleted thread's run stays forgotten"
+    );
+}
+
+#[test]
+fn a_queued_older_run_event_does_not_undo_a_newer_page() {
+    let mut forge = silent_host();
+    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
+    forge.send(async |sender| {
+        sender
+            .thread_page(
+                false,
+                ThreadPageDirection::Latest,
+                0,
+                generation,
+                ThreadsPage {
+                    runs: vec![run("finished", 9, done())],
+                    ..page(vec![thread("finished", 1, 1, false)])
+                },
+            )
+            .await;
+        sender
+            .event(Event::Run {
+                run: run("finished", 5, artisan_api::RunState::Running),
+            })
+            .await;
+    });
+    forge.settle(false);
+    forge.drain_until("the queued event is applied", |_| true);
+    assert!(
+        !forge.working("finished"),
+        "the finished run stays finished"
+    );
+}
