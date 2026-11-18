@@ -406,11 +406,10 @@ impl ThreadView {
             State::Following { .. } | State::Jumping { .. } => None,
         };
         let (shown_len, shown_bytes) = shown.clone().map_or((0, 0), |shown| {
-            self.items
-                .range(shown)
-                .fold((0, 0), |(len, bytes), (_, item)| {
-                    (len + 1, bytes + item.resident_bytes())
-                })
+            self.items.range(shown.clone()).fold(
+                (self.work.range(shown).count(), 0),
+                |(len, bytes), (_, item)| (len + 1, bytes + item.resident_bytes()),
+            )
         });
         let page = PAGE as usize;
         let slack = WINDOW_MAX_BYTES - WINDOW_KEEP_BYTES;
@@ -422,19 +421,22 @@ impl ThreadView {
             WINDOW_MAX_BYTES.max(shown_bytes + slack),
             WINDOW_KEEP_BYTES.max(shown_bytes + slack / 2),
         );
-        if self.items.len() <= max && self.resident_bytes <= max_bytes {
+        if self.entries() <= max && self.resident_bytes <= max_bytes {
             return;
         }
-        let mut before = shown.as_ref().map_or(self.items.len(), |shown| {
-            self.items.range(..*shown.start()).count()
-        });
+        let mut before = shown.as_ref().map_or_else(
+            || self.entries(),
+            |shown| {
+                self.items.range(..*shown.start()).count()
+                    + self.work.range(..*shown.start()).count()
+            },
+        );
         let mut after = shown.as_ref().map_or(0, |shown| {
-            self.items
-                .range((
-                    std::ops::Bound::Excluded(*shown.end()),
-                    std::ops::Bound::Unbounded,
-                ))
-                .count()
+            let later = (
+                std::ops::Bound::Excluded(*shown.end()),
+                std::ops::Bound::Unbounded,
+            );
+            self.items.range(later).count() + self.work.range(later).count()
         });
         let (mut older, mut newer) = (false, false);
         if let Some(evict_older) = evict_older {
@@ -444,20 +446,14 @@ impl ThreadView {
                 before = 0;
             }
         }
-        while self.items.len() > 1
+        while self.entries() > 1
             && (before + after) > 0
-            && (self.items.len() > keep || self.resident_bytes > keep_bytes)
+            && (self.entries() > keep || self.resident_bytes > keep_bytes)
         {
             let take_older = before > after;
-            let removed = if take_older {
-                self.items.pop_first()
-            } else {
-                self.items.pop_last()
-            };
-            let Some((_, item)) = removed else { break };
-            self.resident_bytes -= item.resident_bytes();
-            self.positions.remove(&item.id);
-            self.ui.remove(&item.id);
+            if !self.evict(take_older) {
+                break;
+            }
             if take_older {
                 older = true;
                 before -= 1;
@@ -466,12 +462,14 @@ impl ThreadView {
                 after -= 1;
             }
         }
-        if older && let Some(&oldest) = self.items.keys().next() {
-            self.work.retain(|_, span| span.first > oldest);
+        let first_item = self.items.keys().next().copied();
+        let first_span = self.work.keys().next().copied();
+        if older && let Some(oldest) = first_item.into_iter().chain(first_span).min() {
             self.handle(&Input::EvictedOlder { oldest });
         }
-        if newer && let Some(&last) = self.items.keys().next_back() {
-            self.work.retain(|_, span| span.last < last);
+        let last_item = self.items.keys().next_back().copied();
+        let last_span = self.work.values().next_back().map(|span| span.last);
+        if newer && let Some(last) = last_item.into_iter().chain(last_span).max() {
             self.handle(&Input::EvictedNewer { last });
         }
         let runs: std::collections::HashSet<_> = self
@@ -482,6 +480,49 @@ impl ThreadView {
             .collect();
         self.work_open.retain(|run, _| runs.contains(run));
         self.runs.retain(|run, _| runs.contains(run));
+    }
+
+    fn entries(&self) -> usize {
+        self.items.len() + self.work.len()
+    }
+
+    fn evict(&mut self, older: bool) -> bool {
+        let (item, span) = if older {
+            (
+                self.items.keys().next().copied(),
+                self.work.keys().next().copied(),
+            )
+        } else {
+            (
+                self.items.keys().next_back().copied(),
+                self.work.keys().next_back().copied(),
+            )
+        };
+        let from_items = match (item, span) {
+            (Some(item), Some(span)) => (item < span) == older,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return false,
+        };
+        if !from_items {
+            if older {
+                self.work.pop_first();
+            } else {
+                self.work.pop_last();
+            }
+            return true;
+        }
+        let removed = if older {
+            self.items.pop_first()
+        } else {
+            self.items.pop_last()
+        };
+        if let Some((_, item)) = removed {
+            self.resident_bytes -= item.resident_bytes();
+            self.positions.remove(&item.id);
+            self.ui.remove(&item.id);
+        }
+        true
     }
 
     pub(crate) fn update_live(
@@ -549,3 +590,7 @@ pub const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
         limit: Some(limit),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/thread.rs"]
+mod tests;
