@@ -18,9 +18,9 @@ pub struct SkillRow {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineMark {
-    pub engine: EngineId,
-    pub lit: bool,
-    pub label: String,
+    pub(crate) engine: EngineId,
+    pub(crate) lit: bool,
+    pub(crate) label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +51,7 @@ pub enum ItemKey {
 }
 
 impl Item {
-    pub fn key(&self) -> ItemKey {
+    pub(crate) fn key(&self) -> ItemKey {
         match self {
             Self::Skill(row) => ItemKey::Skill(row.id.clone()),
             Self::Server(row) => ItemKey::Server(row.name.clone()),
@@ -75,18 +75,18 @@ impl Item {
         }
     }
 
-    pub const fn kind(&self) -> Kind {
+    const fn kind(&self) -> Kind {
         match self {
             Self::Skill(_) | Self::Listing(_) => Kind::Skills,
             Self::Server(_) => Kind::Servers,
         }
     }
 
-    pub fn managed(&self) -> bool {
+    pub(crate) fn managed(&self) -> bool {
         !matches!(self, Self::Skill(row) if row.origin == SkillOrigin::Discovered)
     }
 
-    pub fn selector(&self) -> String {
+    pub(crate) fn selector(&self) -> String {
         match self {
             Self::Skill(row) => format!("marketplace-skill-{}", row.id),
             Self::Server(row) => format!("marketplace-server-{}", row.name),
@@ -104,12 +104,12 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn admits(self, item: &Item) -> bool {
+    pub(crate) fn admits(self, item: &Item) -> bool {
         self == Self::All || item.kind() == self
     }
 }
 
-pub fn items(catalog: &[CatalogSkill], servers: &[McpServer]) -> Vec<Item> {
+pub(crate) fn items(catalog: &[CatalogSkill], servers: &[McpServer]) -> Vec<Item> {
     let rank = |origin: SkillOrigin| match origin {
         SkillOrigin::FirstParty => 0,
         SkillOrigin::User => 1,
@@ -154,7 +154,7 @@ pub fn by_name(listings: &[artisan_api::Listing]) -> Vec<(&artisan_api::Listing,
     named
 }
 
-pub fn listing_item(listing: &artisan_api::Listing, others: usize) -> Item {
+pub(crate) fn listing_item(listing: &artisan_api::Listing, others: usize) -> Item {
     let others = match others {
         0 => String::new(),
         others => format!(
@@ -266,7 +266,7 @@ fn engine_mark(state: &SkillEngineState) -> EngineMark {
     }
 }
 
-pub fn prompt_attention(prompt: &GlobalPrompt) -> Option<String> {
+pub(crate) fn prompt_attention(prompt: &GlobalPrompt) -> Option<String> {
     let drifted: Vec<&str> = prompt
         .engines
         .iter()
@@ -285,7 +285,7 @@ pub fn prompt_attention(prompt: &GlobalPrompt) -> Option<String> {
     }
 }
 
-pub fn found_summary(items: &[Item]) -> Option<String> {
+pub(crate) fn found_summary(items: &[Item]) -> Option<String> {
     let mut engines: Vec<EngineId> = Vec::new();
     let mut count = 0;
     for item in items {
@@ -312,7 +312,7 @@ pub fn found_summary(items: &[Item]) -> Option<String> {
     ))
 }
 
-pub const fn engine_name(engine: EngineId) -> &'static str {
+const fn engine_name(engine: EngineId) -> &'static str {
     engine.display_name()
 }
 
@@ -340,7 +340,7 @@ fn size_label(files: u32, bytes: u64) -> String {
     format!("{files} \u{b7} {size}")
 }
 
-pub fn skill_meta(row: &SkillRow) -> String {
+pub(crate) fn skill_meta(row: &SkillRow) -> String {
     let source = match row.origin {
         SkillOrigin::FirstParty => "Artisan".to_owned(),
         SkillOrigin::User => "Your skill".to_owned(),

@@ -59,7 +59,7 @@ pub struct MarketplaceController {
     host_instance: Option<HostInstance>,
     loading_started: Option<Instant>,
     pub reduced_motion: bool,
-    pub prompt_hovered: bool,
+    pub(crate) prompt_hovered: bool,
 }
 
 impl Default for MarketplaceController {
@@ -169,7 +169,7 @@ impl MarketplaceController {
         }
     }
 
-    pub fn loading_started(&self) -> Option<Instant> {
+    pub(crate) fn loading_started(&self) -> Option<Instant> {
         self.loading_started
     }
 
@@ -266,12 +266,12 @@ impl MarketplaceController {
         }
     }
 
-    pub fn clear_search(&mut self, core: &Core) {
+    pub(crate) fn clear_search(&mut self, core: &Core) {
         self.search.state().borrow_mut().set_text("");
         self.edited(core);
     }
 
-    pub fn list_key(&mut self, core: &mut Core, key: EditorListKey) {
+    pub(crate) fn list_key(&mut self, core: &mut Core, key: EditorListKey) {
         let key = match key {
             EditorListKey::Up => ListKey::Up,
             EditorListKey::Down => ListKey::Down,
@@ -286,14 +286,14 @@ impl MarketplaceController {
         }
     }
 
-    pub fn act(&mut self, core: &mut Core, action: Action) {
+    pub(crate) fn act(&mut self, core: &mut Core, action: Action) {
         match action {
             Action::Navigate(screen) => core.navigate(screen),
             Action::Operation(operation) => self.operate(core, operation),
         }
     }
 
-    pub fn operate(&mut self, core: &Core, operation: Operation) {
+    pub(crate) fn operate(&mut self, core: &Core, operation: Operation) {
         let Some(host) = core.active_host() else {
             return;
         };
@@ -316,14 +316,14 @@ impl MarketplaceController {
         });
     }
 
-    pub fn retry_search(&mut self, core: &Core) {
+    pub(crate) fn retry_search(&mut self, core: &Core) {
         self.remote_search.cancel();
         if self.page.retry_search(Instant::now()) {
             self.schedule_search(core);
         }
     }
 
-    pub fn retry(&mut self, core: &mut Core) {
+    pub(crate) fn retry(&mut self, core: &mut Core) {
         if let Some(host) = core
             .active_host()
             .map(|host| host.id.clone())

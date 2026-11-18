@@ -7,7 +7,7 @@ use editor_core::{ForgeClient, HostId, Screen, SettingsPage, client::CallError};
 use presentation::{Item, ItemKey, Kind};
 use std::time::{Duration, Instant};
 
-pub const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
+const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Remote {
@@ -36,7 +36,7 @@ pub enum Entry {
 
 #[derive(Clone, Debug)]
 pub struct SearchRequest {
-    pub query: String,
+    query: String,
     serial: u64,
 }
 
@@ -65,7 +65,7 @@ pub enum OperationError {
 
 #[derive(Clone, Debug)]
 pub struct OperationRequest {
-    pub operation: Operation,
+    operation: Operation,
     generation: u64,
 }
 
@@ -86,17 +86,17 @@ pub enum ListKey {
 #[derive(Default)]
 pub struct Marketplace {
     pub host: Option<HostId>,
-    pub generation: u64,
+    generation: u64,
     pub query: String,
-    pub kind: Kind,
+    kind: Kind,
     selected: Option<ItemKey>,
     pub found_open: bool,
-    pub focus_search: bool,
+    focus_search: bool,
     pub items: Vec<Item>,
     pub listings: Remote,
     pub pending: Option<Operation>,
     pub notice: Option<String>,
-    pub shown: bool,
+    shown: bool,
     search_serial: u64,
     search_due: Option<Instant>,
 }
@@ -137,7 +137,7 @@ impl Marketplace {
         self.restart_search(now);
     }
 
-    pub fn restart_search(&mut self, now: Instant) -> bool {
+    fn restart_search(&mut self, now: Instant) -> bool {
         self.search_serial = self.search_serial.wrapping_add(1);
         self.search_due = None;
         if self.host.is_some() && self.query.trim().chars().count() >= 2 {
@@ -150,7 +150,7 @@ impl Marketplace {
         }
     }
 
-    pub fn retry_search(&mut self, now: Instant) -> bool {
+    fn retry_search(&mut self, now: Instant) -> bool {
         matches!(self.listings, Remote::Failed(_)) && self.restart_search(now)
     }
 
@@ -176,7 +176,7 @@ impl Marketplace {
         }
     }
 
-    pub async fn search(
+    async fn search(
         client: &ForgeClient,
         request: &SearchRequest,
     ) -> Result<Vec<Listing>, CallError> {
@@ -268,7 +268,7 @@ impl Marketplace {
         None
     }
 
-    pub fn act(item: &Item) -> Option<Action> {
+    fn act(item: &Item) -> Option<Action> {
         match item {
             Item::Skill(row) if !item.managed() => Some(Action::Operation(Operation::Skill {
                 id: row.id.clone(),
@@ -292,7 +292,7 @@ impl Marketplace {
         })
     }
 
-    pub async fn execute(
+    async fn execute(
         client: &ForgeClient,
         request: &OperationRequest,
     ) -> Result<Vec<CatalogSkill>, OperationError> {
