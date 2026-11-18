@@ -112,12 +112,42 @@ impl WordmarkLoader {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    StartWsl,
+    RetryNow,
+    ManageForges,
+}
+
+type Commands = Rc<RefCell<Vec<(HostId, HostInstance, Command)>>>;
+
 #[derive(Default)]
 pub struct ConnectionPresenter {
     host: Option<(HostId, HostInstance)>,
     phase: Option<(bool, Instant)>,
     mark: WordmarkLoader,
-    starts: Rc<RefCell<Vec<(HostId, HostInstance)>>>,
+    commands: Commands,
+    last_failure: Option<String>,
+}
+
+fn command_button(
+    key: &'static str,
+    theme: ArtisanTheme,
+    tone: ButtonTone,
+    label: impl Into<String>,
+    commands: &Commands,
+    identity: &(HostId, HostInstance),
+    command: Command,
+) -> Button {
+    let commands = Rc::clone(commands);
+    let (host, instance) = identity.clone();
+    Button::text(key, theme, tone, label)
+        .debug_selector(key)
+        .on_activate(move |_| {
+            commands
+                .borrow_mut()
+                .push((host.clone(), instance, command));
+        })
 }
 
 impl ConnectionPresenter {
@@ -125,7 +155,8 @@ impl ConnectionPresenter {
         self.host = None;
         self.phase = None;
         self.mark.reset();
-        self.starts.borrow_mut().clear();
+        self.commands.borrow_mut().clear();
+        self.last_failure = None;
     }
 
     pub fn waiting(&mut self, theme: ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
@@ -134,10 +165,25 @@ impl ConnectionPresenter {
     }
 
     pub fn dispatch(&mut self, core: &mut Core) {
-        for (id, instance) in std::mem::take(&mut *self.starts.borrow_mut()) {
-            if self.host.as_ref() == Some(&(id.clone(), instance)) {
-                if let Some(host) = core.host_mut_if_instance(&id, instance) {
-                    host.start_wsl();
+        for (id, instance, command) in std::mem::take(&mut *self.commands.borrow_mut()) {
+            if self.host.as_ref() != Some(&(id.clone(), instance)) {
+                continue;
+            }
+            match command {
+                Command::StartWsl => {
+                    if let Some(host) = core.host_mut_if_instance(&id, instance) {
+                        host.start_wsl();
+                    }
+                }
+                Command::RetryNow => {
+                    if let Some(host) = core.host_if_instance(&id, instance) {
+                        host.retry_now();
+                    }
+                }
+                Command::ManageForges => {
+                    core.navigate(crate::core::Screen::Settings(
+                        crate::core::SettingsPage::Hosts,
+                    ));
                 }
             }
         }
@@ -159,10 +205,14 @@ impl ConnectionPresenter {
             ConnectionStatus::Live => {
                 self.phase = None;
                 self.mark.reset();
+                self.last_failure = None;
                 return None;
             }
             ConnectionStatus::Connecting => None,
-            ConnectionStatus::Offline { code, .. } => *code,
+            ConnectionStatus::Offline { code, reason, .. } => {
+                self.last_failure = Some(reason.clone());
+                *code
+            }
         };
         let failure = match code {
             Some(artisan_api::ErrorCode::Unauthorized) => Some((
@@ -188,6 +238,18 @@ impl ConnectionPresenter {
                         .style(Style::new().max_width(Length::Px(TEXT_WIDTH)))
                         .child(label(&theme, detail, theme.colors.text_muted))
                         .build(),
+                )
+                .child(
+                    command_button(
+                        "manage-forges",
+                        theme,
+                        ButtonTone::Neutral,
+                        "Forges",
+                        &self.commands,
+                        &identity,
+                        Command::ManageForges,
+                    )
+                    .build(),
                 )
                 .build();
             return Some(content.debug_selector("new-thread-status"));
@@ -232,17 +294,49 @@ impl ConnectionPresenter {
                         },
                     )
                 };
-                let starts = Rc::clone(&self.starts);
-                let action = Button::text("start-wsl-forge", theme, ButtonTone::Primary, label)
-                    .disabled(wsl.starting)
-                    .debug_selector("start-wsl-forge")
-                    .on_activate(move |_| starts.borrow_mut().push(identity.clone()))
-                    .build();
-                (detail, Some(action))
-            } else if reached {
-                ("Connection dropped — getting you back…".to_owned(), None)
+                let action = command_button(
+                    "start-wsl-forge",
+                    theme,
+                    ButtonTone::Primary,
+                    label,
+                    &self.commands,
+                    &identity,
+                    Command::StartWsl,
+                )
+                .disabled(wsl.starting)
+                .build();
+                (detail, vec![action])
             } else {
-                ("Connecting to Artisan Forge…".to_owned(), None)
+                let detail = if reached {
+                    "Connection dropped — getting you back…"
+                } else {
+                    "Connecting to Artisan Forge…"
+                };
+                let actions = self.last_failure.is_some().then(|| {
+                    vec![
+                        command_button(
+                            "retry-forge",
+                            theme,
+                            ButtonTone::Primary,
+                            "Retry now",
+                            &self.commands,
+                            &identity,
+                            Command::RetryNow,
+                        )
+                        .build(),
+                        command_button(
+                            "manage-forges",
+                            theme,
+                            ButtonTone::Neutral,
+                            "Forges",
+                            &self.commands,
+                            &identity,
+                            Command::ManageForges,
+                        )
+                        .build(),
+                    ]
+                });
+                (detail.to_owned(), actions.unwrap_or_default())
             };
             let first = "This is taking more time than expected…";
             let typography = TextRole::Label.style(&theme);
@@ -274,8 +368,23 @@ impl ConnectionPresenter {
                     theme.colors.destructive_text,
                 ));
             }
-            if let Some(action) = action {
-                line = line.child(action);
+            if host.wsl.is_none()
+                && let Some(reason) = &self.last_failure
+            {
+                line = line.child(label(
+                    &theme,
+                    &format!("Last attempt: {reason}"),
+                    theme.colors.text_muted,
+                ));
+            }
+            if !action.is_empty() {
+                line = line.child(
+                    UiBox::new()
+                        .layout("row")
+                        .spaced(Space::S8)
+                        .children(action)
+                        .build(),
+                );
             }
             let elapsed = now
                 .saturating_duration_since(since + REASSURANCE_DELAY)
@@ -319,5 +428,6 @@ fn label(theme: &ArtisanTheme, value: &str, ink: crate::ui::theme::Oklch) -> Ele
     TextRole::Label
         .text(theme, value.to_owned())
         .gpui_source_color(ink.to_reference_text_color())
+        .wrap(true)
         .build()
 }
