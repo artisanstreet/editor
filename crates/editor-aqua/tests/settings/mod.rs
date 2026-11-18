@@ -92,7 +92,10 @@ fn second_factor_distinguishes_six_ascii_digits() {
 fn delayed_setting_failure_does_not_rollback_replaced_host() {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-    use editor_aqua::settings::{controller::SettingsController, preferences};
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        preferences::{SettingKey, SettingRequest},
+    };
     use serde_json::json;
 
     let dir = tempfile::tempdir().unwrap();
@@ -114,17 +117,28 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
     let original = core.host(&config.id).unwrap().instance();
     let host = core.host_mut(&config.id).unwrap();
     host.settings.insert("suggestions".into(), json!(false));
-    let request = preferences::begin(&mut host.settings, "suggestions", json!(true));
-    let removed_request = preferences::begin(&mut host.settings, "summary_titles", json!(true));
+    host.settings.insert("suggestions".into(), json!(true));
+    host.settings.insert("summary_titles".into(), json!(true));
+    let request = SettingRequest {
+        target: SettingKey {
+            host: config.id.clone(),
+            instance: original,
+            key: "suggestions",
+        },
+        value: json!(true),
+    };
+    let removed_request = SettingRequest {
+        target: SettingKey {
+            host: config.id.clone(),
+            instance: original,
+            key: "summary_titles",
+        },
+        value: json!(true),
+    };
     core.remove_host(&config.id).unwrap();
     assert!(core.host_if_instance(&config.id, original).is_none());
     let mut settings = SettingsController::default();
-    settings.complete_setting_for_tests(
-        config.id.clone(),
-        original,
-        removed_request,
-        Err("late failure".into()),
-    );
+    settings.complete_setting_for_tests(removed_request, Err("late failure".into()));
     assert!(settings.drain(&mut core));
     assert!(core.host(&config.id).is_none());
     core.add_test_host(&config, client);
@@ -143,12 +157,7 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
         core.host(&config.id).unwrap().setting("suggestions"),
         Some(&json!("replacement"))
     );
-    settings.complete_setting_for_tests(
-        config.id.clone(),
-        original,
-        request,
-        Err("late failure".into()),
-    );
+    settings.complete_setting_for_tests(request, Err("late failure".into()));
     assert!(settings.drain(&mut core));
     assert_eq!(
         core.host(&config.id).unwrap().setting("suggestions"),
@@ -472,4 +481,98 @@ fn settings_pages_lay_out_identically_at_fractional_and_double_scale() {
             }
         }
     }
+}
+
+fn add_host(core: &mut editor_aqua::core::Core, id: &str) -> editor_aqua::core::HostId {
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
+    let identity = Identity::generate("settings-host").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let config = HostConfig {
+        id: HostId(id.into()),
+        name: id.into(),
+        address: "127.0.0.1:1".into(),
+        fingerprint: fingerprint.clone(),
+        kind: HostKind::Local,
+    };
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    core.add_test_host(&config, client);
+    config.id
+}
+
+fn retention_target(
+    core: &mut editor_aqua::core::Core,
+) -> editor_aqua::settings::preferences::SettingKey {
+    let id = add_host(core, "writes-host");
+    editor_aqua::settings::preferences::SettingKey {
+        instance: core.host(&id).unwrap().instance(),
+        host: id,
+        key: artisan_api::THREAD_RETENTION_DAYS_KEY,
+    }
+}
+
+#[test]
+fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
+    use editor_aqua::core::{Core, EditorFiles};
+    use editor_aqua::settings::preferences::SettingWrites;
+    use serde_json::{Map, json};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let target = retention_target(&mut core);
+    let key = target.key;
+    let mut settings = Map::new();
+    settings.insert(key.into(), json!(90));
+    let mut writes = SettingWrites::default();
+
+    let seven = writes
+        .begin(&mut settings, target.clone(), json!(7))
+        .expect("the first choice is sent");
+    assert!(
+        writes
+            .begin(&mut settings, target.clone(), json!(14))
+            .is_none(),
+        "a second choice waits for the first to finish"
+    );
+    let fourteen = writes
+        .complete(Some(&mut settings), &seven, &Err("offline".into()))
+        .expect("the newer choice is sent after the older one finishes");
+    assert_eq!(settings.get(key), Some(&json!(14)));
+    assert!(
+        writes
+            .complete(Some(&mut settings), &fourteen, &Ok(()))
+            .is_none()
+    );
+    assert_eq!(settings.get(key), Some(&json!(14)));
+
+    let thirty = writes
+        .begin(&mut settings, target.clone(), json!(30))
+        .expect("sent");
+    assert!(
+        writes
+            .complete(Some(&mut settings), &thirty, &Err("offline".into()))
+            .is_none()
+    );
+    assert_eq!(
+        settings.get(key),
+        Some(&json!(14)),
+        "a failure restores the last value Forge accepted"
+    );
+
+    let sixty = writes
+        .begin(&mut settings, target, json!(60))
+        .expect("sent");
+    settings.insert(key.into(), json!(45));
+    assert!(
+        writes
+            .complete(Some(&mut settings), &sixty, &Err("offline".into()))
+            .is_none()
+    );
+    assert_eq!(
+        settings.get(key),
+        Some(&json!(45)),
+        "a failure never overwrites a value Forge reported since"
+    );
 }

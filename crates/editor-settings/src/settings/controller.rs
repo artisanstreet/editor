@@ -10,7 +10,7 @@ use editor_ui::text::editor::{Editor, Mode};
 use super::archive::{ArchiveForm, ArchiveRequest};
 use super::engines::{EngineRequest, EnginesForm};
 use super::extensions::{ExtensionsForm, MutationRequest};
-use super::preferences::{self, SettingRequest};
+use super::preferences::{SettingKey, SettingRequest, SettingWrites};
 use super::prompt::{PromptForm, PromptRequest};
 
 struct HostCompletion {
@@ -20,9 +20,9 @@ struct HostCompletion {
 }
 
 enum Completion {
-    Setting(HostId, SettingRequest, Result<(), String>),
+    Setting(SettingRequest, Result<(), String>),
     Archive(ArchiveRequest, Result<(), String>),
-    Mcp(MutationRequest, Result<(), String>),
+    Mcp(Box<MutationRequest>, Result<(), String>),
     Engine(EngineRequest, Result<(), String>),
     Prompt(PromptRequest, Result<GlobalPrompt, String>),
     McpSignOut(String, Result<(), String>),
@@ -46,6 +46,7 @@ pub struct SettingsController {
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
     pub editor_setting_error: Option<String>,
+    setting_writes: SettingWrites,
     completion: Delivery<HostCompletion>,
     tasks: Vec<tokio_util::task::AbortOnDropHandle<()>>,
     active_instance: Option<HostInstance>,
@@ -79,6 +80,7 @@ impl Default for SettingsController {
             prompt: PromptForm::default(),
             prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Document))),
             editor_setting_error: None,
+            setting_writes: SettingWrites::default(),
             completion: Delivery::new(NonZeroUsize::new(64).unwrap()),
             tasks: Vec::new(),
             active_instance: None,
@@ -267,20 +269,30 @@ impl SettingsController {
             return;
         };
         let client = host.client.clone();
-        let request = preferences::begin(&mut host.settings, key, value);
+        let target = SettingKey {
+            host: id,
+            instance,
+            key,
+        };
+        if let Some(request) = self.setting_writes.begin(&mut host.settings, target, value) {
+            self.send_setting(client, request);
+        }
+    }
+
+    fn send_setting(&mut self, client: editor_core::ForgeClient, request: SettingRequest) {
         let sender = self.completion.sender();
         self.tasks.retain(|task| !task.is_finished());
         self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
             runtime::runtime().spawn(async move {
                 let result = client
-                    .set_setting(request.key, &request.value)
+                    .set_setting(request.target.key, &request.value)
                     .await
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender
                     .send(HostCompletion {
-                        host: id.clone(),
-                        instance,
-                        result: Completion::Setting(id, request, result),
+                        host: request.target.host.clone(),
+                        instance: request.target.instance,
+                        result: Completion::Setting(request, result),
                     })
                     .await;
             }),
@@ -436,7 +448,7 @@ impl SettingsController {
                     .send(HostCompletion {
                         host: id,
                         instance,
-                        result: Completion::Mcp(request, result),
+                        result: Completion::Mcp(Box::new(request), result),
                     })
                     .await;
             }),
@@ -547,8 +559,6 @@ impl SettingsController {
     #[cfg(feature = "test-support")]
     pub fn complete_setting_for_tests(
         &mut self,
-        host: HostId,
-        instance: HostInstance,
         request: SettingRequest,
         result: Result<(), String>,
     ) {
@@ -556,9 +566,9 @@ impl SettingsController {
         runtime::runtime().block_on(async move {
             let _ = sender
                 .send(HostCompletion {
-                    host: host.clone(),
-                    instance,
-                    result: Completion::Setting(host, request, result),
+                    host: request.target.host.clone(),
+                    instance: request.target.instance,
+                    result: Completion::Setting(request, result),
                 })
                 .await;
         });
@@ -567,6 +577,8 @@ impl SettingsController {
     pub fn drain(&mut self, core: &mut Core) -> bool {
         let completions = self.completion.drain();
         let changed = !completions.is_empty();
+        self.setting_writes
+            .retain_instances(|id, instance| core.host_if_instance(id, instance).is_some());
         for completion in completions {
             if !same_host_instance(
                 Some((&completion.host, completion.instance)),
@@ -576,13 +588,27 @@ impl SettingsController {
                 continue;
             }
             match completion.result {
-                Completion::Setting(id, request, Err(error)) => {
-                    tracing::warn!(key = request.key, "saving a Forge setting: {error}");
-                    if let Some(host) = core.host_mut(&id) {
-                        preferences::rollback(&mut host.settings, request);
+                Completion::Setting(request, result) => {
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            host = %request.target.host,
+                            key = request.target.key,
+                            %error,
+                            "saving a Forge setting"
+                        );
+                    }
+                    let host =
+                        core.host_mut_if_instance(&request.target.host, request.target.instance);
+                    let client = host.as_ref().map(|host| host.client.clone());
+                    let next = self.setting_writes.complete(
+                        host.map(|host| &mut host.settings),
+                        &request,
+                        &result,
+                    );
+                    if let (Some(next), Some(client)) = (next, client) {
+                        self.send_setting(client, next);
                     }
                 }
-                Completion::Setting(_, _, Ok(())) => {}
                 Completion::Archive(request, result) => self.archive.complete(&request, result),
                 Completion::Mcp(request, result) => self.extensions.complete(&request, result),
                 Completion::McpSignOut(server, result) => {
