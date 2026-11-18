@@ -33,9 +33,11 @@ In every permission mode except Full access, an engine's whole process tree (its
 - the thread's project folder, plus the repository's shared `.git` folder when the project is a git worktree,
 - the engine's home, `<root>/forge/data/engines/<engine>/home` (and `CODEX_HOME` when it points elsewhere),
 - a temporary folder for the run, exported as `TMPDIR`, `TMP` and `TEMP` and removed when the engine exits,
+- the shared temporary folders: `/tmp`, `/dev/shm` and Forge's own `$TMPDIR`,
+- the tool caches, so builds and installs work: `$XDG_CACHE_HOME` (usually `~/.cache`, which holds pip's), `~/.npm` and `~/.local/share/pnpm` when they exist, and `~/.cargo/registry`, `~/.cargo/git`, `~/.rustup/tmp`, `~/.bun/install/cache`, `~/.gradle/caches` and `~/.m2/repository`, which Forge creates when the tool's own folder (`~/.cargo`, `~/.rustup`, …) exists,
 - `/dev/null`, `/dev/zero`, `/dev/full` and the terminal devices.
 
-Reading, running programs, the network and Unix sockets stay open, so engines still read your files and reach their model APIs. Any other write fails with `Permission denied`, even when approved; switch the thread to Full access for that. Sandboxed processes can't gain privileges, so `sudo` and other setuid programs fail.
+The rest of your home stays read-only: dotfiles and shell rc files, `~/.ssh`, `~/.gitconfig`, `~/.config` and everything else. Reading, running programs, the network and Unix sockets stay open, so engines still read your files and reach their model APIs. Any other write fails with `Permission denied`, even when approved; switch the thread to Full access for that. Sandboxed processes can't gain privileges, so `sudo` and other setuid programs fail.
 
 | Mode | Linux | Windows | macOS |
 | --- | --- | --- | --- |
