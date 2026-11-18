@@ -7,12 +7,12 @@
   "width": 1100,
   "height": 760,
   "scale_bits": 1065353216,
-  "backend": "Vulkan",
-  "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "backend": "D3D11",
+  "adapter": "D3D12 hardware adapter",
   "pixel_format": "rgba8-unorm",
   "alpha": "opaque",
   "color_profile": "gpui-windows-encoded",
   "surface": "offscreen-client-area-no-native-chrome",
   "repeat_identical": true,
-  "sha256": "112d67f66efc3917aa41098ce0407303e90060ddebb3a5c63772dd909dd58fb1"
+  "sha256": "47012a7d400897dd0bd9ed3929f979c2f0b4715d2e06412d741edb16d02eed55"
 }
