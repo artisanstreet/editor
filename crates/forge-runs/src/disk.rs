@@ -15,6 +15,7 @@ pub(crate) const STOP: u64 = 3 * GIB;
 /// Above this the warning is armed again.
 const REARM: u64 = 12 * GIB;
 const MARGIN: u64 = GIB;
+const EXHAUSTED: u64 = GIB / 4;
 
 /// Free bytes on the volume holding a path.
 pub(crate) type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>;
@@ -91,9 +92,13 @@ impl Watch {
                 return None;
             }
         };
-        let stop_below = *self
-            .stop_below
-            .get_or_insert_with(|| STOP.min(free.saturating_sub(MARGIN)));
+        let stop_below = match self.stop_below {
+            None => STOP.min(free.saturating_sub(MARGIN)),
+            Some(_) if free >= STOP => STOP,
+            Some(line) => line,
+        }
+        .max(EXHAUSTED);
+        self.stop_below = Some(stop_below);
         if free < stop_below {
             return Some(Alarm::Full { path, free });
         }

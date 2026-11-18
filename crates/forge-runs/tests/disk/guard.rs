@@ -198,3 +198,52 @@ async fn a_run_sent_on_a_full_disk_stops_if_it_keeps_filling_it() {
         "{shown:?}"
     );
 }
+
+async fn a_run_on_a_disk_that_goes(from: u64, through: &[u64]) -> (RunStatus, Vec<String>) {
+    let free = Arc::new(AtomicU64::new(from));
+    let (fixture, checks) = fixture_on_disk(
+        Arc::new(|_turn, io| {
+            Box::pin(async move {
+                io.cancel.cancelled().await;
+                Outcome::cancelled()
+            })
+        }),
+        Arc::clone(&free),
+    )
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("build it"))
+        .await
+        .unwrap();
+    for &next in through {
+        observed_disk(&checks).await;
+        assert!(fixture.hub.is_live(&fixture.thread_id));
+        checks.store(0, Ordering::Release);
+        free.store(next, Ordering::Relaxed);
+    }
+    let runs = tokio::time::timeout(Duration::from_secs(10), fixture.settled())
+        .await
+        .expect("the guard stops the run");
+    (runs[0].status(), errors(&fixture.items().await))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_sent_on_a_nearly_empty_disk_still_stops_before_it_runs_out() {
+    let (status, shown) = a_run_on_a_disk_that_goes(GIB / 2, &[GIB / 10]).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        shown[0].starts_with("Stopped: only 0.1 GiB free on "),
+        "{shown:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disk_that_recovered_stops_runs_at_the_normal_line_again() {
+    let (status, shown) = a_run_on_a_disk_that_goes(2 * GIB, &[40 * GIB, 5 * GIB / 2]).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        shown[0].starts_with("Stopped: only 2.5 GiB free on "),
+        "{shown:?}"
+    );
+}
