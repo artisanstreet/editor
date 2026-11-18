@@ -43,3 +43,5 @@ mod sidebar;
 mod avatar;
 #[path = "frame/inbox.rs"]
 mod inbox;
+#[path = "frame/overview.rs"]
+mod overview;

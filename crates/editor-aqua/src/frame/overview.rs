@@ -7,7 +7,7 @@ use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::Role;
 use aqua_core::scene::GpuiQuadPulse;
 use aqua_text::overflow::OverflowMode;
-use aqua_ui::element::{Box as UiBox, Element};
+use aqua_ui::element::{Box as UiBox, Element, Scroll};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use artisan_api::{EngineId, ItemId, Status, TextContent, ThreadId};
@@ -18,6 +18,8 @@ const SURFACE: Surface = Surface::Inset;
 const WIDTH: f32 = 320.0;
 const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
+const VISIBLE_AGENTS: u16 = 8;
+pub const AGENTS_KEY: &str = "artisan-overview-agents";
 
 #[derive(Clone)]
 pub struct Subagent {
@@ -42,7 +44,10 @@ pub struct Overview {
 impl Overview {
     #[must_use]
     pub fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
-        let host = inspector.open.as_ref().and_then(|(host, _)| core.host(host));
+        let host = inspector
+            .open
+            .as_ref()
+            .and_then(|(host, _)| core.host(host));
         let project = host.and_then(|host| {
             inspector
                 .open
@@ -66,7 +71,9 @@ impl Overview {
                     thread: agent.thread.clone(),
                     label: agent.label.clone(),
                     task: match &agent.description {
-                        TextContent::Inline(text) => text.lines().next().unwrap_or_default().to_owned(),
+                        TextContent::Inline(text) => {
+                            text.lines().next().unwrap_or_default().to_owned()
+                        }
                         TextContent::Stored(_) => String::new(),
                     },
                     status: agent.status,
@@ -78,7 +85,10 @@ impl Overview {
     }
 
     fn has_facts(&self) -> bool {
-        self.project.is_some() || self.machine.is_some() || self.branch.is_some() || self.context.is_some()
+        self.project.is_some()
+            || self.machine.is_some()
+            || self.branch.is_some()
+            || self.context.is_some()
     }
 }
 
@@ -115,10 +125,30 @@ pub fn card(
     .collect::<Vec<_>>();
     let rule = (!facts.is_empty() && !overview.agents.is_empty())
         .then(|| Divider::Rule.build(theme, SURFACE.padding_px()));
-    let agents = overview
-        .agents
-        .iter()
-        .map(|agent| subagent(theme, agent, reduced, Rc::clone(&emit)));
+    let agents = (!overview.agents.is_empty()).then(|| {
+        let rows = UiBox::new().layout("column").children(
+            overview
+                .agents
+                .iter()
+                .map(|agent| subagent(theme, agent, reduced, Rc::clone(&emit))),
+        );
+        let row_height = Row::MenuItem
+            .height()
+            .expect("invariant: menu rows have a fixed height");
+        Scroll::new()
+            .layout("column")
+            .preserve_offset(true)
+            .style(
+                Style::new()
+                    .max_height(Length::Px(row_height * f32::from(VISIBLE_AGENTS)))
+                    .flex_shrink(0.0),
+            )
+            .child(rows.build())
+            .build()
+            .with_key(AGENTS_KEY)
+            .role(Role::List)
+            .aria_label(format!("{} agents", overview.agents.len()))
+    });
     let content = UiBox::new()
         .layout("column")
         .children(facts)
@@ -135,7 +165,11 @@ pub fn card(
                     .flex_shrink(0.0)
                     .align(AlignItems::START),
             )
-            .child(SURFACE.build(theme, vec![content]).style(Style::new().flex_grow(1.0)))
+            .child(
+                SURFACE
+                    .build(theme, vec![content])
+                    .style(Style::new().flex_grow(1.0)),
+            )
             .build()
             .with_key("artisan-thread-overview")
             .debug_selector("artisan-thread-overview"),
@@ -232,7 +266,12 @@ fn subagent(
             .spaced(Row::MenuItem.gap())
             .style(body())
             .child(label(&theme, &agent.label, theme.colors.text, Span::Fit))
-            .child(label(&theme, &agent.task, theme.colors.text_muted, Span::Fill))
+            .child(label(
+                &theme,
+                &agent.task,
+                theme.colors.text_muted,
+                Span::Fill,
+            ))
             .build(),
     )
     .trailing(
