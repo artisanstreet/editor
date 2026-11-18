@@ -2059,14 +2059,15 @@ async fn turning_retries_off_publishes_the_setting_before_the_threads_it_unparks
     let mut failed = live_run_with_session(&store, &thread).await;
     failed.status = RunStatus::Failed;
     let (_, parked) = store
-        .settle_run(
-            failed,
-            Vec::new(),
-            Some(forge_store::Park {
+        .settle_run(forge_store::Settlement {
+            run: failed,
+            open: Vec::new(),
+            park: Some(forge_store::Park {
                 continuation: artisan_api::Continuation::Overloaded,
                 due_at: now() + 60_000,
             }),
-        )
+            note: None,
+        })
         .await
         .unwrap();
     assert!(parked);

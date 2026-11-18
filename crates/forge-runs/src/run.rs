@@ -101,7 +101,7 @@ pub async fn drive(
     hub.open_suggestion(thread_id, &run_id);
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
-    let mut outcome = match execute(
+    let mut outcome = match Box::pin(execute(
         hub,
         &thread,
         &mut run,
@@ -113,7 +113,7 @@ pub async fn drive(
         inbox,
         adapter_cancel.clone(),
         &mut items,
-    )
+    ))
     .await
     {
         Ok(outcome) => outcome,
@@ -1261,44 +1261,38 @@ async fn announce_stop(hub: &Hub, run: &Run, items: &Work) -> Result<Run> {
         ended_at: Some(artisan_api::now()),
         ..run.clone()
     };
-    let (stopped, _) = hub
-        .store()
-        .settle_run(stopped, open_items(items), None)
-        .await
-        .with_context(|| format!("settle stopped run {}", run.id))?;
+    let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
+        run: stopped,
+        open: open_items(items),
+        park: None,
+        note: None,
+    }))
+    .await
+    .with_context(|| format!("settle stopped run {}", run.id))?;
     Ok(stopped)
 }
 
 async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Result<()> {
-    let store = hub.store();
     let open = open_items(items);
     if let Some(error) = &outcome.error {
         tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {:?}: {error}", outcome.status);
     }
-    // A run that failed without the engine saying why (it never started,
-    // or Forge stopped it) shows the reason in the transcript; otherwise
-    // the user's message just hangs there unanswered.
-    if outcome.status == RunStatus::Failed
-        && !items.errored
-        && let Some(error) = &outcome.error
-    {
-        store
-            .upsert_item(new_item(
-                ItemId::new(),
-                &run.thread_id,
-                Some(&run.id),
-                None,
-                None,
-                Status::Done,
-                ItemKind::Error {
-                    kind: artisan_api::ErrorKind::Execution,
-                    message: error.clone().into(),
-                    retryable: false,
-                },
-            ))
-            .await
-            .with_context(|| format!("store why run {} failed", run.id))?;
-    }
+    let note = match (&outcome.error, outcome.status) {
+        (Some(error), RunStatus::Failed) if !items.errored => Some(new_item(
+            ItemId::new(),
+            &run.thread_id,
+            Some(&run.id),
+            None,
+            None,
+            Status::Done,
+            ItemKind::Error {
+                kind: artisan_api::ErrorKind::Execution,
+                message: error.clone().into(),
+                retryable: false,
+            },
+        )),
+        _ => None,
+    };
     let park = if outcome.status == RunStatus::Failed {
         crate::park::plan(hub, run, &outcome).await
     } else {
@@ -1307,15 +1301,25 @@ async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Res
     run.status = outcome.status;
     run.error = outcome.error;
     run.ended_at = run.ended_at.or_else(|| Some(artisan_api::now()));
-    let (_, parked) = store
-        .settle_run(run.clone(), open, park)
-        .await
-        .with_context(|| format!("settle run {}", run.id))?;
-    if let Some(park) = park.filter(|_| parked) {
-        tracing::info!(thread = %run.thread_id, run = %run.id, continuation = ?park.continuation,
-            due_at = park.due_at, "parked a failed turn");
+    let settlement = forge_store::Settlement {
+        run: run.clone(),
+        open,
+        park,
+        note,
+    };
+    match hub.store().settle_run(settlement.clone()).await {
+        Ok((_, parked)) => {
+            if let Some(park) = park.filter(|_| parked) {
+                tracing::info!(thread = %run.thread_id, run = %run.id, continuation = ?park.continuation,
+                    due_at = park.due_at, "parked a failed turn");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            hub.keep_unsettled(settlement);
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 fn new_item(

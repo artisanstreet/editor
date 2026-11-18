@@ -92,3 +92,77 @@ async fn a_continue_whose_run_could_not_be_saved_is_still_waiting() {
     );
     assert_eq!(continued.status, RunStatus::Done);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script: Script = Arc::new({
+        let release = Arc::clone(&release);
+        move |turn, io| {
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                io.emit(EngineEvent::InputAccepted {
+                    id: turn.input.id.clone(),
+                })
+                .await;
+                release.notified().await;
+                Outcome::failed("the working directory is gone")
+            })
+        }
+    });
+    let harness: Arc<dyn Harness> = Arc::new(Unscripted(script));
+    let fixture = fixture_with_harness(Arc::new(move |_| Arc::clone(&harness))).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("build it"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| {
+            items.iter().any(|item| {
+                matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+            })
+        })
+        .await;
+    let disk = DiskFull::arming(&fixture, "runs");
+    disk.strike();
+
+    release.notify_one();
+    working(&fixture, false).await;
+    let stuck = fixture
+        .hub
+        .store()
+        .latest_run(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stuck.status, RunStatus::Running);
+    assert!(
+        fixture
+            .items()
+            .await
+            .iter()
+            .all(|item| !matches!(item.kind, ItemKind::Error { .. })),
+        "the reason and the run's end are saved together"
+    );
+
+    disk.clear();
+    test_support::wait::eventually(
+        "the run to settle after storage recovers",
+        Duration::from_secs(10),
+        || async {
+            fixture
+                .hub
+                .store()
+                .latest_run(&fixture.thread_id)
+                .await
+                .unwrap()
+                .is_some_and(|run| run.status == RunStatus::Failed)
+        },
+    )
+    .await;
+    assert!(fixture.items().await.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { message, .. } if message.inline() == Some("the working directory is gone")
+    )));
+}

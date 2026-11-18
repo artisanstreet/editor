@@ -108,6 +108,14 @@ pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'s
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Settlement {
+    pub run: Run,
+    pub open: Vec<ItemId>,
+    pub park: Option<Park>,
+    pub note: Option<NewItem>,
+}
+
 /// An item as an engine adapter or the HTTP layer reports it; the store
 /// fills in position, seq and timestamps.
 #[derive(Clone, Debug, PartialEq, Eq)]

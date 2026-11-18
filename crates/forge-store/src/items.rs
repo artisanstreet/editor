@@ -295,16 +295,18 @@ impl Store {
         .await
     }
 
-    /// All remaining outputs and the final run commit together; activity changes once.
-    /// Ends the run, closing the items it left open; a failed run that
-    /// passes by itself parks as `park` says. Returns whether it parked.
-    pub async fn settle_run(
-        &self,
-        run: Run,
-        open: Vec<ItemId>,
-        park: Option<crate::Park>,
-    ) -> Result<(Run, bool)> {
+    pub async fn settle_run(&self, settlement: crate::Settlement) -> Result<(Run, bool)> {
+        let crate::Settlement {
+            run,
+            open,
+            park,
+            note,
+        } = settlement;
+        let (id, thread) = (run.id.clone(), run.thread_id.clone());
         self.write(move |tx| {
+            if let Some(note) = note {
+                tx.upsert_item(note)?;
+            }
             let status = if run.status == RunStatus::Done {
                 Status::Done
             } else {
@@ -330,8 +332,6 @@ impl Store {
                     {
                         continue;
                     }
-                    // A process exit closes any unanswered blocking interaction;
-                    // completion of the run does not imply a callback was answered.
                     let item = Item {
                         status: if old.status == Status::AwaitingUser {
                             Status::Cancelled
@@ -343,14 +343,11 @@ impl Store {
                     tx.save_item(item, Some(old))?;
                 }
             }
-            // Parked first, so no reader sees the failure without the time
-            // it is picked up again.
             let parked = match park.filter(|_| run.status == RunStatus::Failed) {
                 Some(park) => tx.park(&run, park)?,
                 None => false,
             };
             let run = tx.save_run(run)?;
-            // Forge stopping (an update, a restart) ended it unfinished.
             if run.status == RunStatus::Interrupted {
                 tx.continue_after_restart(&run)?;
             }
@@ -358,6 +355,7 @@ impl Store {
             Ok((run, parked))
         })
         .await
+        .with_context(|| format!("settle run {id} of thread {thread}"))
     }
 
     /// Answers an asynchronous question after its process exits, as a durable next-turn input.

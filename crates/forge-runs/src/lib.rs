@@ -80,6 +80,7 @@ struct Inner {
     data_dir: PathBuf,
     harness_for: HarnessFor,
     live: Mutex<HashMap<ThreadId, LiveRun>>,
+    unsettled: Mutex<HashMap<ThreadId, forge_store::Settlement>>,
     suggestions: Mutex<HashMap<ThreadId, Suggested>>,
     /// How much each thread has done since its last "You should know" check.
     attention: Mutex<HashMap<ThreadId, side::Attention>>,
@@ -110,6 +111,8 @@ struct Inner {
     mcp_auth_writes: tokio::sync::Mutex<()>,
     mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
 }
+
+const UNSETTLED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One live run's handles and memory-only text.
 struct LiveRun {
@@ -197,6 +200,7 @@ impl Hub {
                 data_dir,
                 harness_for,
                 live: Mutex::new(HashMap::new()),
+                unsettled: Mutex::new(HashMap::new()),
                 suggestions: Mutex::new(HashMap::new()),
                 attention: Mutex::new(HashMap::new()),
                 untitled: Mutex::new(std::collections::HashSet::new()),
@@ -680,6 +684,7 @@ impl Hub {
 
     pub fn active_thread_ids(&self) -> Vec<ThreadId> {
         let mut ids: std::collections::BTreeSet<_> = self.lock().keys().cloned().collect();
+        ids.extend(self.unsettled_lock().keys().cloned());
         if let Some(generation) = &self.inner.generation
             && let Ok(owners) = generation.registry.owners()
         {
@@ -819,6 +824,46 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn unsettled_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<ThreadId, forge_store::Settlement>> {
+        self.inner
+            .unsettled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn keep_unsettled(&self, settlement: forge_store::Settlement) {
+        tracing::error!(
+            thread = %settlement.run.thread_id,
+            run = %settlement.run.id,
+            "the run's end could not be saved; retrying until it is"
+        );
+        self.unsettled_lock()
+            .insert(settlement.run.thread_id.clone(), settlement);
+        self.resume_pending();
+    }
+
+    async fn settle_unsettled(&self) {
+        let waiting: Vec<forge_store::Settlement> =
+            self.unsettled_lock().values().cloned().collect();
+        for settlement in waiting {
+            let thread = settlement.run.thread_id.clone();
+            let run = settlement.run.id.clone();
+            match self.store().settle_run(settlement).await {
+                Ok(_) => {
+                    self.unsettled_lock().remove(&thread);
+                    tracing::info!(%thread, %run, "saved the run's end after an earlier failure");
+                    self.agent_run_ended(&thread).await;
+                    self.resume_pending();
+                }
+                Err(error) => {
+                    tracing::warn!(%thread, %run, "saving the run's end failed again: {error:#}");
+                }
+            }
+        }
+    }
+
     fn untitled_lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<ThreadId>> {
         self.inner
             .untitled
@@ -843,7 +888,9 @@ impl Hub {
                         () = hub.inner.dispatch.notified() => {},
                         () = parked => {},
                         () = async { match &hub.inner.generation { Some(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await, None => std::future::pending().await } } => {},
+                        () = async { if hub.unsettled_lock().is_empty() { std::future::pending().await } else { tokio::time::sleep(UNSETTLED_RETRY).await } } => {},
                     }
+                    hub.settle_unsettled().await;
                     if let Some(generation) = &hub.inner.generation
                         && generation.accepting()
                         && let Ok(threads) = hub.store().running_threads().await {
