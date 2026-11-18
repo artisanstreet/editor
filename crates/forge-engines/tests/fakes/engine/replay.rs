@@ -84,9 +84,19 @@ enum ReplayError {
     WrongStep { protocol: Protocol, step: Step },
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Ending {
+    Finished,
+    Died { code: u8 },
+}
+
 pub(crate) fn run() -> ExitCode {
     match replay() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Ending::Finished) => ExitCode::SUCCESS,
+        Ok(Ending::Died { code }) => {
+            log(&format!("died with {code}"));
+            ExitCode::from(code)
+        }
         Err(failure) => {
             let mut stderr = std::io::stderr().lock();
             let mut cause: Option<&dyn std::error::Error> = Some(&failure);
@@ -105,7 +115,7 @@ fn log(text: &str) {
     append(&exe.with_file_name(LOG), &format!("{text}\n"));
 }
 
-fn replay() -> Result<(), ReplayError> {
+fn replay() -> Result<Ending, ReplayError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     log(&format!("started with {args:?}"));
     let protocol = Protocol::of(&args).ok_or(ReplayError::NotATurn { args })?;
@@ -128,7 +138,7 @@ fn replay() -> Result<(), ReplayError> {
     })?;
     match protocol {
         Protocol::Stdio => stdio(steps),
-        Protocol::Http => http(steps),
+        Protocol::Http => http(steps).map(|()| Ending::Finished),
     }
 }
 
@@ -271,7 +281,7 @@ fn stdin_lines() -> mpsc::Receiver<String> {
     received
 }
 
-fn stdio(steps: &[Step]) -> Result<(), ReplayError> {
+fn stdio(steps: &[Step]) -> Result<Ending, ReplayError> {
     let input = stdin_lines();
     let mut ids = Ids::default();
     let mut closed = false;
@@ -294,6 +304,7 @@ fn stdio(steps: &[Step]) -> Result<(), ReplayError> {
                 }
                 closed = true;
             }
+            Step::Exit { code } => return Ok(Ending::Died { code: *code }),
             Step::Request { .. } => {
                 return Err(ReplayError::WrongStep {
                     protocol: Protocol::Stdio,
@@ -307,7 +318,7 @@ fn stdio(steps: &[Step]) -> Result<(), ReplayError> {
             actual: ids.unexpected(&line),
         });
     }
-    Ok(())
+    Ok(Ending::Finished)
 }
 
 #[derive(Debug)]
@@ -362,7 +373,7 @@ fn http(steps: &[Step]) -> Result<(), ReplayError> {
                 taken: false,
             })),
             Step::Out { .. } => Ok(None),
-            Step::In { .. } | Step::Closed => Err(ReplayError::WrongStep {
+            Step::In { .. } | Step::Closed | Step::Exit { .. } => Err(ReplayError::WrongStep {
                 protocol: Protocol::Http,
                 step: step.clone(),
             }),
@@ -444,7 +455,7 @@ fn events(server: Arc<Server>) -> Response {
                         taken.await;
                     }
                 }
-                Step::In { .. } | Step::Closed => {
+                Step::In { .. } | Step::Closed | Step::Exit { .. } => {
                     unreachable!(
                         "invariant: HTTP launches were checked to hold only output and requests"
                     )

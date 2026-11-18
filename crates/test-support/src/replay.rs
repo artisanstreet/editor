@@ -1,3 +1,4 @@
+use crate::transcript::Transcript;
 use artisan_api::EngineId;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,24 @@ pub fn transcript(engine: EngineId, case: &str) -> PathBuf {
 impl ReplayingEngine {
     #[must_use]
     pub fn install(forge_data: &Path, example: &str, engine: EngineId, case: &str) -> Self {
+        let transcript = transcript(engine, case);
+        let text = std::fs::read_to_string(&transcript).unwrap_or_else(|error| {
+            panic!("read the transcript {}: {error}", transcript.display())
+        });
+        Self::install_text(forge_data, example, engine, &text)
+    }
+
+    #[must_use]
+    pub fn install_transcript(
+        forge_data: &Path,
+        example: &str,
+        engine: EngineId,
+        transcript: &Transcript,
+    ) -> Self {
+        Self::install_text(forge_data, example, engine, &transcript.render())
+    }
+
+    fn install_text(forge_data: &Path, example: &str, engine: EngineId, text: &str) -> Self {
         let engine_dir = forge_data.join("engines").join(engine.to_string());
         let version = version(engine);
         let entry = engine_dir.join("versions").join(version).join(
@@ -52,10 +71,7 @@ impl ReplayingEngine {
             .to_path_buf();
         std::fs::create_dir_all(&folder).expect("create the replayed engine's folder");
         std::fs::copy(replayer(example), &entry).expect("install the replaying engine");
-        let transcript = transcript(engine, case);
-        std::fs::copy(&transcript, folder.join("transcript.jsonl")).unwrap_or_else(|error| {
-            panic!("copy the transcript {}: {error}", transcript.display())
-        });
+        std::fs::write(folder.join("transcript.jsonl"), text).expect("write the transcript");
         std::fs::write(engine_dir.join("current"), version).expect("select the replayed version");
         Self { folder }
     }

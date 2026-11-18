@@ -23,6 +23,9 @@ pub enum Step {
         reply: Value,
     },
     Closed,
+    Exit {
+        code: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,9 @@ enum Line {
         reply: Value,
     },
     Closed,
+    Exit {
+        code: u8,
+    },
 }
 
 impl From<Step> for Line {
@@ -67,6 +73,7 @@ impl From<Step> for Line {
                 reply,
             },
             Step::Closed => Self::Closed,
+            Step::Exit { code } => Self::Exit { code },
         }
     }
 }
@@ -211,6 +218,7 @@ impl Transcript {
                     reply,
                 },
                 (Line::Closed, true) => Step::Closed,
+                (Line::Exit { code }, true) => Step::Exit { code },
             };
             launches
                 .last_mut()
