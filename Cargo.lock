@@ -61,6 +61,7 @@ dependencies = [
  "artisan-payload",
  "axum",
  "base64 0.22.1",
+ "build-info",
  "clap",
  "claude-ai-browser",
  "cliclack",
@@ -883,6 +884,10 @@ dependencies = [
  "memchr",
  "serde_core",
 ]
+
+[[package]]
+name = "build-info"
+version = "0.0.0"
 
 [[package]]
 name = "bumpalo"
@@ -2064,6 +2069,7 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "artisan-paths",
+ "build-info",
  "clap",
  "dhat",
  "diagnostics",

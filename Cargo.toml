@@ -6,6 +6,7 @@ members = [
     "crates/artisan-markdown-index",
     "crates/artisan-paths",
     "crates/artisan-payload",
+    "crates/build-info",
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
     "crates/diagnostics",
@@ -54,6 +55,7 @@ artisan-markdown-index = { path = "crates/artisan-markdown-index" }
 artisan-mentions = { path = "crates/artisan-mentions" }
 artisan-paths = { path = "crates/artisan-paths" }
 artisan-payload = { path = "crates/artisan-payload" }
+build-info = { path = "crates/build-info" }
 claude-ai-browser = { path = "crates/claude-ai-browser" }
 diagnostics = { path = "crates/diagnostics" }
 editor-aqua = { path = "crates/editor-aqua" }

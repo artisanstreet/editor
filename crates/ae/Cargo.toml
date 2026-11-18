@@ -43,6 +43,7 @@ tracing.workspace = true
 
 [build-dependencies]
 artisan-payload.workspace = true
+build-info.workspace = true
 
 [dev-dependencies]
 artisan-api = { workspace = true, features = ["tls"] }
