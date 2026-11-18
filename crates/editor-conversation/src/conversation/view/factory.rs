@@ -813,7 +813,7 @@ impl RowFactory {
                     .borrow_mut()
                     .entry(key.clone())
                     .or_insert_with(|| (self.allocate)());
-                let text = text.replace("You answered: ", "");
+                let text = answer_text(text).to_owned();
                 let source = aqua_text::document::SelectionSource {
                     id,
                     order: fold::selection_order(
@@ -2765,3 +2765,11 @@ pub(crate) fn image_caption(
         )
         .build()
 }
+
+fn answer_text(text: &str) -> &str {
+    text.strip_prefix("You answered: ").unwrap_or(text)
+}
+
+#[cfg(test)]
+#[path = "../../../tests/conversation/view/factory.rs"]
+mod tests;
