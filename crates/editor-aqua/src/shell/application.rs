@@ -311,7 +311,10 @@ impl<V: SectionViews> ShellApplication<V> {
             match effect {
                 crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(%error, "could not open URL");
+                        tracing::warn!(
+                            error = %::diagnostics::chain(&error),
+                            "could not open URL"
+                        );
                     }
                 }
                 crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {

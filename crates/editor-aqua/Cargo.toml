@@ -50,6 +50,7 @@ sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 palette.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

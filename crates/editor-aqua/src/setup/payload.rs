@@ -53,7 +53,7 @@ pub fn open_notices() -> Result<()> {
     NOTICES
         .write(&path)
         .with_context(|| format!("write {}", path.display()))?;
-    crate::shell::open_path(&path)
+    Ok(crate::shell::open_path(&path)?)
 }
 
 #[cfg(test)]

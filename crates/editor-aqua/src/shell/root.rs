@@ -1474,7 +1474,10 @@ impl RootViews {
                 }
                 ConversationAction::Link(_, LinkAction::OpenUrl(url)) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(%error, "could not open URL");
+                        tracing::warn!(
+                            error = %::diagnostics::chain(&error),
+                            "could not open URL"
+                        );
                     }
                 }
                 ConversationAction::Color(scope, request) => {
@@ -2289,7 +2292,10 @@ impl RootViews {
                 }
                 Command::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(%error, "could not open repository URL");
+                        tracing::warn!(
+                            error = %::diagnostics::chain(&error),
+                            "could not open repository URL"
+                        );
                     }
                 }
                 Command::Settle {

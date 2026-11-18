@@ -312,7 +312,10 @@ impl Entry {
         }
         if let CoreEvent::OpenUrl(url) = event {
             if let Err(error) = crate::shell::open_url(url) {
-                tracing::warn!(%error, "could not open URL");
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "could not open URL"
+                );
             }
         }
         let mounted = self.sync(core);
