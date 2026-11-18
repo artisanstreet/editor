@@ -13,18 +13,18 @@ pub struct At {
 
 impl At {
     #[must_use]
-    pub fn new(x: f64, y: f64) -> Option<Self> {
+    pub(crate) fn new(x: f64, y: f64) -> Option<Self> {
         let valid = |coordinate: f64| coordinate.is_finite() && coordinate >= 0.0;
         (valid(x) && valid(y)).then_some(Self { x, y })
     }
 
     #[must_use]
-    pub const fn x(self) -> f64 {
+    pub(crate) const fn x(self) -> f64 {
         self.x
     }
 
     #[must_use]
-    pub const fn y(self) -> f64 {
+    pub(crate) const fn y(self) -> f64 {
         self.y
     }
 }
@@ -106,7 +106,7 @@ pub enum Named {
     F(u8),
 }
 
-pub fn parse(steps: &Value) -> Result<Vec<Step>, Refused> {
+pub(crate) fn parse(steps: &Value) -> Result<Vec<Step>, Refused> {
     let steps = steps
         .as_array()
         .ok_or_else(|| Refused("steps is a list of steps.".to_owned()))?;
@@ -284,7 +284,7 @@ fn wait(value: &Value) -> Result<Wait, String> {
     }
 }
 
-pub fn key(name: &str) -> Result<Key, String> {
+pub(crate) fn key(name: &str) -> Result<Key, String> {
     use Named::{
         Alt, Backspace, CapsLock, Ctrl, Delete, Down, End, Enter, Escape, F, Home, Insert, Left,
         Menu, NumLock, PageDown, PageUp, Pause, PrintScreen, Right, ScrollLock, Shift, Space,

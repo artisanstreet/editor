@@ -197,7 +197,8 @@ impl ComputerMcp {
             None
         }
     }
-    pub fn with_desktop(hub: Hub, desktop: Arc<dyn Desktop>) -> Self {
+    #[cfg(any(windows, test))]
+    fn with_desktop(hub: Hub, desktop: Arc<dyn Desktop>) -> Self {
         Self {
             hub,
             desktop,

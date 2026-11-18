@@ -43,7 +43,8 @@ pub enum EncodeError {
 }
 
 impl Frame {
-    pub fn new(width: u32, height: u32, pixels: Vec<[u8; 3]>) -> Result<Self, FrameError> {
+    #[cfg(any(windows, test))]
+    pub(crate) fn new(width: u32, height: u32, pixels: Vec<[u8; 3]>) -> Result<Self, FrameError> {
         let (Some(nonzero_width), Some(nonzero_height)) =
             (NonZeroU32::new(width), NonZeroU32::new(height))
         else {
@@ -66,17 +67,18 @@ impl Frame {
     }
 
     #[must_use]
-    pub const fn width(&self) -> u32 {
+    pub(crate) const fn width(&self) -> u32 {
         self.width.get()
     }
 
     #[must_use]
-    pub const fn height(&self) -> u32 {
+    pub(crate) const fn height(&self) -> u32 {
         self.height.get()
     }
 
     #[must_use]
-    pub fn pixels(&self) -> &[[u8; 3]] {
+    #[cfg(test)]
+    pub(crate) fn pixels(&self) -> &[[u8; 3]] {
         &self.pixels
     }
 
@@ -87,7 +89,8 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Option<Self> {
+    #[cfg(test)]
+    pub(crate) fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Option<Self> {
         let x = x.min(self.width());
         let y = y.min(self.height());
         let width = NonZeroU32::new(width.min(self.width() - x))?;
@@ -104,7 +107,7 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn shrink(&self, width: NonZeroU32, height: NonZeroU32) -> Self {
+    pub(crate) fn shrink(&self, width: NonZeroU32, height: NonZeroU32) -> Self {
         let width = width.min(self.width);
         let height = height.min(self.height);
         if width == self.width && height == self.height {
@@ -144,7 +147,7 @@ impl Frame {
         }
     }
 
-    pub fn png_base64(&self) -> Result<String, EncodeError> {
+    pub(crate) fn png_base64(&self) -> Result<String, EncodeError> {
         let (width, height) = (self.width(), self.height());
         let mut bytes = Vec::new();
         {
@@ -172,7 +175,7 @@ impl Frame {
 }
 
 #[must_use]
-pub fn scale_for(width: u32, height: u32) -> f64 {
+pub(crate) fn scale_for(width: u32, height: u32) -> f64 {
     let (width, height) = (f64::from(width.max(1)), f64::from(height.max(1)));
     (MAX_EDGE / width.max(height))
         .min((MAX_PIXELS / (width * height)).sqrt())
@@ -185,6 +188,6 @@ pub fn scale_for(width: u32, height: u32) -> f64 {
     clippy::cast_sign_loss,
     reason = "a scaled length is a rounded nonnegative pixel count; `as` saturates"
 )]
-pub fn scaled(length: u32, scale: f64) -> NonZeroU32 {
+pub(crate) fn scaled(length: u32, scale: f64) -> NonZeroU32 {
     NonZeroU32::new((f64::from(length) * scale).round() as u32).unwrap_or(NonZeroU32::MIN)
 }

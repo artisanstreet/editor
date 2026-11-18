@@ -13,21 +13,21 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct View {
-    pub rect: Rect,
-    pub width: NonZeroU32,
-    pub height: NonZeroU32,
+    pub(crate) rect: Rect,
+    pub(crate) width: NonZeroU32,
+    pub(crate) height: NonZeroU32,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("{at:?} lies outside the {width}x{height} screenshot")]
 pub struct OutsideScreenshot {
-    pub at: At,
-    pub width: NonZeroU32,
-    pub height: NonZeroU32,
+    at: At,
+    width: NonZeroU32,
+    height: NonZeroU32,
 }
 
 impl View {
-    pub fn new(rect: Rect) -> Self {
+    pub(crate) fn new(rect: Rect) -> Self {
         let scale = frame::scale_for(rect.width, rect.height);
         Self {
             rect,
@@ -40,7 +40,7 @@ impl View {
         clippy::cast_possible_truncation,
         reason = "floored screenshot coordinates within the view map inside the display"
     )]
-    pub fn point(self, at: At) -> Result<Point, OutsideScreenshot> {
+    pub(crate) fn point(self, at: At) -> Result<Point, OutsideScreenshot> {
         let (width, height) = (f64::from(self.width.get()), f64::from(self.height.get()));
         if at.x() >= width || at.y() >= height {
             return Err(OutsideScreenshot {
@@ -70,15 +70,15 @@ pub enum Halted {
 pub struct Halt(OnceLock<Halted>);
 
 impl Halt {
-    pub fn halt(&self, why: Halted) {
+    pub(crate) fn halt(&self, why: Halted) {
         self.0.get_or_init(|| why);
     }
 
-    pub fn halted(&self) -> Option<Halted> {
+    fn halted(&self) -> Option<Halted> {
         self.0.get().copied()
     }
 
-    pub fn check(&self) -> Result<(), Halted> {
+    pub(crate) fn check(&self) -> Result<(), Halted> {
         self.halted().map_or(Ok(()), Err)
     }
 }
@@ -92,10 +92,10 @@ pub enum Screen {
 
 #[derive(Debug)]
 pub struct Outcome {
-    pub completed: usize,
-    pub interrupted: bool,
-    pub screen: Screen,
-    pub settled: bool,
+    pub(crate) completed: usize,
+    pub(crate) interrupted: bool,
+    pub(crate) screen: Screen,
+    pub(crate) settled: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -390,7 +390,7 @@ fn points(step: &Step) -> Vec<At> {
     }
 }
 
-pub fn run(
+pub(crate) fn run(
     desktop: &dyn Desktop,
     view: View,
     steps: &[Step],

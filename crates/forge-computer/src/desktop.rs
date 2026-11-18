@@ -6,15 +6,15 @@ pub type WindowId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl Rect {
     #[must_use]
-    pub fn contains(&self, point: Point) -> bool {
+    pub(crate) fn contains(&self, point: Point) -> bool {
         point.x >= self.x
             && point.y >= self.y
             && i64::from(point.x) < i64::from(self.x) + i64::from(self.width)
@@ -22,7 +22,7 @@ impl Rect {
     }
 
     #[must_use]
-    pub fn center(&self) -> Point {
+    pub(crate) fn center(&self) -> Point {
         Point {
             x: self
                 .x
@@ -36,8 +36,8 @@ impl Rect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
-    pub x: i32,
-    pub y: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,12 +58,12 @@ pub enum Input {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowInfo {
-    pub id: WindowId,
-    pub title: String,
-    pub process: String,
-    pub pid: u32,
-    pub rect: Rect,
-    pub minimized: bool,
+    pub(crate) id: WindowId,
+    pub(crate) title: String,
+    pub(crate) process: String,
+    pub(crate) pid: u32,
+    pub(crate) rect: Rect,
+    pub(crate) minimized: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
