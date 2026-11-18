@@ -429,6 +429,19 @@ fn row(
             let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
                 return InputResponse::default();
             };
+            if matches!(
+                key.key,
+                InputKey::Named(NamedKey::Enter) | InputKey::Char(' ')
+            ) && key.modifiers.is_empty()
+            {
+                if !key.repeat {
+                    key_emit(Action::Activate(index));
+                }
+                return InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                };
+            }
             let command = match key.key {
                 InputKey::Named(NamedKey::Up) => Navigation::Previous,
                 InputKey::Named(NamedKey::Down) => Navigation::Next,

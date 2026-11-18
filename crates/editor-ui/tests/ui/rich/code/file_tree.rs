@@ -103,7 +103,7 @@ fn navigation_uses_visible_rows_and_model_replacement_rejects_stale_actions() {
 }
 
 #[test]
-fn rows_expose_tree_levels_and_only_handle_reference_keyboard_commands() {
+fn rows_expose_tree_levels_and_open_from_enter_space_pointer_and_assistive_tech() {
     use aqua_core::{
         InputEvent, Key, KeyEvent, Modifiers, NamedKey, Point, PointerButton, PointerEvent,
         PointerKind, Role,
@@ -153,7 +153,11 @@ fn rows_expose_tree_levels_and_only_handle_reference_keyboard_commands() {
         app.handle_input(&InputEvent::KeyDown(event));
         app.handle_input(&InputEvent::KeyUp(event));
     }
-    assert!(actions.borrow().is_empty());
+    assert_eq!(
+        actions.borrow().as_slice(),
+        &[Action::Activate(0), Action::Activate(0)]
+    );
+    actions.borrow_mut().clear();
     let event = KeyEvent {
         key: Key::Named(NamedKey::Left),
         modifiers: Modifiers::default(),
