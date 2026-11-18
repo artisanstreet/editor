@@ -34,7 +34,24 @@ pub enum Cause {
     CodeActions,
     QuestionSource,
     Inspector,
-    ShellUpdates,
+    MediaAssets,
+    EntryActions,
+    WorkspaceActions,
+    LiveText,
+    ThreadItems,
+    ListedThreads,
+    OpenThread,
+    HostState,
+    EntryState,
+    ConversationState,
+    ConversationImages,
+    ComposerState,
+    QuestionPages,
+    SidebarState,
+    ScreenState,
+    MarkdownMedia,
+    PaletteState,
+    ReferenceState,
     ComposerImage,
     Unmounted,
     ViewsFrame,
@@ -88,7 +105,24 @@ impl Cause {
             Self::CodeActions => "code_actions",
             Self::QuestionSource => "question_source",
             Self::Inspector => "inspector",
-            Self::ShellUpdates => "shell_updates",
+            Self::MediaAssets => "media_assets",
+            Self::EntryActions => "entry_actions",
+            Self::WorkspaceActions => "workspace_actions",
+            Self::LiveText => "live_text",
+            Self::ThreadItems => "thread_items",
+            Self::ListedThreads => "listed_threads",
+            Self::OpenThread => "open_thread",
+            Self::HostState => "host_state",
+            Self::EntryState => "entry_state",
+            Self::ConversationState => "conversation_state",
+            Self::ConversationImages => "conversation_images",
+            Self::ComposerState => "composer_state",
+            Self::QuestionPages => "question_pages",
+            Self::SidebarState => "sidebar_state",
+            Self::ScreenState => "screen_state",
+            Self::MarkdownMedia => "markdown_media",
+            Self::PaletteState => "palette_state",
+            Self::ReferenceState => "reference_state",
             Self::ComposerImage => "composer_image",
             Self::Unmounted => "unmounted",
             Self::ViewsFrame => "views_frame",
@@ -142,7 +176,19 @@ impl Cause {
             | Self::CodeActions
             | Self::QuestionSource
             | Self::Inspector
-            | Self::ShellUpdates
+            | Self::MediaAssets
+            | Self::EntryActions
+            | Self::WorkspaceActions
+            | Self::OpenThread
+            | Self::HostState
+            | Self::EntryState
+            | Self::ConversationImages
+            | Self::ComposerState
+            | Self::QuestionPages
+            | Self::ScreenState
+            | Self::MarkdownMedia
+            | Self::PaletteState
+            | Self::ReferenceState
             | Self::ComposerImage
             | Self::Unmounted
             | Self::PopupAnimating
@@ -171,7 +217,8 @@ impl Cause {
             | Self::Sidebar
             | Self::Wheel => Refresh::Workspace,
             Self::ViewsFrame => Refresh::None,
-            Self::SidebarMotion | Self::SidebarTick => Refresh::Sidebar,
+            Self::SidebarMotion | Self::SidebarTick | Self::SidebarState => Refresh::Sidebar,
+            Self::ListedThreads => Refresh::Sections,
             Self::LandingExpiry
             | Self::WorkClock
             | Self::AfterLayout
@@ -180,6 +227,9 @@ impl Cause {
             | Self::Landed
             | Self::Reveals
             | Self::Rows
+            | Self::LiveText
+            | Self::ThreadItems
+            | Self::ConversationState
             | Self::Viewport => Refresh::Transcript,
             Self::SidebarAnimation | Self::SidebarResize => Refresh::SidebarFrame,
         }
@@ -206,8 +256,8 @@ impl Invalidation {
     }
 
     #[must_use]
-    pub fn is_only(&self, cause: Cause) -> bool {
-        self.causes == [cause]
+    pub fn is_empty(&self) -> bool {
+        self.causes.is_empty()
     }
 
     #[must_use]

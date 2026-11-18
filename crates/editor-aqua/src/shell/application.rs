@@ -1,6 +1,6 @@
 use crate::shell::host::{Shell, ShellResources, ShellUpdates, set_window_scale};
 use crate::shell::native_notifications::NativeNotifications;
-use crate::shell::refresh::{Cause, Invalidation};
+use crate::shell::refresh::{Cause, Invalidation, Refresh};
 use aqua::prelude::{
     A11yActionRequest, A11yNode, AquaWindowId, CursorIcon, DragRegions, FrameReason, InputEvent,
     Instant, ManagedUiApp, NodeId, ObservedWindowState, Scene, WindowEvent,
@@ -183,9 +183,8 @@ impl<V: SectionViews> ShellApplication<V> {
         &mut self,
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
-        refresh: super::refresh::Refresh,
+        refresh: Refresh,
     ) -> bool {
-        use super::refresh::Refresh;
         if !self.mounted {
             return false;
         }
@@ -580,6 +579,29 @@ impl<V: SectionViews> ShellApplication<V> {
         true
     }
 
+    fn refresh_drained(
+        &mut self,
+        ctx: &mut AppCtx<'_>,
+        id: AquaWindowId,
+        refresh: Refresh,
+    ) -> bool {
+        match refresh {
+            Refresh::None | Refresh::Workspace => false,
+            Refresh::Transcript => self.refresh_transcript(ctx, id, FrameReason::INPUT),
+            Refresh::Sidebar | Refresh::SidebarFrame => self.refresh_sections(ctx, id, refresh),
+            Refresh::Sections | Refresh::FrameSections => {
+                let refreshed = self.refresh_sections(ctx, id, refresh);
+                if refreshed {
+                    self.shell.live.flushed(std::time::Instant::now());
+                    self.views
+                        .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
+                    self.shell.bind(ctx, id);
+                }
+                refreshed
+            }
+        }
+    }
+
     fn show_failure(
         &mut self,
         message: &str,
@@ -733,16 +755,17 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(tm_workspace);
         let drain_span = crate::core::diagnostics::rebuild_stats::span("shell_drain");
         let tm_shell = Tm::new("drain.shell");
-        let updates = self.shell.drain(active, self.ui.ui_mut());
+        let mut updates = self.shell.drain(active, self.ui.ui_mut());
         drop(tm_shell);
         drop(drain_span);
-        domain_changed |= causes.note(Cause::ShellUpdates, updates.changed);
+        let drained = std::mem::take(&mut updates.causes);
+        domain_changed |= !drained.is_empty();
+        causes.extend(drained);
         domain_changed |= causes.note(
             Cause::ComposerImage,
             self.views
                 .open_composer_images(&mut self.shell, self.ui.ui_mut()),
         );
-        let live_only = updates.live_only;
         if let Some(wait) = self.shell.live.remaining(std::time::Instant::now()) {
             ctx.request_animation_deadline(id, ctx.now() + wait);
         }
@@ -778,11 +801,8 @@ impl<V: SectionViews> ShellApplication<V> {
         if !self.mounted {
             causes.note(Cause::Unmounted, true);
         }
-        if domain_changed || !self.mounted {
-            let transcript_only = live_only && self.mounted && causes.is_only(Cause::ShellUpdates);
-            if !(transcript_only && self.refresh_transcript(ctx, id, FrameReason::INPUT)) {
-                self.rebuild(ctx, id, FrameReason::INPUT, &causes);
-            }
+        if (domain_changed || !self.mounted) && !self.refresh_drained(ctx, id, causes.refresh()) {
+            self.rebuild(ctx, id, FrameReason::INPUT, &causes);
         }
     }
 }

@@ -1515,7 +1515,11 @@ impl Workspace {
         }
     }
 
-    pub fn drain_domains(&mut self, core: &mut Core, assets: &aqua::images::ImageAssets) -> bool {
+    pub fn drain_domains(
+        &mut self,
+        core: &mut Core,
+        assets: &aqua::images::ImageAssets,
+    ) -> crate::shell::refresh::Invalidation {
         let tm_1 = crate::shell::application::Tm::new("dd.conversation");
         let conversation_changed = self.conversation.drain(core);
         drop(tm_1);
@@ -1574,16 +1578,18 @@ impl Workspace {
         let tm_8 = crate::shell::application::Tm::new("dd.images");
         let images_changed = self.images.drain(assets) | self.images.poll_assets();
         drop(tm_8);
-        conversation_changed
-            || images_changed
-            || composer_changed
-            || question_changed
-            || sidebar
-            || settings_sidebar
-            || usage
-            || marketplace
-            || settings
-            || home
+        use crate::shell::refresh::Cause;
+        let mut causes = crate::shell::refresh::Invalidation::default();
+        causes.note(Cause::ConversationState, conversation_changed);
+        causes.note(Cause::ConversationImages, images_changed);
+        causes.note(Cause::ComposerState, composer_changed);
+        causes.note(Cause::QuestionPages, question_changed);
+        causes.note(Cause::SidebarState, sidebar);
+        causes.note(
+            Cause::ScreenState,
+            settings_sidebar || usage || marketplace || settings || home,
+        );
+        causes
     }
 
     pub fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {

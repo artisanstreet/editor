@@ -180,7 +180,7 @@ pub struct RootViews {
     color_scope: Option<crate::conversation::presentation::PresentationScope>,
     color_effects: Rc<RefCell<VecDeque<crate::ui::color_copy_menu::ColorCopyEffect>>>,
     resize_key: Option<ResizeKey>,
-    transcript_shape: Option<(u64, usize)>,
+    transcript_landing: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -876,7 +876,7 @@ impl RootViews {
             })),
         );
         let viewport = factory.viewport_callback().map_err(BuildError::Rows)?;
-        self.transcript_shape = Some(transcript_shape(&workspace.conversation));
+        self.transcript_landing = Some(workspace.conversation.is_landing());
         if transcript_only {
             let heights = workspace.conversation.row_heights.clone();
             let revisions = Rc::clone(&factory);
@@ -2105,16 +2105,6 @@ impl RootViews {
     }
 }
 
-fn transcript_shape(conversation: &crate::conversation::controller::Conversation) -> (u64, usize) {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    conversation.is_landing().hash(&mut hasher);
-    for (row, _) in &conversation.rows {
-        row.key().hash(&mut hasher);
-    }
-    (hasher.finish(), conversation.rows.len())
-}
-
 impl RootViews {
     fn app_media(shell: &Shell, window: &ObservedWindowState) -> AppMedia {
         let capability = Rc::clone(&shell.meshes_supported);
@@ -2152,7 +2142,7 @@ impl RootViews {
                         &shell.core,
                         workspace.composer.is_some(),
                     ) == crate::shell::wheel::keyed_node(ui, "jump-latest").is_some()
-                    && self.transcript_shape == Some(transcript_shape(&workspace.conversation))
+                    && self.transcript_landing == Some(workspace.conversation.is_landing())
             })
     }
 }

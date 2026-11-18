@@ -1,5 +1,6 @@
 use crate::core::{Core, CoreEvent, EditorFiles, HostEvent, HostId, Screen};
 use crate::shell::entry::Entry;
+use crate::shell::refresh::{Cause, Invalidation};
 use crate::shell::workspace::{NotificationEffects, Workspace};
 use crate::ui::preferences::Preferences;
 use aqua::AppCtx;
@@ -27,8 +28,7 @@ pub struct ShellUpdates {
     pub preferences_changed: bool,
     pub theme_transition: Option<bool>,
     pub settings_platform_effects: Vec<crate::shell::workspace::SettingsPlatformEffect>,
-    pub changed: bool,
-    pub live_only: bool,
+    pub causes: Invalidation,
 }
 
 impl Shell {
@@ -98,8 +98,7 @@ impl Shell {
                 preferences_changed: true,
                 theme_transition: None,
                 settings_platform_effects: Vec::new(),
-                changed: true,
-                live_only: false,
+                causes: Invalidation::default(),
             },
         )
     }
@@ -192,17 +191,23 @@ impl Shell {
 
     pub fn drain(&mut self, window_active: bool, ui: &mut aqua::UiApp) -> ShellUpdates {
         let mut notifications = Vec::new();
+        let mut causes = Invalidation::default();
         let tm_a = crate::shell::application::Tm::new("sd.assets");
-        let mut changed =
-            self.audio_assets.drain() | self.models.drain() | self.meshes_changed.replace(false);
+        causes.note(
+            Cause::MediaAssets,
+            self.audio_assets.drain() | self.models.drain() | self.meshes_changed.replace(false),
+        );
         let mut preferences_changed = false;
         drop(tm_a);
         let tm_b = crate::shell::application::Tm::new("sd.entry");
         let (mut entry_effects, entry_changed) = self.entry.dispatch(&mut self.core);
-        changed |= entry_changed;
+        causes.note(Cause::EntryActions, entry_changed);
         let (theme_transition, mut settings_platform_effects) =
             if let Some(workspace) = self.entry.workspace_mut() {
-                changed |= workspace.dispatch_actions(&mut self.core);
+                causes.note(
+                    Cause::WorkspaceActions,
+                    workspace.dispatch_actions(&mut self.core),
+                );
                 (
                     workspace.take_theme_transition(),
                     workspace.take_settings_platform_effects(),
@@ -215,31 +220,19 @@ impl Shell {
         drop(tm_b);
         let tm_c = crate::shell::application::Tm::new("sd.events");
         let watched = entry_watched_thread(&self.entry);
+        let thread_on_screen = matches!(self.core.screen(), Screen::Thread { .. });
         let entry = &mut self.entry;
         let live = &mut self.live;
         let now = std::time::Instant::now();
         const MESSAGES_PER_DRAIN: usize = 256;
         const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
-        let mut live_changed = false;
         let mut exhausted = true;
         let mut live_events = super::live_batch::LiveBatch::default();
         let mut apply_event = |core: &mut Core, event: CoreEvent| {
-            match &event {
-                CoreEvent::Host {
-                    host,
-                    event: HostEvent::Live { thread_id, .. },
-                } if is_watched(watched.as_ref(), host, thread_id) => {
-                    live_changed |= live.arrive(now)
-                }
-                CoreEvent::Host {
-                    host,
-                    event: HostEvent::Item(item),
-                } if is_streaming_prose(item)
-                    && is_watched(watched.as_ref(), host, &item.thread_id) =>
-                {
-                    live_changed |= live.arrive(now)
-                }
-                _ => changed |= event_changes_view(&event, watched.as_ref()),
+            match event_cause(&event, watched.as_ref(), thread_on_screen) {
+                Some(Cause::LiveText) => causes.note(Cause::LiveText, live.arrive(now)),
+                Some(cause) => causes.note(cause, true),
+                None => false,
             };
             preferences_changed |= matches!(event, CoreEvent::SettingsChanged);
             if let Some(effects) = entry.handle_event(core, &event, window_active, ui) {
@@ -274,11 +267,11 @@ impl Shell {
         if exhausted {
             self.core.wake();
         }
-        live_changed |= self.live.due(now);
+        causes.note(Cause::LiveText, self.live.due(now));
         drop(tm_c);
         let tm_d = crate::shell::application::Tm::new("sd.finish");
         self.entry.finish_events(&mut self.core, ui);
-        changed |= self.entry.drain(&mut self.core);
+        causes.note(Cause::EntryState, self.entry.drain(&mut self.core));
         if preferences_changed {
             self.preferences = Preferences::from_core(&self.core);
         }
@@ -286,11 +279,13 @@ impl Shell {
         let tm_e = crate::shell::application::Tm::new("sd.domains");
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.refresh_composer_mentions(&mut self.core, &self.preferences.theme());
-            let domains_changed = workspace.drain_domains(&mut self.core, &self.images);
-            changed |= domains_changed;
-            changed |= workspace.markdown.borrow().drain_media();
-            changed |= workspace.drain_palette(&self.core);
-            changed |= workspace.drain_reference(&self.core);
+            causes.extend(workspace.drain_domains(&mut self.core, &self.images));
+            causes.note(
+                Cause::MarkdownMedia,
+                workspace.markdown.borrow().drain_media(),
+            );
+            causes.note(Cause::PaletteState, workspace.drain_palette(&self.core));
+            causes.note(Cause::ReferenceState, workspace.drain_reference(&self.core));
         }
         drop(tm_e);
         ShellUpdates {
@@ -298,8 +293,7 @@ impl Shell {
             preferences_changed,
             theme_transition,
             settings_platform_effects,
-            changed: changed || live_changed,
-            live_only: live_changed && !changed,
+            causes,
         }
     }
 
@@ -413,17 +407,36 @@ fn entry_watched_thread(entry: &Entry) -> Option<(HostId, ThreadId)> {
         .and_then(|workspace| workspace.conversation.open.clone())
 }
 
-pub fn event_changes_view(event: &CoreEvent, watched: Option<&(HostId, ThreadId)>) -> bool {
+pub fn event_cause(
+    event: &CoreEvent,
+    watched: Option<&(HostId, ThreadId)>,
+    thread_on_screen: bool,
+) -> Option<Cause> {
     match event {
         CoreEvent::Host {
             host,
             event: HostEvent::Live { thread_id, .. },
-        } => is_watched(watched, host, thread_id),
+        } => is_watched(watched, host, thread_id).then_some(Cause::LiveText),
         CoreEvent::Host {
             host,
             event: HostEvent::Item(item),
-        } => is_watched(watched, host, &item.thread_id),
-        _ => true,
+        } => match (
+            is_watched(watched, host, &item.thread_id),
+            is_streaming_prose(item),
+        ) {
+            (false, _) => None,
+            (true, true) => Some(Cause::LiveText),
+            (true, false) => Some(Cause::ThreadItems),
+        },
+        CoreEvent::Host {
+            host,
+            event:
+                HostEvent::ThreadChanged { thread_id } | HostEvent::ThreadSummaryChanged { thread_id },
+        } => match (thread_on_screen, is_watched(watched, host, thread_id)) {
+            (true, false) => Some(Cause::ListedThreads),
+            (false, _) | (true, true) => Some(Cause::OpenThread),
+        },
+        _ => Some(Cause::HostState),
     }
 }
 

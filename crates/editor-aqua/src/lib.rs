@@ -46,7 +46,6 @@
     clippy::too_many_lines,
     clippy::type_complexity,
     clippy::unnecessary_fold,
-    clippy::unnecessary_semicolon,
     clippy::unused_self,
     clippy::used_underscore_binding,
     clippy::wildcard_enum_match_arm,
