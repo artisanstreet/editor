@@ -675,3 +675,43 @@ fn a_quarantined_skill_being_installed_says_so_on_its_row() {
         "{texts:?}"
     );
 }
+
+#[test]
+fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
+    use editor_aqua::core::{Core, EditorFiles};
+    use std::rc::Rc;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let mut controller = marketplace_host(&mut core);
+    let long = "a-very-long-skill-name-that-keeps-going-".repeat(6);
+    controller.page.items = vec![Item::Server(ServerRow {
+        name: long.clone(),
+        target: "npx server".into(),
+    })];
+    let app = marketplace_app(&controller, &core, Rc::new(|_| {}));
+    let edit =
+        test_support::editor::ui::node_with_key(&app, &format!("marketplace-server-{long}-edit"));
+    let bounds = app.tree().rect(edit).unwrap();
+    assert!(
+        bounds.x + bounds.w <= 1000.0,
+        "the row's Edit button stays inside the window at {bounds:?}"
+    );
+    let name = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .find(|node| {
+            app.tree().get(*node).is_some_and(|record| {
+                matches!(&record.kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == long)
+            })
+        })
+        .expect("the name is painted");
+    let painted = app.tree().rect(name).unwrap();
+    assert!(
+        painted.x + painted.w <= bounds.x,
+        "the name ends before the Edit button: {painted:?} vs {bounds:?}"
+    );
+}

@@ -228,7 +228,7 @@ pub fn build(
 fn muted(theme: &ArtisanTheme, role: TextRole, words: String) -> Element {
     role.text(theme, words)
         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-        .wrap(false)
+        .wrap(true)
         .build()
 }
 
@@ -557,17 +557,7 @@ fn item_row(
                 .align(AlignItems::BASELINE)
                 .min_width(Length::Pct(0.0)),
         )
-        .child(
-            UiBox::new()
-                .style(Style::new().flex_shrink(0.0))
-                .child(
-                    TextRole::LabelStrong
-                        .text(theme, item.name().to_owned())
-                        .wrap(false)
-                        .build(),
-                )
-                .build(),
-        )
+        .child(name(theme, item.name()))
         .child(caption(theme, meta))
         .build();
     let description = (!description.is_empty()).then(|| caption(theme, description));
@@ -644,6 +634,23 @@ fn item_row(
                 .build(),
         )
         .build()
+}
+
+fn name(theme: &ArtisanTheme, name: &str) -> Element {
+    let full = name.to_owned();
+    let tooltip_theme = *theme;
+    TextRole::LabelStrong
+        .text(theme, name.to_owned())
+        .wrap(false)
+        .overflow(OverflowMode::EndEllipsis)
+        .style(
+            Style::new()
+                .min_width(Length::Pct(0.0))
+                .flex_shrink(1.0)
+                .max_width(Length::Pct(60.0)),
+        )
+        .build()
+        .pointer_tooltip(move || tooltip(&tooltip_theme, &full))
 }
 
 fn install(
