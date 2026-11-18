@@ -113,27 +113,32 @@ const _: () = assert!(
 pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
 
 #[must_use]
-pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {    use base64::Engine as _;
-    if bytes.is_empty() {
-        return vec![TunnelChunk {
-            transfer: transfer.to_owned(),
-            index: 0,
-            total: 1,
-            total_bytes: 0,
-            bytes_b64u: String::new(),
-        }];
+pub const fn chunk_count(bytes: usize) -> usize {
+    if bytes == 0 {
+        1
+    } else {
+        bytes.div_ceil(CHUNK_RAW_BYTES)
     }
-    let total = bytes.len().div_ceil(CHUNK_RAW_BYTES);
-    bytes
-        .chunks(CHUNK_RAW_BYTES)
-        .enumerate()
-        .map(|(index, part)| TunnelChunk {
-            transfer: transfer.to_owned(),
-            index: u32::try_from(index).unwrap_or(u32::MAX),
-            total: u32::try_from(total).unwrap_or(u32::MAX),
-            total_bytes: bytes.len() as u64,
-            bytes_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(part),
-        })
+}
+
+#[must_use]
+pub fn chunk_at(transfer: &str, bytes: &[u8], index: usize) -> TunnelChunk {
+    use base64::Engine as _;
+    let start = index.saturating_mul(CHUNK_RAW_BYTES).min(bytes.len());
+    let end = start.saturating_add(CHUNK_RAW_BYTES).min(bytes.len());
+    TunnelChunk {
+        transfer: transfer.to_owned(),
+        index: u32::try_from(index).unwrap_or(u32::MAX),
+        total: u32::try_from(chunk_count(bytes.len())).unwrap_or(u32::MAX),
+        total_bytes: bytes.len() as u64,
+        bytes_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[start..end]),
+    }
+}
+
+#[must_use]
+pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {
+    (0..chunk_count(bytes.len()))
+        .map(|index| chunk_at(transfer, bytes, index))
         .collect()
 }
 
@@ -145,10 +150,7 @@ pub fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeErro
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 
@@ -203,7 +205,10 @@ mod tests {
         let body = serde_json::json!({"text": "hi"});
         let (content_type, raw) = request_body_bytes(Some(&body)).unwrap();
         assert_eq!(content_type, "application/json");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap(), body);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&raw).unwrap(),
+            body
+        );
     }
 }
 
