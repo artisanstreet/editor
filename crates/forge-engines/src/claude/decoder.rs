@@ -141,6 +141,57 @@ struct Pending {
     request_id: String,
     input: Value,
     suggestions: Vec<Value>,
+    asks_on: AsksOn,
+}
+
+struct Ask {
+    request_id: String,
+    input: Value,
+    suggestions: Vec<Value>,
+    reason: Option<String>,
+    options: Vec<Decision>,
+}
+
+impl Ask {
+    fn of(request: &Value, request_id: &str, input: Value) -> Self {
+        let suggestions = request["permission_suggestions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut options = vec![Decision::AllowOnce];
+        if suggestions
+            .iter()
+            .any(|rule| str_at(rule, "type") == Some("addRules"))
+        {
+            options.push(Decision::AllowAlways);
+        }
+        options.push(Decision::DenyOnce);
+        Self {
+            request_id: request_id.to_owned(),
+            input,
+            suggestions,
+            reason: str_at(request, "decision_reason")
+                .or_else(|| str_at(request, "title"))
+                .or_else(|| str_at(request, "description"))
+                .map(str::to_owned),
+            options,
+        }
+    }
+
+    fn pending(self, asks_on: AsksOn) -> Pending {
+        Pending {
+            request_id: self.request_id,
+            input: self.input,
+            suggestions: self.suggestions,
+            asks_on,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AsksOn {
+    Operation,
+    Gate,
 }
 
 impl ClaudeDecoder {
@@ -270,6 +321,10 @@ impl ClaudeDecoder {
                 }
                 match decision {
                     Decision::AllowOnce | Decision::AllowAlways => {
+                        let allowed = match pending.asks_on {
+                            AsksOn::Operation => Status::Running,
+                            AsksOn::Gate => Status::Done,
+                        };
                         let mut allow =
                             json!({ "behavior": "allow", "updatedInput": pending.input });
                         if *decision == Decision::AllowAlways {
@@ -287,7 +342,7 @@ impl ClaudeDecoder {
                                 .collect();
                             allow["updatedPermissions"] = Value::Array(rules);
                         }
-                        (allow, Status::Running)
+                        (allow, allowed)
                     }
                     Decision::DenyOnce | Decision::DenyAlways => (
                         deny("The user denied this request.", false),
@@ -1021,7 +1076,7 @@ impl ClaudeDecoder {
 
     /// A message that came in from one of this session's agents (`from` is
     /// its id) or from another session (`name` is the session's).
-    fn peer_message(&self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
+    fn peer_message(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
         let origin = &frame["origin"];
         let Some(body) = str_at(origin, "body").filter(|body| !body.trim().is_empty()) else {
             return;
@@ -1035,12 +1090,10 @@ impl ClaudeDecoder {
             tracing::warn!("Claude peer message omitted its sender");
             return;
         };
-        let key = str_at(origin, "msg_id")
-            .or_else(|| str_at(frame, "uuid"))
-            .map_or_else(
-                || format!("peer:{}", self.tools.len()),
-                |id| format!("peer:{id}"),
-            );
+        let key = match str_at(origin, "msg_id").or_else(|| str_at(frame, "uuid")) {
+            Some(id) => format!("peer:{id}"),
+            None => self.next_key("peer"),
+        };
         out.push(EngineEvent::Item {
             key,
             parent,
@@ -1167,12 +1220,7 @@ impl ClaudeDecoder {
         let request = &frame["request"];
         let subtype = str_at(request, "subtype").unwrap_or_default();
         if subtype != "can_use_tool" {
-            // Nothing Artisan registers (hooks, SDK MCP servers) asks this;
-            // say so rather than leave the CLI waiting.
-            self.replies.push(json!({
-                "type": "control_response",
-                "response": { "subtype": "error", "request_id": request_id, "error": format!("unsupported request {subtype}") },
-            }));
+            self.refuse(request_id, &format!("unsupported request {subtype}"));
             return;
         }
         let name = str_at(request, "tool_name").unwrap_or("tool");
@@ -1181,40 +1229,41 @@ impl ClaudeDecoder {
             .unwrap_or(request_id)
             .to_owned();
         if !self.tools.contains_key(&key) {
+            if let Err(message) = validate_input(name, &input) {
+                self.refuse(request_id, &message);
+                out.push(error_item(
+                    format!("invalid-tool:{key}"),
+                    ErrorKind::Execution,
+                    message,
+                    false,
+                ));
+                return;
+            }
+            let before = out.len();
             self.tool_use(&key, name, &input, None, out);
-            out.pop();
+            out.truncate(before);
         }
-        let suggestions = request["permission_suggestions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let ask = Ask::of(request, request_id, input);
         let Some(tool) = self.tools.get_mut(&key) else {
+            self.refuse(
+                request_id,
+                &format!("Artisan can't ask the user about {name}"),
+            );
             return;
         };
-        let reason = str_at(request, "decision_reason")
-            .or_else(|| str_at(request, "title"))
-            .or_else(|| str_at(request, "description"))
-            .map(str::to_owned);
-        let mut options = vec![Decision::AllowOnce];
-        if suggestions
-            .iter()
-            .any(|rule| str_at(rule, "type") == Some("addRules"))
-        {
-            options.push(Decision::AllowAlways);
-        }
-        options.push(Decision::DenyOnce);
-        match &mut tool.kind {
+        let asks_on = match &mut tool.kind {
             ItemKind::Tool {
                 tool: kind,
                 approval,
                 ..
             } => {
                 *approval = Some(Approval {
-                    request: approval_request(kind, name, reason.as_deref()),
-                    reason: reason.map(Into::into),
-                    options,
+                    request: approval_request(kind, name, ask.reason.as_deref()),
+                    reason: ask.reason.clone().map(Into::into),
+                    options: ask.options.clone(),
                     decision: None,
                 });
+                Some(AsksOn::Operation)
             }
             ItemKind::Plan { approval, .. } => {
                 *approval = Some(Approval {
@@ -1225,26 +1274,79 @@ impl ClaudeDecoder {
                     options: vec![Decision::AllowOnce, Decision::DenyOnce],
                     decision: None,
                 });
+                Some(AsksOn::Operation)
             }
+            ItemKind::Question { .. } => Some(AsksOn::Operation),
+            ItemKind::Agent { .. } => Some(AsksOn::Gate),
             ItemKind::UserMessage { .. }
             | ItemKind::AssistantMessage { .. }
-            | ItemKind::Agent { .. }
-            | ItemKind::Question { .. }
             | ItemKind::Image { .. }
             | ItemKind::Compaction { .. }
             | ItemKind::Notice { .. }
-            | ItemKind::Error { .. } => {}
+            | ItemKind::Error { .. } => None,
+        };
+        match asks_on {
+            Some(AsksOn::Operation) => {
+                tool.status = Status::AwaitingUser;
+                out.push(tool.event());
+                self.pending.insert(key, ask.pending(AsksOn::Operation));
+            }
+            Some(AsksOn::Gate) => {
+                let parent = tool.parent.clone();
+                self.gate_agent(&key, parent, name, ask, out);
+            }
+            None => self.refuse(
+                request_id,
+                &format!("Artisan can't ask the user about {name}"),
+            ),
         }
-        tool.status = Status::AwaitingUser;
-        out.push(tool.event());
-        self.pending.insert(
-            key,
-            Pending {
-                request_id: request_id.to_owned(),
-                input,
-                suggestions,
+    }
+
+    fn gate_agent(
+        &mut self,
+        key: &str,
+        parent: Option<String>,
+        name: &str,
+        ask: Ask,
+        out: &mut Vec<EngineEvent>,
+    ) {
+        let agent = str_at(&ask.input, "description")
+            .or_else(|| str_at(&ask.input, "subagent_type"))
+            .unwrap_or("an agent");
+        let gate = Tool {
+            key: format!("approval:{key}"),
+            parent,
+            kind: ItemKind::Tool {
+                tool: ToolKind::Other {
+                    name: name.to_owned(),
+                    input: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(Approval {
+                    request: ApprovalRequest::Action {
+                        description: format!("Start {agent}").into(),
+                    },
+                    reason: ask.reason.clone().map(Into::into),
+                    options: ask.options.clone(),
+                    decision: None,
+                }),
             },
-        );
+            status: Status::AwaitingUser,
+            background: false,
+        };
+        out.push(gate.event());
+        self.pending
+            .insert(gate.key.clone(), ask.pending(AsksOn::Gate));
+        self.tools.insert(gate.key.clone(), gate);
+    }
+
+    fn refuse(&mut self, request_id: &str, message: &str) {
+        self.replies.push(json!({
+            "type": "control_response",
+            "response": { "subtype": "error", "request_id": request_id, "error": message },
+        }));
     }
 
     fn control_response(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
