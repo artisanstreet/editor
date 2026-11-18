@@ -358,6 +358,7 @@ pub struct ForgeServer {
     task: Option<tokio::task::JoinHandle<Result<(), ForgeFailure>>>,
 }
 
+#[derive(Clone, Debug)]
 pub struct PairingInput {
     pub address: String,
     pub code: String,

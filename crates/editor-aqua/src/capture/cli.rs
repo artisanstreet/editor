@@ -89,8 +89,8 @@ fn serve(fixture: PathBuf, editor_dir: PathBuf) -> Result<(), CliError> {
     let mut scenario =
         Scenario::serve(&fixture, root.path(), &editor_dir).map_err(CliError::Serve)?;
     println!("serving {}", editor_dir.display());
-    println!("host {}", super::scenario::MACHINE_ID);
-    println!("account {}", super::scenario::ACCOUNT_ID);
+    println!("host {}", crate::qualification::sign_in::MACHINE_ID);
+    println!("account {}", crate::qualification::sign_in::ACCOUNT_ID);
     std::io::stdout().flush().map_err(CliError::Stdout)?;
     let mut sink = Vec::new();
     std::io::stdin()

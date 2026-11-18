@@ -1,11 +1,8 @@
-use crate::core::config_file::WriteConfigError;
-use crate::core::hosts::PairError;
-use crate::core::{
-    Core, EditorFiles, HostId, IdentityError, OpenCoreError, Screen, SettingsPage, hosts,
-};
+use crate::core::{Core, EditorFiles, HostId, OpenCoreError, Screen, SettingsPage};
 use crate::qualification::fixture::{
     Fixture, ForgeServer, InvalidFixture, PairingError, SeedError, StartForgeError,
 };
+use crate::qualification::sign_in::{JoinForgeError, join_forge};
 use artisan_api::{EngineId, ProjectId, ThreadId};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -58,26 +55,8 @@ pub enum ScenarioError {
     Invite(#[source] PairingError),
     #[error("start the latency proxy")]
     Proxy(#[source] std::io::Error),
-    #[error("load the capture Editor's identity")]
-    Identity(#[source] IdentityError),
-    #[error("pair the capture Editor with its Forge")]
-    Pair(#[source] PairError),
-    #[error("save the capture Editor's host {host}")]
-    SaveHosts {
-        host: HostId,
-        #[source]
-        source: WriteConfigError,
-    },
-    #[error("encode the capture account")]
-    EncodeAccount(#[source] serde_json::Error),
-    #[error("write the capture account to {}", path.display())]
-    WriteAccount {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("write the capture onboarding")]
-    Onboarding(#[source] WriteConfigError),
+    #[error("sign the capture Editor in to its Forge")]
+    Join(#[source] JoinForgeError),
     #[error("open the capture Editor's core")]
     Core(#[source] OpenCoreError),
 }
@@ -217,30 +196,7 @@ impl Scenario {
         let files = EditorFiles {
             dir: editor_dir.to_path_buf(),
         };
-        let identity = files.identity().map_err(ScenarioError::Identity)?;
-        let host = HostId(MACHINE_ID.to_owned());
-        let mut config = runtime
-            .block_on(hosts::pair(
-                &pairing.address,
-                &pairing.code,
-                &pairing.fingerprint,
-                &identity,
-                "capture",
-                "Forge".to_owned(),
-                hosts::HostKind::Local,
-            ))
-            .map_err(ScenarioError::Pair)?;
-        config.id = host.clone();
-        files
-            .save_hosts(&hosts::HostsFile {
-                hosts: vec![config],
-                last: Some(host.clone()),
-            })
-            .map_err(|source| ScenarioError::SaveHosts {
-                host: host.clone(),
-                source,
-            })?;
-        save_signed_in_account(&files)?;
+        let host = join_forge(&files, &pairing).map_err(ScenarioError::Join)?;
         Ok((
             Self {
                 host,
@@ -291,43 +247,4 @@ impl Scenario {
             }
         }
     }
-}
-
-pub const CORE_URL: &str = "http://127.0.0.1:1";
-pub const ACCOUNT_ID: &str = "acct_capture0000000000000000";
-pub const MACHINE_ID: &str = "mch_capture0000000000000000";
-
-fn save_signed_in_account(files: &EditorFiles) -> Result<(), ScenarioError> {
-    use artisan_account::network::{AccountProfile, Jwk, MachineEntry};
-    let profile = AccountProfile {
-        account_id: ACCOUNT_ID.to_owned(),
-        email: "capture@example.invalid".to_owned(),
-        display_name: "Capture".to_owned(),
-        username: None,
-        avatar_url: None,
-        totp_enrolled: false,
-        machines: vec![MachineEntry {
-            id: MACHINE_ID.to_owned(),
-            label: "Capture Forge".to_owned(),
-            public_key: Jwk {
-                kty: "OKP".to_owned(),
-                crv: "Ed25519".to_owned(),
-                x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            },
-            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
-            revoked_at: None,
-            last_seen_at: None,
-        }],
-        latest_config_version: None,
-    };
-    let account = serde_json::json!({
-        "base_url": CORE_URL,
-        "session_token": "capture-session",
-        "profile": profile,
-    });
-    let path = files.dir.join("account.json");
-    let bytes = serde_json::to_vec_pretty(&account).map_err(ScenarioError::EncodeAccount)?;
-    std::fs::write(&path, bytes).map_err(|source| ScenarioError::WriteAccount { path, source })?;
-    crate::core::save_onboarding_for_tests(files, CORE_URL, ACCOUNT_ID, MACHINE_ID)
-        .map_err(ScenarioError::Onboarding)
 }
