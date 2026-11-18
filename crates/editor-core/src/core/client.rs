@@ -192,9 +192,9 @@ impl ForgeClient {
         if let Some(relay) = self.relay().cloned() {
             return AbortOnDropHandle::new(runtime().spawn(async move {
                 let (method, path, body) = relay_parts(request)?;
-                relay
+                Ok(relay
                     .raw_bytes(&method, &path, body, limit.min(RELAY_BYTES))
-                    .await
+                    .await?)
             }))
             .await
             .context("network task")?;

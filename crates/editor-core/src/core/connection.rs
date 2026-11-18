@@ -85,7 +85,8 @@ pub(super) fn follow(
                     Err(error) => (
                         format!("{error:#}"),
                         error
-                            .downcast_ref::<artisan_api::ApiError>()
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<artisan_api::ApiError>())
                             .map(|error| error.code),
                     ),
                 };
