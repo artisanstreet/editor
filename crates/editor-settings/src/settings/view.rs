@@ -1258,7 +1258,6 @@ struct ViewSnapshot {
     mcp_error: Option<String>,
     mcp_fields: Vec<String>,
     prompt: (bool, bool, bool, bool, Option<String>),
-    forge_error: Option<String>,
     forge_code: String,
     second_factor: String,
     menus: (bool, bool, bool),
@@ -1373,7 +1372,6 @@ impl ViewSnapshot {
                 controller.reported_prompt_dirty,
                 controller.prompt.error.clone(),
             ),
-            forge_error: controller.forge_error.clone(),
             forge_code: controller.forge_code.borrow().text().to_owned(),
             second_factor: controller.sign_in.second_factor.borrow().text().to_owned(),
             menus: (

@@ -3,6 +3,7 @@ use super::{
     ui::{self, Ink},
     view::ViewAction,
 };
+use aqua_ui::element::{Box as UiBox, Element};
 use editor_core::{AccountPhase, Core, LocalForge};
 use editor_ui::{
     kit::{ButtonTone, Space, TextRole},
@@ -12,7 +13,6 @@ use editor_ui::{
     },
     theme::ArtisanTheme,
 };
-use aqua_ui::element::{Box as UiBox, Element};
 use std::rc::Rc;
 
 fn text(theme: &ArtisanTheme, value: impl Into<String>, muted: bool) -> Element {
@@ -28,7 +28,9 @@ fn button(
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
+    ui::button(theme, id, label, tone, disabled, move || {
+        emit(action.clone())
+    })
 }
 fn line(theme: &ArtisanTheme, title: impl Into<String>, detail: impl Into<String>) -> UiBox {
     ui::stack(Space::S4)
@@ -318,11 +320,7 @@ pub fn forges(
         )
         .build(),
     );
-    if let Some(error) = controller
-        .forge_error
-        .as_deref()
-        .or_else(|| account.last_error())
-    {
+    if let Some(error) = account.last_error() {
         rows = rows.child(ui::error_text(theme, error));
     }
     rows.build()
@@ -398,7 +396,10 @@ pub fn page(
             "Forges",
             Some("A connected Forge can run anything on its machine."),
             None,
-            ui::card(theme, vec![ui::block(forges(controller, core, theme, emit))]),
+            ui::card(
+                theme,
+                vec![ui::block(forges(controller, core, theme, emit))],
+            ),
         ))
         .build()
 }
