@@ -1717,6 +1717,7 @@ dependencies = [
  "base64 0.22.1",
  "claude-ai-browser",
  "diagnostics",
+ "divan",
  "editor-core",
  "futures",
  "getrandom 0.4.3",

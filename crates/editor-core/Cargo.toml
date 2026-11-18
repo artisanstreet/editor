@@ -36,8 +36,13 @@ getrandom.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+divan.workspace = true
 editor-core = { path = ".", features = ["test-support"] }
 test-support = { workspace = true, features = ["tokio", "http"] }
+
+[[bench]]
+name = "pages"
+harness = false
 
 [lints]
 workspace = true
