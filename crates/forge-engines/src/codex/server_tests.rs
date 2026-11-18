@@ -7,6 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "../../tests/codex/routing.rs"]
 mod activity_routing;
+#[path = "../../tests/codex/server.rs"]
+mod actor;
 #[path = "../../tests/codex/cancellation.rs"]
 mod cancellation;
 
@@ -48,6 +50,7 @@ while IFS= read -r line; do
       load_thread ;;
     thread/resume) load_thread ;;
     thread/unsubscribe)
+      if [ -n "$ARTISAN_TEST_STALL_RELEASE" ]; then continue; fi
       printf '{"id":%s,"result":{"status":"unsubscribed"}}\n' "$id"
       sleep 0.1
       fd=${locks[$thread]}
@@ -58,6 +61,7 @@ while IFS= read -r line; do
       turn="turn-$turns"
       text=$(printf '%s' "$line" | sed -E -n 's/.*"text":"(([^"\\]|\\.)*)".*/\1/p')
       printf '{"id":%s,"result":{"turn":{"id":"%s"}}}\n' "$id" "$turn"
+      if [ "$text" = jam ]; then sleep 30; continue; fi
       if [ "$text" = ask ]; then
         ask_thread=$thread
         ask_turn=$turn

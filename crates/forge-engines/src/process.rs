@@ -83,10 +83,36 @@ pub enum ProbeError {
     },
 }
 
+pub(crate) struct StdinWriter {
+    program: PathBuf,
+    stdin: ChildStdin,
+    trace: Trace,
+}
+
+impl StdinWriter {
+    pub(crate) async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
+        let mut bytes = serde_json::to_vec(value).map_err(|source| SendError::Encode {
+            program: self.program.clone(),
+            source,
+        })?;
+        self.trace
+            .record(Kind::In, &String::from_utf8_lossy(&bytes));
+        bytes.push(b'\n');
+        let written = match self.stdin.write_all(&bytes).await {
+            Ok(()) => self.stdin.flush().await,
+            Err(error) => Err(error),
+        };
+        written.map_err(|source| SendError::Write {
+            program: self.program.clone(),
+            source,
+        })
+    }
+}
+
 pub struct EngineProcess {
     program: PathBuf,
     child: OwnedChild,
-    stdin: Option<ChildStdin>,
+    stdin: Option<StdinWriter>,
     stdout: BufReader<ChildStdout>,
     stderr_tail: Arc<Mutex<String>>,
     line: Vec<u8>,
@@ -231,7 +257,11 @@ fn spawn_command(mut command: Command, trace: Trace) -> Result<EngineProcess, Sp
     command.stdout(Stdio::piped());
     let mut child = owned_command(command)?;
     trace.record(Kind::Note, &format!("started (pid {:?})", child.id()));
-    let stdin = child.stdin().take();
+    let stdin = child.stdin().take().map(|stdin| StdinWriter {
+        program: program.clone(),
+        stdin,
+        trace: trace.clone(),
+    });
     let stdout = BufReader::new(child.stdout().take().unwrap_or_else(|| {
         unreachable!(
             "invariant: {} was spawned with a piped stdout",
@@ -286,20 +316,12 @@ impl EngineProcess {
                 program: self.program.clone(),
             });
         };
-        let mut bytes = serde_json::to_vec(value).map_err(|source| SendError::Encode {
+        stdin.send(value).await
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Result<StdinWriter, SendError> {
+        self.stdin.take().ok_or_else(|| SendError::StdinClosed {
             program: self.program.clone(),
-            source,
-        })?;
-        self.trace
-            .record(Kind::In, &String::from_utf8_lossy(&bytes));
-        bytes.push(b'\n');
-        let written = match stdin.write_all(&bytes).await {
-            Ok(()) => stdin.flush().await,
-            Err(error) => Err(error),
-        };
-        written.map_err(|source| SendError::Write {
-            program: self.program.clone(),
-            source,
         })
     }
 
