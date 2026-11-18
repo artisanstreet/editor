@@ -165,6 +165,7 @@ similar = "=2.7.0"
 socket2 = "=0.6.5"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
+divan = "=0.1.21"
 thiserror = "=2.0.20"
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 tokio = { version = "=1.53.3", default-features = false }
@@ -192,6 +193,11 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
+
+[profile.bench]
+lto = false
+codegen-units = 16
 debug = false
 
 [profile.release]
