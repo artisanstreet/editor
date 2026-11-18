@@ -361,15 +361,50 @@ fn retained_column(from_right: usize, content: Element) -> Element {
         .with_key(format!("column-{from_right}"))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Segment {
+    Digit(char),
+    Run(String),
+}
+
+impl Segment {
+    fn text(&self) -> String {
+        match self {
+            Self::Digit(digit) => digit.to_string(),
+            Self::Run(run) => run.clone(),
+        }
+    }
+}
+
+fn segments(word: &str) -> Vec<Segment> {
+    let model = aqua_text::TextModel::new(word);
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut at = 0;
+    while at < word.len() {
+        let next = model.next_grapheme(at);
+        let cluster = &word[at..next];
+        match (cluster.chars().next(), segments.last_mut()) {
+            (Some(digit), _) if cluster.len() == 1 && digit.is_ascii_digit() => {
+                segments.push(Segment::Digit(digit));
+            }
+            (_, Some(Segment::Run(run))) => run.push_str(cluster),
+            _ => segments.push(Segment::Run(cluster.to_owned())),
+        }
+        at = next;
+    }
+    segments
+}
+
 fn retained_columns(text: &str, typography: &TextStyle, color: GpuiTextColor) -> Element {
-    let count = text.chars().count();
+    let segments = segments(text);
+    let count = segments.len();
     let mut row = UiBox::new()
         .layout("row")
         .style(Style::new().flex_shrink(0.0));
-    for (column, character) in text.chars().enumerate() {
+    for (column, segment) in segments.iter().enumerate() {
         row = row.child(retained_column(
             count - 1 - column,
-            label(character.to_string(), typography, color),
+            label(segment.text(), typography, color),
         ));
     }
     row.build()
@@ -383,19 +418,19 @@ fn retained_odometer(
     typography: &TextStyle,
     color: GpuiTextColor,
 ) -> Element {
-    let before: Vec<char> = from.chars().collect();
-    let after: Vec<char> = to.chars().collect();
+    let before = segments(from);
+    let after = segments(to);
     let mut row = UiBox::new()
         .layout("row")
         .style(Style::new().flex_shrink(0.0));
-    for (column, &target) in after.iter().enumerate() {
+    for (column, target) in after.iter().enumerate() {
         let from_right = after.len() - 1 - column;
         let source = before
             .len()
             .checked_sub(1 + from_right)
-            .map(|index| before[index]);
+            .map(|index| &before[index]);
         let content = match source {
-            Some(source) if source == target => label(target.to_string(), typography, color),
+            Some(source) if source == target => label(target.text(), typography, color),
             Some(source) => retained_reel(
                 source,
                 target,
@@ -405,7 +440,7 @@ fn retained_odometer(
                 typography,
                 color,
             ),
-            None => retained_enter(target.to_string(), typography, color),
+            None => retained_enter(target.text(), typography, color),
         };
         row = row.child(retained_column(from_right, content));
     }
@@ -413,8 +448,8 @@ fn retained_odometer(
 }
 
 fn retained_reel(
-    source: char,
-    target: char,
+    source: &Segment,
+    target: &Segment,
     up: bool,
     from_right: usize,
     line_height: f32,
@@ -431,6 +466,7 @@ fn retained_reel(
         (0.0, -travel)
     };
     let stagger = f64::from(u32::try_from(from_right).unwrap_or(0)) * ROLL_STAGGER_SECONDS;
+    let key = format!("reel-{}-{}-{up}", source.text(), target.text());
     let strip = UiBox::new()
         .style(
             Style::new()
@@ -452,32 +488,34 @@ fn retained_reel(
                         .align(AlignItems::CENTER)
                         .justify(JustifyContent::CENTER),
                 )
-                .child(label(cell.to_string(), typography, color))
+                .child(label(cell, typography, color))
                 .build()
         }))
         .build()
-        .with_key(format!("reel-{source}-{target}-{up}"));
+        .with_key(key);
     UiBox::new()
         .height(line_height)
         .style(Style::new().flex_shrink(0.0))
         .child(mask(true))
-        .child(label(target.to_string(), typography, color).style(Style::new().opacity(0.0)))
+        .child(label(target.text(), typography, color).style(Style::new().opacity(0.0)))
         .child(strip)
         .child(mask(false))
         .build()
 }
 
-fn reel_cells(source: char, target: char, up: bool) -> Vec<char> {
-    let mut cells = vec![source];
-    if let (Some(from), Some(to)) = (source.to_digit(10), target.to_digit(10)) {
+fn reel_cells(source: &Segment, target: &Segment, up: bool) -> Vec<String> {
+    let mut cells = vec![source.text()];
+    if let (Segment::Digit(from), Segment::Digit(to)) = (source, target)
+        && let (Some(from), Some(to)) = (from.to_digit(10), to.to_digit(10))
+    {
         let step = if up { 1 } else { 9 };
         let mut digit = from;
         while digit != to {
             digit = (digit + step) % 10;
-            cells.push(char::from_digit(digit, 10).unwrap_or(target));
+            cells.push(digit.to_string());
         }
     } else {
-        cells.push(target);
+        cells.push(target.text());
     }
     if !up {
         cells.reverse();

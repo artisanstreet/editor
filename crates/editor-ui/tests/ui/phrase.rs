@@ -90,3 +90,42 @@ fn an_extending_phrase_reads_as_its_current_text_once() {
         vec!["Searching files".to_owned()]
     );
 }
+
+#[test]
+fn only_ascii_digits_split_from_the_shaped_text_around_them() {
+    assert_eq!(
+        segments("1مرحلة"),
+        vec![Segment::Digit('1'), Segment::Run("مرحلة".to_owned())]
+    );
+    assert_eq!(
+        segments("12नमस्ते"),
+        vec![
+            Segment::Digit('1'),
+            Segment::Digit('2'),
+            Segment::Run("नमस्ते".to_owned())
+        ]
+    );
+    assert_eq!(
+        segments("3👩\u{200d}💻s"),
+        vec![
+            Segment::Digit('3'),
+            Segment::Run("👩\u{200d}💻s".to_owned())
+        ]
+    );
+    assert_eq!(
+        segments("4\u{20e3}5"),
+        vec![Segment::Run("4\u{20e3}".to_owned()), Segment::Digit('5')],
+        "a digit inside a keycap cluster stays with its mark"
+    );
+}
+
+#[test]
+fn a_rolling_digit_passes_every_digit_between_and_a_word_swaps_directly() {
+    let cells = |from, to, up| reel_cells(&Segment::Digit(from), &Segment::Digit(to), up);
+    assert_eq!(cells('8', '1', true), vec!["8", "9", "0", "1"]);
+    assert_eq!(cells('1', '8', false), vec!["8", "9", "0", "1"]);
+    assert_eq!(
+        reel_cells(&Segment::Run("a".to_owned()), &Segment::Digit('2'), true),
+        vec!["a", "2"]
+    );
+}
