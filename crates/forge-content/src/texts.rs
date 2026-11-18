@@ -1,6 +1,3 @@
-//! Every authored text and stored collection of an item, visited the same
-//! way before storage and on Forge's reads. Identities and short display
-//! labels stay metadata.
 use artisan_api::{ApprovalRequest, Collection, ContentRef, ItemKind, TextContent, ToolKind};
 
 macro_rules! approval_texts {
@@ -69,7 +66,6 @@ macro_rules! item_texts {
     }};
 }
 
-/// Traversals of an item's authored payload.
 pub trait ItemTexts {
     fn try_visit_texts<E>(&self, visit: impl FnMut(&TextContent) -> Result<(), E>)
     -> Result<(), E>;
@@ -77,14 +73,10 @@ pub trait ItemTexts {
         &mut self,
         visit: impl FnMut(&mut TextContent) -> Result<(), E>,
     ) -> Result<(), E>;
-    /// Stored collections, visited apart from resident text. A stored
-    /// collection's own dependencies belong to its immutable source.
     fn try_visit_collection_sources<E>(
         &self,
         visit: impl FnMut(&ContentRef) -> Result<(), E>,
     ) -> Result<(), E>;
-    /// Stores large collections by identity. Nested texts must already use
-    /// the store's source descriptors, or the identity differs.
     fn compact_collections(&mut self) -> Result<(), serde_json::Error>;
 }
 

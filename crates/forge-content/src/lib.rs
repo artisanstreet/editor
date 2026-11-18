@@ -1,8 +1,3 @@
-//! Forge's content policy over `artisan-api` items: which authored texts and
-//! record collections leave the item as stored sources, and the identity
-//! those sources get. The store applies it when it saves an item; engine
-//! decoders apply the same rules to the copies they keep of settled items, so
-//! a later event about the same item names sources the store already has.
 #![expect(
     clippy::renamed_function_params,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
@@ -17,14 +12,9 @@ use artisan_api::{
 };
 use serde::Serialize;
 
-/// A collection with more records than this is stored.
 pub const INLINE_COLLECTION_ENTRIES: usize = 64;
-/// A collection whose NDJSON is larger than this is stored.
 pub const INLINE_COLLECTION_BYTES: usize = 64 * 1024;
 
-/// The stored identity of `records`: SHA-256 of their exact NDJSON, one
-/// record per line. Serialization streams into the digest; no combined JSON
-/// buffer is built.
 pub fn collection_ref<T: Serialize>(records: &[T]) -> Result<CollectionRef, serde_json::Error> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
@@ -63,8 +53,6 @@ pub fn collection_ref<T: Serialize>(records: &[T]) -> Result<CollectionRef, serd
     })
 }
 
-/// Replaces a large inline collection by its stored identity. Nested texts
-/// must already be compacted, so the identity matches what the store saved.
 pub fn compact_collection<T: Serialize>(
     collection: &mut Collection<T>,
 ) -> Result<bool, serde_json::Error> {
@@ -82,7 +70,6 @@ pub fn compact_collection<T: Serialize>(
     }
 }
 
-/// Replaces a text the store keeps as a source by its identity.
 pub fn compact_text(text: &mut TextContent) {
     if let TextContent::Inline(value) = text
         && value.len() > INLINE_TEXT_BYTES
@@ -91,8 +78,6 @@ pub fn compact_text(text: &mut TextContent) {
     }
 }
 
-/// What a settled item becomes once the store has its complete event:
-/// every large text and collection by its stored identity.
 pub fn compact_settled(kind: &mut ItemKind) -> Result<(), serde_json::Error> {
     let texts: Result<(), std::convert::Infallible> = kind.try_visit_texts_mut(|text| {
         compact_text(text);
@@ -106,33 +91,5 @@ pub fn compact_settled(kind: &mut ItemKind) -> Result<(), serde_json::Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The store and the decoders name a stored collection the same way, or
-    /// a later event about a settled item would name a source Forge lacks.
-    #[test]
-    fn a_collection_is_named_by_its_exact_ndjson() {
-        let records = vec!["α\n🙂".to_owned(), "second".to_owned()];
-        let reference = collection_ref(&records).unwrap();
-        let exact = records
-            .iter()
-            .map(|record| serde_json::to_string(record).unwrap() + "\n")
-            .collect::<String>();
-        assert_eq!(reference.source, ContentRef::from_text(&exact));
-        assert_eq!(reference.count, 2);
-    }
-
-    #[test]
-    fn a_large_collection_keeps_its_count_and_drops_its_records() {
-        let mut records = Collection::from(
-            (0..5000)
-                .map(|index| format!("record-{index}"))
-                .collect::<Vec<_>>(),
-        );
-        assert!(compact_collection(&mut records).unwrap());
-        assert_eq!(records.len(), 5000);
-        assert!(records.inline().is_none());
-        assert!(!compact_collection(&mut records).unwrap());
-    }
-}
+#[path = "../tests/lib/unit.rs"]
+mod tests;
