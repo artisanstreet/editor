@@ -15,8 +15,6 @@ const BACKLOG_LIMIT: usize = 20_000;
 
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
 
-const AUTHORIZATION_RECHECK: Duration = Duration::from_secs(5);
-
 struct Queued {
     seq: Option<Seq>,
     data: String,
@@ -162,6 +160,7 @@ pub async fn stream(
     tasks.spawn(async move {
         let store = app.hub.store();
         let revocations = store.subscribe_revocations();
+        let changes = store.subscribe_device_changes();
         if !still_authorized(store, &client.certificate).await {
             stop.cancel();
             return;
@@ -169,7 +168,7 @@ pub async fn stream(
         tokio::select! {
             biased;
             () = stop.cancelled() => {},
-            () = watch_authorization(store, &device, &client.certificate, revocations) => { stop.cancel(); },
+            () = watch_authorization(store, &device, &client.certificate, revocations, changes) => { stop.cancel(); },
             () = sender.sender.closed() => {},
             result = async {
                 if let Err(error) = store.touch_device(&device).await {
@@ -456,9 +455,8 @@ async fn watch_authorization(
     device: &DeviceId,
     certificate: &forge_store::DeviceCertificate,
     mut revocations: tokio::sync::broadcast::Receiver<DeviceId>,
+    mut changes: tokio::sync::watch::Receiver<()>,
 ) {
-    let mut recheck = tokio::time::interval(AUTHORIZATION_RECHECK);
-    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             revoked = revocations.recv() => match revoked {
@@ -471,8 +469,8 @@ async fn watch_authorization(
                     }
                 }
             },
-            _ = recheck.tick() => {
-                if !still_authorized(store, certificate).await {
+            notified = changes.changed() => {
+                if notified.is_err() || !still_authorized(store, certificate).await {
                     return;
                 }
             }
@@ -644,6 +642,7 @@ mod tests {
             .await
             .unwrap();
         let revocations = store.subscribe_revocations();
+        let changes = store.subscribe_device_changes();
         store.revoke_device(&device).await.unwrap();
         tokio::time::timeout(
             Duration::from_millis(100),
@@ -652,13 +651,14 @@ mod tests {
                 &device,
                 &forge_store::DeviceCertificate::from_der(b"certificate"),
                 revocations,
+                changes,
             ),
         )
         .await
         .unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn revocation_by_another_process_closes_a_passive_watcher() {
         let directory = tempfile::tempdir().unwrap();
         let store = forge_store::Store::open(directory.path()).unwrap();
@@ -673,17 +673,26 @@ mod tests {
             let store = store.clone();
             let device = device.clone();
             let revocations = store.subscribe_revocations();
+            let changes = store.subscribe_device_changes();
             async move {
                 watch_authorization(
                     &store,
                     &device,
                     &forge_store::DeviceCertificate::from_der(b"certificate"),
                     revocations,
+                    changes,
                 )
                 .await;
             }
         });
-        tokio::time::advance(Duration::from_secs(30)).await;
+        store
+            .add_device(
+                "another client".into(),
+                forge_store::DeviceCertificate::from_der(b"another certificate"),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
         assert!(
             !watcher.is_finished(),
             "a paired device's stream stays open"
@@ -693,7 +702,7 @@ mod tests {
             .revoke_device(device.as_str())
             .unwrap()
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(60), watcher)
+        tokio::time::timeout(Duration::from_secs(10), watcher)
             .await
             .expect("a device revoked by `ae forge devices revoke` kept receiving events")
             .unwrap();

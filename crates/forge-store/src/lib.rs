@@ -285,6 +285,7 @@ struct Inner {
     hot: Arc<hot::HotPages>,
     index_build: Arc<Semaphore>,
     authorizer: Authorizer,
+    device_watch: pairing::DeviceWatch,
     database: PathBuf,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
@@ -303,16 +304,17 @@ fn open_database(path: &Path) -> Result<Connection> {
     })
 }
 
-fn start_authorizer(
+fn start_devices(
     database: &Path,
     revocations: broadcast::Sender<DeviceId>,
-) -> Result<Authorizer, OpenStoreError> {
+) -> Result<(Authorizer, pairing::DeviceWatch), OpenStoreError> {
     let prepare = |source| OpenStoreError::Database {
         database: database.to_path_buf(),
         source,
     };
     let devices = Devices::open(open_database(database).map_err(prepare)?).map_err(prepare)?;
-    Ok(Authorizer::new(devices, revocations))
+    let watch = pairing::DeviceWatch::start(database).map_err(OpenStoreError::WatchDevices)?;
+    Ok((Authorizer::new(devices, revocations), watch))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -355,6 +357,8 @@ pub enum OpenStoreError {
     Schema { expected: usize, found: usize },
     #[error("{} refused WAL journaling (mode {mode})", database.display())]
     Wal { database: PathBuf, mode: String },
+    #[error("watch for device changes from other processes")]
+    WatchDevices(#[source] pairing::WatchDevicesError),
     #[error("start the store's {thread} thread")]
     Spawn {
         thread: &'static str,
@@ -592,7 +596,7 @@ impl Store {
 
         let first_reader = open_database(&database).map_err(prepare)?;
         let revocations = broadcast::channel(64).0;
-        let authorizer = start_authorizer(&database, revocations.clone())?;
+        let (authorizer, device_watch) = start_devices(&database, revocations.clone())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 #[cfg(feature = "qualification")]
@@ -615,6 +619,7 @@ impl Store {
                 hot,
                 index_build: Arc::new(Semaphore::new(1)),
                 authorizer,
+                device_watch,
                 database,
                 blob_dir,
                 resource_dir,

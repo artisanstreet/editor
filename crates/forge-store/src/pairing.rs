@@ -6,8 +6,9 @@ use base64::engine::general_purpose::STANDARD;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
@@ -134,6 +135,76 @@ impl Devices {
     }
 }
 
+pub(crate) fn device_signal(database: &Path) -> PathBuf {
+    database.with_file_name("devices.changed")
+}
+
+pub(crate) fn announce_device_change(database: &Path) -> std::io::Result<()> {
+    std::fs::write(device_signal(database), now().to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WatchDevicesError {
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("watch {}", path.display())]
+    Watch {
+        path: PathBuf,
+        #[source]
+        source: notify::Error,
+    },
+}
+
+pub(crate) struct DeviceWatch {
+    _watcher: notify::RecommendedWatcher,
+    changes: watch::Sender<()>,
+}
+
+impl DeviceWatch {
+    pub(crate) fn start(database: &Path) -> Result<Self, WatchDevicesError> {
+        use notify::Watcher as _;
+        let path = device_signal(database);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| WatchDevicesError::Create {
+                path: path.clone(),
+                source,
+            })?;
+        let changes = watch::Sender::new(());
+        let notify = changes.clone();
+        let watching = |source| WatchDevicesError::Watch {
+            path: path.clone(),
+            source,
+        };
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+                Ok(event) => {
+                    if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
+                        notify.send_replace(());
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "watching for device changes from other processes");
+                    notify.send_replace(());
+                }
+            })
+            .map_err(watching)?;
+        watcher
+            .watch(&path, notify::RecursiveMode::NonRecursive)
+            .map_err(watching)?;
+        Ok(Self {
+            _watcher: watcher,
+            changes,
+        })
+    }
+}
+
 pub(crate) struct Authorizer {
     queue: Arc<Mutex<Queue>>,
     revocations: broadcast::Sender<DeviceId>,
@@ -226,6 +297,10 @@ impl Store {
         self.inner.revocations.subscribe()
     }
 
+    pub fn subscribe_device_changes(&self) -> watch::Receiver<()> {
+        self.inner.device_watch.changes.subscribe()
+    }
+
     pub async fn pair_device(
         &self,
         code: PairCodeHash,
@@ -289,6 +364,17 @@ impl Store {
             })?;
         if revoked {
             self.inner.revocations.send(id.clone()).ok();
+            let database = self.inner.database.clone();
+            tokio::task::spawn_blocking(move || announce_device_change(&database))
+                .await
+                .map_err(|source| RevokeDeviceError {
+                    device: id.clone(),
+                    cause: Box::new(StorageError::Task(source)),
+                })?
+                .map_err(|source| RevokeDeviceError {
+                    device: id.clone(),
+                    cause: Box::new(StorageError::Announce(source)),
+                })?;
         }
         Ok(revoked)
     }

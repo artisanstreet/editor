@@ -12,6 +12,8 @@ pub enum StorageError {
     WriterStopped,
     #[error("the store writer dropped the write")]
     WriteDropped(#[source] tokio::sync::oneshot::error::RecvError),
+    #[error("tell other processes that the paired devices changed")]
+    Announce(#[source] std::io::Error),
     #[error("the store's authorization worker dropped the check")]
     AuthorizationDropped(#[source] tokio::sync::oneshot::error::RecvError),
     #[error("wait for a store read slot")]

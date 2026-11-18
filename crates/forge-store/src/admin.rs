@@ -46,6 +46,13 @@ pub enum RevokeError {
         #[source]
         source: StorageError,
     },
+    #[error("tell the running Forge that device {id:?} was revoked through {}", path.display())]
+    Announce {
+        id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 crate::error::operation_error!(ReadSecretError(StorageError), "read secret {key}", key: String);
@@ -55,6 +62,7 @@ crate::error::operation_error!(DevicesError(StorageError), "list the paired devi
 
 pub struct Admin {
     conn: Connection,
+    database: PathBuf,
 }
 
 impl Admin {
@@ -62,7 +70,10 @@ impl Admin {
         let path = existing(dir)?;
         let conn = connect(&path, OpenFlags::default())?;
         require_current(&path, &conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            database: path,
+        })
     }
 
     pub fn open_read_only(dir: &Path) -> Result<Self, AdminError> {
@@ -72,7 +83,10 @@ impl Admin {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         require_current(&path, &conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            database: path,
+        })
     }
 
     pub fn open_exclusive(dir: &Path, _data_lock: &std::fs::File) -> Result<Self, AdminError> {
@@ -91,7 +105,10 @@ impl Admin {
             path: path.clone(),
             source,
         })?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            database: path,
+        })
     }
 
     pub fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
@@ -192,6 +209,13 @@ impl Admin {
                 [device.id.as_str()],
             )
             .map_err(|source| storage(source.into()))?;
+        crate::pairing::announce_device_change(&self.database).map_err(|source| {
+            RevokeError::Announce {
+                id: id.to_owned(),
+                path: crate::pairing::device_signal(&self.database),
+                source,
+            }
+        })?;
         Ok(Some(device))
     }
 }

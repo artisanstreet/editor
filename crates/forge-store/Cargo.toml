@@ -33,6 +33,7 @@ thiserror.workspace = true
 webp.workspace = true
 fff-grep = "=0.9.6"
 memchr = "2.8.3"
+notify.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
