@@ -1589,9 +1589,7 @@ async fn read_body(
     }
 }
 
-/// HTML as readable text: scripts and styles dropped, block tags as line
-/// breaks, entities decoded, blank runs collapsed.
-fn html_to_text(html: &str) -> String {
+pub fn html_to_text(html: &str) -> String {
     let mut without = html.to_owned();
     for tag in ["script", "style", "noscript", "template"] {
         without = strip_blocks(&without, tag);
@@ -1685,51 +1683,58 @@ fn strip_blocks(html: &str, tag: &str) -> String {
     out
 }
 
-/// The common named entities, and numeric ones.
 fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find(';').filter(|end| *end <= 12) else {
-            out.push_str(&rest[start..=start]);
+        let end = start
+            + 1
+            + rest.as_bytes()[start + 1..]
+                .iter()
+                .take(12)
+                .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'#')
+                .count();
+        let decoded = (rest.as_bytes().get(end) == Some(&b';'))
+            .then(|| entity(&rest[start + 1..end]))
+            .flatten();
+        if let Some(character) = decoded {
+            out.push(character);
+            rest = &rest[end + 1..];
+        } else {
+            out.push('&');
             rest = &rest[start + 1..];
-            continue;
-        };
-        let entity = &rest[start + 1..start + end];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" | "#39" => Some('\''),
-            "nbsp" | "#160" => Some(' '),
-            "mdash" | "#8212" => Some('—'),
-            "ndash" | "#8211" => Some('–'),
-            "hellip" | "#8230" => Some('…'),
-            "rsquo" | "#8217" => Some('\u{2019}'),
-            "lsquo" | "#8216" => Some('\u{2018}'),
-            "ldquo" | "#8220" => Some('\u{201C}'),
-            "rdquo" | "#8221" => Some('\u{201D}'),
-            _ => entity
-                .strip_prefix("#x")
-                .or_else(|| entity.strip_prefix("#X"))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| {
-                    entity
-                        .strip_prefix('#')
-                        .and_then(|decimal| decimal.parse::<u32>().ok())
-                })
-                .and_then(char::from_u32),
-        };
-        match decoded {
-            Some(character) => out.push(character),
-            None => out.push_str(&rest[start..=start + end]),
         }
-        rest = &rest[start + end + 1..];
     }
     out.push_str(rest);
     out
+}
+
+fn entity(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" | "#39" => Some('\''),
+        "nbsp" | "#160" => Some(' '),
+        "mdash" | "#8212" => Some('—'),
+        "ndash" | "#8211" => Some('–'),
+        "hellip" | "#8230" => Some('…'),
+        "rsquo" | "#8217" => Some('\u{2019}'),
+        "lsquo" | "#8216" => Some('\u{2018}'),
+        "ldquo" | "#8220" => Some('\u{201C}'),
+        "rdquo" | "#8221" => Some('\u{201D}'),
+        _ => name
+            .strip_prefix("#x")
+            .or_else(|| name.strip_prefix("#X"))
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .or_else(|| {
+                name.strip_prefix('#')
+                    .and_then(|decimal| decimal.parse::<u32>().ok())
+            })
+            .and_then(char::from_u32),
+    }
 }
 
 /// Collapses blank runs, trailing whitespace and runs of spaces.
@@ -2175,6 +2180,12 @@ mod tests {
             "{}",
             found.text
         );
+    }
+
+    #[test]
+    fn entities_decode_between_bare_ampersands() {
+        let text = html_to_text("<p>a=1&b=2&c=3 &amp; d &#x41;&#66;&hellip;</p>");
+        assert_eq!(text, "a=1&b=2&c=3 & d AB…");
     }
 
     #[tokio::test]

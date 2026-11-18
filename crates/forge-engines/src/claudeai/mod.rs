@@ -34,7 +34,7 @@ pub use session::{
     UpdateSessionError, cookie_change,
 };
 pub use side::SideQueryError;
-pub use tools::{Allowed, Answer, Call, Plan, Runtime};
+pub use tools::{Allowed, Answer, Call, Plan, Runtime, html_to_text};
 pub use transport::{
     Backend, BuildClientError, CompleteError, CreateConversationError, DeleteConversationError,
     Events, HOST, OpenTransportError, Refusal, Refused, RenameConversationError, Request,
