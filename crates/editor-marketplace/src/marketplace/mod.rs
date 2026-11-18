@@ -3,7 +3,7 @@ pub mod presentation;
 pub mod view;
 
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
-use editor_core::{ForgeClient, HostId, Screen, SettingsPage};
+use editor_core::{ForgeClient, HostId, Screen, SettingsPage, client::CallError};
 use presentation::{Item, Kind};
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,23 @@ pub struct SearchRequest {
 pub enum Operation {
     Listing(String),
     Skill { id: String, action: SkillAction },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OperationError {
+    #[error("install listing {listing}")]
+    Install {
+        listing: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("{verb} skill {skill}", verb = action.as_str())]
+    Skill {
+        skill: String,
+        action: SkillAction,
+        #[source]
+        source: CallError,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -151,20 +168,24 @@ impl Marketplace {
     pub async fn search(
         client: &ForgeClient,
         request: &SearchRequest,
-    ) -> anyhow::Result<Vec<Listing>> {
-        client
-            .marketplace_search(&request.query)
-            .await
-            .map_err(anyhow::Error::from)
+    ) -> Result<Vec<Listing>, CallError> {
+        client.marketplace_search(&request.query).await
     }
 
-    pub fn finish_search(&mut self, request: &SearchRequest, result: anyhow::Result<Vec<Listing>>) {
+    pub fn finish_search(
+        &mut self,
+        request: &SearchRequest,
+        result: Result<Vec<Listing>, CallError>,
+    ) {
         if request.serial != self.search_serial || self.query.trim() != request.query {
             return;
         }
         self.listings = match result {
             Ok(listings) => Remote::Found(listings),
-            Err(error) => Remote::Failed(format!("Couldn't search skills.sh: {error:#}")),
+            Err(error) => Remote::Failed(format!(
+                "Couldn't search skills.sh: {}",
+                diagnostics::chain(&error)
+            )),
         };
     }
 
@@ -238,23 +259,34 @@ impl Marketplace {
     pub async fn execute(
         client: &ForgeClient,
         request: &OperationRequest,
-    ) -> anyhow::Result<Vec<CatalogSkill>> {
+    ) -> Result<Vec<CatalogSkill>, OperationError> {
         match &request.operation {
-            Operation::Listing(id) => client
-                .marketplace_install(id)
-                .await
-                .map_err(anyhow::Error::from),
-            Operation::Skill { id, action } => client
-                .skill_action(id, *action)
-                .await
-                .map_err(anyhow::Error::from),
+            Operation::Listing(id) => {
+                client
+                    .marketplace_install(id)
+                    .await
+                    .map_err(|source| OperationError::Install {
+                        listing: id.clone(),
+                        source,
+                    })
+            }
+            Operation::Skill { id, action } => {
+                client
+                    .skill_action(id, *action)
+                    .await
+                    .map_err(|source| OperationError::Skill {
+                        skill: id.clone(),
+                        action: *action,
+                        source,
+                    })
+            }
         }
     }
 
     pub fn finish_operation(
         &mut self,
         request: &OperationRequest,
-        result: anyhow::Result<Vec<CatalogSkill>>,
+        result: Result<Vec<CatalogSkill>, OperationError>,
     ) -> bool {
         if self.generation != request.generation {
             return false;
@@ -271,7 +303,10 @@ impl Marketplace {
                     } => "install",
                     Operation::Skill { action, .. } => action.as_str(),
                 };
-                self.notice = Some(format!("Couldn't {verb} the skill: {error:#}"));
+                self.notice = Some(format!(
+                    "Couldn't {verb} the skill: {}",
+                    diagnostics::chain(&error)
+                ));
                 false
             }
         }

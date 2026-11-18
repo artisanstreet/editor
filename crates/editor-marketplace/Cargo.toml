@@ -20,7 +20,7 @@ aqua-text = { workspace = true }
 aqua-ui = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 editor-assets.workspace = true
-anyhow.workspace = true
+thiserror.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 tokio-util.workspace = true

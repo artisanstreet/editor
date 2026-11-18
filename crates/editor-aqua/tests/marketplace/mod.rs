@@ -2,8 +2,20 @@ use std::time::{Duration, Instant};
 
 use artisan_api::Listing;
 use editor_aqua::core::HostId;
+use editor_aqua::core::client::{CallError, CallFailure};
 use editor_aqua::marketplace::presentation::{self, Item, ServerRow};
-use editor_aqua::marketplace::{Marketplace, Remote};
+use editor_aqua::marketplace::{Marketplace, OperationError, Remote};
+
+fn refused() -> OperationError {
+    OperationError::Install {
+        listing: "listing".into(),
+        source: CallError {
+            method: "POST".parse().expect("POST is an HTTP method"),
+            path: "/marketplace/install".into(),
+            failure: Box::new(CallFailure::Inconsistent { check: "test" }),
+        },
+    }
+}
 
 fn listing(id: &str, name: &str, installs: u64) -> Listing {
     Listing {
@@ -89,7 +101,7 @@ fn changing_host_discards_old_operation_completion() {
             .is_none()
     );
     page.sync_host(Some(HostId("second".into())), &[], &[]);
-    assert!(!page.finish_operation(&request, Err(anyhow::anyhow!("failed"))));
+    assert!(!page.finish_operation(&request, Err(refused())));
     assert!(page.pending.is_none());
     assert!(page.notice.is_none());
 }
@@ -117,7 +129,7 @@ fn removed_and_readded_host_rejects_old_requests() {
     page.sync_host(Some(host), &[], &[]);
     page.finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
     assert_eq!(page.listings, Remote::Idle);
-    assert!(!page.finish_operation(&operation, Err(anyhow::anyhow!("old error"))));
+    assert!(!page.finish_operation(&operation, Err(refused())));
     assert!(page.pending.is_none());
     assert!(page.notice.is_none());
     assert!(
@@ -178,11 +190,7 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         .page
         .finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
     assert_eq!(controller.page.listings, Remote::Idle);
-    assert!(
-        !controller
-            .page
-            .finish_operation(&operation, Err(anyhow::anyhow!("old error")))
-    );
+    assert!(!controller.page.finish_operation(&operation, Err(refused())));
     assert!(controller.page.pending.is_none());
     assert!(controller.page.notice.is_none());
     assert!(

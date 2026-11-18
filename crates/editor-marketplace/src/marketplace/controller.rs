@@ -10,20 +10,23 @@ use editor_ui::text::mount::{EditorController, EditorEvent};
 use editor_ui::text::{Editor, ListKey as EditorListKey, Mode};
 use std::rc::Rc;
 
-use super::{Action, ListKey, Marketplace, Operation, OperationRequest, SearchRequest};
+use super::{
+    Action, ListKey, Marketplace, Operation, OperationError, OperationRequest, SearchRequest,
+};
+use editor_core::client::CallError;
 
 enum Completion {
     Search(
         HostId,
         HostInstance,
         SearchRequest,
-        anyhow::Result<Vec<Listing>>,
+        Result<Vec<Listing>, CallError>,
     ),
     Operation(
         HostId,
         HostInstance,
         OperationRequest,
-        anyhow::Result<Vec<CatalogSkill>>,
+        Result<Vec<CatalogSkill>, OperationError>,
     ),
 }
 

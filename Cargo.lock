@@ -1724,7 +1724,6 @@ dependencies = [
 name = "editor-marketplace"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-text",
@@ -1735,6 +1734,7 @@ dependencies = [
  "editor-core",
  "editor-ui",
  "serde_json",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
 ]
