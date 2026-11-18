@@ -16,6 +16,7 @@ aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-protocol = { workspace = true }
 aqua-text = { workspace = true }
+aqua-fonts-system = { workspace = true }
 aqua-ui = { workspace = true }
 aqua-reactive = { workspace = true }
 aqua-media = { workspace = true }
@@ -39,6 +40,7 @@ pulldown-cmark.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
 mermaid-rs-renderer.workspace = true
+skrifa = "0.46.2"
 usvg = { version = "0.48.1", default-features = false, features = ["text"] }
 vte.workspace = true
 unicode-width.workspace = true

@@ -7,6 +7,8 @@ use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
 
+use aqua_fonts_system::{FaceBytes, FontDatabase, Query, Stretch, Style, Weight};
+
 use super::DiagramSvg;
 use crate::ui::theme::{ArtisanTheme, Oklch, ThemeMode};
 
@@ -21,6 +23,19 @@ const MAX_SEPARATORS: usize = 512;
 const MAX_GRAPH_ITEMS: usize = 512;
 const FONT_FAMILY: &str = "Spline Sans";
 const FONT_SIZE_PX: f32 = 14.0;
+const FALLBACK_SAMPLES: [char; 7] = ['日', 'あ', '한', 'ع', 'א', 'Ж', 'क'];
+const FALLBACK_FAMILIES: [&str; 10] = [
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "Yu Gothic UI",
+    "Malgun Gothic",
+    "Nirmala UI",
+    "Noto Sans",
+    "Noto Sans CJK SC",
+    "Noto Sans Arabic",
+    "Noto Sans Devanagari",
+    "DejaVu Sans",
+];
 
 #[derive(Debug, Default)]
 pub(super) struct DiagramCache {
@@ -180,22 +195,78 @@ fn summary(graph: &Graph) -> String {
     parts.join(". ")
 }
 
-fn outline_text(source: &str) -> Option<String> {
+fn diagram_fonts() -> &'static Arc<usvg::fontdb::Database> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fonts = FONTS.get_or_init(|| {
-        let mut fonts = usvg::fontdb::Database::new();
-        for face in editor_assets::fonts::FACES {
-            fonts.load_font_data(face.to_vec());
-        }
-        fonts.set_sans_serif_family(FONT_FAMILY);
-        Arc::new(fonts)
+    FONTS.get_or_init(|| Arc::new(fonts_with_fallbacks(&mut FontDatabase::system())))
+}
+
+fn fonts_with_fallbacks(system: &mut FontDatabase) -> usvg::fontdb::Database {
+    let mut fonts = usvg::fontdb::Database::new();
+    for face in editor_assets::fonts::FACES {
+        fonts.load_font_data(face.to_vec());
+    }
+    fonts.set_sans_serif_family(FONT_FAMILY);
+    let mut chosen: Vec<FaceBytes> = Vec::new();
+    let preferred = FALLBACK_FAMILIES.iter().filter_map(|family| {
+        system.query(&Query {
+            family,
+            weight: Weight(400),
+            stretch: Stretch::NORMAL,
+            style: Style::Normal,
+        })
     });
-    let options = usvg::Options {
+    let candidates: Vec<_> = preferred
+        .chain(system.faces().map(|face| face.id))
+        .collect();
+    for sample in FALLBACK_SAMPLES {
+        if editor_assets::fonts::FACES
+            .iter()
+            .map(|face| (*face, 0))
+            .chain(chosen.iter().map(|face| (face.bytes(), face.index())))
+            .any(|(bytes, index)| covers(bytes, index, sample))
+        {
+            continue;
+        }
+        if let Some(face) = candidates
+            .iter()
+            .filter_map(|id| system.face_bytes(*id))
+            .find(|face| covers(face.bytes(), face.index(), sample))
+        {
+            chosen.push(face);
+        }
+    }
+    for face in chosen {
+        fonts.load_font_source(usvg::fontdb::Source::Binary(Arc::new(SystemFace(face))));
+    }
+    fonts
+}
+
+fn covers(bytes: &[u8], index: u32, character: char) -> bool {
+    skrifa::FontRef::from_index(bytes, index).is_ok_and(|font| {
+        skrifa::charmap::Charmap::new(&font)
+            .map(character)
+            .is_some()
+    })
+}
+
+struct SystemFace(FaceBytes);
+
+impl AsRef<[u8]> for SystemFace {
+    fn as_ref(&self) -> &[u8] {
+        self.0.bytes()
+    }
+}
+
+fn diagram_options() -> usvg::Options<'static> {
+    usvg::Options {
         font_family: FONT_FAMILY.to_owned(),
-        fontdb: Arc::clone(fonts),
+        fontdb: Arc::clone(diagram_fonts()),
         ..Default::default()
-    };
-    let tree = usvg::Tree::from_str(source, &options).ok()?;
+    }
+}
+
+fn outline_text(source: &str) -> Option<String> {
+    let tree = usvg::Tree::from_str(source, &diagram_options()).ok()?;
     Some(tree.to_string(&usvg::WriteOptions::default()))
 }
 

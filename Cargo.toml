@@ -96,6 +96,7 @@ aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b
 aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
 aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
 aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
+aqua-fonts-system = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
 accesskit_consumer = "=0.39.2"
 aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
 aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }

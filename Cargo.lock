@@ -1859,6 +1859,7 @@ version = "0.0.0"
 dependencies = [
  "aqua",
  "aqua-core",
+ "aqua-fonts-system",
  "aqua-media",
  "aqua-protocol",
  "aqua-reactive",
@@ -1891,6 +1892,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "skrifa 0.46.2",
  "stl_io",
  "syntect",
  "tempfile",
