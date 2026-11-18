@@ -8,6 +8,8 @@ use aqua::images::ImageAssets;
 use aqua::prelude::AquaWindowId;
 use artisan_api::ThreadId;
 
+pub const INTERFACE_LANGUAGE: &str = "en";
+
 pub struct Shell {
     pub titlebar: crate::shell::titlebar::Titlebar,
     pub core: Core,

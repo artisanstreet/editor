@@ -463,7 +463,7 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(build_span);
         aqua_core::checkpoint::reach();
         let element = match built {
-            Ok(element) => element,
+            Ok(element) => element.aria_language(crate::shell::host::INTERFACE_LANGUAGE),
             Err(error) => {
                 let chain = ::diagnostics::chain(&error);
                 tracing::error!(error = %chain, "could not build Editor view");
@@ -1371,6 +1371,7 @@ fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element
         .style(sheet(&theme))
         .child(card)
         .build()
+        .aria_language(crate::shell::host::INTERFACE_LANGUAGE)
 }
 
 pub(crate) struct Tm(

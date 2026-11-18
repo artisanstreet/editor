@@ -251,3 +251,13 @@ fn installing_breathes_on_the_gpu_and_holds_still_under_reduced_motion() {
     let (mut still, _) = shown_with_motion(&setup, true);
     assert!(!pulses(&mut still));
 }
+
+#[test]
+fn assistive_tech_hears_the_setup_window_in_english() {
+    let (app, _) = shown(&with_three_distros());
+    let semantics = app.tree().emit_semantics();
+    let root = semantics
+        .first()
+        .expect("the setup window has a semantic root");
+    assert_eq!(root.language.as_deref(), Some("en"));
+}

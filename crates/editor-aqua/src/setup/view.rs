@@ -62,6 +62,7 @@ pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
         .style(TextRole::Label.inherit(theme))
         .child(card)
         .build()
+        .aria_language(crate::shell::host::INTERFACE_LANGUAGE)
 }
 
 fn heading(theme: &ArtisanTheme, setup: &Setup) -> Element {

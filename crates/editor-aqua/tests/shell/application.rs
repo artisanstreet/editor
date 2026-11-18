@@ -41,3 +41,17 @@ fn the_accessibility_revision_holds_still_until_the_tree_changes() {
         "moving focus publishes a fresh snapshot"
     );
 }
+
+#[test]
+fn assistive_tech_hears_the_editor_window_in_english() {
+    let (aqua, mut app, id, _directory) = started();
+    let window = observed(id);
+    app.prepare_accessibility(&window, aqua.clock());
+    app.build_scene(&window, aqua.clock());
+    let (root, _, nodes) = app.a11y_nodes_for(id).expect("editor semantic tree");
+    let root = nodes
+        .iter()
+        .find(|node| node.semantic.node == root)
+        .expect("the root is in the tree");
+    assert_eq!(root.semantic.language.as_deref(), Some("en"));
+}
