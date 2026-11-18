@@ -926,7 +926,7 @@ fn answer(
 }
 
 impl Tx<'_> {
-    pub(crate) fn upsert_item(&mut self, mut new: NewItem) -> Result<Item, WriteFailure> {
+    fn upsert_item(&mut self, mut new: NewItem) -> Result<Item, WriteFailure> {
         let native_id = new.native_id.clone();
         let old = read::item(self, &new.id)?;
         if let ItemKind::Agent { label, .. } = &mut new.kind
@@ -1020,7 +1020,7 @@ impl Tx<'_> {
         Ok(item)
     }
 
-    pub(crate) fn send_message(
+    fn send_message(
         &mut self,
         thread_id: ThreadId,
         message: SendMessage,

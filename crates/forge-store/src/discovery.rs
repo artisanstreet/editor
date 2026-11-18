@@ -11,8 +11,8 @@ operation_error!(DiscoverWorkersError(StorageError), "discover workers");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileCursor {
-    pub row_id: i64,
-    pub line: String,
+    row_id: i64,
+    line: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

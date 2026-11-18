@@ -18,11 +18,11 @@ pub enum Tail {
 }
 
 impl Tail {
-    pub fn rows(query: &ItemsQuery) -> Option<Self> {
+    pub(crate) fn rows(query: &ItemsQuery) -> Option<Self> {
         is_tail(query).then_some(Self::Rows { limit: query.limit })
     }
 
-    pub fn items(parent: Option<&ItemId>, query: &ItemsQuery) -> Option<Self> {
+    pub(crate) fn items(parent: Option<&ItemId>, query: &ItemsQuery) -> Option<Self> {
         is_tail(query).then(|| Self::Items {
             parent: parent.cloned(),
             limit: query.limit,
@@ -105,7 +105,7 @@ impl HotPages {
             .committed(envelopes);
     }
 
-    pub fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.window
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

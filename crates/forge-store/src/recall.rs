@@ -43,9 +43,9 @@ const PREVIEW_LEAD: usize = 100;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Searchable {
-    pub(crate) text: String,
-    pub(crate) output: String,
-    pub(crate) paths: String,
+    text: String,
+    output: String,
+    paths: String,
 }
 
 impl Searchable {

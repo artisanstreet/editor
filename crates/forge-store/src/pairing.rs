@@ -59,7 +59,7 @@ impl DeviceCertificate {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.0
     }
 }

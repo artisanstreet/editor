@@ -111,7 +111,7 @@ fn still_removable(
 }
 
 impl Tx<'_> {
-    pub(crate) fn remove_thread(&mut self, id: &ThreadId) -> Result<Option<Thread>> {
+    fn remove_thread(&mut self, id: &ThreadId) -> Result<Option<Thread>> {
         let Some(thread) = read::thread(self, id)? else {
             return Ok(None);
         };

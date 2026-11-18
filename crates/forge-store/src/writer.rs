@@ -235,7 +235,7 @@ pub struct Tx<'c> {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
-pub struct Stamp {
+pub(crate) struct Stamp {
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
 }
@@ -893,7 +893,7 @@ impl Tx<'_> {
         Ok(dropped > 0)
     }
 
-    pub(crate) fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
+    fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
         let threads: Vec<String> = self
             .sql
             .prepare_cached(include_str!("sql/continues/parked_for.sql"))?

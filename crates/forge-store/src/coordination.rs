@@ -345,7 +345,7 @@ pub enum Content {
 }
 
 impl Content {
-    pub const fn kind(&self) -> &'static str {
+    const fn kind(&self) -> &'static str {
         match self {
             Self::Work { .. } => "work",
             Self::Claim { .. } => "claim",

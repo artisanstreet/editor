@@ -82,9 +82,9 @@ pub use pairing::{
 };
 pub use read::{ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    GrepCursor, GrepCursorError, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery,
-    RecallGrepError, RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor,
-    SearchCursorError, SearchHit, SearchPage, Touch,
+    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
+    RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor, SearchHit,
+    SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
@@ -146,7 +146,7 @@ pub struct Park {
 }
 
 #[must_use]
-pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'static str> {
+const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'static str> {
     match continuation {
         artisan_api::Continuation::Overloaded => Some(RETRY_WHEN_OVERLOADED_KEY),
         artisan_api::Continuation::UsageLimit => Some(CONTINUE_AFTER_USAGE_LIMIT_KEY),
@@ -222,14 +222,14 @@ pub enum CreateThreadError {
 #[derive(Debug, thiserror::Error)]
 #[error("save run {run}: it belongs to thread {stored}, not {requested}")]
 pub struct RunMoved {
-    pub run: RunId,
-    pub stored: ThreadId,
-    pub requested: ThreadId,
+    run: RunId,
+    stored: ThreadId,
+    requested: ThreadId,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("item {0} not found")]
-pub struct ItemNotFound(pub ItemId);
+pub struct ItemNotFound(ItemId);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendRejected {
@@ -702,7 +702,7 @@ impl Store {
         self.inner.coordination.subscribe()
     }
 
-    pub(crate) fn coordination_changed(&self) {
+    fn coordination_changed(&self) {
         self.inner.coordination.send_replace(());
     }
 
