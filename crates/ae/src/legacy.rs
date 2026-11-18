@@ -1,373 +1,936 @@
-//! Moves earlier layouts into Artisan Street, once: Forge's data and the
-//! Editor's settings from where earlier `ae` versions and the old dev loop
-//! kept them, then removes the old programs. Runs before an install of
-//! Forge or the Editor on this machine, for those apps; it does nothing when
-//! there is nothing old left.
-
-use crate::{platform, service, sys, ui};
-use anyhow::{Context, Result};
+use crate::{install, platform, service, sys, ui};
 use artisan_paths::App;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn migrate(apps: &[App]) -> Result<()> {
-    let forge = apps.contains(&App::Forge);
-    let editor = apps.contains(&App::Editor);
-    if !forge && !editor {
+const RECORD: &str = ".ae-migrated-from";
+const PID_FILE_SLACK_SECONDS: u64 = 5;
+const CODEX_HOME: &str = "engines/codex/home/.codex";
+const AE: &[App] = &[App::Ae, App::Forge];
+const EDITOR: &[App] = &[App::Editor];
+const EVERY_APP: &[App] = &[App::Ae, App::Forge, App::Editor];
+
+#[derive(Debug, thiserror::Error)]
+pub enum MigrateError {
+    #[error("find where the earlier install kept its files")]
+    Locate(#[source] io::Error),
+    #[error("check what the earlier install left in {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("stop the earlier Forge service")]
+    StopService(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("stop the earlier programs")]
+    StopPrograms(#[source] platform::StopError),
+    #[error("{} names {}, which is not one of the earlier install's folders", record.display(), named)]
+    UnknownRecord { record: PathBuf, named: String },
+    #[error("Codex's state database {} has no threads.rollout_path column; its schema is not one ae can move", path.display())]
+    UnsupportedCodexSchema { path: PathBuf },
+    #[error("read Codex's state database {}", path.display())]
+    ReadCodexState {
+        path: PathBuf,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    #[error("point Codex's rollouts in {} from {} to {}", path.display(), from.display(), to.display())]
+    Retarget {
+        path: PathBuf,
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    #[error("record the move of {} in {}", from.display(), record.display())]
+    Record {
+        from: PathBuf,
+        record: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("move {} to {}", from.display(), to.display())]
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("copy {}", path.display())]
+    Copy {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(unix)]
+    #[error("repoint the link {} to {}", link.display(), target.display())]
+    Relink {
+        link: PathBuf,
+        target: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("rewrite the Editor's hosts in {}", path.display())]
+    Hosts {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("drop {} from PATH", path.display())]
+    PathEntry {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+pub fn migrate(selected: &[App]) -> Result<(), MigrateError> {
+    let done: Vec<App> = App::ALL
+        .into_iter()
+        .filter(|app| selected.contains(app) || install::installed(*app).is_some())
+        .collect();
+    let old = Old::here().map_err(MigrateError::Locate)?;
+    let data_moves = DataMove::here(selected, &old).map_err(MigrateError::Locate)?;
+    let work = Work {
+        old: &old,
+        done: &done,
+        moves: &data_moves,
+    };
+    if !work.pending()? {
         return Ok(());
     }
-    let old = Old::here()?;
-    let forge_data = App::Forge.data()?;
-    let editor_data = App::Editor.data()?;
-    let move_forge = forge && !forge_data.join("forge.sqlite3").exists();
-    let move_editor = editor && !editor_data.exists();
-
-    let forge_from = newest(&old.forge_data, |dir| mtime(&dir.join("forge.sqlite3")));
-    let editor_from = newest(&old.editor_data, |dir| {
-        ["settings.json", "hosts.json", "identity.json"]
-            .iter()
-            .filter_map(|name| mtime(&dir.join(name)))
-            .max()
-    });
-    let anything = (move_forge && forge_from.is_some())
-        || (move_editor && editor_from.is_some())
-        || old.programs.iter().any(|path| path.exists());
-    if !anything {
-        return Ok(());
-    }
-
     let progress = ui::Progress::spinner("Moving the earlier install into Artisan Street");
-    let result = (|| -> Result<Vec<String>> {
-        let mut notes = Vec::new();
-        stop_old_forge(&old)?;
-        platform::close_processes(&old.executables())?;
-        if move_forge && let Some(from) = &forge_from {
-            move_dir(from, &forge_data)?;
-            for name in ["forge.pid", "forge.lock"] {
-                std::fs::remove_file(forge_data.join(name)).ok();
-            }
-            retarget_codex_rollouts(from, &forge_data)?;
-            notes.push(format!("Forge's data from {}", from.display()));
-        }
-        if move_editor && let Some(from) = &editor_from {
-            move_dir(from, &editor_data)?;
-            // The old dev Forge listened on 47901; there is one Forge now.
-            let hosts = editor_data.join("hosts.json");
-            if let Ok(text) = std::fs::read_to_string(&hosts) {
-                let text = text
-                    .replace("127.0.0.1:47901", "127.0.0.1:47900")
-                    .replace("localhost:47901", "localhost:47900");
-                sys::write(&hosts, &text)?;
-            }
-            notes.push(format!("the Editor's settings from {}", from.display()));
-        }
-        // Older copies than the one that moved.
-        if editor {
-            for dir in &old.editor_data {
-                sys::remove(dir).ok();
-            }
-        }
-        for path in &old.programs {
-            sys::remove(path)?;
-        }
-        for path in &old.path_entries {
-            platform::remove_path_entry(path)?;
-        }
-        for dir in &old.parents {
-            // Only once nothing (such as unmoved Forge data) is left.
-            std::fs::remove_dir(dir).ok();
-        }
-        Ok(notes)
-    })();
-    match result {
+    match work.run() {
         Ok(notes) if notes.is_empty() => progress.done("Removed the earlier install"),
         Ok(notes) => progress.done(format!(
             "Moved {} and removed the earlier install",
             notes.join(" and ")
         )),
         Err(error) => {
-            progress.fail(format!("{error:#}"));
+            progress.fail(diagnostics::chain(&error));
             return Err(error);
         }
     }
     Ok(())
 }
 
-/// Where earlier versions kept things on this OS.
+struct Owned {
+    path: PathBuf,
+    owners: &'static [App],
+}
+
+impl Owned {
+    const fn new(path: PathBuf, owners: &'static [App]) -> Self {
+        Self { path, owners }
+    }
+
+    fn removable(&self, done: &[App]) -> bool {
+        self.owners.iter().all(|app| done.contains(app))
+    }
+}
+
 struct Old {
     forge_data: Vec<PathBuf>,
     editor_data: Vec<PathBuf>,
-    /// Removed outright.
-    programs: Vec<PathBuf>,
-    /// Removed when empty.
+    programs: Vec<Owned>,
+    executables: Vec<Owned>,
     parents: Vec<PathBuf>,
-    /// User `Path` entries (Windows).
-    path_entries: Vec<PathBuf>,
-    /// Old `ae` binaries; a Forge running from one is stopped.
-    ae: Vec<PathBuf>,
+    path_entries: Vec<Owned>,
+    unit: Option<PathBuf>,
 }
 
 impl Old {
-    fn here() -> Result<Self> {
+    fn here() -> io::Result<Self> {
         if cfg!(windows) {
-            let local =
-                PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?);
-            let roaming = PathBuf::from(std::env::var_os("APPDATA").context("APPDATA is not set")?);
-            let release = local.join("Artisan");
-            let dev = local.join("Artisan Dev");
-            Ok(Self {
-                forge_data: vec![release.join("forge")],
-                editor_data: vec![roaming.join("Artisan").join("editor"), dev.join("editor")],
-                programs: vec![
-                    release.join("versions"),
-                    release.join("bin"),
-                    release.join("current"),
-                    release.join("previous"),
-                    dev.join("artisan-editor.exe"),
-                    dev.join("launch.cmd"),
-                    // Before the Editor was `Artisan Editor.exe`.
-                    App::Editor.dir()?.join("artisan-editor.exe"),
-                    artisan_paths::home()?
-                        .join("Desktop")
-                        .join("Artisan Editor.lnk"),
-                ],
-                parents: vec![release, dev, roaming.join("Artisan")],
-                path_entries: vec![local.join("Artisan").join("bin")],
-                ae: vec![local.join("Artisan").join("bin").join("ae.exe")],
-            })
+            let local = PathBuf::from(env("LOCALAPPDATA")?);
+            let roaming = PathBuf::from(env("APPDATA")?);
+            Self::windows(
+                &local,
+                &roaming,
+                &artisan_paths::home()?,
+                &App::Editor.dir()?,
+            )
         } else {
-            let data = artisan_paths::xdg_data()?;
             let config = artisan_paths::xdg_config()?;
-            let release = data.join("artisan");
-            let dev = data.join("artisan-dev");
-            Ok(Self {
-                forge_data: vec![release.join("forge"), dev.join("forge")],
-                editor_data: vec![config.join("Artisan").join("editor"), dev.join("editor")],
-                programs: vec![
-                    release.join("versions"),
-                    release.join("bin"),
-                    release.join("current"),
-                    release.join("previous"),
-                    dev.join("bin"),
-                    dev.join("wsl-env.sh"),
-                    dev.join("editor.log"),
-                ],
-                parents: vec![release, dev, config.join("Artisan")],
-                path_entries: Vec::new(),
-                ae: vec![data.join("artisan/bin/ae"), data.join("artisan-dev/bin/ae")],
-            })
+            let mut old = Self::unix(&artisan_paths::xdg_data()?, &config)?;
+            if cfg!(target_os = "linux") {
+                old.unit = Some(config.join("systemd/user").join(service::UNIT));
+            }
+            Ok(old)
         }
     }
 
-    /// Old binaries whose processes must stop before their files go.
-    fn executables(&self) -> Vec<PathBuf> {
-        let mut executables = self.ae.clone();
-        if cfg!(windows)
-            && let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-        {
-            executables.push(local.join("Artisan Dev").join("artisan-editor.exe"));
-            if let Ok(dir) = App::Editor.dir() {
-                executables.push(dir.join("artisan-editor.exe"));
-            }
-            if let Ok(versions) = std::fs::read_dir(local.join("Artisan").join("versions")) {
-                for version in versions.flatten() {
-                    executables.push(version.path().join("artisan-editor.exe"));
-                    executables.push(version.path().join("ae.exe"));
-                }
-            }
-        } else if let Ok(data) = artisan_paths::xdg_data() {
-            executables.push(data.join("artisan-dev/bin/artisan-editor"));
-            if let Ok(versions) = std::fs::read_dir(data.join("artisan/versions")) {
-                for version in versions.flatten() {
-                    executables.push(version.path().join("artisan-editor"));
-                    executables.push(version.path().join("ae"));
-                }
-            }
-        }
-        executables
+    fn windows(local: &Path, roaming: &Path, home: &Path, editor: &Path) -> io::Result<Self> {
+        let release = local.join("Artisan");
+        let dev = local.join("Artisan Dev");
+        let mut executables = vec![
+            Owned::new(release.join("bin").join("ae.exe"), AE),
+            Owned::new(dev.join("artisan-editor.exe"), EDITOR),
+            Owned::new(editor.join("artisan-editor.exe"), EDITOR),
+        ];
+        executables.extend(versioned(
+            &release.join("versions"),
+            "ae.exe",
+            "artisan-editor.exe",
+        )?);
+        Ok(Self {
+            forge_data: vec![release.join("forge")],
+            editor_data: vec![roaming.join("Artisan").join("editor"), dev.join("editor")],
+            programs: vec![
+                Owned::new(release.join("versions"), EVERY_APP),
+                Owned::new(release.join("bin"), AE),
+                Owned::new(release.join("current"), EVERY_APP),
+                Owned::new(release.join("previous"), EVERY_APP),
+                Owned::new(dev.join("artisan-editor.exe"), EDITOR),
+                Owned::new(dev.join("launch.cmd"), EDITOR),
+                Owned::new(editor.join("artisan-editor.exe"), EDITOR),
+                Owned::new(home.join("Desktop").join("Artisan Editor.lnk"), EDITOR),
+            ],
+            executables,
+            parents: vec![release.clone(), dev, roaming.join("Artisan")],
+            path_entries: vec![Owned::new(release.join("bin"), AE)],
+            unit: None,
+        })
+    }
+
+    fn unix(data: &Path, config: &Path) -> io::Result<Self> {
+        let release = data.join("artisan");
+        let dev = data.join("artisan-dev");
+        let mut executables = vec![
+            Owned::new(release.join("bin/ae"), AE),
+            Owned::new(dev.join("bin/ae"), AE),
+            Owned::new(dev.join("bin/artisan-editor"), EDITOR),
+        ];
+        executables.extend(versioned(
+            &release.join("versions"),
+            "ae",
+            "artisan-editor",
+        )?);
+        Ok(Self {
+            forge_data: vec![release.join("forge"), dev.join("forge")],
+            editor_data: vec![config.join("Artisan").join("editor"), dev.join("editor")],
+            programs: vec![
+                Owned::new(release.join("versions"), EVERY_APP),
+                Owned::new(release.join("bin"), AE),
+                Owned::new(release.join("current"), EVERY_APP),
+                Owned::new(release.join("previous"), EVERY_APP),
+                Owned::new(dev.join("bin"), EVERY_APP),
+                Owned::new(dev.join("wsl-env.sh"), EVERY_APP),
+                Owned::new(dev.join("editor.log"), EDITOR),
+            ],
+            executables,
+            parents: vec![release, dev, config.join("Artisan")],
+            path_entries: Vec::new(),
+            unit: None,
+        })
     }
 }
 
-/// Stops a Forge an earlier `ae` runs: its systemd unit (`ae forge serve`),
-/// or the detached process in its pid file.
-fn stop_old_forge(old: &Old) -> Result<()> {
-    if cfg!(target_os = "linux")
-        && let Ok(unit) = service::unit_path()
-        && let Ok(text) = std::fs::read_to_string(&unit)
-        && text.contains("forge serve")
-    {
-        sys::run("systemctl", &["--user", "disable", "--now", service::UNIT]).ok();
-        sys::remove(&unit)?;
-        sys::run("systemctl", &["--user", "daemon-reload"]).ok();
+fn env(name: &str) -> io::Result<std::ffi::OsString> {
+    std::env::var_os(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{name} is not set")))
+}
+
+fn versioned(versions: &Path, ae: &str, editor: &str) -> io::Result<Vec<Owned>> {
+    let entries = match std::fs::read_dir(versions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut executables = Vec::new();
+    for entry in entries {
+        let version = entry?.path();
+        executables.push(Owned::new(version.join(ae), AE));
+        executables.push(Owned::new(version.join(editor), EDITOR));
     }
-    for dir in &old.forge_data {
-        let Some(pid) = std::fs::read_to_string(dir.join("forge.pid"))
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
-        else {
-            continue;
+    Ok(executables)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Data {
+    Forge,
+    Editor,
+}
+
+impl Data {
+    const fn markers(self) -> &'static [&'static str] {
+        match self {
+            Self::Forge => &["forge.sqlite3"],
+            Self::Editor => &["settings.json", "hosts.json", "identity.json"],
+        }
+    }
+
+    const fn transient(self) -> &'static [&'static str] {
+        match self {
+            Self::Forge => &["forge.pid", "forge.lock"],
+            Self::Editor => &[],
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Forge => "Forge's data",
+            Self::Editor => "the Editor's settings",
+        }
+    }
+}
+
+struct DataMove {
+    data: Data,
+    sources: Vec<PathBuf>,
+    destination: PathBuf,
+}
+
+enum Staged {
+    Nothing,
+    Partial,
+    Complete { from: PathBuf },
+}
+
+enum Landed {
+    Empty,
+    Unrelated,
+    Own,
+    Migrated { from: PathBuf },
+}
+
+enum Outcome {
+    Nothing,
+    Kept,
+    Moved { from: PathBuf },
+}
+
+impl DataMove {
+    fn here(selected: &[App], old: &Old) -> io::Result<Vec<Self>> {
+        let mut moves = Vec::new();
+        if selected.contains(&App::Forge) {
+            moves.push(Self {
+                data: Data::Forge,
+                sources: old.forge_data.clone(),
+                destination: App::Forge.data()?,
+            });
+        }
+        if selected.contains(&App::Editor) {
+            moves.push(Self {
+                data: Data::Editor,
+                sources: old.editor_data.clone(),
+                destination: App::Editor.data()?,
+            });
+        }
+        Ok(moves)
+    }
+
+    fn staging(&self) -> PathBuf {
+        let mut name = self
+            .destination
+            .file_name()
+            .expect("invariant: an app's data folder has a name")
+            .to_os_string();
+        name.push(".migrating");
+        self.destination.with_file_name(name)
+    }
+
+    fn newest(&self) -> Result<Option<PathBuf>, MigrateError> {
+        let mut newest: Option<(SystemTime, &PathBuf)> = None;
+        for dir in &self.sources {
+            for marker in self.data.markers() {
+                let Some(time) = modified(&dir.join(marker))? else {
+                    continue;
+                };
+                if newest.is_none_or(|(best, _)| time > best) {
+                    newest = Some((time, dir));
+                }
+            }
+        }
+        Ok(newest.map(|(_, dir)| dir.clone()))
+    }
+
+    fn staged(&self) -> Result<Staged, MigrateError> {
+        let staging = self.staging();
+        if !exists(&staging)? {
+            return Ok(Staged::Nothing);
+        }
+        Ok(match self.record(&staging)? {
+            Some(from) => Staged::Complete { from },
+            None => Staged::Partial,
+        })
+    }
+
+    fn landed(&self) -> Result<Landed, MigrateError> {
+        if let Some(from) = self.record(&self.destination)? {
+            return Ok(Landed::Migrated { from });
+        }
+        for marker in self.data.markers() {
+            if exists(&self.destination.join(marker))? {
+                return Ok(Landed::Own);
+            }
+        }
+        let empty = match std::fs::read_dir(&self.destination) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => false,
+            Err(source) => {
+                return Err(MigrateError::Inspect {
+                    path: self.destination.clone(),
+                    source,
+                });
+            }
         };
-        if cfg!(windows) {
-            sys::run("taskkill.exe", &["/PID", &pid.to_string(), "/T", "/F"]).ok();
+        Ok(if empty {
+            Landed::Empty
         } else {
-            sys::run("kill", &["-TERM", &pid.to_string()]).ok();
+            Landed::Unrelated
+        })
+    }
+
+    fn record(&self, dir: &Path) -> Result<Option<PathBuf>, MigrateError> {
+        let record = dir.join(RECORD);
+        let named = match std::fs::read_to_string(&record) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(MigrateError::Inspect {
+                    path: record,
+                    source,
+                });
+            }
+        };
+        match self
+            .sources
+            .iter()
+            .find(|source| source.to_string_lossy() == named)
+        {
+            Some(source) => Ok(Some(source.clone())),
+            None => Err(MigrateError::UnknownRecord { record, named }),
         }
     }
-    // Old Forges run as `ae forge serve` from an old `ae`.
-    platform::close_processes(&old.ae)?;
-    Ok(())
-}
 
-fn newest(dirs: &[PathBuf], time: impl Fn(&Path) -> Option<SystemTime>) -> Option<PathBuf> {
-    dirs.iter()
-        .filter_map(|dir| Some((time(dir)?, dir)))
-        .max_by_key(|(time, _)| *time)
-        .map(|(_, dir)| dir.clone())
-}
-
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
-
-/// Renames `from` to `to`; copies and deletes across volumes.
-fn move_dir(from: &Path, to: &Path) -> Result<()> {
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    fn pending(&self) -> Result<bool, MigrateError> {
+        Ok(match (self.landed()?, self.staged()?) {
+            (Landed::Own, _) => false,
+            (Landed::Migrated { .. }, _) | (_, Staged::Partial | Staged::Complete { .. }) => true,
+            (Landed::Empty | Landed::Unrelated, Staged::Nothing) => self.newest()?.is_some(),
+        })
     }
-    std::fs::remove_dir(to).ok();
-    if std::fs::rename(from, to).is_err() {
-        copy_dir(from, to)
-            .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
-        std::fs::remove_dir_all(from).with_context(|| format!("remove {}", from.display()))?;
+
+    fn run(&self) -> Result<Outcome, MigrateError> {
+        let staged = match self.staged()? {
+            Staged::Partial => {
+                remove(&self.staging())?;
+                Staged::Nothing
+            }
+            Staged::Nothing => Staged::Nothing,
+            Staged::Complete { from } => Staged::Complete { from },
+        };
+        let landed = self.landed()?;
+        let from = match (landed, staged) {
+            (Landed::Own, _) => return Ok(Outcome::Kept),
+            (Landed::Migrated { from }, _) => {
+                self.finish(&from)?;
+                return Ok(Outcome::Moved { from });
+            }
+            (landed, Staged::Complete { from }) => {
+                self.clear_destination(&landed)?;
+                from
+            }
+            (landed, Staged::Nothing | Staged::Partial) => {
+                let Some(from) = self.newest()? else {
+                    return Ok(Outcome::Nothing);
+                };
+                self.clear_destination(&landed)?;
+                self.stage(&from)?;
+                from
+            }
+        };
+        self.prepare(&from)?;
+        commit(&self.staging(), &self.destination)?;
+        self.finish(&from)?;
+        Ok(Outcome::Moved { from })
     }
-    #[cfg(unix)]
-    retarget_links(to, from, to);
+
+    fn clear_destination(&self, landed: &Landed) -> Result<(), MigrateError> {
+        match landed {
+            Landed::Empty => match std::fs::remove_dir(&self.destination) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(MigrateError::Remove {
+                    path: self.destination.clone(),
+                    source,
+                }),
+            },
+            Landed::Unrelated => {
+                let aside = set_aside_name(&self.destination);
+                std::fs::rename(&self.destination, &aside).map_err(|source| MigrateError::Move {
+                    from: self.destination.clone(),
+                    to: aside,
+                    source,
+                })
+            }
+            Landed::Own | Landed::Migrated { .. } => {
+                unreachable!("invariant: only an empty or unrelated destination is cleared")
+            }
+        }
+    }
+
+    fn stage(&self, from: &Path) -> Result<(), MigrateError> {
+        if self.data == Data::Forge {
+            check_codex_schema(from)?;
+        }
+        let staging = self.staging();
+        if let Some(parent) = staging.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| MigrateError::Move {
+                from: from.to_owned(),
+                to: parent.to_owned(),
+                source,
+            })?;
+        }
+        write_record(from, from)?;
+        match std::fs::rename(from, &staging) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                remove(&from.join(RECORD))?;
+                copy_tree(from, &staging)?;
+                write_record(&staging, from)
+            }
+            Err(source) => {
+                remove(&from.join(RECORD))?;
+                Err(MigrateError::Move {
+                    from: from.to_owned(),
+                    to: staging,
+                    source,
+                })
+            }
+        }
+    }
+
+    fn prepare(
+        &self,
+        #[cfg_attr(
+            not(unix),
+            expect(unused_variables, reason = "links are repointed on Unix only")
+        )]
+        from: &Path,
+    ) -> Result<(), MigrateError> {
+        let staging = self.staging();
+        if self.data == Data::Forge {
+            check_codex_schema(&staging)?;
+        }
+        for name in self.data.transient() {
+            remove(&staging.join(name))?;
+        }
+        if self.data == Data::Editor {
+            point_hosts_at_one_forge(&staging.join("hosts.json"))?;
+        }
+        #[cfg(unix)]
+        retarget_links(&staging, from, &self.destination)?;
+        Ok(())
+    }
+
+    fn finish(&self, from: &Path) -> Result<(), MigrateError> {
+        if self.data == Data::Forge {
+            retarget_codex_rollouts(from, &self.destination)?;
+        }
+        remove(from)?;
+        remove(&self.destination.join(RECORD))
+    }
+}
+
+fn set_aside_name(destination: &Path) -> PathBuf {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut name = destination
+        .file_name()
+        .expect("invariant: an app's data folder has a name")
+        .to_os_string();
+    name.push(format!(".before-migration-{seconds}"));
+    destination.with_file_name(name)
+}
+
+fn write_record(dir: &Path, from: &Path) -> Result<(), MigrateError> {
+    let record = dir.join(RECORD);
+    std::fs::write(&record, from.to_string_lossy().as_bytes()).map_err(|source| {
+        MigrateError::Record {
+            from: from.to_owned(),
+            record,
+            source,
+        }
+    })
+}
+
+fn commit(staging: &Path, destination: &Path) -> Result<(), MigrateError> {
+    std::fs::rename(staging, destination).map_err(|source| MigrateError::Move {
+        from: staging.to_owned(),
+        to: destination.to_owned(),
+        source,
+    })
+}
+
+fn point_hosts_at_one_forge(hosts: &Path) -> Result<(), MigrateError> {
+    let text = match std::fs::read_to_string(hosts) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(MigrateError::Hosts {
+                path: hosts.to_owned(),
+                source,
+            });
+        }
+    };
+    let pointed = text
+        .replace("127.0.0.1:47901", "127.0.0.1:47900")
+        .replace("localhost:47901", "localhost:47900");
+    if pointed == text {
+        return Ok(());
+    }
+    std::fs::write(hosts, pointed).map_err(|source| MigrateError::Hosts {
+        path: hosts.to_owned(),
+        source,
+    })
+}
+
+struct Work<'a> {
+    old: &'a Old,
+    done: &'a [App],
+    moves: &'a [DataMove],
+}
+
+impl Work<'_> {
+    fn pending(&self) -> Result<bool, MigrateError> {
+        for data_move in self.moves {
+            if data_move.pending()? {
+                return Ok(true);
+            }
+        }
+        for program in self.removable(&self.old.programs) {
+            if exists(&program.path)? {
+                return Ok(true);
+            }
+        }
+        Ok(self.done.contains(&App::Forge) && self.old_unit()?.is_some())
+    }
+
+    fn removable<'b>(&self, owned: &'b [Owned]) -> impl Iterator<Item = &'b Owned> {
+        let done = self.done;
+        owned.iter().filter(move |owned| owned.removable(done))
+    }
+
+    fn run(&self) -> Result<Vec<String>, MigrateError> {
+        if self.done.contains(&App::Forge) {
+            self.stop_old_forge()?;
+        }
+        let executables: Vec<PathBuf> = self
+            .removable(&self.old.executables)
+            .map(|owned| owned.path.clone())
+            .collect();
+        platform::close_processes(&executables).map_err(MigrateError::StopPrograms)?;
+        let mut moved = Vec::new();
+        for data_move in self.moves {
+            if let Outcome::Moved { from } = data_move.run()? {
+                moved.push(format!(
+                    "{} from {}",
+                    data_move.data.description(),
+                    from.display()
+                ));
+            }
+        }
+        for program in self.removable(&self.old.programs) {
+            remove(&program.path)?;
+        }
+        for entry in self.removable(&self.old.path_entries) {
+            platform::remove_path_entry(&entry.path).map_err(|error| MigrateError::PathEntry {
+                path: entry.path.clone(),
+                source: error.into(),
+            })?;
+        }
+        for dir in &self.old.parents {
+            remove_if_empty(dir)?;
+        }
+        Ok(moved)
+    }
+
+    fn old_unit(&self) -> Result<Option<&Path>, MigrateError> {
+        let Some(unit) = &self.old.unit else {
+            return Ok(None);
+        };
+        match std::fs::read_to_string(unit) {
+            Ok(text) if text.contains("forge serve") => Ok(Some(unit)),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(MigrateError::Inspect {
+                path: unit.clone(),
+                source,
+            }),
+        }
+    }
+
+    fn stop_old_forge(&self) -> Result<(), MigrateError> {
+        if let Some(unit) = self.old_unit()? {
+            sys::run("systemctl", &["--user", "disable", "--now", service::UNIT])
+                .map_err(|error| MigrateError::StopService(error.into()))?;
+            remove(unit)?;
+            sys::run("systemctl", &["--user", "daemon-reload"])
+                .map_err(|error| MigrateError::StopService(error.into()))?;
+        }
+        let mut forges = Vec::new();
+        for dir in &self.old.forge_data {
+            if let Some(forge) = old_forge(&dir.join("forge.pid"))? {
+                forges.push(forge);
+            }
+        }
+        platform::stop(&forges).map_err(MigrateError::StopPrograms)
+    }
+}
+
+fn old_forge(pid_file: &Path) -> Result<Option<platform::Running>, MigrateError> {
+    let inspect = |source| MigrateError::Inspect {
+        path: pid_file.to_owned(),
+        source,
+    };
+    let text = match std::fs::read_to_string(pid_file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(inspect(error)),
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return Ok(None);
+    };
+    let written = std::fs::metadata(pid_file)
+        .and_then(|metadata| metadata.modified())
+        .map_err(inspect)?
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    Ok(platform::running(pid).filter(|process| {
+        is_forge_program(&process.executable) && process.started <= written + PID_FILE_SLACK_SECONDS
+    }))
+}
+
+fn is_forge_program(executable: &Path) -> bool {
+    executable.file_stem().is_some_and(|stem| {
+        let stem = stem.to_string_lossy();
+        ["ae", "forge"]
+            .iter()
+            .any(|name| stem.eq_ignore_ascii_case(name))
+    })
+}
+
+fn modified(path: &Path) -> Result<Option<SystemTime>, MigrateError> {
+    match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
+        Ok(time) => Ok(Some(time)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(MigrateError::Inspect {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn exists(path: &Path) -> Result<bool, MigrateError> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(MigrateError::Inspect {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn remove(path: &Path) -> Result<(), MigrateError> {
+    let removed = match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(MigrateError::Remove {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn remove_if_empty(dir: &Path) -> Result<(), MigrateError> {
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(MigrateError::Remove {
+            path: dir.to_owned(),
+            source,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn retarget_links(dir: &Path, from: &Path, to: &Path) -> Result<(), MigrateError> {
+    let inspect = |path: &Path| {
+        let path = path.to_owned();
+        move |source| MigrateError::Inspect { path, source }
+    };
+    for entry in std::fs::read_dir(dir).map_err(inspect(dir))? {
+        let entry = entry.map_err(inspect(dir))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(inspect(&path))?;
+        if kind.is_symlink() {
+            let target = std::fs::read_link(&path).map_err(inspect(&path))?;
+            if let Ok(rest) = target.strip_prefix(from) {
+                relink(&path, &to.join(rest))?;
+            }
+        } else if kind.is_dir() {
+            retarget_links(&path, from, to)?;
+        }
+    }
     Ok(())
 }
 
 #[cfg(unix)]
-fn retarget_links(dir: &Path, from: &Path, to: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn relink(link: &Path, target: &Path) -> Result<(), MigrateError> {
+    let failed = |source| MigrateError::Relink {
+        link: link.to_owned(),
+        target: target.to_owned(),
+        source,
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&path)
-                && let Ok(rest) = target.strip_prefix(from)
-            {
-                std::fs::remove_file(&path).ok();
-                std::os::unix::fs::symlink(to.join(rest), &path).ok();
-            }
-        } else if kind.is_dir() {
-            retarget_links(&path, from, to);
-        }
-    }
+    let mut name = link
+        .file_name()
+        .expect("invariant: a directory entry has a name")
+        .to_os_string();
+    name.push(".ae-relink");
+    let replacement = link.with_file_name(name);
+    remove(&replacement)?;
+    std::os::unix::fs::symlink(target, &replacement).map_err(failed)?;
+    std::fs::rename(&replacement, link).map_err(failed)
 }
 
-/// Codex resumes a thread from the absolute rollout path its state
-/// database recorded, and doesn't look again when the file isn't there:
-/// after a move every earlier thread fails with "no rollout found". Points
-/// those paths into the moved folder.
-fn retarget_codex_rollouts(from: &Path, to: &Path) -> Result<()> {
-    // Codex's home inside Forge's data (forge-engines' `Layout`).
-    let codex = to.join("engines").join("codex").join("home").join(".codex");
-    let Ok(entries) = std::fs::read_dir(&codex) else {
-        return Ok(());
+fn codex_states(root: &Path) -> Result<Vec<PathBuf>, MigrateError> {
+    let codex = root.join(CODEX_HOME);
+    let entries = match std::fs::read_dir(&codex) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(MigrateError::Inspect {
+                path: codex,
+                source,
+            });
+        }
     };
+    let mut states = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| MigrateError::Inspect {
+            path: codex.clone(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("state_") && name.ends_with(".sqlite") {
+            states.push(entry.path());
+        }
+    }
+    Ok(states)
+}
+
+fn check_codex_schema(root: &Path) -> Result<(), MigrateError> {
+    for path in codex_states(root)? {
+        let read = |source| MigrateError::ReadCodexState {
+            path: path.clone(),
+            source: Box::new(source),
+        };
+        let db = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(read)?;
+        let supported: bool = db
+            .query_row(include_str!("legacy/rollout_column.sql"), [], |row| {
+                row.get(0)
+            })
+            .map_err(read)?;
+        if !supported {
+            return Err(MigrateError::UnsupportedCodexSchema { path });
+        }
+    }
+    Ok(())
+}
+
+fn retarget_codex_rollouts(from: &Path, to: &Path) -> Result<(), MigrateError> {
     let separator = std::path::MAIN_SEPARATOR_STR;
     let old = format!("{}{separator}", from.display());
     let new = format!("{}{separator}", to.display());
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !(name.starts_with("state_") && name.ends_with(".sqlite")) {
-            continue;
-        }
-        let retarget = || -> Result<usize> {
-            let db = rusqlite::Connection::open(&path)?;
-            db.busy_timeout(std::time::Duration::from_secs(5))?;
-            Ok(db.execute(
-                "UPDATE threads SET rollout_path = ?2 || substr(rollout_path, length(?1) + 1)
-                 WHERE substr(rollout_path, 1, length(?1)) = ?1",
-                rusqlite::params![old, new],
-            )?)
+    for path in codex_states(to)? {
+        let failed = |source| MigrateError::Retarget {
+            path: path.clone(),
+            from: from.to_owned(),
+            to: to.to_owned(),
+            source: Box::new(source),
         };
-        retarget().with_context(|| {
-            format!(
-                "point Codex's rollouts in {} from {} to {}",
-                path.display(),
-                from.display(),
-                to.display()
-            )
-        })?;
+        let db = rusqlite::Connection::open(&path).map_err(failed)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(failed)?;
+        db.execute(
+            include_str!("legacy/retarget_rollouts.sql"),
+            rusqlite::params![old, new],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
+fn copy_tree(from: &Path, to: &Path) -> Result<(), MigrateError> {
+    let failed = |path: &Path| {
+        let path = path.to_owned();
+        move |source| MigrateError::Copy { path, source }
+    };
+    std::fs::create_dir_all(to).map_err(failed(to))?;
+    for entry in std::fs::read_dir(from).map_err(failed(from))? {
+        let entry = entry.map_err(failed(from))?;
+        let path = entry.path();
+        if entry.file_name() == RECORD {
+            continue;
+        }
         let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
+        let kind = entry.file_type().map_err(failed(&path))?;
+        if kind.is_symlink() {
+            copy_link(&path, &target, kind).map_err(failed(&path))?;
+        } else if kind.is_dir() {
+            copy_tree(&path, &target)?;
         } else {
-            std::fs::copy(entry.path(), &target)?;
+            std::fs::copy(&path, &target).map_err(failed(&path))?;
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path, _kind: std::fs::FileType) -> io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
+}
+
+#[cfg(windows)]
+fn copy_link(from: &Path, to: &Path, kind: std::fs::FileType) -> io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+    let target = std::fs::read_link(from)?;
+    if kind.is_symlink_dir() {
+        std::os::windows::fs::symlink_dir(target, to)
+    } else {
+        std::os::windows::fs::symlink_file(target, to)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A Codex thread started before the move resumes after it: its
-    /// recorded rollout path follows the data, other paths stay put.
-    #[test]
-    fn codex_threads_from_before_the_move_find_their_rollouts() {
-        let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("artisan-dev").join("forge");
-        let to = dir.path().join("artisan-street").join("forge").join("data");
-        let codex = to.join("engines").join("codex").join("home").join(".codex");
-        std::fs::create_dir_all(&codex).unwrap();
-        let rollout = |root: &Path| {
-            root.join("engines/codex/home/.codex/sessions/2026/10/17/rollout-a.jsonl")
-                .display()
-                .to_string()
-        };
-        let elsewhere = dir
-            .path()
-            .join("other/rollout-b.jsonl")
-            .display()
-            .to_string();
-        let db = rusqlite::Connection::open(codex.join("state_5.sqlite")).unwrap();
-        db.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
-            .unwrap();
-        db.execute(
-            "INSERT INTO threads VALUES ('a', ?1), ('b', ?2)",
-            rusqlite::params![rollout(&from), elsewhere],
-        )
-        .unwrap();
-        drop(db);
-
-        retarget_codex_rollouts(&from, &to).unwrap();
-
-        let db = rusqlite::Connection::open(codex.join("state_5.sqlite")).unwrap();
-        let path = |id: &str| -> String {
-            db.query_row(
-                "SELECT rollout_path FROM threads WHERE id = ?1",
-                [id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(path("a"), rollout(&to));
-        assert_eq!(path("b"), elsewhere);
-    }
-}
+#[path = "../tests/legacy/migrate.rs"]
+mod tests;

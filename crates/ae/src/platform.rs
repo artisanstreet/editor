@@ -6,6 +6,7 @@ use crate::sys::{self, ps_quote, ps_string};
 use anyhow::{Context, Result};
 use artisan_paths::App;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DESKTOP_FILE: &str = "artisan-editor.desktop";
 const EDITOR_ICON: &str = include_str!("../../editor-assets/app/artisan-editor.svg");
@@ -263,68 +264,137 @@ pub fn launch_editor() -> Result<()> {
     Ok(())
 }
 
-/// Closes running processes started from `executables` (case-insensitive
-/// on Windows), so their files can be replaced. Forge holds all data, so a
-/// forced stop after 10 seconds loses nothing.
-pub fn close_processes(executables: &[PathBuf]) -> Result<usize> {
-    if cfg!(windows) {
-        let list = executables
-            .iter()
-            .map(|path| ps_quote(path))
-            .collect::<Vec<_>>()
-            .join(",");
-        let closed = sys::powershell(&format!(
-            "$targets = @({list}); \
-             $p = @(Get-CimInstance Win32_Process | Where-Object {{ $x = $_.ExecutablePath; $x -and ($targets | Where-Object {{ $_ -ieq $x }}) }}); \
-             foreach ($x in $p) {{ taskkill.exe /PID $x.ProcessId | Out-Null }}; \
-             foreach ($x in $p) {{ Wait-Process -Id $x.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }}; \
-             @($p | Where-Object {{ Get-Process -Id $_.ProcessId -ErrorAction Ignore }}) | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}; \
-             $p.Count"
-        ))?;
-        Ok(closed.trim().parse().unwrap_or(0))
-    } else {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-        );
-        let running: Vec<_> = system
-            .processes()
-            .iter()
-            .filter_map(|(pid, process)| {
-                let exe = process.exe()?.to_string_lossy().into_owned();
-                let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
-                executables
-                    .iter()
-                    .any(|path| Path::new(exe) == path)
-                    .then_some((*pid, process.start_time()))
+const CLOSE_DEADLINE: Duration = Duration::from_secs(10);
+const FORCE_DEADLINE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Running {
+    pub pid: u32,
+    pub executable: PathBuf,
+    pub started: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StopError {
+    #[error("process {pid} ({}) still runs after it was force-stopped", executable.display())]
+    Survived { pid: u32, executable: PathBuf },
+}
+
+pub fn close_processes(executables: &[PathBuf]) -> Result<usize, StopError> {
+    let running: Vec<Running> = processes(sysinfo::ProcessesToUpdate::All)
+        .into_iter()
+        .filter(|process| {
+            executables
+                .iter()
+                .any(|path| same_executable(&process.executable, path))
+        })
+        .collect();
+    stop(&running)?;
+    Ok(running.len())
+}
+
+pub fn running(pid: u32) -> Option<Running> {
+    processes(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(
+        pid,
+    )]))
+    .into_iter()
+    .next()
+}
+
+pub fn stop(processes: &[Running]) -> Result<(), StopError> {
+    for process in processes {
+        request_close(process);
+    }
+    let started = Instant::now();
+    let mut left: Vec<&Running> = processes.iter().collect();
+    while !left.is_empty() && started.elapsed() < CLOSE_DEADLINE {
+        std::thread::sleep(Duration::from_millis(100));
+        left.retain(|process| alive(process));
+    }
+    for process in &left {
+        force_close(process);
+    }
+    let forced = Instant::now();
+    while !left.is_empty() && forced.elapsed() < FORCE_DEADLINE {
+        std::thread::sleep(Duration::from_millis(50));
+        left.retain(|process| alive(process));
+    }
+    match left.first() {
+        Some(process) => Err(StopError::Survived {
+            pid: process.pid,
+            executable: process.executable.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+fn processes(which: sysinfo::ProcessesToUpdate<'_>) -> Vec<Running> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        which,
+        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+    );
+    system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            !matches!(
+                process.status(),
+                sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+            )
+        })
+        .filter_map(|(pid, process)| {
+            let executable = process.exe()?.to_string_lossy();
+            let executable = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+            Some(Running {
+                pid: pid.as_u32(),
+                executable: PathBuf::from(executable),
+                started: process.start_time(),
             })
-            .collect();
-        for (pid, _) in &running {
-            sys::run("kill", &["-TERM", &pid.to_string()]).ok();
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        for (pid, started) in &running {
-            loop {
-                let mut current = sysinfo::System::new();
-                current.refresh_processes_specifics(
-                    sysinfo::ProcessesToUpdate::Some(&[*pid]),
-                    sysinfo::ProcessRefreshKind::new(),
-                );
-                let alive = current
-                    .process(*pid)
-                    .is_some_and(|process| process.start_time() == *started);
-                if !alive {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    sys::run("kill", &["-KILL", &pid.to_string()]).ok();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-        Ok(running.len())
+        })
+        .collect()
+}
+
+fn alive(process: &Running) -> bool {
+    running(process.pid).is_some_and(|now| now.started == process.started)
+}
+
+pub fn same_executable(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn request_close(process: &Running) {
+    let pid = process.pid.to_string();
+    let requested = if cfg!(windows) {
+        sys::run("taskkill.exe", &["/PID", &pid])
+    } else {
+        sys::run("kill", &["-TERM", &pid])
+    };
+    if let Err(error) = requested {
+        tracing::debug!(
+            pid = process.pid,
+            "asking the process to close failed: {error:#}"
+        );
+    }
+}
+
+fn force_close(process: &Running) {
+    let pid = process.pid.to_string();
+    let forced = if cfg!(windows) {
+        sys::run("taskkill.exe", &["/PID", &pid, "/F"])
+    } else {
+        sys::run("kill", &["-KILL", &pid])
+    };
+    if let Err(error) = forced {
+        tracing::debug!(
+            pid = process.pid,
+            "force-stopping the process failed: {error:#}"
+        );
     }
 }
 
