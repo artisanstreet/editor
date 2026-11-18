@@ -722,11 +722,14 @@ fn render_leaf(
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
-        let marker = ui::Text::new(marker)
+        let mut marker = ui::Text::new(marker)
             .text_style(style)
             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
             .wrap(false)
             .build();
+        if level.task.is_some() {
+            marker = marker.aria_hidden();
+        }
         frame = frame.child(
             ui::Box::new()
                 .style(Style::new().absolute_at(
@@ -742,8 +745,17 @@ fn render_leaf(
                 .build(),
         );
     }
+    let mut frame = frame.build().with_key(frame_key.clone());
+    if let Some(item) = target.context.lists.last().filter(|level| level.first) {
+        frame = frame
+            .role(aqua_core::Role::ListItem)
+            .aria_level(target.context.lists.len());
+        if let Some(checked) = item.task {
+            frame = frame.aria_checked(checked);
+        }
+    }
     Ok((
-        frame.build().with_key(frame_key.clone()),
+        frame,
         ProjectedGeometry {
             frame_key,
             text,

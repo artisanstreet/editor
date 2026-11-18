@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use aqua_core::Insets;
+use aqua_core::{CollectionSemantics, Insets, Role};
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::element::{Element, ui};
@@ -12,10 +12,19 @@ use super::{Block, ListItem};
 use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
 
+struct Marker {
+    indent: usize,
+    glyph: String,
+    ordered: bool,
+    task: Option<bool>,
+    position: usize,
+    size: usize,
+}
+
 struct Row<'a> {
     block: Option<&'a Block>,
     indent: usize,
-    markers: Vec<(usize, String, bool)>,
+    markers: Vec<Marker>,
     gap: f32,
 }
 
@@ -102,13 +111,20 @@ fn visit_items<'a>(
         }
         visit(&item.blocks, indent + 1, rows);
         if let Some(row) = rows.get_mut(first) {
-            let marker = match item.task {
+            let glyph = match item.task {
                 Some(true) => "☑".to_owned(),
                 Some(false) => "☐".to_owned(),
                 None if ordered => format!("{}.", start.saturating_add(index as u64)),
                 None => "•".to_owned(),
             };
-            row.markers.push((indent, marker, ordered));
+            row.markers.push(Marker {
+                indent,
+                glyph,
+                ordered,
+                task: item.task,
+                position: index + 1,
+                size: items.len(),
+            });
             if index > 0 {
                 row.gap += ProseTypography::ITEM_GAP_PX;
             }
@@ -197,7 +213,18 @@ pub(super) fn render(
                 ..Insets::default()
             }))
             .child(leaf.element);
-        for (indent, marker, ordered) in row.markers {
+        let item = row
+            .markers
+            .first()
+            .map(|marker| (marker.indent + 1, marker.task, marker.position, marker.size));
+        for Marker {
+            indent,
+            glyph,
+            ordered,
+            task,
+            ..
+        } in row.markers
+        {
             let color = theme.colors.text_muted.to_reference_text_color();
             let style = TextStyle {
                 families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
@@ -211,11 +238,14 @@ pub(super) fn render(
                 letter_spacing_em: Some(theme.typography.tracking_em),
                 ..TextStyle::default()
             };
-            let marker = ui::Text::new(marker)
+            let mut marker = ui::Text::new(glyph)
                 .text_style(style)
                 .gpui_source_color(color)
                 .wrap(false)
                 .build();
+            if task.is_some() {
+                marker = marker.aria_hidden();
+            }
             frame = frame.child(
                 ui::Box::new()
                     .style(Style::new().absolute_at(
@@ -231,7 +261,25 @@ pub(super) fn render(
                     .build(),
             );
         }
-        list = list.child(frame.build());
+        let mut frame = frame.build();
+        if let Some((level, task, position, size)) = item {
+            frame = frame
+                .role(Role::ListItem)
+                .aria_level(level)
+                .collection_semantics(CollectionSemantics {
+                    position_in_set: Some(position),
+                    set_size: Some(size),
+                    ..CollectionSemantics::default()
+                });
+            if let Some(checked) = task {
+                frame = frame.aria_checked(checked);
+            }
+        }
+        list = list.child(frame);
     }
-    Ok(list.build())
+    Ok(list.build().role(Role::List))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/list.rs"]
+mod tests;
