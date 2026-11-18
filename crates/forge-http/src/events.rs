@@ -1,10 +1,10 @@
 use crate::routes::App;
-use artisan_api::{DeviceId, Envelope, Event, LiveTarget, Seq};
+use artisan_api::{DeviceId, Envelope, Event, LiveTarget, Seq, ThreadId};
 use axum::extract::{Extension, Query, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures::Stream;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -264,12 +264,8 @@ pub async fn forward(
             .map_err(sent("reset"))?;
         return Ok(());
     }
-    let live_revision =
-        send_live_snapshot(app, scope, sender, &completed_items, &completed_runs).await?;
-    let mut cursor = Cursor {
-        last,
-        live_revision,
-    };
+    let mut cursor =
+        send_live_snapshot(app, scope, sender, last, &completed_items, &completed_runs).await?;
     send_engine_statuses(app, sender)
         .await
         .map_err(sent("engine statuses"))?;
@@ -321,10 +317,12 @@ async fn send_live_snapshot(
     app: &App,
     scope: &Since,
     sender: &impl EnvelopeSink,
+    last: Seq,
     completed_items: &HashSet<artisan_api::ItemId>,
     completed_runs: &HashSet<artisan_api::RunId>,
-) -> Result<u64, ForwardError> {
+) -> Result<Cursor, ForwardError> {
     let (live_revision, snapshot) = app.hub.distributed_live_snapshot().await?;
+    let cursor = Cursor::after_snapshot(last, live_revision, &snapshot);
     for event in snapshot {
         if let Event::Live { target, .. } = &event {
             let completed = match target {
@@ -350,7 +348,7 @@ async fn send_live_snapshot(
             sender.send(envelope).await.map_err(sent("live snapshot"))?;
         }
     }
-    Ok(live_revision)
+    Ok(cursor)
 }
 
 async fn send_engine_statuses(app: &App, sender: &impl EnvelopeSink) -> Result<(), SinkError> {
@@ -367,20 +365,88 @@ async fn send_engine_statuses(app: &App, sender: &impl EnvelopeSink) -> Result<(
     Ok(())
 }
 
-struct Cursor {
+pub(crate) struct Cursor {
     last: Seq,
     live_revision: u64,
+    covered: HashMap<(ThreadId, LiveTarget), u64>,
 }
+
 impl Cursor {
-    const fn accept(&mut self, envelope: &Envelope) -> bool {
+    pub(crate) fn after_snapshot(last: Seq, live_revision: u64, snapshot: &[Event]) -> Self {
+        let covered = snapshot
+            .iter()
+            .filter_map(|event| match event {
+                Event::Live {
+                    thread_id,
+                    target,
+                    coverage,
+                    ..
+                } => Some(((thread_id.clone(), target.clone()), coverage.total)),
+                Event::Hello { .. }
+                | Event::Project { .. }
+                | Event::Thread { .. }
+                | Event::ThreadRemoved { .. }
+                | Event::Item { .. }
+                | Event::Run { .. }
+                | Event::ItemState { .. }
+                | Event::Setting { .. }
+                | Event::Suggestion { .. }
+                | Event::Engine { .. }
+                | Event::EngineInstall { .. }
+                | Event::EditorCall { .. }
+                | Event::Reset => None,
+            })
+            .collect();
+        Self {
+            last,
+            live_revision,
+            covered,
+        }
+    }
+
+    pub(crate) fn accept(&mut self, envelope: &Envelope) -> bool {
         if let Some(seq) = envelope.seq {
             if seq <= self.last {
                 return false;
             }
             self.last = seq;
-            true
-        } else {
-            envelope.live_revision > self.live_revision
+            return true;
+        }
+        let published_after_snapshot = envelope.live_revision > self.live_revision;
+        match &envelope.event {
+            Event::Live {
+                thread_id,
+                target,
+                append,
+                coverage,
+                ..
+            } => {
+                if !published_after_snapshot {
+                    return false;
+                }
+                let key = (thread_id.clone(), target.clone());
+                match self.covered.get(&key) {
+                    Some(&total) if *append && coverage.total <= total => false,
+                    Some(_) => {
+                        self.covered.remove(&key);
+                        true
+                    }
+                    None => true,
+                }
+            }
+            Event::Suggestion { .. } => published_after_snapshot,
+            Event::Hello { .. }
+            | Event::Project { .. }
+            | Event::Thread { .. }
+            | Event::ThreadRemoved { .. }
+            | Event::Item { .. }
+            | Event::Run { .. }
+            | Event::ItemState { .. }
+            | Event::Setting { .. }
+            | Event::Engine { .. }
+            | Event::EngineInstall { .. }
+            | Event::EditorCall { .. }
+            | Event::Reset => true,
         }
     }
 }
@@ -549,10 +615,7 @@ mod tests {
         let snapshot = "before";
         store.publish_live(live("after", 0).event);
         let mut rendered = snapshot.to_owned();
-        let mut cursor = Cursor {
-            last: 0,
-            live_revision: boundary,
-        };
+        let mut cursor = Cursor::after_snapshot(0, boundary, &[]);
         for _ in 0..2 {
             let envelope = receiver.recv().await.unwrap();
             if !cursor.accept(&envelope) {

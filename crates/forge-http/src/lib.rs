@@ -762,6 +762,9 @@ fn lock_generation_dir(dir: &Path) -> Result<std::fs::File, StartError> {
 }
 
 #[cfg(test)]
+#[path = "../tests/events.rs"]
+mod events_tests;
+#[cfg(test)]
 #[path = "../tests/generation.rs"]
 mod generation_tests;
 #[cfg(test)]
