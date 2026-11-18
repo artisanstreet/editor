@@ -975,7 +975,7 @@ async fn mutate_mcp(
         .map_err(bad_request)?;
     // The card shows whether a new or changed server needs a sign-in.
     let hub = app.hub.clone();
-    app.tasks.spawn(async move { hub.check_mcp_auth().await });
+    app.tasks.spawn(async move { hub.mcp().check_auth().await });
     Ok(Json(servers))
 }
 
@@ -1135,10 +1135,10 @@ async fn engine_action(
                 };
                 match result {
                     Ok(()) => {
-                        if let Err(error) = hub.reconcile_global_prompt().await {
+                        if let Err(error) = hub.extensions().reconcile_global_prompt().await {
                             tracing::warn!(%engine, "reconcile prompt: {error:#}");
                         }
-                        if let Err(error) = hub.reconcile_skills().await {
+                        if let Err(error) = hub.extensions().reconcile_skills().await {
                             tracing::warn!(%engine, "reconcile skills: {error:#}");
                         }
                         engines.refresh(engine).await;

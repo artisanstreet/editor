@@ -10,9 +10,12 @@ use artisan_api::{
     CatalogSkill, EngineId, GlobalPrompt, PromptCandidate, PromptEngineState, PromptEngineStatus,
     ResolvePrompt, SavePrompt, SkillOrigin,
 };
+use forge_engines::Engines;
 use forge_engines::{Customisation, PromptApplied};
+use forge_store::Store;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Forge's setting holding the ids of the skills the user turned off.
 pub const DISABLED_SKILLS_KEY: &str = "disabled_skills";
@@ -29,7 +32,73 @@ fn refused(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Refused(message.into()))
 }
 
+#[derive(Clone)]
+pub struct Extensions {
+    store: Store,
+    engines: Engines,
+    data_dir: PathBuf,
+    homes: Arc<Mutex<()>>,
+}
+
 impl Hub {
+    /// What an engine gets at launch: the prompt (once the user has one),
+    /// MCP servers, and the enabled skills.
+    pub(crate) async fn customisation(&self) -> Result<Customisation> {
+        Ok(Customisation {
+            prompt: self.extensions().launch_prompt().await?,
+            mcp_servers: self
+                .mcp()
+                .with_tokens(
+                    self.store()
+                        .setting("mcp_servers")
+                        .await?
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default(),
+                )
+                .await,
+            ..self.extensions().skill_customisation().await?
+        })
+    }
+}
+
+impl Extensions {
+    pub(crate) fn new(store: Store, engines: Engines, data_dir: PathBuf) -> Self {
+        Self {
+            store,
+            engines,
+            data_dir,
+            homes: Arc::default(),
+        }
+    }
+
+    fn store(&self) -> &Store {
+        &self.store
+    }
+
+    fn engines(&self) -> &Engines {
+        &self.engines
+    }
+
+    fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub(crate) fn skills_dir(&self) -> PathBuf {
+        self.data_dir.join("extensions").join("skills")
+    }
+
+    pub(crate) fn homes_lock(&self) -> Result<(MutexGuard<'_, ()>, std::fs::File)> {
+        let local = self.homes.lock().unwrap_or_else(PoisonError::into_inner);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.data_dir.join("homes.lock"))?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok((local, file))
+    }
+
     /// Every engine with its home when installed.
     fn engine_homes(&self) -> Vec<(EngineId, Option<PathBuf>)> {
         let engines = self.engines();
@@ -48,7 +117,7 @@ impl Hub {
 
     /// The skills part of what an engine gets: Artisan's own and the user's,
     /// less the ones turned off.
-    async fn skill_customisation(&self) -> Result<Customisation> {
+    pub(crate) async fn skill_customisation(&self) -> Result<Customisation> {
         Ok(Customisation {
             skills_dir: self.skills_dir(),
             first_party: true,
@@ -57,32 +126,14 @@ impl Hub {
         })
     }
 
-    /// What an engine gets at launch: the prompt (once the user has one),
-    /// MCP servers, and the enabled skills.
-    pub(crate) async fn customisation(&self) -> Result<Customisation> {
-        Ok(Customisation {
-            prompt: self.launch_prompt().await?,
-            mcp_servers: self
-                .with_mcp_tokens(
-                    self.store()
-                        .setting("mcp_servers")
-                        .await?
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default(),
-                )
-                .await,
-            ..self.skill_customisation().await?
-        })
-    }
-
     /// Runs filesystem work on engine homes, one job at a time.
     async fn on_homes<R: Send + 'static>(
         &self,
         job: impl FnOnce() -> R + Send + 'static,
     ) -> Result<R> {
-        let hub = self.clone();
+        let extensions = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _homes = hub.homes_lock()?;
+            let _homes = extensions.homes_lock()?;
             Ok(job())
         })
         .await
@@ -215,7 +266,7 @@ impl Hub {
 
     /// The prompt engines get at launch; `None` while the user must still
     /// choose between the engines' differing prompts.
-    async fn launch_prompt(&self) -> Result<Option<String>> {
+    pub(crate) async fn launch_prompt(&self) -> Result<Option<String>> {
         if let Some(text) = self.stored_prompt().await? {
             return Ok(Some(text));
         }

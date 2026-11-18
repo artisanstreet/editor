@@ -1,4 +1,4 @@
-use crate::Hub;
+use crate::mcp_auth::Mcp;
 use artisan_api::McpServer;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
@@ -19,19 +19,18 @@ async fn answers(endpoint: &Endpoint) -> bool {
     matches!(tokio::time::timeout(PATIENCE, connect).await, Ok(Ok(_)))
 }
 
-impl Hub {
-    pub(crate) fn mcp_server_reachable(&self, server: &McpServer) -> bool {
+impl Mcp {
+    pub(crate) fn server_reachable(&self, server: &McpServer) -> bool {
         endpoint(server).is_none_or(|endpoint| {
             !self
-                .inner
-                .mcp_unreachable
+                .unreachable
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&endpoint)
         })
     }
 
-    pub async fn probe_mcp_servers(&self) -> anyhow::Result<()> {
+    pub async fn probe_servers(&self) -> anyhow::Result<()> {
         let servers: Vec<McpServer> = self
             .store()
             .setting("mcp_servers")
@@ -57,8 +56,7 @@ impl Hub {
             }
         }
         let mut known = self
-            .inner
-            .mcp_unreachable
+            .unreachable
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (endpoint, name) in &named {
@@ -79,9 +77,9 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn watch_mcp_servers(&self, stop: CancellationToken) {
+    pub async fn watch_servers(&self, stop: CancellationToken) {
         loop {
-            if let Err(error) = self.probe_mcp_servers().await {
+            if let Err(error) = self.probe_servers().await {
                 tracing::warn!("check which MCP servers answer: {error:#}");
             }
             tokio::select! {

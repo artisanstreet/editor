@@ -4,8 +4,15 @@ use super::*;
 async fn a_damaged_disabled_skills_setting_keeps_skills_out_instead_of_enabling_them() {
     let fixture = fixture(Arc::new(|_turn, _io| Box::pin(async { Outcome::done() }))).await;
     let hub = &fixture.hub;
-    write_skill(&hub.skills_dir(), "review", "Reviews the diff.");
-    hub.set_skill_enabled("local.review", false).await.unwrap();
+    write_skill(
+        &hub.extensions().skills_dir(),
+        "review",
+        "Reviews the diff.",
+    );
+    hub.extensions()
+        .set_skill_enabled("local.review", false)
+        .await
+        .unwrap();
     hub.store()
         .set_setting(
             DISABLED_SKILLS_KEY.to_owned(),
@@ -15,6 +22,7 @@ async fn a_damaged_disabled_skills_setting_keeps_skills_out_instead_of_enabling_
         .unwrap();
 
     let refused = hub
+        .extensions()
         .reconcile_skills()
         .await
         .expect_err("a damaged setting is reported, not read as no skills turned off");

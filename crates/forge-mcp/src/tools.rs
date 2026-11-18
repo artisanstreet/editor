@@ -1624,7 +1624,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 return Ok("No MCP servers besides Artisan's own.".to_owned());
             }
             let auth = hub
-                .mcp_auth()
+                .mcp()
+                .auth()
                 .await
                 .map_err(forge("read the MCP sign-in states"))?;
             Ok(servers
@@ -1701,9 +1702,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 })
                 .await
                 .map_err(forge("save the MCP servers"))?;
-            hub.check_mcp_auth().await;
+            hub.mcp().check_auth().await;
             let sign_in = match hub
-                .mcp_auth()
+                .mcp()
+                .auth()
                 .await
                 .map_err(forge("read the MCP sign-in states"))?
                 .get(&added)
@@ -1744,7 +1746,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .mutate_mcp(McpMutation::Remove { previous })
                 .await
                 .map_err(forge("save the MCP servers"))?;
-            hub.check_mcp_auth().await;
+            hub.mcp().check_auth().await;
             Ok(format!("Removed {}.", remove.name))
         }
         "sign_in_mcp_server" => {
@@ -1780,6 +1782,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
         }
         "list_skills" => {
             let skills = hub
+                .extensions()
                 .skill_catalog()
                 .await
                 .map_err(forge("list the skills"))?;
@@ -1811,7 +1814,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 enabled: bool,
             }
             let enable: Enable = args(arguments)?;
-            hub.set_skill_enabled(&enable.id, enable.enabled)
+            hub.extensions()
+                .set_skill_enabled(&enable.id, enable.enabled)
                 .await
                 .map_err(forge("switch the skill"))?;
             Ok(format!(
@@ -1838,6 +1842,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .await?;
             }
             let skill = hub
+                .extensions()
                 .install_skill(install.path.into(), install.replace)
                 .await
                 .map_err(forge("install the skill"))?;
@@ -1847,6 +1852,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
         }
         "get_global_prompt" => {
             let prompt = hub
+                .extensions()
                 .global_prompt()
                 .await
                 .map_err(forge("load the global prompt"))?;
@@ -1866,6 +1872,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let set: Set = args(arguments)?;
             let navigate_user = set.navigate_user;
             let current = hub
+                .extensions()
                 .global_prompt()
                 .await
                 .map_err(forge("load the global prompt"))?;
@@ -1880,6 +1887,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             )
             .await?;
             let saved = hub
+                .extensions()
                 .save_global_prompt(artisan_api::SavePrompt {
                     base_version: current.version,
                     text: set.text,
@@ -1946,10 +1954,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 let engines = background.engines().clone();
                 match engines.install(engine).await {
                     Ok(_) => {
-                        if let Err(error) = background.reconcile_global_prompt().await {
+                        if let Err(error) = background.extensions().reconcile_global_prompt().await
+                        {
                             tracing::warn!(%engine, "reconcile prompt after install: {error:#}");
                         }
-                        if let Err(error) = background.reconcile_skills().await {
+                        if let Err(error) = background.extensions().reconcile_skills().await {
                             tracing::warn!(%engine, "reconcile skills after install: {error:#}");
                         }
                         engines.refresh(engine).await;

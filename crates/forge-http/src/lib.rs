@@ -251,10 +251,10 @@ async fn start_mode(
 }
 
 async fn reconcile_startup(hub: &Hub) -> Result<()> {
-    hub.reconcile_global_prompt()
+    hub.extensions().reconcile_global_prompt()
         .await
         .context("reconcile global prompt")?;
-    hub.reconcile_skills()
+    hub.extensions().reconcile_skills()
         .await
         .context("reconcile managed skills")?;
     hub.ensure_scratch_project()
@@ -314,12 +314,12 @@ async fn start_services(
     }
     hub.resume_pending();
     let auth = hub.clone();
-    tasks.spawn(async move { auth.check_mcp_auth().await });
+    tasks.spawn(async move { auth.mcp().check_auth().await });
     let agents = hub.clone();
     tasks.spawn(async move { agents.reconcile_agents().await });
     let servers = hub.clone();
     let stop = shutdown.clone();
-    tasks.spawn(async move { servers.watch_mcp_servers(stop).await });
+    tasks.spawn(async move { servers.mcp().watch_servers(stop).await });
     if hub.generation().is_none() {
         tasks.spawn(remove_inactive_threads(
             hub.clone(),

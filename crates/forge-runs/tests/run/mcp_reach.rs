@@ -52,7 +52,7 @@ async fn a_turn_starts_without_servers_that_do_not_answer() {
         "before anything is known every server is offered"
     );
 
-    fixture.hub.probe_mcp_servers().await.unwrap();
+    fixture.hub.mcp().probe_servers().await.unwrap();
     assert_eq!(
         turn_servers(&fixture, &seen).await,
         ["local", "up"],
@@ -60,7 +60,7 @@ async fn a_turn_starts_without_servers_that_do_not_answer() {
     );
 
     let _revived = tokio::net::TcpListener::bind(down).await.unwrap();
-    fixture.hub.probe_mcp_servers().await.unwrap();
+    fixture.hub.mcp().probe_servers().await.unwrap();
     assert_eq!(
         turn_servers(&fixture, &seen).await,
         ["down", "local", "up"],

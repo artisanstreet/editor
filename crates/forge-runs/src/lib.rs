@@ -44,9 +44,9 @@ mod scratch;
 mod side;
 
 pub use agents::{AgentInfo, AgentState, MAX_AGENT_DEPTH, SpawnAgent};
-pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY};
+pub use extensions::{DISABLED_SKILLS_KEY, Extensions, GLOBAL_PROMPT_KEY};
 pub use gateway::COMPUTER_USE_KEY;
-pub use mcp_auth::{McpSignInFinishError, McpSignInStartError, McpStoreError};
+pub use mcp_auth::{Mcp, McpSignInFinishError, McpSignInStartError, McpStoreError};
 pub use refusal::{Refused, refusal};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
@@ -90,8 +90,8 @@ struct Inner {
     untitled: Mutex<std::collections::HashSet<ThreadId>>,
     /// Titles being generated independently of the working turn.
     title_queries: Mutex<std::collections::HashSet<ThreadId>>,
-    /// Held while skills or the prompt are written into engine homes.
-    homes: Mutex<()>,
+    extensions: Extensions,
+    mcp: Mcp,
     shutdown: CancellationToken,
     tasks: TaskTracker,
     harness_slots: Arc<Semaphore>,
@@ -107,10 +107,6 @@ struct Inner {
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
     /// How runs read the free space where they work.
     disk: disk::Probe,
-    mcp_flows: Mutex<mcp_auth::Flows>,
-    mcp_http: forge_engines::mcp_oauth::Http,
-    mcp_auth_writes: tokio::sync::Mutex<()>,
-    mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
 }
 
 const RUN_CAPACITY: usize = 8;
@@ -195,6 +191,8 @@ impl Hub {
         disk: disk::Probe,
         generation: Option<runtime::Generation>,
     ) -> Self {
+        let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
+        let mcp = Mcp::new(store.clone());
         let hub = Self {
             inner: Arc::new(Inner {
                 generation,
@@ -208,7 +206,8 @@ impl Hub {
                 attention: Mutex::new(HashMap::new()),
                 untitled: Mutex::new(std::collections::HashSet::new()),
                 title_queries: Mutex::new(std::collections::HashSet::new()),
-                homes: Mutex::new(()),
+                extensions,
+                mcp,
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 harness_slots: Arc::new(Semaphore::new(RUN_CAPACITY)),
@@ -219,10 +218,6 @@ impl Hub {
                 agent_waiters: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 disk,
-                mcp_flows: Mutex::new(mcp_auth::Flows::default()),
-                mcp_http: forge_engines::mcp_oauth::Http::new(),
-                mcp_auth_writes: tokio::sync::Mutex::new(()),
-                mcp_unreachable: Mutex::default(),
             }),
         };
         hub.forward_engine_status();
@@ -1015,25 +1010,14 @@ impl Hub {
             .spawn(tracing::Instrument::instrument(run, span));
     }
 
-    fn homes_lock(&self) -> Result<(std::sync::MutexGuard<'_, ()>, std::fs::File)> {
-        let local = self
-            .inner
-            .homes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.inner.data_dir.join("homes.lock"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
-        Ok((local, file))
+    #[must_use]
+    pub fn extensions(&self) -> &Extensions {
+        &self.inner.extensions
     }
 
-    /// `<data>/extensions/skills`, where Forge keeps the skills it installs.
-    fn skills_dir(&self) -> PathBuf {
-        self.inner.data_dir.join("extensions").join("skills")
+    #[must_use]
+    pub fn mcp(&self) -> &Mcp {
+        &self.inner.mcp
     }
 
     async fn user_input(&self, item: &Item, engine: EngineId) -> Result<forge_engines::UserInput> {
@@ -1065,7 +1049,7 @@ impl Hub {
             None => forge_engines::normalize_command(engine, &text)?.unwrap_or(text),
         };
         let text = if text.contains('$') {
-            let skills = match self.enabled_skills().await {
+            let skills = match self.extensions().enabled_skills().await {
                 Ok(skills) => skills,
                 Err(error) => {
                     // The message still goes; only the closing line naming

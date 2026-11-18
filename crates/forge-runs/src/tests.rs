@@ -675,10 +675,19 @@ async fn claude_is_told_which_skill_the_user_mentioned() {
         })
     }))
     .await;
-    write_skill(&fixture.hub.skills_dir(), "review", "Reviews the diff");
-    write_skill(&fixture.hub.skills_dir(), "release", "Ships it");
+    write_skill(
+        &fixture.hub.extensions().skills_dir(),
+        "review",
+        "Reviews the diff",
+    );
+    write_skill(
+        &fixture.hub.extensions().skills_dir(),
+        "release",
+        "Ships it",
+    );
     fixture
         .hub
+        .extensions()
         .set_skill_enabled("local.release", false)
         .await
         .unwrap();
@@ -1169,10 +1178,18 @@ async fn a_skill_turned_off_never_reaches_the_engine() {
     }))
     .await;
     let hub = &fixture.hub;
-    write_skill(&hub.skills_dir(), "review", "Reviews the diff.");
-    write_skill(&hub.skills_dir(), "deploy", "Ships it.");
+    write_skill(
+        &hub.extensions().skills_dir(),
+        "review",
+        "Reviews the diff.",
+    );
+    write_skill(&hub.extensions().skills_dir(), "deploy", "Ships it.");
 
-    let catalog = hub.set_skill_enabled("local.review", false).await.unwrap();
+    let catalog = hub
+        .extensions()
+        .set_skill_enabled("local.review", false)
+        .await
+        .unwrap();
     assert_eq!(
         hub.store().setting(DISABLED_SKILLS_KEY).await.unwrap(),
         Some(serde_json::json!(["local.review"])),
@@ -1202,7 +1219,10 @@ async fn a_skill_turned_off_never_reaches_the_engine() {
         "the run's engine has every skill but the one turned off"
     );
 
-    hub.set_skill_enabled("local.review", true).await.unwrap();
+    hub.extensions()
+        .set_skill_enabled("local.review", true)
+        .await
+        .unwrap();
     assert_eq!(
         claude_skills(hub),
         [
@@ -1218,11 +1238,15 @@ async fn a_skill_turned_off_never_reaches_the_engine() {
 async fn a_clash_with_an_engines_own_skill_names_the_engine_as_the_ui_does() {
     let fixture = fixture(Arc::new(|_turn, _io| Box::pin(async { Outcome::done() }))).await;
     let hub = &fixture.hub;
-    write_skill(&hub.skills_dir(), "review", "Reviews the diff.");
+    write_skill(
+        &hub.extensions().skills_dir(),
+        "review",
+        "Reviews the diff.",
+    );
     let claude_skills_dir = hub.engines().home(EngineId::Claude).join(".claude/skills");
     write_skill(&claude_skills_dir, "review", "Claude's own review.");
 
-    let catalog = hub.skill_catalog().await.unwrap();
+    let catalog = hub.extensions().skill_catalog().await.unwrap();
     let review = catalog
         .iter()
         .find(|skill| skill.id == "local.review")
@@ -1247,7 +1271,7 @@ async fn adopting_a_skill_found_in_an_engine_copies_it_into_forge() {
     let claude_skills_dir = hub.engines().home(EngineId::Claude).join(".claude/skills");
     write_skill(&claude_skills_dir, "pdf", "Fills PDF forms.");
 
-    let catalog = hub.skill_catalog().await.unwrap();
+    let catalog = hub.extensions().skill_catalog().await.unwrap();
     let found = catalog
         .iter()
         .find(|skill| skill.origin == artisan_api::SkillOrigin::Discovered)
@@ -1265,9 +1289,9 @@ async fn adopting_a_skill_found_in_an_engine_copies_it_into_forge() {
         artisan_api::SkillEngineStatus::Native
     );
 
-    let catalog = hub.adopt_skill(&found.id).await.unwrap();
+    let catalog = hub.extensions().adopt_skill(&found.id).await.unwrap();
     assert!(
-        hub.skills_dir().join("pdf/SKILL.md").is_file(),
+        hub.extensions().skills_dir().join("pdf/SKILL.md").is_file(),
         "the skill is copied into Forge's skills folder"
     );
     assert_eq!(
@@ -1288,7 +1312,7 @@ async fn adopting_a_skill_found_in_an_engine_copies_it_into_forge() {
         .collect();
     assert_eq!(backups.len(), 1, "the engine's copy is kept as a backup");
 
-    let again = hub.adopt_skill(&found.id).await.unwrap_err();
+    let again = hub.extensions().adopt_skill(&found.id).await.unwrap_err();
     assert!(
         again.downcast_ref::<Refused>().is_some(),
         "adopting twice is refused: {again:#}"
@@ -1311,6 +1335,7 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
         .join(".claude/CLAUDE.md");
 
     let saved = hub
+        .extensions()
         .save_global_prompt(artisan_api::SavePrompt {
             base_version: 0,
             text: "Be brief.".to_owned(),
@@ -1333,7 +1358,7 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
     );
 
     std::fs::write(&file, "My own rules.").unwrap();
-    let prompt = hub.global_prompt().await.unwrap();
+    let prompt = hub.extensions().global_prompt().await.unwrap();
     let state = claude(&prompt);
     assert_eq!(state.status, artisan_api::PromptEngineStatus::Drifted);
     assert_eq!(state.external_text.as_deref(), Some("My own rules."));
@@ -1350,6 +1375,7 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
     );
 
     let refusal = hub
+        .extensions()
         .save_global_prompt(artisan_api::SavePrompt {
             base_version: 0,
             text: "Old base.".to_owned(),
@@ -1362,6 +1388,7 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
     );
 
     let used = hub
+        .extensions()
         .resolve_global_prompt(artisan_api::ResolvePrompt::UseEngine {
             engine: EngineId::Claude,
         })
@@ -1379,6 +1406,7 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
 
     std::fs::write(&file, "Edited again.").unwrap();
     let restored = hub
+        .extensions()
         .resolve_global_prompt(artisan_api::ResolvePrompt::RestoreEngine {
             engine: EngineId::Claude,
         })
@@ -2131,7 +2159,7 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
     let (held, acquired) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
     let guard = tokio::task::spawn_blocking(move || {
-        let _guard = owner.homes_lock().unwrap();
+        let _guard = owner.extensions().homes_lock().unwrap();
         held.send(()).unwrap();
         released.recv().unwrap();
     });

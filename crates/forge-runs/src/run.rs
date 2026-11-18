@@ -626,10 +626,10 @@ pub async fn prepare(
     let mut customisation = hub.customisation().await?;
     customisation
         .mcp_servers
-        .retain(|server| hub.mcp_server_reachable(server));
+        .retain(|server| hub.mcp().server_reachable(server));
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
-        let _homes = owner.homes_lock()?;
+        let _homes = owner.extensions().homes_lock()?;
         anyhow::Ok(owner.engines().materialize(engine, &customisation)?)
     })
     .await

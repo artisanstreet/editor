@@ -201,12 +201,14 @@ async fn mcp_fixture(provider: &Provider) -> Fixture {
 async fn sign_in(fixture: &Fixture) {
     let started = fixture
         .hub
-        .mcp_sign_in_start("linear", REDIRECT)
+        .mcp()
+        .sign_in_start("linear", REDIRECT)
         .await
         .unwrap();
     fixture
         .hub
-        .mcp_sign_in_finish(&started.state, "code")
+        .mcp()
+        .sign_in_finish(&started.state, "code")
         .await
         .unwrap();
 }
@@ -224,7 +226,8 @@ async fn launch_token(fixture: &Fixture) -> Option<String> {
     .unwrap();
     fixture
         .hub
-        .with_mcp_tokens(servers)
+        .mcp()
+        .with_tokens(servers)
         .await
         .remove(0)
         .headers
@@ -232,11 +235,11 @@ async fn launch_token(fixture: &Fixture) -> Option<String> {
 }
 
 async fn status(fixture: &Fixture) -> Option<McpAuthStatus> {
-    fixture.hub.mcp_auth().await.unwrap().remove("linear")
+    fixture.hub.mcp().auth().await.unwrap().remove("linear")
 }
 
 fn waiters_on_lifetime(fixture: &Fixture) -> usize {
-    fixture.hub.mcp_lifetime_holders("linear")
+    fixture.hub.mcp().lifetime_holders("linear")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,7 +247,7 @@ async fn a_check_that_changes_no_status_writes_nothing() {
     let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
     let store = fixture.hub.store();
     let head = store.head();
-    fixture.hub.check_mcp_auth().await;
+    fixture.hub.mcp().check_auth().await;
     assert_eq!(store.head(), head);
 }
 
@@ -260,10 +263,10 @@ async fn a_check_records_a_changed_status_once() {
         .await
         .unwrap();
     let head = store.head();
-    fixture.hub.check_mcp_auth().await;
+    fixture.hub.mcp().check_auth().await;
     assert_eq!(store.head(), head + 1);
-    assert!(fixture.hub.mcp_auth().await.unwrap().is_empty());
-    fixture.hub.check_mcp_auth().await;
+    assert!(fixture.hub.mcp().auth().await.unwrap().is_empty());
+    fixture.hub.mcp().check_auth().await;
     assert_eq!(store.head(), head + 1);
 }
 
@@ -315,11 +318,16 @@ async fn signing_out_cancels_a_waiting_sign_in() {
     let fixture = mcp_fixture(&provider).await;
     let started = fixture
         .hub
-        .mcp_sign_in_start("linear", REDIRECT)
+        .mcp()
+        .sign_in_start("linear", REDIRECT)
         .await
         .unwrap();
-    fixture.hub.mcp_sign_out("linear").await.unwrap();
-    let finished = fixture.hub.mcp_sign_in_finish(&started.state, "code").await;
+    fixture.hub.mcp().sign_out("linear").await.unwrap();
+    let finished = fixture
+        .hub
+        .mcp()
+        .sign_in_finish(&started.state, "code")
+        .await;
     assert!(
         matches!(finished, Err(McpSignInFinishError::Expired)),
         "a sign-in started before signing out finished: {finished:?}"
@@ -334,18 +342,25 @@ async fn signing_out_during_a_token_exchange_stays_signed_out() {
     let fixture = Arc::new(mcp_fixture(&provider).await);
     let started = fixture
         .hub
-        .mcp_sign_in_start("linear", REDIRECT)
+        .mcp()
+        .sign_in_start("linear", REDIRECT)
         .await
         .unwrap();
     provider.token_gate.arm();
     let finishing = tokio::spawn({
         let fixture = Arc::clone(&fixture);
-        async move { fixture.hub.mcp_sign_in_finish(&started.state, "code").await }
+        async move {
+            fixture
+                .hub
+                .mcp()
+                .sign_in_finish(&started.state, "code")
+                .await
+        }
     });
     provider.token_gate.arrived.notified().await;
     let signing_out = tokio::spawn({
         let fixture = Arc::clone(&fixture);
-        async move { fixture.hub.mcp_sign_out("linear").await }
+        async move { fixture.hub.mcp().sign_out("linear").await }
     });
     eventually("sign-out to wait for the exchange", LIMIT, || {
         let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
@@ -373,7 +388,7 @@ async fn signing_out_during_a_refresh_stays_signed_out() {
     provider.token_gate.arrived.notified().await;
     let signing_out = tokio::spawn({
         let fixture = Arc::clone(&fixture);
-        async move { fixture.hub.mcp_sign_out("linear").await }
+        async move { fixture.hub.mcp().sign_out("linear").await }
     });
     eventually("sign-out to wait for the refresh", LIMIT, || {
         let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
@@ -395,7 +410,8 @@ async fn a_registration_is_not_reused_with_another_authorization_server() {
     provider.second_issuer.store(true, Ordering::SeqCst);
     let started = fixture
         .hub
-        .mcp_sign_in_start("linear", REDIRECT)
+        .mcp()
+        .sign_in_start("linear", REDIRECT)
         .await
         .unwrap();
     let second = provider.url("/second");
@@ -415,17 +431,17 @@ async fn a_registration_is_not_reused_with_another_authorization_server() {
 async fn an_unavailable_server_keeps_its_sign_in_state() {
     let (provider, _stub) = provider().await;
     let fixture = mcp_fixture(&provider).await;
-    fixture.hub.check_mcp_auth().await;
+    fixture.hub.mcp().check_auth().await;
     assert_eq!(status(&fixture).await, Some(McpAuthStatus::NeedsSignIn));
     for unavailable in [403, 404, 503] {
         provider.probe_status.store(unavailable, Ordering::SeqCst);
-        fixture.hub.check_mcp_auth().await;
+        fixture.hub.mcp().check_auth().await;
         assert_eq!(
             status(&fixture).await,
             Some(McpAuthStatus::NeedsSignIn),
             "HTTP {unavailable} dropped the sign-in requirement"
         );
-        let started = fixture.hub.mcp_sign_in_start("linear", REDIRECT).await;
+        let started = fixture.hub.mcp().sign_in_start("linear", REDIRECT).await;
         assert!(
             matches!(started, Err(McpSignInStartError::Probe { .. })),
             "HTTP {unavailable} started as {started:?}"
@@ -440,7 +456,7 @@ async fn a_check_does_not_overwrite_a_sign_in_that_finished_meanwhile() {
     provider.probe_gate.arm();
     let checking = tokio::spawn({
         let fixture = Arc::clone(&fixture);
-        async move { fixture.hub.check_mcp_auth().await }
+        async move { fixture.hub.mcp().check_auth().await }
     });
     provider.probe_gate.arrived.notified().await;
     sign_in(&fixture).await;
@@ -455,8 +471,8 @@ async fn concurrent_sign_in_starts_share_one_flow() {
     let (provider, _stub) = provider().await;
     let fixture = mcp_fixture(&provider).await;
     let (first, second) = tokio::join!(
-        fixture.hub.mcp_sign_in_start("linear", REDIRECT),
-        fixture.hub.mcp_sign_in_start("linear", REDIRECT)
+        fixture.hub.mcp().sign_in_start("linear", REDIRECT),
+        fixture.hub.mcp().sign_in_start("linear", REDIRECT)
     );
     assert_eq!(first.unwrap().state, second.unwrap().state);
     assert_eq!(provider.registrations.lock().unwrap().len(), 1);

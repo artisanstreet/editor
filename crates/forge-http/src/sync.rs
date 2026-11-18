@@ -318,7 +318,7 @@ async fn apply(
         }
     }
     if !manifest.skills.is_empty() {
-        let catalog = hub.skill_catalog().await?;
+        let catalog = hub.extensions().skill_catalog().await?;
         for skill in &manifest.skills {
             let suffix = format!(".{}", skill.name);
             let entry = catalog
@@ -333,11 +333,14 @@ async fn apply(
                     )
                 })?;
             if !entry.enabled {
-                hub.set_skill_enabled(&entry.id, true).await?;
+                hub.extensions().set_skill_enabled(&entry.id, true).await?;
                 changed.push(format!("skill:{}", entry.id));
             }
         }
-        hub.reconcile_skills().await.context("reconcile skills")?;
+        hub.extensions()
+            .reconcile_skills()
+            .await
+            .context("reconcile skills")?;
     }
     if let Some(text) = manifest.global_prompt.as_deref() {
         let store = hub.store();
@@ -352,7 +355,8 @@ async fn apply(
                         "the global prompt changed while syncing (now version {latest})"
                     )
                 })?;
-            hub.reconcile_global_prompt()
+            hub.extensions()
+                .reconcile_global_prompt()
                 .await
                 .context("reconcile the global prompt")?;
             changed.push("globalPrompt".to_owned());
@@ -360,7 +364,7 @@ async fn apply(
     }
     let mcp = apply_mcp(hub.store(), &manifest.mcp_servers, synced_before).await?;
     changed.extend(mcp.changed);
-    hub.check_mcp_auth().await;
+    hub.mcp().check_auth().await;
     Ok(Applied {
         changed,
         placed: mcp.placed,
@@ -389,7 +393,8 @@ async fn install_bundle(hub: &forge_runs::Hub, name: &str, bundle: &SkillBundle)
         }
         tokio::fs::write(&path, bytes).await?;
     }
-    hub.install_skill(dir.path().to_path_buf(), true)
+    hub.extensions()
+        .install_skill(dir.path().to_path_buf(), true)
         .await
         .with_context(|| format!("install skill {name}"))?;
     Ok(())
@@ -844,7 +849,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, ConfigOutcome::Updated { .. }));
-        let catalog = hub.skill_catalog().await.unwrap();
+        let catalog = hub.extensions().skill_catalog().await.unwrap();
         let installed = catalog
             .iter()
             .find(|entry| entry.id == "local.syncprobed")
@@ -883,7 +888,7 @@ mod tests {
         // Nothing applied: prompt untouched, no skill installed, no state.
         let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
         assert_eq!(prompt, None);
-        let catalog = hub.skill_catalog().await.unwrap();
+        let catalog = hub.extensions().skill_catalog().await.unwrap();
         assert!(
             catalog.iter().all(|entry| entry.id != "local.brokenskill"),
             "no partial install may remain"

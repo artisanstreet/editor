@@ -1,13 +1,15 @@
-use crate::Hub;
+use crate::mcp_reach::Endpoint;
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
 use forge_engines::mcp_oauth::{
     self, Client, Discovery, Pkce, Probe, ProbeError, RegistrationError, Revocation, TokenError,
     Tokens,
 };
 use forge_store::McpSecret;
+use forge_store::Store;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const FLOW_LASTS: Duration = Duration::from_mins(10);
@@ -15,7 +17,7 @@ const FLOW_LASTS: Duration = Duration::from_mins(10);
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Default)]
-pub struct Flows {
+struct Flows {
     by_state: HashMap<String, Flow>,
     lifetimes: HashMap<String, Arc<tokio::sync::Mutex<Lifetime>>>,
 }
@@ -161,8 +163,30 @@ fn chain(error: &(dyn std::error::Error + 'static)) -> String {
         .join(": ")
 }
 
-impl Hub {
-    async fn mcp_servers(&self) -> Result<Vec<McpServer>, McpStoreError> {
+pub struct Mcp {
+    store: Store,
+    flows: Mutex<Flows>,
+    http: mcp_oauth::Http,
+    writes: tokio::sync::Mutex<()>,
+    pub(crate) unreachable: Mutex<HashSet<Endpoint>>,
+}
+
+impl Mcp {
+    pub(crate) fn new(store: Store) -> Self {
+        Self {
+            store,
+            flows: Mutex::default(),
+            http: mcp_oauth::Http::new(),
+            writes: tokio::sync::Mutex::new(()),
+            unreachable: Mutex::default(),
+        }
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    async fn servers(&self) -> Result<Vec<McpServer>, McpStoreError> {
         self.store()
             .setting("mcp_servers")
             .await
@@ -173,12 +197,9 @@ impl Hub {
             .map(Option::unwrap_or_default)
     }
 
-    async fn mcp_server_named(
-        &self,
-        name: &str,
-    ) -> Result<(McpServer, String), McpSignInStartError> {
+    async fn server_named(&self, name: &str) -> Result<(McpServer, String), McpSignInStartError> {
         let server = self
-            .mcp_servers()
+            .servers()
             .await?
             .into_iter()
             .find(|server| server.name == name)
@@ -193,35 +214,39 @@ impl Hub {
         Ok((server, url))
     }
 
-    fn flows(&self) -> std::sync::MutexGuard<'_, Flows> {
-        self.inner
-            .mcp_flows
+    fn flows_lock(&self) -> std::sync::MutexGuard<'_, Flows> {
+        self.flows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn mcp_lifetime(&self, server: &str) -> Arc<tokio::sync::Mutex<Lifetime>> {
-        Arc::clone(self.flows().lifetimes.entry(server.to_owned()).or_default())
+    fn lifetime(&self, server: &str) -> Arc<tokio::sync::Mutex<Lifetime>> {
+        Arc::clone(
+            self.flows_lock()
+                .lifetimes
+                .entry(server.to_owned())
+                .or_default(),
+        )
     }
 
     #[cfg(test)]
-    pub(crate) fn mcp_lifetime_holders(&self, server: &str) -> usize {
-        self.flows()
+    pub(crate) fn lifetime_holders(&self, server: &str) -> usize {
+        self.flows_lock()
             .lifetimes
             .get(server)
             .map_or(0, Arc::strong_count)
     }
 
-    pub async fn mcp_sign_in_start(
+    pub async fn sign_in_start(
         &self,
         name: &str,
         redirect_uri: &str,
     ) -> Result<McpSignInStarted, McpSignInStartError> {
-        let (server, url) = self.mcp_server_named(name).await?;
-        let lifetime = self.mcp_lifetime(name);
+        let (server, url) = self.server_named(name).await?;
+        let lifetime = self.lifetime(name);
         let lifetime = lifetime.lock().await;
         {
-            let mut flows = self.flows();
+            let mut flows = self.flows_lock();
             flows.by_state.retain(|_, flow| flow.alive());
             if let Some((state, flow)) = flows.by_state.iter().find(|(_, flow)| {
                 flow.server == name
@@ -236,7 +261,7 @@ impl Hub {
             }
         }
         let headers: Vec<(String, String)> = server.headers.clone().into_iter().collect();
-        let probed = mcp_oauth::probe(&self.inner.mcp_http, name, &url, &headers)
+        let probed = mcp_oauth::probe(&self.http, name, &url, &headers)
             .await
             .map_err(|source| McpSignInStartError::Probe {
                 server: name.to_owned(),
@@ -245,28 +270,26 @@ impl Hub {
         let discovery = match probed {
             Probe::SignIn(discovery) => *discovery,
             Probe::Open => {
-                self.record_mcp_auth(name, None).await?;
+                self.record_auth(name, None).await?;
                 return Err(McpSignInStartError::Open {
                     server: name.to_owned(),
                 });
             }
             Probe::NeedsToken => {
-                self.record_mcp_auth(name, Some(McpAuthStatus::NeedsToken))
+                self.record_auth(name, Some(McpAuthStatus::NeedsToken))
                     .await?;
                 return Err(McpSignInStartError::NeedsToken {
                     server: name.to_owned(),
                 });
             }
         };
-        let client = self
-            .mcp_client(name, &url, &discovery, redirect_uri)
-            .await?;
+        let client = self.client(name, &url, &discovery, redirect_uri).await?;
         let pkce = Pkce::new().map_err(|source| McpSignInStartError::Random {
             server: name.to_owned(),
             source,
         })?;
         let authorize_url = mcp_oauth::authorize_url(&discovery, &client, &pkce);
-        self.flows().by_state.insert(
+        self.flows_lock().by_state.insert(
             pkce.state.clone(),
             Flow {
                 server: name.to_owned(),
@@ -279,7 +302,7 @@ impl Hub {
                 started: Instant::now(),
             },
         );
-        self.record_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
+        self.record_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await?;
         Ok(McpSignInStarted {
             authorize_url,
@@ -287,7 +310,7 @@ impl Hub {
         })
     }
 
-    async fn mcp_client(
+    async fn client(
         &self,
         name: &str,
         url: &str,
@@ -312,7 +335,7 @@ impl Hub {
         if let Some(client) = reusable {
             return Ok(client);
         }
-        let client = mcp_oauth::register(&self.inner.mcp_http, name, discovery, redirect_uri)
+        let client = mcp_oauth::register(&self.http, name, discovery, redirect_uri)
             .await
             .map_err(|source| McpSignInStartError::Registration {
                 server: name.to_owned(),
@@ -337,18 +360,18 @@ impl Hub {
         Ok(client)
     }
 
-    pub async fn mcp_sign_in_finish(
+    pub async fn sign_in_finish(
         &self,
         state: &str,
         code: &str,
     ) -> Result<String, McpSignInFinishError> {
         let flow = self
-            .flows()
+            .flows_lock()
             .by_state
             .remove(state)
             .filter(Flow::alive)
             .ok_or(McpSignInFinishError::Expired)?;
-        let lifetime = self.mcp_lifetime(&flow.server);
+        let lifetime = self.lifetime(&flow.server);
         let lifetime = lifetime.lock().await;
         if lifetime.signed_out != flow.signed_out {
             return Err(McpSignInFinishError::SignedOut {
@@ -356,7 +379,7 @@ impl Hub {
             });
         }
         let tokens = mcp_oauth::exchange(
-            &self.inner.mcp_http,
+            &self.http,
             &flow.server,
             &flow.discovery,
             &flow.client,
@@ -375,40 +398,44 @@ impl Hub {
             client: flow.client,
             tokens,
         };
-        if !self.keep_mcp_tokens(&flow.server, &saved).await? {
+        if !self.keep_tokens(&flow.server, &saved).await? {
             return Err(McpSignInFinishError::Removed {
                 server: flow.server,
             });
         }
-        self.record_mcp_auth(&flow.server, Some(McpAuthStatus::SignedIn))
+        self.record_auth(&flow.server, Some(McpAuthStatus::SignedIn))
             .await?;
         drop(lifetime);
         Ok(flow.server)
     }
 
-    pub fn mcp_sign_in_cancel(&self, state: &str) {
-        self.flows().by_state.remove(state);
+    pub fn sign_in_cancel(&self, state: &str) {
+        self.flows_lock().by_state.remove(state);
     }
 
-    pub async fn mcp_sign_out(&self, name: &str) -> Result<(), McpStoreError> {
-        self.flows().by_state.retain(|_, flow| flow.server != name);
-        let lifetime = self.mcp_lifetime(name);
+    pub async fn sign_out(&self, name: &str) -> Result<(), McpStoreError> {
+        self.flows_lock()
+            .by_state
+            .retain(|_, flow| flow.server != name);
+        let lifetime = self.lifetime(name);
         let mut lifetime = lifetime.lock().await;
         lifetime.signed_out += 1;
-        self.flows().by_state.retain(|_, flow| flow.server != name);
-        self.forget_mcp_tokens(name).await
+        self.flows_lock()
+            .by_state
+            .retain(|_, flow| flow.server != name);
+        self.forget_tokens(name).await
     }
 
-    async fn forget_mcp_tokens(&self, name: &str) -> Result<(), McpStoreError> {
+    async fn forget_tokens(&self, name: &str) -> Result<(), McpStoreError> {
         self.store()
             .set_secret(&McpSecret::Tokens.key(name), None)
             .await
             .map_err(store_error(name, "forgetting the tokens"))?;
-        self.record_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
+        self.record_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await
     }
 
-    async fn keep_mcp_tokens(&self, name: &str, saved: &Saved) -> Result<bool, McpStoreError> {
+    async fn keep_tokens(&self, name: &str, saved: &Saved) -> Result<bool, McpStoreError> {
         self.store()
             .set_mcp_secret(
                 name.to_owned(),
@@ -421,15 +448,15 @@ impl Hub {
             .map_err(store_error(name, "saving the tokens"))
     }
 
-    pub async fn check_mcp_auth(&self) {
-        if let Err(error) = self.check_mcp_auth_inner().await {
+    pub async fn check_auth(&self) {
+        if let Err(error) = self.check_auth_inner().await {
             tracing::warn!("checking MCP sign-ins: {}", chain(&error));
         }
     }
 
-    async fn check_mcp_auth_inner(&self) -> Result<(), McpStoreError> {
+    async fn check_auth_inner(&self) -> Result<(), McpStoreError> {
         let mut observed = Vec::new();
-        for server in self.mcp_servers().await? {
+        for server in self.servers().await? {
             let Some(url) = http_url(&server).map(str::to_owned) else {
                 continue;
             };
@@ -437,17 +464,17 @@ impl Hub {
                 continue;
             }
             let headers: Vec<(String, String)> = server.headers.clone().into_iter().collect();
-            match mcp_oauth::probe(&self.inner.mcp_http, &server.name, &url, &headers).await {
+            match mcp_oauth::probe(&self.http, &server.name, &url, &headers).await {
                 Ok(probed) => observed.push((server.name, url, probed)),
                 Err(error) => {
                     tracing::debug!(server = %server.name, "probing for sign-in: {}", chain(&error));
                 }
             }
         }
-        let _writes = self.inner.mcp_auth_writes.lock().await;
-        let servers = self.mcp_servers().await?;
+        let _writes = self.writes.lock().await;
+        let servers = self.servers().await?;
         let recorded = self
-            .mcp_auth()
+            .auth()
             .await
             .map_err(|source| McpStoreError::Statuses {
                 step: "reading",
@@ -512,7 +539,7 @@ impl Hub {
         }
     }
 
-    pub async fn mcp_auth(&self) -> anyhow::Result<BTreeMap<String, McpAuthStatus>> {
+    pub async fn auth(&self) -> anyhow::Result<BTreeMap<String, McpAuthStatus>> {
         Ok(self
             .store()
             .setting(MCP_AUTH_KEY)
@@ -522,19 +549,19 @@ impl Hub {
             .unwrap_or_default())
     }
 
-    async fn record_mcp_auth(
+    async fn record_auth(
         &self,
         name: &str,
         status: Option<McpAuthStatus>,
     ) -> Result<(), McpStoreError> {
-        self.set_mcp_auth(name, status)
+        self.set_auth(name, status)
             .await
             .map_err(store_error(name, "recording the sign-in state"))
     }
 
-    async fn set_mcp_auth(&self, name: &str, status: Option<McpAuthStatus>) -> anyhow::Result<()> {
-        let _guard = self.inner.mcp_auth_writes.lock().await;
-        let mut statuses = self.mcp_auth().await?;
+    async fn set_auth(&self, name: &str, status: Option<McpAuthStatus>) -> anyhow::Result<()> {
+        let _guard = self.writes.lock().await;
+        let mut statuses = self.auth().await?;
         match status {
             Some(status) => statuses.insert(name.to_owned(), status),
             None => statuses.remove(name),
@@ -559,7 +586,7 @@ impl Hub {
         Ok(Some(saved).filter(|saved| saved.url == url))
     }
 
-    pub(crate) async fn with_mcp_tokens(&self, mut servers: Vec<McpServer>) -> Vec<McpServer> {
+    pub(crate) async fn with_tokens(&self, mut servers: Vec<McpServer>) -> Vec<McpServer> {
         for server in &mut servers {
             let Some(url) = http_url(server).map(str::to_owned) else {
                 continue;
@@ -590,7 +617,7 @@ impl Hub {
             }
             Some(_) => {}
         }
-        let lifetime = self.mcp_lifetime(name);
+        let lifetime = self.lifetime(name);
         let lifetime = lifetime.lock().await;
         let Some(mut saved) = self.saved(name, url).await? else {
             return Ok(None);
@@ -600,11 +627,11 @@ impl Hub {
             return Ok(Some(saved.tokens.access_token().expose().to_owned()));
         }
         let Some(refresh_token) = saved.tokens.refresh_token().cloned() else {
-            self.forget_mcp_tokens(name).await?;
+            self.forget_tokens(name).await?;
             return Ok(None);
         };
         let refreshed = mcp_oauth::refresh(
-            &self.inner.mcp_http,
+            &self.http,
             name,
             &saved.discovery,
             &saved.client,
@@ -615,7 +642,7 @@ impl Hub {
         let token = match refreshed {
             Ok(tokens) => {
                 saved.tokens = tokens;
-                self.keep_mcp_tokens(name, &saved)
+                self.keep_tokens(name, &saved)
                     .await?
                     .then(|| saved.tokens.access_token().expose().to_owned())
             }
@@ -630,7 +657,7 @@ impl Hub {
                         .await
                         .map_err(store_error(name, "forgetting Artisan's registration"))?;
                 }
-                self.forget_mcp_tokens(name).await?;
+                self.forget_tokens(name).await?;
                 None
             }
             Err(error) => {
