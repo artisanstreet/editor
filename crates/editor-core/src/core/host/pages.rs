@@ -1,11 +1,13 @@
 use super::{HostCompletion, HostData, HostEvent, HostMessage};
 use crate::core::{client::CallError, hosts::HostId};
 use artisan_api::{Thread, ThreadCursor, ThreadId, ThreadWindow, ThreadsQuery};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
 const PAGE: u32 = 200;
+const RETAINED: usize = 5 * PAGE as usize;
 const CHANGES: usize = 600;
 
 #[derive(Clone, Copy)]
@@ -32,12 +34,78 @@ enum PageLoad {
 #[derive(Default)]
 pub struct ThreadPage {
     ids: Vec<ThreadId>,
+    members: HashSet<ThreadId>,
     next: Option<ThreadCursor>,
     at_latest: bool,
     load: PageLoad,
 }
 
+fn newest_first(a: &Thread, b: &Thread) -> Ordering {
+    b.activity_seq
+        .cmp(&a.activity_seq)
+        .then_with(|| b.id.cmp(&a.id))
+}
+
 impl ThreadPage {
+    fn place(&self, thread: &Thread, threads: &HashMap<ThreadId, Thread>) -> usize {
+        self.ids
+            .partition_point(|id| newest_first(&threads[id], thread) == Ordering::Less)
+    }
+
+    fn insert(&mut self, id: &ThreadId, threads: &HashMap<ThreadId, Thread>) {
+        if self.members.insert(id.clone()) {
+            let at = self.place(&threads[id], threads);
+            self.ids.insert(at, id.clone());
+        }
+    }
+
+    fn remove(
+        &mut self,
+        id: &ThreadId,
+        stored: Option<&Thread>,
+        threads: &HashMap<ThreadId, Thread>,
+    ) {
+        if !self.members.remove(id) {
+            return;
+        }
+        let at = stored
+            .map(|thread| self.place(thread, threads))
+            .filter(|at| self.ids.get(*at) == Some(id))
+            .or_else(|| self.ids.iter().position(|known| known == id))
+            .expect("invariant: every page member is listed in the page");
+        self.ids.remove(at);
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&ThreadId) -> bool) {
+        self.ids.retain(|id| keep(id));
+        self.members = self.ids.iter().cloned().collect();
+    }
+
+    fn window(&mut self, older: bool, threads: &HashMap<ThreadId, Thread>) {
+        let Some(excess) = self
+            .ids
+            .len()
+            .checked_sub(RETAINED)
+            .filter(|excess| *excess > 0)
+        else {
+            return;
+        };
+        let dropped: Vec<ThreadId> = if older {
+            self.at_latest = false;
+            self.ids.drain(..excess).collect()
+        } else {
+            let dropped = self.ids.split_off(RETAINED);
+            self.next = self.ids.last().map(|id| ThreadCursor {
+                activity_seq: threads[id].activity_seq,
+                id: id.clone(),
+            });
+            dropped
+        };
+        for id in &dropped {
+            self.members.remove(id);
+        }
+    }
+
     #[must_use]
     pub fn ids(&self) -> &[ThreadId] {
         &self.ids
@@ -110,8 +178,46 @@ pub(super) struct ThreadPages {
     queued: VecDeque<ThreadId>,
     recent: VecDeque<ThreadId>,
     unavailable: HashMap<ThreadId, ThreadUnavailable>,
-    removed: HashSet<ThreadId>,
+    removed: HashMap<ThreadId, u64>,
     generation: u64,
+}
+
+impl ThreadPages {
+    fn retire_removed(&mut self) {
+        let oldest = self
+            .pages
+            .iter()
+            .filter_map(|page| match page.load {
+                PageLoad::Loading { generation, .. } => Some(generation),
+                PageLoad::Unloaded | PageLoad::Ready | PageLoad::Failed(_) => None,
+            })
+            .chain(self.direct.values().map(|(generation, _)| *generation))
+            .min();
+        match oldest {
+            Some(oldest) => self.removed.retain(|_, removed| oldest <= *removed),
+            None => self.removed.clear(),
+        }
+    }
+
+    fn deleted(&self, id: &ThreadId) -> bool {
+        self.removed.contains_key(id)
+            || matches!(self.unavailable.get(id), Some(ThreadUnavailable::Deleted))
+    }
+}
+
+enum Accepted {
+    Refused,
+    New,
+    Replaced(Thread),
+}
+
+fn listed_in(thread: &Thread, archived: bool) -> bool {
+    thread.archived == archived && thread.parent_thread_id.is_none()
+}
+
+fn inbox_worthy(thread: &Thread) -> bool {
+    let settled = thread.settled_seq > 0 && thread.settled_seq >= thread.activity_seq;
+    listed_in(thread, false) && thread.is_unread() && !settled
 }
 
 impl HostData {
@@ -132,11 +238,23 @@ impl HostData {
     pub fn thread_unavailable(&self, id: &ThreadId) -> Option<&ThreadUnavailable> {
         self.thread_pages.unavailable.get(id)
     }
-    pub fn fill_threads(&mut self) {
-        let page = self.thread_page(false);
-        if matches!(page.load, PageLoad::Ready) && page.next.is_some() {
-            self.load_threads(false, ThreadPageDirection::Older);
+    fn store_thread(&mut self, thread: Thread) -> Option<Thread> {
+        let id = thread.id.clone();
+        let mut placed = [false; 2];
+        for (index, page) in self.thread_pages.pages.iter_mut().enumerate() {
+            if page.members.contains(&id) {
+                let stored = self.threads.get(&id);
+                page.remove(&id, stored, &self.threads);
+                placed[index] = true;
+            }
         }
+        let old = self.threads.insert(id.clone(), thread);
+        for (index, page) in self.thread_pages.pages.iter_mut().enumerate() {
+            if placed[index] {
+                page.insert(&id, &self.threads);
+            }
+        }
+        old
     }
     pub(super) fn reset_thread_pages(&mut self, next: Option<ThreadCursor>) {
         let generation = self.thread_pages.generation.wrapping_add(1);
@@ -144,27 +262,25 @@ impl HostData {
             generation,
             ..ThreadPages::default()
         };
-        let mut ids: Vec<_> = self
+        let mut threads: Vec<&Thread> = self
             .threads
             .values()
-            .filter(|thread| !thread.archived && thread.parent_thread_id.is_none())
+            .filter(|thread| listed_in(thread, false))
+            .collect();
+        threads.sort_by(|a, b| newest_first(a, b));
+        threads.truncate(PAGE as usize);
+        let ids: Vec<ThreadId> = threads
+            .into_iter()
             .map(|thread| thread.id.clone())
             .collect();
-        ids.sort_by(|a, b| {
-            self.threads[b]
-                .activity_seq
-                .cmp(&self.threads[a].activity_seq)
-                .then_with(|| b.cmp(a))
-        });
-        ids.truncate(PAGE as usize);
-        let page = ThreadPage {
+        let members = ids.iter().cloned().collect();
+        self.thread_pages.pages[0] = ThreadPage {
             ids,
+            members,
             next,
             at_latest: true,
             load: PageLoad::Ready,
         };
-        self.thread_pages.pages[0] = page;
-        self.fill_threads();
     }
     pub fn load_threads(&mut self, archived: bool, direction: ThreadPageDirection) {
         let page = &mut self.thread_pages.pages[usize::from(archived)];
@@ -260,8 +376,8 @@ impl HostData {
                 self.merge_thread_page(archived, direction, started_seq, result, &changed);
             }
         }
+        self.thread_pages.retire_removed();
         self.prune_threads();
-        self.fill_threads();
         true
     }
     fn merge_thread_page(
@@ -274,13 +390,15 @@ impl HostData {
     ) {
         let older = matches!(direction, ThreadPageDirection::Older);
         let newer = matches!(direction, ThreadPageDirection::Newer);
-        let page = &mut self.thread_pages.pages[usize::from(archived)];
+        let index = usize::from(archived);
+        let page = &mut self.thread_pages.pages[index];
         if newer {
             page.at_latest = !result.newer;
         } else {
             if !older {
-                page.ids.retain(|id| {
-                    self.threads
+                let threads = &self.threads;
+                page.retain(|id| {
+                    threads
                         .get(id)
                         .is_some_and(|thread| thread.seq > started_seq)
                 });
@@ -290,42 +408,38 @@ impl HostData {
         }
         for thread in result.threads {
             let id = thread.id.clone();
-            if self.thread_pages.removed.contains(&id) {
+            if self.thread_pages.deleted(&id) {
                 continue;
             }
             self.accept_thread(thread);
-            let page = &mut self.thread_pages.pages[usize::from(archived)];
-            if self.threads.get(&id).is_some_and(|thread| {
-                thread.archived == archived && thread.parent_thread_id.is_none()
-            }) && !page.ids.contains(&id)
+            if self
+                .threads
+                .get(&id)
+                .is_some_and(|thread| listed_in(thread, archived))
             {
-                page.ids.push(id);
+                self.thread_pages.pages[index].insert(&id, &self.threads);
             }
         }
         for run in result.runs {
             self.remember_run(run);
         }
-        let page = &mut self.thread_pages.pages[usize::from(archived)];
+        let page = &mut self.thread_pages.pages[index];
         if page.at_latest {
             for id in changed {
-                if self.threads.get(id).is_some_and(|thread| {
-                    thread.archived == archived && thread.parent_thread_id.is_none()
-                }) && !page.ids.contains(id)
+                if self
+                    .threads
+                    .get(id)
+                    .is_some_and(|thread| listed_in(thread, archived))
                 {
-                    page.ids.push(id.clone());
+                    page.insert(id, &self.threads);
                 }
             }
         }
-        page.ids.sort_by(|a, b| {
-            self.threads[b]
-                .activity_seq
-                .cmp(&self.threads[a].activity_seq)
-                .then_with(|| b.cmp(a))
-        });
+        page.window(older, &self.threads);
     }
 
     pub fn ensure_thread(&mut self, id: &ThreadId) {
-        if self.thread_pages.removed.contains(id) {
+        if self.thread_pages.deleted(id) {
             return;
         }
         self.thread_pages.recent.retain(|known| known != id);
@@ -404,6 +518,7 @@ impl HostData {
                     .insert(id.clone(), ThreadUnavailable::Failed(Arc::new(error)));
             }
         }
+        self.thread_pages.retire_removed();
         self.prune_threads();
         self.pump_thread_lookups();
         self.pending_events
@@ -411,27 +526,29 @@ impl HostData {
         true
     }
     pub(super) fn is_deleted(&self, id: &ThreadId) -> bool {
-        self.thread_pages.removed.contains(id)
+        self.thread_pages.deleted(id)
     }
-    fn accept_thread(&mut self, thread: Thread) -> bool {
-        if self.thread_pages.removed.contains(&thread.id)
+    fn accept_thread(&mut self, thread: Thread) -> Accepted {
+        if self.thread_pages.deleted(&thread.id)
             || self
                 .threads
                 .get(&thread.id)
                 .is_some_and(|old| old.seq > thread.seq)
         {
-            return false;
+            return Accepted::Refused;
         }
-        self.threads.insert(thread.id.clone(), thread);
-        true
+        self.store_thread(thread)
+            .map_or(Accepted::New, Accepted::Replaced)
     }
     pub(super) fn remember_thread(&mut self, thread: Thread) -> bool {
         let id = thread.id.clone();
         let index = usize::from(thread.archived);
         let top_level = thread.parent_thread_id.is_none();
-        if !self.accept_thread(thread) {
-            return false;
-        }
+        let old = match self.accept_thread(thread) {
+            Accepted::Refused => return false,
+            Accepted::New => None,
+            Accepted::Replaced(old) => Some(old),
+        };
         for page in &mut self.thread_pages.pages {
             if let PageLoad::Loading { changed, .. } = &mut page.load {
                 changed.insert(id.clone());
@@ -440,28 +557,26 @@ impl HostData {
                 }
             }
         }
-        self.thread_pages.pages[1 - index]
-            .ids
-            .retain(|known| known != &id);
-        let page = &mut self.thread_pages.pages[index];
-        if top_level && page.is_loaded() && (page.at_latest || page.ids.contains(&id)) {
-            if !page.ids.contains(&id) {
-                page.ids.push(id);
-            }
-            page.ids.sort_by(|a, b| {
-                self.threads[b]
-                    .activity_seq
-                    .cmp(&self.threads[a].activity_seq)
-                    .then_with(|| b.cmp(a))
-            });
+        let moved = old
+            .as_ref()
+            .is_some_and(|old| usize::from(old.archived) != index);
+        if moved {
+            self.thread_pages.pages[1 - index].remove(&id, None, &self.threads);
         }
-        self.prune_threads();
+        let page = &mut self.thread_pages.pages[index];
+        let joined = top_level && page.is_loaded() && page.at_latest && !page.members.contains(&id);
+        if joined {
+            page.insert(&id, &self.threads);
+        }
+        if old.is_none() || moved || joined {
+            self.prune_threads();
+        }
         true
     }
     pub(super) fn forget_thread(&mut self, id: &ThreadId) {
         let pages = &mut self.thread_pages;
         for page in &mut pages.pages {
-            page.ids.retain(|known| known != id);
+            page.remove(id, None, &self.threads);
             if let PageLoad::Loading { changed, .. } = &mut page.load {
                 changed.remove(id);
             }
@@ -471,7 +586,8 @@ impl HostData {
         pages
             .unavailable
             .insert(id.clone(), ThreadUnavailable::Deleted);
-        pages.removed.insert(id.clone());
+        pages.removed.insert(id.clone(), pages.generation);
+        pages.retire_removed();
         self.threads.remove(id);
         self.runs.remove(id);
         self.stopping.remove(id);
@@ -494,6 +610,12 @@ impl HostData {
             })
             .chain(self.thread_pages.recent.iter().cloned())
             .collect();
+        keep.extend(
+            self.threads
+                .values()
+                .filter(|thread| inbox_worthy(thread))
+                .map(|thread| thread.id.clone()),
+        );
         keep.extend(self.observed.borrow().iter().cloned());
         keep.extend(self.read_acks.keys().cloned());
         keep.extend(

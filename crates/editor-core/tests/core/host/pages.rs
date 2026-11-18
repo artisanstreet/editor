@@ -234,15 +234,7 @@ fn archived_threads_land_only_in_the_archive_and_older_pages_append() {
             )
             .await;
     });
-    let host = forge.host.clone();
-    wait_until(
-        "the next page starts loading",
-        Duration::from_secs(10),
-        || {
-            forge.core.drain_with(|_, _| {});
-            forge.generation(false) != first
-        },
-    );
+    forge.settle(false);
     assert_eq!(
         forge.ids(false),
         ["newest"],
@@ -251,12 +243,13 @@ fn archived_threads_land_only_in_the_archive_and_older_pages_append() {
     assert!(
         forge
             .core
-            .host(&host)
+            .host(&forge.host)
             .expect("host")
             .thread_page(false)
-            .is_loading(),
-        "the list fills itself with the next older page"
+            .has_older(),
+        "older threads wait until the list scrolls to them"
     );
+    forge.start_loading(false, ThreadPageDirection::Older);
     let older = forge.generation(false);
     let sender = forge
         .core
@@ -447,5 +440,57 @@ fn a_queued_older_run_event_does_not_undo_a_newer_page() {
     assert!(
         !forge.working("finished"),
         "the finished run stays finished"
+    );
+}
+
+#[test]
+fn scrolling_far_back_keeps_a_bounded_window_and_reloads_newer_threads() {
+    let mut forge = silent_host();
+    let sender = forge
+        .core
+        .host(&forge.host)
+        .expect("host")
+        .test_transition_sender();
+    let mut activity = 10_000;
+    let mut direction = ThreadPageDirection::Latest;
+    for _ in 0..8 {
+        let generation = forge.start_loading(false, direction);
+        let threads: Vec<Thread> = (0..200)
+            .map(|_| {
+                activity -= 1;
+                let mut read = thread(&format!("t{activity}"), activity, activity, false);
+                read.read_seq = activity;
+                read
+            })
+            .collect();
+        let last = threads.last().expect("a full page").id.clone();
+        runtime().block_on(sender.thread_page(
+            false,
+            direction,
+            0,
+            generation,
+            ThreadsPage {
+                next: Some(artisan_api::ThreadCursor {
+                    activity_seq: activity,
+                    id: last,
+                }),
+                ..page(threads)
+            },
+        ));
+        forge.settle(false);
+        direction = ThreadPageDirection::Older;
+    }
+    let ids = forge.ids(false);
+    assert_eq!(ids.len(), 1_000, "the list keeps five pages");
+    assert_eq!(ids.first().map(String::as_str), Some("t9399"));
+    assert_eq!(ids.last().map(String::as_str), Some("t8400"));
+    let host = forge.core.host(&forge.host).expect("host");
+    assert!(
+        !host.thread_page(false).at_latest(),
+        "scrolling back up asks for the newer threads again"
+    );
+    assert!(
+        host.threads.len() <= 1_000,
+        "threads outside the window are released"
     );
 }

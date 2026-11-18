@@ -2331,14 +2331,6 @@ impl RootViews {
                 }
             }
         }
-        if let Some(host) = workspace
-            .sidebar
-            .host
-            .as_ref()
-            .and_then(|id| core.host_mut(id))
-        {
-            host.fill_threads();
-        }
         if !self.sidebar.refresh_due(std::time::Instant::now()) {
             return outlined;
         }
