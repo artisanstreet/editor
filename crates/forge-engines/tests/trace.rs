@@ -1,4 +1,4 @@
-use forge_engines::trace::{Kind, Started, Trace};
+use forge_engines::trace::{Kind, Secrets, Started, Trace};
 use serde_json::Value;
 
 #[expect(clippy::unwrap_used, reason = "a writer that panicked fails the test")]
@@ -32,7 +32,7 @@ fn of_kind<'a>(records: &'a [Value], kind: &str) -> Vec<&'a Value> {
 #[test]
 fn an_oversized_record_is_kept_truncated_and_says_how_long_it_was() {
     let dir = tempfile::tempdir().unwrap();
-    let started = Trace::start(dir.path(), "claude-t-1").unwrap();
+    let started = Trace::start(dir.path(), "claude-t-1", Secrets::default()).unwrap();
     let long = "é".repeat(200 * 1024);
     started.trace.record(Kind::Out, &long);
     finish(started);
@@ -53,7 +53,7 @@ fn an_oversized_record_is_kept_truncated_and_says_how_long_it_was() {
 #[test]
 fn every_record_past_the_budget_is_counted_as_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let started = Trace::start(dir.path(), "codex-t-2").unwrap();
+    let started = Trace::start(dir.path(), "codex-t-2", Secrets::default()).unwrap();
     let chunk = "x".repeat(200 * 1024);
     let sent = 120;
     for _ in 0..sent {
@@ -75,5 +75,65 @@ fn every_record_past_the_budget_is_counted_as_dropped() {
         written as u64 + marked + at_end,
         sent + 1,
         "every record is either written or counted as dropped"
+    );
+}
+
+#[test]
+fn launch_credentials_never_reach_the_trace() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut launch = forge_engines::Launch::default();
+    forge_engines::with_gateway_mcp(
+        artisan_api::EngineId::Codex,
+        &mut launch,
+        "artisan",
+        "https://127.0.0.1:4100/mcp/artisan/gateway-token-0123456789",
+    );
+    launch.mcp_servers.push(forge_engines::McpServer {
+        name: "docs".to_owned(),
+        url: Some("https://docs.example/mcp".to_owned()),
+        headers: [(
+            "Authorization".to_owned(),
+            "Bearer \"header-secret\"".to_owned(),
+        )]
+        .into(),
+        ..forge_engines::McpServer::default()
+    });
+    launch.env.push((
+        "OPENCODE_SERVER_PASSWORD".to_owned(),
+        "server-password-42".to_owned(),
+    ));
+    let started = Trace::start(dir.path(), "codex-t-3", Secrets::of(&launch)).unwrap();
+    let frame = serde_json::json!({
+        "method": "thread/start",
+        "params": {
+            "config": {
+                "mcp_servers": {
+                    "artisan": { "url": "https://127.0.0.1:4100/mcp/artisan/gateway-token-0123456789" },
+                    "docs": { "http_headers": { "Authorization": "Bearer \"header-secret\"" } },
+                },
+            },
+            "text": "the token was gateway-token-0123456789 and the password server-password-42",
+        },
+    });
+    started.trace.record(Kind::In, &frame.to_string());
+    finish(started);
+    let records = records(dir.path());
+    let traced = of_kind(&records, "in")[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for secret in [
+        "gateway-token-0123456789",
+        "header-secret",
+        "server-password-42",
+    ] {
+        assert!(
+            !traced.contains(secret),
+            "the trace kept {secret}: {traced}"
+        );
+    }
+    assert!(
+        traced.contains("thread/start") && traced.contains("[redacted]"),
+        "the frame is kept with its credentials redacted: {traced}"
     );
 }

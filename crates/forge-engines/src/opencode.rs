@@ -164,7 +164,7 @@ async fn ready(server: &mut EngineProcess) -> Result<String> {
         if let Some((_, url)) = line.split_once("listening on ") {
             return Ok(url.trim().trim_end_matches('/').to_owned());
         }
-        tracing::debug!(target: "engine_stdout", "{line}");
+        tracing::debug!(target: "engine_stdout", bytes = line.len(), "OpenCode wrote to stdout");
     }
     bail!("OpenCode exited before it was ready")
 }
@@ -254,7 +254,7 @@ async fn drive(
                         None => bail!("OpenCode's event stream closed mid-run"),
                     },
                     line = server.next_line() => match line {
-                        Ok(Some(line)) => tracing::debug!(target: "engine_stdout", "{line}"),
+                        Ok(Some(line)) => tracing::debug!(target: "engine_stdout", bytes = line.len(), "OpenCode wrote to stdout"),
                         _ => bail!("OpenCode exited mid-run"),
                     },
                 }
@@ -574,7 +574,7 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>> {
         .await
         .map_err(|_elapsed| anyhow!("OpenCode's event stream sent nothing"))?
         .context("OpenCode's event stream closed at once")?;
-    tracing::debug!(target: "engine_stdout", "{first}");
+    tracing::debug!(target: "engine_events", bytes = first.len(), "OpenCode's event stream opened");
     Ok(receiver)
 }
 

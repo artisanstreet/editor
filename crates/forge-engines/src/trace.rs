@@ -75,7 +75,69 @@ impl Record {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct Secrets(Arc<[String]>);
+
+const MIN_SECRET_BYTES: usize = 8;
+const SECRET_ENV_MARKERS: [&str; 7] = [
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "AUTH",
+    "CREDENTIAL",
+    "COOKIE",
+];
+const REDACTED: &str = "[redacted]";
+
+impl Secrets {
+    #[must_use]
+    pub fn of(launch: &crate::Launch) -> Self {
+        let servers = launch.mcp_servers.iter().flat_map(|server| {
+            server
+                .url
+                .iter()
+                .chain(server.headers.values())
+                .chain(server.env.values())
+        });
+        let gateway = launch
+            .gateway_mcp
+            .iter()
+            .flat_map(|(_, url)| std::iter::once(url.as_str()).chain(url.rsplit('/').next()));
+        let env = launch
+            .env
+            .iter()
+            .filter(|(key, _)| {
+                let key = key.to_ascii_uppercase();
+                key == "OPENCODE_CONFIG_CONTENT"
+                    || SECRET_ENV_MARKERS.iter().any(|marker| key.contains(marker))
+            })
+            .map(|(_, value)| value.as_str());
+        let mut secrets: Vec<String> = servers
+            .map(String::as_str)
+            .chain(gateway)
+            .chain(env)
+            .filter(|secret| secret.len() >= MIN_SECRET_BYTES)
+            .flat_map(|secret| {
+                let escaped = serde_json::Value::from(secret).to_string();
+                let escaped = escaped[1..escaped.len() - 1].to_owned();
+                [secret.to_owned(), escaped]
+            })
+            .collect();
+        secrets.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        secrets.dedup();
+        Self(secrets.into())
+    }
+
+    fn redact(&self, text: &str) -> String {
+        self.0.iter().fold(text.to_owned(), |text, secret| {
+            text.replace(secret.as_str(), REDACTED)
+        })
+    }
+}
+
 struct Sink {
+    secrets: Secrets,
     sender: SyncSender<Record>,
     remaining: AtomicUsize,
     dropped: Arc<AtomicUsize>,
@@ -93,12 +155,8 @@ pub struct Started {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartTraceError {
-    #[error("create the engine trace folder {path}")]
-    CreateFolder {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error("create the engine trace folder")]
+    CreateFolder(#[source] artisan_paths::private::PrivateFileError),
     #[error("create the engine trace {path}")]
     CreateFile {
         path: PathBuf,
@@ -114,19 +172,23 @@ pub enum StartTraceError {
 }
 
 impl Trace {
-    pub fn start(dir: &Path, name: &str) -> Result<Started, StartTraceError> {
-        std::fs::create_dir_all(dir).map_err(|source| StartTraceError::CreateFolder {
-            path: dir.to_owned(),
-            source,
-        })?;
+    pub fn start(dir: &Path, name: &str, secrets: Secrets) -> Result<Started, StartTraceError> {
+        artisan_paths::private::create_folder(dir).map_err(StartTraceError::CreateFolder)?;
         let path = dir.join(format!("{name}-{}.jsonl", artisan_api::now()));
-        let file = std::fs::File::create(&path).map_err(|source| StartTraceError::CreateFile {
-            path: path.clone(),
-            source,
-        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
+            .open(&path)
+            .map_err(|source| StartTraceError::CreateFile {
+                path: path.clone(),
+                source,
+            })?;
         let (sender, receiver) = sync_channel::<Record>(32);
         let dropped = Arc::new(AtomicUsize::new(0));
         let sink = Arc::new(Sink {
+            secrets,
             sender,
             remaining: AtomicUsize::new(MAX_TRACE_BYTES),
             dropped: Arc::clone(&dropped),
@@ -144,7 +206,7 @@ impl Trace {
 
     pub fn record(&self, kind: Kind, text: &str) {
         let Some(sink) = &self.sink else { return };
-        let text = Text::bounded(text);
+        let text = Text::bounded(&sink.secrets.redact(text));
         let bytes = text
             .kept()
             .len()

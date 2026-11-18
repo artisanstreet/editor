@@ -1,7 +1,7 @@
 //! Spawning an engine and speaking JSON lines over its stdio.
 
 use crate::Turn;
-use crate::trace::{Kind, Trace};
+use crate::trace::{Kind, Secrets, Trace};
 use anyhow::{Context, Result};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
 use std::process::Stdio;
@@ -72,7 +72,7 @@ pub(crate) fn spawn_in(
         .trace_dir
         .as_deref()
         .map_or_else(Trace::default, |dir| {
-            Trace::start(dir, name).map_or_else(
+            Trace::start(dir, name, Secrets::of(&turn.launch)).map_or_else(
                 |failure| {
                     let error: &dyn std::error::Error = &failure;
                     tracing::warn!(error, "this engine process runs without a diagnostic trace");
@@ -173,7 +173,7 @@ fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
                     break;
                 }
                 let text = String::from_utf8_lossy(&buffer[..read]);
-                tracing::debug!(target: "engine_stderr", "{}", text.trim_end());
+                tracing::debug!(target: "engine_stderr", bytes = read, "the engine wrote to stderr");
                 stderr_trace.record(Kind::Stderr, &text);
                 let mut tail = tail
                     .lock()
@@ -353,6 +353,11 @@ pub async fn probe(
 #[cfg(unix)]
 #[path = "../tests/process/gateway.rs"]
 mod gateway_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/logs.rs"]
+mod log_tests;
 
 #[cfg(test)]
 #[cfg(unix)]

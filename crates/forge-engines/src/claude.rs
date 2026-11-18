@@ -236,7 +236,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
             outcome = Some(result);
         } else {
             let stderr = engine.stderr_tail();
-            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, "Claude exited without a result: {stderr}");
+            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, stderr_bytes = stderr.len(), "Claude exited without a result");
             return Outcome::failed(format!(
                 "Claude exited ({}) before finishing{}",
                 code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
