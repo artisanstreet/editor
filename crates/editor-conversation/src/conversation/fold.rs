@@ -516,6 +516,10 @@ pub const fn in_composer_strip(item: &Item) -> bool {
     )
 }
 
+fn run_order(run: &Run) -> (Timestamp, &RunId) {
+    (run.started_at, &run.id)
+}
+
 pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
     let find = |id: &RunId| {
         latest
@@ -528,8 +532,8 @@ pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
             .runs
             .values()
             .chain(latest)
-            .filter(|other| other.started_at < carried.started_at)
-            .max_by_key(|other| other.started_at);
+            .filter(|other| run_order(other) < run_order(carried))
+            .max_by_key(|other| run_order(other));
         match previous {
             Some(previous)
                 if !matches!(
@@ -1189,7 +1193,7 @@ fn summaries(
         if members.len() < 2 && members.first() == Some(&root) {
             continue;
         }
-        members.sort_by_key(|run| summaries[run].started_at);
+        members.sort_by(|a, b| (summaries[a].started_at, a).cmp(&(summaries[b].started_at, b)));
         let (first, last) = (
             &summaries[&members[0]],
             &summaries[&members[members.len() - 1]],
