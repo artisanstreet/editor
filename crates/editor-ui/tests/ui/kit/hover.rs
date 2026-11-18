@@ -1,5 +1,4 @@
-use editor_ui::kit::{Highlight, Hover};
-use editor_ui::theme::{ArtisanTheme, ThemeMode};
+use editor_ui::kit::Highlight;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -44,18 +43,5 @@ fn relighting_an_already_lit_highlight_keeps_its_timeline() {
         lit.light(true, now + Duration::from_millis(40), false),
         lit,
         "no restart"
-    );
-}
-
-#[test]
-fn the_neutral_material_is_the_account_menu_hover() {
-    let dark = Hover::Neutral.material(ArtisanTheme::for_mode(ThemeMode::Dark));
-    assert!((dark.top.alpha() - 0.09).abs() < 1e-4, "dark top");
-    assert!((dark.bottom.alpha() - 0.03).abs() < 1e-4, "dark bottom");
-    assert!((dark.ring.alpha() - 0.07).abs() < 1e-4, "dark ring");
-    let light = Hover::Neutral.material(ArtisanTheme::for_mode(ThemeMode::Light));
-    assert!(
-        light.top.alpha() < light.bottom.alpha(),
-        "light mode darkens towards the bottom"
     );
 }

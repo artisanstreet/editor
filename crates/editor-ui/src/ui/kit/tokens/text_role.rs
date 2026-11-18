@@ -38,16 +38,6 @@ const fn sans(size: f32, line: f32, weight: FontWeight) -> TextSpec {
 }
 
 impl TextRole {
-    pub const ALL: [Self; 7] = [
-        Self::Caption,
-        Self::Label,
-        Self::LabelStrong,
-        Self::Title,
-        Self::Prose,
-        Self::Code,
-        Self::Heading,
-    ];
-
     #[must_use]
     pub const fn spec(self) -> TextSpec {
         match self {

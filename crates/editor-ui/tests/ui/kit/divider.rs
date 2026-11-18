@@ -19,7 +19,10 @@ fn a_rule_occupies_the_height_it_declares() {
         .child(Divider::Rule.build(&theme, 0.0))
         .child(UiBox::new().height(1.0).build().with_key("below"))
         .build();
-    assert!(mounted.set_content(&mut tree, vec![column]).is_ok(), "the rule mounts");
+    assert!(
+        mounted.set_content(&mut tree, vec![column]).is_ok(),
+        "the rule mounts"
+    );
     assert!(
         mounted
             .compute_layout(&mut tree, Size::new(200.0, 200.0), &NaiveMeasurer)
