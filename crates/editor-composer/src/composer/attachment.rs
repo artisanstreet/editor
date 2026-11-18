@@ -452,7 +452,10 @@ impl Attachments {
                     if item.encoded.is_some() && matches!(item.state, State::Encoding) =>
                 {
                     item.preview = item.pending_preview.take();
-                    let bytes = item.encoded.take().unwrap();
+                    let bytes = item
+                        .encoded
+                        .take()
+                        .expect("invariant: the guard checked the encoded bytes are present");
                     if item.state.accept(&Input::Encoded) {
                         let key = item.key;
                         let client = self.client.clone();
@@ -477,22 +480,35 @@ impl Attachments {
                     changed = true;
                 }
                 ImageStatus::Failed(error) => {
-                    if matches!(item.state, State::Encoding) {
-                        fail(item, error.to_string());
-                    } else {
-                        item.preview_error = Some(error.to_string());
-                    }
-                    item.pending_preview = None;
+                    abandon_preview(item, error.to_string());
                     changed = true;
                 }
-                _ => {}
+                ImageStatus::Cancelled => {
+                    abandon_preview(item, "The preview was cancelled.".to_owned());
+                    changed = true;
+                }
+                ImageStatus::Pending | ImageStatus::Ready { .. } => {}
             }
         }
         changed
     }
 }
 
+fn abandon_preview(item: &mut Attachment, reason: String) {
+    if matches!(item.state, State::Encoding) {
+        fail(item, reason);
+    } else {
+        item.preview_error = Some(reason);
+    }
+    item.pending_preview = None;
+    item.encoded = None;
+}
+
 fn fail(item: &mut Attachment, reason: String) {
     tracing::warn!(key = item.key, name = %item.name, %reason, "pasted image failed");
     item.state.accept(&Input::Failed(reason));
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/attachment.rs"]
+mod tests;
