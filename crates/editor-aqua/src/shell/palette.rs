@@ -39,14 +39,14 @@ struct SearchUpdate {
     host: HostId,
     instance: HostInstance,
     name: String,
-    result: Result<Vec<Thread>, ()>,
+    result: Result<Vec<Thread>, crate::core::client::CallError>,
 }
 
 struct SearchResult {
     host: HostId,
     instance: HostInstance,
     name: String,
-    result: Result<Vec<Thread>, ()>,
+    result: Result<Vec<Thread>, crate::core::client::CallError>,
 }
 
 pub struct Palette {
@@ -92,6 +92,8 @@ fn insert_thread(
     entries.truncate(limit);
 }
 
+const SEARCH_MAILBOX: NonZeroUsize = NonZeroUsize::new(64).expect("invariant: 64 is nonzero");
+
 impl Default for Palette {
     fn default() -> Self {
         Self {
@@ -102,7 +104,7 @@ impl Default for Palette {
             search: None,
             generation: 0,
             request: None,
-            delivery: crate::core::delivery::Delivery::new(NonZeroUsize::new(64).unwrap()),
+            delivery: crate::core::delivery::Delivery::new(SEARCH_MAILBOX),
         }
     }
 }
@@ -152,7 +154,7 @@ impl Palette {
                         host,
                         instance,
                         name,
-                        result: result.map(|page| page.threads).map_err(|_| ()),
+                        result: result.map(|page| page.threads),
                     };
                     if sender.send(update).await.is_err() {
                         return;
@@ -171,6 +173,13 @@ impl Palette {
                     .is_none()
             {
                 continue;
+            }
+            if let Err(error) = &update.result {
+                tracing::warn!(
+                    host = %update.host,
+                    error = %::diagnostics::chain(error),
+                    "thread search failed on a Forge"
+                );
             }
             let search = self.search.get_or_insert_with(Vec::new);
             search.push(SearchResult {
@@ -272,7 +281,7 @@ impl Palette {
                             insert_thread(&mut results, thread, &result.host, &result.name, SHOWN);
                         }
                     }
-                    Err(()) => failures += 1,
+                    Err(_) => failures += 1,
                 }
             }
             self.search_error =
