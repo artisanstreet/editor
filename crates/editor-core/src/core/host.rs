@@ -698,7 +698,10 @@ impl HostData {
                     self.stopping.remove(&thread);
                     settled
                 }
-                stopping::Held::Other(other) => other,
+                stopping::Held::Other(other) => {
+                    self.stopping.remove(&thread);
+                    other
+                }
             },
             None => run,
         };
