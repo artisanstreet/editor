@@ -661,6 +661,9 @@ impl EditorController {
             .build()
             .focusable(!disabled)
             .disabled(disabled);
+        if !placeholder.is_empty() {
+            element = element.aria_label(placeholder);
+        }
         for kind in [
             InputKind::KeyDown,
             InputKind::TextInput,
