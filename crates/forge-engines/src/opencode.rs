@@ -14,6 +14,9 @@ mod goal_tests;
 #[path = "../tests/opencode/background.rs"]
 mod background_tests;
 #[cfg(test)]
+#[path = "../tests/opencode/endings.rs"]
+mod ending_tests;
+#[cfg(test)]
 #[path = "../tests/opencode/forms.rs"]
 mod form_tests;
 #[cfg(all(test, unix))]

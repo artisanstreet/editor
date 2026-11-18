@@ -99,6 +99,7 @@ pub struct Decoder {
     /// Child sessions no `subagent` call has claimed yet → their
     /// `session.created` data, for the Agent item they get if none does.
     unbound: HashMap<String, Value>,
+    orphans: HashMap<String, String>,
     /// Tool names by call id: `session.tool.called` doesn't repeat it.
     tool_names: HashMap<String, String>,
     /// By OpenCode call id.
@@ -374,6 +375,11 @@ impl Decoder {
             return out;
         };
         let root = self.root.as_deref() == Some(session);
+        if let Some(status) = execution_end(kind)
+            && let Some(key) = self.orphans.remove(session)
+        {
+            out.push(EngineEvent::Status { key, status });
+        }
         match kind {
             "rpc.opencode.goal.changed" => {
                 if let Ok(goal) = serde_json::from_value::<Option<Goal>>(data["goal"].clone()) {
@@ -524,7 +530,8 @@ impl Decoder {
                 self.step_ended(session, parent.as_deref(), data, &mut out);
             }
             "session.step.failed" => {
-                self.step_texts.remove(session);
+                let texts = self.step_texts.remove(session).unwrap_or_default();
+                settle_texts(texts, parent.as_deref(), false, &mut out);
                 // An interrupt fails the step; the user already knows.
                 if data["error"]["type"] != "aborted" {
                     let message = error_message(&data["error"]);
@@ -753,6 +760,7 @@ impl Decoder {
                 label: None,
             },
         });
+        self.orphans.insert(session.to_owned(), key.clone());
         self.sessions.insert(session.to_owned(), Some(key));
     }
 
@@ -948,7 +956,8 @@ impl Decoder {
             .as_i64()
             .and_then(|code| i32::try_from(code).ok());
         tool.status = match (data["status"].as_str(), exit) {
-            (Some("exited"), Some(0) | None) => Status::Done,
+            (Some("exited"), None) => return,
+            (Some("exited"), Some(0)) => Status::Done,
             (Some("killed"), _) => Status::Cancelled,
             _ => Status::Failed,
         };
@@ -1370,6 +1379,15 @@ impl FormField {
             }
             (FieldKind::Text | FieldKind::Choice, Given::Text(text)) => Ok(Value::from(text)),
         }
+    }
+}
+
+fn execution_end(kind: &str) -> Option<Status> {
+    match kind {
+        "session.execution.succeeded" => Some(Status::Done),
+        "session.execution.interrupted" => Some(Status::Cancelled),
+        "session.execution.failed" => Some(Status::Failed),
+        _ => None,
     }
 }
 
