@@ -21,6 +21,10 @@ pub const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 /// The longest global prompt Forge keeps.
 const PROMPT_MAX_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+#[error("read the skills turned off in Forge's {DISABLED_SKILLS_KEY} setting")]
+pub struct DisabledSkillsError(#[source] pub serde_json::Error);
+
 fn refused(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Refused(message.into()))
 }
@@ -36,12 +40,10 @@ impl Hub {
     }
 
     async fn disabled_skills(&self) -> Result<BTreeSet<String>> {
-        Ok(self
-            .store()
-            .setting(DISABLED_SKILLS_KEY)
-            .await?
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default())
+        match self.store().setting(DISABLED_SKILLS_KEY).await? {
+            None => Ok(BTreeSet::new()),
+            Some(value) => Ok(serde_json::from_value(value).map_err(DisabledSkillsError)?),
+        }
     }
 
     /// The skills part of what an engine gets: Artisan's own and the user's,

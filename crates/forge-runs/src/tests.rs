@@ -19,6 +19,8 @@ mod coordination;
 mod disk_guard;
 #[path = "../tests/run/durability.rs"]
 mod durability;
+#[path = "../tests/extensions/skills.rs"]
+mod extensions_tests;
 #[path = "../tests/run/mcp_auth.rs"]
 mod mcp_auth_tests;
 #[path = "../tests/run/mcp_reach.rs"]
