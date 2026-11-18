@@ -82,7 +82,12 @@ impl App {
 
     /// The app's folder.
     pub fn dir(self) -> Result<PathBuf> {
-        Ok(root()?.join(self.folder()))
+        Ok(self.dir_under(&root()?))
+    }
+
+    #[must_use]
+    pub fn dir_under(self, root: &Path) -> PathBuf {
+        root.join(self.folder())
     }
 
     /// The installed executable.
@@ -138,6 +143,10 @@ fn point(default: &Path, chosen: &Path) -> Result<()> {
         })?;
     std::fs::create_dir_all(default)?;
     std::fs::write(pointer, format!("{text}\n"))
+}
+
+pub fn root_pointer() -> Result<PathBuf> {
+    Ok(default_root()?.join(LOCATION))
 }
 
 pub fn choose_root(chosen: &Path) -> Result<()> {

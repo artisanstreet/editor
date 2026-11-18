@@ -1,19 +1,22 @@
-//! WSL from Windows: which distributions have Forge, and running `ae`
-//! inside one. On Windows, Forge commands go to the distribution that has
-//! Forge when this PC has none.
-
 use crate::{sys, ui};
 use anyhow::{Context, Result, bail};
 use artisan_paths::App;
 use std::process::Command;
+use std::time::Duration;
 
-/// The installed distributions, without Docker's.
+const LIST_DEADLINE: Duration = Duration::from_secs(20);
+const PROBE_DEADLINE: Duration = Duration::from_secs(60);
+
 pub fn distros() -> Result<Vec<String>> {
-    let output = sys::quiet(Command::new("wsl.exe").args(["--list", "--quiet"]))
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("run wsl.exe")?;
-    // wsl.exe writes UTF-16LE.
+    let output = sys::output_within(
+        Command::new("wsl.exe").args(["--list", "--quiet"]),
+        LIST_DEADLINE,
+    )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "wsl.exe --list failed ({})",
+        output.status
+    );
     let units: Vec<u16> = output
         .stdout
         .as_chunks::<2>()
@@ -31,7 +34,6 @@ pub fn distros() -> Result<Vec<String>> {
         .collect())
 }
 
-/// `ae` inside `distro`, where `ae install` links it.
 pub fn ae(distro: &str) -> Command {
     let mut command = Command::new("wsl.exe");
     command.args([
@@ -46,29 +48,56 @@ pub fn ae(distro: &str) -> Command {
     command
 }
 
-fn has_forge(distro: &str) -> bool {
-    sys::quiet(Command::new("wsl.exe").args([
-        "-d",
-        distro,
-        "--exec",
-        "sh",
-        "-c",
-        r#"test -x "${XDG_DATA_HOME:-$HOME/.local/share}/artisan-street/forge/forge""#,
-    ]))
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .is_ok_and(|status| status.success())
+pub struct Probe {
+    pub distro: String,
+    pub report: Result<serde_json::Value>,
 }
 
-/// The distributions with Forge installed (starts stopped ones to look).
-pub fn distros_with_forge() -> Vec<String> {
-    distros()
-        .unwrap_or_default()
+impl Probe {
+    pub fn has_forge(&self) -> bool {
+        self.report.as_ref().is_ok_and(|report| {
+            report["apps"]
+                .as_array()
+                .is_some_and(|apps| apps.iter().any(|app| app["app"] == App::Forge.id()))
+        })
+    }
+}
+
+fn status_in(distro: &str) -> Result<serde_json::Value> {
+    let output = sys::output_within(ae(distro).args(["status", "--json"]), PROBE_DEADLINE)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "`ae status` in {distro} failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("read `ae status --json` from {distro}"))
+}
+
+pub fn probe_all() -> Result<Vec<Probe>> {
+    Ok(distros()?
         .into_iter()
-        .filter(|distro| has_forge(distro))
-        .collect()
+        .map(|distro| {
+            let report = status_in(&distro);
+            Probe { distro, report }
+        })
+        .collect())
+}
+
+pub fn distros_with_forge() -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for probe in probe_all()? {
+        match &probe.report {
+            Ok(_) if probe.has_forge() => found.push(probe.distro),
+            Ok(_) => {}
+            Err(error) => ui::warning(format!(
+                "Couldn't check {} (WSL) for Forge: {error:#}",
+                probe.distro
+            )),
+        }
+    }
+    Ok(found)
 }
 
 /// Where a Forge command runs: `None` for this machine, else the WSL
@@ -84,6 +113,7 @@ pub fn forge_target(distro: Option<&str>) -> Result<Option<String>> {
     let progress = ui::Progress::spinner("Looking for Forge in WSL");
     let found = distros_with_forge();
     progress.clear();
+    let found = found?;
     match found.as_slice() {
         [] => bail!("Forge isn't installed on this PC or in WSL; run `ae install`"),
         [distro] => Ok(Some(distro.clone())),

@@ -509,10 +509,7 @@ pub async fn invite(store: &Store) -> Result<PairInvite> {
     })
 }
 
-/// [`invite`] without opening the store, so it works while Forge runs on
-/// `data_dir` (opening a `Store` would recover, i.e. cancel, its live runs).
-pub fn invite_offline(data_dir: &Path) -> Result<PairInvite> {
-    let mut admin = forge_store::admin::Admin::open(data_dir)?;
+pub fn invite_offline(admin: &mut forge_store::admin::Admin) -> Result<PairInvite> {
     let stored = if let Some(stored) = admin.secret(IDENTITY_KEY)? {
         stored
     } else {
@@ -541,7 +538,7 @@ fn new_code() -> Result<(String, Timestamp)> {
     Ok((code, artisan_api::now() + PAIR_CODE_LIFETIME_MS))
 }
 
-pub(crate) fn hash_code(code: &str) -> String {
+pub fn hash_code(code: &str) -> String {
     let normalised: String = code
         .chars()
         .filter(char::is_ascii_alphanumeric)

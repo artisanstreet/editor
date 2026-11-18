@@ -1,22 +1,25 @@
-//! `ae status`: what is installed where, whether Forge runs and answers,
-//! and what to do about problems. On Windows it includes Forge in WSL.
-
 use crate::{install, platform, service, wsl};
 use artisan_api::{EngineId, InstallState};
 use artisan_paths::App;
+use forge_store::admin::{Admin, AdminError};
 use serde_json::{Value, json};
 
 pub fn status(json_output: bool) {
     let report = local();
     let wsl: Vec<(String, Value)> = if cfg!(windows) {
-        wsl::distros_with_forge()
-            .into_iter()
-            .filter_map(|distro| {
-                let output = wsl::ae(&distro).args(["status", "--json"]).output().ok()?;
-                let value = serde_json::from_slice(&output.stdout).ok()?;
-                Some((distro, value))
-            })
-            .collect()
+        match wsl::probe_all() {
+            Ok(probes) => probes
+                .into_iter()
+                .filter(|probe| probe.report.is_err() || probe.has_forge())
+                .map(|probe| {
+                    let report = probe
+                        .report
+                        .unwrap_or_else(|error| json!({ "error": format!("{error:#}") }));
+                    (probe.distro, report)
+                })
+                .collect(),
+            Err(error) => vec![("WSL".to_owned(), json!({ "error": format!("{error:#}") }))],
+        }
     } else {
         Vec::new()
     };
@@ -30,6 +33,27 @@ pub fn status(json_output: bool) {
     for (distro, report) in &wsl {
         println!();
         print(report, Some(distro));
+    }
+}
+
+fn paired_devices(problems: &mut Vec<String>) -> Value {
+    let counted = App::Forge
+        .data()
+        .map_err(|error| format!("{error}"))
+        .and_then(|data| match Admin::open_read_only(&data) {
+            Ok(admin) => admin
+                .devices()
+                .map(|devices| devices.len())
+                .map_err(|error| format!("{error:#}")),
+            Err(AdminError::Missing { .. }) => Ok(0),
+            Err(error) => Err(diagnostics::chain(&error)),
+        });
+    match counted {
+        Ok(count) => json!(count),
+        Err(error) => {
+            problems.push(format!("Couldn't count paired devices: {error}"));
+            Value::Null
+        }
     }
 }
 
@@ -51,25 +75,33 @@ fn local() -> Value {
         problems.push("`ae` isn't on PATH for new terminals; run `ae install`".to_owned());
     }
     let forge = if has(App::Forge) {
-        let address = service::address();
         let running = service::is_running();
-        let listening = service::listening(address);
+        let address = match service::address() {
+            Ok(address) => Some(address),
+            Err(error) => {
+                problems.push(format!("{error:#}"));
+                None
+            }
+        };
+        let listening = address.is_some_and(service::listening);
+        let log = match service::log_hint() {
+            Ok(log) => Some(log),
+            Err(error) => {
+                problems.push(format!("Couldn't find Forge's log: {error:#}"));
+                None
+            }
+        };
         if !running {
             problems.push("Forge isn't running; run `ae forge start`".to_owned());
-        } else if !listening {
+        } else if let Some(address) = address.filter(|_| !listening) {
             problems.push(format!(
                 "Forge runs but doesn't answer on {address}; see {}",
-                service::log_hint()
+                log.as_deref().unwrap_or("its log")
             ));
         }
-        let data = App::Forge.data().ok();
-        let devices = data
-            .as_ref()
-            .filter(|data| data.join("forge.sqlite3").exists())
-            .and_then(|data| forge_store::admin::Admin::open(data).ok())
-            .and_then(|admin| admin.devices().ok())
-            .map_or(0, |devices| devices.len());
-        let engines: Vec<Value> = data
+        let devices = paired_devices(&mut problems);
+        let engines: Vec<Value> = App::Forge
+            .data()
             .map(|data| {
                 let engines = forge_engines::Engines::new(&data);
                 EngineId::ALL
@@ -90,9 +122,9 @@ fn local() -> Value {
         json!({
             "running": running,
             "pid": service::running_pid(),
-            "address": address.to_string(),
+            "address": address.map(|address| address.to_string()),
             "listening": listening,
-            "log": service::log_hint(),
+            "log": log,
             "devices": devices,
             "engines": engines,
         })
@@ -130,6 +162,10 @@ fn print(report: &Value, distro: Option<&str>) {
         |distro| format!("{distro} (WSL)"),
     );
     println!("{machine}");
+    if let Some(error) = report["error"].as_str() {
+        println!("  ! couldn't read its status: {error}");
+        return;
+    }
     for app in report["apps"].as_array().into_iter().flatten() {
         let name = match app["app"].as_str() {
             Some("forge") => "Forge",
@@ -159,9 +195,12 @@ fn print(report: &Value, distro: Option<&str>) {
         println!("  Forge    {state}");
         println!(
             "           log: {}",
-            forge["log"].as_str().unwrap_or_default()
+            forge["log"].as_str().unwrap_or("unknown")
         );
-        println!("           {} paired device(s)", forge["devices"]);
+        match forge["devices"].as_u64() {
+            Some(devices) => println!("           {devices} paired device(s)"),
+            None => println!("           paired devices unknown"),
+        }
         let engines: Vec<String> = forge["engines"]
             .as_array()
             .into_iter()

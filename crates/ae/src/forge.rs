@@ -1,6 +1,3 @@
-//! `ae pair` and `ae devices`: connecting Editors to this machine's Forge.
-//! Both work on Forge's data directly, running or not.
-
 use crate::{service, ui};
 use anyhow::{Context, Result, bail};
 use artisan_api::Timestamp;
@@ -8,6 +5,7 @@ use artisan_paths::App;
 use forge_http::tls;
 use forge_store::admin::Admin;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 fn data() -> Result<std::path::PathBuf> {
@@ -19,24 +17,51 @@ fn data() -> Result<std::path::PathBuf> {
     Ok(data)
 }
 
-/// The address Editors on this machine reach Forge at.
-fn reachable_address() -> SocketAddr {
-    let address = service::address();
-    if address.ip().is_unspecified() {
-        SocketAddr::from(([127, 0, 0, 1], address.port()))
-    } else {
-        address
+struct Administration {
+    admin: Admin,
+    _data_lock: Option<std::fs::File>,
+}
+
+fn administer(data: &Path) -> Result<Administration> {
+    let lock = data.join("forge.lock");
+    std::fs::create_dir_all(data).with_context(|| format!("create {}", data.display()))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .with_context(|| format!("open {}", lock.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Administration {
+            admin: Admin::open_exclusive(data, &file)?,
+            _data_lock: Some(file),
+        }),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Administration {
+            admin: Admin::open(data)?,
+            _data_lock: None,
+        }),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("lock {}", lock.display()))
+        }
     }
 }
 
-/// Makes a one-time pairing code. In a terminal it waits until an Editor
-/// uses it; `--json` prints it for the Editor and returns.
+fn reachable_address() -> Result<SocketAddr> {
+    let address = service::address()?;
+    Ok(if address.ip().is_unspecified() {
+        SocketAddr::from(([127, 0, 0, 1], address.port()))
+    } else {
+        address
+    })
+}
+
 pub fn pair(json: bool) -> Result<()> {
     let data = data()?;
-    let invite = forge_http::invite_offline(&data)
+    let invite = forge_http::invite_offline(&mut administer(&data)?.admin)
         .with_context(|| format!("make a pairing code for the Forge in {}", data.display()))?;
     let fingerprint = tls::fingerprint_of(&invite.forge_certificate)?;
-    let address = reachable_address();
+    let address = reachable_address()?;
     if json {
         let value = serde_json::json!({
             "code": invite.code,
@@ -64,10 +89,11 @@ pub fn pair(json: bool) -> Result<()> {
             invite.code
         ),
     );
-    if !service::listening(service::address()) {
+    if !service::listening(address) {
         ui::warning("Forge isn't running; the Editor can't pair until it is (`ae forge start`).");
     }
-    let before = Admin::open(&data)?.devices()?.len();
+    let code = forge_http::hash_code(&invite.code);
+    let issued = artisan_api::now();
     let progress = ui::Progress::spinner("Waiting for an Editor");
     loop {
         let left = (invite.expires_at - artisan_api::now()) / 1000;
@@ -80,22 +106,27 @@ pub fn pair(json: bool) -> Result<()> {
             left / 60,
             left % 60
         ));
-        let devices = Admin::open(&data)?.devices()?;
-        if devices.len() > before {
-            let newest = devices
+        let administration = administer(&data)?;
+        if !administration.admin.pair_code_pending(&code)? {
+            let devices = administration.admin.devices()?;
+            let paired = devices
                 .iter()
+                .filter(|device| device.created_at >= issued)
                 .max_by_key(|device| device.created_at)
-                .map_or("an Editor", |device| device.name.as_str());
-            progress.done(format!("Paired {newest}"));
+                .map_or("an Editor that was already paired", |device| {
+                    device.name.as_str()
+                });
+            progress.done(format!("Paired {paired}"));
             ui::outro("Done.");
             return Ok(());
         }
+        drop(administration);
         std::thread::sleep(Duration::from_secs(1));
     }
 }
 
 pub fn devices(json: bool) -> Result<()> {
-    let devices = Admin::open(&data()?)?.devices()?;
+    let devices = Admin::open_read_only(&data()?)?.devices()?;
     if json {
         let list: Vec<_> = devices
             .iter()
@@ -138,8 +169,7 @@ pub fn devices(json: bool) -> Result<()> {
 
 pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
     let data = data()?;
-    let admin = Admin::open(&data)?;
-    let devices = admin.devices()?;
+    let devices = Admin::open_read_only(&data)?.devices()?;
     let (id, name) = match id {
         Some(id) => {
             let matches: Vec<_> = devices
@@ -185,8 +215,7 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    drop(admin);
-    match Admin::open(&data)?.revoke_device(&id)? {
+    match administer(&data)?.admin.revoke_device(&id)? {
         Some(device) => {
             ui::success(format!(
                 "Unpaired {}. Its next request is refused.",

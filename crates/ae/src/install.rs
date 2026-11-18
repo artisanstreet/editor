@@ -3,16 +3,25 @@ use crate::{legacy, platform, service, sys, ui, wsl};
 use anyhow::{Context, Result, bail};
 use artisan_paths::App;
 use clap::Args;
+use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::Duration;
+
+const ASIDE_SLOTS: usize = 100;
+#[cfg(unix)]
+const SCHEMA_PROBE_DEADLINE: Duration = Duration::from_secs(30);
+const INSTALL_LOCK: &str = ".install.lock";
+const ORIGIN_FILE: &str = "release-feed";
 
 #[derive(Args, Default)]
 pub struct InstallArgs {
     /// Where the Editor goes: here, windows (from WSL), keep or none.
-    #[arg(long, value_name = "WHERE", value_parser = Place::parse)]
-    editor: Option<Place>,
+    #[arg(long, value_name = "WHERE", value_parser = EditorPlace::parse)]
+    editor: Option<EditorPlace>,
     /// Where Forge goes: here, wsl:<distro> (from Windows), keep or none.
-    #[arg(long, value_name = "WHERE", value_parser = Place::parse)]
-    forge: Option<Place>,
+    #[arg(long, value_name = "WHERE", value_parser = ForgePlace::parse)]
+    forge: Option<ForgePlace>,
     /// Install this version instead of the newest (also how you go back).
     #[arg(long, value_name = "VERSION")]
     version: Option<String>,
@@ -37,24 +46,51 @@ pub struct InstallArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Place {
+pub enum EditorPlace {
     Here,
     Windows,
-    Wsl(String),
     Keep,
     Skip,
 }
 
-impl Place {
+impl EditorPlace {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "here" => Ok(Self::Here),
             "windows" => Ok(Self::Windows),
             "keep" => Ok(Self::Keep),
             "none" => Ok(Self::Skip),
+            _ => Err("the Editor goes here, windows (from WSL), keep or none".to_owned()),
+        }
+    }
+
+    const fn argument(&self) -> &'static str {
+        match self {
+            Self::Here => "here",
+            Self::Windows => "windows",
+            Self::Keep => "keep",
+            Self::Skip => "none",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForgePlace {
+    Here,
+    Wsl(String),
+    Keep,
+    Skip,
+}
+
+impl ForgePlace {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "here" => Ok(Self::Here),
+            "keep" => Ok(Self::Keep),
+            "none" => Ok(Self::Skip),
             _ => match value.strip_prefix("wsl:") {
                 Some(distro) if !distro.is_empty() => Ok(Self::Wsl(distro.to_owned())),
-                _ => Err("expected here, windows, wsl:<distro>, keep or none".to_owned()),
+                _ => Err("Forge goes here, wsl:<distro> (from Windows), keep or none".to_owned()),
             },
         }
     }
@@ -62,10 +98,38 @@ impl Place {
     fn argument(&self) -> String {
         match self {
             Self::Here => "here".to_owned(),
-            Self::Windows => "windows".to_owned(),
             Self::Wsl(distro) => format!("wsl:{distro}"),
             Self::Keep => "keep".to_owned(),
             Self::Skip => "none".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Feed(String),
+    Local,
+}
+
+impl Origin {
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let url = text
+            .strip_prefix("https://")
+            .or_else(|| text.strip_prefix("http://"));
+        match url {
+            _ if text == "local" => Some(Self::Local),
+            Some(rest) if !rest.is_empty() && !text.contains(char::is_whitespace) => {
+                Some(Self::Feed(text.to_owned()))
+            }
+            Some(_) | None => None,
+        }
+    }
+
+    fn record(&self) -> String {
+        match self {
+            Self::Feed(url) => format!("{url}\n"),
+            Self::Local => "local\n".to_owned(),
         }
     }
 }
@@ -85,20 +149,18 @@ struct Plan {
 }
 
 impl Plan {
-    fn settle(editor: &Place, forge: &Place) -> Self {
+    fn settle(editor: &EditorPlace, forge: &ForgePlace) -> Self {
         let editor = match editor {
-            Place::Here => EditorTarget::Here,
-            Place::Windows => EditorTarget::Windows,
-            Place::Keep if installed(App::Editor).is_some() => EditorTarget::Here,
-            Place::Keep | Place::Wsl(_) | Place::Skip => EditorTarget::Nowhere,
+            EditorPlace::Here => EditorTarget::Here,
+            EditorPlace::Windows => EditorTarget::Windows,
+            EditorPlace::Keep if installed(App::Editor).is_some() => EditorTarget::Here,
+            EditorPlace::Keep | EditorPlace::Skip => EditorTarget::Nowhere,
         };
-        let kept_here = installed(App::Forge).is_some();
         let (forge_here, distros) = match forge {
-            Place::Here => (true, Vec::new()),
-            Place::Wsl(distro) => (false, vec![distro.clone()]),
-            Place::Keep if kept_here || !cfg!(windows) => (kept_here, Vec::new()),
-            Place::Keep => (false, wsl::distros_with_forge()),
-            Place::Windows | Place::Skip => (false, Vec::new()),
+            ForgePlace::Here => (true, Vec::new()),
+            ForgePlace::Wsl(distro) => (false, vec![distro.clone()]),
+            ForgePlace::Keep => (installed(App::Forge).is_some(), kept_in_wsl()),
+            ForgePlace::Skip => (false, Vec::new()),
         };
         Self {
             editor,
@@ -141,13 +203,13 @@ impl Plan {
         apps
     }
 
-    fn summary(&self, version: &str) -> Result<Vec<String>> {
+    fn summary(&self, version: &str, root: &Path) -> Vec<String> {
         let mut lines = Vec::new();
         for app in self.here() {
             lines.push(summary_line(
                 app,
                 version,
-                &app.dir()?.display().to_string(),
+                &app.dir_under(root).display().to_string(),
             ));
         }
         for distro in &self.distros {
@@ -156,7 +218,35 @@ impl Plan {
         if self.editor == EditorTarget::Windows {
             lines.push(format!("Editor   {version} → Windows, with ae"));
         }
-        Ok(lines)
+        lines
+    }
+}
+
+fn kept_in_wsl() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    match wsl::distros_with_forge() {
+        Ok(distros) => distros,
+        Err(error) => {
+            ui::warning(format!("Couldn't look for Forge in WSL: {error:#}"));
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForgeUpgrade {
+    Online,
+    Restart,
+}
+
+#[cfg(unix)]
+const fn forge_upgrade(hands_over: bool, database: Option<usize>, incoming: usize) -> ForgeUpgrade {
+    match database {
+        Some(database) if hands_over && database == incoming => ForgeUpgrade::Online,
+        Some(_) | None => ForgeUpgrade::Restart,
     }
 }
 
@@ -207,30 +297,62 @@ fn resolve(
     Ok(release)
 }
 
-fn relocate(location: &Path) -> Result<()> {
+fn relocation(location: &Path) -> Result<Option<PathBuf>> {
     let location =
         std::path::absolute(location).with_context(|| format!("resolve {}", location.display()))?;
     let current = artisan_paths::root()?;
     if location == current {
-        return Ok(());
+        return Ok(None);
     }
     anyhow::ensure!(
         App::ALL.iter().all(|app| installed(*app).is_none()),
         "Artisan is already installed in {}; uninstall it before choosing another folder",
         current.display()
     );
-    artisan_paths::choose_root(&location)
-        .with_context(|| format!("remember {} as the install folder", location.display()))
+    Ok(Some(location))
+}
+
+fn install_lock() -> Result<std::fs::File> {
+    let root = artisan_paths::root()?;
+    std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    let path = root.join(INSTALL_LOCK);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            ui::info("Waiting for another installer to finish");
+            file.lock()
+                .with_context(|| format!("lock {}", path.display()))?;
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(error).with_context(|| format!("lock {}", path.display()));
+        }
+    }
+    Ok(file)
+}
+
+fn staging_in(dir: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(dir)
+        .with_context(|| format!("make a staging folder in {}", dir.display()))
 }
 
 pub fn install(args: &InstallArgs) -> Result<()> {
     if !args.apply {
         ui::intro("Artisan installer");
     }
-    if args.editor == Some(Place::Windows) && !platform::in_wsl() {
+    if args.editor == Some(EditorPlace::Windows) && !platform::in_wsl() {
         bail!("--editor windows is for installing from inside WSL");
     }
-    if matches!(args.forge, Some(Place::Wsl(_))) && !cfg!(windows) {
+    if matches!(args.forge, Some(ForgePlace::Wsl(_))) && !cfg!(windows) {
         bail!("--forge wsl:<distro> is for installing from Windows");
     }
     let source = Source::new(args.from.as_deref(), args.version.as_deref(), args.apply)?;
@@ -241,9 +363,14 @@ pub fn install(args: &InstallArgs) -> Result<()> {
     };
     let release = resolve(&runtime, &source, carried)?;
     let version = release.version(os())?;
-    if let Some(location) = &args.location {
-        relocate(location)?;
-    }
+    let relocated = match &args.location {
+        Some(location) => relocation(location)?,
+        None => None,
+    };
+    let root = match &relocated {
+        Some(root) => root.clone(),
+        None => artisan_paths::root()?,
+    };
 
     let editor = match &args.editor {
         Some(place) => place.clone(),
@@ -259,40 +386,19 @@ pub fn install(args: &InstallArgs) -> Result<()> {
     plan.check(&release)?;
 
     if !args.apply {
-        ui::note("Install", plan.summary(&version)?.join("\n"));
-        if !args.yes && ui::interactive() {
-            let go = cliclack::confirm("Install?")
-                .initial_value(true)
-                .interact()
-                .map_err(ui::prompt_error)?;
-            if !go {
-                ui::outro("Nothing was installed.");
-                return Ok(());
-            }
-        }
-    }
-    if let Some(file) = platform::foreign_ae() {
-        let replace = if ui::interactive() && !args.apply {
-            cliclack::confirm(format!(
-                "{} is a file that isn't Artisan's. Replace it with Artisan's `ae`?",
-                file.display()
-            ))
-            .initial_value(true)
-            .interact()
-            .map_err(ui::prompt_error)?
-        } else if args.yes || args.apply {
-            true
-        } else {
-            return Err(ui::needs_flag(
-                &format!("whether to replace {}", file.display()),
-                "--yes",
-            ));
-        };
-        if !replace {
+        ui::note("Install", plan.summary(&version, &root).join("\n"));
+        if !args.yes && ui::interactive() && !confirmed("Install?")? {
             ui::outro("Nothing was installed.");
             return Ok(());
         }
-        sys::remove(&file)?;
+    }
+    if !replace_foreign_ae(args)? {
+        ui::outro("Nothing was installed.");
+        return Ok(());
+    }
+    if let Some(root) = &relocated {
+        artisan_paths::choose_root(root)
+            .with_context(|| format!("remember {} as the install folder", root.display()))?;
     }
 
     if let Release::Feed(feed) = &release {
@@ -302,11 +408,14 @@ pub fn install(args: &InstallArgs) -> Result<()> {
         );
         hand_over(&runtime, feed, &editor, &forge)?;
     } else {
-        let feed = args
-            .feed
-            .clone()
-            .or_else(|| source.update_feed().map(str::to_owned));
-        apply(&release, &source, feed.as_deref(), &plan)?;
+        let origin = match args.feed.as_deref() {
+            Some(feed) => Origin::parse(feed)
+                .with_context(|| format!("{feed:?} is not a release feed URL"))?,
+            None => source
+                .update_feed()
+                .map_or(Origin::Local, |feed| Origin::Feed(feed.to_owned())),
+        };
+        apply(&release, &source, &origin, &plan)?;
     }
 
     let editor_somewhere = plan.editor != EditorTarget::Nowhere;
@@ -321,12 +430,43 @@ pub fn install(args: &InstallArgs) -> Result<()> {
     Ok(())
 }
 
-fn apply(release: &Release, source: &Source, feed: Option<&str>, plan: &Plan) -> Result<()> {
+fn confirmed(question: &str) -> Result<bool> {
+    cliclack::confirm(question)
+        .initial_value(true)
+        .interact()
+        .map_err(ui::prompt_error)
+}
+
+fn replace_foreign_ae(args: &InstallArgs) -> Result<bool> {
+    let Some(file) = platform::foreign_ae() else {
+        return Ok(true);
+    };
+    let replace = if ui::interactive() && !args.apply {
+        confirmed(&format!(
+            "{} is a file that isn't Artisan's. Replace it with Artisan's `ae`?",
+            file.display()
+        ))?
+    } else if args.yes || args.apply {
+        true
+    } else {
+        return Err(ui::needs_flag(
+            &format!("whether to replace {}", file.display()),
+            "--yes",
+        ));
+    };
+    if replace {
+        sys::remove(&file)?;
+    }
+    Ok(replace)
+}
+
+fn apply(release: &Release, source: &Source, origin: &Origin, plan: &Plan) -> Result<()> {
+    let _installing = install_lock()?;
     let here = plan.here();
     legacy::migrate(&here)?;
-    install_here(release, feed, &here)?;
+    install_here(release, origin, &here)?;
     for distro in &plan.distros {
-        install_in_wsl(release, source, feed, distro)?;
+        install_in_wsl(release, source, origin, distro)?;
     }
     if plan.editor == EditorTarget::Windows {
         install_in_windows(release, source)?;
@@ -343,17 +483,17 @@ fn apply(release: &Release, source: &Source, feed: Option<&str>, plan: &Plan) ->
 fn hand_over(
     runtime: &tokio::runtime::Runtime,
     feed: &Feed,
-    editor: &Place,
-    forge: &Place,
+    editor: &EditorPlace,
+    forge: &ForgePlace,
 ) -> Result<()> {
     let remembered: Vec<&str> = feed
         .update_feed()
         .map(|url| vec!["--feed", url])
         .unwrap_or_default();
     let mut editor = editor.clone();
-    if editor == Place::Windows {
-        let (folder, windows_folder) = windows_temp()?;
-        let carrier = runtime.block_on(feed.fetch_carrier("windows", &folder))?;
+    if editor == EditorPlace::Windows {
+        let (staging, windows_folder) = windows_temp()?;
+        let carrier = runtime.block_on(feed.fetch_carrier("windows", staging.path()))?;
         ui::step("Installing the Editor on Windows");
         let status = std::process::Command::new(&carrier)
             .args(["--install", "--editor", "here", "--forge", "none"])
@@ -361,13 +501,11 @@ fn hand_over(
             .current_dir("/mnt/c")
             .status()
             .with_context(|| format!("run {windows_folder}"))?;
-        std::fs::remove_dir_all(&folder).ok();
         anyhow::ensure!(status.success(), "installing on Windows failed ({status})");
-        editor = Place::Skip;
+        editor = EditorPlace::Skip;
     }
-    let folder = App::Ae.dir()?.join(".installer");
-    std::fs::remove_dir_all(&folder).ok();
-    let carrier = runtime.block_on(feed.fetch_carrier(os(), &folder))?;
+    let staging = staging_in(&App::Ae.dir()?, ".installer-")?;
+    let carrier = runtime.block_on(feed.fetch_carrier(os(), staging.path()))?;
     let mut command = std::process::Command::new(&carrier);
     if cfg!(windows) {
         command.arg("--install");
@@ -375,12 +513,11 @@ fn hand_over(
         command.args(["install", "--apply"]);
     }
     let status = command
-        .args(["--editor", &editor.argument()])
+        .args(["--editor", editor.argument()])
         .args(["--forge", &forge.argument()])
         .args(&remembered)
         .status()
         .with_context(|| format!("run {}", carrier.display()))?;
-    std::fs::remove_dir_all(&folder).ok();
     anyhow::ensure!(
         status.success(),
         "installing Artisan {} failed ({status})",
@@ -389,36 +526,61 @@ fn hand_over(
     Ok(())
 }
 
-fn windows_temp() -> Result<(PathBuf, String)> {
+fn windows_temp() -> Result<(tempfile::TempDir, String)> {
     let temp = std::process::Command::new("cmd.exe")
         .args(["/d", "/c", "echo %TEMP%"])
         .current_dir("/mnt/c")
         .output()
         .context("find Windows' temp folder")?;
     let temp = String::from_utf8_lossy(&temp.stdout).trim().to_owned();
-    let windows_folder = format!("{temp}\\artisan-install-{}", std::process::id());
-    let folder = PathBuf::from(sys::output("wslpath", &["-a", "-u", &windows_folder])?.trim());
-    std::fs::remove_dir_all(&folder).ok();
-    Ok((folder, windows_folder))
+    let folder = PathBuf::from(sys::output("wslpath", &["-a", "-u", &temp])?.trim());
+    let staging = tempfile::Builder::new()
+        .prefix("artisan-install-")
+        .tempdir_in(&folder)
+        .with_context(|| format!("make a staging folder in {}", folder.display()))?;
+    let windows_folder = sys::output("wslpath", &["-a", "-w", &staging.path().to_string_lossy()])?
+        .trim()
+        .to_owned();
+    Ok((staging, windows_folder))
+}
+
+fn origin_file() -> Result<PathBuf> {
+    Ok(App::Ae.dir()?.join(ORIGIN_FILE))
+}
+
+fn remembered_origin() -> Result<Origin> {
+    let path = origin_file()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Origin::parse(&text).with_context(|| {
+            format!(
+                "{} should name a release feed URL or `local` but holds {:?}",
+                path.display(),
+                text.trim()
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Origin::Feed(
+            release::feed_for(
+                installed(App::Ae)
+                    .as_deref()
+                    .unwrap_or(env!("CARGO_PKG_VERSION")),
+            )
+            .to_owned(),
+        )),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn remembered_feed() -> Result<String> {
-    match std::fs::read_to_string(App::Ae.dir()?.join("release-feed")) {
-        Ok(feed) => Ok(feed.trim().to_owned()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(release::feed_for(
-            installed(App::Ae)
-                .as_deref()
-                .unwrap_or(env!("CARGO_PKG_VERSION")),
-        )
-        .to_owned()),
-        Err(error) => Err(error).context("read the release feed"),
+    match remembered_origin()? {
+        Origin::Feed(url) => Ok(url),
+        Origin::Local => bail!("this install came from a local build; install again to change it"),
     }
 }
 
 pub fn install_editor() -> Result<()> {
     install(&InstallArgs {
-        editor: Some(Place::Here),
-        forge: Some(Place::Skip),
+        editor: Some(EditorPlace::Here),
+        forge: Some(ForgePlace::Skip),
         from: Some(remembered_feed()?),
         yes: true,
         ..InstallArgs::default()
@@ -447,11 +609,11 @@ fn version_hint(app: App, version: &str) -> String {
     }
 }
 
-fn choose_editor(release: &Release, version: &str) -> Result<Place> {
+fn choose_editor(release: &Release, version: &str) -> Result<EditorPlace> {
     let wsl = platform::in_wsl();
     let mut options = Vec::new();
     if wsl && release.has(App::Editor, "windows") {
-        options.push((Place::Windows, "On Windows".to_owned(), String::new()));
+        options.push((EditorPlace::Windows, "On Windows".to_owned(), String::new()));
     }
     if platform::has_desktop() && release.has(App::Editor, os()) {
         let label = if wsl {
@@ -462,9 +624,9 @@ fn choose_editor(release: &Release, version: &str) -> Result<Place> {
         } else {
             format!("On {}", this_machine())
         };
-        options.push((Place::Here, label, version_hint(App::Editor, version)));
+        options.push((EditorPlace::Here, label, version_hint(App::Editor, version)));
     }
-    options.push((Place::Skip, "Don't install".to_owned(), String::new()));
+    options.push((EditorPlace::Skip, "Don't install".to_owned(), String::new()));
     let default = options[0].0.clone();
     if !ui::interactive() || options.len() == 1 {
         return Ok(default);
@@ -476,25 +638,30 @@ fn choose_editor(release: &Release, version: &str) -> Result<Place> {
         .map_err(ui::prompt_error)
 }
 
-fn choose_forge(release: &Release, version: &str) -> Result<Place> {
+fn choose_forge(release: &Release, version: &str) -> Result<ForgePlace> {
     let mut options = Vec::new();
     if release.has(App::Forge, os()) {
         options.push((
-            Place::Here,
+            ForgePlace::Here,
             format!("On {}", this_machine()),
             version_hint(App::Forge, version),
         ));
     }
     if cfg!(windows) && release.has(App::Forge, "linux") && ui::interactive() {
-        for distro in wsl::distros().unwrap_or_default() {
-            options.push((
-                Place::Wsl(distro.clone()),
-                format!("In {distro} (WSL)"),
-                String::new(),
-            ));
+        match wsl::distros() {
+            Ok(distros) => {
+                for distro in distros {
+                    options.push((
+                        ForgePlace::Wsl(distro.clone()),
+                        format!("In {distro} (WSL)"),
+                        String::new(),
+                    ));
+                }
+            }
+            Err(error) => ui::warning(format!("Couldn't list WSL distributions: {error:#}")),
         }
     }
-    options.push((Place::Skip, "Don't install".to_owned(), String::new()));
+    options.push((ForgePlace::Skip, "Don't install".to_owned(), String::new()));
     let default = options[0].0.clone();
     if !ui::interactive() || options.len() == 1 {
         return Ok(default);
@@ -506,64 +673,83 @@ fn choose_forge(release: &Release, version: &str) -> Result<Place> {
         .map_err(ui::prompt_error)
 }
 
-fn install_here(release: &Release, feed: Option<&str>, apps: &[App]) -> Result<()> {
+#[cfg(unix)]
+fn incoming_schema(forge: &Path) -> Result<usize> {
+    let output = sys::output_within(
+        std::process::Command::new(forge).arg("--schema-version"),
+        SCHEMA_PROBE_DEADLINE,
+    )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{} --schema-version failed ({})",
+        forge.display(),
+        output.status
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .with_context(|| format!("read the schema version of {}", forge.display()))
+}
+
+#[cfg(unix)]
+fn upgrade_forge_online(incoming: &Path, progress: &ui::Progress) -> Result<bool> {
+    let data = App::Forge.data()?;
+    let hands_over = forge_http::upgrade::gateway(&data)?.is_some() && service::is_running();
+    if !hands_over {
+        return Ok(false);
+    }
+    let database = forge_store::admin::schema_version(&data)?;
+    let forge = incoming.join(App::Forge.binary_name());
+    match forge_upgrade(hands_over, database, incoming_schema(&forge)?) {
+        ForgeUpgrade::Online => {
+            progress.message("Checking replacement Forge and handing over new work");
+            runtime()?.block_on(forge_http::upgrade::replace(&data, &forge))?;
+            Ok(true)
+        }
+        ForgeUpgrade::Restart => {
+            progress.message("Forge's database changes in this version; restarting Forge");
+            Ok(false)
+        }
+    }
+}
+
+fn install_here(release: &Release, origin: &Origin, apps: &[App]) -> Result<()> {
     let version = release.version(os())?;
     for app in apps {
         let dir = app.dir()?;
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        clear_leftovers(&dir);
-        let incoming = dir.join(".incoming");
-        std::fs::remove_dir_all(&incoming).ok();
-        release.unpack(*app, os(), &incoming)?;
+        clear_leftovers(&dir)?;
+        let incoming = staging_in(&dir, ".incoming-")?;
+        release.unpack(*app, os(), incoming.path())?;
 
         let progress =
             ui::Progress::spinner(format!("Installing {} {version}", app.display_name()));
         let result = (|| -> Result<String> {
             let binary = app.binary()?;
             #[cfg(unix)]
-            let mut upgraded = false;
+            let upgraded = *app == App::Forge && upgrade_forge_online(incoming.path(), &progress)?;
             #[cfg(not(unix))]
             let upgraded = false;
             match app {
-                App::Forge => {
-                    #[cfg(unix)]
-                    {
-                        if forge_http::upgrade::gateway(&App::Forge.data()?)?.is_some()
-                            && service::is_running()
-                        {
-                            progress
-                                .message("Checking replacement Forge and handing over new work");
-                            runtime()?.block_on(forge_http::upgrade::replace(
-                                &App::Forge.data()?,
-                                &incoming.join("forge"),
-                            ))?;
-                            upgraded = true;
-                        }
-                    }
-                    if !upgraded {
-                        progress.message("Bootstrapping Forge's upgrade service");
-                        service::prepare_bootstrap_stop()?;
-                        service::stop()?;
-                    }
+                App::Forge if !upgraded => {
+                    progress.message("Stopping Forge");
+                    service::prepare_bootstrap_stop()?;
+                    service::stop()?;
                 }
                 App::Editor => {
                     if platform::close_processes(std::slice::from_ref(&binary))? > 0 {
                         progress.message("Closed the running Editor");
                     }
                 }
-                App::Ae => {}
+                App::Forge | App::Ae => {}
             }
-            replace(&dir, &incoming)?;
+            replace(&dir, incoming.path())?;
             std::fs::write(dir.join("LICENSE.md"), LICENSE)
                 .with_context(|| format!("write {}", dir.join("LICENSE.md").display()))?;
-            std::fs::write(dir.join("version"), format!("{version}\n"))
-                .with_context(|| format!("write {}", dir.join("version").display()))?;
-            if let Some(feed) = feed {
-                std::fs::write(dir.join("release-feed"), format!("{feed}\n"))
-                    .context("remember the app's release feed")?;
-            }
+            std::fs::write(dir.join(ORIGIN_FILE), origin.record())
+                .with_context(|| format!("write {}", dir.join(ORIGIN_FILE).display()))?;
             platform::register_uninstall(*app, &version)?;
-            Ok(match app {
+            let message = match app {
                 App::Ae => platform::add_to_path()?.map_or_else(
                     || format!("ae {version} installed, on PATH"),
                     |hint| format!("ae {version} installed. {hint}"),
@@ -576,14 +762,17 @@ fn install_here(release: &Release, feed: Option<&str>, apps: &[App]) -> Result<(
                     }
                     format!(
                         "Forge {version} is running on {}; {autostart}",
-                        service::address()
+                        service::address()?
                     )
                 }
                 App::Editor => {
                     platform::integrate_editor()?;
                     format!("Editor {version} installed")
                 }
-            })
+            };
+            std::fs::write(dir.join("version"), format!("{version}\n"))
+                .with_context(|| format!("write {}", dir.join("version").display()))?;
+            Ok(message)
         })();
         match result {
             Ok(message) => progress.done(message),
@@ -596,54 +785,177 @@ fn install_here(release: &Release, feed: Option<&str>, apps: &[App]) -> Result<(
     Ok(())
 }
 
-fn replace(dir: &Path, incoming: &Path) -> Result<()> {
-    for entry in
-        std::fs::read_dir(incoming).with_context(|| format!("read {}", incoming.display()))?
-    {
-        let entry = entry?;
-        let target = dir.join(entry.file_name());
-        if target.is_dir() {
-            std::fs::remove_dir_all(&target)
-                .with_context(|| format!("remove {}", target.display()))?;
-        } else if target.exists() && cfg!(windows) {
-            let aside = (0..100)
-                .map(|index| {
-                    dir.join(format!(
-                        ".old-{index}-{}",
-                        entry.file_name().to_string_lossy()
-                    ))
-                })
-                .find(|path| !path.exists() || std::fs::remove_file(path).is_ok())
-                .context("no free name to move the old file aside")?;
-            std::fs::rename(&target, &aside)
-                .with_context(|| format!("move {} aside", target.display()))?;
-        }
-        std::fs::rename(entry.path(), &target)
-            .with_context(|| format!("put {} in place", target.display()))?;
-    }
-    std::fs::remove_dir_all(incoming).with_context(|| format!("remove {}", incoming.display()))
+#[derive(Debug, thiserror::Error)]
+enum ReplaceError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("no free name to move {} aside among {ASIDE_SLOTS}", path.display())]
+    NoAside { path: PathBuf },
+    #[error("move {} aside", path.display())]
+    Aside {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("put {} in place", path.display())]
+    Place {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{failed}; restoring the previous files also failed: {restore}")]
+    Restore {
+        #[source]
+        failed: Box<Self>,
+        restore: String,
+    },
 }
 
-fn clear_leftovers(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+struct Swap {
+    target: PathBuf,
+    aside: Option<PathBuf>,
+    placed: bool,
+}
+
+fn replace(dir: &Path, incoming: &Path) -> Result<(), ReplaceError> {
+    replace_with(dir, incoming, |from, to| std::fs::rename(from, to))
+}
+
+fn replace_with(
+    dir: &Path,
+    incoming: &Path,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), ReplaceError> {
+    let read = |source| ReplaceError::Read {
+        path: incoming.to_owned(),
+        source,
     };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(".old-") {
-            std::fs::remove_file(entry.path()).ok();
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(incoming).map_err(read)? {
+        names.push(entry.map_err(read)?.file_name());
+    }
+    names.sort();
+    let mut swaps = Vec::new();
+    for name in &names {
+        if let Err(error) = swap_in(dir, &incoming.join(name), name, &rename, &mut swaps) {
+            return Err(roll_back(swaps, error, &rename));
+        }
+    }
+    for swap in swaps {
+        if let Some(aside) = swap.aside {
+            discard(&aside);
+        }
+    }
+    Ok(())
+}
+
+fn swap_in(
+    dir: &Path,
+    new: &Path,
+    name: &std::ffi::OsStr,
+    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
+    swaps: &mut Vec<Swap>,
+) -> Result<(), ReplaceError> {
+    let target = dir.join(name);
+    let aside = if target.symlink_metadata().is_ok() {
+        let aside = (0..ASIDE_SLOTS)
+            .map(|slot| {
+                let mut aside = std::ffi::OsString::from(format!(".old-{slot}-"));
+                aside.push(name);
+                dir.join(aside)
+            })
+            .find(|path| path.symlink_metadata().is_err())
+            .ok_or_else(|| ReplaceError::NoAside {
+                path: target.clone(),
+            })?;
+        rename(&target, &aside).map_err(|source| ReplaceError::Aside {
+            path: target.clone(),
+            source,
+        })?;
+        Some(aside)
+    } else {
+        None
+    };
+    swaps.push(Swap {
+        target: target.clone(),
+        aside,
+        placed: false,
+    });
+    rename(new, &target).map_err(|source| ReplaceError::Place {
+        path: target.clone(),
+        source,
+    })?;
+    swaps
+        .last_mut()
+        .expect("invariant: the swap was just recorded")
+        .placed = true;
+    Ok(())
+}
+
+fn roll_back(
+    swaps: Vec<Swap>,
+    failed: ReplaceError,
+    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> ReplaceError {
+    let mut problems = Vec::new();
+    for swap in swaps.into_iter().rev() {
+        if swap.placed
+            && let Err(error) = sys::remove(&swap.target)
+        {
+            problems.push(format!("{error:#}"));
+            continue;
+        }
+        if let Some(aside) = swap.aside
+            && let Err(error) = rename(&aside, &swap.target)
+        {
+            problems.push(format!(
+                "put {} back as {}: {error}",
+                aside.display(),
+                swap.target.display()
+            ));
+        }
+    }
+    if problems.is_empty() {
+        failed
+    } else {
+        ReplaceError::Restore {
+            failed: Box::new(failed),
+            restore: problems.join("; "),
         }
     }
 }
 
-fn install_in_wsl(
-    release: &Release,
-    source: &Source,
-    feed: Option<&str>,
-    distro: &str,
-) -> Result<()> {
-    let stage = std::env::temp_dir().join(format!("artisan-wsl-{}", std::process::id()));
-    std::fs::remove_dir_all(&stage).ok();
-    release.unpack(App::Ae, "linux", &stage)?;
+fn discard(path: &Path) {
+    if let Err(error) = sys::remove(path) {
+        tracing::debug!(
+            path = %path.display(),
+            "the replaced file stays until the next install: {error:#}"
+        );
+    }
+}
+
+fn clear_leftovers(dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read {}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".old-") || name.starts_with(".incoming-") {
+            discard(&entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn install_in_wsl(release: &Release, source: &Source, origin: &Origin, distro: &str) -> Result<()> {
+    let stage = tempfile::Builder::new()
+        .prefix("artisan-wsl-")
+        .tempdir()
+        .context("make a staging folder")?;
+    release.unpack(App::Ae, "linux", stage.path())?;
     let to_wsl = |path: &Path| -> Result<String> {
         let output = sys::quiet(
             std::process::Command::new("wsl.exe")
@@ -655,24 +967,23 @@ fn install_in_wsl(
         anyhow::ensure!(output.status.success(), "wslpath failed in {distro}");
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
-    let mut origin = Vec::new();
+    let mut forwarded = Vec::new();
     if let Source::Dir(dir) = source {
-        origin.extend(["--from".to_owned(), to_wsl(dir)?]);
+        forwarded.extend(["--from".to_owned(), to_wsl(dir)?]);
     }
-    if let Some(feed) = feed {
-        origin.extend(["--feed".to_owned(), feed.to_owned()]);
+    if let Origin::Feed(feed) = origin {
+        forwarded.extend(["--feed".to_owned(), feed.clone()]);
     }
     ui::step(format!("Installing Forge in {distro} (WSL)"));
     let status = sys::quiet(
         std::process::Command::new("wsl.exe")
             .args(["-d", distro, "--exec"])
-            .arg(to_wsl(&stage.join("ae"))?)
+            .arg(to_wsl(&stage.path().join("ae"))?)
             .args(["install", "--apply", "--forge", "here", "--editor", "none"])
-            .args(origin),
+            .args(forwarded),
     )
     .status()
     .context("run the installer in WSL")?;
-    std::fs::remove_dir_all(&stage).ok();
     anyhow::ensure!(status.success(), "installing in {distro} failed ({status})");
     Ok(())
 }
@@ -682,44 +993,48 @@ fn install_in_windows(release: &Release, source: &Source) -> Result<()> {
         bail!("this installer carries no Editor for Windows");
     };
     let (stage, _) = windows_temp()?;
-    release.unpack(App::Ae, "windows", &stage)?;
+    release.unpack(App::Ae, "windows", stage.path())?;
     let from = sys::output("wslpath", &["-a", "-w", &dir.to_string_lossy()])?
         .trim()
         .to_owned();
     ui::step("Installing the Editor on Windows");
-    let status = std::process::Command::new(stage.join("ae.exe"))
+    let status = std::process::Command::new(stage.path().join("ae.exe"))
         .args([
             "install", "--editor", "here", "--forge", "none", "--yes", "--from", &from,
         ])
         .current_dir("/mnt/c")
         .status()
         .context("run the installer on Windows")?;
-    std::fs::remove_dir_all(&stage).ok();
     anyhow::ensure!(status.success(), "installing on Windows failed ({status})");
     Ok(())
 }
 
 pub fn update(yes: bool) -> Result<()> {
     ui::intro("Artisan update");
-    let Some(current) = installed(App::Ae) else {
+    if installed(App::Ae).is_none() {
         bail!("nothing is installed here; run `ae install`");
-    };
+    }
     let source = Source::new(Some(&remembered_feed()?), None, false)?;
     let runtime = runtime()?;
     let Release::Feed(feed) = resolve(&runtime, &source, Carried::default())? else {
         bail!("this install came from a local build; install again to change it");
     };
     let version = feed.version().to_owned();
-    let outdated = release::newer(&version, &current);
-    let lines: Vec<String> = App::ALL
+    let components: Vec<(App, String)> = App::ALL
         .into_iter()
-        .filter_map(|app| {
-            let current = installed(app)?;
-            Some(if outdated {
+        .filter_map(|app| Some((app, installed(app)?)))
+        .collect();
+    let outdated = components
+        .iter()
+        .any(|(_, current)| release::newer(&version, current));
+    let lines: Vec<String> = components
+        .iter()
+        .map(|(app, current)| {
+            if release::newer(&version, current) {
                 format!("{:<8} {current} → {version}", app.id())
             } else {
                 format!("{:<8} {current} ✓ up to date", app.id())
-            })
+            }
         })
         .collect();
     ui::note("Installed", lines.join("\n"));
@@ -737,9 +1052,23 @@ pub fn update(yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    hand_over(&runtime, &feed, &Place::Keep, &Place::Keep)?;
+    hand_over(&runtime, &feed, &EditorPlace::Keep, &ForgePlace::Keep)?;
     ui::outro("Up to date.");
     Ok(())
+}
+
+fn removable(present: &[App], with_data: &[App], purge: bool) -> Vec<App> {
+    App::ALL
+        .into_iter()
+        .filter(|app| present.contains(app) || (purge && with_data.contains(app)))
+        .collect()
+}
+
+fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
+    chosen.contains(&App::Ae)
+        && present
+            .iter()
+            .any(|app| *app != App::Ae && !chosen.contains(app))
 }
 
 pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
@@ -748,12 +1077,17 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
         .into_iter()
         .filter(|app| app.binary().is_ok_and(|binary| binary.is_file()))
         .collect();
+    let with_data: Vec<App> = App::ALL
+        .into_iter()
+        .filter(|app| app.data().is_ok_and(|data| data.exists()))
+        .collect();
+    let candidates = removable(&present, &with_data, purge);
     let mut chosen: Vec<App> = if apps.is_empty() {
-        present.clone()
+        candidates.clone()
     } else {
         apps.iter()
             .copied()
-            .filter(|app| present.contains(app))
+            .filter(|app| candidates.contains(app))
             .collect()
     };
     if chosen.is_empty() {
@@ -767,7 +1101,7 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
         }
         if apps.is_empty() {
             let mut select = cliclack::multiselect("Uninstall").required(true);
-            for app in &present {
+            for app in &candidates {
                 select = select.item(
                     *app,
                     app.display_name(),
@@ -775,24 +1109,31 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
                 );
             }
             chosen = select
-                .initial_values(present)
+                .initial_values(candidates)
                 .interact()
                 .map_err(ui::prompt_error)?;
         }
-        let with_data: Vec<&str> = chosen
+        let keeping: Vec<&str> = chosen
             .iter()
-            .filter(|app| app.data().is_ok_and(|data| data.exists()))
+            .filter(|app| with_data.contains(app))
             .map(|app| app.display_name())
             .collect();
-        if !purge && !with_data.is_empty() {
+        if !purge && !keeping.is_empty() {
             purge = cliclack::confirm(format!(
                 "Also delete the data of {}? (threads, settings, paired devices)",
-                with_data.join(" and ")
+                keeping.join(" and ")
             ))
             .initial_value(false)
             .interact()
             .map_err(ui::prompt_error)?;
         }
+    }
+    if leaves_orphans(&chosen, &present) {
+        bail!(
+            "ae is what manages and uninstalls Forge and the Editor; uninstall them first, or together with ae"
+        );
+    }
+    if !yes {
         let names: Vec<&str> = chosen.iter().map(|app| app.display_name()).collect();
         let go = cliclack::confirm(format!("Uninstall {}?", names.join(", ")))
             .initial_value(true)
@@ -803,14 +1144,20 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
+    let installing = install_lock()?;
     chosen.sort();
     chosen.reverse();
+    let mut deferred = false;
     for app in chosen {
-        ui::task(
+        deferred |= ui::task(
             format!("Removing {}", app.display_name()),
             format!("Removed {}", app.display_name()),
             || remove_app(app, purge),
         )?;
+    }
+    drop(installing);
+    if !deferred {
+        forget_empty_root()?;
     }
     ui::outro(if purge {
         "Uninstalled."
@@ -820,7 +1167,31 @@ pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn remove_app(app: App, purge: bool) -> Result<()> {
+fn remove_dir_if_empty(dir: &Path) -> Result<bool> {
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error).with_context(|| format!("remove {}", dir.display())),
+    }
+}
+
+fn forget_empty_root() -> Result<()> {
+    let root = artisan_paths::root()?;
+    sys::remove(&root.join(INSTALL_LOCK))?;
+    if remove_dir_if_empty(&root)? {
+        artisan_paths::forget_root().context("forget the install folder")?;
+    }
+    Ok(())
+}
+
+fn remove_app(app: App, purge: bool) -> Result<bool> {
     match app {
         App::Forge => {
             service::stop()?;
@@ -834,30 +1205,39 @@ fn remove_app(app: App, purge: bool) -> Result<()> {
     }
     platform::unregister_uninstall(app)?;
     let dir = app.dir()?;
+    let self_removal = app == App::Ae && cfg!(windows);
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let path = entry?.path();
         if !purge && path.file_name().is_some_and(|name| name == "data") {
             continue;
         }
-        if app == App::Ae && cfg!(windows) && path == app.binary()? {
-            let script = format!(
-                "ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"",
-                path.display()
-            );
-            sys::spawn_detached(std::process::Command::new("cmd.exe").args(["/d", "/c", &script]))
-                .ok();
+        if self_removal && path == app.binary()? {
             continue;
         }
         sys::remove(&path)?;
     }
+    if self_removal {
+        remove_self_later(&app.binary()?, &dir)?;
+        return Ok(true);
+    }
     if purge || app == App::Ae {
-        std::fs::remove_dir(&dir).ok();
+        remove_dir_if_empty(&dir)?;
     }
-    if let Ok(root) = artisan_paths::root()
-        && std::fs::remove_dir(root).is_ok()
-    {
-        artisan_paths::forget_root().ok();
-    }
+    Ok(false)
+}
+
+fn remove_self_later(ae: &Path, dir: &Path) -> Result<()> {
+    let root = artisan_paths::root()?;
+    let script = format!(
+        "ping -n 3 127.0.0.1 >nul & del /f /q \"{ae}\" & rmdir \"{dir}\" & del /f /q \"{lock}\" & rmdir \"{root}\" && (del /f /q \"{pointer}\" & rmdir \"{default}\")",
+        ae = ae.display(),
+        dir = dir.display(),
+        lock = root.join(INSTALL_LOCK).display(),
+        root = root.display(),
+        pointer = artisan_paths::root_pointer()?.display(),
+        default = artisan_paths::default_root()?.display(),
+    );
+    sys::spawn_detached(std::process::Command::new("cmd.exe").args(["/d", "/c", &script]))?;
     Ok(())
 }
 

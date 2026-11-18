@@ -277,7 +277,7 @@ fn forge_service(command: &ForgeCommand) -> Result<()> {
         App::Forge.binary()?.is_file(),
         "Forge isn't installed here; run `ae install`"
     );
-    let address = service::address();
+    let address = service::address()?;
     let started = |pid: Option<u32>| {
         let pid = pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
         format!("Forge is running on {address}{pid}")

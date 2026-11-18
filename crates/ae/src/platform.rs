@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 const DESKTOP_FILE: &str = "artisan-editor.desktop";
 const EDITOR_ICON: &str = include_str!("../../editor-assets/app/artisan-editor.svg");
 const SHORTCUT: &str = "Artisan Editor.lnk";
+const PROTOCOL_KEY: &str = r"HKCU:\Software\Classes\artisan";
+const KEEP_OTHER_ENTRIES: &str = r"$_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\')";
 
 /// Puts `ae` on PATH: its folder on the user `Path` on Windows,
 /// `~/.local/bin/ae` elsewhere. Returns a hint when the shell won't see it.
@@ -23,7 +25,7 @@ pub fn add_to_path() -> Result<Option<String>> {
         sys::powershell(&format!(
             "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
              $old = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); \
-             $parts = @($old -split ';' | Where-Object {{ $_ -and $_ -ne $dir }}); \
+             $parts = @($old -split ';' | Where-Object {{ {KEEP_OTHER_ENTRIES} }}); \
              $key.SetValue('Path', ((@($dir) + $parts) -join ';'), 'ExpandString'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', '1', 'User'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', $null, 'User')"
@@ -81,7 +83,7 @@ pub fn remove_path_entry(dir: &Path) -> Result<()> {
     sys::powershell(&format!(
         "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
          $old = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); \
-         $new = (@($old -split ';' | Where-Object {{ $_ -and $_.TrimEnd('\\') -ne $dir.TrimEnd('\\') }})) -join ';'; \
+         $new = (@($old -split ';' | Where-Object {{ {KEEP_OTHER_ENTRIES} }})) -join ';'; \
          if ($new -ne $old) {{ $key.SetValue('Path', $new, 'ExpandString') }}"
     ))
     .map(drop)
@@ -126,11 +128,11 @@ pub fn integrate_editor() -> Result<()> {
     let editor = App::Editor.binary()?;
     if cfg!(windows) {
         let link = start_menu()?.join(SHORTCUT);
-        let command = format!("\"{}\" \"%1\"", editor.display());
+        let command = protocol_command(&editor);
         sys::powershell(&format!(
             "$shell = New-Object -ComObject WScript.Shell; $s = $shell.CreateShortcut({link}); \
              $s.TargetPath = {target}; $s.WorkingDirectory = {folder}; $s.IconLocation = {target} + ',0'; $s.Save(); \
-             $key = 'HKCU:\\Software\\Classes\\artisan'; \
+             $key = {protocol}; \
              New-Item -Path \"$key\\shell\\open\\command\" -Force | Out-Null; \
              Set-ItemProperty -Path $key -Name '(default)' -Value 'URL:Artisan Protocol'; \
              Set-ItemProperty -Path $key -Name 'URL Protocol' -Value ''; \
@@ -139,6 +141,7 @@ pub fn integrate_editor() -> Result<()> {
             target = ps_quote(&editor),
             folder = ps_quote(editor.parent().unwrap_or(&editor)),
             command = ps_string(&command),
+            protocol = ps_string(PROTOCOL_KEY),
         ))
         .map(drop)
     } else if cfg!(target_os = "linux") {
@@ -164,11 +167,15 @@ pub fn integrate_editor() -> Result<()> {
 pub fn remove_editor_integration() -> Result<()> {
     if cfg!(windows) {
         sys::remove(&start_menu()?.join(SHORTCUT))?;
-        if sys::output("reg.exe", &["query", r"HKCU\Software\Classes\artisan"]).is_ok() {
-            sys::run(
-                "reg.exe",
-                &["delete", r"HKCU\Software\Classes\artisan", "/f"],
-            )?;
+        let registered = sys::powershell(&format!(
+            "$v = (Get-ItemProperty -LiteralPath {key} -ErrorAction SilentlyContinue).'(default)'; if ($v) {{ $v }}",
+            key = ps_string(&format!(r"{PROTOCOL_KEY}\shell\open\command")),
+        ))?;
+        if registered.trim() == protocol_command(&App::Editor.binary()?) {
+            sys::powershell(&format!(
+                "Remove-Item -LiteralPath {} -Recurse -Force",
+                ps_string(PROTOCOL_KEY)
+            ))?;
         }
         Ok(())
     } else if cfg!(target_os = "linux") {
@@ -177,6 +184,10 @@ pub fn remove_editor_integration() -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn protocol_command(editor: &Path) -> String {
+    format!("\"{}\" \"%1\"", editor.display())
 }
 
 pub fn start_menu() -> Result<PathBuf> {

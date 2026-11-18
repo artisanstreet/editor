@@ -1,41 +1,39 @@
-//! The Forge service. On Linux with systemd: a user unit running `forge`.
-//! Elsewhere (Windows, macOS, WSL without systemd): `forge` started
-//! detached, with a pid file and log in its data folder; on Windows a Run
-//! entry starts it at sign-in.
-
 use crate::sys;
 use anyhow::{Context, Result, bail};
 use artisan_paths::App;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const UNIT: &str = "artisan-forge.service";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Artisan Forge";
+const STOP_FILE: &str = "forge.stop";
+const STALL_DEADLINE: Duration = Duration::from_secs(60);
+const STOP_DEADLINE: Duration = Duration::from_secs(30);
+const FORCE_DEADLINE: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(100);
 
 fn data() -> Result<PathBuf> {
     App::Forge.data().context("find Forge's data folder")
 }
 
-/// Where Forge listens.
-pub fn address() -> SocketAddr {
-    data()
-        .and_then(|data| forge_http::configured_listen(&data))
-        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], forge_http::DEFAULT_PORT)))
+pub fn address() -> Result<SocketAddr> {
+    let data = data()?;
+    forge_http::configured_listen(&data)
+        .with_context(|| format!("read where Forge listens from {}", data.display()))
 }
 
 pub fn log_file() -> Result<PathBuf> {
     Ok(data()?.join("forge.log"))
 }
 
-/// Where to read Forge's log.
-pub fn log_hint() -> String {
+pub fn log_hint() -> Result<String> {
     if uses_systemd() {
-        format!("journalctl --user -u {UNIT}")
+        Ok(format!("journalctl --user -u {UNIT}"))
     } else {
-        log_file().map_or_else(|_| "forge.log".to_owned(), |log| log.display().to_string())
+        Ok(log_file()?.display().to_string())
     }
 }
 
@@ -43,20 +41,30 @@ pub fn unit_path() -> Result<PathBuf> {
     Ok(artisan_paths::xdg_config()?.join("systemd/user").join(UNIT))
 }
 
+fn wants_link() -> Result<PathBuf> {
+    Ok(artisan_paths::xdg_config()?
+        .join("systemd/user/default.target.wants")
+        .join(UNIT))
+}
+
 fn systemd_available() -> bool {
     cfg!(target_os = "linux") && sys::output("systemctl", &["--user", "show-environment"]).is_ok()
 }
 
-/// Whether our unit is installed (one running this `forge`, not an older
-/// Artisan's).
+fn unit_is_ours() -> Result<bool> {
+    if !cfg!(target_os = "linux") {
+        return Ok(false);
+    }
+    let unit = unit_path()?;
+    match std::fs::read_to_string(&unit) {
+        Ok(text) => Ok(unit_runs(&text, &App::Forge.binary()?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("read {}", unit.display())),
+    }
+}
+
 fn uses_systemd() -> bool {
-    cfg!(target_os = "linux")
-        && unit_path()
-            .ok()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .zip(App::Forge.binary().ok())
-            .is_some_and(|(text, forge)| unit_runs(&text, &forge))
-        && systemd_available()
+    unit_is_ours().is_ok_and(|ours| ours) && systemd_available()
 }
 
 fn unit_runs(text: &str, forge: &Path) -> bool {
@@ -66,9 +74,8 @@ fn unit_runs(text: &str, forge: &Path) -> bool {
 }
 
 fn unit_quote(value: &str) -> String {
-    // JSON quoting is the subset of systemd double-quoted strings we emit;
-    // percent specifiers are escaped too. A string always serializes.
-    serde_json::to_string(&value.replace('%', "%%")).unwrap_or_default()
+    serde_json::to_string(&value.replace('%', "%%"))
+        .expect("invariant: a string always serializes as JSON")
 }
 
 #[derive(Clone, Copy)]
@@ -77,15 +84,25 @@ enum StopMode {
     ProcessGroup,
 }
 
-fn unit_text(forge: &Path, mode: StopMode) -> String {
+fn service_path(installer: &str, temporary: &Path) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for entry in installer.split(':') {
+        let transient = entry.is_empty()
+            || entry.starts_with("/nix/store/")
+            || Path::new(entry).starts_with(temporary);
+        if !transient && !kept.contains(&entry) {
+            kept.push(entry);
+        }
+    }
+    kept.join(":")
+}
+
+fn unit_text(forge: &Path, mode: StopMode, path: &str) -> String {
     let kill_mode = match mode {
         StopMode::Gateway => "mixed",
         StopMode::ProcessGroup => "control-group",
     };
-    let path = unit_quote(&format!(
-        "PATH={}",
-        std::env::var("PATH").unwrap_or_default()
-    ));
+    let path = unit_quote(&format!("PATH={path}"));
     format!(
         "[Unit]\nDescription=Artisan Forge\nAfter=network-online.target\n\n\
          [Service]\nType=notify\nNotifyAccess=all\nDelegate=yes\nDelegateSubgroup=forge\nExecStart={}\nEnvironment={path}\n\
@@ -95,31 +112,46 @@ fn unit_text(forge: &Path, mode: StopMode) -> String {
     )
 }
 
+fn this_unit(mode: StopMode) -> Result<String> {
+    let installer = std::env::var("PATH").unwrap_or_default();
+    Ok(unit_text(
+        &App::Forge.binary()?,
+        mode,
+        &service_path(&installer, &std::env::temp_dir()),
+    ))
+}
+
 pub fn prepare_bootstrap_stop() -> Result<()> {
     if uses_systemd() {
-        sys::write(
-            &unit_path()?,
-            &unit_text(&App::Forge.binary()?, StopMode::ProcessGroup),
-        )?;
+        sys::write(&unit_path()?, &this_unit(StopMode::ProcessGroup)?)?;
         sys::run("systemctl", &["--user", "daemon-reload"])?;
     }
     Ok(())
 }
 
-/// Makes Forge start at login: the systemd unit, or the Windows Run entry.
-/// Returns how it starts, for the summary.
+fn run_command(forge: &Path) -> String {
+    format!("\"{}\"", forge.display())
+}
+
 pub fn enable_autostart() -> Result<&'static str> {
     let forge = App::Forge.binary()?;
     if systemd_available() {
-        sys::write(&unit_path()?, &unit_text(&forge, StopMode::Gateway))?;
+        sys::write(&unit_path()?, &this_unit(StopMode::Gateway)?)?;
         sys::run("systemctl", &["--user", "daemon-reload"])?;
         sys::run("systemctl", &["--user", "enable", UNIT])?;
         Ok("starts at login (systemd)")
     } else if cfg!(windows) {
-        let command = format!("\"{}\"", forge.display());
         sys::run(
             "reg.exe",
-            &["add", RUN_KEY, "/v", RUN_VALUE, "/d", &command, "/f"],
+            &[
+                "add",
+                RUN_KEY,
+                "/v",
+                RUN_VALUE,
+                "/d",
+                &run_command(&forge),
+                "/f",
+            ],
         )?;
         Ok("starts at sign-in")
     } else if cfg!(target_os = "linux") {
@@ -130,15 +162,37 @@ pub fn enable_autostart() -> Result<&'static str> {
 }
 
 pub fn disable_autostart() -> Result<()> {
-    if uses_systemd() {
-        sys::run("systemctl", &["--user", "disable", UNIT])?;
+    if unit_is_ours()? {
+        let manager = systemd_available();
+        if manager {
+            sys::run("systemctl", &["--user", "disable", UNIT])?;
+        }
+        sys::remove(&wants_link()?)?;
         sys::remove(&unit_path()?)?;
-        sys::run("systemctl", &["--user", "daemon-reload"])?;
+        if manager {
+            sys::run("systemctl", &["--user", "daemon-reload"])?;
+        }
     }
-    if cfg!(windows) && sys::output("reg.exe", &["query", RUN_KEY, "/v", RUN_VALUE]).is_ok() {
+    if cfg!(windows) && run_entry()?.is_some_and(|command| command == run_command_of_forge()) {
         sys::run("reg.exe", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])?;
     }
     Ok(())
+}
+
+fn run_command_of_forge() -> String {
+    App::Forge
+        .binary()
+        .map_or_else(|_| String::new(), |forge| run_command(&forge))
+}
+
+fn run_entry() -> Result<Option<String>> {
+    let value = sys::powershell(&format!(
+        "$v = (Get-ItemProperty -Path {key} -Name {name} -ErrorAction SilentlyContinue).{name}; if ($v) {{ $v }}",
+        key = sys::ps_string(r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"),
+        name = sys::ps_string(RUN_VALUE),
+    ))?;
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
 fn operation_lock() -> Result<std::fs::File> {
@@ -160,12 +214,13 @@ pub fn start() -> Result<Option<u32>> {
 }
 
 fn start_unlocked() -> Result<Option<u32>> {
-    let address = address();
     if uses_systemd() {
         sys::run("systemctl", &["--user", "start", UNIT])?;
-        wait_listening(address, || {
-            sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]).is_ok()
-        })?;
+        anyhow::ensure!(
+            systemd_active(),
+            "Forge's service isn't active after starting{}",
+            recent_log()
+        );
         return Ok(None);
     }
     if let Some(pid) = running_pid() {
@@ -176,12 +231,15 @@ fn start_unlocked() -> Result<Option<u32>> {
         forge.is_file(),
         "Forge isn't installed here; run `ae install`"
     );
+    let address = address()?;
     anyhow::ensure!(
         !listening(address),
         "{address} is already occupied by another service"
     );
     let data = data()?;
     std::fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
+    sys::remove(&pid_file()?)?;
+    sys::remove(&data.join(STOP_FILE))?;
     let log = log_file()?;
     let pid = sys::spawn_detached(
         Command::new(&forge)
@@ -191,46 +249,113 @@ fn start_unlocked() -> Result<Option<u32>> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     )?;
-    std::fs::write(pid_file()?, pid.to_string()).context("write forge.pid")?;
-    if let Err(error) = wait_listening(address, || running_pid() == Some(pid)) {
-        stop_unlocked().ok();
-
+    if let Err(error) = wait_ready(pid, &log) {
+        if process_exists(pid)
+            && let Err(stopping) = stop_process(pid, &data)
+        {
+            return Err(error.context(format!(
+                "stopping the Forge that didn't start failed too: {stopping:#}"
+            )));
+        }
         return Err(error);
     }
     Ok(Some(pid))
 }
 
-/// Waits for as long as Forge is alive: it binds only once its database is
-/// upgraded, and a first start on a new schema can take a while.
-fn wait_listening(address: SocketAddr, alive: impl Fn() -> bool) -> Result<()> {
-    loop {
-        if !alive() {
-            bail!("Forge exited while starting{}", recent_log());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Startup {
+    Ready,
+    Starting,
+    Exited,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Ready,
+    Waiting,
+    Exited,
+    Stalled,
+}
+
+struct StartWatch {
+    logged: u64,
+    since: Instant,
+}
+
+impl StartWatch {
+    const fn new(logged: u64, now: Instant) -> Self {
+        Self { logged, since: now }
+    }
+
+    fn observe(&mut self, startup: Startup, logged: u64, now: Instant) -> Verdict {
+        match startup {
+            Startup::Ready => return Verdict::Ready,
+            Startup::Exited => return Verdict::Exited,
+            Startup::Starting => {}
         }
-        if listening(address) {
-            return Ok(());
+        if logged != self.logged {
+            self.logged = logged;
+            self.since = now;
+            Verdict::Waiting
+        } else if now.duration_since(self.since) >= STALL_DEADLINE {
+            Verdict::Stalled
+        } else {
+            Verdict::Waiting
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// The log's last lines, for a failed start.
+fn startup(pid: u32) -> Startup {
+    if pid_file().ok().and_then(|path| recorded_pid(&path)) == Some(pid) {
+        Startup::Ready
+    } else if process_exists(pid) {
+        Startup::Starting
+    } else {
+        Startup::Exited
+    }
+}
+
+fn log_length(log: &Path) -> u64 {
+    std::fs::metadata(log).map_or(0, |metadata| metadata.len())
+}
+
+fn wait_ready(pid: u32, log: &Path) -> Result<()> {
+    let mut watch = StartWatch::new(log_length(log), Instant::now());
+    loop {
+        match watch.observe(startup(pid), log_length(log), Instant::now()) {
+            Verdict::Ready => return Ok(()),
+            Verdict::Exited => bail!("Forge exited while starting{}", recent_log()),
+            Verdict::Stalled => bail!(
+                "Forge (pid {pid}) made no progress starting for {} seconds{}",
+                STALL_DEADLINE.as_secs(),
+                recent_log()
+            ),
+            Verdict::Waiting => std::thread::sleep(POLL),
+        }
+    }
+}
+
+fn systemd_active() -> bool {
+    sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]).is_ok()
+}
+
 fn recent_log() -> String {
     let text = if uses_systemd() {
         sys::output(
             "journalctl",
             &["--user", "-u", UNIT, "-n", "15", "--no-pager", "-o", "cat"],
         )
-        .unwrap_or_default()
+        .unwrap_or_else(|error| format!("(journalctl failed: {error:#})"))
     } else {
-        log_file()
-            .ok()
-            .and_then(|log| std::fs::read_to_string(log).ok())
-            .map(|text| {
+        match log_file().map(std::fs::read_to_string) {
+            Ok(Ok(text)) => {
                 let lines: Vec<&str> = text.lines().collect();
                 lines[lines.len().saturating_sub(15)..].join("\n")
-            })
-            .unwrap_or_default()
+            }
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Ok(Err(error)) => format!("(reading the log failed: {error})"),
+            Err(error) => format!("(finding the log failed: {error:#})"),
+        }
     };
     if text.trim().is_empty() {
         String::new()
@@ -253,30 +378,56 @@ fn stop_unlocked() -> Result<bool> {
     let Some(pid) = running_pid() else {
         return Ok(false);
     };
+    stop_process(pid, &data()?)?;
+    Ok(true)
+}
+
+fn stop_process(pid: u32, data: &Path) -> Result<()> {
     if cfg!(windows) {
-        sys::run("taskkill.exe", &["/PID", &pid.to_string(), "/T", "/F"])?;
+        std::fs::write(data.join(STOP_FILE), pid.to_string())
+            .with_context(|| format!("ask Forge (pid {pid}) to stop"))?;
     } else {
         sys::run("kill", &["-TERM", &pid.to_string()])?;
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let directory = data()?;
-    while process_exists(pid) || forge_http::lock_data_dir(&directory).is_err() {
-        if std::time::Instant::now() >= deadline {
-            bail!("Forge (pid {pid}) didn't stop within 30 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    let stopped = wait_stopped(pid, data, STOP_DEADLINE);
+    if !stopped && cfg!(windows) {
+        sys::run("taskkill.exe", &["/PID", &pid.to_string(), "/T", "/F"])?;
+        anyhow::ensure!(
+            wait_stopped(pid, data, FORCE_DEADLINE),
+            "Forge (pid {pid}) didn't stop even when forced"
+        );
+    } else if !stopped {
+        bail!(
+            "Forge (pid {pid}) didn't stop within {} seconds",
+            STOP_DEADLINE.as_secs()
+        );
     }
-    std::fs::remove_file(pid_file()?).ok();
-    Ok(true)
+    sys::remove(&pid_file()?)?;
+    sys::remove(&data.join(STOP_FILE))
+}
+
+fn wait_stopped(pid: u32, data: &Path, deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if !process_exists(pid) && forge_http::lock_data_dir(data).is_ok() {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
 }
 
 pub fn restart() -> Result<Option<u32>> {
     let _operation = operation_lock()?;
     if uses_systemd() {
         sys::run("systemctl", &["--user", "restart", UNIT])?;
-        wait_listening(address(), || {
-            sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]).is_ok()
-        })?;
+        anyhow::ensure!(
+            systemd_active(),
+            "Forge's service isn't active after restarting{}",
+            recent_log()
+        );
         return Ok(None);
     }
     stop_unlocked()?;
@@ -285,7 +436,7 @@ pub fn restart() -> Result<Option<u32>> {
 
 pub fn is_running() -> bool {
     if uses_systemd() {
-        sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]).is_ok()
+        systemd_active()
     } else {
         running_pid().is_some()
     }
@@ -295,66 +446,34 @@ fn pid_file() -> Result<PathBuf> {
     Ok(data()?.join("forge.pid"))
 }
 
-/// The detached Forge's pid, if the pid file names a live `forge` from
-/// this install.
+fn recorded_pid(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 pub fn running_pid() -> Option<u32> {
-    let pid: u32 = std::fs::read_to_string(pid_file().ok()?)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    let mut system = sysinfo::System::new();
-    let process_id = sysinfo::Pid::from_u32(pid);
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[process_id]),
-        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-    );
-    let process = system.process(process_id)?;
-    if matches!(
-        process.status(),
-        sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
-    ) {
-        return None;
-    }
-    let executable = process.exe()?.to_string_lossy().into_owned();
-    let executable = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+    let pid = recorded_pid(&pid_file().ok()?)?;
+    let process = crate::platform::running(pid)?;
     #[cfg(unix)]
     if let Some(gateway) = forge_http::upgrade::gateway(&data().ok()?).ok().flatten()
         && gateway.pid == pid
-        && same_path(Path::new(executable), &gateway.binary)
+        && same_path(&process.executable, &gateway.binary)
     {
         return Some(pid);
     }
-    same_path(Path::new(executable), &App::Forge.binary().ok()?).then_some(pid)
+    same_path(&process.executable, &App::Forge.binary().ok()?).then_some(pid)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
-        _ if cfg!(windows) => left
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy()),
-        _ => left == right,
+        _ => crate::platform::same_executable(left, right),
     }
 }
 
-/// Whether `pid` is still a live process; a zombie has closed its files.
 fn process_exists(pid: u32) -> bool {
-    let mut system = sysinfo::System::new();
-    let process_id = sysinfo::Pid::from_u32(pid);
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[process_id]),
-        sysinfo::ProcessRefreshKind::new(),
-    );
-    system.process(process_id).is_some_and(|process| {
-        !matches!(
-            process.status(),
-            sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
-        )
-    })
+    crate::platform::running(pid).is_some()
 }
 
-/// Whether something accepts connections on `address`.
 pub fn listening(address: SocketAddr) -> bool {
     let address = if address.ip().is_unspecified() {
         SocketAddr::from(([127, 0, 0, 1], address.port()))
@@ -365,18 +484,5 @@ pub fn listening(address: SocketAddr) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_unit_running_this_forge_is_ours() {
-        let forge = Path::new("/home/a/.local/share/artisan-street/forge/forge");
-        assert!(unit_runs(&unit_text(forge, StopMode::Gateway), forge));
-        let quoted = Path::new("/tmp/quoted \"percent%h\" forge");
-        assert!(unit_runs(&unit_text(quoted, StopMode::Gateway), quoted));
-        assert!(!unit_runs(
-            "[Service]\nExecStart=\"/home/a/.local/share/artisan/bin/ae\" forge serve\n",
-            forge
-        ));
-    }
-}
+#[path = "../tests/service/unit.rs"]
+mod tests;
