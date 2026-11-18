@@ -127,56 +127,20 @@ impl Store {
         &self,
         mutation: artisan_api::McpMutation,
     ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
+        self.mutate_mcp_together(vec![mutation]).await
+    }
+
+    pub async fn mutate_mcp_together(
+        &self,
+        mutations: Vec<artisan_api::McpMutation>,
+    ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
         self.write_acknowledged(move |tx| {
-            use artisan_api::McpMutation;
             let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(read::from_value)
                 .transpose()?
                 .unwrap_or_default();
-            let previous = match &mutation {
-                McpMutation::Upsert { previous, .. } => previous.as_ref(),
-                McpMutation::Remove { previous } => Some(previous),
-            };
-            if let Some(previous) = previous
-                && servers.iter().find(|server| server.name == previous.name) != Some(previous)
-            {
-                return Err(SettingFailure::McpChanged {
-                    server: previous.name.clone(),
-                });
-            }
-            if let McpMutation::Upsert { server, .. } = &mutation {
-                if server.name.trim().is_empty() {
-                    return Err(SettingFailure::McpUnnamed);
-                }
-                if server.command.trim().is_empty()
-                    && server.url.as_ref().is_none_or(|url| url.trim().is_empty())
-                {
-                    return Err(SettingFailure::McpTargetMissing {
-                        server: server.name.clone(),
-                    });
-                }
-                if servers.iter().any(|other| {
-                    other.name == server.name && previous.is_none_or(|old| old.name != other.name)
-                }) {
-                    return Err(SettingFailure::McpNameTaken {
-                        server: server.name.clone(),
-                    });
-                }
-            }
-            if let Some(previous) = previous {
-                servers.retain(|server| server.name != previous.name);
-                let kept = match &mutation {
-                    McpMutation::Upsert { server, .. } => {
-                        server.name == previous.name && server.url == previous.url
-                    }
-                    McpMutation::Remove { .. } => false,
-                };
-                if !kept {
-                    forget_mcp_secrets(tx, &previous.name)?;
-                }
-            }
-            if let McpMutation::Upsert { server, .. } = mutation {
-                servers.push(server);
+            for mutation in mutations {
+                apply_mcp_mutation(tx, &mut servers, mutation)?;
             }
             servers.sort_by(|a, b| a.name.cmp(&b.name));
             tx.save_setting("mcp_servers".into(), read::to_value(&servers)?)?;
@@ -688,5 +652,59 @@ fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<(), St
             McpSecret::Tokens.key(server),
             McpSecret::Client.key(server)
         ])?;
+    Ok(())
+}
+
+fn apply_mcp_mutation(
+    tx: &crate::writer::Tx<'_>,
+    servers: &mut Vec<artisan_api::McpServer>,
+    mutation: artisan_api::McpMutation,
+) -> Result<(), SettingFailure> {
+    use artisan_api::McpMutation;
+    let previous = match &mutation {
+        McpMutation::Upsert { previous, .. } => previous.as_ref(),
+        McpMutation::Remove { previous } => Some(previous),
+    };
+    if let Some(previous) = previous
+        && servers.iter().find(|server| server.name == previous.name) != Some(previous)
+    {
+        return Err(SettingFailure::McpChanged {
+            server: previous.name.clone(),
+        });
+    }
+    if let McpMutation::Upsert { server, .. } = &mutation {
+        if server.name.trim().is_empty() {
+            return Err(SettingFailure::McpUnnamed);
+        }
+        if server.command.trim().is_empty()
+            && server.url.as_ref().is_none_or(|url| url.trim().is_empty())
+        {
+            return Err(SettingFailure::McpTargetMissing {
+                server: server.name.clone(),
+            });
+        }
+        if servers.iter().any(|other| {
+            other.name == server.name && previous.is_none_or(|old| old.name != other.name)
+        }) {
+            return Err(SettingFailure::McpNameTaken {
+                server: server.name.clone(),
+            });
+        }
+    }
+    if let Some(previous) = previous {
+        servers.retain(|server| server.name != previous.name);
+        let kept = match &mutation {
+            McpMutation::Upsert { server, .. } => {
+                server.name == previous.name && server.url == previous.url
+            }
+            McpMutation::Remove { .. } => false,
+        };
+        if !kept {
+            forget_mcp_secrets(tx, &previous.name)?;
+        }
+    }
+    if let McpMutation::Upsert { server, .. } = mutation {
+        servers.push(server);
+    }
     Ok(())
 }
