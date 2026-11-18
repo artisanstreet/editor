@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 const BUDGET_BYTES: usize = 32 * 1024 * 1024;
 const LARGEST_PAGE_BYTES: usize = BUDGET_BYTES / 8;
+const THREADS_REMEMBERED: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tail {
@@ -53,7 +54,7 @@ struct Held {
 
 #[derive(Default)]
 struct Thread {
-    version: u64,
+    changed_at: u64,
     held: Vec<Held>,
 }
 
@@ -63,6 +64,8 @@ struct Window {
     bytes: usize,
     clock: u64,
     epoch: u64,
+    revision: u64,
+    forgotten: u64,
 }
 
 #[derive(Default)]
@@ -108,42 +111,63 @@ impl HotPages {
             .unwrap_or_else(PoisonError::into_inner)
             .invalidate_everything();
     }
+
+    pub fn threads_remembered(&self) -> usize {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .threads
+            .len()
+    }
+
+    pub fn held_bytes(&self) -> usize {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bytes
+    }
 }
 
 impl Window {
     fn lookup(&mut self, thread: &ThreadId, tail: &Tail) -> Lookup {
         self.clock += 1;
-        let epoch = self.epoch;
+        let read_at = Version {
+            epoch: self.epoch,
+            revision: self.revision,
+        };
         let Some(known) = self.threads.get_mut(thread) else {
-            return Lookup::Miss(Version { epoch, revision: 0 });
+            return Lookup::Miss(read_at);
         };
         match known.held.iter_mut().find(|held| held.tail == *tail) {
             Some(held) => {
                 held.used = self.clock;
                 Lookup::Hit(Arc::clone(&held.page))
             }
-            None => Lookup::Miss(Version {
-                epoch,
-                revision: known.version,
-            }),
+            None => Lookup::Miss(read_at),
         }
     }
 
     fn hold(&mut self, thread: &ThreadId, read_at: Version, mut held: Held) {
         self.clock += 1;
-        let epoch = self.epoch;
-        let known = self.threads.entry(thread.clone()).or_default();
-        let current = Version {
-            epoch,
-            revision: known.version,
-        };
-        if current != read_at || known.held.iter().any(|kept| kept.tail == held.tail) {
+        let changed_at = self
+            .threads
+            .get(thread)
+            .map_or(self.forgotten, |known| known.changed_at);
+        if read_at.epoch != self.epoch || changed_at > read_at.revision {
+            return;
+        }
+        let known = self.threads.entry(thread.clone()).or_insert(Thread {
+            changed_at,
+            held: Vec::new(),
+        });
+        if known.held.iter().any(|kept| kept.tail == held.tail) {
             return;
         }
         held.used = self.clock;
         self.bytes += held.bytes;
         known.held.push(held);
         self.shed();
+        self.forget();
     }
 
     fn committed(&mut self, envelopes: &[Envelope]) {
@@ -157,16 +181,47 @@ impl Window {
     }
 
     fn invalidate(&mut self, thread: &ThreadId) {
+        self.revision += 1;
         let known = self.threads.entry(thread.clone()).or_default();
-        known.version += 1;
+        known.changed_at = self.revision;
         let released: usize = known.held.drain(..).map(|held| held.bytes).sum();
         self.bytes -= released;
+        self.forget();
     }
 
     fn invalidate_everything(&mut self) {
         self.epoch += 1;
         self.threads.clear();
         self.bytes = 0;
+        self.forgotten = self.revision;
+    }
+
+    fn forget(&mut self) {
+        if self.threads.len() <= THREADS_REMEMBERED {
+            return;
+        }
+        let mut oldest: Vec<((bool, u64), ThreadId)> = self
+            .threads
+            .iter()
+            .map(|(thread, known)| {
+                let recency = known
+                    .held
+                    .iter()
+                    .map(|held| held.used)
+                    .max()
+                    .map_or((false, known.changed_at), |used| (true, used));
+                (recency, thread.clone())
+            })
+            .collect();
+        let excess = self.threads.len() - THREADS_REMEMBERED / 2;
+        oldest.select_nth_unstable(excess);
+        oldest.truncate(excess);
+        for (_, thread) in oldest {
+            if let Some(known) = self.threads.remove(&thread) {
+                self.forgotten = self.forgotten.max(known.changed_at);
+                self.bytes -= known.held.iter().map(|held| held.bytes).sum::<usize>();
+            }
+        }
     }
 
     fn shed(&mut self) {
@@ -211,23 +266,6 @@ const fn changed_transcript(event: &Event) -> Option<&ThreadId> {
     }
 }
 
-struct ByteCount(usize);
-
-impl std::io::Write for ByteCount {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn page_bytes(page: &ItemsPage) -> usize {
-    let mut count = ByteCount(0);
-    match serde_json::to_writer(&mut count, page) {
-        Ok(()) => count.0,
-        Err(_unserializable) => usize::MAX,
-    }
+    crate::encoded::len(page)
 }

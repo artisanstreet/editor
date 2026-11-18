@@ -22,6 +22,7 @@ mod collection;
 mod content;
 pub mod coordination;
 pub mod discovery;
+mod encoded;
 mod error;
 pub mod hot;
 mod items;
