@@ -21,8 +21,8 @@ mod prompt;
 mod skills;
 
 pub use prompt::{
-    PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt, prompt_digest,
-    read_prompt_file,
+    ApplyPromptError, PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt,
+    prompt_digest, read_prompt_file,
 };
 pub use skills::{
     AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, ReadSkillsError,
@@ -115,6 +115,12 @@ pub fn reconcile_skills(
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
+    #[error("bringing the global prompt in line for {engine}")]
+    Prompt {
+        engine: EngineId,
+        #[source]
+        source: ApplyPromptError,
+    },
     #[error("preparing the skills for {engine}")]
     Wanted {
         engine: EngineId,
@@ -143,14 +149,12 @@ pub fn materialize(
 ) -> Result<Launch, MaterializeError> {
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
-            match apply_prompt(engine, home, prompt, false) {
-                Some(PromptApplied::Drifted(_)) => {
+            match prompt::reconcile(engine, home, prompt, false) {
+                Some(Ok((prompt::Reconciled::Drifted, _))) => {
                     tracing::info!(%engine, file = %paths.prompt.display(), "the global prompt was edited outside Artisan; leaving it until the user decides");
                 }
-                Some(PromptApplied::Failed(reason)) => {
-                    tracing::warn!(%engine, file = %paths.prompt.display(), reason = %reason, "couldn't write the global prompt");
-                }
-                Some(PromptApplied::Synced) | None => {}
+                Some(Err(source)) => return Err(MaterializeError::Prompt { engine, source }),
+                Some(Ok((prompt::Reconciled::Synced, _))) | None => {}
             }
         }
         let wanted =

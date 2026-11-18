@@ -64,8 +64,8 @@ pub use customise::{
     skill_catalog, with_gateway_mcp,
 };
 pub use customise::{
-    AdoptSkillError, DiscardSkillError, FindSkillError, ImportError, InstallSkillError,
-    LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
+    AdoptSkillError, ApplyPromptError, DiscardSkillError, FindSkillError, ImportError,
+    InstallSkillError, LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
 };
 pub use engines::host_entry;
 pub use harness::*;
