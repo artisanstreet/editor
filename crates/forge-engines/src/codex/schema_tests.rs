@@ -1,31 +1,48 @@
-//! The decoder against what Codex says it may send. Examples are generated
-//! from Codex's own protocol schema (`schema/`) three ways: sparse (optional
-//! fields left out), filled in, and filled in with `null` wherever it is
-//! allowed; each covers every enum value and every variant of a union. Every message
-//! Artisan reads must parse, and none may turn into an error in the
-//! transcript: that is how a free-text question (`"options": null`) once
-//! showed as "invalid Codex asynchronous questions".
-
 use super::decoder::Decoder;
 use super::protocol::{Notification, Request};
 use crate::EngineEvent;
 use artisan_api::ItemKind;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 
+const READ_NOTIFICATIONS: [&str; 21] = [
+    "error",
+    "item/agentMessage/delta",
+    "item/commandExecution/outputDelta",
+    "item/completed",
+    "item/mcpToolCall/progress",
+    "item/plan/delta",
+    "item/reasoning/summaryPartAdded",
+    "item/reasoning/summaryTextDelta",
+    "item/started",
+    "model/rerouted",
+    "model/safetyBuffering/updated",
+    "serverRequest/resolved",
+    "thread/goal/cleared",
+    "thread/goal/updated",
+    "thread/name/updated",
+    "thread/started",
+    "thread/tokenUsage/updated",
+    "turn/completed",
+    "turn/plan/updated",
+    "turn/started",
+    "warning",
+];
+const READ_REQUESTS: [&str; 5] = [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+];
 const NOTIFICATIONS: &str = include_str!("schema/ServerNotification.json");
 const REQUESTS: &str = include_str!("schema/ServerRequest.json");
-/// Examples per schema node, so unions inside unions stay bounded.
 const MAX_EXAMPLES: usize = 48;
-/// Deeper than any message Artisan reads; recursive types stop here.
 const MAX_DEPTH: usize = 14;
 
-/// Example values for one schema, in one of two modes.
 struct Examples<'a> {
     definitions: &'a Map<String, Value>,
-    /// Every field there, lists with an entry; otherwise only required
-    /// fields, lists empty.
     full: bool,
-    /// `null` wherever it is allowed.
     nulls: bool,
 }
 
@@ -53,7 +70,6 @@ impl Examples<'_> {
         if let Some(values) = schema["enum"].as_array() {
             return values.clone();
         }
-        // Parts of one object: each example merges one of every part's.
         if let Some(parts) = schema["allOf"].as_array() {
             if let [only] = parts.as_slice() {
                 return self.of(only, name, depth);
@@ -77,7 +93,6 @@ impl Examples<'_> {
         }
         for union in ["oneOf", "anyOf"] {
             if let Some(branches) = schema[union].as_array() {
-                // Shared fields beside the union go into every variant.
                 if schema.get("properties").is_some() {
                     let mut base = schema.clone();
                     base.as_object_mut().expect("object schema").remove(union);
@@ -123,16 +138,11 @@ impl Examples<'_> {
         self.or_null(nullable, values)
     }
 
-    /// `values`, after a `null` first where it is allowed and wanted: the
-    /// field is `null` in one example and present in the others, so a
-    /// `null` deep inside a present parent is tried too.
     fn or_null(&self, nullable: bool, values: impl IntoIterator<Item = Value>) -> Vec<Value> {
         let null = (self.nulls && nullable).then_some(Value::Null);
         null.into_iter().chain(values).collect()
     }
 
-    /// One object per example of its widest field, the other fields cycling
-    /// through theirs.
     fn object(&self, schema: &Value, depth: usize) -> Vec<Value> {
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -167,14 +177,12 @@ impl Examples<'_> {
     }
 }
 
-/// Every `(method, params)` example the schema in `source` allows.
 fn messages(source: &str) -> Vec<(String, Value)> {
     let schema: Value = serde_json::from_str(source).expect("Codex schema is JSON");
     let definitions = schema["definitions"]
         .as_object()
         .expect("schema definitions");
     let mut messages = Vec::new();
-    // Sparse, filled, and filled with `null` wherever allowed.
     for (full, nulls) in [(false, true), (true, false), (true, true)] {
         let examples = Examples {
             definitions,
@@ -197,7 +205,6 @@ fn messages(source: &str) -> Vec<(String, Value)> {
     messages
 }
 
-/// A decoder with the run's thread started, as when messages arrive.
 fn started() -> Decoder {
     let mut decoder = Decoder::default();
     let request = decoder.request("thread/start", json!({}));
@@ -207,8 +214,6 @@ fn started() -> Decoder {
     decoder
 }
 
-/// Errors the decoder raises about Codex's data, rather than ones Codex
-/// reports about its own work.
 fn complaints(events: &[EngineEvent]) -> Vec<String> {
     events
         .iter()
@@ -240,7 +245,6 @@ fn check(
     failures: &mut Vec<String>,
 ) {
     match parsed {
-        // A method Artisan doesn't read.
         Ok(false) => return,
         Ok(true) => {}
         Err(error) => {
@@ -259,7 +263,6 @@ fn check(
         Err(error) => failures.push(format!(
             "{kind} {method} fails the run: {error:#}\n  {params}"
         )),
-        // Codex reporting a failure of its own is meant to show.
         Ok(_) if method == "error" || params["turn"]["status"] == "failed" => {}
         Ok(events) => {
             for complaint in complaints(&events) {
@@ -275,22 +278,40 @@ fn check(
 fn every_notification_codex_may_send_reads_without_error() {
     let mut failures = Vec::new();
     let messages = messages(NOTIFICATIONS);
-    assert!(messages.len() > 100, "the schema yields examples");
+    let mut read = BTreeSet::new();
     for (method, params) in &messages {
         let parsed = Notification::parse(method, params)
             .map(|notice| !matches!(notice, Notification::Unknown));
+        if matches!(parsed, Ok(true)) {
+            read.insert(method.as_str());
+        }
         check("notification", method, params, parsed, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(
+        read,
+        BTreeSet::from(READ_NOTIFICATIONS),
+        "every notification Artisan reads is checked against the schema"
+    );
 }
 
 #[test]
 fn every_request_codex_may_send_reads_without_error() {
     let mut failures = Vec::new();
-    for (method, params) in &messages(REQUESTS) {
+    let messages = messages(REQUESTS);
+    let mut read = BTreeSet::new();
+    for (method, params) in &messages {
         let parsed =
             Request::parse(method, params).map(|request| !matches!(request, Request::Unknown));
+        if matches!(parsed, Ok(true)) {
+            read.insert(method.as_str());
+        }
         check("request", method, params, parsed, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(
+        read,
+        BTreeSet::from(READ_REQUESTS),
+        "every request Artisan reads is checked against the schema"
+    );
 }
