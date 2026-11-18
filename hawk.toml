@@ -1,0 +1,595 @@
+preserve-uniform-field-visibility = true
+
+[[production]]
+package = "editor-aqua"
+bin = "editor-aqua"
+reason = "shipped Editor"
+
+[[production]]
+package = "forge"
+bin = "forge"
+reason = "shipped Forge"
+
+[[production]]
+package = "ae"
+bin = "ae"
+reason = "shipped CLI and installer"
+
+[[feature-profile]]
+name = "shipped"
+
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[exclude]]
+crate = "editor_aqua"
+module = "capture"
+level = "expect"
+reason = "capture tooling only runs on Windows with the capture feature; elsewhere it compiles partially, so its findings are not comparable across targets"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_sources"
+item = "sources::controller::ContentText::completion_for_tests"
+kind = "inherent_method"
+level = "expect"
+reason = "test-only helper behind the test-support feature, used by editor-aqua tests"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_aqua"
+item = "shell::native_notifications::record_cold_launch"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_aqua"
+item = "shell::application::ShellApplication::<V>::tap_render"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_isolation"
+item = "sandbox::landlock::Landlock::abi"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "Linux-only sandbox module, so the Windows run cannot confirm the finding"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "upgrade::Upgrade::binary"
+kind = "field"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::browser::resolve"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::entry::Entry::qualification_account"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::root::qualification::<impl shell::root::RootViews>::qualification_observation"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_isolation"
+item = "linux::protect_forge"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "Linux-only sandbox module, so the Windows run cannot confirm the finding"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_aqua"
+item = "shell::open_url"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_audio"
+item = "state::Inner::fill_mapped"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_http"
+item = "start_generation"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::upgrade_lock"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "artisan_api"
+item = "clock::step"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "artisan_api"
+item = "clock::reset"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_aqua"
+item = "shell::entry::Entry::qualification_account"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_aqua"
+item = "shell::root::qualification::<impl shell::root::RootViews>::qualification_observation"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_aqua"
+item = "shell::application::ShellApplication::<shell::root::RootViews>::qualification_observation"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::take_tally"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::Tally::event"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "editor_core"
+item = "core::host::project_icons::<impl core::host::HostData>::project_icon_checked"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_store"
+item = "faults::heal"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_store"
+item = "faults::fail_commits"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "test_support"
+item = "replay::ReplayingEngine::install_transcript"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "Server::hub"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::read"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::write"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::UpgradeLock"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::root"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::peers"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::active"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::retire_unused"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "artisan_api"
+item = "clock"
+kind = "module"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "diagnostics"
+item = "Destination"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::browser::resolve"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::items"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::native_notifications::record_cold_launch"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::landing"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::row_count"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::page_loaded"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "shell::application::ShellApplication::<V>::tap_render"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::scroll_y_bits"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::page_in_flight"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::visible_row_start"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::Tally::reasons"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::Tally::rebuilds"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_ui"
+item = "ui::locale::system::posix_locale"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_aqua"
+item = "shell::open_url"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_audio"
+item = "state::Inner::fill"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::host"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::agent"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::thread"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::account"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::page_gap"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::load_error"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::page_oldest"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::page_exhausted"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::work_in_flight"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::measured_row_count"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::composer_bounds_bits"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::prepared_inline_prose"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_aqua"
+item = "qualification::observation::Observation::transcript_bounds_bits"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::Tally::events"
+kind = "field"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
