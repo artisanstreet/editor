@@ -34,6 +34,13 @@ struct QuestionSourceIdentity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Followed {
+    Navigated,
+    BehindSettings,
+    Stayed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidePanel {
     Overview,
     Inspector,
@@ -1472,6 +1479,36 @@ impl Workspace {
         self.theme_transition.take()
     }
 
+    pub fn follow_accepted(
+        core: &mut Core,
+        target: &crate::composer::controller::ComposerTarget,
+        thread: &artisan_api::ThreadId,
+    ) -> Followed {
+        let host = match target {
+            crate::composer::controller::ComposerTarget::Thread { .. } => return Followed::Stayed,
+            crate::composer::controller::ComposerTarget::NewThread { host, .. } => host,
+        };
+        let composing = matches!(
+            core.workspace_screen(),
+            Screen::NewThread { host: shown, .. } if shown == host
+        );
+        let sent = Screen::Thread {
+            host: host.clone(),
+            thread: thread.clone(),
+        };
+        match (composing, core.screen()) {
+            (false, _) => Followed::Stayed,
+            (true, Screen::Settings(_)) => {
+                core.show_behind_settings(sent);
+                Followed::BehindSettings
+            }
+            (true, _) => {
+                core.navigate(sent);
+                Followed::Navigated
+            }
+        }
+    }
+
     pub fn drain_domains(&mut self, core: &mut Core, assets: &aqua::images::ImageAssets) -> bool {
         let tm_1 = crate::shell::application::Tm::new("dd.conversation");
         let conversation_changed = self.conversation.drain(core);
@@ -1504,15 +1541,8 @@ impl Workspace {
         }
         drop(tm_3);
         if let Some((target, thread)) = accepted {
-            if matches!(
-                target,
-                crate::composer::controller::ComposerTarget::NewThread { .. }
-            ) {
+            if Self::follow_accepted(core, &target, &thread) == Followed::Navigated {
                 self.sent_new_thread = Some(thread.clone());
-                core.navigate(Screen::Thread {
-                    host: target.host().clone(),
-                    thread: thread.clone(),
-                });
             }
             if core.workspace_screen().thread() == Some(&thread) {
                 self.conversation

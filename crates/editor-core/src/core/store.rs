@@ -516,6 +516,26 @@ impl Core {
         }
         self.events.push(CoreEvent::ScreenChanged);
     }
+    pub fn show_behind_settings(&mut self, screen: Screen) {
+        if !matches!(self.screen, Screen::Settings(_)) {
+            self.navigate(screen);
+            return;
+        }
+        if let Screen::Thread { host, thread } = &screen
+            && let Some(host) = self.hosts.get_mut(host)
+        {
+            host.ensure_thread(thread);
+        }
+        match self
+            .back
+            .iter()
+            .rposition(|shown| !matches!(shown, Screen::Settings(_)))
+        {
+            Some(index) => self.back[index] = screen,
+            None => self.back.insert(0, screen),
+        }
+        self.events.push(CoreEvent::ScreenChanged);
+    }
     pub fn screen_behind_settings(&self) -> Option<&Screen> {
         self.back
             .iter()

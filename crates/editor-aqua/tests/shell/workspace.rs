@@ -103,3 +103,60 @@ fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
         }
     }
 }
+
+#[test]
+fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it() {
+    use artisan_api::ThreadId;
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::core::SettingsPage;
+    use editor_aqua::shell::workspace::Followed;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_owned(),
+    })
+    .unwrap();
+    let identity = Identity::generate("accepted-send").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let config = host_config(&fingerprint);
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    core.add_test_host(&config, client);
+    let composing = Screen::NewThread {
+        host: config.id.clone(),
+        project: None,
+    };
+    let target = ComposerTarget::NewThread {
+        host: config.id.clone(),
+        project: None,
+    };
+    let sent = ThreadId::from("sent-thread");
+    let opened = Screen::Thread {
+        host: config.id.clone(),
+        thread: sent.clone(),
+    };
+
+    core.navigate(composing.clone());
+    assert_eq!(
+        Workspace::follow_accepted(&mut core, &target, &sent),
+        Followed::Navigated
+    );
+    assert_eq!(core.screen(), &opened);
+
+    core.navigate(composing.clone());
+    core.navigate(Screen::Settings(SettingsPage::General));
+    assert_eq!(
+        Workspace::follow_accepted(&mut core, &target, &sent),
+        Followed::BehindSettings
+    );
+    assert_eq!(core.screen(), &Screen::Settings(SettingsPage::General));
+    core.close_settings();
+    assert_eq!(core.screen(), &opened);
+
+    core.navigate(composing);
+    core.navigate(Screen::Marketplace);
+    assert_eq!(
+        Workspace::follow_accepted(&mut core, &target, &sent),
+        Followed::Stayed
+    );
+    assert_eq!(core.screen(), &Screen::Marketplace);
+}
