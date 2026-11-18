@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -664,22 +665,24 @@ pub fn resolve<T: DeserializeOwned>(
     Ok(records)
 }
 
-pub fn visit_questions(
+pub fn visit_until<T: DeserializeOwned>(
     conn: &Connection,
-    questions: &artisan_api::Collection<artisan_api::Question>,
-    mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
+    collection: &artisan_api::Collection<T>,
+    mut visit: impl FnMut(&T) -> Result<ControlFlow<()>>,
 ) -> Result<()> {
-    match questions {
-        artisan_api::Collection::Inline(questions) => {
-            for (index, question) in questions.iter().enumerate() {
-                visit(index, question)?;
+    match collection {
+        artisan_api::Collection::Inline(records) => {
+            for record in records {
+                if visit(record)?.is_break() {
+                    return Ok(());
+                }
             }
         }
         artisan_api::Collection::Stored(reference) => {
             metrics(conn, reference)?;
             let mut offset = 0;
             while offset < reference.count {
-                let page = range::<artisan_api::Question>(
+                let page = range::<T>(
                     conn,
                     &reference.source.id,
                     CollectionQuery {
@@ -691,14 +694,29 @@ pub fn visit_questions(
                 if !(page.end > offset && page.total == reference.count) {
                     return Err(damaged(&reference.source.id, Damage::DescriptorMismatch));
                 }
-                for (index, question) in page.records.iter().enumerate() {
-                    visit(to_usize(offset) + index, question)?;
+                for record in &page.records {
+                    if visit(record)?.is_break() {
+                        return Ok(());
+                    }
                 }
                 offset = page.end;
             }
         }
     }
     Ok(())
+}
+
+pub fn visit_questions(
+    conn: &Connection,
+    questions: &artisan_api::Collection<artisan_api::Question>,
+    mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
+) -> Result<()> {
+    let mut index = 0;
+    visit_until(conn, questions, |question| {
+        visit(index, question)?;
+        index += 1;
+        Ok(ControlFlow::Continue(()))
+    })
 }
 pub fn validate_answers(
     conn: &Connection,

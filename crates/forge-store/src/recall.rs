@@ -1,11 +1,12 @@
 use crate::Store;
 use crate::content::ContentError;
 use artisan_api::{
-    Collection, ContentQuery, EngineId, FileOp, Item, ItemId, ItemKind, ProjectId, Status,
-    TextContent, ThreadId, Timestamp, ToolKind,
+    ContentQuery, EngineId, FileOp, Item, ItemId, ItemKind, ProjectId, Status, TextContent,
+    ThreadId, Timestamp, ToolKind,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::ops::ControlFlow;
 use std::ops::Range;
 
 type Result<T, E = ContentError> = std::result::Result<T, E>;
@@ -53,6 +54,14 @@ impl Searchable {
     }
 }
 
+fn full(field: &str) -> ControlFlow<()> {
+    if field.len() >= FIELD_BYTES {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
+}
+
 fn push(field: &mut String, text: &str) {
     let text = text.trim();
     if text.is_empty() || field.len() >= FIELD_BYTES {
@@ -81,16 +90,6 @@ fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
         )?
         .map(|range| range.text)
         .unwrap_or_default()),
-    }
-}
-
-fn entries<T: serde::de::DeserializeOwned + Clone>(
-    conn: &Connection,
-    collection: &Collection<T>,
-) -> Result<Vec<T>> {
-    match collection {
-        Collection::Inline(entries) => Ok(entries.clone()),
-        Collection::Stored(_) => crate::collection::resolve(conn, collection),
     }
 }
 
@@ -143,9 +142,10 @@ pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
             answer_text,
             ..
         } => {
-            for question in entries(conn, questions)? {
+            crate::collection::visit_until(conn, questions, |question| {
                 push(text, &text_of(conn, &question.text)?);
-            }
+                Ok(full(text))
+            })?;
             if let Some(answer) = answer_text {
                 push(text, &text_of(conn, answer)?);
             }
@@ -156,9 +156,10 @@ pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
             if let Some(proposal) = proposal {
                 push(text, &text_of(conn, proposal)?);
             }
-            for step in entries(conn, steps)? {
+            crate::collection::visit_until(conn, steps, |step| {
                 push(text, &text_of(conn, &step.text)?);
-            }
+                Ok(full(text))
+            })?;
         }
         ItemKind::Image { caption, .. } => {
             if let Some(caption) = caption {
@@ -190,14 +191,15 @@ fn push_tool(
             push(paths, &format!("read\t{path}"));
         }
         ToolKind::Edit { changes } => {
-            for change in entries(conn, changes)? {
+            crate::collection::visit_until(conn, changes, |change| {
                 let op = match change.op {
                     FileOp::Add => "create",
                     FileOp::Delete => "delete",
                     FileOp::Modify | FileOp::Move { .. } => "edit",
                 };
                 push(paths, &format!("{op}\t{}", change.path));
-            }
+                Ok(full(paths))
+            })?;
         }
         ToolKind::Search { pattern, path, .. } => {
             push(text, pattern);
