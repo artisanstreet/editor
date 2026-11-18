@@ -1,4 +1,4 @@
-use artisan_api::{Item, ItemKind, LiveTarget, Run, RunStatus, Status, ToolKind};
+use artisan_api::{Item, ItemKind, LiveTarget, Run, RunOutcome, RunState, Status, ToolKind};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -10,7 +10,7 @@ pub enum Phase {
     Replying,
     Compacting,
     WaitingOnYou,
-    Settled(RunStatus),
+    Settled(RunOutcome),
 }
 
 #[must_use]
@@ -19,8 +19,8 @@ pub fn turn_phase<S: BuildHasher>(
     items: &[&Item],
     live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
 ) -> Phase {
-    if !run.status().is_live() {
-        return Phase::Settled(run.status());
+    if let RunState::Finished { outcome, .. } = &run.state {
+        return Phase::Settled(*outcome);
     }
     if items.iter().any(|item| item.status == Status::AwaitingUser) {
         return Phase::WaitingOnYou;
@@ -105,12 +105,12 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
     match phase {
         Phase::Unknown if worked => "Worked".to_owned(),
         Phase::Unknown => "Thought".to_owned(),
-        Phase::Settled(RunStatus::Done) if worked => format!("Worked for {elapsed}"),
-        Phase::Settled(RunStatus::Done) => format!("Thought for {elapsed}"),
-        Phase::Settled(RunStatus::Failed | RunStatus::Refused) => {
+        Phase::Settled(RunOutcome::Done) if worked => format!("Worked for {elapsed}"),
+        Phase::Settled(RunOutcome::Done) => format!("Thought for {elapsed}"),
+        Phase::Settled(RunOutcome::Failed | RunOutcome::Refused) => {
             format!("Failed after {elapsed}")
         }
-        Phase::Settled(RunStatus::Cancelled | RunStatus::Interrupted) => {
+        Phase::Settled(RunOutcome::Cancelled | RunOutcome::Interrupted) => {
             format!("Stopped after {elapsed}")
         }
         Phase::Thinking
@@ -118,7 +118,6 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Replying
         | Phase::Compacting
         | Phase::WaitingOnYou
-        | Phase::Settled(RunStatus::Running)
             if worked =>
         {
             format!("Working for {elapsed}")
@@ -127,8 +126,7 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Working
         | Phase::Replying
         | Phase::Compacting
-        | Phase::WaitingOnYou
-        | Phase::Settled(RunStatus::Running) => format!("Thinking for {elapsed}"),
+        | Phase::WaitingOnYou => format!("Thinking for {elapsed}"),
     }
 }
 

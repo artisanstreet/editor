@@ -2,8 +2,8 @@ use super::activity;
 use super::phase::{self, Phase};
 use super::thread::ThreadView;
 use artisan_api::{
-    Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunStatus, Seq,
-    Status, Timestamp,
+    Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunOutcome,
+    RunStatus, Seq, Status, Timestamp,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher as _};
@@ -1152,7 +1152,7 @@ fn summaries(
                 view.work_open
                     .get(run_id)
                     .copied()
-                    .unwrap_or_else(|| phase != Phase::Settled(RunStatus::Done))
+                    .unwrap_or_else(|| phase != Phase::Settled(RunOutcome::Done))
             };
             (
                 run_id.clone(),
@@ -1207,7 +1207,7 @@ fn summaries(
             view.work_open
                 .get(&root)
                 .copied()
-                .unwrap_or_else(|| last.phase != Phase::Settled(RunStatus::Done))
+                .unwrap_or_else(|| last.phase != Phase::Settled(RunOutcome::Done))
         };
         let merged = RunSummary {
             phase: last.phase,
