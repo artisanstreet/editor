@@ -242,9 +242,6 @@ impl MarkdownIndex {
             .get(leaf)
             .map(|leaf| &self.contexts[leaf.context])
     }
-    pub const fn source_bytes(&self) -> usize {
-        self.source_bytes
-    }
     pub fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.leaves.capacity() * std::mem::size_of::<IndexedLeaf>()
