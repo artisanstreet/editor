@@ -13,36 +13,36 @@ struct Completion(CompletionKey, Result<Item, CallError>);
 pub struct TerminalDialog {
     pub job: Option<Job>,
     error: Option<String>,
-    pub following: bool,
+    pub(crate) following: bool,
     generation: u64,
     fetch: CompletionSlot,
     delivery: Delivery<Completion>,
 }
 
 pub struct Job {
-    pub host: HostId,
-    pub instance: HostInstance,
-    pub thread: ThreadId,
-    pub item: ItemId,
-    pub data: Option<Arc<Item>>,
-    pub command: String,
-    pub commands: Vec<Range<usize>>,
-    pub cwd: Option<String>,
-    pub status: Status,
-    pub screen: TerminalScreen,
-    pub unverified: bool,
-    pub command_source: Option<ContentText>,
-    pub output_source: Option<ContentText>,
+    pub(crate) host: HostId,
+    pub(crate) instance: HostInstance,
+    thread: ThreadId,
+    pub(crate) item: ItemId,
+    pub(crate) data: Option<Arc<Item>>,
+    pub(crate) command: String,
+    pub(crate) commands: Vec<Range<usize>>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) status: Status,
+    pub(crate) screen: TerminalScreen,
+    pub(crate) unverified: bool,
+    pub(crate) command_source: Option<ContentText>,
+    pub(crate) output_source: Option<ContentText>,
     stream: StreamState,
     source: Option<(Option<u64>, usize, u64)>,
 }
 
 impl Job {
-    pub fn missing(&self) -> bool {
+    fn missing(&self) -> bool {
         self.unverified || self.screen.cleared_earlier() || self.screen.truncated_line_count() > 0
     }
 
-    pub fn copy_output(&self) -> String {
+    pub(crate) fn copy_output(&self) -> String {
         let mut text = self.screen.plain_text();
         if self.unverified {
             text.push_str("\n[Live output only; Forge supplied no final snapshot.]");
@@ -94,11 +94,11 @@ impl TerminalDialog {
         true
     }
 
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.fetch.cancel();
         self.job = None;
@@ -113,7 +113,7 @@ impl TerminalDialog {
         self.fetch.is_running()
     }
 
-    pub fn follow(&mut self, open: Option<&(HostId, ThreadId)>) {
+    pub(crate) fn follow(&mut self, open: Option<&(HostId, ThreadId)>) {
         if self
             .job
             .as_ref()
@@ -178,7 +178,7 @@ impl TerminalDialog {
         changed
     }
 
-    pub fn on_core_event(&mut self, core: &Core, event: &CoreEvent) -> bool {
+    pub(crate) fn on_core_event(&mut self, core: &Core, event: &CoreEvent) -> bool {
         let Some(job) = &self.job else {
             return false;
         };
@@ -223,7 +223,7 @@ impl TerminalDialog {
         }
     }
 
-    pub fn sync(&mut self, core: &Core) {
+    fn sync(&mut self, core: &Core) {
         let Some(job) = &mut self.job else {
             return;
         };
@@ -330,7 +330,7 @@ pub struct Layout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Row {
+pub(crate) enum Row {
     Command(usize),
     Missing,
     Output(usize),
@@ -338,7 +338,7 @@ pub enum Row {
 }
 
 impl Layout {
-    pub fn of(job: &Job) -> Self {
+    pub(crate) fn of(job: &Job) -> Self {
         Self {
             commands: job.commands.len(),
             lead: job.commands.len() + usize::from(job.missing()),
@@ -348,15 +348,15 @@ impl Layout {
         }
     }
 
-    pub const fn total(self) -> usize {
+    pub(crate) const fn total(self) -> usize {
         self.lead + self.lines + 1
     }
 
-    pub const fn output(self) -> Range<usize> {
+    const fn output(self) -> Range<usize> {
         self.lead..self.lead + self.lines
     }
 
-    pub fn row(self, index: usize) -> Option<Row> {
+    pub(crate) fn row(self, index: usize) -> Option<Row> {
         if index < self.commands {
             Some(Row::Command(index))
         } else if index < self.lead {

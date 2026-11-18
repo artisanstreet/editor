@@ -144,7 +144,7 @@ impl CollectionSource for Rows {
     }
 }
 
-pub fn terminal_view(
+pub(crate) fn terminal_view(
     dialog: Rc<RefCell<TerminalDialog>>,
     theme: ArtisanTheme,
     viewport_height: f32,

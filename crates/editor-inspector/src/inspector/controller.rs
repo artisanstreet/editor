@@ -1,18 +1,18 @@
 use super::{Entry, entries};
+use artisan_api::{InspectorSummary, PlanStep, ThreadId};
 use editor_conversation::controller::Conversation;
 use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen};
 use editor_sources::{CollectionBrowser, ContentText};
-use artisan_api::{InspectorSummary, PlanStep, ThreadId};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 pub struct Inspector {
     pub open: Option<(HostId, ThreadId)>,
     instance: Option<HostInstance>,
     pub summary: Arc<InspectorSummary>,
-    pub entries: Vec<Entry>,
-    pub error: Option<String>,
-    pub source: Option<ContentText>,
-    pub plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) error: Option<String>,
+    pub(crate) source: Option<ContentText>,
+    pub(crate) plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
 }
 
 impl Default for Inspector {
@@ -57,7 +57,7 @@ impl Inspector {
         true
     }
 
-    pub fn on_core_event(
+    pub(crate) fn on_core_event(
         &mut self,
         core: &Core,
         conversation: &Conversation,
@@ -87,7 +87,7 @@ impl Inspector {
         }
     }
 
-    pub fn sync_summary(&mut self, core: &Core) {
+    fn sync_summary(&mut self, core: &Core) {
         let state = self.open.as_ref().and_then(|(host, thread)| {
             core.host_if_instance(host, self.instance?)?
                 .thread_summary(thread)
@@ -108,7 +108,7 @@ impl Inspector {
         self.entries = entries(&self.summary);
     }
 
-    pub fn retry_summary(&self, core: &mut Core) {
+    pub(crate) fn retry_summary(&self, core: &mut Core) {
         if let Some((host, thread)) = &self.open
             && let Some(instance) = self.instance
             && let Some(host) = core.host_mut_if_instance(host, instance)
@@ -117,7 +117,7 @@ impl Inspector {
         }
     }
 
-    pub fn open_agent_target(
+    pub(crate) fn open_agent_target(
         &self,
         core: &mut Core,
         conversation: &mut Conversation,
@@ -143,7 +143,7 @@ impl Inspector {
         }
     }
 
-    pub fn open_source(&mut self, core: &Core, source: artisan_api::ContentRef) {
+    pub(crate) fn open_source(&mut self, core: &Core, source: artisan_api::ContentRef) {
         let Some((host, _)) = &self.open else {
             return;
         };
@@ -156,7 +156,7 @@ impl Inspector {
         self.source = Some(ContentText::new(host, source));
     }
 
-    pub fn open_plan(&mut self, core: &Core) {
+    pub(crate) fn open_plan(&mut self, core: &Core) {
         let Some(source) = self.summary.plan.stored().cloned() else {
             return;
         };

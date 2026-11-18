@@ -11,7 +11,7 @@ pub enum Entry {
     Workflow(usize),
 }
 
-pub fn entries(summary: &InspectorSummary) -> Vec<Entry> {
+pub(crate) fn entries(summary: &InspectorSummary) -> Vec<Entry> {
     let mut entries = ["Project", "Forge", "Branch", "Worktree"]
         .into_iter()
         .map(Entry::Fact)

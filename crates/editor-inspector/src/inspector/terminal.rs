@@ -2,7 +2,8 @@ mod view;
 
 use artisan_api::{Item, ItemId, Output, TextContent, ThreadId};
 use std::ops::Range;
-pub use view::{TerminalAction, terminal_view};
+pub use view::TerminalAction;
+pub(crate) use view::terminal_view;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Feed {
@@ -28,18 +29,23 @@ impl StreamState {
         Feed { reset, bytes }
     }
 
-    pub const fn fed(&self) -> usize {
+    pub(crate) const fn fed(&self) -> usize {
         self.fed
     }
 }
 
-pub fn accepts_item(item: &Item, id: &ItemId, thread: &ThreadId, previous: Option<&Item>) -> bool {
+pub(crate) fn accepts_item(
+    item: &Item,
+    id: &ItemId,
+    thread: &ThreadId,
+    previous: Option<&Item>,
+) -> bool {
     &item.id == id
         && &item.thread_id == thread
         && previous.is_none_or(|known| known.seq <= item.seq)
 }
 
-pub fn shell_output(output: Option<&Output>) -> Option<&str> {
+pub(crate) fn shell_output(output: Option<&Output>) -> Option<&str> {
     match output {
         Some(Output {
             text: TextContent::Inline(text),

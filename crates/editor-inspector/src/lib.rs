@@ -1,7 +1,6 @@
 #![expect(
     clippy::collapsible_if,
     clippy::derivable_impls,
-    clippy::implicit_hasher,
     clippy::large_types_passed_by_value,
     clippy::let_underscore_must_use,
     clippy::let_underscore_untyped,

@@ -20,11 +20,11 @@ pub struct SourceIds {
 
 pub struct InspectorOwner {
     pub inspector: Inspector,
-    pub terminal: Rc<RefCell<TerminalDialog>>,
-    pub source: SourceView,
-    pub command: SourceView,
-    pub output: SourceView,
-    pub detail: SourceView,
+    terminal: Rc<RefCell<TerminalDialog>>,
+    source: SourceView,
+    command: SourceView,
+    output: SourceView,
+    detail: SourceView,
     ids: SourceIds,
     terminal_hovered: bool,
     copied_until: Option<aqua::Instant>,
@@ -75,7 +75,7 @@ impl InspectorOwner {
         true
     }
 
-    pub fn dispatch(
+    fn dispatch(
         &mut self,
         core: &mut Core,
         conversation: &mut Conversation,

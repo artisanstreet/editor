@@ -454,7 +454,7 @@ fn terminal_row(
     .build()
 }
 
-pub fn inspector_view(
+pub(crate) fn inspector_view(
     core: &Core,
     inspector: &Inspector,
     theme: ArtisanTheme,

@@ -1,8 +1,8 @@
+use aqua_text::{FontSlant, StyledSpan};
 use editor_ui::{
     markdown::terminal::{TerminalColor, TerminalLine},
     theme::{ArtisanTheme, Opacity},
 };
-use aqua_text::{FontSlant, StyledSpan};
 use palette::{Hsla, IntoColor, Srgba};
 
 #[derive(Clone, Copy)]
@@ -64,20 +64,20 @@ impl TerminalPalette {
         clippy::disallowed_types,
         reason = "ANSI bold is a terminal data attribute, not chrome"
     )]
-    pub fn bold(base: &Font) -> Font {
+    pub(crate) fn bold(base: &Font) -> Font {
         let mut font = base.clone();
         font.weight = aqua_text::FontWeight::BOLD;
         font
     }
 
-    pub fn for_theme(theme: &ArtisanTheme) -> Self {
+    pub(crate) fn for_theme(theme: &ArtisanTheme) -> Self {
         Self {
             base: theme.colors.ansi.0.map(theme_color),
             dim: theme_color(theme.colors.text_muted),
         }
     }
 
-    pub fn resolve(&self, color: TerminalColor) -> [f32; 4] {
+    fn resolve(&self, color: TerminalColor) -> [f32; 4] {
         match color {
             TerminalColor::Indexed(index @ 0..=15) => self.base[usize::from(index)],
             TerminalColor::Indexed(index @ 16..=231) => {
