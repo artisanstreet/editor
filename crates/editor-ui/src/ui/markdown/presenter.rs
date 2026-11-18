@@ -1958,9 +1958,6 @@ impl MarkdownPresenter {
                 )
             }
             Prepared::Callout(callout) => {
-                if envelope.subtitle.is_some() || envelope.caption.is_some() {
-                    return Err(PresenterError::Unavailable("rich envelope"));
-                }
                 let glyph: GlyphFactory = glyph.clone();
                 let block_id = format!("{id}-rich-{}-callout", entry.id);
                 self.callout_ids
@@ -1971,6 +1968,10 @@ impl MarkdownPresenter {
                 callout.view(
                     block_id,
                     theme,
+                    crate::ui::rich::narrative::callout::CalloutNotes {
+                        subtitle: envelope.subtitle.as_deref(),
+                        caption: envelope.caption.as_deref(),
+                    },
                     self.callouts.clone(),
                     glyph,
                     invalidate.clone(),

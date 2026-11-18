@@ -55,6 +55,12 @@ impl CalloutState {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CalloutNotes<'a> {
+    pub(crate) subtitle: Option<&'a str>,
+    pub(crate) caption: Option<&'a str>,
+}
+
 pub(crate) type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
 
 impl Kind {
@@ -131,6 +137,7 @@ impl Callout {
         &self,
         id: String,
         theme: &ArtisanTheme,
+        notes: CalloutNotes<'_>,
         states: CalloutState,
         glyph: GlyphFactory,
         invalidate: Rc<dyn Fn()>,
@@ -219,6 +226,14 @@ impl Callout {
             .layout("column")
             .spaced(Space::S8)
             .child(header);
+        if let Some(subtitle) = notes.subtitle {
+            content = content.child(text(
+                theme,
+                subtitle,
+                TextRole::Label,
+                theme.colors.text_muted,
+            ));
+        }
         if open {
             let mut paragraphs = ui::Box::new().layout("column").spaced(Space::S8);
             for paragraph in self
@@ -231,6 +246,14 @@ impl Callout {
                     paragraphs.child(text(theme, paragraph, TextRole::Label, theme.colors.text));
             }
             content = content.child(paragraphs.build());
+            if let Some(caption) = notes.caption {
+                content = content.child(text(
+                    theme,
+                    caption,
+                    TextRole::Caption,
+                    theme.colors.text_muted,
+                ));
+            }
         }
         surface
             .build(theme, vec![stripe, content.build()])

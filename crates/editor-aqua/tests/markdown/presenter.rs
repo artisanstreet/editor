@@ -602,6 +602,53 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
 }
 
 #[test]
+fn callout_draws_the_documented_subtitle_and_caption() {
+    let engine = MarkdownEngine::new().unwrap();
+    let mut presenter = MarkdownPresenter::default();
+    let source = "```artisan-callout\n{\"kind\":\"warning\",\"title\":\"Stale copy fails CI\",\"subtitle\":\"Checked on every push\",\"caption\":\"From ci.yml\",\"body\":\"Regenerate it.\"}\n```";
+    presenter.prepare(&engine, source).unwrap();
+    let code = editor_aqua::ui::markdown::presenter::CodeServices {
+        copy_enabled: false,
+        reference: None,
+        copy: Rc::new(|_, _| aqua_ui::element::ui::Box::new().build()),
+    };
+    let drawn = presenter
+        .render_projected_with_code(
+            0,
+            "item",
+            ArtisanTheme::for_mode(ThemeMode::Dark),
+            BodyTone::Foreground,
+            SelectionDocumentId(1),
+            &[7],
+            |index| SelectionSourceId(index as u64 + 10),
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
+            Rc::new(|| {}),
+            None,
+            None,
+            None,
+            None,
+            Some(&code),
+        )
+        .expect("a callout with the documented envelope draws");
+    let texts = test_support::editor::ui::painted_texts(&test_support::editor::ui::mounted(
+        900.0,
+        700.0,
+        drawn.element,
+    ));
+    for expected in [
+        "Stale copy fails CI",
+        "Checked on every push",
+        "Regenerate it.",
+        "From ci.yml",
+    ] {
+        assert!(
+            texts.iter().any(|text| text == expected),
+            "{expected} in {texts:?}"
+        );
+    }
+}
+
+#[test]
 fn leaf_proofs_survive_appends_but_not_edits_to_their_own_leaf() {
     let engine = MarkdownEngine::new().unwrap();
     let mut presenter = MarkdownPresenter::default();
