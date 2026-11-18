@@ -968,10 +968,6 @@ async fn tool(
 }
 
 impl forge_engines::Harness for McpScripted {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "a scripted engine: one branch per test prompt"
-    )]
     fn run(
         &self,
         turn: forge_engines::Turn,
@@ -986,17 +982,12 @@ impl forge_engines::Harness for McpScripted {
             let answer = if turn.engine == EngineId::Codex {
                 format!("child heard: {}", turn.input.text)
             } else if turn.input.text == "recall" {
-                // Claude takes the server as inline `--mcp-config` JSON.
                 let url = turn
                     .launch
-                    .args
+                    .gateway_mcp
                     .iter()
-                    .filter_map(|arg| serde_json::from_str::<serde_json::Value>(arg).ok())
-                    .find_map(|config| {
-                        config["mcpServers"]["artisan"]["url"]
-                            .as_str()
-                            .map(str::to_owned)
-                    })
+                    .find(|(name, _)| name == "artisan")
+                    .map(|(_, url)| url.clone())
                     .expect("a Claude thread is launched with the Artisan MCP");
                 let http = reqwest::Client::new();
                 let hello = mcp(
@@ -1051,14 +1042,10 @@ impl forge_engines::Harness for McpScripted {
             } else if turn.input.text == "background" {
                 let url = turn
                     .launch
-                    .args
+                    .gateway_mcp
                     .iter()
-                    .filter_map(|arg| serde_json::from_str::<serde_json::Value>(arg).ok())
-                    .find_map(|config| {
-                        config["mcpServers"]["artisan"]["url"]
-                            .as_str()
-                            .map(str::to_owned)
-                    })
+                    .find(|(name, _)| name == "artisan")
+                    .map(|(_, url)| url.clone())
                     .unwrap();
                 tool(
                     &reqwest::Client::new(),

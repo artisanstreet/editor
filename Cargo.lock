@@ -2124,6 +2124,7 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "artisan-mentions",
+ "artisan-paths",
  "base64 0.22.1",
  "chrono",
  "encoding_rs",

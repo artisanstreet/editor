@@ -133,6 +133,59 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temp, path)
 }
 
+fn write_private_if_changed(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), artisan_paths::private::PrivateFileError> {
+    if fs::read(path).is_ok_and(|current| current == bytes) {
+        return artisan_paths::private::restrict_file(path);
+    }
+    artisan_paths::private::write_file(path, bytes)
+}
+
+pub(crate) struct GatewayFile {
+    path: PathBuf,
+}
+
+impl GatewayFile {
+    pub(crate) fn write(
+        home: &Path,
+        servers: &[(String, String)],
+    ) -> Result<Self, artisan_paths::private::PrivateFileError> {
+        static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = home
+            .join(".artisan/gateway")
+            .join(format!("{}-{launch}.json", std::process::id()));
+        let servers: Map<String, Value> = servers
+            .iter()
+            .map(|(name, url)| (name.clone(), json!({ "type": "http", "url": url })))
+            .collect();
+        let config = json!({ "mcpServers": servers }).to_string();
+        artisan_paths::private::write_file(&path, config.as_bytes())?;
+        Ok(Self { path })
+    }
+
+    pub(crate) fn claude_args(&self, args: &[String]) -> Vec<String> {
+        let path = self.path.to_string_lossy().into_owned();
+        let mut args = args.to_vec();
+        match args.iter().position(|arg| arg == "--mcp-config") {
+            Some(flag) => args.insert((flag + 2).min(args.len()), path),
+            None => args.extend(["--mcp-config".to_owned(), path]),
+        }
+        args
+    }
+}
+
+impl Drop for GatewayFile {
+    fn drop(&mut self) {
+        if let Err(failure) = remove_file_if_present(&self.path) {
+            let error: &dyn std::error::Error = &failure;
+            tracing::warn!(path = %self.path.display(), error, "couldn't remove a finished launch's gateway file");
+        }
+    }
+}
+
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -316,7 +369,7 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 remove_file_if_present(&path)?;
             } else {
                 let config = json!({ "mcpServers": claude_servers(servers) });
-                write_if_changed(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+                write_private_if_changed(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
                 launch.args = vec![
                     "--mcp-config".to_owned(),
                     path.to_string_lossy().into_owned(),
@@ -384,7 +437,7 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 entries.insert(server.name.clone(), entry.into());
             }
             config.insert("mcp_servers".into(), entries.into());
-            write_if_changed(&path, toml::to_string_pretty(&config)?.as_bytes())?;
+            write_private_if_changed(&path, toml::to_string_pretty(&config)?.as_bytes())?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -417,18 +470,9 @@ pub fn with_gateway_mcp(engine: EngineId, launch: &mut Launch, name: &str, url: 
         ..McpServer::default()
     });
     match engine {
-        EngineId::Claude => {
-            // `--mcp-config` takes files and JSON strings, several at once.
-            let inline =
-                json!({ "mcpServers": { name: { "type": "http", "url": url } } }).to_string();
-            match launch.args.iter().position(|arg| arg == "--mcp-config") {
-                Some(flag) => launch.args.insert(flag + 2, inline),
-                None => launch.args.extend(["--mcp-config".to_owned(), inline]),
-            }
+        EngineId::Claude | EngineId::Codex => {
+            launch.gateway_mcp.push((name.to_owned(), url.to_owned()));
         }
-        // Codex's app-server is shared by threads; it takes the servers in
-        // each thread's own config.
-        EngineId::Codex => launch.gateway_mcp.push((name.to_owned(), url.to_owned())),
         EngineId::OpenCode => merge_opencode_config(
             launch,
             &json!({ "mcp": { name: { "type": "remote", "url": url, "enabled": true } } }),
@@ -784,6 +828,11 @@ mod tests {
         assert!(launch.args.is_empty() && !home.join(".artisan/claude-mcp.json").exists());
     }
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/customise/launch.rs"]
+mod launch_tests;
 
 #[cfg(test)]
 mod reform_tests {

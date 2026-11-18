@@ -22,6 +22,7 @@ pub struct EngineProcess {
     oversized: bool,
     trace: Trace,
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    gateway: Option<crate::customise::GatewayFile>,
 }
 
 /// Starts `turn.binary` with `args` in `turn.cwd`, `HOME` set to the
@@ -44,10 +45,23 @@ pub(crate) fn spawn_in(
     cwd: &std::path::Path,
     name: &str,
 ) -> Result<EngineProcess> {
+    let gateway = match turn.engine {
+        artisan_api::EngineId::Claude if !turn.launch.gateway_mcp.is_empty() => Some(
+            crate::customise::GatewayFile::write(&turn.home, &turn.launch.gateway_mcp)
+                .context("writing the launch's gateway MCP config")?,
+        ),
+        artisan_api::EngineId::Claude
+        | artisan_api::EngineId::Codex
+        | artisan_api::EngineId::OpenCode => None,
+    };
+    let launch_args = gateway.as_ref().map_or_else(
+        || turn.launch.args.clone(),
+        |gateway| gateway.claude_args(&turn.launch.args),
+    );
     let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home);
     command
         .args(args)
-        .args(&turn.launch.args)
+        .args(&launch_args)
         .current_dir(cwd)
         .envs(turn.launch.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
@@ -67,8 +81,10 @@ pub(crate) fn spawn_in(
                 |started| started.trace,
             )
         });
-    spawn_command(command, trace)
-        .with_context(|| format!("starting {} in {}", turn.binary.display(), cwd.display()))
+    let mut process = spawn_command(command, trace)
+        .with_context(|| format!("starting {} in {}", turn.binary.display(), cwd.display()))?;
+    process.gateway = gateway;
+    Ok(process)
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess> {
@@ -182,6 +198,7 @@ fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
         oversized: false,
         trace,
         stderr_task,
+        gateway: None,
     })
 }
 
@@ -331,6 +348,11 @@ pub async fn probe(
     }
     result
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/gateway.rs"]
+mod gateway_tests;
 
 #[cfg(test)]
 #[cfg(unix)]

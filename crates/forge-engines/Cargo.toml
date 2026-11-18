@@ -15,6 +15,7 @@ default = []
 [dependencies]
 anyhow.workspace = true
 artisan-api.workspace = true
+artisan-paths.workspace = true
 artisan-mentions.workspace = true
 forge-content.workspace = true
 forge-isolation.workspace = true
