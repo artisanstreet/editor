@@ -1,5 +1,5 @@
-use editor_core::ForgeClient;
 use artisan_api::{Answer, Collection, ItemId, Question, QuestionAnswer};
+use editor_core::ForgeClient;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,10 +117,25 @@ impl QuestionnairePanel {
         }
         self.save(text);
         let before = self.active().map(|entry| entry.item.clone());
+        let replaced: Vec<ItemId> = questionnaires
+            .iter()
+            .filter(|entry| {
+                self.questionnaires
+                    .iter()
+                    .any(|old| old.item == entry.item && old.questions != entry.questions)
+            })
+            .map(|entry| entry.item.clone())
+            .collect();
         let open = |item: &ItemId| questionnaires.iter().any(|entry| &entry.item == item);
+        let kept = |item: &ItemId| open(item) && !replaced.contains(item);
         self.answered.retain(&open);
-        self.drafts.retain(|item, _| open(item));
-        self.payloads.retain(|item, _| open(item));
+        self.drafts.retain(|item, _| kept(item));
+        self.payloads.retain(|item, _| kept(item));
+        if before.as_ref().is_some_and(|item| replaced.contains(item)) {
+            self.step = 0;
+            self.recorded.clear();
+            self.ticked.clear();
+        }
         if self.sending.as_ref().is_some_and(|item| !open(item)) {
             self.sending = None;
         }

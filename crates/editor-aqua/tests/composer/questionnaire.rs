@@ -1,7 +1,7 @@
 use aqua_text::{SharedFonts, SharedRuns};
 use aqua_ui::element::{Box as UiBox, Key};
 use aqua_ui::style::Length;
-use artisan_api::{Collection, ItemId, Question, QuestionOption};
+use artisan_api::{Answer, Collection, ItemId, Question, QuestionAnswer, QuestionOption};
 use editor_aqua::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
 use editor_aqua::composer::view::questionnaire;
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -89,5 +89,44 @@ fn a_long_option_description_wraps_inside_the_card() {
     assert!(
         long.h > short.h + 15.0,
         "the long description takes more lines: {long:?} against {short:?}"
+    );
+}
+
+#[test]
+fn replacing_a_question_set_drops_answers_recorded_against_the_old_one() {
+    let question = |id: &str| Question {
+        id: id.into(),
+        header: None,
+        text: format!("Question {id}?").into(),
+        multi_select: false,
+        options: Collection::Inline(Vec::new()),
+    };
+    let asked = |ids: &[&str]| {
+        vec![ComposerQuestionnaire {
+            item: ItemId("question".into()),
+            questions: Collection::Inline(ids.iter().map(|id| question(id)).collect()),
+        }]
+    };
+    let mut text = String::new();
+    let mut panel = QuestionnairePanel::default();
+    panel.set_questionnaires(asked(&["a", "b"]), &mut text);
+    assert!(
+        panel
+            .answer(QuestionAnswer::Text { text: "for a".into() }, true, &mut text)
+            .is_none()
+    );
+    assert_eq!(panel.step, 1);
+
+    panel.set_questionnaires(asked(&["b"]), &mut text);
+    assert_eq!(panel.step, 0, "progress through [a, b] does not carry into [b]");
+    let (_, answer) = panel
+        .answer(QuestionAnswer::Text { text: "for b".into() }, true, &mut text)
+        .expect("answering the only question submits");
+    assert_eq!(
+        answer,
+        Answer::Question {
+            answers: vec![Some(QuestionAnswer::Text { text: "for b".into() })]
+        },
+        "a's answer is not sent as b's"
     );
 }
