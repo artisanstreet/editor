@@ -440,25 +440,8 @@ impl RowFactory {
         let source = match state {
             StoredPreparation::Pending => return Ok((pending("Loading formatted content…"), None)),
             StoredPreparation::Failed(error) => {
-                let collected = RefCell::new(Vec::new());
-                let used = RefCell::new(std::collections::HashSet::new());
-                let full = self.source_field(
-                    row_owner,
-                    item,
-                    crate::conversation::content::SourceField::of_slot(slot),
-                    &collected,
-                    &used,
-                )?;
-                row_owner.retain_batches(&used.into_inner());
-                batches.extend(collected.into_inner());
-                return Ok((
-                    aqua_ui::element::Box::new()
-                        .layout("column")
-                        .child(pending(&error))
-                        .child(full)
-                        .build(),
-                    None,
-                ));
+                let full = self.slot_source_field(row_owner, item, slot, batches)?;
+                return Ok((pending_above(pending(&error), full), None));
             }
             StoredPreparation::Ready(source) => source,
         };
@@ -475,25 +458,8 @@ impl RowFactory {
         let leaf = match services.owner.borrow_mut().leaf(&key, &source, block) {
             LeafPreparation::Pending => return Ok((pending("Loading content…"), None)),
             LeafPreparation::Failed(error) => {
-                let collected = RefCell::new(Vec::new());
-                let used = RefCell::new(std::collections::HashSet::new());
-                let full = self.source_field(
-                    row_owner,
-                    item,
-                    crate::conversation::content::SourceField::of_slot(slot),
-                    &collected,
-                    &used,
-                )?;
-                row_owner.retain_batches(&used.into_inner());
-                batches.extend(collected.into_inner());
-                return Ok((
-                    aqua_ui::element::Box::new()
-                        .layout("column")
-                        .child(pending(&error))
-                        .child(full)
-                        .build(),
-                    None,
-                ));
+                let full = self.slot_source_field(row_owner, item, slot, batches)?;
+                return Ok((pending_above(pending(&error), full), None));
             }
             LeafPreparation::Ready(leaf) => leaf,
         };
@@ -707,37 +673,13 @@ impl RowFactory {
         {
             LiteralPreparation::Pending => return Ok(pending("Loading content…")),
             LiteralPreparation::Failed(error) => {
-                let collected = RefCell::new(Vec::new());
-                let used = RefCell::new(std::collections::HashSet::new());
-                let full = self.source_field(
-                    row_owner,
-                    item,
-                    crate::conversation::content::SourceField::of_slot(slot),
-                    &collected,
-                    &used,
-                )?;
-                row_owner.retain_batches(&used.into_inner());
-                batches.extend(collected.into_inner());
-                return Ok(aqua_ui::element::Box::new()
-                    .layout("column")
-                    .child(pending(&error))
-                    .child(full)
-                    .build());
+                let full = self.slot_source_field(row_owner, item, slot, batches)?;
+                return Ok(pending_above(pending(&error), full));
             }
             LiteralPreparation::Ready(leaf) => leaf,
         };
         if leaf.needs_native_window() {
-            let collected = RefCell::new(Vec::new());
-            let used = RefCell::new(std::collections::HashSet::new());
-            let full = self.source_field(
-                row_owner,
-                item,
-                crate::conversation::content::SourceField::of_slot(slot),
-                &collected,
-                &used,
-            )?;
-            row_owner.retain_batches(&used.into_inner());
-            batches.extend(collected.into_inner());
+            let full = self.slot_source_field(row_owner, item, slot, batches)?;
             return Ok(full);
         }
         let document = self
@@ -771,11 +713,8 @@ impl RowFactory {
             element,
             selection: Some(selection.source().clone()),
         };
-        let mut retained = row_owner.batches.borrow_mut();
-        if !retained.set_scope(&self.scope) {
-            return Err(RealizeRowError::Stale(Staleness::LiteralBatch));
-        }
-        let prepared = retained.row(&self.scope, resource, document, view)?;
+        let prepared =
+            self.retained_row(row_owner, resource, document, view, Staleness::LiteralBatch)?;
         batches.extend(prepared.batches);
         Ok(prepared.element)
     }
@@ -894,6 +833,42 @@ impl RowFactory {
         batches.extend(collected.into_inner());
         Ok(result)
     }
+    fn retained_row(
+        &self,
+        owner: &super::row_cache::RowOwner,
+        key: super::resources::ResourceKey,
+        document: aqua_text::document::SelectionDocumentId,
+        view: editor_sources::ContentView,
+        stale: Staleness,
+    ) -> Result<BatchedCollectionRow, RealizeRowError> {
+        let mut retained = owner.batches.borrow_mut();
+        if !retained.set_scope(&self.scope) {
+            return Err(RealizeRowError::Stale(stale));
+        }
+        Ok(retained.row(&self.scope, key, document, view)?)
+    }
+
+    fn slot_source_field(
+        &self,
+        owner: &Rc<super::row_cache::RowOwner>,
+        item: &artisan_api::Item,
+        slot: Slot,
+        batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
+    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
+        let collected = RefCell::new(Vec::new());
+        let used = RefCell::new(std::collections::HashSet::new());
+        let full = self.source_field(
+            owner,
+            item,
+            crate::conversation::content::SourceField::of_slot(slot),
+            &collected,
+            &used,
+        )?;
+        owner.retain_batches(&used.into_inner());
+        batches.extend(collected.into_inner());
+        Ok(full)
+    }
+
     fn source_field(
         &self,
         owner: &Rc<super::row_cache::RowOwner>,
@@ -956,11 +931,8 @@ impl RowFactory {
                     element,
                     selection: Some(source),
                 };
-                let mut retained = owner.batches.borrow_mut();
-                if !retained.set_scope(&self.scope) {
-                    return Err(RealizeRowError::Stale(Staleness::AnswerBatch));
-                }
-                let row = retained.row(&self.scope, key, services.document, view)?;
+                let row =
+                    self.retained_row(owner, key, services.document, view, Staleness::AnswerBatch)?;
                 batches.borrow_mut().extend(row.batches);
                 return Ok(row.element);
             }
@@ -1022,11 +994,7 @@ impl RowFactory {
             .borrow()
             .view(&item.id, &field, theme, services.document, id, callback)
             .ok_or(RealizeRowError::Unavailable(Part::SourceView))?;
-        let mut retained = owner.batches.borrow_mut();
-        if !retained.set_scope(&self.scope) {
-            return Err(RealizeRowError::Stale(Staleness::SourceBatch));
-        }
-        let row = retained.row(&self.scope, key, services.document, view)?;
+        let row = self.retained_row(owner, key, services.document, view, Staleness::SourceBatch)?;
         batches.borrow_mut().extend(row.batches);
         Ok(row.element)
     }
@@ -1104,11 +1072,13 @@ impl RowFactory {
                     detail_id,
                     callback,
                 );
-                let mut retained = owner.batches.borrow_mut();
-                if !retained.set_scope(&self.scope) {
-                    return Err(RealizeRowError::Stale(Staleness::DetailBatch));
-                }
-                let row = retained.row(&self.scope, detail_key, services.document, view)?;
+                let row = self.retained_row(
+                    owner,
+                    detail_key,
+                    services.document,
+                    view,
+                    Staleness::DetailBatch,
+                )?;
                 batches.borrow_mut().extend(row.batches);
                 Some(row.element)
             } else {
@@ -1138,11 +1108,13 @@ impl RowFactory {
             .borrow()
             .view(theme, services.document, id, stored_detail, callback)
             .ok_or(RealizeRowError::Unavailable(Part::QuestionView))?;
-        let mut retained = owner.batches.borrow_mut();
-        if !retained.set_scope(&self.scope) {
-            return Err(RealizeRowError::Stale(Staleness::QuestionBatch));
-        }
-        let row = retained.row(&self.scope, key, services.document, view)?;
+        let row = self.retained_row(
+            owner,
+            key,
+            services.document,
+            view,
+            Staleness::QuestionBatch,
+        )?;
         batches.borrow_mut().extend(row.batches);
         Ok(row.element)
     }
@@ -2934,6 +2906,17 @@ pub(crate) fn image_caption(
                 .wrap(true)
                 .build(),
         )
+        .build()
+}
+
+fn pending_above(
+    pending: aqua_ui::element::Element,
+    full: aqua_ui::element::Element,
+) -> aqua_ui::element::Element {
+    aqua_ui::element::Box::new()
+        .layout("column")
+        .child(pending)
+        .child(full)
         .build()
 }
 
