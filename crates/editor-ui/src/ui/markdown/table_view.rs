@@ -3,7 +3,7 @@ use super::visual::{BodyTone, LinkAction, interactive_table_leaf};
 use super::{Table, TableAlignment};
 use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
-use aqua_core::Insets;
+use aqua_core::{CollectionSemantics, Insets, Role};
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
@@ -98,9 +98,37 @@ pub(super) fn render(
                 sources.push(leaf.source);
                 cell = cell.child(leaf.element);
             }
-            grid = grid.child(cell.build());
+            let role = match row {
+                0 => Role::ColumnHeader,
+                _ => Role::Cell,
+            };
+            grid = grid.child(
+                cell.build()
+                    .role(role)
+                    .collection_semantics(CollectionSemantics {
+                        row_index: Some(row),
+                        column_index: Some(column),
+                        ..CollectionSemantics::default()
+                    }),
+            );
         }
-        output = output.child(grid.build());
+        output = output.child(grid.build().role(Role::Row).collection_semantics(
+            CollectionSemantics {
+                row_index: Some(row),
+                ..CollectionSemantics::default()
+            },
+        ));
     }
-    Ok(output.build())
+    Ok(output
+        .build()
+        .role(Role::Table)
+        .collection_semantics(CollectionSemantics {
+            row_count: Some(total_rows),
+            column_count: Some(columns),
+            ..CollectionSemantics::default()
+        }))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/table_view.rs"]
+mod tests;

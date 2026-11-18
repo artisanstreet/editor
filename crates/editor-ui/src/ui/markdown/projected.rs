@@ -1011,7 +1011,16 @@ fn table_row(
                 .with_key(text_key(*id)),
             );
         }
-        grid = grid.child(cell.build());
+        let role = match header {
+            true => aqua_core::Role::ColumnHeader,
+            false => aqua_core::Role::Cell,
+        };
+        grid = grid.child(cell.build().role(role).collection_semantics(
+            aqua_core::CollectionSemantics {
+                column_index: Some(column),
+                ..aqua_core::CollectionSemantics::default()
+            },
+        ));
     }
-    Ok(grid.build())
+    Ok(grid.build().role(aqua_core::Role::Row))
 }
