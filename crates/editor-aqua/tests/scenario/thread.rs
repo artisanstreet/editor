@@ -52,6 +52,24 @@ fn a_message_sent_from_the_composer_streams_its_reply_into_the_thread() {
 }
 
 #[test]
+fn a_draft_set_by_assistive_tech_can_be_sent() {
+    let mut editor = Scenario::replaying(EngineId::Claude, "reply")
+        .thread("thread-a", "Greeting")
+        .open(Opening::Thread("thread-a"));
+    editor.click(Role::TextInput, COMPOSER);
+    editor.set_value(Role::TextInput, COMPOSER, "Say hello");
+    editor.settle("the set draft to enable Send", |view| {
+        view.find(Role::Button, "Send message")
+            .is_some_and(|send| !send.disabled)
+    });
+    editor.activate(Role::Button, "Send message");
+    editor.settle("the reply to finish", |view| {
+        view.shows("Hello from the replay.") && view.find(Role::Button, "Stop").is_none()
+    });
+    assert_eq!(editor.engine().launches(), 1, "the set draft runs one turn");
+}
+
+#[test]
 fn stop_ends_the_turn_and_continue_picks_the_work_back_up() {
     let mut editor = Scenario::replaying(EngineId::Claude, "stop-before-acknowledgement")
         .thread("thread-a", "Parser")

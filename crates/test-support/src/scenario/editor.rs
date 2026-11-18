@@ -8,7 +8,7 @@ use aqua::AccessSink;
 use aqua::prelude::{AquaWindowId, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{Aqua, AquaConfig, AquaUserEvent};
 use aqua_a11y_uia::A11yBridge;
-use aqua_a11y_uia::accesskit::{Action, ActionRequest, Role, TreeId};
+use aqua_a11y_uia::accesskit::{Action, ActionData, ActionRequest, Role, TreeId};
 use aqua_core::{
     InputEvent, Key, KeyEvent, Modifiers, Point, PointerButton, PointerEvent, PointerKind,
 };
@@ -562,6 +562,18 @@ impl Editor {
             target_tree: TreeId::ROOT,
             target_node: target.node,
             data: None,
+        });
+        self.pump();
+    }
+
+    #[track_caller]
+    pub fn set_value(&mut self, role: Role, label: &str, value: &str) {
+        let target = self.node(role, label);
+        self.bridge.native_action(&ActionRequest {
+            action: Action::SetValue,
+            target_tree: TreeId::ROOT,
+            target_node: target.node,
+            data: Some(ActionData::Value(value.into())),
         });
         self.pump();
     }
