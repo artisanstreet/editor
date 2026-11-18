@@ -1,12 +1,12 @@
 use super::{Format, Model, Up, parse};
 use crate::ui::media::{
-    resource_cache::{Load, LoadTicket, ResourceCache, ResourceLoader},
+    loads::Loads,
+    resource_cache::{Load, ResourceLoader},
     source::{self, MediaFetcher, MediaLoadError, MediaSource, Owned, Parsed},
 };
 use aqua_core::gpui_mesh::{GpuiMesh, GpuiMeshVertex};
-use editor_core::{delivery::Delivery, media_http, runtime};
-use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
-use tokio::task::AbortHandle;
+use editor_core::media_http;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererCapability {
@@ -83,33 +83,11 @@ impl ResourceLoader for Loader {
     type Source = Owned<Request>;
     type Output = Result<Arc<LoadedModel>, String>;
 }
-struct Completion {
-    id: u64,
-    result: Result<Arc<LoadedModel>, String>,
-}
-struct Job {
-    ticket: LoadTicket<Loader>,
-    abort: AbortHandle,
-}
-struct State {
-    next: u64,
-    jobs: HashMap<u64, Job>,
-    delivery: Delivery<Completion>,
-}
-impl Drop for State {
-    fn drop(&mut self) {
-        for job in self.jobs.values() {
-            job.ticket.cancel();
-            job.abort.abort();
-        }
-    }
-}
+type Loaded = Result<Arc<LoadedModel>, String>;
 
 #[derive(Clone)]
 pub struct ModelAssets {
-    state: Rc<RefCell<State>>,
-    mailbox: Rc<RefCell<aqua::mailbox::Mailbox<()>>>,
-    fallback: Arc<ResourceCache>,
+    loads: Loads<Loader, Loaded>,
 }
 impl Default for ModelAssets {
     fn default() -> Self {
@@ -118,20 +96,12 @@ impl Default for ModelAssets {
 }
 impl ModelAssets {
     pub fn new() -> Self {
-        let mailbox = Rc::new(RefCell::new(aqua::mailbox::Mailbox::new(NonZeroUsize::MIN)));
-        let sender = mailbox.borrow().sender();
         Self {
-            state: Rc::new(RefCell::new(State {
-                next: 0,
-                jobs: HashMap::new(),
-                delivery: Delivery::with_wake(NonZeroUsize::new(16).unwrap(), sender),
-            })),
-            mailbox,
-            fallback: ResourceCache::new(),
+            loads: Loads::new(),
         }
     }
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
-        ctx.bind_mailbox(window, &self.mailbox.borrow());
+        self.loads.bind(ctx, window);
     }
     pub fn request(
         &self,
@@ -144,7 +114,7 @@ impl ModelAssets {
         waiter: u64,
         wake: aqua::mailbox::Wake,
     ) -> Option<Result<Arc<LoadedModel>, String>> {
-        self.discard_stale();
+        self.loads.discard_stale();
         match source.parsed() {
             Parsed::Url(_) => return Some(Err("only model files on disk load here".to_owned())),
             Parsed::Invalid => return Some(Err("the path is not valid".to_owned())),
@@ -168,7 +138,7 @@ impl ModelAssets {
                 renderer,
             },
         );
-        let cache = fetcher.map_or(&self.fallback, MediaFetcher::resources);
+        let cache = self.loads.cache(fetcher);
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
         let source_bytes = match source.parsed() {
             Parsed::Data(data) => data.bytes.len(),
@@ -179,13 +149,9 @@ impl ModelAssets {
             Load::Pending => None,
             Load::TooLarge => Some(Err(MediaLoadError::TooLarge.to_string())),
             Load::Start(ticket) => {
-                let mut state = self.state.borrow_mut();
-                let id = state.next;
-                state.next = state.next.wrapping_add(1);
-                let sender = state.delivery.sender();
                 let source = source.clone();
                 let transport = fetcher.map(MediaFetcher::provider);
-                let task = runtime::runtime().spawn(async move {
+                self.loads.start(ticket, async move {
                     let fetcher = transport.map(|provider| {
                         let scope = provider.scope().to_owned();
                         MediaFetcher::new(scope, move |request| provider.fetch(request))
@@ -193,7 +159,7 @@ impl ModelAssets {
                     let loaded =
                         source::load_image_bytes(&source, fetcher.as_ref(), &media_http::client())
                             .await;
-                    let result = match loaded {
+                    match loaded {
                         Err(error) => Err(error.to_string()),
                         Ok(bytes) => tokio::task::spawn_blocking(move || {
                             let _permit = bytes.permit;
@@ -202,49 +168,17 @@ impl ModelAssets {
                         })
                         .await
                         .unwrap_or_else(|_| Err("the file could not be read".to_owned())),
-                    };
-                    let _ = sender.send(Completion { id, result }).await;
+                    }
                 });
-                let abort = task.abort_handle();
-                if ticket.attach(abort.clone()) {
-                    state.jobs.insert(id, Job { ticket, abort });
-                } else {
-                    abort.abort();
-                }
                 None
             }
         }
     }
     pub fn drain(&self) -> bool {
-        self.mailbox.borrow_mut().drain();
-        let completions = self.state.borrow_mut().delivery.drain();
-        let mut changed = false;
-        for completion in completions {
-            let Some(job) = self.state.borrow_mut().jobs.remove(&completion.id) else {
-                continue;
-            };
-            if !job.ticket.current() {
-                job.abort.abort();
-                continue;
-            }
-            let size = completion
-                .result
-                .as_ref()
-                .map_or(0, |model| model.resident_bytes);
-            job.ticket.publish(completion.result, size, drop);
-            changed = true;
-        }
-        self.discard_stale();
-        changed
-    }
-    fn discard_stale(&self) {
-        self.state.borrow_mut().jobs.retain(|_, job| {
-            let current = job.ticket.current();
-            if !current {
-                job.abort.abort();
-            }
-            current
-        });
+        self.loads.drain(|result| {
+            let size = result.as_ref().map_or(0, |model| model.resident_bytes);
+            (result, size)
+        })
     }
 }
 #[cfg(test)]

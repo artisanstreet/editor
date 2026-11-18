@@ -26,7 +26,7 @@ impl Fixture {
         .owned_by(&[7], 1);
         let assets = AudioAssets::new();
         let (wake, incoming) = mpsc::channel();
-        assets.mailbox.borrow().set_waker(Arc::new(move || {
+        assets.loads.set_test_waker(Arc::new(move || {
             let _ = wake.send(());
         }));
         Self {
