@@ -759,8 +759,8 @@ impl InspectorOwner {
             }),
             terminal_generation: terminal.generation(),
             terminal_following: terminal.following,
-            terminal_loading: terminal.loading,
-            terminal_error: terminal.error.clone(),
+            terminal_loading: terminal.loading(),
+            terminal_error: terminal.error().map(str::to_owned),
             command: terminal
                 .job
                 .as_ref()

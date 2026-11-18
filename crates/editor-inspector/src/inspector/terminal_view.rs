@@ -173,17 +173,17 @@ pub fn terminal_view(
         .min(640.0)
         .min((viewport_height - 160.0).max(32.0));
     let mut content = UiBox::new().layout("column").width(Length::Pct(100.0));
-    if let Some(error) = &state.error {
+    if let Some(error) = state.error() {
         let retry = Rc::clone(&action);
         content = content
-            .child(TextRole::Label.text(&theme, error.clone()).build())
+            .child(TextRole::Label.text(&theme, error.to_owned()).build())
             .child(
                 Button::text("terminal-retry", theme, ButtonTone::Neutral, "Retry")
                     .within(WELL)
                     .on_activate(move |_| retry(TerminalAction::Retry))
                     .build(),
             );
-    } else if state.loading && job.data.is_none() {
+    } else if state.loading() && job.data.is_none() {
         content = content.child(
             TextRole::Label
                 .text(&theme, "Loading shell output…")

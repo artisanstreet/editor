@@ -49,8 +49,7 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     assert!(current.drain(&core));
     assert!(
         current
-            .error
-            .as_deref()
+            .error()
             .is_some_and(|error| error.starts_with("Couldn't load shell output:"))
     );
 
@@ -59,7 +58,7 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     core.remove_host(&config.id).unwrap();
     assert!(removed.drain(&core));
     assert!(removed.job.is_none());
-    assert!(removed.error.is_none());
+    assert!(removed.error().is_none());
 
     core.add_test_host(&config, client(&core));
     assert_ne!(old, core.host(&config.id).unwrap().instance());
@@ -67,7 +66,7 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     core.add_test_host(&config, client(&core));
     assert!(replaced.drain(&core));
     assert!(replaced.job.is_none());
-    assert!(replaced.error.is_none());
+    assert!(replaced.error().is_none());
 }
 
 #[test]
@@ -90,4 +89,23 @@ fn inspector_scope_rejects_same_id_host_replacement_until_followed() {
     assert!(inspector.is_current(&core));
     core.remove_host(&config.id).unwrap();
     assert!(!inspector.is_current(&core));
+}
+
+#[test]
+fn a_fetch_that_finished_before_retry_does_not_cancel_the_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().to_owned(),
+    })
+    .unwrap();
+    let config = config();
+    core.add_test_host(&config, client(&core));
+    let mut dialog = pending_dialog(&core, &config);
+    dialog.fetch(&core);
+    assert!(!dialog.drain(&core));
+    assert!(
+        dialog.loading(),
+        "the earlier fetch's failure must not abort the retry"
+    );
+    assert!(dialog.error().is_none());
 }

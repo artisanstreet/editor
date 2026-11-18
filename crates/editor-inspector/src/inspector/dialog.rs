@@ -1,23 +1,21 @@
 use super::{StreamState, accepts_item, command_lines, shell_output};
 use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, TextContent, ThreadId, ToolKind};
 use editor_core::{
-    Core, CoreEvent, HostEvent, HostId, HostInstance, client::CallError, delivery::Delivery,
-    runtime::runtime,
+    CompletionKey, CompletionSlot, Core, CoreEvent, HostEvent, HostId, HostInstance,
+    client::CallError, delivery::Delivery,
 };
 use editor_sources::ContentText;
 use editor_ui::markdown::terminal::TerminalScreen;
 use std::{num::NonZeroUsize, ops::Range, sync::Arc};
-use tokio_util::task::AbortOnDropHandle;
 
-struct Completion(u64, Result<Item, CallError>);
+struct Completion(CompletionKey, Result<Item, CallError>);
 
 pub struct TerminalDialog {
     pub job: Option<Job>,
-    pub error: Option<String>,
-    pub loading: bool,
+    error: Option<String>,
     pub following: bool,
     generation: u64,
-    load: Option<AbortOnDropHandle<()>>,
+    fetch: CompletionSlot,
     delivery: Delivery<Completion>,
 }
 
@@ -58,10 +56,9 @@ impl TerminalDialog {
         Self {
             job: None,
             error: None,
-            loading: false,
             following: true,
             generation: 0,
-            load: None,
+            fetch: CompletionSlot::default(),
             delivery: Delivery::with_wake(NonZeroUsize::MIN, core.wake_mailbox().sender()),
         }
     }
@@ -103,10 +100,17 @@ impl TerminalDialog {
 
     pub fn close(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.load = None;
+        self.fetch.cancel();
         self.job = None;
         self.error = None;
-        self.loading = false;
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub const fn loading(&self) -> bool {
+        self.fetch.is_running()
     }
 
     pub fn follow(&mut self, open: Option<&(HostId, ThreadId)>) {
@@ -121,7 +125,7 @@ impl TerminalDialog {
 
     #[cfg(feature = "test-support")]
     pub fn fetch_finished(&self) -> bool {
-        self.load.as_ref().is_some_and(|load| load.is_finished())
+        self.fetch.is_finished()
     }
 
     pub fn fetch(&mut self, core: &Core) {
@@ -133,14 +137,13 @@ impl TerminalDialog {
         };
         let client = host.client.clone();
         let item = job.item.clone();
-        let generation = self.generation;
         let sender = self.delivery.sender();
-        self.loading = true;
         self.error = None;
-        self.load = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = client.item(&item).await;
-            let _ = sender.send(Completion(generation, result)).await;
-        })));
+        self.fetch
+            .spawn(&job.host, job.instance, move |key| async move {
+                let result = client.item(&item).await;
+                let _ = sender.send(Completion(key, result)).await;
+            });
     }
 
     pub fn drain(&mut self, core: &Core) -> bool {
@@ -154,12 +157,10 @@ impl TerminalDialog {
             return true;
         }
         let mut changed = false;
-        for Completion(generation, result) in self.delivery.drain() {
-            if generation != self.generation {
+        for Completion(key, result) in self.delivery.drain() {
+            if !self.fetch.finish(core, &key) {
                 continue;
             }
-            self.load = None;
-            self.loading = false;
             match result {
                 Ok(item) => {
                     self.set_item(Arc::new(item));
