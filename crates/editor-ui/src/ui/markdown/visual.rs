@@ -641,6 +641,13 @@ fn interactive_leaf_impl(
     if !source.copies.is_empty() {
         element = element.aria_label(accessible_text(&source));
     }
+    if !prepared.links.is_empty() {
+        let ring = aqua_ui::style::Style::new().focus_ring(
+            theme.interaction.focus_ring_width,
+            theme.colors.ring.to_paint(),
+        );
+        element = element.focusable(true).focus_visible_style(ring);
+    }
     if let Some(on_link) = on_link {
         let prepared = prepared.clone();
         element = element.on_input(

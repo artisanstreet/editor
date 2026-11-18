@@ -1,8 +1,9 @@
 use super::*;
 use crate::ui::markdown::MarkdownEngine;
 use crate::ui::markdown::presenter::MarkdownPresenter;
-use aqua_core::{Role, SemanticNode};
+use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role, SemanticNode};
 use aqua_text::{SharedFonts, SharedRuns};
+use std::cell::RefCell;
 
 fn answer(source: &str, on_link: Rc<dyn Fn(LinkAction)>) -> aqua::UiApp {
     let engine = MarkdownEngine::new().unwrap();
@@ -34,6 +35,57 @@ fn answer(source: &str, on_link: Rc<dyn Fn(LinkAction)>) -> aqua::UiApp {
 
 fn semantics(app: &aqua::UiApp) -> Vec<SemanticNode> {
     app.tree().emit_semantics()
+}
+
+fn press(app: &mut aqua::UiApp, key: NamedKey) {
+    let event = KeyEvent {
+        key: Key::Named(key),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(event));
+    app.handle_input(&InputEvent::KeyUp(event));
+}
+
+fn links(app: &aqua::UiApp) -> Vec<(String, bool)> {
+    app.a11y_nodes()
+        .unwrap()
+        .2
+        .into_iter()
+        .filter_map(|node| node.text)
+        .flat_map(|text| text.links)
+        .map(|link| (link.label, link.focused))
+        .collect()
+}
+
+#[test]
+fn answer_links_are_announced_and_open_from_the_keyboard() {
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = opened.clone();
+    let mut app = answer(
+        "Read [the docs](https://docs.example) or [the guide](https://guide.example).",
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    assert_eq!(
+        links(&app),
+        vec![
+            ("the docs".to_owned(), false),
+            ("the guide".to_owned(), false)
+        ]
+    );
+    press(&mut app, NamedKey::Tab);
+    assert_eq!(
+        links(&app),
+        vec![
+            ("the docs".to_owned(), true),
+            ("the guide".to_owned(), false)
+        ]
+    );
+    press(&mut app, NamedKey::Enter);
+    assert_eq!(
+        opened.borrow().as_slice(),
+        &[LinkAction::OpenUrl("https://docs.example".to_owned())]
+    );
 }
 
 #[test]
