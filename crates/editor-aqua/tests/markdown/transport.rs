@@ -8,7 +8,7 @@ use editor_aqua::qualification::fixture::ForgeServer;
 use editor_aqua::ui::markdown::{
     Block, IndexedLeafContent,
     presenter::MarkdownPresenter,
-    stored::{LeafPreparation, StoredOwner, StoredPreparation, StoredSource},
+    stored::{LeafPreparation, PagePreparation, StoredOwner, StoredPreparation, StoredSource},
     visual::BodyTone,
 };
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
@@ -31,24 +31,19 @@ fn wait_source(
     owner: &mut StoredOwner,
     receiver: &mpsc::Receiver<()>,
     deadline: Instant,
-    start: Option<usize>,
 ) -> StoredSource {
     loop {
         owner.drain();
         match owner.current("row") {
-            StoredPreparation::Ready(source)
-                if start.is_none_or(|start| source.loaded_range().start == start) =>
-            {
-                return source;
-            }
+            StoredPreparation::Ready(source) => return source,
             StoredPreparation::Failed(error) => panic!("source index failed: {error}"),
-            _ => wait_wake(receiver, deadline),
+            StoredPreparation::Pending => wait_wake(receiver, deadline),
         }
     }
 }
 
 #[test]
-fn real_forge_stored_markdown_moves_bounded_windows_and_revokes_leaf_proof() {
+fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let directory = tempfile::tempdir().unwrap();
     let server = runtime()
         .block_on(ForgeServer::start(
@@ -158,17 +153,26 @@ fn real_forge_stored_markdown_moves_bounded_windows_and_revokes_leaf_proof() {
         ),
         StoredPreparation::Pending
     ));
-    let tail = wait_source(&mut owner, &received, deadline, None);
-    assert!(tail.block_count() > 64);
-    assert_eq!(tail.loaded_range().end, tail.block_count());
-    assert!(tail.loaded_range().len() <= 64);
-    assert!(tail.loaded_range().start > 0);
+    let first = wait_source(&mut owner, &received, deadline);
+    assert!(first.block_count() > 64);
     assert!(matches!(
-        owner.move_window("row", &tail, 0),
-        StoredPreparation::Pending
+        owner.page(&first, first.block_count() - 1),
+        PagePreparation::Ready(_)
     ));
-    let first = wait_source(&mut owner, &received, deadline, Some(0));
-    assert!(first.loaded_range().len() <= 64);
+    assert!(owner.descriptor(&first, 0).is_none());
+    assert_eq!(owner.page(&first, 0), PagePreparation::Pending);
+    let descriptor = loop {
+        owner.drain();
+        match owner.page(&first, 0) {
+            PagePreparation::Ready(descriptor) => break descriptor,
+            PagePreparation::Failed { offset, cause } => {
+                panic!("page {offset} failed: {cause}")
+            }
+            PagePreparation::Pending => wait_wake(&received, deadline),
+        }
+    };
+    assert_eq!(descriptor.ordinal, 0);
+    assert!(owner.descriptor(&first, 64).is_none());
     let StoredPreparation::Ready(again) = owner.ensure(
         "row",
         provider.clone(),
@@ -177,9 +181,7 @@ fn real_forge_stored_markdown_moves_bounded_windows_and_revokes_leaf_proof() {
     ) else {
         panic!("current window was not retained")
     };
-    assert_eq!(again.loaded_range(), first.loaded_range());
-    let descriptor = first.descriptor(0).unwrap().clone();
-    assert!(first.descriptor(first.loaded_range().end).is_none());
+    assert_eq!(again.revision(), first.revision());
     let leaf = loop {
         owner.drain();
         match owner.leaf("leaf-0", &first, 0) {
@@ -239,7 +241,7 @@ fn real_forge_stored_markdown_moves_bounded_windows_and_revokes_leaf_proof() {
     );
     assert!(owner.leaf_is_current(&projected.proof));
     stored_conversation_transaction(&mut core, &config, &client, item, deadline);
-    let _ = owner.move_window("row", &first, 64);
+    assert_eq!(owner.page(&first, 64), PagePreparation::Pending);
     core.add_test_host(&config, client);
     assert!(!provider.is_available());
     owner.drain();
@@ -261,17 +263,38 @@ fn stored_conversation_transaction(
 ) {
     use aqua_text::{SharedFonts, SharedRuns};
     use artisan_api::Event;
-    use editor_aqua::conversation::{adapter::row_model, controller::Conversation, fold::{Row, Slot}, presentation::{BodyKey, PresentationScope}, stored::StoredConversation, view::{factory::{RealizedRow, RowFactory}, status::StatusShimmers, transcript::TranscriptObservations}};
+    use editor_aqua::conversation::{
+        adapter::row_model,
+        controller::Conversation,
+        fold::{Row, Slot},
+        presentation::{BodyKey, PresentationScope},
+        stored::StoredConversation,
+        view::{
+            factory::{RealizedRow, RowFactory},
+            status::StatusShimmers,
+            transcript::TranscriptObservations,
+        },
+    };
     use editor_aqua::core::Screen;
     use std::cell::{Cell, RefCell};
 
-    core.navigate(Screen::Thread { host: config.id.clone(), thread: item.thread_id.clone() });
+    core.navigate(Screen::Thread {
+        host: config.id.clone(),
+        thread: item.thread_id.clone(),
+    });
     let mut conversation = Conversation::new(core);
     conversation.open_thread(core, config.id.clone(), item.thread_id.clone());
     let sender = core.host(&config.id).unwrap().test_transition_sender();
     runtime().block_on(sender.event(Event::Item { item: item.clone() }));
-    while conversation.view.as_ref().and_then(|view| view.item(&item.id)).is_none() {
-        core.drain_with(|core, event| { conversation.core_event(core, &event, false); });
+    while conversation
+        .view
+        .as_ref()
+        .and_then(|view| view.item(&item.id))
+        .is_none()
+    {
+        core.drain_with(|core, event| {
+            conversation.core_event(core, &event, false);
+        });
         assert!(Instant::now() < deadline, "stored item delivery deadline");
         std::thread::yield_now();
     }
@@ -280,20 +303,49 @@ fn stored_conversation_transaction(
     let stored = Rc::new(RefCell::new(StoredConversation::default()));
     stored.borrow_mut().rebind(Some(scope.clone()));
     let (wake, received) = mpsc::channel();
-    stored.borrow().wake_mailbox().unwrap().set_waker(Arc::new(move || { let _ = wake.send(()); }));
-    let key = BodyKey { item: item.id.clone(), slot: Slot::Prose };
+    stored
+        .borrow()
+        .wake_mailbox()
+        .unwrap()
+        .set_waker(Arc::new(move || {
+            let _ = wake.send(());
+        }));
+    let key = BodyKey {
+        item: item.id.clone(),
+        slot: Slot::Prose,
+    };
     let version = conversation.body_version(&key).unwrap();
-    let ItemKind::AssistantMessage { text: TextContent::Stored(reference), .. } = &item.kind else { panic!("expected stored message") };
-    assert!(matches!(stored.borrow_mut().ensure(&scope, &provider, key.clone(), reference.clone(), version).unwrap(), StoredPreparation::Pending));
+    let ItemKind::AssistantMessage {
+        text: TextContent::Stored(reference),
+        ..
+    } = &item.kind
+    else {
+        panic!("expected stored message")
+    };
+    assert!(matches!(
+        stored
+            .borrow_mut()
+            .ensure(&scope, &provider, key.clone(), reference.clone(), version)
+            .unwrap(),
+        StoredPreparation::Pending
+    ));
     loop {
         stored.borrow_mut().drain_publish(&mut conversation, core);
-        if let Some(range) = stored.borrow().current_range(&key) && range.end > range.start { break; }
+        if stored
+            .borrow()
+            .block_count(&key)
+            .is_some_and(|count| count > 0)
+        {
+            break;
+        }
         wait_wake(&received, deadline);
     }
-    let range = stored.borrow().current_range(&key).unwrap();
-    let ordinal = range.end - 1;
+    let ordinal = stored.borrow().block_count(&key).unwrap() - 1;
     let source = loop {
-        let state = stored.borrow_mut().ensure(&scope, &provider, key.clone(), reference.clone(), version).unwrap();
+        let state = stored
+            .borrow_mut()
+            .ensure(&scope, &provider, key.clone(), reference.clone(), version)
+            .unwrap();
         match state {
             StoredPreparation::Ready(source) => break source,
             StoredPreparation::Failed(error) => panic!("stored index failed: {error}"),
@@ -320,35 +372,106 @@ fn stored_conversation_transaction(
     let model = row_model(&conversation, index, None).unwrap();
     let row_key = model.row.key();
     let document = SelectionDocumentId(555);
-    let markdown = Rc::new(RefCell::new(editor_aqua::conversation::presentation::MarkdownOwners::new(document)));
+    let markdown = Rc::new(RefCell::new(
+        editor_aqua::conversation::presentation::MarkdownOwners::new(document),
+    ));
     let observations = TranscriptObservations::default();
     let ids = Rc::new(Cell::new(1000));
     let allocated = ids.clone();
-    let factory = Rc::new(RowFactory::new(vec![RealizedRow { model, disclosure: Default::default(), held: false }], scope.clone(), markdown.clone(), Rc::new(RefCell::new(StatusShimmers::default())), *ArtisanTheme::for_mode(ThemeMode::Dark), true, Instant::now(), Rc::new(move || { let id = allocated.get() + 1; allocated.set(id); SelectionSourceId(id) }), Rc::new(|| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), editor_aqua::conversation::view::factory::WorkResources { motion: Rc::default(), names: Default::default(), seconds: 0.0, timestamp: 0 })
-        .with_sources(provider.clone(), document, Rc::new(|_| {})).unwrap()
-        .with_stored(stored.clone(), provider).unwrap()
-        .with_observations(observations.clone()));
+    let factory = Rc::new(
+        RowFactory::new(
+            vec![RealizedRow {
+                model,
+                disclosure: Default::default(),
+                held: false,
+            }],
+            scope.clone(),
+            markdown.clone(),
+            Rc::new(RefCell::new(StatusShimmers::default())),
+            *ArtisanTheme::for_mode(ThemeMode::Dark),
+            true,
+            Instant::now(),
+            Rc::new(move || {
+                let id = allocated.get() + 1;
+                allocated.set(id);
+                SelectionSourceId(id)
+            }),
+            Rc::new(|| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            editor_aqua::conversation::view::factory::WorkResources {
+                motion: Rc::default(),
+                names: Default::default(),
+                seconds: 0.0,
+                timestamp: 0,
+            },
+        )
+        .with_sources(provider.clone(), document, Rc::new(|_| {}))
+        .unwrap()
+        .with_stored(stored.clone(), provider)
+        .unwrap()
+        .with_observations(observations.clone()),
+    );
     let realized = factory.realize(0, &row_key).unwrap();
     let source_id = realized.batches[0].sources()[0].id;
     let callback = factory.callback();
     let list_key = row_key.clone();
-    let list = aqua_ui::collection::List::new().items(vec![0_usize]).key(move |_: &usize| format!("{list_key:?}")).try_batched_row(move |index: &usize| callback(*index, &row_key)).virtualize().estimated_row_height(aqua_ui::style::Length::Px(30.0)).style(aqua_ui::style::Style::new().width(aqua_ui::style::Length::Px(600.0)).height(aqua_ui::style::Length::Px(300.0))).build();
+    let list = aqua_ui::collection::List::new()
+        .items(vec![0_usize])
+        .key(move |_: &usize| format!("{list_key:?}"))
+        .try_batched_row(move |index: &usize| callback(*index, &row_key))
+        .virtualize()
+        .estimated_row_height(aqua_ui::style::Length::Px(30.0))
+        .style(
+            aqua_ui::style::Style::new()
+                .width(aqua_ui::style::Length::Px(600.0))
+                .height(aqua_ui::style::Length::Px(300.0)),
+        )
+        .build();
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.set_viewport(800.0, 600.0, 1.0);
     app.mount(|_| list).unwrap();
     app.layout().unwrap();
     app.build_frame().unwrap();
-    let clip = aqua_core::Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
-    let painted = observations.drain().painted.into_iter().find(|paint| paint.snapshot.stored.is_some()).unwrap();
-    let candidate = painted.clone().capture(&conversation, core, &markdown.borrow(), &scope, clip, true).unwrap();
-    let stale_host = painted.capture(&conversation, core, &markdown.borrow(), &scope, clip, true).unwrap();
+    let clip = aqua_core::Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 800.0,
+        h: 600.0,
+    };
+    let painted = observations
+        .drain()
+        .painted
+        .into_iter()
+        .find(|paint| paint.snapshot.stored.is_some())
+        .unwrap();
+    let candidate = painted
+        .clone()
+        .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
+        .unwrap();
+    let stale_host = painted
+        .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
+        .unwrap();
     assert!(app.unregister_selection_source_in(document, source_id));
     let mut changed = item.clone();
     changed.seq += 1;
-    if let ItemKind::AssistantMessage { text, .. } = &mut changed.kind { *text = TextContent::Stored(artisan_api::ContentRef::from_text("different source")); }
-    runtime().block_on(sender.event(Event::Item { item: changed.clone() }));
-    while conversation.view.as_ref().and_then(|view| view.item(&item.id)).is_none_or(|current| current.seq != changed.seq) {
-        core.drain_with(|core, event| { conversation.core_event(core, &event, false); });
+    if let ItemKind::AssistantMessage { text, .. } = &mut changed.kind {
+        *text = TextContent::Stored(artisan_api::ContentRef::from_text("different source"));
+    }
+    runtime().block_on(sender.event(Event::Item {
+        item: changed.clone(),
+    }));
+    while conversation
+        .view
+        .as_ref()
+        .and_then(|view| view.item(&item.id))
+        .is_none_or(|current| current.seq != changed.seq)
+    {
+        core.drain_with(|core, event| {
+            conversation.core_event(core, &event, false);
+        });
         assert!(Instant::now() < deadline, "stored item update deadline");
         std::thread::yield_now();
     }

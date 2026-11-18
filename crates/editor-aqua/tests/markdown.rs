@@ -21,7 +21,6 @@ mod reveal;
     clippy::needless_pass_by_value,
     clippy::redundant_clone,
     clippy::unwrap_used,
-    let_underscore_drop,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #[path = "markdown/transport.rs"]

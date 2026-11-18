@@ -11,6 +11,7 @@ use aqua_ui::collection_runtime::CollectionError;
 use artisan_api::{ItemKind, Status, TextContent};
 use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use editor_ui::markdown::presenter::HeatmapServices;
+use editor_ui::markdown::stored::PagePreparation;
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::rich::actions::{ResourceScope, ShowCopyMenu};
 use editor_ui::theme::ArtisanTheme;
@@ -422,8 +423,15 @@ impl RowFactory {
             }
             StoredPreparation::Ready(source) => source,
         };
-        if block >= source.block_count() || source.descriptor(block).is_none() {
+        if block >= source.block_count() {
             return Ok((pending("Content layout is updating…"), None));
+        }
+        match self.stored_page(services, &key, &source, block, version) {
+            PagePreparation::Ready(_) => {}
+            PagePreparation::Pending => return Ok((pending("Loading content…"), None)),
+            PagePreparation::Failed { offset, cause } => {
+                return Ok((self.page_failure(&key, offset, &cause), None));
+            }
         }
         let leaf = match services.owner.borrow_mut().leaf(&key, &source, block) {
             LeafPreparation::Pending => return Ok((pending("Loading content…"), None)),
@@ -542,6 +550,63 @@ impl RowFactory {
         batches.extend(prepared.batches);
         Ok((prepared.element, Some(proof)))
     }
+    fn stored_page(
+        &self,
+        services: &StoredResources,
+        key: &BodyKey,
+        source: &editor_ui::markdown::stored::StoredSource,
+        block: usize,
+        version: u64,
+    ) -> PagePreparation {
+        let (page, moved) = services.owner.borrow_mut().page(key, source, block);
+        if let Some(leaves) = moved {
+            self.pending_projections.borrow_mut().push((
+                key.clone(),
+                crate::conversation::projection::BodyProjection {
+                    version,
+                    revision: source.revision(),
+                    leaves,
+                },
+            ));
+        }
+        page
+    }
+
+    fn page_failure(&self, key: &BodyKey, offset: u64, cause: &str) -> aqua_ui::element::Element {
+        let dispatch = Rc::clone(&self.dispatch);
+        let active = Rc::clone(&self.active);
+        let body = key.clone();
+        let retry = Button::text(
+            format!("retry-stored-page-{}-{}-{offset}", key.item, key.slot),
+            self.theme,
+            ButtonTone::Neutral,
+            "Try again",
+        )
+        .on_activate(move |_| {
+            if active.get() {
+                dispatch(crate::conversation::adapter::Action::RetryStoredPage {
+                    body: body.clone(),
+                    offset,
+                });
+            }
+        })
+        .build();
+        let text = TextRole::Label
+            .text(
+                &self.theme,
+                format!("Couldn't load this part of the message: {cause}"),
+            )
+            .gpui_source_color(self.theme.colors.text_muted.to_reference_text_color())
+            .build();
+        aqua_ui::element::Box::new()
+            .layout("column")
+            .width(aqua_ui::style::Length::Pct(100.0))
+            .spaced(Space::S8)
+            .child(text)
+            .child(retry)
+            .build()
+    }
+
     fn literal_row(
         &self,
         row_owner: &Rc<super::row_cache::RowOwner>,
@@ -586,8 +651,15 @@ impl RowFactory {
             StoredPreparation::Failed(error) => return Ok(pending(&error)),
             StoredPreparation::Ready(source) => source,
         };
-        if block >= source.block_count() || source.descriptor(block).is_none() {
+        if block >= source.block_count() {
             return Ok(pending("Content layout is updating…"));
+        }
+        match self.stored_page(services, &key, &source, block, version) {
+            PagePreparation::Ready(_) => {}
+            PagePreparation::Pending => return Ok(pending("Loading content…")),
+            PagePreparation::Failed { offset, cause } => {
+                return Ok(self.page_failure(&key, offset, &cause));
+            }
         }
         let leaf = match services
             .owner
@@ -2061,12 +2133,12 @@ impl RowFactory {
                         .stored
                         .as_ref()
                         .and_then(|services| {
-                            services.owner.borrow().current_range(&BodyKey {
+                            services.owner.borrow().block_count(&BodyKey {
                                 item: id.clone(),
                                 slot: *slot,
                             })
                         })
-                        .map_or(1, |range| range.end);
+                        .unwrap_or(1);
                     let sticker = self.bubble_sticker(
                         &row_owner,
                         key,

@@ -213,7 +213,7 @@ impl LiteralOwner {
         if !owner.source_is_current(source) {
             return LiteralPreparation::Pending;
         }
-        let Some(descriptor) = source.descriptor(ordinal).cloned() else {
+        let Some(descriptor) = owner.descriptor(source, ordinal).cloned() else {
             return LiteralPreparation::Pending;
         };
         let (Ok(start), Ok(end)) = (

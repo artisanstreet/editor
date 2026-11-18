@@ -1353,6 +1353,7 @@ impl RootViews {
             for action in row_actions {
                 changed |= action.dispatch(
                     &mut workspace.conversation,
+                    &mut self.stored.borrow_mut(),
                     &shell.core,
                     reduced,
                     shell.core.clock().now(),

@@ -6,6 +6,7 @@ use artisan_api::{
 use editor_aqua::conversation::adapter::{Action, ActionScope, RowModel};
 use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
+use editor_aqua::conversation::stored::StoredConversation;
 use editor_aqua::conversation::thread::{AnswerRequest, AnswerState};
 use editor_aqua::conversation::view::row_cache::RowCache;
 use std::cell::RefCell;
@@ -187,5 +188,11 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         Some(editor_aqua::conversation::view::row_sources::RowSourceEffect::SavePath(_))
     ));
     connect(&mut core, &config);
-    assert!(!scoped.dispatch(&mut conversation, &core, true, Instant::now()));
+    assert!(!scoped.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
 }

@@ -11,14 +11,30 @@ use std::time::Instant;
 #[derive(Clone)]
 pub enum Action {
     OpenAgent(ItemId),
-    ToggleWork { run: RunId, open: bool },
-    ToggleChain { id: ItemId, open: bool },
-    ToggleItem { id: ItemId, expanded: bool },
-    Answer { id: ItemId, answer: Answer },
+    ToggleWork {
+        run: RunId,
+        open: bool,
+    },
+    ToggleChain {
+        id: ItemId,
+        open: bool,
+    },
+    ToggleItem {
+        id: ItemId,
+        expanded: bool,
+    },
+    Answer {
+        id: ItemId,
+        answer: Answer,
+    },
     Jump(Seq),
     JumpLatest,
     LoadNewer,
     LoadEarlierWork(Seq),
+    RetryStoredPage {
+        body: super::presentation::BodyKey,
+        offset: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -58,6 +74,7 @@ impl ScopedAction {
     pub fn dispatch(
         self,
         conversation: &mut Conversation,
+        stored: &mut super::stored::StoredConversation,
         core: &Core,
         reduce_motion: bool,
         now: Instant,
@@ -145,6 +162,7 @@ impl ScopedAction {
                 conversation.load_work(core, first);
                 before != conversation.work_reading()
             }
+            Action::RetryStoredPage { body, offset } => stored.retry_page(&body, offset),
         }
     }
 }

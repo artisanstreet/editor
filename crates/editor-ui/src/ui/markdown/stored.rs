@@ -5,6 +5,9 @@ use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceIndexRange}
 pub const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 pub const RANGE_BYTES: u32 = 65_536;
 pub const MAX_INDEX_ENTRIES: usize = 48;
+pub const PAGE_LEAVES: usize = artisan_api::SOURCE_INDEX_PAGE_LEAVES as usize;
+pub const PAGES_PER_SOURCE: usize = 8;
+pub const MAX_CACHED_PAGES: usize = 64;
 pub const MAX_PREPARED_ENTRIES: usize = 128;
 pub const MAX_PENDING_JOBS: usize = 48;
 pub const PREPARED_BYTES: usize = 32 * 1024 * 1024;
@@ -121,7 +124,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use artisan_api::SourceLeafDescriptor;
+use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 
@@ -131,7 +134,7 @@ use editor_core::{delivery::Delivery, host::ScopedSourceProvider, runtime};
 #[derive(Clone)]
 pub struct StoredSource {
     provider: ScopedSourceProvider,
-    page: Arc<SourceIndexRange>,
+    header: Arc<SourceIndexHeader>,
     revision: u64,
     owner: String,
 }
@@ -152,26 +155,34 @@ impl StoredSource {
     }
 
     pub fn source_ref(&self) -> &ContentRef {
-        &self.page.index.source
+        &self.header.source
     }
     pub fn format(&self) -> SourceIndexFormat {
-        self.page.index.format
+        self.header.format
     }
     pub fn block_count(&self) -> usize {
-        usize::try_from(self.page.index.leaves).unwrap_or(usize::MAX)
+        usize::try_from(self.header.leaves).unwrap_or(usize::MAX)
     }
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn loaded_range(&self) -> Range<usize> {
-        usize::try_from(self.page.start).unwrap_or(usize::MAX)
-            ..usize::try_from(self.page.end).unwrap_or(usize::MAX)
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
-    pub fn descriptor(&self, ordinal: usize) -> Option<&SourceLeafDescriptor> {
-        self.page
-            .leaves
-            .get(ordinal.checked_sub(usize::try_from(self.page.start).ok()?)?)
+    fn holds(&self, provider: &ScopedSourceProvider, page: &SourceIndexRange) -> bool {
+        StoredOwner::same_provider(&self.provider, provider) && page.index == *self.header
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PagePreparation {
+    Pending,
+    Ready(SourceLeafDescriptor),
+    Failed { offset: u64, cause: String },
+}
+
+pub fn page_start(ordinal: usize) -> u64 {
+    (ordinal - ordinal % PAGE_LEAVES) as u64
 }
 
 #[derive(Clone)]
@@ -231,25 +242,38 @@ impl StoredLeaf {
     }
 }
 
+struct Task(AbortHandle);
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+enum IndexPhase {
+    Loading { _task: Task },
+    Ready(StoredSource),
+    Failed(String),
+}
+
+enum FetchState {
+    Loading { _task: Task },
+    Failed(String),
+}
+
+struct PageFetch {
+    start: u64,
+    state: FetchState,
+}
+
 struct IndexEntry {
     owner: String,
     provider: ScopedSourceProvider,
     reference: ContentRef,
     format: SourceIndexFormat,
     revision: u64,
-    pending_offset: Option<Option<u64>>,
-    failed_offset: Option<Option<u64>>,
-    current: Option<StoredSource>,
-    error: Option<String>,
-    task: Option<AbortHandle>,
-}
-
-impl Drop for IndexEntry {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
+    phase: IndexPhase,
+    fetches: Vec<PageFetch>,
 }
 
 enum LeafPhase {
@@ -289,6 +313,7 @@ enum Completion {
     Index {
         owner: String,
         revision: u64,
+        offset: Option<u64>,
         result: Result<SourceIndexRange, String>,
     },
     Range {
@@ -373,35 +398,32 @@ impl StoredOwner {
     fn same_provider(a: &ScopedSourceProvider, b: &ScopedSourceProvider) -> bool {
         a.is_available() && b.is_available() && a.host() == b.host() && a.instance() == b.instance()
     }
+    fn same_source(
+        provider: &ScopedSourceProvider,
+        page: &SourceIndexRange,
+        other_provider: &ScopedSourceProvider,
+        other: &SourceIndexRange,
+    ) -> bool {
+        Self::same_provider(provider, other_provider)
+            && page.index.source == other.index.source
+            && page.index.format == other.index.format
+    }
     fn remember_page(&mut self, provider: ScopedSourceProvider, page: Arc<SourceIndexRange>) {
         self.pages.retain(|(existing_provider, existing)| {
-            !(Self::same_provider(existing_provider, &provider)
-                && existing.index.source == page.index.source
-                && existing.index.format == page.index.format
+            !(Self::same_source(existing_provider, existing, &provider, &page)
                 && existing.start == page.start)
         });
-        while self
-            .pages
-            .iter()
-            .filter(|(existing_provider, existing)| {
-                Self::same_provider(existing_provider, &provider)
-                    && existing.index.source == page.index.source
-                    && existing.index.format == page.index.format
-            })
-            .count()
-            >= 2
-        {
-            let Some(index) = self.pages.iter().position(|(existing_provider, existing)| {
-                Self::same_provider(existing_provider, &provider)
-                    && existing.index.source == page.index.source
-                    && existing.index.format == page.index.format
-            }) else {
-                break;
+        let same =
+            |(existing_provider, existing): &(ScopedSourceProvider, Arc<SourceIndexRange>)| {
+                Self::same_source(existing_provider, existing, &provider, &page)
             };
-            self.pages.remove(index);
+        if self.pages.iter().filter(|entry| same(entry)).count() >= PAGES_PER_SOURCE
+            && let Some(oldest) = self.pages.iter().position(same)
+        {
+            self.pages.remove(oldest);
         }
         self.pages.push_back((provider, page));
-        while self.pages.len() > MAX_INDEX_ENTRIES {
+        while self.pages.len() > MAX_CACHED_PAGES {
             self.pages.pop_front();
         }
     }
@@ -449,25 +471,84 @@ impl StoredOwner {
             self.leaves.retain(|entry| entry.source.owner != owner);
         }
         while self.indices.len() >= MAX_INDEX_ENTRIES {
-            let Some(index) = self.indices.iter().position(|entry| entry.task.is_none()) else {
+            let Some(index) = self
+                .indices
+                .iter()
+                .position(|entry| !matches!(entry.phase, IndexPhase::Loading { .. }))
+            else {
                 return StoredPreparation::Pending;
             };
             self.indices.remove(index);
         }
         let revision = self.next_generation();
+        let cached = self
+            .pages
+            .iter()
+            .find(|(cached_provider, page)| {
+                Self::same_provider(cached_provider, &provider)
+                    && page.index.source == reference
+                    && page.index.format == format
+                    && page.end == page.index.leaves
+            })
+            .map(|(_, page)| page.clone());
+        let phase = if let Some(page) = cached {
+            IndexPhase::Ready(StoredSource {
+                provider: provider.clone(),
+                header: Arc::new(page.index.clone()),
+                revision,
+                owner: owner.to_owned(),
+            })
+        } else {
+            let Some(future) = provider.index_range(
+                reference.clone(),
+                format,
+                None,
+                artisan_api::SOURCE_INDEX_PAGE_LEAVES,
+            ) else {
+                return StoredPreparation::Failed("Host disconnected".to_owned());
+            };
+            IndexPhase::Loading {
+                _task: self.spawn_index(owner, revision, None, future),
+            }
+        };
         self.indices.push_back(IndexEntry {
             owner: owner.to_owned(),
             provider,
             reference,
             format,
             revision,
-            pending_offset: None,
-            failed_offset: None,
-            current: None,
-            error: None,
-            task: None,
+            phase,
+            fetches: Vec::new(),
         });
-        self.start_index(owner, None)
+        self.current(owner)
+    }
+    fn spawn_index(
+        &self,
+        owner: &str,
+        revision: u64,
+        offset: Option<u64>,
+        future: futures::future::BoxFuture<
+            'static,
+            Result<SourceIndexRange, editor_core::client::RangeError>,
+        >,
+    ) -> Task {
+        let owner = owner.to_owned();
+        let sender = self.delivery.sender();
+        Task(
+            runtime::runtime()
+                .spawn(async move {
+                    let result = future.await.map_err(|error| error.to_string());
+                    let _ = sender
+                        .send(Completion::Index {
+                            owner,
+                            revision,
+                            offset,
+                            result,
+                        })
+                        .await;
+                })
+                .abort_handle(),
+        )
     }
     pub fn current(&self, owner: &str) -> StoredPreparation {
         let Some(entry) = self
@@ -477,116 +558,125 @@ impl StoredOwner {
         else {
             return StoredPreparation::Pending;
         };
-        if let Some(current) = &entry.current {
-            StoredPreparation::Ready(current.clone())
-        } else if let Some(error) = &entry.error {
-            StoredPreparation::Failed(error.clone())
-        } else {
-            StoredPreparation::Pending
+        match &entry.phase {
+            IndexPhase::Loading { .. } => StoredPreparation::Pending,
+            IndexPhase::Ready(source) => StoredPreparation::Ready(source.clone()),
+            IndexPhase::Failed(error) => StoredPreparation::Failed(error.clone()),
         }
     }
-    pub fn move_window(
-        &mut self,
-        owner: &str,
+    pub fn descriptor(
+        &self,
         source: &StoredSource,
-        offset: u64,
-    ) -> StoredPreparation {
-        if !self.source_is_current(source) || source.owner != owner {
-            return StoredPreparation::Pending;
-        }
-        if source.page.start == offset {
-            return StoredPreparation::Ready(source.clone());
-        }
-        if let Some(entry) = self.indices.iter().find(|entry| entry.owner == owner)
-            && entry.failed_offset == Some(Some(offset))
-            && let Some(error) = &entry.error
-        {
-            return StoredPreparation::Failed(error.clone());
-        }
-        self.start_index(owner, Some(offset))
+        ordinal: usize,
+    ) -> Option<&SourceLeafDescriptor> {
+        let ordinal = u64::try_from(ordinal).ok()?;
+        self.pages
+            .iter()
+            .find(|(provider, page)| {
+                source.holds(provider, page) && (page.start..page.end).contains(&ordinal)
+            })
+            .and_then(|(_, page)| page.leaves.get(usize::try_from(ordinal - page.start).ok()?))
     }
-    fn start_index(&mut self, owner: &str, offset: Option<u64>) -> StoredPreparation {
-        let Some(index) = self.indices.iter().position(|entry| entry.owner == owner) else {
-            return StoredPreparation::Pending;
+    pub fn page(&mut self, source: &StoredSource, ordinal: usize) -> PagePreparation {
+        if !self.source_is_current(source) || ordinal >= source.block_count() {
+            return PagePreparation::Pending;
+        }
+        let wanted = ordinal as u64;
+        if let Some(position) = self.pages.iter().position(|(provider, page)| {
+            source.holds(provider, page) && (page.start..page.end).contains(&wanted)
+        }) {
+            let cached = self
+                .pages
+                .remove(position)
+                .expect("invariant: a found page position is in the cache");
+            let descriptor = cached.1.leaves[(wanted - cached.1.start) as usize].clone();
+            self.pages.push_back(cached);
+            return PagePreparation::Ready(descriptor);
+        }
+        let start = page_start(ordinal);
+        let index = self
+            .indices
+            .iter()
+            .position(|entry| entry.owner == source.owner)
+            .expect("invariant: a current stored source keeps its index entry");
+        match self.indices[index]
+            .fetches
+            .iter()
+            .find(|fetch| fetch.start == start)
+            .map(|fetch| &fetch.state)
+        {
+            Some(FetchState::Loading { .. }) => PagePreparation::Pending,
+            Some(FetchState::Failed(cause)) => PagePreparation::Failed {
+                offset: start,
+                cause: cause.clone(),
+            },
+            None => self.start_page(index, start),
+        }
+    }
+    pub fn retry_page(&mut self, owner: &str, offset: u64) -> bool {
+        let Some(index) = self.indices.iter().position(|entry| {
+            entry.owner == owner
+                && entry.provider.is_available()
+                && matches!(entry.phase, IndexPhase::Ready(_))
+        }) else {
+            return false;
         };
-        if self.indices[index].pending_offset == Some(offset) {
-            return StoredPreparation::Pending;
+        let fetches = &mut self.indices[index].fetches;
+        let Some(failed) = fetches.iter().position(|fetch| {
+            fetch.start == offset && matches!(fetch.state, FetchState::Failed(_))
+        }) else {
+            return false;
+        };
+        fetches.remove(failed);
+        self.start_page(index, offset);
+        true
+    }
+    fn start_page(&mut self, index: usize, start: u64) -> PagePreparation {
+        let entry = &self.indices[index];
+        if entry
+            .fetches
+            .iter()
+            .filter(|fetch| matches!(fetch.state, FetchState::Loading { .. }))
+            .count()
+            >= PAGES_PER_SOURCE
+        {
+            return PagePreparation::Pending;
         }
-        let cached = self.pages.iter().position(|(provider, page)| {
-            let entry = &self.indices[index];
-            Self::same_provider(provider, &entry.provider)
-                && page.index.source == entry.reference
-                && page.index.format == entry.format
-                && offset.map_or(page.end == page.index.leaves, |offset| {
-                    page.start == offset.min(page.index.leaves)
-                })
-        });
-        if let Some(position) = cached {
-            let (_, page) = self.pages.remove(position).unwrap();
-            let revision = self.next_generation();
-            let entry = &mut self.indices[index];
-            if let Some(task) = entry.task.take() {
-                task.abort();
-            }
-            entry.pending_offset = None;
-            entry.failed_offset = None;
-            entry.error = None;
-            entry.revision = revision;
-            let source = StoredSource {
-                provider: entry.provider.clone(),
-                page: page.clone(),
-                revision,
-                owner: owner.to_owned(),
-            };
-            entry.current = Some(source.clone());
-            self.pages.push_back((entry.provider.clone(), page));
-            return StoredPreparation::Ready(source);
-        }
-        let revision = self.next_generation();
-        let entry = &mut self.indices[index];
-        if let Some(task) = entry.task.take() {
-            task.abort();
-        }
-        let Some(future) = entry.provider.index_range(
+        let state = match entry.provider.index_range(
             entry.reference.clone(),
             entry.format,
-            offset,
+            Some(start),
             artisan_api::SOURCE_INDEX_PAGE_LEAVES,
-        ) else {
-            return StoredPreparation::Failed("Host disconnected".to_owned());
+        ) {
+            Some(future) => FetchState::Loading {
+                _task: self.spawn_index(&entry.owner, entry.revision, Some(start), future),
+            },
+            None => FetchState::Failed("Host disconnected".to_owned()),
         };
-        entry.revision = revision;
-        entry.pending_offset = Some(offset);
-        entry.error = None;
-        entry.failed_offset = None;
-        let owner = owner.to_owned();
-        let sender = self.delivery.sender();
-        entry.task = Some(
-            runtime::runtime()
-                .spawn(async move {
-                    let result = future.await.map_err(|error| error.to_string());
-                    let _ = sender
-                        .send(Completion::Index {
-                            owner,
-                            revision,
-                            result,
-                        })
-                        .await;
-                })
-                .abort_handle(),
-        );
-        StoredPreparation::Pending
+        let fetches = &mut self.indices[index].fetches;
+        if fetches.len() >= PAGES_PER_SOURCE
+            && let Some(oldest) = fetches
+                .iter()
+                .position(|fetch| matches!(fetch.state, FetchState::Failed(_)))
+        {
+            fetches.remove(oldest);
+        }
+        let preparation = match &state {
+            FetchState::Loading { .. } => PagePreparation::Pending,
+            FetchState::Failed(cause) => PagePreparation::Failed {
+                offset: start,
+                cause: cause.clone(),
+            },
+        };
+        fetches.push(PageFetch { start, state });
+        preparation
     }
     pub fn source_is_current(&self, source: &StoredSource) -> bool {
         source.provider.is_available()
             && self.indices.iter().any(|entry| {
                 entry.owner == source.owner
                     && Self::same_provider(&entry.provider, &source.provider)
-                    && entry.current.as_ref().is_some_and(|current| {
-                        current.revision == source.revision
-                            && current.page.index.source == source.page.index.source
-                            && current.page.index.format == source.page.index.format
-                    })
+                    && matches!(&entry.phase, IndexPhase::Ready(current) if current.revision == source.revision && current.header == source.header)
             })
     }
     pub fn leaf_is_current(&self, proof: &LeafProof) -> bool {
@@ -596,9 +686,7 @@ impl StoredOwner {
                     && Self::same_provider(&entry.provider, &proof.provider)
                     && entry.reference == proof.reference
                     && entry.format == SourceIndexFormat::Markdown
-                    && entry.current.as_ref().and_then(|source| {
-                        source.descriptor(usize::try_from(proof.descriptor.ordinal).ok()?)
-                    }) == Some(&proof.descriptor)
+                    && matches!(entry.phase, IndexPhase::Ready(_))
             })
             && self.leaves.iter().any(|entry| {
                 entry.generation == proof.generation
@@ -616,7 +704,7 @@ impl StoredOwner {
         if !self.source_is_current(source) {
             return LeafPreparation::Pending;
         }
-        let Some(descriptor) = source.descriptor(ordinal).cloned() else {
+        let Some(descriptor) = self.descriptor(source, ordinal).cloned() else {
             return LeafPreparation::Pending;
         };
         if let Some(index) = self.leaves.iter().position(|entry| entry.key == key) {
@@ -624,7 +712,7 @@ impl StoredOwner {
                 let entry = &self.leaves[index];
                 entry.source.owner == source.owner
                     && Self::same_provider(&entry.source.provider, &source.provider)
-                    && entry.source.page.index.source == source.page.index.source
+                    && entry.source.header.source == source.header.source
                     && entry.descriptor == descriptor
             };
             if same {
@@ -704,13 +792,12 @@ impl StoredOwner {
                 );
             }
         };
-        let collector = match RangeCollector::new(
-            source.page.index.metadata.clone(),
-            metadata_start..metadata_end,
-        ) {
-            Ok(value) => value,
-            Err(error) => return LeafPreparation::Failed(error),
-        };
+        let collector =
+            match RangeCollector::new(source.header.metadata.clone(), metadata_start..metadata_end)
+            {
+                Ok(value) => value,
+                Err(error) => return LeafPreparation::Failed(error),
+            };
         let generation = self.next_generation();
         self.leaves.push_back(LeafEntry {
             key: key.to_owned(),
@@ -915,6 +1002,7 @@ impl StoredOwner {
                 Completion::Index {
                     owner,
                     revision,
+                    offset,
                     result,
                 } => {
                     let Some(entry) = self.indices.iter_mut().find(|entry| {
@@ -924,27 +1012,56 @@ impl StoredOwner {
                     }) else {
                         continue;
                     };
-                    entry.task = None;
-                    let offset = entry.pending_offset.take().unwrap_or(None);
-                    match result.and_then(|page| {
+                    let validated = result.and_then(|page| {
                         validate_page(&entry.reference, entry.format, offset, &page)?;
-                        Ok(page)
-                    }) {
-                        Ok(page) => {
-                            let source = StoredSource {
-                                provider: entry.provider.clone(),
-                                page: Arc::new(page),
+                        Ok(Arc::new(page))
+                    });
+                    let provider = entry.provider.clone();
+                    let remembered = match (offset, validated) {
+                        (None, Ok(page)) => {
+                            entry.phase = IndexPhase::Ready(StoredSource {
+                                provider: provider.clone(),
+                                header: Arc::new(page.index.clone()),
                                 revision,
                                 owner: owner.clone(),
+                            });
+                            Some(page)
+                        }
+                        (None, Err(error)) => {
+                            entry.phase = IndexPhase::Failed(error);
+                            None
+                        }
+                        (Some(start), validated) => {
+                            let Some(fetch) = entry.fetches.iter_mut().find(|fetch| {
+                                fetch.start == start
+                                    && matches!(fetch.state, FetchState::Loading { .. })
+                            }) else {
+                                continue;
                             };
-                            let provider = entry.provider.clone();
-                            entry.current = Some(source.clone());
-                            self.remember_page(provider, source.page);
+                            let IndexPhase::Ready(source) = &entry.phase else {
+                                unreachable!("page {start} of {owner} fetched before its index")
+                            };
+                            match validated {
+                                Ok(page) if source.holds(&provider, &page) => {
+                                    entry.fetches.retain(|fetch| fetch.start != start);
+                                    Some(page)
+                                }
+                                Ok(_) => {
+                                    fetch.state = FetchState::Failed(
+                                        "Markdown descriptor page does not match its immutable source"
+                                            .to_owned(),
+                                    );
+                                    None
+                                }
+                                Err(error) => {
+                                    fetch.state = FetchState::Failed(error);
+                                    None
+                                }
+                            }
                         }
-                        Err(error) => {
-                            entry.failed_offset = Some(offset);
-                            entry.error = Some(error);
-                        }
+                    };
+                    if let Some(page) = remembered {
+                        self.remember_page(provider, page);
                     }
                     updates.push(StoredUpdate::Index { owner, revision });
                 }
@@ -982,7 +1099,7 @@ impl StoredOwner {
                                     Ok((
                                         metadata,
                                         RangeCollector::new(
-                                            entry.source.page.index.source.clone(),
+                                            entry.source.header.source.clone(),
                                             start..end,
                                         )?,
                                     ))
@@ -1081,7 +1198,7 @@ impl StoredOwner {
                                 proof: LeafProof {
                                     provider: entry.source.provider.clone(),
                                     owner: entry.source.owner.clone(),
-                                    reference: entry.source.page.index.source.clone(),
+                                    reference: entry.source.header.source.clone(),
                                     descriptor: entry.descriptor.clone(),
                                     generation,
                                 },

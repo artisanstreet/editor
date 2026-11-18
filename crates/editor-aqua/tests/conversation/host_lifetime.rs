@@ -1,6 +1,7 @@
 use artisan_api::{ItemId, ThreadId};
 use editor_aqua::conversation::adapter::{Action, ScopedAction};
 use editor_aqua::conversation::controller::Conversation;
+use editor_aqua::conversation::stored::StoredConversation;
 use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use std::time::{Duration, Instant};
 
@@ -94,7 +95,13 @@ fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
     )
     .unwrap();
     core.add_test_host(&config, client(&core));
-    assert!(!action.dispatch(&mut conversation, &core, true, Instant::now()));
+    assert!(!action.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
     assert!(!conversation.view.as_ref().unwrap().ui.contains_key(&item));
 
     let old_action = ScopedAction::new(
@@ -106,7 +113,13 @@ fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
     )
     .unwrap();
     conversation.open_thread(&mut core, config.id.clone(), thread);
-    assert!(!old_action.dispatch(&mut conversation, &core, true, Instant::now()));
+    assert!(!old_action.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
     assert!(!conversation.view.as_ref().unwrap().ui.contains_key(&item));
     let current = ScopedAction::new(
         &conversation,
@@ -116,7 +129,13 @@ fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
         },
     )
     .unwrap();
-    assert!(current.dispatch(&mut conversation, &core, true, Instant::now()));
+    assert!(current.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
     assert_eq!(
         conversation.view.as_ref().unwrap().ui[&item].expanded,
         Some(true)
@@ -129,5 +148,11 @@ fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
         },
     )
     .unwrap();
-    assert!(!repeated.dispatch(&mut conversation, &core, true, Instant::now()));
+    assert!(!repeated.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
 }

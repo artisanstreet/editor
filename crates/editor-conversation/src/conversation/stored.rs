@@ -4,9 +4,39 @@ use super::projection::BodyProjection;
 use editor_core::{Core, host::ScopedSourceProvider};
 use editor_ui::markdown::literal::{LiteralOwner, LiteralPreparation};
 use editor_ui::markdown::presenter::{HeatmapServices, MarkdownPresenter, StoredProjectedMarkdown};
-use editor_ui::markdown::stored::{LeafPreparation, StoredOwner, StoredPreparation, StoredSource};
+use editor_ui::markdown::stored::{
+    LeafPreparation, PAGE_LEAVES, PagePreparation, StoredOwner, StoredPreparation, StoredSource,
+};
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::theme::ArtisanTheme;
+
+pub const ROW_WINDOW: usize = 16 * PAGE_LEAVES;
+const WINDOW_EDGE: usize = 4 * PAGE_LEAVES;
+const WINDOW_SHIFT: usize = 8 * PAGE_LEAVES;
+
+pub fn row_window(
+    current: Option<&std::ops::Range<usize>>,
+    count: usize,
+    reached: Option<usize>,
+) -> std::ops::Range<usize> {
+    let len = ROW_WINDOW.min(count);
+    let start = match (current, reached) {
+        (None, _) => count - len,
+        (Some(window), Some(reached))
+            if window.start > 0 && reached < window.start + WINDOW_EDGE =>
+        {
+            window.start.saturating_sub(WINDOW_SHIFT)
+        }
+        (Some(window), Some(reached))
+            if window.end < count && reached + WINDOW_EDGE >= window.end =>
+        {
+            window.start + WINDOW_SHIFT
+        }
+        (Some(window), _) => window.start,
+    };
+    let start = start.min(count - len);
+    start..start + len
+}
 
 pub fn retired_leaves(
     window: &std::ops::Range<usize>,
@@ -83,7 +113,7 @@ impl StoredProof {
             && row.visual().is_none()
             && matches!(self.key.slot.text(item), Some(TextContent::Stored(reference)) if reference == self.source.source_ref())
             && self.source.format() == SourceIndexFormat::Markdown
-            && self.source.descriptor(self.ordinal).is_some()
+            && owner.owner.descriptor(&self.source, self.ordinal).is_some()
             && owner.owner.source_is_current(&self.source)
             && owner.owner.leaf_is_current(&self.leaf)
     }
@@ -93,6 +123,7 @@ struct Body {
     owner: String,
     source: ContentRef,
     version: u64,
+    window: Option<std::ops::Range<usize>>,
     presenter: MarkdownPresenter,
     ids: HashMap<usize, Vec<SelectionSourceId>>,
     batches: HashMap<usize, Arc<SelectionSourceBatch>>,
@@ -198,6 +229,7 @@ impl StoredConversation {
             owner: name,
             source,
             version,
+            window: None,
             presenter: MarkdownPresenter::default(),
             ids: HashMap::new(),
             batches: HashMap::new(),
@@ -508,14 +540,36 @@ impl StoredConversation {
             .prepare(&self.owner, &leaf_key, source, ordinal)
     }
 
-    pub fn current_range(&self, key: &BodyKey) -> Option<std::ops::Range<usize>> {
+    pub fn block_count(&self, key: &BodyKey) -> Option<usize> {
         let body = self.bodies.get(key)?;
         match self.owner.current(&body.owner) {
             StoredPreparation::Ready(source) if self.owner.source_is_current(&source) => {
-                Some(source.loaded_range())
+                Some(source.block_count())
             }
             _ => None,
         }
+    }
+
+    pub fn page(
+        &mut self,
+        key: &BodyKey,
+        source: &StoredSource,
+        ordinal: usize,
+    ) -> (PagePreparation, Option<std::ops::Range<usize>>) {
+        let moved = self.bodies.get_mut(key).and_then(|body| {
+            let window = row_window(body.window.as_ref(), source.block_count(), Some(ordinal));
+            (body.window.as_ref() != Some(&window)).then(|| {
+                body.window = Some(window.clone());
+                window
+            })
+        });
+        (self.owner.page(source, ordinal), moved)
+    }
+
+    pub fn retry_page(&mut self, key: &BodyKey, offset: u64) -> bool {
+        self.bodies
+            .get(key)
+            .is_some_and(|body| self.owner.retry_page(&body.owner, offset))
     }
 
     pub fn proof(
@@ -573,13 +627,15 @@ impl StoredConversation {
                 && self.owner.source_is_current(&source)
                 && conversation.body_version(key) == Some(body.version)
             {
-                windows.push((key.clone(), source.loaded_range()));
+                let window = row_window(body.window.as_ref(), source.block_count(), None);
+                body.window = Some(window.clone());
+                windows.push((key.clone(), window.clone()));
                 projections.push((
                     key.clone(),
                     BodyProjection {
                         version: body.version,
                         revision: source.revision(),
-                        leaves: source.loaded_range(),
+                        leaves: window,
                     },
                 ));
             }

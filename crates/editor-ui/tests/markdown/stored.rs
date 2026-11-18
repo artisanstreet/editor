@@ -62,10 +62,11 @@ fn prepared(
     generation: u64,
     result: PreparedLeaf,
 ) -> LeafPreparation {
+    let descriptor = owner.descriptor(source, ordinal).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: key.into(),
         source: source.clone(),
-        descriptor: source.descriptor(ordinal).unwrap().clone(),
+        descriptor,
         generation,
         capacity: None,
         phase: LeafPhase::Working,
@@ -210,27 +211,87 @@ fn owner_fixture() -> (
     (directory, core, config, provider)
 }
 
+fn long_page(
+    source: &ContentRef,
+    metadata: &ContentRef,
+    leaves: u64,
+    range: std::ops::Range<u64>,
+) -> SourceIndexRange {
+    SourceIndexRange {
+        index: SourceIndexHeader {
+            format: SourceIndexFormat::Markdown,
+            source: source.clone(),
+            metadata: metadata.clone(),
+            version: artisan_api::SOURCE_INDEX_VERSION,
+            leaves,
+        },
+        start: range.start,
+        end: range.end,
+        leaves: range
+            .map(|ordinal| SourceLeafDescriptor {
+                ordinal,
+                source_start: 0,
+                source_end: source.bytes,
+                metadata_start: 0,
+                metadata_end: metadata.bytes,
+            })
+            .collect(),
+    }
+}
+
+fn hold_fetch(owner: &mut StoredOwner, start: u64) {
+    owner.indices[0].fetches = vec![PageFetch {
+        start,
+        state: FetchState::Loading {
+            _task: Task(
+                runtime::runtime()
+                    .spawn(std::future::pending::<()>())
+                    .abort_handle(),
+            ),
+        },
+    }];
+}
+
+fn deliver_page(
+    owner: &mut StoredOwner,
+    revision: u64,
+    offset: u64,
+    result: Result<SourceIndexRange, String>,
+) -> Vec<StoredUpdate> {
+    assert!(
+        runtime::runtime()
+            .block_on(owner.delivery.sender().send(Completion::Index {
+                owner: "row".into(),
+                revision,
+                offset: Some(offset),
+                result,
+            }))
+            .is_ok()
+    );
+    owner.drain()
+}
+
 #[test]
 fn cached_pages_obey_global_and_per_source_capacity() {
     let (_directory, _core, _config, provider) = owner_fixture();
     let mut owner = StoredOwner::default();
     let metadata = ContentRef::from_text("{}");
     let source = ContentRef::from_text("abc");
-    for start in 0..3 {
+    for start in 0..=PAGES_PER_SOURCE as u64 {
         let mut item = page(&source, &metadata);
         item.start = start;
         owner.remember_page(provider.clone(), Arc::new(item));
     }
-    assert_eq!(owner.pages.len(), 2);
+    assert_eq!(owner.pages.len(), PAGES_PER_SOURCE);
     assert_eq!(owner.pages.front().unwrap().1.start, 1);
-    for index in 0..50 {
+    for index in 0..MAX_CACHED_PAGES {
         let item = page(
             &ContentRef::from_text(&format!("source {index}")),
             &metadata,
         );
         owner.remember_page(provider.clone(), Arc::new(item));
     }
-    assert_eq!(owner.pages.len(), MAX_INDEX_ENTRIES);
+    assert_eq!(owner.pages.len(), MAX_CACHED_PAGES);
     assert!(
         owner
             .pages
@@ -240,51 +301,62 @@ fn cached_pages_obey_global_and_per_source_capacity() {
 }
 
 #[test]
-fn moved_window_survives_ensure_and_stale_completion() {
+fn a_failed_page_reports_its_offset_and_cause_until_retried() {
     let (_directory, mut core, config, provider) = owner_fixture();
     let source = ContentRef::from_text("abc");
     let metadata = ContentRef::from_text("{}");
-    let mut first = page(&source, &metadata);
-    first.end = 1;
-    first.leaves.truncate(1);
-    let mut second = page(&source, &metadata);
-    second.start = 1;
-    second.leaves.remove(0);
     let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(first.clone()));
-    owner.remember_page(provider.clone(), Arc::new(second));
+    owner.remember_page(
+        provider.clone(),
+        Arc::new(long_page(&source, &metadata, 130, 66..130)),
+    );
     let StoredPreparation::Ready(tail) = owner.ensure(
         "row",
         provider.clone(),
         source.clone(),
         SourceIndexFormat::Markdown,
     ) else {
-        panic!("expected cached tail")
+        panic!("expected the cached tail page")
     };
-    let StoredPreparation::Ready(moved) = owner.move_window("row", &tail, 0) else {
-        panic!("expected cached window")
+    assert_eq!(tail.block_count(), 130);
+    assert!(matches!(
+        owner.page(&tail, 129),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 129
+    ));
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    hold_fetch(&mut owner, 0);
+    let failed = PagePreparation::Failed {
+        offset: 0,
+        cause: "connection refused".to_owned(),
     };
-    let StoredPreparation::Ready(current) =
-        owner.ensure("row", provider.clone(), source, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected retained window")
-    };
-    assert_eq!(current.loaded_range(), moved.loaded_range());
-    assert!(!owner.source_is_current(&tail));
-    let old_revision = current.revision();
-    owner.indices[0].revision = old_revision + 1;
-    owner.indices[0].pending_offset = Some(Some(0));
     assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Index {
-                owner: "row".into(),
-                revision: old_revision,
-                result: Ok(first),
-            }))
-            .is_ok()
+        !deliver_page(
+            &mut owner,
+            tail.revision(),
+            0,
+            Err("connection refused".into())
+        )
+        .is_empty()
     );
-    assert!(owner.drain().is_empty());
-    assert_eq!(owner.indices[0].pending_offset, Some(Some(0)));
+    assert_eq!(owner.page(&tail, 10), failed);
+    assert_eq!(owner.page(&tail, 63), failed);
+    assert!(matches!(
+        owner.page(&tail, 70),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 70
+    ));
+    assert!(!owner.retry_page("row", 64));
+    assert!(owner.retry_page("row", 0));
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    assert!(!owner.retry_page("row", 0));
+    hold_fetch(&mut owner, 0);
+    let first = long_page(&source, &metadata, 130, 0..64);
+    assert!(deliver_page(&mut owner, tail.revision() + 1, 0, Ok(first.clone())).is_empty());
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    assert!(!deliver_page(&mut owner, tail.revision(), 0, Ok(first)).is_empty());
+    assert!(matches!(
+        owner.page(&tail, 10),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 10
+    ));
     let client = editor_core::ForgeClient::new(
         &config.address,
         &config.fingerprint,
@@ -294,7 +366,7 @@ fn moved_window_survives_ensure_and_stale_completion() {
     core.add_test_host(&config, client);
     owner.drain();
     assert!(owner.indices.is_empty());
-    assert!(!owner.source_is_current(&current));
+    assert!(!owner.source_is_current(&tail));
 }
 
 #[test]
@@ -326,7 +398,7 @@ fn leaf_admission_precedes_collector_allocation() {
 fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation() {
     let (_directory, _core, _config, provider) = owner_fixture();
     let (mut owner, source) = cached_source(provider);
-    let descriptor = source.descriptor(0).unwrap().clone();
+    let descriptor = owner.descriptor(&source, 0).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: "leaf".into(),
         source: source.clone(),
