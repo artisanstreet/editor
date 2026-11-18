@@ -319,6 +319,43 @@ fn native_replacement_beside_a_composition_survives_cancel() {
 }
 
 #[test]
+fn mounted_tab_leaves_a_single_line_field() {
+    use aqua_core::{InputEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::ui::text::mount::EditorController;
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let first = EditorController::new(Editor::new("me@example.com", Mode::SingleLine), |_| {});
+    let second = EditorController::new(Editor::new("", Mode::SingleLine), |_| {});
+    let theme = ArtisanTheme::resolved();
+    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    runtime
+        .mount(|_| {
+            aqua_ui::element::Box::new()
+                .child(first.element(Mode::SingleLine, &theme, ""))
+                .child(second.element(Mode::SingleLine, &theme, ""))
+                .build()
+        })
+        .unwrap();
+    runtime.set_viewport(400.0, 200.0, 1.0);
+    runtime.build_frame().unwrap();
+    let fields: Vec<_> = runtime
+        .tree()
+        .traverse()
+        .into_iter()
+        .filter(|node| runtime.tree().editor_snapshot(*node).is_some())
+        .collect();
+    runtime.tree_mut().set_focused(Some(fields[0]));
+    runtime.handle_input(&InputEvent::KeyDown(aqua_core::KeyEvent {
+        key: aqua_core::Key::Named(NamedKey::Tab),
+        modifiers: Modifiers::NONE,
+        repeat: false,
+    }));
+    assert_eq!(runtime.tree().focused(), Some(fields[1]));
+    assert_eq!(first.state().borrow().text(), "me@example.com");
+}
+
+#[test]
 fn undo_restores_the_active_end_of_a_backward_selection() {
     let mut editor = Editor::new("abcdef", Mode::Document);
     assert!(editor.set_selection(1..3, true));

@@ -623,8 +623,7 @@ impl Editor {
         }
         match self.mode {
             Mode::Document => CommandOutcome::Edit(self.replace_input(None, "  ", None)),
-            Mode::SingleLine => CommandOutcome::Ignored,
-            Mode::Prompt => CommandOutcome::Propagate,
+            Mode::SingleLine | Mode::Prompt => CommandOutcome::Propagate,
         }
     }
     pub fn list_vertical(&self, up: bool) -> Option<ListKey> {
