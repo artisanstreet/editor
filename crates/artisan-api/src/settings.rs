@@ -287,6 +287,26 @@ pub const SETTINGS: &[SettingDecl] = &[
         needs_approval: false,
     },
     SettingDecl {
+        key: "streaming_mode",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Options {
+            values: &["smooth", "swift"],
+        },
+        default: "\"smooth\"",
+        label: "Text Streaming",
+        description: "How a reply appears while it streams: \"smooth\" fades new text in briefly as it arrives, \"swift\" shows it immediately without reveal animation.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: "graphics_vsync",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Bool,
+        default: "true",
+        label: "Match monitor refresh rate",
+        description: "Synchronize presentation to the current monitor; with this and the lower refresh rate both off, rendering is uncapped.",
+        needs_approval: false,
+    },
+    SettingDecl {
         key: "reduced_motion",
         owner: SettingOwner::Editor,
         kind: SettingKind::Bool,
