@@ -13,7 +13,6 @@ doctest = false
 default = []
 
 [dependencies]
-anyhow.workspace = true
 artisan-api.workspace = true
 artisan-paths.workspace = true
 artisan-mentions.workspace = true

@@ -2097,6 +2097,7 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "base64 0.22.1",
+ "diagnostics",
  "forge-engines",
  "forge-mcp",
  "forge-runs",
@@ -2104,6 +2105,7 @@ dependencies = [
  "png",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "windows 0.62.2",
@@ -2124,7 +2126,6 @@ dependencies = [
 name = "forge-engines"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "artisan-mentions",
  "artisan-paths",
