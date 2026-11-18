@@ -7,6 +7,8 @@ use super::*;
 mod activity;
 #[path = "../tests/agents/spawn.rs"]
 mod agent_spawn;
+#[path = "../tests/agents/status.rs"]
+mod agent_status;
 #[path = "../tests/run/cancellation.rs"]
 mod cancellation;
 #[path = "../tests/coordination/notifications.rs"]

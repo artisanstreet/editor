@@ -559,6 +559,12 @@ impl Store {
             .await
     }
 
+    pub async fn has_runnable_input(&self, thread_id: &ThreadId) -> Result<bool> {
+        let thread = thread_id.clone();
+        self.read(move |conn| read::has_runnable_input(conn, &thread))
+            .await
+    }
+
     /// Reads a bounded initial batch and all observed pending input's sequence boundary in one snapshot.
     pub async fn pending_inputs(&self, thread_id: &ThreadId) -> Result<PendingInputs> {
         let thread = thread_id.clone();

@@ -161,23 +161,10 @@ pub fn pending_threads(
     limit: usize,
     excluded: &[ThreadId],
 ) -> Result<Vec<ThreadId>> {
-    // Threads with undelivered messages, and threads asked to continue.
-    let mut query = conn.prepare_cached(
-        "SELECT thread_id FROM (
-           SELECT pending.thread_id, pending.seq FROM items pending
-           WHERE pending.status = 'running' AND pending.kind_type = 'user_message'
-             AND NOT EXISTS (
-               SELECT 1 FROM runs latest WHERE latest.rowid = (
-                 SELECT rowid FROM runs WHERE thread_id = pending.thread_id ORDER BY rowid DESC LIMIT 1
-               ) AND latest.status IN ('failed','refused')
-                 AND pending.seq <= json_extract(latest.body, '$.input_cutoff')
-             )
-           UNION ALL
-           SELECT thread_id, seq FROM continues WHERE due_at IS NULL OR due_at <= ?3
-         )
-         WHERE thread_id NOT IN (SELECT value FROM json_each(?1))
-         GROUP BY thread_id ORDER BY min(seq) LIMIT ?2"
-    )?;
+    let mut query = conn.prepare_cached(concat!(
+        include_str!("sql/pending/runnable_inputs.sql"),
+        include_str!("sql/pending/threads.sql")
+    ))?;
     Ok(query
         .query_map(
             params![serde_json::to_string(excluded)?, limit, artisan_api::now()],
@@ -185,6 +172,15 @@ pub fn pending_threads(
         )?
         .map(|row| row.map(ThreadId))
         .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(concat!(
+            include_str!("sql/pending/runnable_inputs.sql"),
+            include_str!("sql/pending/thread_has_input.sql")
+        ))?
+        .query_row([thread_id.as_str()], |row| row.get(0))?)
 }
 
 pub fn pending_inputs(

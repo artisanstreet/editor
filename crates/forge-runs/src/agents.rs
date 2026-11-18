@@ -536,7 +536,7 @@ impl Hub {
         if store.awaits_user(child).await? {
             return Ok((AgentState::WaitingForUser, None));
         }
-        if self.is_live(child) || !store.pending_inputs(child).await?.items.is_empty() {
+        if self.is_live(child) || store.has_runnable_input(child).await? {
             return Ok((AgentState::Working, None));
         }
         let run = store.latest_run(child).await?;
