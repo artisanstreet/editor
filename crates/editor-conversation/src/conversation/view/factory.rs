@@ -2535,6 +2535,7 @@ impl RowFactory {
             Row::Text {
                 id,
                 slot: Slot::Plain(section),
+                block,
                 ..
             } => {
                 let item = row
@@ -2542,7 +2543,10 @@ impl RowFactory {
                     .items
                     .get(id)
                     .ok_or(RealizeRowError::Unavailable(Part::Item))?;
-                let Some(text) = section.inline_text(item) else {
+                let Some(text) = section
+                    .inline_text(item)
+                    .and_then(|text| plain_block(text, *block))
+                else {
                     return Err(RealizeRowError::Changed(Part::PlainText));
                 };
                 Some(match section {
@@ -2764,6 +2768,12 @@ pub(crate) fn image_caption(
                 .build(),
         )
         .build()
+}
+
+fn plain_block(text: &str, block: usize) -> Option<&str> {
+    fold::plain_ranges(text)
+        .get(block)
+        .map(|range| &text[range.clone()])
 }
 
 fn answer_text(text: &str) -> &str {
