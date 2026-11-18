@@ -74,21 +74,34 @@ impl aqua_ui::tree::NativeTextModel for NativeEditorModel {
     }
 
     fn replace_utf16(&self, text: &str, selected: Option<std::ops::Range<usize>>) {
+        self.edit(|state| input_change(state.replace_utf16_range(None, text, selected)));
+    }
+
+    fn replace_all(&self, text: &str) {
+        self.edit(|state| {
+            let everything = 0..state.text().len();
+            state.replace(everything, text)
+        });
+    }
+}
+
+impl NativeEditorModel {
+    fn edit(&self, apply: impl FnOnce(&mut Editor) -> EditOutcome) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
         let mut state = state.borrow_mut();
         let previous_selection = (state.selection(), state.selection_reversed(), state.caret());
         let previous_limit = state.limit_notice();
-        let outcome = state.replace_utf16_range(None, text, selected);
+        let outcome = apply(&mut state);
         self.follow_caret.set(true);
         let next_selection = (state.selection(), state.selection_reversed(), state.caret());
         let next_limit = state.limit_notice();
         drop(state);
-        if outcome == InputChange::Changed {
+        if outcome == EditOutcome::Changed {
             (self.event)(EditorEvent::Changed);
         }
-        if previous_limit != next_limit || outcome == InputChange::Unchanged {
+        if previous_limit != next_limit || outcome == EditOutcome::Unchanged {
             (self.event)(EditorEvent::PresentationChanged);
         }
         if previous_selection != next_selection {

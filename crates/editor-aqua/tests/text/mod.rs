@@ -319,6 +319,29 @@ fn native_replacement_beside_a_composition_survives_cancel() {
 }
 
 #[test]
+fn mounted_accessibility_value_edits_the_editor() {
+    use aqua::RuntimeInput;
+    use aqua_protocol::{A11yAction, A11yActionData};
+    use editor_aqua::ui::text::mount::EditorEvent;
+
+    let (controller, mut runtime, node, events) = mounted("draft", Mode::Prompt, 400.0);
+    runtime.drive(RuntimeInput::Access(aqua_protocol::A11yActionRequest {
+        node,
+        action: A11yAction::SetValue,
+        data: A11yActionData::Value("spoken".into()),
+    }));
+    assert_eq!(controller.state().borrow().text(), "spoken");
+    controller.state().borrow_mut().set_selection(0..5, false);
+    runtime.drive(RuntimeInput::Access(aqua_protocol::A11yActionRequest {
+        node,
+        action: A11yAction::ReplaceSelectedText,
+        data: A11yActionData::Value("broke".into()),
+    }));
+    assert_eq!(controller.state().borrow().text(), "broken");
+    assert!(events.borrow().contains(&EditorEvent::Changed));
+}
+
+#[test]
 fn mounted_tab_leaves_a_single_line_field() {
     use aqua_core::{InputEvent, Modifiers, NamedKey};
     use aqua_text::{SharedFonts, SharedRuns};
