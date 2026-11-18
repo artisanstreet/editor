@@ -386,9 +386,7 @@ pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
                                 .iter()
                                 .enumerate()
                                 .map(|(option, choice)| artisan_api::QuestionOption {
-                                    id: choice["label"]
-                                        .as_str()
-                                        .map_or_else(|| format!("{index}.{option}"), str::to_owned),
+                                    id: format!("{index}.{option}"),
                                     label: choice["label"].as_str().unwrap_or_default().to_owned(),
                                     description: choice["description"]
                                         .as_str()

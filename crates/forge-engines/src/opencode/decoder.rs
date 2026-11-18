@@ -595,17 +595,34 @@ impl Decoder {
         let ItemKind::Question { questions, .. } = &tool.kind else {
             return Ok(None);
         };
-        let native = crate::question::native_collection_answers(questions, answers)?;
+        let questions = questions
+            .inline()
+            .ok_or("native questions must be inline")?;
         let Some(Pending::Form { fields, .. }) = self.pending.get(key) else {
             return Ok(None);
         };
-        fields
-            .iter()
-            .zip(&native)
-            .filter_map(|(field, answer)| Some((field, answer.as_ref()?)))
-            .map(|(field, answer)| Ok((field.key.clone(), field.value(answer)?)))
-            .collect::<Result<Map<String, Value>, String>>()
-            .map(Some)
+        if answers.len() != questions.len() || fields.len() != questions.len() {
+            return Err("question answer count differs from the request".into());
+        }
+        let mut form = Map::new();
+        for ((question, field), answer) in questions.iter().zip(fields).zip(answers) {
+            question
+                .validate_answer_structure(answer)
+                .map_err(str::to_owned)?;
+            let given = match answer {
+                None => continue,
+                Some(artisan_api::QuestionAnswer::Text { text }) => Given::Text(text),
+                Some(artisan_api::QuestionAnswer::Choices { ids }) => Given::Choices(
+                    ids.inline()
+                        .ok_or("submitted choices must be inline")?
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                ),
+            };
+            form.insert(field.key.clone(), field.value(given)?);
+        }
+        Ok(Some(form))
     }
 
     fn answer_raw(&mut self, key: &str, answer: &Answer) -> Answered {
@@ -1013,22 +1030,7 @@ impl Decoder {
         out.push(EngineEvent::Usage(self.usage.clone()));
         let texts = self.step_texts.remove(session).unwrap_or_default();
         let final_step = data["finish"].as_str() != Some("tool-calls");
-        let last = texts.len().saturating_sub(1);
-        for (index, (key, text)) in texts.into_iter().enumerate() {
-            out.push(EngineEvent::Item {
-                key,
-                parent: parent.map(str::to_owned),
-                status: Status::Done,
-                kind: ItemKind::AssistantMessage {
-                    text: text.into(),
-                    phase: if final_step && index == last {
-                        Phase::Final
-                    } else {
-                        Phase::Commentary
-                    },
-                },
-            });
-        }
+        settle_texts(texts, parent, final_step, out);
     }
 
     fn permission_asked(&mut self, session: &str, data: &Value, out: &mut Vec<EngineEvent>) {
@@ -1303,7 +1305,8 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     };
     let values = options
         .into_iter()
-        .map(|option| (option.label, option.value))
+        .enumerate()
+        .map(|(index, option)| (format!("option-{index}"), option.value))
         .collect();
     Some((
         question,
@@ -1315,34 +1318,82 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     ))
 }
 
+enum Given<'a> {
+    Text(&'a str),
+    Choices(Vec<&'a str>),
+}
+
 impl FormField {
-    fn value(&self, answer: &[String]) -> Result<Value, String> {
-        let value = |label: &String| self.values.get(label).unwrap_or(label).clone();
-        let text = answer
-            .first()
-            .map(String::as_str)
-            .unwrap_or_default()
-            .trim();
-        match self.kind {
-            FieldKind::Choices => Ok(Value::from(answer.iter().map(value).collect::<Vec<_>>())),
-            FieldKind::Boolean => Ok(Value::from(
-                answer.first().is_some_and(|label| label == "Yes"),
-            )),
-            FieldKind::Integer => text.parse::<i64>().map(Value::from).map_err(|error| {
-                format!("{} needs a whole number, not {text:?}: {error}", self.key)
-            }),
-            FieldKind::Number => match text.parse::<f64>().map(serde_json::Number::from_f64) {
-                Ok(Some(number)) => Ok(Value::Number(number)),
-                Ok(None) => Err(format!("{} needs a finite number, not {text:?}", self.key)),
-                Err(error) => Err(format!(
-                    "{} needs a number, not {text:?}: {error}",
-                    self.key
-                )),
+    fn chosen(&self, id: &str) -> Result<String, String> {
+        self.values
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown choice {id} for {}", self.key))
+    }
+
+    fn value(&self, given: Given<'_>) -> Result<Value, String> {
+        match (self.kind, given) {
+            (FieldKind::Choices, Given::Choices(ids)) => ids
+                .into_iter()
+                .map(|id| self.chosen(id))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::from),
+            (FieldKind::Choice, Given::Choices(ids)) => match ids.as_slice() {
+                [id] => self.chosen(id).map(Value::from),
+                _ => Err(format!("{} takes one choice", self.key)),
             },
-            FieldKind::Text | FieldKind::Choice => {
-                Ok(Value::from(answer.first().map(value).unwrap_or_default()))
+            (FieldKind::Boolean, Given::Choices(ids)) => match ids.as_slice() {
+                [id] => self.chosen(id).map(|value| Value::from(value == "Yes")),
+                _ => Err(format!("{} takes yes or no", self.key)),
+            },
+            (FieldKind::Integer | FieldKind::Number | FieldKind::Text, Given::Choices(_)) => {
+                Err(format!("{} takes text, not choices", self.key))
             }
+            (FieldKind::Choices, Given::Text(text)) => Ok(Value::from(vec![text.to_owned()])),
+            (FieldKind::Boolean, Given::Text(text)) => Ok(Value::from(text == "Yes")),
+            (FieldKind::Integer, Given::Text(text)) => {
+                let text = text.trim();
+                text.parse::<i64>().map(Value::from).map_err(|error| {
+                    format!("{} needs a whole number, not {text:?}: {error}", self.key)
+                })
+            }
+            (FieldKind::Number, Given::Text(text)) => {
+                let text = text.trim();
+                match text.parse::<f64>().map(serde_json::Number::from_f64) {
+                    Ok(Some(number)) => Ok(Value::Number(number)),
+                    Ok(None) => Err(format!("{} needs a finite number, not {text:?}", self.key)),
+                    Err(error) => Err(format!(
+                        "{} needs a number, not {text:?}: {error}",
+                        self.key
+                    )),
+                }
+            }
+            (FieldKind::Text | FieldKind::Choice, Given::Text(text)) => Ok(Value::from(text)),
         }
+    }
+}
+
+fn settle_texts(
+    texts: Vec<(String, String)>,
+    parent: Option<&str>,
+    final_step: bool,
+    out: &mut Vec<EngineEvent>,
+) {
+    let last = texts.len().saturating_sub(1);
+    for (index, (key, text)) in texts.into_iter().enumerate() {
+        out.push(EngineEvent::Item {
+            key,
+            parent: parent.map(str::to_owned),
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: text.into(),
+                phase: if final_step && index == last {
+                    Phase::Final
+                } else {
+                    Phase::Commentary
+                },
+            },
+        });
     }
 }
 

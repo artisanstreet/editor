@@ -136,3 +136,30 @@ async fn a_form_reply_opencode_rejects_does_not_mark_the_question_answered() {
         );
     }
 }
+
+#[test]
+fn a_choice_sends_the_value_of_the_option_picked_even_when_labels_repeat() {
+    let mut decoder = Decoder::new(Some("root".to_owned()));
+    decoder
+        .feed(
+            &json!({ "id": "evt_form", "type": "form.created", "data": { "form": {
+                "id": "frm_1", "sessionID": "root", "title": "Questions",
+                "metadata": { "kind": "question", "tool": { "id": "call_1" } },
+                "fields": [{ "key": "target", "title": "Deploy where?", "type": "string", "options": [
+                    { "value": "prod-eu", "label": "Production" },
+                    { "value": "prod-us", "label": "Production" },
+                ] }],
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+    let picked = Answer::Question {
+        answers: vec![Some(QuestionAnswer::Choices {
+            ids: vec!["option-0".to_owned()].into(),
+        })],
+    };
+    assert_eq!(
+        sent(decoder.answer("call_1", &picked)),
+        json!({ "answer": { "target": "prod-eu" } })
+    );
+}

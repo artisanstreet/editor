@@ -818,6 +818,69 @@ async fn a_failed_resumed_turn_keeps_the_saved_continuation() {
 }
 
 #[tokio::test]
+async fn a_question_s_choices_keep_their_own_ids_and_reach_the_model_by_label() {
+    let work = tempfile::tempdir().expect("a dir");
+    let backend = script(vec![
+        calls(
+            "m1",
+            &[(
+                "toolu_q",
+                "AskUserQuestion",
+                json!({ "questions": [{ "question": "Deploy where?", "header": "Target", "multiSelect": false, "options": [
+                    { "label": "Production", "description": "EU" },
+                    { "label": "Production", "description": "US" },
+                    { "label": "Staging" },
+                ] }] }),
+            )],
+        ),
+        answer("m2", "Deploying."),
+    ]);
+    let mut answered = false;
+    let user: User = Box::new(move |event| {
+        if let EngineEvent::Item {
+            key,
+            status: Status::AwaitingUser,
+            kind: ItemKind::Question { questions, .. },
+            ..
+        } = event
+            && !answered
+        {
+            answered = true;
+            let option_ids: Vec<String> = questions.inline().expect("inline")[0]
+                .options
+                .inline()
+                .expect("inline")
+                .iter()
+                .map(|option| option.id.clone())
+                .collect();
+            assert_eq!(
+                option_ids.iter().collect::<HashSet<_>>().len(),
+                3,
+                "{option_ids:?}"
+            );
+            return vec![Input::Answer {
+                key: key.clone(),
+                answer: UserAnswer::Question {
+                    answers: vec![Some(artisan_api::QuestionAnswer::Choices {
+                        ids: vec![option_ids[2].clone()].into(),
+                    })],
+                },
+            }];
+        }
+        Vec::new()
+    });
+    let (outcome, _, _) = run(
+        Arc::clone(&backend),
+        turn(work.path(), None, Permissions::Auto),
+        user,
+    )
+    .await;
+    assert_eq!(outcome.status(), RunStatus::Done);
+    let sent = backend.sent.lock().expect("lock").clone();
+    assert!(sent[1].prompt.contains("Staging"), "{}", sent[1].prompt);
+}
+
+#[tokio::test]
 async fn a_gone_conversation_hands_the_message_back_for_a_fresh_session() {
     let work = tempfile::tempdir().expect("a dir");
     let backend = script(vec![Reply::Refuses(Refusal::ConversationGone)]);

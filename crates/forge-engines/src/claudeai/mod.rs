@@ -1200,12 +1200,15 @@ async fn ask_user(call: &Call, inbox: &mut Inbox, io: &mut RunIo) -> Option<Answ
         },
     )
     .await;
-    let answers = loop {
+    let (answers, chosen) = loop {
         match inbox.next(io).await? {
             Input::Answer {
                 key: answer_key,
                 answer: artisan_api::Answer::Question { answers },
-            } if answer_key == key => break answers,
+            } if answer_key == key => match crate::question::native_answers(&questions, &answers) {
+                Ok(chosen) => break (answers, chosen),
+                Err(message) => emit(io, crate::question::invalid_answer(&key, message)).await,
+            },
             input @ (Input::Steer(_)
             | Input::Answer { .. }
             | Input::ClearGoal
@@ -1214,15 +1217,12 @@ async fn ask_user(call: &Call, inbox: &mut Inbox, io: &mut RunIo) -> Option<Answ
     };
     let text = questions
         .iter()
-        .zip(answers.iter())
-        .map(|(question, answer)| {
-            let said = match answer {
-                Some(artisan_api::QuestionAnswer::Choices { ids }) => {
-                    ids.inline().map(|ids| ids.join(", ")).unwrap_or_default()
-                }
-                Some(artisan_api::QuestionAnswer::Text { text }) => text.clone(),
-                None => String::new(),
-            };
+        .zip(chosen.iter())
+        .map(|(question, chosen)| {
+            let said = chosen
+                .as_deref()
+                .map(|said| said.join(", "))
+                .unwrap_or_default();
             let asked = question.text.inline().unwrap_or_default().to_owned();
             if said.trim().is_empty() {
                 format!("{asked}\n(no answer)")
