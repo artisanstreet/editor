@@ -653,11 +653,7 @@ impl Decoder {
                 }
             }
             (
-                Pending::Form {
-                    session,
-                    form,
-                    fields: _,
-                },
+                Pending::Form { session, form, .. },
                 Answer::Question { answers },
             ) => {
                 let skipped = answers.iter().all(Option::is_none);

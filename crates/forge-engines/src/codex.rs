@@ -96,7 +96,7 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             set_title(turn, title)
                 .await
-                .map_err(|source| crate::SetTitleError::Codex { thread, source })
+                .map_err(|source| crate::SetTitleError::Codex { thread, source: Box::new(source) })
         })
     }
 
@@ -109,7 +109,7 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             side::compact(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::Codex { thread, source })
+                .map_err(|source| crate::SideQueryError::Codex { thread, source: Box::new(source) })
         })
     }
 
@@ -156,7 +156,7 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             side::side_query(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::Codex { thread, source })
+                .map_err(|source| crate::SideQueryError::Codex { thread, source: Box::new(source) })
         })
     }
 
@@ -165,7 +165,7 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             goal::clear_goal(turn)
                 .await
-                .map_err(|source| crate::ClearGoalError::Codex { thread, source })
+                .map_err(|source| crate::ClearGoalError::Codex { thread, source: Box::new(source) })
         })
     }
 }

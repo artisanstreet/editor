@@ -256,28 +256,26 @@ pub enum SideQueryError {
     Claude {
         thread: ThreadId,
         #[source]
-        source: crate::claude::SideQueryError,
+        source: Box<crate::claude::SideQueryError>,
     },
     #[error("Codex side query for thread {thread}")]
     Codex {
         thread: ThreadId,
         #[source]
-        source: crate::codex::SideQueryError,
+        source: Box<crate::codex::SideQueryError>,
     },
     #[error("OpenCode side query for thread {thread}")]
     OpenCode {
         thread: ThreadId,
         #[source]
-        source: crate::opencode::SideQueryError,
+        source: Box<crate::opencode::SideQueryError>,
     },
     #[error("claude.ai side query for thread {thread}")]
     ClaudeAi {
         thread: ThreadId,
         #[source]
-        source: crate::claudeai::SideQueryError,
+        source: Box<crate::claudeai::SideQueryError>,
     },
-    #[error(transparent)]
-    Unconverted(#[from] anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -286,28 +284,26 @@ pub enum SetTitleError {
     Claude {
         thread: ThreadId,
         #[source]
-        source: crate::claude::SetTitleError,
+        source: Box<crate::claude::SetTitleError>,
     },
     #[error("name Codex thread {thread}")]
     Codex {
         thread: ThreadId,
         #[source]
-        source: crate::codex::SetTitleError,
+        source: Box<crate::codex::SetTitleError>,
     },
     #[error("name OpenCode thread {thread}")]
     OpenCode {
         thread: ThreadId,
         #[source]
-        source: crate::opencode::SetTitleError,
+        source: Box<crate::opencode::SetTitleError>,
     },
     #[error("name claude.ai thread {thread}")]
     ClaudeAi {
         thread: ThreadId,
         #[source]
-        source: crate::claudeai::SetTitleError,
+        source: Box<crate::claudeai::SetTitleError>,
     },
-    #[error(transparent)]
-    Unconverted(#[from] anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -318,16 +314,14 @@ pub enum ClearGoalError {
     Codex {
         thread: ThreadId,
         #[source]
-        source: crate::codex::ClearGoalError,
+        source: Box<crate::codex::ClearGoalError>,
     },
     #[error("clear the goal of OpenCode thread {thread}")]
     OpenCode {
         thread: ThreadId,
         #[source]
-        source: crate::opencode::ClearGoalError,
+        source: Box<crate::opencode::ClearGoalError>,
     },
-    #[error(transparent)]
-    Unconverted(#[from] anyhow::Error),
 }
 
 /// The channels of one live run.
@@ -406,10 +400,4 @@ pub trait Harness: Send + Sync {
         let engine = turn.engine;
         Box::pin(async move { Err(ClearGoalError::Unsupported { engine }) })
     }
-}
-
-pub(crate) async fn bridge<T, E: From<anyhow::Error>>(
-    work: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> Result<T, E> {
-    work.await.map_err(E::from)
 }

@@ -65,7 +65,7 @@ impl Harness for ClaudeHarness {
             {
                 Some(native) => rename_on_claude_ai(&turn, native, &title).await,
                 None => set_title(&turn, &title)
-                    .map_err(|source| crate::SetTitleError::Claude { thread, source }),
+                    .map_err(|source| crate::SetTitleError::Claude { thread, source: Box::new(source) }),
             }
         })
     }
@@ -92,13 +92,13 @@ impl Harness for ClaudeHarness {
             Box::pin(async move {
                 crate::claudeai::compact(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source })
+                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source: Box::new(source) })
             })
         } else {
             Box::pin(async move {
                 side::compact(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::Claude { thread, source })
+                    .map_err(|source| crate::SideQueryError::Claude { thread, source: Box::new(source) })
             })
         }
     }
@@ -125,13 +125,13 @@ impl Harness for ClaudeHarness {
             Box::pin(async move {
                 crate::claudeai::side_query(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source })
+                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source: Box::new(source) })
             })
         } else {
             Box::pin(async move {
                 side::side_query(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::Claude { thread, source })
+                    .map_err(|source| crate::SideQueryError::Claude { thread, source: Box::new(source) })
             })
         }
     }
@@ -149,7 +149,7 @@ async fn rename_on_claude_ai(
         .await
         .map_err(|source| crate::SetTitleError::ClaudeAi {
             thread: turn.thread_id.clone(),
-            source,
+            source: Box::new(source),
         })
 }
 
@@ -351,15 +351,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         } else {
             let stderr = engine.stderr_tail();
             tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, stderr_bytes = stderr.len(), "Claude exited without a result");
-            return Outcome::failed(format!(
-                "Claude exited ({}) before finishing{}",
-                code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
-                if stderr.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {stderr}")
-                }
-            ));
+            return exited_without_result(code, &stderr);
         }
         if outcome
             .as_ref()
@@ -381,6 +373,18 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         return Outcome::cancelled();
     }
     outcome.unwrap_or_else(|| Outcome::failed("Claude produced no result"))
+}
+
+fn exited_without_result(code: Option<i32>, stderr: &str) -> Outcome {
+    Outcome::failed(format!(
+        "Claude exited ({}) before finishing{}",
+        code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
+        if stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr}")
+        }
+    ))
 }
 
 struct Finished {

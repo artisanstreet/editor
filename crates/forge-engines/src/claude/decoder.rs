@@ -153,9 +153,9 @@ impl ClaudeDecoder {
             return Err(DecodeError::NoType);
         }
         if str_at(&frame, "type") == Some("assistant")
-            && !str_at(&frame["message"], "id")
+            && str_at(&frame["message"], "id")
                 .or_else(|| str_at(&frame, "uuid"))
-                .is_some_and(|id| !id.is_empty())
+                .is_none_or(str::is_empty)
         {
             return Err(DecodeError::NoMessageId);
         }

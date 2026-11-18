@@ -139,44 +139,44 @@ pub enum RunError {
         session: String,
         agent: &'static str,
         #[source]
-        source: ApiError,
+        source: Box<ApiError>,
     },
     #[error("switch OpenCode session {session} to model {model}")]
     Model {
         session: String,
         model: Value,
         #[source]
-        source: ApiError,
+        source: Box<ApiError>,
     },
     #[error("create an OpenCode session")]
-    Create(#[source] ApiError),
+    Create(#[source] Box<ApiError>),
     #[error("OpenCode created a session without an id")]
     NoSessionId,
     #[error("interrupt OpenCode session {session}")]
     Interrupt {
         session: String,
         #[source]
-        source: ApiError,
+        source: Box<ApiError>,
     },
     #[error("send message {item} to OpenCode session {session}")]
     Input {
         session: String,
         item: ItemId,
         #[source]
-        source: InputError,
+        source: Box<InputError>,
     },
     #[error("clear the goal of OpenCode session {session}")]
     ClearGoal {
         session: String,
         #[source]
-        source: GoalError,
+        source: Box<GoalError>,
     },
     #[error("answer OpenCode request {path} for item {key}")]
     Answer {
         key: String,
         path: String,
         #[source]
-        source: ApiError,
+        source: Box<ApiError>,
     },
     #[error("decode an OpenCode event")]
     Decode(#[source] DecodeError),
@@ -210,7 +210,7 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             goal::clear_goal(turn)
                 .await
-                .map_err(|source| crate::ClearGoalError::OpenCode { thread, source })
+                .map_err(|source| crate::ClearGoalError::OpenCode { thread, source: Box::new(source) })
         })
     }
 
@@ -223,7 +223,7 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             side::side_query(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::OpenCode { thread, source })
+                .map_err(|source| crate::SideQueryError::OpenCode { thread, source: Box::new(source) })
         })
     }
 
@@ -236,7 +236,7 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             set_title(turn, title)
                 .await
-                .map_err(|source| crate::SetTitleError::OpenCode { thread, source })
+                .map_err(|source| crate::SetTitleError::OpenCode { thread, source: Box::new(source) })
         })
     }
 
@@ -249,7 +249,7 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             side::compact(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::OpenCode { thread, source })
+                .map_err(|source| crate::SideQueryError::OpenCode { thread, source: Box::new(source) })
         })
     }
 
@@ -386,50 +386,7 @@ async fn drive(
     server: &mut EngineProcess,
 ) -> Result<Outcome, RunError> {
     let mut events = subscribe(api).await.map_err(RunError::Subscribe)?;
-    let agent = agent_name(turn.config.permissions);
-    let variant = turn.config.variant.as_deref();
-    let model = model_ref(turn.config.model.as_deref(), variant);
-    let session = if let Some(session) = &turn.session_id {
-        api.post(
-            &format!("/api/session/{session}/agent"),
-            Some(&json!({ "agent": agent })),
-        )
-        .await
-        .map_err(|source| RunError::Agent {
-            session: session.clone(),
-            agent,
-            source,
-        })?;
-        if let Some(model) = &model {
-            api.post(
-                &format!("/api/session/{session}/model"),
-                Some(&json!({ "model": model })),
-            )
-            .await
-            .map_err(|source| RunError::Model {
-                session: session.clone(),
-                model: model.clone(),
-                source,
-            })?;
-        }
-        session.clone()
-    } else {
-        let mut body = json!({
-            "agent": agent,
-            "location": { "directory": turn.cwd.to_string_lossy() },
-        });
-        if let Some(model) = &model {
-            body["model"] = model.clone();
-        }
-        let created = api
-            .post("/api/session", Some(&body))
-            .await
-            .map_err(RunError::Create)?;
-        created["data"]["id"]
-            .as_str()
-            .ok_or(RunError::NoSessionId)?
-            .to_owned()
-    };
+    let session = open_session(turn, api).await?;
     io.emit(EngineEvent::Session {
         id: session.clone(),
     })
@@ -441,7 +398,7 @@ async fn drive(
         () = cancel.cancelled() => {
             api.post(&format!("/api/session/{session}/interrupt"), None)
                 .await
-                .map_err(|source| RunError::Interrupt { session: session.clone(), source })?;
+                .map_err(|source| RunError::Interrupt { session: session.clone(), source: Box::new(source) })?;
             emit_all(io, decoder.cancel()).await;
             Ok(Outcome::Cancelled)
         }
@@ -486,6 +443,53 @@ async fn drive(
     }
 }
 
+async fn open_session(turn: &Turn, api: &Api) -> Result<String, RunError> {
+    let agent = agent_name(turn.config.permissions);
+    let variant = turn.config.variant.as_deref();
+    let model = model_ref(turn.config.model.as_deref(), variant);
+    Ok(if let Some(session) = &turn.session_id {
+        api.post(
+            &format!("/api/session/{session}/agent"),
+            Some(&json!({ "agent": agent })),
+        )
+        .await
+        .map_err(|source| RunError::Agent {
+            session: session.clone(),
+            agent,
+            source: Box::new(source),
+        })?;
+        if let Some(model) = &model {
+            api.post(
+                &format!("/api/session/{session}/model"),
+                Some(&json!({ "model": model })),
+            )
+            .await
+            .map_err(|source| RunError::Model {
+                session: session.clone(),
+                model: model.clone(),
+                source: Box::new(source),
+            })?;
+        }
+        session.clone()
+    } else {
+        let mut body = json!({
+            "agent": agent,
+            "location": { "directory": turn.cwd.to_string_lossy() },
+        });
+        if let Some(model) = &model {
+            body["model"] = model.clone();
+        }
+        let created = api
+            .post("/api/session", Some(&body))
+            .await
+            .map_err(|source| RunError::Create(Box::new(source)))?;
+        created["data"]["id"]
+            .as_str()
+            .ok_or(RunError::NoSessionId)?
+            .to_owned()
+    })
+}
+
 async fn handle_input(
     api: &Api,
     session: &str,
@@ -502,7 +506,7 @@ async fn handle_input(
                 .await
                 .map_err(|source| RunError::ClearGoal {
                     session: session.to_owned(),
-                    source: GoalError::Command(source),
+                    source: Box::new(GoalError::Command(source)),
                 })?;
             emit_all(io, decoder.goal_changed(session, None)).await;
         }
@@ -516,7 +520,7 @@ async fn handle_input(
             .map_err(|source| RunError::Agent {
                 session: session.to_owned(),
                 agent,
-                source,
+                source: Box::new(source),
             })?;
         }
         Input::Answer { key, answer } => match decoder.answer(&key, &answer) {
@@ -528,7 +532,7 @@ async fn handle_input(
                 request.map_err(|source| RunError::Answer {
                     key: key.clone(),
                     path: reply.path.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
                 emit_all(io, events).await;
             }
@@ -551,7 +555,7 @@ async fn send_input(
     let failed = |source| RunError::Input {
         session: session.to_owned(),
         item: input.id.clone(),
-        source,
+        source: Box::new(source),
     };
     if let Some(text) = goal::argument(&input.text) {
         let files = input_files(input).await.map_err(failed)?;
