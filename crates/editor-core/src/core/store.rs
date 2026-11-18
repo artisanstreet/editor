@@ -690,7 +690,6 @@ impl Core {
                 return;
             }
         };
-        self.dials.remove(&opened.id);
         if matches!(config.kind, HostKind::Account { .. }) {
             self.relay_configs.insert(opened.id.clone(), config.clone());
         } else if !self.hosts_file.hosts.contains(&config) {
@@ -700,11 +699,22 @@ impl Core {
             });
             match saved {
                 Ok(file) => self.hosts_file = file,
-                Err(error) => self.account.report(
-                    &anyhow::Error::new(error).context("save the pairing with this machine's Forge"),
-                ),
+                Err(error) => {
+                    tracing::error!(
+                        host = %opened.id,
+                        error = %::diagnostics::chain(&error),
+                        "couldn't save the pairing with this machine's Forge"
+                    );
+                    self.dials.insert(opened.id, Dial::Failed);
+                    self.account.report(
+                        &anyhow::Error::new(error)
+                            .context("save the pairing with this machine's Forge"),
+                    );
+                    return;
+                }
             }
         }
+        self.dials.remove(&opened.id);
         let mut host = HostData::new(
             config.id.clone(),
             config.name.clone(),

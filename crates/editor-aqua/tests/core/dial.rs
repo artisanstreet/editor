@@ -75,3 +75,122 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
     );
     drop(release);
 }
+
+#[cfg(unix)]
+async fn pair_server() -> (String, String, Arc<std::sync::atomic::AtomicUsize>) {
+    use artisan_api::tls::Identity;
+    use base64::Engine as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let identity = Identity::generate("pairing-forge").unwrap();
+    let certificate = identity.certificate_der().unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(certificate.as_ref());
+    let config = rustls::ServerConfig::builder_with_provider(artisan_api::tls::provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], identity.key_der().unwrap())
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let pairings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&pairings);
+    tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let Ok(mut socket) = acceptor.accept(socket).await else {
+                continue;
+            };
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") && socket.read(&mut byte).await.unwrap() == 1 {
+                request.push(byte[0]);
+            }
+            if request.starts_with(b"POST /pair ") {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let body = br#"{"device_id":"device-1"}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (address, encoded, pairings)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pairing_that_cannot_be_saved_is_not_left_connected_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let files = EditorFiles {
+        dir: directory.path().to_owned(),
+    };
+    write_files(&files);
+    std::fs::remove_file(files.dir.join("hosts.json")).unwrap();
+    let (address, certificate, pairings) =
+        editor_aqua::core::runtime::runtime().block_on(pair_server());
+    let invite = serde_json::json!({
+        "code": "pair-code",
+        "forge_certificate": certificate,
+        "address": address,
+    })
+    .to_string();
+    let status = serde_json::json!({
+        "enrolled": true,
+        "machine_id": MACHINE,
+        "account_id": ACCOUNT,
+    })
+    .to_string();
+    let services = Services::scripted(
+        CORE_URL,
+        Arc::new(move |args| match args {
+            ["account", ..] => Ok(status.clone()),
+            ["pair", "--json"] => Ok(invite.clone()),
+            _ => anyhow::bail!("unexpected ae call {args:?}"),
+        }),
+        None,
+    );
+    let mut core = Core::with_services(files.clone(), services).unwrap();
+    std::fs::set_permissions(&files.dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let id = HostId(MACHINE.into());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while core
+        .account()
+        .last_error()
+        .is_none_or(|error| !error.contains("save the pairing"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the pairing never reported that it could not be saved"
+        );
+        core.drain_with(|_, _| {});
+        std::thread::yield_now();
+    }
+    assert_eq!(pairings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(core.host(&id).is_none());
+
+    std::fs::set_permissions(&files.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    core.connect_machine(MACHINE);
+    while core.host(&id).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "retrying the pairing did not connect this machine's Forge"
+        );
+        core.drain_with(|_, _| {});
+        std::thread::yield_now();
+    }
+    assert_eq!(pairings.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(
+        files
+            .hosts()
+            .unwrap()
+            .hosts
+            .iter()
+            .any(|host| host.id == id)
+    );
+}
