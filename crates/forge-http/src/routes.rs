@@ -226,6 +226,50 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+impl From<forge_runs::McpStoreError> for Failure {
+    fn from(error: forge_runs::McpStoreError) -> Self {
+        Self(
+            error.into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+        )
+    }
+}
+
+impl From<forge_runs::McpSignInStartError> for Failure {
+    fn from(error: forge_runs::McpSignInStartError) -> Self {
+        match error {
+            forge_runs::McpSignInStartError::Store(store) => store.into(),
+            forge_runs::McpSignInStartError::UnknownServer { .. } => {
+                Self(error.into(), StatusCode::NOT_FOUND, ErrorCode::NotFound)
+            }
+            forge_runs::McpSignInStartError::NotHttp { .. }
+            | forge_runs::McpSignInStartError::Probe { .. }
+            | forge_runs::McpSignInStartError::Open { .. }
+            | forge_runs::McpSignInStartError::NeedsToken { .. }
+            | forge_runs::McpSignInStartError::Registration { .. }
+            | forge_runs::McpSignInStartError::Removed { .. }
+            | forge_runs::McpSignInStartError::Random { .. } => {
+                Self(error.into(), StatusCode::CONFLICT, ErrorCode::Conflict)
+            }
+        }
+    }
+}
+
+impl From<forge_runs::McpSignInFinishError> for Failure {
+    fn from(error: forge_runs::McpSignInFinishError) -> Self {
+        match error {
+            forge_runs::McpSignInFinishError::Store(store) => store.into(),
+            forge_runs::McpSignInFinishError::Expired
+            | forge_runs::McpSignInFinishError::SignedOut { .. }
+            | forge_runs::McpSignInFinishError::Exchange { .. }
+            | forge_runs::McpSignInFinishError::Removed { .. } => {
+                Self(error.into(), StatusCode::CONFLICT, ErrorCode::Conflict)
+            }
+        }
+    }
+}
+
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         if self.1 == StatusCode::INTERNAL_SERVER_ERROR {

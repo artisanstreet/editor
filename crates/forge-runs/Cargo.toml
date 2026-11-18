@@ -34,9 +34,10 @@ thiserror.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
+axum.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
-test-support = { workspace = true, features = ["tokio"] }
+test-support = { workspace = true, features = ["tokio", "http"] }
 image = { workspace = true, features = ["png"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

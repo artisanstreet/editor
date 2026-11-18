@@ -1,32 +1,34 @@
-//! Signing in to the user's HTTP MCP servers. Forge does the OAuth work
-//! (`forge_engines::mcp_oauth`) and keeps the tokens as secrets; the Editor
-//! opens the browser and catches the redirect. Engines get the token as an
-//! `Authorization` header, so one sign-in covers every harness.
-//!
-//! The sign-in state of each server is the `mcp_auth` setting, which syncs
-//! to Editors for the Extensions page.
-
 use crate::Hub;
-use anyhow::Result;
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
-use forge_engines::mcp_oauth::{self, Client, Discovery, Pkce, Probe, Tokens};
-use forge_store::{McpSecret, Refused};
+use forge_engines::mcp_oauth::{
+    self, Client, Discovery, Pkce, Probe, ProbeError, RegistrationError, Revocation, TokenError,
+    Tokens,
+};
+use forge_store::McpSecret;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long a started sign-in waits for its redirect.
 const FLOW_LASTS: Duration = Duration::from_mins(10);
 
-/// Sign-ins waiting for their redirect, by `state`.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 #[derive(Default)]
 pub struct Flows {
     by_state: HashMap<String, Flow>,
+    lifetimes: HashMap<String, Arc<tokio::sync::Mutex<Lifetime>>>,
+}
+
+#[derive(Default)]
+struct Lifetime {
+    signed_out: u64,
 }
 
 struct Flow {
     server: String,
     url: String,
+    signed_out: u64,
     discovery: Discovery,
     client: Client,
     verifier: artisan_api::Secret,
@@ -34,27 +36,113 @@ struct Flow {
     started: Instant,
 }
 
-/// What Forge keeps per signed-in server.
+impl Flow {
+    fn alive(&self) -> bool {
+        self.started.elapsed() < FLOW_LASTS
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
-    /// The server URL the tokens are for; a changed URL drops them.
     url: String,
     discovery: Discovery,
     client: Client,
     tokens: Tokens,
 }
 
-fn removed_while_signing_in(server: &str) -> anyhow::Error {
-    refused(format!(
-        "{server} was removed or changed while signing in; nothing was saved."
-    ))
+#[derive(Debug, thiserror::Error)]
+pub enum McpStoreError {
+    #[error("reading the MCP server list")]
+    Servers(#[source] BoxError),
+    #[error("{step} for the MCP sign-in states")]
+    Statuses {
+        step: &'static str,
+        #[source]
+        source: BoxError,
+    },
+    #[error("{step} for MCP server {server}")]
+    Credentials {
+        server: String,
+        step: &'static str,
+        #[source]
+        source: BoxError,
+    },
 }
 
-fn refused(message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(Refused(message.into()))
+fn store_error<'a>(
+    server: &'a str,
+    step: &'static str,
+) -> impl FnOnce(anyhow::Error) -> McpStoreError + 'a {
+    move |source| McpStoreError::Credentials {
+        server: server.to_owned(),
+        step,
+        source: source.into(),
+    }
 }
 
-/// The user set their own token.
+fn encoding_error<'a>(
+    server: &'a str,
+    step: &'static str,
+) -> impl FnOnce(serde_json::Error) -> McpStoreError + 'a {
+    move |source| McpStoreError::Credentials {
+        server: server.to_owned(),
+        step,
+        source: Box::new(source),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum McpSignInStartError {
+    #[error("There is no MCP server {server}.")]
+    UnknownServer { server: String },
+    #[error("{server} runs as a program; only HTTP servers sign in.")]
+    NotHttp { server: String },
+    #[error("Couldn't check how {server} signs in")]
+    Probe {
+        server: String,
+        #[source]
+        source: ProbeError,
+    },
+    #[error("{server} answers without signing in.")]
+    Open { server: String },
+    #[error("{server} doesn't offer OAuth sign-in; it needs a token in an Authorization header.")]
+    NeedsToken { server: String },
+    #[error("Couldn't register Artisan to sign in to {server}")]
+    Registration {
+        server: String,
+        #[source]
+        source: RegistrationError,
+    },
+    #[error("{server} was removed or changed while signing in; nothing was saved.")]
+    Removed { server: String },
+    #[error("generating the secrets for signing in to {server}")]
+    Random {
+        server: String,
+        #[source]
+        source: getrandom::Error,
+    },
+    #[error(transparent)]
+    Store(#[from] McpStoreError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum McpSignInFinishError {
+    #[error("That sign-in expired or was cancelled; start it again.")]
+    Expired,
+    #[error("{server} was signed out while signing in; nothing was saved.")]
+    SignedOut { server: String },
+    #[error("Couldn't sign in to {server}")]
+    Exchange {
+        server: String,
+        #[source]
+        source: TokenError,
+    },
+    #[error("{server} was removed or changed while signing in; nothing was saved.")]
+    Removed { server: String },
+    #[error(transparent)]
+    Store(#[from] McpStoreError),
+}
+
 fn has_authorization(server: &McpServer) -> bool {
     server
         .headers
@@ -62,27 +150,46 @@ fn has_authorization(server: &McpServer) -> bool {
         .any(|name| name.eq_ignore_ascii_case("authorization"))
 }
 
+fn http_url(server: &McpServer) -> Option<&str> {
+    server.url.as_deref().filter(|url| !url.trim().is_empty())
+}
+
+fn chain(error: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(error), |error| error.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 impl Hub {
-    async fn mcp_server_named(&self, name: &str) -> Result<(McpServer, String)> {
-        let servers: Vec<McpServer> = self
-            .store()
+    async fn mcp_servers(&self) -> Result<Vec<McpServer>, McpStoreError> {
+        self.store()
             .setting("mcp_servers")
+            .await
+            .map_err(|source| McpStoreError::Servers(source.into()))?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|source| McpStoreError::Servers(Box::new(source)))
+            .map(Option::unwrap_or_default)
+    }
+
+    async fn mcp_server_named(
+        &self,
+        name: &str,
+    ) -> Result<(McpServer, String), McpSignInStartError> {
+        let server = self
+            .mcp_servers()
             .await?
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
-        let server = servers
             .into_iter()
             .find(|server| server.name == name)
-            .ok_or_else(|| refused(format!("There is no MCP server {name}.")))?;
-        let url = server
-            .url
-            .clone()
-            .filter(|url| !url.trim().is_empty())
-            .ok_or_else(|| {
-                refused(format!(
-                    "{name} runs as a program; only HTTP servers sign in."
-                ))
+            .ok_or_else(|| McpSignInStartError::UnknownServer {
+                server: name.to_owned(),
             })?;
+        let url = http_url(&server)
+            .ok_or_else(|| McpSignInStartError::NotHttp {
+                server: name.to_owned(),
+            })?
+            .to_owned();
         Ok((server, url))
     }
 
@@ -93,22 +200,34 @@ impl Hub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Starts signing in `name`, coming back to `redirect_uri`. A sign-in
-    /// already waiting for the same server and address is reused, so the
-    /// card's button and an agent never race.
+    fn mcp_lifetime(&self, server: &str) -> Arc<tokio::sync::Mutex<Lifetime>> {
+        Arc::clone(self.flows().lifetimes.entry(server.to_owned()).or_default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_lifetime_holders(&self, server: &str) -> usize {
+        self.flows()
+            .lifetimes
+            .get(server)
+            .map_or(0, Arc::strong_count)
+    }
+
     pub async fn mcp_sign_in_start(
         &self,
         name: &str,
         redirect_uri: &str,
-    ) -> Result<McpSignInStarted> {
+    ) -> Result<McpSignInStarted, McpSignInStartError> {
         let (server, url) = self.mcp_server_named(name).await?;
+        let lifetime = self.mcp_lifetime(name);
+        let lifetime = lifetime.lock().await;
         {
             let mut flows = self.flows();
-            flows
-                .by_state
-                .retain(|_, flow| flow.started.elapsed() < FLOW_LASTS);
+            flows.by_state.retain(|_, flow| flow.alive());
             if let Some((state, flow)) = flows.by_state.iter().find(|(_, flow)| {
-                flow.server == name && flow.url == url && flow.client.redirect_uri == redirect_uri
+                flow.server == name
+                    && flow.url == url
+                    && flow.signed_out == lifetime.signed_out
+                    && flow.client.serves(&flow.discovery, redirect_uri)
             }) {
                 return Ok(McpSignInStarted {
                     authorize_url: flow.authorize_url.clone(),
@@ -116,58 +235,43 @@ impl Hub {
                 });
             }
         }
-        let http = self.engines().http();
         let headers: Vec<(String, String)> = server.headers.clone().into_iter().collect();
-        let probed = mcp_oauth::probe(http, &url, &headers)
+        let probed = mcp_oauth::probe(&self.inner.mcp_http, name, &url, &headers)
             .await
-            .map_err(|error| refused(format!("Couldn't reach {name}: {error:#}")))?;
+            .map_err(|source| McpSignInStartError::Probe {
+                server: name.to_owned(),
+                source,
+            })?;
         let discovery = match probed {
             Probe::SignIn(discovery) => *discovery,
             Probe::Open => {
-                self.set_mcp_auth(name, None).await?;
-                return Err(refused(format!("{name} answers without signing in.")));
+                self.record_mcp_auth(name, None).await?;
+                return Err(McpSignInStartError::Open {
+                    server: name.to_owned(),
+                });
             }
             Probe::NeedsToken => {
-                self.set_mcp_auth(name, Some(McpAuthStatus::NeedsToken))
+                self.record_mcp_auth(name, Some(McpAuthStatus::NeedsToken))
                     .await?;
-                return Err(refused(format!(
-                    "{name} doesn't offer OAuth sign-in; it needs a token in an Authorization header."
-                )));
+                return Err(McpSignInStartError::NeedsToken {
+                    server: name.to_owned(),
+                });
             }
         };
-        let cached: Option<Client> = self
-            .store()
-            .secret(&McpSecret::Client.key(name))
-            .await?
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .filter(|client: &Client| client.redirect_uri == redirect_uri);
-        let client = if let Some(client) = cached {
-            client
-        } else {
-            let client = mcp_oauth::register(http, &discovery, redirect_uri)
-                .await
-                .map_err(|error| refused(format!("Couldn't sign in to {name}: {error:#}")))?;
-            let kept = self
-                .store()
-                .set_mcp_secret(
-                    name.to_owned(),
-                    url.clone(),
-                    McpSecret::Client,
-                    serde_json::to_string(&client)?,
-                )
-                .await?;
-            if !kept {
-                return Err(removed_while_signing_in(name));
-            }
-            client
-        };
-        let pkce = Pkce::new()?;
-        let authorize_url = mcp_oauth::authorize_url(&discovery, &client, &pkce)?;
+        let client = self
+            .mcp_client(name, &url, &discovery, redirect_uri)
+            .await?;
+        let pkce = Pkce::new().map_err(|source| McpSignInStartError::Random {
+            server: name.to_owned(),
+            source,
+        })?;
+        let authorize_url = mcp_oauth::authorize_url(&discovery, &client, &pkce);
         self.flows().by_state.insert(
             pkce.state.clone(),
             Flow {
                 server: name.to_owned(),
                 url,
+                signed_out: lifetime.signed_out,
                 discovery,
                 client,
                 verifier: pkce.verifier,
@@ -175,7 +279,7 @@ impl Hub {
                 started: Instant::now(),
             },
         );
-        self.set_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
+        self.record_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await?;
         Ok(McpSignInStarted {
             authorize_url,
@@ -183,17 +287,77 @@ impl Hub {
         })
     }
 
-    /// Trades the code the redirect brought back for tokens and keeps them.
-    /// Returns the server's name.
-    pub async fn mcp_sign_in_finish(&self, state: &str, code: &str) -> Result<String> {
+    async fn mcp_client(
+        &self,
+        name: &str,
+        url: &str,
+        discovery: &Discovery,
+        redirect_uri: &str,
+    ) -> Result<Client, McpSignInStartError> {
+        let cached = self
+            .store()
+            .secret(&McpSecret::Client.key(name))
+            .await
+            .map_err(store_error(name, "reading Artisan's registration"))?;
+        let reusable = match cached.map(|text| serde_json::from_str::<Client>(&text)) {
+            Some(Ok(client)) => {
+                Some(client).filter(|client| client.serves(discovery, redirect_uri))
+            }
+            Some(Err(unreadable)) => {
+                tracing::info!(server = %name, "registering again over an unreadable registration: {unreadable}");
+                None
+            }
+            None => None,
+        };
+        if let Some(client) = reusable {
+            return Ok(client);
+        }
+        let client = mcp_oauth::register(&self.inner.mcp_http, name, discovery, redirect_uri)
+            .await
+            .map_err(|source| McpSignInStartError::Registration {
+                server: name.to_owned(),
+                source,
+            })?;
+        let kept = self
+            .store()
+            .set_mcp_secret(
+                name.to_owned(),
+                url.to_owned(),
+                McpSecret::Client,
+                serde_json::to_string(&client)
+                    .map_err(encoding_error(name, "encoding Artisan's registration"))?,
+            )
+            .await
+            .map_err(store_error(name, "saving Artisan's registration"))?;
+        if !kept {
+            return Err(McpSignInStartError::Removed {
+                server: name.to_owned(),
+            });
+        }
+        Ok(client)
+    }
+
+    pub async fn mcp_sign_in_finish(
+        &self,
+        state: &str,
+        code: &str,
+    ) -> Result<String, McpSignInFinishError> {
         let flow = self
             .flows()
             .by_state
             .remove(state)
-            .filter(|flow| flow.started.elapsed() < FLOW_LASTS)
-            .ok_or_else(|| refused("That sign-in expired or was cancelled; start it again."))?;
+            .filter(Flow::alive)
+            .ok_or(McpSignInFinishError::Expired)?;
+        let lifetime = self.mcp_lifetime(&flow.server);
+        let lifetime = lifetime.lock().await;
+        if lifetime.signed_out != flow.signed_out {
+            return Err(McpSignInFinishError::SignedOut {
+                server: flow.server,
+            });
+        }
         let tokens = mcp_oauth::exchange(
-            self.engines().http(),
+            &self.inner.mcp_http,
+            &flow.server,
             &flow.discovery,
             &flow.client,
             code,
@@ -201,64 +365,98 @@ impl Hub {
             artisan_api::now(),
         )
         .await
-        .map_err(|error| refused(format!("Couldn't sign in to {}: {error:#}", flow.server)))?;
+        .map_err(|source| McpSignInFinishError::Exchange {
+            server: flow.server.clone(),
+            source,
+        })?;
         let saved = Saved {
             url: flow.url,
             discovery: flow.discovery,
             client: flow.client,
             tokens,
         };
-        let kept = self
-            .store()
-            .set_mcp_secret(
-                flow.server.clone(),
-                saved.url.clone(),
-                McpSecret::Tokens,
-                serde_json::to_string(&saved)?,
-            )
-            .await?;
-        if !kept {
-            return Err(removed_while_signing_in(&flow.server));
+        if !self.keep_mcp_tokens(&flow.server, &saved).await? {
+            return Err(McpSignInFinishError::Removed {
+                server: flow.server,
+            });
         }
-        self.set_mcp_auth(&flow.server, Some(McpAuthStatus::SignedIn))
+        self.record_mcp_auth(&flow.server, Some(McpAuthStatus::SignedIn))
             .await?;
+        drop(lifetime);
         Ok(flow.server)
     }
 
-    /// Drops a waiting sign-in.
     pub fn mcp_sign_in_cancel(&self, state: &str) {
         self.flows().by_state.remove(state);
     }
 
-    /// Forgets the tokens Artisan holds for `name`.
-    pub async fn mcp_sign_out(&self, name: &str) -> Result<()> {
+    pub async fn mcp_sign_out(&self, name: &str) -> Result<(), McpStoreError> {
+        self.flows().by_state.retain(|_, flow| flow.server != name);
+        let lifetime = self.mcp_lifetime(name);
+        let mut lifetime = lifetime.lock().await;
+        lifetime.signed_out += 1;
+        self.flows().by_state.retain(|_, flow| flow.server != name);
+        self.forget_mcp_tokens(name).await
+    }
+
+    async fn forget_mcp_tokens(&self, name: &str) -> Result<(), McpStoreError> {
         self.store()
             .set_secret(&McpSecret::Tokens.key(name), None)
-            .await?;
-        self.set_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
+            .await
+            .map_err(store_error(name, "forgetting the tokens"))?;
+        self.record_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await
     }
 
-    /// Asks every HTTP server without a token whether it needs a sign-in,
-    /// and records the answers. Unreachable servers are left as they were.
+    async fn keep_mcp_tokens(&self, name: &str, saved: &Saved) -> Result<bool, McpStoreError> {
+        self.store()
+            .set_mcp_secret(
+                name.to_owned(),
+                saved.url.clone(),
+                McpSecret::Tokens,
+                serde_json::to_string(saved)
+                    .map_err(encoding_error(name, "encoding the tokens"))?,
+            )
+            .await
+            .map_err(store_error(name, "saving the tokens"))
+    }
+
     pub async fn check_mcp_auth(&self) {
         if let Err(error) = self.check_mcp_auth_inner().await {
-            tracing::warn!("checking MCP sign-ins: {error:#}");
+            tracing::warn!("checking MCP sign-ins: {}", chain(&error));
         }
     }
 
-    async fn check_mcp_auth_inner(&self) -> Result<()> {
-        let servers: Vec<McpServer> = self
-            .store()
-            .setting("mcp_servers")
-            .await?
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
-        let recorded = self.mcp_auth().await?;
+    async fn check_mcp_auth_inner(&self) -> Result<(), McpStoreError> {
+        let mut observed = Vec::new();
+        for server in self.mcp_servers().await? {
+            let Some(url) = http_url(&server).map(str::to_owned) else {
+                continue;
+            };
+            if has_authorization(&server) || self.signed_in(&server.name, &url).await {
+                continue;
+            }
+            let headers: Vec<(String, String)> = server.headers.clone().into_iter().collect();
+            match mcp_oauth::probe(&self.inner.mcp_http, &server.name, &url, &headers).await {
+                Ok(probed) => observed.push((server.name, url, probed)),
+                Err(error) => {
+                    tracing::debug!(server = %server.name, "probing for sign-in: {}", chain(&error));
+                }
+            }
+        }
+        let _writes = self.inner.mcp_auth_writes.lock().await;
+        let servers = self.mcp_servers().await?;
+        let recorded = self
+            .mcp_auth()
+            .await
+            .map_err(|source| McpStoreError::Statuses {
+                step: "reading",
+                source: source.into(),
+            })?;
         let mut statuses = recorded.clone();
         statuses.retain(|name, _| servers.iter().any(|server| &server.name == name));
         for server in &servers {
-            let Some(url) = server.url.as_ref().filter(|url| !url.trim().is_empty()) else {
+            let Some(url) = http_url(server) else {
                 statuses.remove(&server.name);
                 continue;
             };
@@ -266,45 +464,75 @@ impl Hub {
                 statuses.remove(&server.name);
                 continue;
             }
-            if self.saved(&server.name, url).await?.is_some() {
+            if self.signed_in(&server.name, url).await {
                 statuses.insert(server.name.clone(), McpAuthStatus::SignedIn);
                 continue;
             }
-            let headers: Vec<(String, String)> = server.headers.clone().into_iter().collect();
-            match mcp_oauth::probe(self.engines().http(), url, &headers).await {
-                Ok(Probe::Open) => {
+            let observation = observed
+                .iter()
+                .find(|(name, observed_url, _)| name == &server.name && observed_url == url);
+            match observation.map(|(_, _, probed)| probed) {
+                Some(Probe::Open) => {
                     statuses.remove(&server.name);
                 }
-                Ok(Probe::SignIn(_)) => {
+                Some(Probe::SignIn(_)) => {
                     statuses.insert(server.name.clone(), McpAuthStatus::NeedsSignIn);
                 }
-                Ok(Probe::NeedsToken) => {
+                Some(Probe::NeedsToken) => {
                     statuses.insert(server.name.clone(), McpAuthStatus::NeedsToken);
                 }
-                Err(error) => {
-                    tracing::debug!(server = %server.name, "probing for sign-in: {error:#}");
-                }
+                None => {}
             }
         }
         if statuses == recorded {
             return Ok(());
         }
         self.store()
-            .set_setting(MCP_AUTH_KEY.to_owned(), serde_json::to_value(&statuses)?)
+            .set_setting(
+                MCP_AUTH_KEY.to_owned(),
+                serde_json::to_value(&statuses).map_err(|source| McpStoreError::Statuses {
+                    step: "encoding",
+                    source: Box::new(source),
+                })?,
+            )
             .await
+            .map_err(|source| McpStoreError::Statuses {
+                step: "recording",
+                source: source.into(),
+            })
     }
 
-    /// The sign-in state of each server that has one.
-    pub async fn mcp_auth(&self) -> Result<BTreeMap<String, McpAuthStatus>> {
+    async fn signed_in(&self, name: &str, url: &str) -> bool {
+        match self.saved(name, url).await {
+            Ok(saved) => saved.is_some(),
+            Err(error) => {
+                tracing::warn!(server = %name, "reading saved MCP tokens: {}", chain(&error));
+                false
+            }
+        }
+    }
+
+    pub async fn mcp_auth(&self) -> anyhow::Result<BTreeMap<String, McpAuthStatus>> {
         Ok(self
             .store()
             .setting(MCP_AUTH_KEY)
             .await?
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(serde_json::from_value)
+            .transpose()?
             .unwrap_or_default())
     }
 
-    async fn set_mcp_auth(&self, name: &str, status: Option<McpAuthStatus>) -> Result<()> {
+    async fn record_mcp_auth(
+        &self,
+        name: &str,
+        status: Option<McpAuthStatus>,
+    ) -> Result<(), McpStoreError> {
+        self.set_mcp_auth(name, status)
+            .await
+            .map_err(store_error(name, "recording the sign-in state"))
+    }
+
+    async fn set_mcp_auth(&self, name: &str, status: Option<McpAuthStatus>) -> anyhow::Result<()> {
         let _guard = self.inner.mcp_auth_writes.lock().await;
         let mut statuses = self.mcp_auth().await?;
         match status {
@@ -316,21 +544,23 @@ impl Hub {
             .await
     }
 
-    async fn saved(&self, name: &str, url: &str) -> Result<Option<Saved>> {
-        Ok(self
+    async fn saved(&self, name: &str, url: &str) -> Result<Option<Saved>, McpStoreError> {
+        let Some(text) = self
             .store()
             .secret(&McpSecret::Tokens.key(name))
-            .await?
-            .and_then(|text| serde_json::from_str::<Saved>(&text).ok())
-            .filter(|saved| saved.url == url))
+            .await
+            .map_err(store_error(name, "reading the tokens"))?
+        else {
+            return Ok(None);
+        };
+        let saved: Saved =
+            serde_json::from_str(&text).map_err(encoding_error(name, "decoding the tokens"))?;
+        Ok(Some(saved).filter(|saved| saved.url == url))
     }
 
-    /// `servers` with the tokens Artisan holds as `Authorization` headers,
-    /// refreshed when stale. A refresh the server refuses signs the server
-    /// out, so its card asks again.
     pub(crate) async fn with_mcp_tokens(&self, mut servers: Vec<McpServer>) -> Vec<McpServer> {
         for server in &mut servers {
-            let Some(url) = server.url.clone() else {
+            let Some(url) = http_url(server).map(str::to_owned) else {
                 continue;
             };
             if has_authorization(server) {
@@ -344,58 +574,70 @@ impl Hub {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(server = %server.name, "MCP token: {error:#}");
+                    tracing::warn!(server = %server.name, "MCP token: {}", chain(&error));
                 }
             }
         }
         servers
     }
 
-    async fn fresh_token(&self, name: &str, url: &str) -> Result<Option<String>> {
+    async fn fresh_token(&self, name: &str, url: &str) -> Result<Option<String>, McpStoreError> {
+        match self.saved(name, url).await? {
+            None => return Ok(None),
+            Some(saved) if !saved.tokens.stale(artisan_api::now()) => {
+                return Ok(Some(saved.tokens.access_token().expose().to_owned()));
+            }
+            Some(_) => {}
+        }
+        let lifetime = self.mcp_lifetime(name);
+        let lifetime = lifetime.lock().await;
         let Some(mut saved) = self.saved(name, url).await? else {
             return Ok(None);
         };
         let now = artisan_api::now();
         if !saved.tokens.stale(now) {
-            return Ok(Some(saved.tokens.access_token.expose().to_owned()));
+            return Ok(Some(saved.tokens.access_token().expose().to_owned()));
         }
-        let Some(refresh_token) = saved.tokens.refresh_token.clone() else {
-            self.mcp_sign_out(name).await?;
+        let Some(refresh_token) = saved.tokens.refresh_token().cloned() else {
+            self.forget_mcp_tokens(name).await?;
             return Ok(None);
         };
-        match mcp_oauth::refresh(
-            self.engines().http(),
+        let refreshed = mcp_oauth::refresh(
+            &self.inner.mcp_http,
+            name,
             &saved.discovery,
             &saved.client,
-            refresh_token.expose(),
+            &refresh_token,
             now,
         )
-        .await
-        {
+        .await;
+        let token = match refreshed {
             Ok(tokens) => {
                 saved.tokens = tokens;
-                let kept = self
-                    .store()
-                    .set_mcp_secret(
-                        name.to_owned(),
-                        url.to_owned(),
-                        McpSecret::Tokens,
-                        serde_json::to_string(&saved)?,
-                    )
-                    .await?;
-                Ok(kept.then(|| saved.tokens.access_token.expose().to_owned()))
+                self.keep_mcp_tokens(name, &saved)
+                    .await?
+                    .then(|| saved.tokens.access_token().expose().to_owned())
             }
-            // Refused: the grant is gone, so the card asks again.
-            Err(error) if error.downcast_ref::<mcp_oauth::Rejected>().is_some() => {
-                tracing::info!(server = %name, "refresh refused, signing out: {error:#}");
-                self.mcp_sign_out(name).await?;
-                Ok(None)
+            Err(TokenError::Revoked { revocation, .. }) => {
+                tracing::info!(server = %name, ?revocation, "refresh refused, signing out");
+                if matches!(
+                    revocation,
+                    Revocation::InvalidClient | Revocation::UnauthorizedClient
+                ) {
+                    self.store()
+                        .set_secret(&McpSecret::Client.key(name), None)
+                        .await
+                        .map_err(store_error(name, "forgetting Artisan's registration"))?;
+                }
+                self.forget_mcp_tokens(name).await?;
+                None
             }
-            // Out of reach: try the old token; the next launch refreshes again.
             Err(error) => {
-                tracing::warn!(server = %name, "refreshing an MCP token: {error:#}");
-                Ok(Some(saved.tokens.access_token.expose().to_owned()))
+                tracing::warn!(server = %name, "refreshing an MCP token: {}", chain(&error));
+                Some(saved.tokens.access_token().expose().to_owned())
             }
-        }
+        };
+        drop(lifetime);
+        Ok(token)
     }
 }

@@ -46,6 +46,7 @@ pub use agents::{AgentInfo, AgentState, MAX_AGENT_DEPTH, SpawnAgent};
 pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY};
 pub use forge_store::Refused;
 pub use gateway::COMPUTER_USE_KEY;
+pub use mcp_auth::{McpSignInFinishError, McpSignInStartError, McpStoreError};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
 use anyhow::{Context, Result, bail};
@@ -105,9 +106,8 @@ struct Inner {
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
     /// How runs read the free space where they work.
     disk: disk::Probe,
-    /// MCP sign-ins waiting for their redirect.
     mcp_flows: Mutex<mcp_auth::Flows>,
-    /// Serialises changes to the `mcp_auth` setting.
+    mcp_http: forge_engines::mcp_oauth::Http,
     mcp_auth_writes: tokio::sync::Mutex<()>,
     mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
 }
@@ -217,6 +217,7 @@ impl Hub {
                 approvals: Mutex::new(HashMap::new()),
                 disk,
                 mcp_flows: Mutex::new(mcp_auth::Flows::default()),
+                mcp_http: forge_engines::mcp_oauth::Http::new(),
                 mcp_auth_writes: tokio::sync::Mutex::new(()),
                 mcp_unreachable: Mutex::default(),
             }),
