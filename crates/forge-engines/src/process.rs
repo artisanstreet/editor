@@ -463,6 +463,11 @@ mod log_tests;
 
 #[cfg(test)]
 #[cfg(unix)]
+#[path = "../tests/process/containment.rs"]
+mod containment_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
 mod reform_tests {
     use super::*;
     #[tokio::test]
