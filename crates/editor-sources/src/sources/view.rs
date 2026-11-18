@@ -231,7 +231,7 @@ pub fn dispatch_content(
     None
 }
 
-pub fn drain_content(view: &mut ContentText, core: &editor_core::Core) -> Option<ContentEffect> {
+fn drain_content(view: &mut ContentText, core: &editor_core::Core) -> Option<ContentEffect> {
     view.drain(core).map(ContentEffect::Clipboard)
 }
 

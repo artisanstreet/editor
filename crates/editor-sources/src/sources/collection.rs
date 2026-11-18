@@ -1,6 +1,6 @@
 use artisan_api::{CollectionRange, CollectionRef};
 
-pub fn valid_page<T>(source: &CollectionRef, page: &CollectionRange<T>, index: u64) -> bool {
+fn valid_page<T>(source: &CollectionRef, page: &CollectionRange<T>, index: u64) -> bool {
     page.source == source.source
         && page.total == source.count
         && index >= page.start

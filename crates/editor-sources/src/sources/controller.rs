@@ -104,8 +104,8 @@ pub struct CollectionViewState {
 pub struct ContentText {
     identity: u64,
     window: ContentWindow,
-    pub rows: Vec<Range<usize>>,
-    pub page: Option<Arc<ContentRange>>,
+    pub(crate) rows: Vec<Range<usize>>,
+    page: Option<Arc<ContentRange>>,
     pub error: Option<String>,
     clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     client: ForgeClient,
@@ -186,7 +186,7 @@ impl ContentText {
         &self.window
     }
 
-    pub fn retry(&mut self, core: &Core) {
+    pub(crate) fn retry(&mut self, core: &Core) {
         if self.reconcile(core) {
             self.window.retry();
         }
@@ -196,7 +196,7 @@ impl ContentText {
         self.delivery.mailbox()
     }
 
-    pub fn reconcile(&mut self, core: &Core) -> bool {
+    fn reconcile(&mut self, core: &Core) -> bool {
         if core.host_if_instance(&self.host, self.instance).is_some() {
             return true;
         }
@@ -228,7 +228,7 @@ impl ContentText {
         self.sync();
     }
 
-    pub fn sync(&mut self) {
+    fn sync(&mut self) {
         let RangeState::Ready(page) = self.window.state() else {
             self.page = None;
             self.rows.clear();
@@ -241,7 +241,7 @@ impl ContentText {
         self.page = Some(Arc::clone(page));
     }
 
-    pub fn previous(&mut self, core: &Core) {
+    pub(crate) fn previous(&mut self, core: &Core) {
         if !self.reconcile(core) {
             return;
         }
@@ -253,7 +253,7 @@ impl ContentText {
         }
     }
 
-    pub fn next(&mut self, core: &Core) {
+    pub(crate) fn next(&mut self, core: &Core) {
         if !self.reconcile(core) {
             return;
         }
@@ -309,7 +309,7 @@ impl ContentText {
         }
     }
 
-    pub fn export(&mut self, core: &Core, path: PathBuf) {
+    fn export(&mut self, core: &Core, path: PathBuf) {
         if !self.reconcile(core) || self.busy() {
             return;
         }
@@ -423,7 +423,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         self.identity
     }
 
-    pub fn reconcile(&mut self, core: &Core) -> bool {
+    pub(crate) fn reconcile(&mut self, core: &Core) -> bool {
         if core.host_if_instance(&self.host, self.instance).is_some() {
             return true;
         }
