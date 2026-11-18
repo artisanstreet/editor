@@ -131,3 +131,18 @@ fn word_only_in_archived_threads(bencher: Bencher<'_, '_>) {
 fn common_phrase(bencher: Bencher<'_, '_>) {
     search(bencher, "damaged rows");
 }
+
+#[divan::bench(sample_count = 10)]
+fn uppercase_phrase(bencher: Bencher<'_, '_>) {
+    search(bencher, "DAMAGED ROWS");
+}
+
+#[divan::bench(sample_count = 10)]
+fn missing_accented_word(bencher: Bencher<'_, '_>) {
+    search(bencher, "RÉNDERER");
+}
+
+#[divan::bench(sample_count = 10)]
+fn missing_two_letters(bencher: Bencher<'_, '_>) {
+    search(bencher, "qz");
+}

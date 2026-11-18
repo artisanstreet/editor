@@ -1,9 +1,11 @@
 use crate::Store;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ProjectId, Seq, TextHit, TextSearchQuery, ThreadId, Timestamp};
-use fff_grep::{LineTerminator, Match, Matcher, NoError, Searcher, Sink, SinkMatch};
+use folded::Folded;
 use rusqlite::Connection;
 use std::collections::HashMap;
+
+pub(crate) mod folded;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
@@ -17,81 +19,6 @@ const MAX_HITS: u32 = 100;
 const HITS_PER_THREAD: usize = 3;
 const SNIPPET_BEFORE: usize = 24;
 const SNIPPET_CHARS: usize = 120;
-
-struct Literal {
-    lower: Vec<u8>,
-}
-
-impl Literal {
-    fn new(needle: &str) -> Self {
-        Self {
-            lower: needle.to_ascii_lowercase().into_bytes(),
-        }
-    }
-}
-
-impl Matcher for Literal {
-    type Error = NoError;
-
-    fn find_at(&self, haystack: &[u8], at: usize) -> Result<Option<Match>, NoError> {
-        let Some((&first, rest)) = self.lower.split_first() else {
-            return Ok(None);
-        };
-        let upper = first.to_ascii_uppercase();
-        let mut from = at;
-        while let Some(found) = haystack
-            .get(from..)
-            .and_then(|tail| memchr::memchr2(first, upper, tail))
-        {
-            let start = from + found;
-            let end = start + self.lower.len();
-            if haystack
-                .get(start + 1..end)
-                .is_some_and(|tail| tail.eq_ignore_ascii_case(rest))
-            {
-                return Ok(Some(Match::new(start, end)));
-            }
-            from = start + 1;
-        }
-        Ok(None)
-    }
-
-    fn line_terminator(&self) -> Option<LineTerminator> {
-        Some(LineTerminator::byte(b'\n'))
-    }
-}
-
-struct FirstLine<'a> {
-    needle: &'a Literal,
-    found: Option<(usize, usize)>,
-}
-
-impl Sink for FirstLine<'_> {
-    type Error = std::io::Error;
-
-    fn matched(&mut self, _: &Searcher, line: &SinkMatch<'_>) -> Result<bool, std::io::Error> {
-        let start = usize::try_from(line.absolute_byte_offset()).unwrap_or(usize::MAX);
-        self.found = self
-            .needle
-            .find(line.bytes())
-            .ok()
-            .flatten()
-            .map(|found| (start + found.start(), start + found.end()));
-        Ok(false)
-    }
-}
-
-fn first_match(searcher: &Searcher, needle: &Literal, text: &str) -> Option<(usize, usize)> {
-    let mut sink = FirstLine {
-        needle,
-        found: None,
-    };
-    searcher
-        .search_slice(needle, text.as_bytes(), &mut sink)
-        .ok()?;
-    sink.found
-        .filter(|(start, end)| text.is_char_boundary(*start) && text.is_char_boundary(*end))
-}
 
 fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
     let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
@@ -121,19 +48,18 @@ fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
 
 fn indexed_phrase(wanted: &str) -> Option<String> {
     (wanted.chars().count() >= TRIGRAM_CHARS)
-        .then(|| format!("text : \"{}\"", wanted.replace('"', "\"\"")))
+        .then(|| format!("folded : \"{}\"", wanted.replace('"', "\"\"")))
 }
 
-fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>> {
-    let wanted = query.query.trim();
+pub(crate) fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>> {
+    let wanted = folded::needle(query.query.trim());
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
     let limit = query.limit.unwrap_or(DEFAULT_HITS).clamp(1, MAX_HITS) as usize;
-    let needle = Literal::new(wanted);
-    let searcher = Searcher::new();
+    let candidate = memchr::memmem::Finder::new(wanted.as_bytes());
     let scan_rows = i64::try_from(SCAN_ROWS).expect("invariant: the scan bound fits in i64");
-    let (mut rows, values) = match indexed_phrase(wanted) {
+    let (mut rows, values) = match indexed_phrase(&wanted) {
         Some(phrase) => (
             conn.prepare_cached(include_str!("sql/search/messages_indexed.sql"))?,
             vec![
@@ -158,9 +84,13 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
         if per_thread.get(&thread_id).copied().unwrap_or(0) >= HITS_PER_THREAD {
             continue;
         }
+        let folded = row.get_ref(7)?.as_bytes().map_err(rusqlite::Error::from)?;
+        scanned_bytes += folded.len();
+        if candidate.find(folded).is_none() {
+            continue;
+        }
         let text = row.get_ref(6)?.as_str().map_err(rusqlite::Error::from)?;
-        scanned_bytes += text.len();
-        let Some((start, end)) = first_match(&searcher, &needle, text) else {
+        let Some(std::ops::Range { start, end }) = Folded::new(text).find(&wanted) else {
             continue;
         };
         let (snippet, matched) = snippet(text, start, end);

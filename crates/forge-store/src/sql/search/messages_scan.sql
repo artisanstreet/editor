@@ -1,5 +1,5 @@
 SELECT t.thread_id, t.item_id, t.created_at, i.position,
-       json_extract(h.body, '$.title'), json_extract(h.body, '$.project_id'), t.text
+       json_extract(h.body, '$.title'), json_extract(h.body, '$.project_id'), t.text, t.folded
 FROM item_text t
 JOIN items i ON i.rowid = t.rowid
 JOIN threads h ON h.id = t.thread_id

@@ -32,7 +32,8 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
 thiserror.workspace = true
 webp.workspace = true
-fff-grep = "=0.9.6"
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
 memchr = "2.8.3"
 notify.workspace = true
 

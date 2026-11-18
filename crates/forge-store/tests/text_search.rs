@@ -203,3 +203,104 @@ async fn archived_threads_never_crowd_out_listed_ones() {
     assert_eq!(short.len(), 1, "{short:?}");
     assert_eq!(short[0].thread_id, listed);
 }
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+async fn matches(messages: &[&str], query: &str) -> Vec<(usize, String)> {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
+    for (index, text) in messages.iter().enumerate() {
+        let home = thread(&store, &index.to_string(), None).await;
+        store
+            .upsert_item(said(&home, text, Phase::Final))
+            .await
+            .unwrap();
+    }
+    let mut found: Vec<(usize, String)> = store
+        .text_search(TextSearchQuery {
+            query: query.into(),
+            limit: None,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| {
+            let index: usize = hit.thread_title.unwrap().parse().unwrap();
+            let text = messages[index];
+            (
+                index,
+                text[hit.offset.0 as usize..hit.offset.1 as usize].to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn hits<const N: usize>(expected: [(usize, &str); N]) -> Vec<(usize, String)> {
+    expected
+        .into_iter()
+        .map(|(index, text)| (index, text.to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn non_ascii_letters_match_in_any_case() {
+    let messages = ["Brød og SMØR", "smør på brødet", "Ψωμί και ΒΟΎΤΥΡΟ", "smor"];
+    assert_eq!(
+        matches(&messages, "Smør").await,
+        hits([(0, "SMØR"), (1, "smør")])
+    );
+    assert_eq!(matches(&messages, "βούτυρο").await, hits([(2, "ΒΟΎΤΥΡΟ")]));
+    assert_eq!(matches(&messages, "øR").await, hits([(0, "ØR"), (1, "ør")]));
+}
+
+#[tokio::test]
+async fn sharp_s_matches_double_s_both_ways() {
+    let messages = ["Die Straße ist lang", "DIE STRASSE IST LANG", "Maß"];
+    assert_eq!(
+        matches(&messages, "strasse").await,
+        hits([(0, "Straße"), (1, "STRASSE")])
+    );
+    assert_eq!(
+        matches(&messages, "STRAẞE").await,
+        hits([(0, "Straße"), (1, "STRASSE")])
+    );
+    assert_eq!(
+        matches(&messages, "ss").await,
+        hits([(0, "ß"), (1, "SS"), (2, "ß")])
+    );
+    assert_eq!(
+        matches(&messages, "s").await,
+        hits([(0, "S"), (1, "S")]),
+        "half of ß is not a hit"
+    );
+}
+
+#[tokio::test]
+async fn composed_and_decomposed_accents_match_each_other() {
+    let messages = [
+        "Et glass på caf\u{e9}en",
+        "Et glass på cafe\u{301}en",
+        "Kaffe på cafeteria",
+    ];
+    assert_eq!(
+        matches(&messages, "CAFÉ").await,
+        hits([(0, "caf\u{e9}"), (1, "cafe\u{301}")])
+    );
+    assert_eq!(
+        matches(&messages, "cafe\u{301}en").await,
+        hits([(0, "caf\u{e9}en"), (1, "cafe\u{301}en")])
+    );
+    assert_eq!(
+        matches(&messages, "cafe").await,
+        hits([(2, "cafe")]),
+        "a bare e never matches an accented one"
+    );
+    assert_eq!(
+        matches(&messages, "\u{e9}").await,
+        hits([(0, "\u{e9}"), (1, "e\u{301}")])
+    );
+}

@@ -258,38 +258,52 @@ pub fn index(conn: &Connection, item: &Item) -> Result<()> {
     let previous = conn
         .prepare_cached(include_str!("sql/recall/indexed.sql"))?
         .query_row([rowid], |row| {
-            Ok(Searchable {
-                text: row.get(0)?,
-                output: row.get(1)?,
-                paths: row.get(2)?,
-            })
+            Ok((
+                Searchable {
+                    text: row.get(0)?,
+                    output: row.get(1)?,
+                    paths: row.get(2)?,
+                },
+                row.get::<_, String>(3)?,
+            ))
         })
         .optional()?;
-    if previous.as_ref() == Some(&next) {
+    if previous.as_ref().map(|(searchable, _)| searchable) == Some(&next) {
         return Ok(());
     }
-    if let Some(previous) = &previous {
+    if let Some((previous, folded)) = &previous {
         conn.prepare_cached(include_str!("sql/recall/unindex.sql"))?
             .execute(params![rowid, previous.text, previous.paths])?;
+        conn.prepare_cached(include_str!("sql/search/unindex.sql"))?
+            .execute(params![rowid, folded])?;
     }
     if next.is_empty() {
         conn.prepare_cached(include_str!("sql/recall/delete_text.sql"))?
             .execute([rowid])?;
         return Ok(());
     }
+    let kind = RecallKind::of(&item.kind);
+    let folded = if kind.is_message() {
+        crate::text_search::folded::text(&next.text)
+    } else {
+        String::new()
+    };
     conn.prepare_cached(include_str!("sql/recall/save_text.sql"))?
         .execute(params![
             rowid,
             item.thread_id.as_str(),
             item.id.as_str(),
-            RecallKind::of(&item.kind).name(),
+            kind.name(),
             item.created_at,
             next.text,
             next.output,
             next.paths,
+            folded,
         ])?;
     conn.prepare_cached(include_str!("sql/recall/index.sql"))?
         .execute(params![rowid, next.text, next.paths])?;
+    conn.prepare_cached(include_str!("sql/search/index.sql"))?
+        .execute(params![rowid, folded])?;
     Ok(())
 }
 
@@ -336,6 +350,20 @@ impl RecallKind {
             Self::Compaction => "compaction",
             Self::Notice => "notice",
             Self::Error => "error",
+        }
+    }
+
+    const fn is_message(self) -> bool {
+        match self {
+            Self::User | Self::Assistant => true,
+            Self::Tool
+            | Self::Agent
+            | Self::Question
+            | Self::Plan
+            | Self::Image
+            | Self::Compaction
+            | Self::Notice
+            | Self::Error => false,
         }
     }
 
