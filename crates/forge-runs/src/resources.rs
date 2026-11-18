@@ -13,6 +13,7 @@ const KERNEL_RELEASE: &str = "/proc/sys/kernel/osrelease";
 const WSL_CONFIG: &str = "/etc/wsl.conf";
 const WSL_DRIVES: &str = "/mnt";
 const BLOCK_PREFIX: &str = "artisan-";
+const WSL_DISTRIBUTION: &str = "WSL_DISTRO_NAME";
 
 static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 
@@ -143,6 +144,7 @@ pub fn written_sources(markdown: &str) -> Vec<Written> {
 pub struct Host {
     pub home: Option<PathBuf>,
     pub windows_drives: Option<PathBuf>,
+    pub wsl_distribution: Option<String>,
 }
 
 #[must_use]
@@ -175,6 +177,9 @@ impl Host {
             home: dirs::home_dir(),
             windows_drives: inside_wsl
                 .then(|| automount_root(&std::fs::read_to_string(WSL_CONFIG).unwrap_or_default())),
+            wsl_distribution: std::env::var(WSL_DISTRIBUTION)
+                .into_iter()
+                .find(|name| inside_wsl && !name.is_empty()),
         }
     }
 }
@@ -227,34 +232,46 @@ fn without_scheme(path: &str) -> Result<String, ResourceError> {
     ))
 }
 
-fn wsl_share(path: &str) -> Option<&str> {
+fn wsl_share(path: &str) -> Option<(&str, &str)> {
     let mut parts = path
         .strip_prefix("\\\\")
         .or_else(|| path.strip_prefix("//"))?
         .splitn(3, ['\\', '/']);
     let host = parts.next()?;
-    let _distribution = parts.next()?;
+    let distribution = parts.next()?;
     let rest = parts.next()?;
     (host.eq_ignore_ascii_case("wsl.localhost") || host.eq_ignore_ascii_case("wsl$"))
-        .then_some(rest)
+        .then_some((distribution, rest))
 }
 
-fn inside_wsl(path: &str, drives: &Path) -> Option<PathBuf> {
+fn inside_wsl(
+    path: &str,
+    drives: &Path,
+    own: Option<&str>,
+) -> Result<Option<PathBuf>, ResourceError> {
     let forward = |rest: &str| rest.replace('\\', "/");
     if is_drive(path) {
         let letter = path[..1].to_ascii_lowercase();
-        return Some(drives.join(letter).join(forward(&path[3..])));
+        return Ok(Some(drives.join(letter).join(forward(&path[3..]))));
     }
-    wsl_share(path).map(|rest| Path::new("/").join(forward(rest)))
+    match wsl_share(path) {
+        None => Ok(None),
+        Some((named, rest)) if own.is_some_and(|own| own.eq_ignore_ascii_case(named)) => {
+            Ok(Some(Path::new("/").join(forward(rest))))
+        }
+        Some((named, _)) => Err(ResourceError::Refused(format!(
+            "the file is in the WSL distribution {named}, which Forge does not run in"
+        ))),
+    }
 }
 
 pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBuf, ResourceError> {
     let local = without_scheme(&written.path)?;
-    let path = host
-        .windows_drives
-        .as_deref()
-        .and_then(|drives| inside_wsl(&local, drives))
-        .unwrap_or_else(|| PathBuf::from(&local));
+    let translated = match host.windows_drives.as_deref() {
+        Some(drives) => inside_wsl(&local, drives, host.wsl_distribution.as_deref())?,
+        None => None,
+    };
+    let path = translated.unwrap_or_else(|| PathBuf::from(&local));
     if written.from_home {
         return host
             .home

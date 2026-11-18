@@ -12,6 +12,7 @@ fn wsl() -> Host {
     Host {
         home: Some(PathBuf::from("/home/ada")),
         windows_drives: Some(PathBuf::from("/mnt")),
+        wsl_distribution: Some("Ubuntu".to_owned()),
     }
 }
 
@@ -19,6 +20,7 @@ fn plain() -> Host {
     Host {
         home: Some(PathBuf::from("/home/ada")),
         windows_drives: None,
+        wsl_distribution: None,
     }
 }
 
@@ -50,6 +52,39 @@ fn windows_paths_reach_the_mounted_drive_inside_wsl() {
 }
 
 #[test]
+fn a_link_into_another_wsl_distribution_is_refused_not_read_from_this_one() {
+    for path in [
+        "\\\\wsl.localhost\\Debian\\home\\ada\\a.png",
+        "//wsl$/Debian/tmp/shot.png",
+        "file://wsl.localhost/Debian/tmp/shot.png",
+    ] {
+        assert!(
+            matches!(
+                host_path(&written(path), Path::new("/work/project"), &wsl()),
+                Err(ResourceError::Refused(_))
+            ),
+            "{path}"
+        );
+    }
+    let unnamed = Host {
+        wsl_distribution: None,
+        ..wsl()
+    };
+    assert!(matches!(
+        host_path(
+            &written("//wsl$/Ubuntu/tmp/shot.png"),
+            Path::new("/work/project"),
+            &unnamed
+        ),
+        Err(ResourceError::Refused(_))
+    ));
+    assert_eq!(
+        resolved("//WSL.localhost/ubuntu/tmp/shot.png", &wsl()),
+        PathBuf::from("/tmp/shot.png")
+    );
+}
+
+#[test]
 fn drive_mounts_follow_the_configured_automount_root() {
     assert_eq!(automount_root(""), PathBuf::from("/mnt"));
     assert_eq!(
@@ -61,6 +96,7 @@ fn drive_mounts_follow_the_configured_automount_root() {
     let host = Host {
         home: None,
         windows_drives: Some(root),
+        wsl_distribution: None,
     };
     assert_eq!(
         resolved("E:/a.png", &host),
