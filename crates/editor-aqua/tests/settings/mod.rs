@@ -842,3 +842,88 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
     ));
     assert!(!texts.iter().any(|text| text.starts_with("Couldn't save")));
 }
+
+#[test]
+fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use artisan_api::{EngineId, EngineStatus};
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        view::{ViewAction, dispatch},
+    };
+    use serde_json::json;
+    use std::{cell::RefCell, rc::Rc};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let (_silent, id) = silent_host(&mut core, "Desk");
+    let engine = EngineId::Codex;
+    let status: EngineStatus = serde_json::from_value(json!({
+        "engine": engine,
+        "install": {"state": "installed", "version": "1.0.0", "update": null},
+        "sign_in": {"state": "logging_in", "url": null, "code": null, "accepts_code": true},
+        "models": [],
+        "default_model": null,
+        "usage": null,
+    }))
+    .unwrap();
+    core.host_mut(&id).unwrap().engines.insert(engine, status);
+    core.navigate(Screen::Settings(SettingsPage::Engine(engine)));
+    let mut settings = SettingsController::default();
+    settings.sync(&mut core);
+    settings.engines.busy.insert(engine);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
+    let mut app = render_settings(&settings, &core, emit.clone());
+    test_support::editor::ui::click(&mut app, &format!("settings-engine-cancel-login-{engine}"));
+    for action in actions.borrow_mut().drain(..) {
+        dispatch(&mut settings, &mut core, action);
+    }
+    assert!(settings.engines.cancelling.contains(&engine));
+    let texts =
+        test_support::editor::ui::painted_texts(&render_settings(&settings, &core, emit.clone()));
+    assert!(texts.iter().any(|text| text == "Cancelling…"), "{texts:?}");
+
+    settings.engines.busy.remove(&engine);
+    settings
+        .engines
+        .login_codes
+        .get(&engine)
+        .unwrap()
+        .borrow_mut()
+        .set_text("abc-123");
+    let mut app = render_settings(&settings, &core, emit);
+    assert!(app.focus_key(&format!("settings-engine-login-code-{engine}")));
+    let enter = KeyEvent {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(enter));
+    app.handle_input(&InputEvent::KeyUp(enter));
+    let submitted: Vec<_> = actions.borrow_mut().drain(..).collect();
+    assert!(
+        submitted.iter().any(
+            |action| matches!(action, ViewAction::EngineCode(submitted) if *submitted == engine)
+        ),
+        "{submitted:?}"
+    );
+    for action in submitted {
+        dispatch(&mut settings, &mut core, action);
+    }
+    assert!(settings.engines.busy.contains(&engine));
+    assert_eq!(
+        settings
+            .engines
+            .login_codes
+            .get(&engine)
+            .unwrap()
+            .borrow()
+            .text(),
+        ""
+    );
+}

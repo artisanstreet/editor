@@ -1331,6 +1331,7 @@ struct ViewSnapshot {
     archive_restoring: std::collections::HashSet<artisan_api::ThreadId>,
     archive_error: Option<String>,
     engine_busy: std::collections::BTreeSet<artisan_api::EngineId>,
+    engine_cancelling: std::collections::BTreeSet<artisan_api::EngineId>,
     engine_errors: std::collections::HashMap<artisan_api::EngineId, String>,
     engine_versions: std::collections::HashSet<artisan_api::EngineId>,
     engine_codes: std::collections::HashMap<artisan_api::EngineId, String>,
@@ -1416,6 +1417,7 @@ impl ViewSnapshot {
             archive_restoring: controller.archive.restoring.clone(),
             archive_error: controller.archive.error.clone(),
             engine_busy: controller.engines.busy.clone(),
+            engine_cancelling: controller.engines.cancelling.clone(),
             engine_errors: controller.engines.errors.clone(),
             engine_versions: controller.engines.choosing_version.clone(),
             engine_codes: controller

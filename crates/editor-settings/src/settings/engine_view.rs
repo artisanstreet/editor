@@ -4,6 +4,10 @@ use super::{
     ui::{self, Ink},
     view::ViewAction,
 };
+use aqua_ui::element::{Box as UiBox, Element};
+use artisan_api::{
+    ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
+};
 use editor_core::{Core, HostData, SettingsPage, SettingsSection};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
@@ -13,10 +17,6 @@ use editor_ui::{
         mount::{EditorController, EditorEvent},
     },
     theme::ArtisanTheme,
-};
-use aqua_ui::element::{Box as UiBox, Element};
-use artisan_api::{
-    ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
 };
 use std::rc::Rc;
 
@@ -29,7 +29,9 @@ fn button(
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
+    ui::button(theme, id, label, tone, disabled, move || {
+        emit(action.clone())
+    })
 }
 fn band(theme: &ArtisanTheme, value: String) -> Element {
     ui::block(ui::text(theme, TextRole::Label, Ink::Plain, value))
@@ -204,12 +206,8 @@ fn installation(
                 } else {
                     Ink::Plain
                 };
-                let mut row = ui::actions().child(ui::grow(ui::text(
-                    theme,
-                    TextRole::Label,
-                    ink,
-                    label,
-                )));
+                let mut row =
+                    ui::actions().child(ui::grow(ui::text(theme, TextRole::Label, ink, label)));
                 if !version.current && !version.unsupported {
                     row = row.child(button(
                         theme,
@@ -350,6 +348,7 @@ fn account(
                             EditorEvent::PresentationChanged => {
                                 send(ViewAction::EnginePresentationChanged)
                             }
+                            EditorEvent::Submitted => send(ViewAction::EngineCode(engine)),
                             _ => {}
                         });
                     content = content.child(
@@ -375,12 +374,17 @@ fn account(
                     );
                 }
             }
+            let cancelling = controller.engines.cancelling.contains(&engine);
             content = content.child(button(
                 theme,
                 format!("settings-engine-cancel-login-{engine}"),
-                "Cancel",
+                if cancelling {
+                    "Cancelling…"
+                } else {
+                    "Cancel"
+                },
                 ButtonTone::Quiet,
-                false,
+                cancelling,
                 ViewAction::EngineAction(engine, EngineCommand::CancelLogin {}),
                 emit.clone(),
             ));

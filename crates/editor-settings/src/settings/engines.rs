@@ -1,5 +1,5 @@
-use editor_ui::text::{Editor, Mode};
 use artisan_api::EngineId;
+use editor_ui::text::{Editor, Mode};
 use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap, HashSet},
@@ -11,15 +11,23 @@ pub struct EnginesForm {
     pub host: Option<String>,
     pub login_codes: HashMap<EngineId, Rc<RefCell<Editor>>>,
     pub busy: BTreeSet<EngineId>,
+    pub cancelling: BTreeSet<EngineId>,
     pub errors: HashMap<EngineId, String>,
     pub choosing_version: HashSet<EngineId>,
     generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    Action,
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
 pub struct EngineRequest {
     pub host: String,
     pub engine: EngineId,
+    lane: Lane,
     generation: u64,
 }
 
@@ -32,6 +40,7 @@ impl EnginesForm {
         self.generation += 1;
         self.login_codes.clear();
         self.busy.clear();
+        self.cancelling.clear();
         self.errors.clear();
         self.choosing_version.clear();
     }
@@ -46,6 +55,21 @@ impl EnginesForm {
         Some(EngineRequest {
             host,
             engine,
+            lane: Lane::Action,
+            generation: self.generation,
+        })
+    }
+
+    pub fn begin_cancel(&mut self, engine: EngineId) -> Option<EngineRequest> {
+        let host = self.host.clone()?;
+        if !self.cancelling.insert(engine) {
+            return None;
+        }
+        self.errors.remove(&engine);
+        Some(EngineRequest {
+            host,
+            engine,
+            lane: Lane::Cancel,
             generation: self.generation,
         })
     }
@@ -54,7 +78,10 @@ impl EnginesForm {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }
-        self.busy.remove(&request.engine);
+        match request.lane {
+            Lane::Action => self.busy.remove(&request.engine),
+            Lane::Cancel => self.cancelling.remove(&request.engine),
+        };
         if let Some(error) = error {
             self.errors.insert(request.engine, error);
         }
@@ -67,6 +94,9 @@ impl EnginesForm {
     }
 
     pub fn login_code(&mut self, engine: EngineId) -> Option<String> {
+        if self.busy.contains(&engine) {
+            return None;
+        }
         let code = self.login_codes.get_mut(&engine)?;
         let trimmed = code.borrow().text().trim().to_owned();
         if trimmed.is_empty() {

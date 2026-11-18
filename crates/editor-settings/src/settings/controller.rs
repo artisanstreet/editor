@@ -561,7 +561,11 @@ impl SettingsController {
         {
             return;
         }
-        let Some(request) = self.engines.begin(engine) else {
+        let request = match action {
+            EngineCommand::CancelLogin {} => self.engines.begin_cancel(engine),
+            _ => self.engines.begin(engine),
+        };
+        let Some(request) = request else {
             return;
         };
         let Some(host) = core.host(&HostId(request.host.clone())) else {
