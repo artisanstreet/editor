@@ -73,7 +73,7 @@ pub fn row_factory(
     )
 }
 
-pub fn row_factory_at(
+fn row_factory_at(
     rows: Vec<RealizedRow>,
     scope: PresentationScope,
     markdown: Rc<RefCell<MarkdownOwners>>,

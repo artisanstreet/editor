@@ -120,7 +120,7 @@ impl<'a> View<'a> {
     }
 
     #[must_use]
-    pub fn render(self) -> String {
+    pub(crate) fn render(self) -> String {
         rendered(&self.state.root())
     }
 

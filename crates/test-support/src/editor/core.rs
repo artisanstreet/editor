@@ -9,7 +9,7 @@ pub fn test_core(directory: &Path) -> Core {
     test_core_with_clock(directory, Clock::system())
 }
 
-pub fn test_core_with_clock(directory: &Path, clock: Clock) -> Core {
+pub(crate) fn test_core_with_clock(directory: &Path, clock: Clock) -> Core {
     Core::for_tests_with_clock(
         EditorFiles {
             dir: directory.to_owned(),
@@ -29,7 +29,7 @@ pub fn remote_host(id: &str) -> HostConfig {
     }
 }
 
-pub fn client(core: &Core, config: &HostConfig) -> ForgeClient {
+fn client(core: &Core, config: &HostConfig) -> ForgeClient {
     let identity = core
         .identity
         .as_ref()
@@ -56,7 +56,7 @@ impl OpenThread {
         Self::with_clock(host, thread, Clock::system())
     }
 
-    pub fn with_clock(host: &str, thread: &str, clock: Clock) -> Self {
+    fn with_clock(host: &str, thread: &str, clock: Clock) -> Self {
         let directory = tempfile::tempdir().expect("create a test data folder");
         let mut core = test_core_with_clock(directory.path(), clock);
         let host = remote_host(host);

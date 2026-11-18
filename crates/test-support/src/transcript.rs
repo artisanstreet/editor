@@ -168,11 +168,6 @@ impl Transcript {
     }
 
     #[must_use]
-    pub const fn source(&self) -> Source {
-        self.source
-    }
-
-    #[must_use]
     pub fn launch(&self, index: usize) -> Option<&[Step]> {
         self.launches.get(index).map(Vec::as_slice)
     }

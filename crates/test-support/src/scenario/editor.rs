@@ -511,7 +511,7 @@ impl Editor {
     }
 
     #[track_caller]
-    pub fn node(&mut self, role: Role, label: &str) -> Found {
+    fn node(&mut self, role: Role, label: &str) -> Found {
         self.settle(&format!("a {role:?} named {label:?}"), |view| {
             view.find(role, label).is_some()
         });

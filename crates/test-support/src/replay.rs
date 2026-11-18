@@ -31,7 +31,7 @@ fn replayer(example: &str) -> PathBuf {
 }
 
 #[must_use]
-pub fn transcript(engine: EngineId, case: &str) -> PathBuf {
+fn transcript(engine: EngineId, case: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../forge-engines/transcripts/replay")
         .join(engine.to_string())
