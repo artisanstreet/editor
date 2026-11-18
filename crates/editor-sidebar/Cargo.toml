@@ -21,6 +21,7 @@ artisan-mentions.workspace = true
 editor-assets.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
+diagnostics.workspace = true
 tracing.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true

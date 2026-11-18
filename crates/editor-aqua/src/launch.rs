@@ -55,7 +55,7 @@ pub fn launch() -> anyhow::Result<()> {
     }
     let qualifying = std::env::args().any(|argument| argument == "--qualify-editor");
     if !qualifying {
-        let data = EditorFiles::default_location().dir;
+        let data = EditorFiles::default_location()?.dir;
         diagnostics::CrashReporter {
             app: artisan_paths::App::Editor,
             version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
@@ -120,7 +120,7 @@ fn run(qualifying: bool) -> anyhow::Result<()> {
         None if source_encoded => fixture_configuration()?,
         None => {
             let (width, height) = launch_dimensions();
-            (EditorFiles::default_location().dir, width, height)
+            (EditorFiles::default_location()?.dir, width, height)
         }
     };
     #[cfg(not(feature = "qualification"))]
@@ -128,7 +128,7 @@ fn run(qualifying: bool) -> anyhow::Result<()> {
         fixture_configuration()?
     } else {
         let (width, height) = launch_dimensions();
-        (EditorFiles::default_location().dir, width, height)
+        (EditorFiles::default_location()?.dir, width, height)
     };
     anyhow::ensure!(
         width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0,

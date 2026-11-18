@@ -45,6 +45,7 @@ pub struct SettingsController {
     pub extensions: ExtensionsForm,
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
+    pub editor_setting_error: Option<String>,
     completion: Delivery<HostCompletion>,
     tasks: Vec<tokio_util::task::AbortOnDropHandle<()>>,
     active_instance: Option<HostInstance>,
@@ -77,6 +78,7 @@ impl Default for SettingsController {
             extensions: ExtensionsForm::default(),
             prompt: PromptForm::default(),
             prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Document))),
+            editor_setting_error: None,
             completion: Delivery::new(NonZeroUsize::new(64).unwrap()),
             tasks: Vec::new(),
             active_instance: None,
@@ -171,6 +173,22 @@ impl SettingsController {
             }
         }
         self.reported_prompt_dirty = self.prompt_editor.borrow().text() != self.prompt.saved;
+    }
+
+    pub fn set_editor_setting(&mut self, core: &mut Core, key: &'static str, value: Value) {
+        match core.set_setting(key, value) {
+            Ok(()) => self.editor_setting_error = None,
+            Err(error) => {
+                let cause = ::diagnostics::chain(&error);
+                tracing::error!(key, error = %cause, "saving an Editor setting");
+                self.editor_setting_error = Some(format!("Couldn't save {key}: {cause}"));
+            }
+        }
+    }
+
+    pub fn reload_editor_settings(&mut self, core: &mut Core) {
+        self.editor_setting_error = None;
+        core.reload_settings();
     }
 
     pub fn core_event(&mut self, core: &mut Core, event: &editor_core::CoreEvent) {

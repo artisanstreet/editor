@@ -83,6 +83,7 @@ pub enum ViewAction {
     SetFrameRate(bool),
     SetVsync(bool),
     SetNotifications(bool),
+    ReloadSettings,
     SetHostSetting(
         editor_core::HostId,
         editor_core::HostInstance,
@@ -217,19 +218,36 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         }
         ViewAction::FontMenu(open) => _controller.reported_font_menu = open,
         ViewAction::StreamingMenu(open) => _controller.reported_streaming_menu = open,
-        ViewAction::SetFont(font) => core.set_setting("font_set", font.into()),
-        ViewAction::SetDarkMode(enabled) => core.set_setting("dark_mode", enabled.into()),
-        ViewAction::SetOutlineText(enabled) => core.set_setting("outline_text", enabled.into()),
+        ViewAction::SetFont(font) => _controller.set_editor_setting(core, "font_set", font.into()),
+        ViewAction::SetDarkMode(enabled) => {
+            _controller.set_editor_setting(core, "dark_mode", enabled.into());
+        }
+        ViewAction::SetOutlineText(enabled) => {
+            _controller.set_editor_setting(core, "outline_text", enabled.into());
+        }
         ViewAction::SetShowAllModels(enabled) => {
-            core.set_setting(artisan_api::SHOW_ALL_MODELS_KEY, enabled.into());
+            _controller.set_editor_setting(core, artisan_api::SHOW_ALL_MODELS_KEY, enabled.into());
         }
         ViewAction::SetHideBadModelOptions(enabled) => {
-            core.set_setting(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY, enabled.into());
+            _controller.set_editor_setting(
+                core,
+                artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY,
+                enabled.into(),
+            );
         }
-        ViewAction::SetStreaming(mode) => core.set_setting("streaming_mode", mode.into()),
-        ViewAction::SetFrameRate(enabled) => core.set_setting("lower_refresh_rate", enabled.into()),
-        ViewAction::SetVsync(enabled) => core.set_setting("graphics_vsync", enabled.into()),
-        ViewAction::SetNotifications(enabled) => core.set_setting("notifications", enabled.into()),
+        ViewAction::SetStreaming(mode) => {
+            _controller.set_editor_setting(core, "streaming_mode", mode.into());
+        }
+        ViewAction::SetFrameRate(enabled) => {
+            _controller.set_editor_setting(core, "lower_refresh_rate", enabled.into());
+        }
+        ViewAction::SetVsync(enabled) => {
+            _controller.set_editor_setting(core, "graphics_vsync", enabled.into());
+        }
+        ViewAction::SetNotifications(enabled) => {
+            _controller.set_editor_setting(core, "notifications", enabled.into());
+        }
+        ViewAction::ReloadSettings => _controller.reload_editor_settings(core),
         ViewAction::SetHostSetting(host, instance, key, enabled) => {
             _controller.set_host_setting_for(core, host, instance, key, enabled.into())
         }
@@ -255,6 +273,7 @@ pub fn build(
     if page == SettingsPage::GlobalPrompt && core.active_host().is_some() {
         return prompt(controller, core, &theme, emit);
     }
+    let emit_for_error = emit.clone();
     let content = match page.parent() {
         SettingsPage::General if page == SettingsPage::General => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
@@ -370,6 +389,13 @@ pub fn build(
             ))
             .build(),
     };
+    let content = match (
+        page.parent(),
+        device_settings_error(controller, core, &theme, emit_for_error),
+    ) {
+        (SettingsPage::General, Some(error)) => ui::column().child(error).child(content).build(),
+        _ => content,
+    };
     Scroll::new()
         .preserve_offset(true)
         .width(Length::Pct(100.0))
@@ -396,6 +422,35 @@ pub fn build(
         )
         .build()
         .with_key(format!("settings-screen-{page:?}"))
+}
+
+fn device_settings_error(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Option<Element> {
+    let message = match (core.settings.unreadable(), &controller.editor_setting_error) {
+        (Some(error), _) => format!(
+            "Couldn't read settings.json: {}. The file is kept as it is and changes here are not saved until it can be read. Fix or remove the file, then reload.",
+            ::diagnostics::chain(error)
+        ),
+        (None, Some(error)) => error.clone(),
+        (None, None) => return None,
+    };
+    Some(
+        ui::stack(Space::S8)
+            .child(ui::callout(theme, Tone::Danger, message))
+            .child(ui::button(
+                theme,
+                "settings-reload",
+                "Reload settings",
+                ButtonTone::Neutral,
+                false,
+                move || emit(ViewAction::ReloadSettings),
+            ))
+            .build(),
+    )
 }
 
 fn about(theme: &ArtisanTheme, build: &BuildInfo) -> Element {
@@ -1170,6 +1225,7 @@ struct ViewSnapshot {
     account_error: Option<String>,
     local_forge: editor_core::LocalForge,
     device_settings: Vec<Option<serde_json::Value>>,
+    device_settings_error: (bool, Option<String>),
     host_settings: Vec<Option<serde_json::Value>>,
     host_instance: Option<editor_core::HostInstance>,
     archive_loading: Option<(bool, bool, bool, Option<String>)>,
@@ -1227,6 +1283,10 @@ impl ViewSnapshot {
                         .unwrap_or(true)
                 )),
             ],
+            device_settings_error: (
+                core.settings.unreadable().is_some(),
+                controller.editor_setting_error.clone(),
+            ),
             host_settings: host_keys
                 .iter()
                 .map(|key| {

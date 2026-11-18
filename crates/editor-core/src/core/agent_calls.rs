@@ -53,8 +53,19 @@ impl Core {
             EditorCall::HostsList => Ok(Value::Array(self.hosts().map(|(config, host)| json!({ "id": config.id.0, "name": config.name, "address": config.address, "kind": config.kind, "connected": host.status == ConnectionStatus::Live, "is_caller": &config.id == from })).collect())),
             EditorCall::HostRemove { host } => { let id = self.find_host(&host)?; self.remove_host(&id)?; Ok(json!({ "removed": id.0 })) },
             EditorCall::HostSwitch { host } => { let id = self.find_host(&host)?; self.navigate(Screen::NewThread { host: id.clone(), project: None }); Ok(json!({ "switched_to": id.0 })) },
-            EditorCall::SettingGet { key } => { let decl = editor_setting(&key)?; Ok(self.settings.get(&key).cloned().unwrap_or_else(|| decl.default_value())) },
-            EditorCall::SettingSet { key, value } => { let decl = editor_setting(&key)?; decl.check(&value).map_err(|error| anyhow!(error))?; self.set_setting(&key, value.clone()); Ok(json!({ "key": key, "value": value })) },
+            EditorCall::SettingGet { key } => {
+                let decl = editor_setting(&key)?;
+                if let Some(error) = self.settings.unreadable() {
+                    bail!("The Editor's settings.json could not be read, so {key} is unknown until it is recovered: {}", ::diagnostics::chain(error));
+                }
+                Ok(self.settings.get(&key).cloned().unwrap_or_else(|| decl.default_value()))
+            }
+            EditorCall::SettingSet { key, value } => {
+                let decl = editor_setting(&key)?;
+                decl.check(&value).map_err(|error| anyhow!(error))?;
+                self.set_setting(&key, value.clone())?;
+                Ok(json!({ "key": key, "value": value }))
+            }
             EditorCall::OpenThread { thread } => { self.navigate(Screen::Thread { host: from.clone(), thread: thread.clone() }); Ok(json!({ "opened": thread })) },
             EditorCall::OpenSettings { page } => { let found = SettingsPage::from_name(&page).with_context(|| { let names: Vec<_> = SettingsPage::ALL.iter().map(|(_, name)| *name).collect(); format!("There is no settings page {page}; pages: {}.", names.join(", ")) })?; self.navigate(Screen::Settings(found)); Ok(json!({ "opened": page })) },
             EditorCall::HostAdd { .. } | EditorCall::McpSignIn { .. } => unreachable!(),

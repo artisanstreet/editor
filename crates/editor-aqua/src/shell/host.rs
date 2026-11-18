@@ -42,13 +42,21 @@ impl Shell {
         link: Option<Screen>,
     ) -> (Self, ShellUpdates) {
         aqua::native::startup_mark("core_init_begin");
-        let (mut core, failure) = Core::init(files);
+        let (mut core, failures) = Core::init(files);
         aqua::native::startup_mark("core_init_done");
         if let Some(screen) = link {
             core.navigate(screen);
         }
-        let failure =
-            failure.map(|error| format!("Couldn't read this device's Artisan files: {error:#}"));
+        let failure = (!failures.is_empty()).then(|| {
+            let causes: Vec<String> = failures
+                .iter()
+                .map(|failure| ::diagnostics::chain(failure))
+                .collect();
+            format!(
+                "Couldn't read this device's Artisan files: {}. They are kept as they are until they can be read.",
+                causes.join("; ")
+            )
+        });
         Self::from_core(core, images, failure)
     }
 

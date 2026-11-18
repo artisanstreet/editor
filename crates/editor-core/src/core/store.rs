@@ -2,13 +2,15 @@ use crate::core::{
     ForgeClient,
     access::{self, EntryGate},
     account::{Account, AccountEvent, LocalForge},
+    config_file::ReadConfigError,
     delivery::{AdmissionOrder, Delivery},
     host::{HostData, HostEvent, HostInstance},
-    hosts::{self, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, HostsFile},
+    hosts::{self, EditorFiles, HostConfig, HostId, HostKind, HostsFile, IdentityError},
     mcp_sign_in::{McpEvent, McpSignIn, McpSignIns},
     runtime::runtime,
     screen::{Screen, SettingsPage},
     services::{self, Services},
+    settings::{SetSettingError, Settings},
 };
 use anyhow::{Context as _, Result};
 use artisan_api::tls::Identity;
@@ -91,7 +93,7 @@ impl Effects {
 pub struct Core {
     pub files: EditorFiles,
     pub identity: Option<Identity>,
-    pub settings: EditorSettings,
+    pub settings: Settings,
     pub device_name: String,
     hosts: HashMap<HostId, HostData>,
     hosts_file: HostsFile,
@@ -119,23 +121,43 @@ impl Drop for DrainGuard {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OpenCoreError {
+    #[error("open this device's identity")]
+    Identity(#[source] IdentityError),
+    #[error("read the paired Forges")]
+    Hosts(#[source] ReadConfigError),
+}
+
 impl Core {
-    pub fn new(files: EditorFiles) -> Result<Self> {
-        Self::with_services(files, Services::installed())
+    pub fn with_services(files: EditorFiles, services: Services) -> Result<Self, OpenCoreError> {
+        let identity = files.identity().map_err(OpenCoreError::Identity)?;
+        let hosts_file = files.hosts().map_err(OpenCoreError::Hosts)?;
+        Ok(Self::assemble(files, services, Some(identity), hosts_file))
     }
-    pub fn with_services(files: EditorFiles, services: Services) -> Result<Self> {
-        let identity = Some(files.identity()?);
-        let hosts_file = files.hosts()?;
-        Ok(Self::assemble(files, services, identity, hosts_file))
-    }
-    pub fn init(files: EditorFiles) -> (Self, Option<anyhow::Error>) {
-        match Self::new(files.clone()) {
-            Ok(core) => (core, None),
-            Err(error) => (
-                Self::assemble(files, Services::installed(), None, HostsFile::default()),
-                Some(error),
-            ),
+    pub fn init(files: EditorFiles) -> (Self, Vec<OpenCoreError>) {
+        let mut failures = Vec::new();
+        let identity = match files.identity() {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                failures.push(OpenCoreError::Identity(error));
+                None
+            }
+        };
+        let hosts_file = match files.hosts() {
+            Ok(hosts) => hosts,
+            Err(error) => {
+                failures.push(OpenCoreError::Hosts(error));
+                HostsFile::default()
+            }
+        };
+        for failure in &failures {
+            tracing::error!(error = %::diagnostics::chain(failure), "opening the Editor's files");
         }
+        (
+            Self::assemble(files, Services::installed(), identity, hosts_file),
+            failures,
+        )
     }
     fn assemble(
         files: EditorFiles,
@@ -143,10 +165,13 @@ impl Core {
         identity: Option<Identity>,
         hosts_file: HostsFile,
     ) -> Self {
-        let settings = files.settings().unwrap_or_else(|error| {
-            tracing::warn!("ignored unreadable settings: {error:#}");
-            EditorSettings::new()
-        });
+        let settings = Settings::read(files.settings());
+        if let Some(error) = settings.unreadable() {
+            tracing::error!(
+                error = %::diagnostics::chain(error),
+                "settings.json is unreadable; keeping it and blocking saves until it is recovered"
+            );
+        }
         let wake = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
         let admission = AdmissionOrder::default();
         let draining = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -246,13 +271,14 @@ impl Core {
 
     #[cfg(feature = "test-support")]
     pub fn add_test_host(&mut self, config: &HostConfig, client: ForgeClient) {
-        let mut file = self.hosts_file.clone();
-        file.hosts.retain(|known| known.id != config.id);
-        file.hosts.push(config.clone());
-        file.last = Some(config.id.clone());
-        if let Err(error) = self.files.save_hosts(&file) {
-            tracing::warn!("test hosts.json: {error:#}");
-        }
+        let file = self
+            .files
+            .update_hosts(|file| {
+                file.hosts.retain(|known| known.id != config.id);
+                file.hosts.push(config.clone());
+                file.last = Some(config.id.clone());
+            })
+            .expect("invariant: test hosts.json is writable");
         self.hosts_file = file;
         let mut host = HostData::new(
             config.id.clone(),
@@ -404,11 +430,14 @@ impl Core {
         if let Some(host) = screen.host()
             && self.hosts_file.last.as_ref() != Some(host)
         {
-            let mut file = self.hosts_file.clone();
-            file.last = Some(host.clone());
-            match self.files.save_hosts(&file) {
-                Ok(()) => self.hosts_file = file,
-                Err(error) => tracing::warn!("couldn't remember the last host: {error:#}"),
+            let last = host.clone();
+            match self.files.update_hosts(|file| file.last = Some(last)) {
+                Ok(file) => self.hosts_file = file,
+                Err(error) => tracing::warn!(
+                    host = %host,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't remember the last host"
+                ),
             }
         }
         let previous = std::mem::replace(&mut self.screen, screen);
@@ -459,32 +488,61 @@ impl Core {
             self.events.push(CoreEvent::ScreenChanged);
         }
     }
-    pub fn set_setting(&mut self, key: &str, value: serde_json::Value) {
-        if self.settings.get(key) == Some(&value) {
-            return;
+    pub fn set_setting(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), SetSettingError> {
+        if let Settings::Unreadable(source) = &self.settings {
+            return Err(SetSettingError::Unreadable {
+                key: key.to_owned(),
+                source: source.clone(),
+            });
         }
-        let previous = self.settings.insert(key.to_owned(), value);
-        if let Err(error) = self.files.save_settings(&self.settings) {
-            match previous {
-                Some(value) => {
-                    self.settings.insert(key.to_owned(), value);
-                }
-                None => {
-                    self.settings.remove(key);
-                }
+        if self.settings.get(key) == Some(&value) {
+            return Ok(());
+        }
+        let saved = self.files.update_settings(|settings| {
+            settings.insert(key.to_owned(), value);
+        });
+        match saved {
+            Ok(settings) => {
+                self.settings = Settings::Loaded(settings);
+                self.events.push(CoreEvent::SettingsChanged);
+                Ok(())
             }
-            tracing::error!("couldn't save settings: {error:#}");
-            return;
+            Err(crate::core::config_file::UpdateConfigError::Read(error)) => {
+                let error = std::sync::Arc::new(error);
+                self.settings = Settings::Unreadable(error.clone());
+                self.events.push(CoreEvent::SettingsChanged);
+                Err(SetSettingError::Unreadable {
+                    key: key.to_owned(),
+                    source: error,
+                })
+            }
+            Err(source) => Err(SetSettingError::Save {
+                key: key.to_owned(),
+                source,
+            }),
+        }
+    }
+    pub fn reload_settings(&mut self) {
+        self.settings = Settings::read(self.files.settings());
+        if let Some(error) = self.settings.unreadable() {
+            tracing::warn!(
+                error = %::diagnostics::chain(error),
+                "settings.json is still unreadable"
+            );
         }
         self.events.push(CoreEvent::SettingsChanged);
     }
     pub fn remove_host(&mut self, id: &HostId) -> Result<()> {
-        let mut file = self.hosts_file.clone();
-        file.hosts.retain(|known| &known.id != id);
-        if file.last.as_ref() == Some(id) {
-            file.last = None;
-        }
-        self.files.save_hosts(&file)?;
+        let file = self.files.update_hosts(|file| {
+            file.hosts.retain(|known| &known.id != id);
+            if file.last.as_ref() == Some(id) {
+                file.last = None;
+            }
+        })?;
         self.hosts_file = file;
         self.relay_configs.remove(id);
         if let Some(host) = self.hosts.remove(id) {
@@ -636,14 +694,15 @@ impl Core {
         if matches!(config.kind, HostKind::Account { .. }) {
             self.relay_configs.insert(opened.id.clone(), config.clone());
         } else if !self.hosts_file.hosts.contains(&config) {
-            let mut file = self.hosts_file.clone();
-            file.hosts.retain(|known| known.id != config.id);
-            file.hosts.push(config.clone());
-            match self.files.save_hosts(&file) {
-                Ok(()) => self.hosts_file = file,
-                Err(error) => self
-                    .account
-                    .report(&error.context("save the pairing with this machine's Forge")),
+            let saved = self.files.update_hosts(|file| {
+                file.hosts.retain(|known| known.id != config.id);
+                file.hosts.push(config.clone());
+            });
+            match saved {
+                Ok(file) => self.hosts_file = file,
+                Err(error) => self.account.report(
+                    &anyhow::Error::new(error).context("save the pairing with this machine's Forge"),
+                ),
             }
         }
         let mut host = HostData::new(
@@ -849,18 +908,25 @@ impl Core {
                     {
                         continue;
                     }
-                    if let HostEvent::WslDistro { distro } = &event {
-                        let mut file = self.hosts_file.clone();
-                        if let Some(config) = file.hosts.iter_mut().find(|config| config.id == id) {
-                            config.kind = HostKind::Wsl {
-                                distro: distro.clone(),
-                            };
-                            match self.files.save_hosts(&file) {
-                                Ok(()) => self.hosts_file = file,
-                                Err(error) => tracing::warn!(
-                                    "couldn't save the host's WSL distribution: {error:#}"
-                                ),
+                    if let HostEvent::WslDistro { distro } = &event
+                        && self.hosts_file.hosts.iter().any(|config| config.id == id)
+                    {
+                        let saved = self.files.update_hosts(|file| {
+                            if let Some(config) =
+                                file.hosts.iter_mut().find(|config| config.id == id)
+                            {
+                                config.kind = HostKind::Wsl {
+                                    distro: distro.clone(),
+                                };
                             }
+                        });
+                        match saved {
+                            Ok(file) => self.hosts_file = file,
+                            Err(error) => tracing::warn!(
+                                host = %id,
+                                error = %::diagnostics::chain(&error),
+                                "couldn't save the host's WSL distribution"
+                            ),
                         }
                     }
                     if let HostEvent::EditorCall { id: call_id, call } = &event {

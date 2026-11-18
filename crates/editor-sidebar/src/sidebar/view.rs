@@ -367,7 +367,13 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::RailHover(glyph) => {
             animation_started = sidebar.rail_motion.play(glyph, std::time::Instant::now());
         }
-        ViewAction::SetDarkMode(dark) => core.set_setting("dark_mode", dark.into()),
+        ViewAction::SetDarkMode(dark) => {
+            if let Err(error) = core.set_setting("dark_mode", dark.into()) {
+                let cause = ::diagnostics::chain(&error);
+                tracing::error!(error = %cause, "saving the theme");
+                sidebar.error = Some(format!("Couldn't save the theme: {cause}"));
+            }
+        }
         ViewAction::ThreadViewport {
             host,
             instance,

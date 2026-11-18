@@ -5,7 +5,7 @@ use artisan_account::network::AccountProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::core::account::{AccountMachine, AccountPhase};
-use crate::core::hosts::{read_json, write_json};
+use crate::core::config_file;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryGate {
@@ -64,12 +64,14 @@ pub fn load_onboarding(
     base_url: &str,
     account_id: &str,
 ) -> Result<Option<OnboardingRecord>> {
-    read_json(&onboarding_path(data_dir, base_url, account_id))
+    Ok(config_file::read(&onboarding_path(
+        data_dir, base_url, account_id,
+    ))?)
 }
 
 pub fn save_onboarding(data_dir: &Path, record: &OnboardingRecord) -> Result<()> {
-    write_json(
+    Ok(config_file::write(
         &onboarding_path(data_dir, &record.base_url, &record.account_id),
         record,
-    )
+    )?)
 }

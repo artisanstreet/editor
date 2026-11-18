@@ -30,6 +30,8 @@ sse-core.workspace = true
 tokio-util.workspace = true
 reqwest = { workspace = true, features = ["json", "stream", "zstd"] }
 claude-ai-browser.workspace = true
+diagnostics.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 editor-core = { path = ".", features = ["test-support"] }

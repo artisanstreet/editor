@@ -3,6 +3,7 @@ pub mod account;
 pub mod ae;
 mod agent_calls;
 pub mod client;
+pub mod config_file;
 pub mod connection;
 pub mod delivery;
 pub mod host;
@@ -14,6 +15,7 @@ pub mod resident;
 pub mod runtime;
 pub mod screen;
 pub mod services;
+pub mod settings;
 pub mod store;
 #[cfg(feature = "test-support")]
 mod testing;
@@ -30,7 +32,9 @@ pub use host::{
     Attention, BlobImage, HostData, HostEvent, HostInstance, LiveSnapshot, ProjectionLoad,
     ThreadPage, ThreadPageDirection, ThreadSummary, WslStatus,
 };
-pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind};
+pub use hosts::{
+    DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,
+};
 pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 #[cfg(feature = "test-support")]
 pub use range_window::RangeCompletion;
@@ -40,5 +44,6 @@ pub use screen::{DraggedThread, Screen, SettingsPage, SettingsSection};
 #[cfg(feature = "test-support")]
 pub use services::RelayScript;
 pub use services::{RelayDialRequest, Services};
-pub use store::{Core, CoreEvent};
+pub use settings::{SetSettingError, Settings};
+pub use store::{Core, CoreEvent, OpenCoreError};
 pub mod diagnostics;

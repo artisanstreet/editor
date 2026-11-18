@@ -2,14 +2,15 @@ mod enrollment;
 
 use crate::core::{
     access::{self, EntryGate, OnboardingRecord},
+    config_file,
     delivery::{AdmissionOrder, Delivery},
-    hosts::{EditorFiles, read_json, write_json},
+    hosts::EditorFiles,
     runtime::runtime,
     services::Services,
 };
 use anyhow::{Context as _, Result};
-use artisan_account::browser::{self, Arrival, Handoff, Problem};
 pub use artisan_account::browser::Provider;
+use artisan_account::browser::{self, Arrival, Handoff, Problem};
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
 use enrollment::AeBinding;
 pub use enrollment::LocalForge;
@@ -76,7 +77,10 @@ impl SecondFactor {
     #[must_use]
     pub fn parse(input: &str) -> Option<Self> {
         let code = input.trim();
-        match (code.is_empty(), code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())) {
+        match (
+            code.is_empty(),
+            code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
+        ) {
             (true, _) => None,
             (false, true) => Some(Self::Authenticator(code.to_owned())),
             (false, false) => Some(Self::Recovery(code.to_owned())),
@@ -217,10 +221,11 @@ impl Account {
         order: AdmissionOrder,
         effects: crate::core::store::Effects,
     ) -> Self {
-        let (stored, unreadable) = match read_json::<AccountFile>(&files.dir.join("account.json")) {
-            Ok(stored) => (stored, None),
-            Err(error) => (AccountFile::default(), Some(error)),
-        };
+        let (stored, unreadable) =
+            match config_file::read::<AccountFile>(&files.dir.join("account.json")) {
+                Ok(stored) => (stored, None),
+                Err(error) => (AccountFile::default(), Some(error)),
+            };
         let base_url = services
             .core_url
             .clone()
@@ -232,7 +237,10 @@ impl Account {
         let session = stored.session_token.map(SessionToken::new);
         let phase = match (unreadable, &session, stored.profile) {
             (Some(error), _, _) => AccountPhase::Error {
-                message: format!("Couldn't read the saved sign-in: {error:#}"),
+                message: format!(
+                    "Couldn't read the saved sign-in: {}",
+                    ::diagnostics::chain(&error)
+                ),
             },
             (None, Some(_), Some(profile)) => AccountPhase::Authenticated {
                 profile,
@@ -329,14 +337,14 @@ impl Account {
         self.events.account(AccountEvent::Changed);
     }
     fn persist(&self) -> Result<()> {
-        write_json(
+        Ok(config_file::write(
             &self.files.dir.join("account.json"),
             &AccountFile {
                 base_url: Some(self.base_url.clone()),
                 session_token: self.session.as_ref().map(|token| token.as_str().to_owned()),
                 profile: self.profile().cloned(),
             },
-        )
+        )?)
     }
     fn load_onboarding(&mut self) {
         let Some(id) = self.profile().map(|p| p.account_id.clone()) else {

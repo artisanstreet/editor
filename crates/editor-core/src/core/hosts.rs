@@ -1,11 +1,12 @@
 use crate::core::ae::Ae;
 use crate::core::client::ForgeClient;
+use crate::core::config_file::{self, ReadConfigError, UpdateConfigError, WriteConfigError};
 use crate::core::runtime::runtime;
 use anyhow::{Context, Result, bail};
 use artisan_api::PairRequest;
 use artisan_api::tls::Identity;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -55,80 +56,87 @@ pub struct EditorFiles {
     pub dir: PathBuf,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DataDirError {
+    #[error("find the Editor's data directory")]
+    Resolve(#[source] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("read this device's identity")]
+    Read(#[source] ReadConfigError),
+    #[error("generate this device's identity")]
+    Generate(#[source] anyhow::Error),
+    #[error("save this device's new identity")]
+    Save(#[source] WriteConfigError),
+    #[error("{path} was removed while another Editor created it")]
+    Vanished { path: PathBuf },
+}
+
 impl EditorFiles {
-    #[must_use]
-    pub fn default_location() -> Self {
-        let dir = std::env::var_os("ARTISAN_EDITOR_DATA").map_or_else(
-            || {
-                artisan_paths::App::Editor
-                    .data()
-                    .unwrap_or_else(|_| std::env::temp_dir().join("artisan-editor"))
-            },
-            PathBuf::from,
-        );
-        Self { dir }
+    pub fn default_location() -> Result<Self, DataDirError> {
+        let dir = match std::env::var_os("ARTISAN_EDITOR_DATA") {
+            Some(dir) => PathBuf::from(dir),
+            None => artisan_paths::App::Editor
+                .data()
+                .map_err(DataDirError::Resolve)?,
+        };
+        Ok(Self { dir })
     }
 
-    pub fn identity(&self) -> Result<Identity> {
+    pub fn identity(&self) -> Result<Identity, IdentityError> {
         let path = self.dir.join("identity.json");
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+        if let Some(identity) =
+            config_file::read::<Option<Identity>>(&path).map_err(IdentityError::Read)?
+        {
+            return Ok(identity);
+        }
+        let identity = Identity::generate("artisan-editor").map_err(IdentityError::Generate)?;
+        match config_file::create(&path, &identity) {
+            Ok(()) => Ok(identity),
+            Err(WriteConfigError::AlreadyExists { .. }) => {
+                config_file::read::<Option<Identity>>(&path)
+                    .map_err(IdentityError::Read)?
+                    .ok_or(IdentityError::Vanished { path })
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let identity = Identity::generate("artisan-editor")?;
-                write_json(&path, &identity)?;
-                Ok(identity)
-            }
-            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+            Err(error) => Err(IdentityError::Save(error)),
         }
     }
 
-    pub fn hosts(&self) -> Result<HostsFile> {
-        read_json(&self.dir.join("hosts.json"))
+    pub fn hosts(&self) -> Result<HostsFile, ReadConfigError> {
+        config_file::read(&self.hosts_path())
     }
 
-    pub fn save_hosts(&self, hosts: &HostsFile) -> Result<()> {
-        write_json(&self.dir.join("hosts.json"), hosts)
+    pub fn save_hosts(&self, hosts: &HostsFile) -> Result<(), WriteConfigError> {
+        config_file::write(&self.hosts_path(), hosts)
     }
 
-    pub fn settings(&self) -> Result<EditorSettings> {
-        read_json(&self.dir.join("settings.json"))
+    pub fn update_hosts(
+        &self,
+        change: impl FnOnce(&mut HostsFile),
+    ) -> Result<HostsFile, UpdateConfigError> {
+        config_file::update(&self.hosts_path(), change).map(|(hosts, ())| hosts)
     }
 
-    pub fn save_settings(&self, settings: &EditorSettings) -> Result<()> {
-        write_json(&self.dir.join("settings.json"), settings)
+    pub fn settings(&self) -> Result<EditorSettings, ReadConfigError> {
+        config_file::read(&self.settings_path())
     }
-}
 
-pub(crate) fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    pub fn update_settings(
+        &self,
+        change: impl FnOnce(&mut EditorSettings),
+    ) -> Result<EditorSettings, UpdateConfigError> {
+        config_file::update(&self.settings_path(), change).map(|(settings, ())| settings)
     }
-}
 
-pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    use std::io::Write as _;
-    let parent = path.parent().context("configuration directory")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).context("create configuration temporary")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o600))
-            .context("restrict configuration temporary")?;
+    fn hosts_path(&self) -> PathBuf {
+        self.dir.join("hosts.json")
     }
-    serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
-    temporary.flush()?;
-    temporary
-        .persist(path)
-        .with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+
+    fn settings_path(&self) -> PathBuf {
+        self.dir.join("settings.json")
+    }
 }
 
 #[derive(Debug, Deserialize)]

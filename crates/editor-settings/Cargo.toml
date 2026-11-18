@@ -12,6 +12,7 @@ doctest = false
 test-support = ["editor-core/test-support", "editor-ui/test-support"]
 
 [dependencies]
+diagnostics.workspace = true
 aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-ui = { workspace = true }
