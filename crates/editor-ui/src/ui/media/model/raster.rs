@@ -213,6 +213,9 @@ struct Grid {
     height: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cancelled;
+
 pub fn render(
     mesh: &Mesh,
     camera: &Camera,
@@ -220,7 +223,8 @@ pub fn render(
     width: u32,
     height: u32,
     samples: u32,
-) -> Frame {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Frame, Cancelled> {
     let samples = samples.max(1);
     let grid = Grid {
         width: (width * samples) as usize,
@@ -228,13 +232,26 @@ pub fn render(
     };
     #[expect(clippy::cast_precision_loss, reason = "frame sides are small")]
     let projection = Projection::new(mesh, camera, grid.width as f32, grid.height as f32);
-    let winner = visibility(&projection, grid);
-    let color = shade(mesh, &projection, &winner, look, camera, grid, samples);
-    Frame {
+    let winner = visibility(&projection, grid, cancelled)?;
+    let color = shade(
+        mesh,
+        &projection,
+        &winner,
+        look,
+        camera,
+        grid,
+        samples,
+        cancelled,
+    )?;
+    Ok(Frame {
         width,
         height,
         pixels: resolve(&winner, &color, grid, samples),
-    }
+    })
+}
+
+fn proceed(cancelled: &dyn Fn() -> bool) -> Result<(), Cancelled> {
+    if cancelled() { Err(Cancelled) } else { Ok(()) }
 }
 
 #[expect(
@@ -243,11 +260,16 @@ pub fn render(
     clippy::cast_sign_loss,
     reason = "sample coordinates are small, non-negative, and clamped to the grid"
 )]
-fn visibility(projection: &Projection, grid: Grid) -> Vec<u32> {
+fn visibility(
+    projection: &Projection,
+    grid: Grid,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u32>, Cancelled> {
     let mut depth = vec![0.0_f32; grid.width * grid.height];
     let mut winner = vec![EMPTY; grid.width * grid.height];
     let (right, bottom) = (grid.width as f32 - 1.0, grid.height as f32 - 1.0);
     for triangle in 0..projection.projected.len() / 3 {
+        proceed(cancelled)?;
         let screen = projection.screen(triangle);
         let corners = screen.corners;
         if corners.iter().any(|corner| corner.inverse_depth <= 0.0)
@@ -302,7 +324,7 @@ fn visibility(projection: &Projection, grid: Grid) -> Vec<u32> {
             }
         }
     }
-    winner
+    Ok(winner)
 }
 
 #[expect(clippy::cast_precision_loss, reason = "sample coordinates are small")]
@@ -314,11 +336,15 @@ fn shade(
     camera: &Camera,
     grid: Grid,
     samples: u32,
-) -> Vec<Vec3> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Vec3>, Cancelled> {
     let lights = Lights::new();
     let edge_half_width = 0.5 * samples as f32;
     let mut color = vec![Vec3::ZERO; winner.len()];
     for (at, (out, triangle)) in color.iter_mut().zip(winner).enumerate() {
+        if at % grid.width == 0 {
+            proceed(cancelled)?;
+        }
         if *triangle == EMPTY {
             continue;
         }
@@ -347,7 +373,7 @@ fn shade(
         }
         *out = shaded;
     }
-    color
+    Ok(color)
 }
 
 #[expect(
@@ -458,3 +484,7 @@ fn encode(linear: f32) -> u8 {
     let index = linear.clamp(0.0, 1.0).mul_add(4095.0, 0.5) as usize;
     TABLE[index.min(4095)]
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/ui/media/model/raster.rs"]
+mod tests;

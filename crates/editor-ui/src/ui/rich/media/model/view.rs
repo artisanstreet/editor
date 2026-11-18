@@ -1,7 +1,7 @@
 use super::{ModelBlock, Shading};
 use crate::ui::media::{
     model::{
-        Camera, Look,
+        Camera, Cancelled, Look,
         load::{Geometry, LoadedModel, ModelAssets, RendererCapability},
         render,
     },
@@ -24,13 +24,15 @@ use std::{
     num::NonZeroUsize,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::task::AbortHandle;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 static NEXT_WAITER: AtomicU64 = AtomicU64::new(1);
+static RASTER_WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 pub(crate) type FrameFactory = Rc<dyn Fn(Element, f32, f32, &str, Option<bool>) -> Element>;
 pub(crate) type PlaceholderFactory = Rc<dyn Fn(&str, bool) -> Element>;
@@ -70,14 +72,23 @@ struct Entry {
     drag: Option<Drag>,
     bounds: Rc<Cell<Option<Rect>>>,
     shown: Option<(ImageHandle, FrameKey)>,
-    rendering: Option<(FrameKey, AbortHandle)>,
+    rendering: Option<Rendering>,
     generation: u64,
+}
+struct Rendering {
+    key: FrameKey,
+    stop: CancellationToken,
+}
+impl Drop for Rendering {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
 }
 struct Completion {
     id: String,
     generation: u64,
     key: FrameKey,
-    frame: Option<crate::ui::media::model::Frame>,
+    frame: crate::ui::media::model::Frame,
 }
 struct State {
     entries: HashMap<String, Entry>,
@@ -85,15 +96,6 @@ struct State {
     delivery: Delivery<Completion>,
     mailbox: aqua::mailbox::Mailbox<()>,
     next_generation: u64,
-}
-impl Drop for State {
-    fn drop(&mut self) {
-        for entry in self.entries.values() {
-            if let Some((_, task)) = &entry.rendering {
-                task.abort();
-            }
-        }
-    }
 }
 #[derive(Clone)]
 pub(crate) struct ModelState(Rc<RefCell<State>>);
@@ -119,11 +121,8 @@ impl ModelState {
         self.0.borrow_mut().waiters.remove(id);
     }
     fn suspend(&self, id: &str) {
-        if let Some(entry) = self.0.borrow_mut().entries.remove(id) {
-            if let Some((_, task)) = entry.rendering {
-                task.abort();
-            }
-        }
+        let removed = self.0.borrow_mut().entries.remove(id);
+        drop(removed);
     }
     fn waiter(&self, id: &str) -> u64 {
         *self
@@ -144,14 +143,14 @@ impl ModelState {
                 || !entry
                     .rendering
                     .as_ref()
-                    .is_some_and(|(key, _)| *key == completed.key)
+                    .is_some_and(|rendering| rendering.key == completed.key)
             {
                 continue;
             }
             entry.rendering = None;
-            if let Some(frame) = completed.frame
-                && let Ok(decoded) =
-                    aqua::images::DecodedImage::from_rgba(frame.width, frame.height, frame.pixels)
+            let frame = completed.frame;
+            if let Ok(decoded) =
+                aqua::images::DecodedImage::from_rgba(frame.width, frame.height, frame.pixels)
             {
                 if let Ok(image) = images.insert(decoded) {
                     entry.shown = Some((image, completed.key));
@@ -209,9 +208,7 @@ impl ModelState {
             let generation = state.next_generation;
             state.next_generation = state.next_generation.wrapping_add(1);
             let entry = state.entries.get_mut(id).unwrap();
-            if let Some((_, task)) = entry.rendering.take() {
-                task.abort();
-            }
+            entry.rendering = None;
             entry.shown = None;
             entry.generation = generation;
         }
@@ -231,33 +228,48 @@ impl ModelState {
         }
         let generation = entry.generation;
         let id = id.to_owned();
-        let task = runtime::runtime().spawn(async move {
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+        runtime::runtime().spawn(async move {
+            let permit = tokio::select! {
+                () = task_stop.cancelled() => return,
+                permit = Arc::clone(&RASTER_WORKERS).acquire_owned() => {
+                    permit.expect("invariant: the raster worker semaphore is never closed")
+                }
+            };
+            let raster_stop = task_stop.clone();
             let rendered = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let Geometry::Software(mesh) = &model.geometry else {
-                    return None;
+                    unreachable!("invariant: software frames render software geometry");
                 };
-                Some(render(
+                render(
                     mesh,
                     &key.camera,
                     &key.look,
                     key.width,
                     key.height,
                     key.samples,
-                ))
+                    &|| raster_stop.is_cancelled(),
+                )
             })
-            .await
-            .ok()
-            .flatten();
+            .await;
+            let frame = match rendered {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(Cancelled)) => return,
+                Err(error) if error.is_cancelled() => return,
+                Err(error) => std::panic::resume_unwind(error.into_panic()),
+            };
             let _ = sender
                 .send(Completion {
                     id,
                     generation,
                     key,
-                    frame: rendered,
+                    frame,
                 })
                 .await;
         });
-        entry.rendering = Some((key, task.abort_handle()));
+        entry.rendering = Some(Rendering { key, stop });
     }
 }
 

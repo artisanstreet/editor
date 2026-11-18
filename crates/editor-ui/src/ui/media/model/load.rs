@@ -36,7 +36,7 @@ pub struct LoadedModel {
 }
 
 impl LoadedModel {
-    fn from_model(model: Model, renderer: RendererCapability) -> Self {
+    pub(crate) fn from_model(model: Model, renderer: RendererCapability) -> Self {
         let Model {
             mesh,
             triangles,

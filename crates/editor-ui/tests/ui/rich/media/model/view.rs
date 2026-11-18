@@ -103,11 +103,13 @@ fn released_view_rejects_old_software_completion_for_reused_id() {
         height: 1,
         samples: 1,
     };
-    let pending = runtime::runtime().spawn(std::future::pending::<()>());
     let generation = {
         let mut state = state.0.borrow_mut();
         let entry = state.entries.get_mut("model").unwrap();
-        entry.rendering = Some((key, pending.abort_handle()));
+        entry.rendering = Some(Rendering {
+            key,
+            stop: CancellationToken::new(),
+        });
         entry.generation
     };
     assert_ne!(generation, old_generation);
@@ -119,11 +121,11 @@ fn released_view_rejects_old_software_completion_for_reused_id() {
                     id: "model".to_owned(),
                     generation: old_generation,
                     key,
-                    frame: Some(crate::ui::media::model::Frame {
+                    frame: crate::ui::media::model::Frame {
                         width: 1,
                         height: 1,
                         pixels: vec![255, 0, 0, 255],
-                    }),
+                    },
                 })
                 .await
                 .is_ok()
@@ -136,4 +138,50 @@ fn released_view_rejects_old_software_completion_for_reused_id() {
     let entry = &inner.entries["model"];
     assert!(entry.shown.is_none());
     assert!(entry.rendering.is_some());
+}
+
+#[test]
+fn releasing_a_view_cancels_its_queued_software_render_and_frees_the_model() {
+    let busy = runtime::runtime()
+        .block_on(Arc::clone(&RASTER_WORKERS).acquire_many_owned(2))
+        .unwrap();
+    let state = ModelState::default();
+    let model = Arc::new(LoadedModel::from_model(
+        crate::ui::media::model::parse(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", None, None)
+            .unwrap(),
+        RendererCapability::Software,
+    ));
+    let initial = Camera::default();
+    state.ensure("model", initial, Shading::Shaded);
+    let key = FrameKey {
+        model: 1,
+        camera: initial,
+        look: Look {
+            base: glam::Vec3::ONE,
+            edges: None,
+        },
+        width: 8,
+        height: 8,
+        samples: 1,
+    };
+    state.render_software("model", key, Arc::clone(&model));
+    let stop = state.0.borrow().entries["model"]
+        .rendering
+        .as_ref()
+        .unwrap()
+        .stop
+        .clone();
+    assert!(!stop.is_cancelled());
+    state.release("model");
+    assert!(stop.is_cancelled());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while Arc::strong_count(&model) > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled render still holds the model"
+        );
+        std::thread::yield_now();
+    }
+    drop(busy);
+    assert!(state.0.borrow_mut().delivery.drain().is_empty());
 }
