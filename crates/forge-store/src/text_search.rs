@@ -1,9 +1,13 @@
 use crate::Store;
-use anyhow::{Context, Result};
+use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ProjectId, Seq, TextHit, TextSearchQuery, ThreadId, Timestamp};
 use fff_grep::{LineTerminator, Match, Matcher, NoError, Searcher, Sink, SinkMatch};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
+
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
+operation_error!(TextSearchError(StorageError), "search message text for {query:?}", query: String);
 
 const SCAN_ROWS: usize = 60_000;
 const DEFAULT_HITS: u32 = 30;
@@ -135,7 +139,7 @@ fn home(conn: &Connection, thread: &ThreadId) -> Result<Option<Home>> {
         },
     )
     .optional()
-    .with_context(|| format!("read thread {thread} for a text hit"))
+    .map_err(Into::into)
 }
 
 fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>> {
@@ -205,11 +209,16 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
 }
 
 impl Store {
-    pub async fn text_search(&self, query: TextSearchQuery) -> Result<Vec<TextHit>> {
-        self.scan(move |conn| {
-            text_hits(conn, &query)
-                .with_context(|| format!("search message text for {:?}", query.query))
-        })
-        .await
+    pub async fn text_search(
+        &self,
+        query: TextSearchQuery,
+    ) -> Result<Vec<TextHit>, TextSearchError> {
+        let searched = query.query.clone();
+        self.scan(move |conn| text_hits(conn, &query))
+            .await
+            .map_err(|cause| TextSearchError {
+                query: searched,
+                cause: Box::new(cause),
+            })
     }
 }

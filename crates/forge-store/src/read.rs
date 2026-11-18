@@ -1,6 +1,5 @@
-//! Queries shared by the read pool and the writer's transactions.
-
-use anyhow::{Context, Result};
+use crate::content::ContentError;
+use crate::error::StorageError;
 use artisan_api::{
     Envelope, Event, Item, ItemId, ItemsPage, ItemsQuery, Project, ProjectId, Run, RunId, Seq,
     Thread, ThreadId, WorkSpan,
@@ -8,23 +7,37 @@ use artisan_api::{
 use rusqlite::{Connection, OptionalExtension, Params, params};
 use serde::{Serialize, de::DeserializeOwned};
 
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
 const DEFAULT_PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
 
-pub fn to_body<T: Serialize>(value: &T) -> Result<String> {
-    serde_json::to_string(value).context("serialise row body")
+pub fn to_body<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(StorageError::encode::<T>)
 }
 
-fn from_body<T: DeserializeOwned>(body: &str) -> Result<T> {
-    serde_json::from_str(body).context("parse row body")
+pub fn from_body<T: DeserializeOwned>(body: &str) -> Result<T> {
+    serde_json::from_str(body).map_err(StorageError::decode::<T>)
 }
 
-/// The serde name of a unit enum variant, as stored in status columns.
-pub fn tag<T: Serialize>(value: &T) -> Result<String> {
-    serde_json::to_value(value)?
-        .as_str()
-        .context("stored status must be a unit enum")
-        .map(str::to_owned)
+pub fn from_value<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
+    serde_json::from_value(value).map_err(StorageError::decode::<T>)
+}
+
+pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<serde_json::Value> {
+    serde_json::to_value(value).map_err(StorageError::encode::<T>)
+}
+
+pub fn tag<T: Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(tag)) => tag,
+        Ok(other) => unreachable!("invariant: stored statuses are unit variants, not {other}"),
+        Err(error) => unreachable!("invariant: stored statuses always encode: {error}"),
+    }
+}
+
+pub fn untag<T: DeserializeOwned>(tag: String) -> Result<T> {
+    from_value(serde_json::Value::String(tag))
 }
 
 fn one<T: DeserializeOwned>(
@@ -61,7 +74,7 @@ pub fn max_seq(conn: &Connection) -> Result<Seq> {
         [],
         |row| row.get(0),
     )
-    .context("read the highest stored seq")
+    .map_err(Into::into)
 }
 
 pub fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
@@ -90,13 +103,13 @@ pub fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<It
     conn.prepare_cached(sql)?
         .query_map(params, item_row)?
         .collect::<rusqlite::Result<_>>()
-        .context("read Items")
+        .map_err(Into::into)
 }
 pub fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
     conn.prepare_cached("SELECT body FROM items WHERE id=?1")?
         .query_row([id.as_str()], item_row)
         .optional()
-        .context("read Item")
+        .map_err(Into::into)
 }
 pub fn item_by_native(
     conn: &Connection,
@@ -105,11 +118,9 @@ pub fn item_by_native(
     native_id: &str,
 ) -> Result<Option<Item>> {
     conn.prepare_cached("SELECT body FROM items WHERE thread_id=?1 AND native_id=?2 AND (?3 IS NULL OR run_id=?3) ORDER BY position DESC LIMIT 1")?
-        .query_row(params![thread_id.as_str(),native_id,run_id.map(RunId::as_str)],item_row).optional().context("read native Item")
+        .query_row(params![thread_id.as_str(),native_id,run_id.map(RunId::as_str)],item_row).optional().map_err(Into::into)
 }
 
-/// The thread's `Agent` item an engine addresses as `address` (Claude's
-/// `agentId`): the latest one, as a resumed agent keeps its address.
 pub fn agent_by_address(
     conn: &Connection,
     thread_id: &ThreadId,
@@ -124,10 +135,9 @@ pub fn agent_by_address(
     })
     .optional()
     .map(|id| id.map(ItemId))
-    .context("read the agent an engine address names")
+    .map_err(Into::into)
 }
 
-/// The names Artisan already gave subagents in a thread.
 pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
     let mut statement = conn.prepare_cached(
         "SELECT json_extract(body, '$.kind.label') FROM items
@@ -140,11 +150,8 @@ pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<Strin
     Ok(labels)
 }
 
-/// Items waiting on the user, across threads.
 pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
-    let mut statement = conn.prepare_cached(
-        "SELECT id,thread_id FROM items WHERE status='awaiting_user' ORDER BY position",
-    )?;
+    let mut statement = conn.prepare_cached(include_str!("sql/pending/awaiting_user.sql"))?;
     statement
         .query_map([], |row| {
             Ok(artisan_api::PendingItem {
@@ -153,7 +160,7 @@ pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::Pending
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .context("read pending interaction identities")
+        .map_err(Into::into)
 }
 
 pub fn pending_threads(
@@ -167,7 +174,7 @@ pub fn pending_threads(
     ))?;
     Ok(query
         .query_map(
-            params![serde_json::to_string(excluded)?, limit, artisan_api::now()],
+            params![to_body(excluded)?, limit, artisan_api::now()],
             |row| row.get::<_, String>(0),
         )?
         .map(|row| row.map(ThreadId))
@@ -181,12 +188,8 @@ pub fn continue_request(
     let reason: Option<String> = conn
         .prepare_cached(include_str!("sql/pending/continue_request.sql"))?
         .query_row([thread.as_str()], |row| row.get(0))
-        .optional()
-        .with_context(|| format!("read the continue request of thread {thread}"))?;
-    reason
-        .map(|reason| serde_json::from_value(serde_json::Value::String(reason)))
-        .transpose()
-        .with_context(|| format!("decode the continue request of thread {thread}"))
+        .optional()?;
+    reason.map(untag).transpose()
 }
 
 pub fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<bool> {
@@ -213,7 +216,7 @@ pub fn pending_inputs(
     let mut bytes = 0usize;
     let mut image_bytes = 0u64;
     while let Some(row) = rows.next()? {
-        let body = row.get_ref(0)?.as_str()?;
+        let body = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
         let item = item_row(row)?;
         let payload_bytes = if let artisan_api::ItemKind::UserMessage {
             text: artisan_api::TextContent::Stored(source),
@@ -229,8 +232,6 @@ pub fn pending_inputs(
             break;
         }
         let next_images = if let artisan_api::ItemKind::UserMessage { images, .. } = &item.kind {
-            // A bad historical reference remains in the first batch. The
-            // coordinator validates it after Run creation and settles Failed.
             crate::blobs::input_images(blob_dir, images)
                 .map_or(128 * 1024 * 1024 + 1, |(_, bytes)| bytes)
         } else {
@@ -253,7 +254,6 @@ pub fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
     one(conn, "SELECT body FROM runs WHERE id = ?1", [id.as_str()])
 }
 
-/// Runs are only ever inserted in start order, so rowid orders them.
 pub fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>> {
     one(
         conn,
@@ -300,7 +300,6 @@ pub fn items_page(
     scoped_items_page(conn, thread_id, query, None)
 }
 
-/// `Some(None)` is the root transcript; `Some(Some(id))` is one agent's own work.
 #[expect(
     clippy::option_option,
     reason = "None is every item, Some(None) the root transcript, Some(Some) one agent's work"
@@ -325,11 +324,8 @@ pub fn scoped_items_page(
         .before
         .map_or(i64::MAX, |before| i64::try_from(before).unwrap_or(i64::MAX));
     let fetch = limit + 1;
-    // Without `after` the page is the newest items before `before` (the tail);
-    // with it the page reads forward from `after`.
     let order = if query.after.is_some() { "ASC" } else { "DESC" };
     let sql = match parent {
-        // An agent's own work, plus the messages the root sent it.
         Some(Some(_)) => format!("SELECT body FROM (
             SELECT body,position FROM items WHERE thread_id=?1 AND parent_id=?5 AND position>?2 AND position<?3
             UNION ALL
@@ -356,8 +352,6 @@ pub fn scoped_items_page(
     let mut byte_limited = false;
     while let Some(row) = rows.next()? {
         let body: String = row.get(0)?;
-        // Every persisted Item is compact after source normalization. No
-        // oversized-item exception or whole-source allocation is needed here.
         if bytes.saturating_add(body.len()) > PAGE_BYTES {
             byte_limited = true;
             break;
@@ -386,7 +380,7 @@ pub fn scoped_items_page(
     let runs = many(
         conn,
         "SELECT body FROM runs WHERE id IN (SELECT value FROM json_each(?1))",
-        [serde_json::to_string(&ids)?],
+        [to_body(&ids)?],
     )?;
     snapshot.commit()?;
     Ok(ItemsPage {
@@ -397,7 +391,6 @@ pub fn scoped_items_page(
     })
 }
 
-/// Items per page: `limit`, or the default, within bounds.
 fn page_limit(query: &ItemsQuery) -> usize {
     query
         .limit
@@ -407,7 +400,6 @@ fn page_limit(query: &ItemsQuery) -> usize {
         .clamp(1, MAX_PAGE)
 }
 
-/// A page's position bounds, exclusive: `(after, before)`.
 fn page_bounds(query: &ItemsQuery) -> (i64, i64) {
     let after = query
         .after
@@ -418,8 +410,6 @@ fn page_bounds(query: &ItemsQuery) -> (i64, i64) {
     (after, before)
 }
 
-/// Reads up to `limit` item bodies from `rows`, the first always and the
-/// rest within the page's byte budget. Returns them and whether more exist.
 fn read_page(rows: &mut rusqlite::Rows<'_>, limit: usize) -> Result<(Vec<Item>, bool)> {
     const PAGE_BYTES: usize = 8 * 1024 * 1024;
     let mut items: Vec<Item> = Vec::new();
@@ -437,7 +427,6 @@ fn read_page(rows: &mut rusqlite::Rows<'_>, limit: usize) -> Result<(Vec<Item>, 
     Ok((items, false))
 }
 
-/// The runs `items` and `work` belong to.
 fn page_runs(conn: &Connection, items: &[Item], work: &[WorkSpan]) -> Result<Vec<Run>> {
     let ids: std::collections::BTreeSet<_> = items
         .iter()
@@ -447,12 +436,10 @@ fn page_runs(conn: &Connection, items: &[Item], work: &[WorkSpan]) -> Result<Vec
     many(
         conn,
         "SELECT body FROM runs WHERE id IN (SELECT value FROM json_each(?1))",
-        [serde_json::to_string(&ids)?],
+        [to_body(&ids)?],
     )
 }
 
-/// The root work strictly between positions `after` and `before`, as one
-/// span per run's unbroken stretch: a row or another run's item ends one.
 fn work_spans(
     conn: &Connection,
     thread_id: &ThreadId,
@@ -500,13 +487,6 @@ fn work_spans(
     Ok(spans)
 }
 
-/// A page of the root transcript as the reader sees it: up to `limit`
-/// items that stand on their own (the newest before `before`, or the
-/// oldest after `after`) and the work between them as spans, so a turn of
-/// any length is one row's worth. The page owns the work from its far row
-/// to its near bound; the next page owns the work beyond the far row. A
-/// live run's newest work ships as items: it is always open, and its
-/// phase reads from it.
 pub fn transcript_page(
     conn: &Connection,
     thread_id: &ThreadId,
@@ -529,7 +509,6 @@ pub fn transcript_page(
     if !forward {
         items.reverse();
     }
-    // With more rows beyond it, the page's work stops at its far row.
     let far = |end: Option<&Item>| {
         end.filter(|_| more)
             .map(|item| i64::try_from(item.position).unwrap_or(i64::MAX))
@@ -556,7 +535,6 @@ pub fn transcript_page(
             drop(statement);
             let shipped = u32::try_from(newest.len()).unwrap_or(u32::MAX);
             if let Some(oldest) = newest.last().filter(|_| rest) {
-                // The rest of the span ends just before what shipped.
                 span.last = conn.query_row(
                     "SELECT max(position) FROM items WHERE thread_id=?1 AND parent_id IS NULL
                      AND work=1 AND position>=?2 AND position<?3",
@@ -581,8 +559,6 @@ pub fn transcript_page(
     })
 }
 
-/// The root work strictly between `after` and `before`, newest first: an
-/// open work section loading its span from the end the reader meets.
 pub fn work_page(conn: &Connection, thread_id: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
@@ -699,9 +675,10 @@ pub fn changes_since(
     Ok(Some(envelopes))
 }
 
-/// Compact current controls, independent of any transcript page. Every
-/// query is indexed by thread and kind, so it is computed per request.
-pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
+pub fn inspector(
+    conn: &Connection,
+    thread: &ThreadId,
+) -> Result<artisan_api::InspectorSummary, ContentError> {
     use artisan_api::{InspectorSummary, InspectorTerminal, InspectorWorkflow};
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
@@ -710,30 +687,24 @@ pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::In
         [thread.as_str()],
         |row| row.get(0),
     )?;
-    // Work counts as background when the engine started it there, or when it
-    // runs on after its run ended (a Codex command left running).
-    let terminals: Vec<InspectorTerminal> = many(conn,
-        "SELECT json_object('id',id,'command',json_extract(body,'$.kind.tool.command'),
-            'cwd',json_extract(body,'$.kind.tool.cwd'),'status',status,
-            'background',json(CASE WHEN COALESCE(json_extract(body,'$.kind.tool.background'),0)
-                OR (SELECT r.status FROM runs r WHERE r.id=items.run_id)!='running'
-                THEN 'true' ELSE 'false' END),
-            'watch',json(CASE WHEN COALESCE(json_extract(body,'$.kind.tool.watch'),0)
-                THEN 'true' ELSE 'false' END)) FROM items
-         WHERE thread_id=?1 AND status IN ('running','awaiting_user') AND json_extract(body,'$.kind.tool.kind')='shell' ORDER BY position DESC",
-         [thread.as_str()])?;
+    let terminals: Vec<InspectorTerminal> = many(
+        conn,
+        include_str!("sql/inspector/terminals.sql"),
+        [thread.as_str()],
+    )?;
     let agents = live_agents(conn, thread)?;
-    let workflows: Vec<InspectorWorkflow> = many(conn,
-        "SELECT json_object('id',id,'status',status,'name',json_extract(body,'$.kind.tool.name')) FROM items
-         WHERE thread_id=?1 AND status IN ('running','awaiting_user')
-            AND json_extract(body,'$.kind.tool.kind')='workflow' ORDER BY position DESC",
-        [thread.as_str()])?;
+    let workflows: Vec<InspectorWorkflow> = many(
+        conn,
+        include_str!("sql/inspector/workflows.sql"),
+        [thread.as_str()],
+    )?;
     let plan = current_plan(conn, thread)?;
     let goal = current_goal(conn, thread)?;
-    let questions = many(conn,
-        "SELECT json_object('id',id,'questions',json(json_extract(body,'$.kind.questions'))) FROM items
-            WHERE thread_id=?1 AND status='awaiting_user' AND kind_type='question'
-            AND json_extract(body,'$.kind.answers') IS NULL ORDER BY position ASC",[thread.as_str()])?;
+    let questions = many(
+        conn,
+        include_str!("sql/inspector/questions.sql"),
+        [thread.as_str()],
+    )?;
     let edits = conn
         .query_row(
             "SELECT added,removed FROM thread_edit_totals WHERE thread_id=?1 AND operations>0",
@@ -771,7 +742,6 @@ fn live_agents(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::
         if agent.label.is_empty() {
             agent.label = artisan_api::fallback_agent_name(agent.id.as_str()).into();
         }
-        // An engine's own subagent runs on the thread's settings but its own model.
         if let Some(config) = &mut agent.config
             && let Some(model) = &agent.model
             && config.model.as_ref() != Some(model)
@@ -783,49 +753,69 @@ fn live_agents(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::
     Ok(agents)
 }
 
-/// The thread's current goal, for the inspector's strip.
-fn current_goal(conn: &Connection, thread: &ThreadId) -> Result<Option<artisan_api::ThreadGoal>> {
-    conn.query_row(
-        "SELECT json_extract(body,'$.kind.kind.state'),json_quote(json_extract(body,'$.kind.text')) FROM items
-            WHERE thread_id=?1 AND parent_id IS NULL
-            AND kind_type='notice' AND json_extract(body,'$.kind.kind.type')='goal'
-            ORDER BY seq DESC LIMIT 1",
-        [thread.as_str()],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))
-    ).optional()?.and_then(|(state,objective)| {
-        let state = match state.as_str() {
-            "active" => artisan_api::ThreadGoalState::Active,
-            "paused" => artisan_api::ThreadGoalState::Paused,
-            "blocked" => artisan_api::ThreadGoalState::Blocked,
-            "usageLimited" => artisan_api::ThreadGoalState::UsageLimited,
-            "budgetLimited" => artisan_api::ThreadGoalState::BudgetLimited,
-            // Complete and cleared goals leave the strip.
-            _ => return None,
-        };
-        Some(from_body::<artisan_api::TextContent>(&objective).and_then(|objective| {
-            let prefix = match &objective {
-                artisan_api::TextContent::Inline(text) => std::borrow::Cow::Borrowed(text.as_str()),
-                artisan_api::TextContent::Stored(source) => std::borrow::Cow::Owned(crate::content::range(conn, &source.id,
-                    &artisan_api::ContentQuery { offset: 0, limit: Some(1024) })?
-                    .context("current goal source unavailable")?.text),
-            };
-            let mut summary: String = prefix.chars().take(160).collect();
-            if objective.byte_len() > summary.len() as u64 { summary.push('…'); }
-            Ok(artisan_api::ThreadGoal { objective, summary, state })
-        }))
-    }).transpose()
+fn goal_state(state: &str) -> Option<artisan_api::ThreadGoalState> {
+    match state {
+        "active" => Some(artisan_api::ThreadGoalState::Active),
+        "paused" => Some(artisan_api::ThreadGoalState::Paused),
+        "blocked" => Some(artisan_api::ThreadGoalState::Blocked),
+        "usageLimited" => Some(artisan_api::ThreadGoalState::UsageLimited),
+        "budgetLimited" => Some(artisan_api::ThreadGoalState::BudgetLimited),
+        _ => None,
+    }
 }
 
-/// The user's own messages in `thread`, in order, each labelled by its first
-/// line. A steer sits inside its run's work, and an agent's result Forge
-/// delivered reads as that agent's report, so neither is one.
-/// The checklist the inspector shows: the thread's newest top-level plan,
-/// until it is finished and the user has sent a message after it. A
-/// finished checklist stays through the turn that finished it, so the
-/// reader sees it complete; the next request starts without it.
+fn text_prefix(conn: &Connection, text: &artisan_api::TextContent) -> Result<String, ContentError> {
+    match text {
+        artisan_api::TextContent::Inline(text) => Ok(text.clone()),
+        artisan_api::TextContent::Stored(source) => crate::content::range(
+            conn,
+            &source.id,
+            &artisan_api::ContentQuery {
+                offset: 0,
+                limit: Some(1024),
+            },
+        )?
+        .map(|range| range.text)
+        .ok_or_else(|| ContentError::Missing {
+            content: source.id.clone(),
+        }),
+    }
+}
+
+fn current_goal(
+    conn: &Connection,
+    thread: &ThreadId,
+) -> Result<Option<artisan_api::ThreadGoal>, ContentError> {
+    let Some((state, objective)) = conn
+        .query_row(
+            include_str!("sql/inspector/goal.sql"),
+            [thread.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let Some(state) = goal_state(&state) else {
+        return Ok(None);
+    };
+    let objective = from_body::<artisan_api::TextContent>(&objective)?;
+    let prefix = text_prefix(conn, &objective)?;
+    let mut summary: String = prefix.chars().take(160).collect();
+    if objective.byte_len() > summary.len() as u64 {
+        summary.push('…');
+    }
+    Ok(Some(artisan_api::ThreadGoal {
+        objective,
+        summary,
+        state,
+    }))
+}
+
 fn current_plan(
     conn: &Connection,
     thread: &ThreadId,
-) -> Result<artisan_api::Collection<artisan_api::PlanStep>> {
+) -> Result<artisan_api::Collection<artisan_api::PlanStep>, ContentError> {
     let Some((position, steps)) = conn
         .query_row(
             "SELECT position,json_extract(body,'$.kind.steps') FROM items
@@ -839,13 +829,8 @@ fn current_plan(
         return Ok(artisan_api::Collection::default());
     };
     let plan: artisan_api::Collection<artisan_api::PlanStep> = from_body(&steps)?;
-    // The same user messages the navigator counts: not steers, not agents.
     let asked_since: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM items
-         WHERE thread_id=?1 AND kind_type='user_message' AND position>?2
-            AND json_extract(body,'$.parent_id') IS NULL
-            AND NOT (run_id IS NOT NULL AND json_extract(body,'$.kind.steer')=1)
-            AND json_extract(body,'$.kind.from_agent') IS NULL)",
+        include_str!("sql/inspector/asked_since.sql"),
         params![thread.as_str(), position],
         |row| row.get(0),
     )?;
@@ -871,14 +856,11 @@ fn current_plan(
     })
 }
 
-fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::OutlineEntry>> {
-    let mut statement = conn.prepare_cached(
-        "SELECT id,position,json_quote(json_extract(body,'$.kind.text')) FROM items
-         WHERE thread_id=?1 AND kind_type='user_message' AND json_extract(body,'$.parent_id') IS NULL
-            AND NOT (run_id IS NOT NULL AND json_extract(body,'$.kind.steer')=1)
-            AND json_extract(body,'$.kind.from_agent') IS NULL
-         ORDER BY position ASC",
-    )?;
+fn outline(
+    conn: &Connection,
+    thread: &ThreadId,
+) -> Result<Vec<artisan_api::OutlineEntry>, ContentError> {
+    let mut statement = conn.prepare_cached(include_str!("sql/inspector/outline.sql"))?;
     let rows = statement.query_map([thread.as_str()], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -889,32 +871,15 @@ fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::Outl
     rows.map(|row| {
         let (id, position, text) = row?;
         let text = from_body::<artisan_api::TextContent>(&text)?;
-        let prefix = match &text {
-            artisan_api::TextContent::Inline(text) => std::borrow::Cow::Borrowed(text.as_str()),
-            artisan_api::TextContent::Stored(source) => std::borrow::Cow::Owned(
-                crate::content::range(
-                    conn,
-                    &source.id,
-                    &artisan_api::ContentQuery {
-                        offset: 0,
-                        limit: Some(1024),
-                    },
-                )?
-                .map(|range| range.text)
-                .unwrap_or_default(),
-            ),
-        };
         Ok(artisan_api::OutlineEntry {
             id: ItemId(id),
             position,
-            label: outline_label(&prefix),
+            label: outline_label(&text_prefix(conn, &text)?),
         })
     })
     .collect()
 }
 
-/// A message's first non-empty line, at most 160 characters; "Image" for one
-/// that is only attachments.
 fn outline_label(text: &str) -> String {
     let prefix: String = text.chars().take(1024).collect();
     let line = prefix
@@ -929,10 +894,24 @@ fn outline_label(text: &str) -> String {
     label
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ThreadsPageFailure {
+    #[error("the search is {bytes} bytes; the limit is 256")]
+    SearchTooLong { bytes: usize },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for ThreadsPageFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
 pub fn threads_page(
     conn: &Connection,
     query: &artisan_api::ThreadsQuery,
-) -> Result<artisan_api::ThreadsPage> {
+) -> Result<artisan_api::ThreadsPage, ThreadsPageFailure> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
     let (newer, cursor, id) = match &query.window {
         artisan_api::ThreadWindow::Latest => (false, i64::MAX as u64, ""),
@@ -948,7 +927,11 @@ pub fn threads_page(
         ),
     };
     let search = query.query.as_deref().unwrap_or("").trim();
-    anyhow::ensure!(search.len() <= 256, "thread search exceeds 256 bytes");
+    if search.len() > 256 {
+        return Err(ThreadsPageFailure::SearchTooLong {
+            bytes: search.len(),
+        });
+    }
     let escaped = search
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -991,7 +974,7 @@ pub fn threads_page(
     } else {
         None
     };
-    let ids = serde_json::to_string(&threads.iter().map(|thread| &thread.id).collect::<Vec<_>>())?;
+    let ids = to_body(&threads.iter().map(|thread| &thread.id).collect::<Vec<_>>())?;
     let runs = many(conn,
         "SELECT body FROM runs r WHERE r.thread_id IN (SELECT value FROM json_each(?1))
           AND r.rowid=(SELECT rowid FROM runs WHERE thread_id=r.thread_id ORDER BY rowid DESC LIMIT 1)", [ids])?;

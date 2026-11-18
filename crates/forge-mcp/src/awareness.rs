@@ -555,7 +555,7 @@ async fn find_files(
                 normalize_path(&path)
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     let page = hub
         .store()
         .discover_file_activity(
@@ -694,6 +694,6 @@ async fn relevant_context(
     let resources = resources
         .into_iter()
         .map(Resource::normalize)
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok((resources, dependencies, records))
 }

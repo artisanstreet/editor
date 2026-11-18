@@ -6,7 +6,7 @@ use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, RunId,
     SendMessage, ThreadId,
 };
-use forge_store::{Acceptance, SendRejected, Store};
+use forge_store::{Acceptance, InputFailure, SendRejected, Store};
 
 #[expect(
     clippy::unwrap_used,
@@ -127,8 +127,8 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .await
         .unwrap_err();
     assert!(matches!(
-        too_large.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *too_large.cause,
+        InputFailure::Rejected(SendRejected::TextTooLarge { .. })
     ));
     assert_eq!(store.head(), head);
     let hash = BlobHash("a".repeat(64));
@@ -142,8 +142,8 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .await
         .unwrap_err();
     assert!(matches!(
-        missing.downcast_ref::<SendRejected>(),
-        Some(SendRejected::MissingBlob(_))
+        *missing.cause,
+        InputFailure::Rejected(SendRejected::MissingBlob(_))
     ));
     assert_eq!(store.head(), head);
     let count = store
@@ -156,8 +156,8 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .await
         .unwrap_err();
     assert!(matches!(
-        count.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *count.cause,
+        InputFailure::Rejected(SendRejected::TooManyImages { count: 129 })
     ));
     assert_eq!(store.head(), head);
     let mut hashes = Vec::new();
@@ -186,8 +186,8 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .await
         .unwrap_err();
     assert!(matches!(
-        total.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *total.cause,
+        InputFailure::Rejected(SendRejected::ImagesTooLarge { .. })
     ));
     assert_eq!(store.head(), head);
 }
@@ -256,7 +256,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         .await
         .unwrap_err();
     assert!(matches!(
-        error.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *error.cause,
+        InputFailure::Rejected(SendRejected::ImageTooLarge { .. })
     ));
 }

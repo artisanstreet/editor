@@ -1,5 +1,5 @@
+use crate::error::{StorageError, operation_error};
 use crate::{Store, read};
-use anyhow::{Context, Result, ensure};
 use artisan_api::{ItemId, ProjectId, ThreadId, Timestamp, now};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,109 @@ pub struct Conflict {
     pub id: String,
     pub current_revision: u64,
 }
+
+type Result<T, E = CoordinationFailure> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinationFailure {
+    #[error("path must contain 1..4096 printable bytes")]
+    PathInvalid,
+    #[error("use an absolute worktree path")]
+    PathNotAbsolute,
+    #[error("path escapes its root")]
+    PathEscapes,
+    #[error("resource path must remain inside its worktree")]
+    OutsideWorktree,
+    #[error("named resource needs a namespace and key")]
+    NamedResourceInvalid,
+    #[error("coordination record exceeds 192 KiB; narrow its scope or evidence")]
+    RecordTooLarge,
+    #[error("at most 64 work dependencies")]
+    TooManyDependencies,
+    #[error("dependency {dependency} must publish work first")]
+    DependencyUnpublished { dependency: ThreadId },
+    #[error("work dependency would create a cycle")]
+    DependencyCycle,
+    #[error("calling thread {thread} no longer exists")]
+    CallerGone { thread: ThreadId },
+    #[error("work needs a concise objective and summary")]
+    WorkInvalid,
+    #[error("too much work metadata")]
+    WorkMetadataTooLarge,
+    #[error("claim needs resources and a concise purpose")]
+    ClaimInvalid,
+    #[error("claim lifetime must be at most 24 hours")]
+    ClaimLifetime,
+    #[error("recipient must be another existing thread")]
+    RecipientInvalid,
+    #[error("message needs 1..16384 bytes and prepared state")]
+    MessageInvalid,
+    #[error("watch needs another existing thread")]
+    WatchInvalid,
+    #[error("target must publish work before it can be watched")]
+    WatchTargetUnpublished,
+    #[error("coordination record belongs to another worker or kind")]
+    RecordOfAnother,
+    #[error("use the record's transition tool instead of replacing it")]
+    UseTransition,
+    #[error("record no longer exists")]
+    RecordGone,
+    #[error("coordination record {id} not found")]
+    NotFound { id: String },
+    #[error(transparent)]
+    Stale(Conflict),
+    #[error("only the claimant can release a claim")]
+    NotClaimant,
+    #[error("only the claimant can renew for 1..86400 seconds")]
+    RenewalInvalid,
+    #[error("only the recipient can acknowledge, resolve, or decline a message")]
+    NotRecipient,
+    #[error("message is already settled")]
+    MessageSettled,
+    #[error("reply exceeds 8192 bytes")]
+    ReplyTooLong,
+    #[error("only the sender can record delivery")]
+    NotSender,
+    #[error("message cannot be marked failed")]
+    CannotFail,
+    #[error("only the sender can record a receipt notification")]
+    NotReceiptSender,
+    #[error("only the subscriber can prepare its notification")]
+    NotSubscriber,
+    #[error("only the owner can settle a pending watch")]
+    WatchNotOwner,
+    #[error("transition does not apply to this coordination record")]
+    TransitionInvalid,
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for CoordinationFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+fn require(condition: bool, failure: CoordinationFailure) -> Result<()> {
+    if condition { Ok(()) } else { Err(failure) }
+}
+
+operation_error!(CoordinationGetError(CoordinationFailure), "read coordination record {id}", id: String);
+operation_error!(
+    CoordinationListError(CoordinationFailure),
+    "list coordination records"
+);
+operation_error!(CoordinationPutError(CoordinationFailure), "save a coordination record for thread {caller}", caller: ThreadId);
+operation_error!(CoordinationUpdateError(CoordinationFailure), "update coordination record {id} for thread {caller}", id: String, caller: ThreadId);
+operation_error!(CoordinationChangesError(StorageError), "read the coordination changes after {after}", after: u64);
+operation_error!(
+    CoordinationWatchesError(StorageError),
+    "read the coordination watches"
+);
+operation_error!(
+    CoordinationReceiptsError(StorageError),
+    "read the coordination receipts"
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -29,13 +132,13 @@ pub enum Resource {
 
 pub fn normalize_path(path: &str) -> Result<String> {
     let path = path.trim().replace('\\', "/");
-    ensure!(
+    require(
         !path.is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control),
-        "path must contain 1..4096 printable bytes"
-    );
+        CoordinationFailure::PathInvalid,
+    )?;
     let windows = path.as_bytes().get(1) == Some(&b':') || path.starts_with("//");
     let absolute = path.starts_with('/') || (windows && path.as_bytes().get(2) == Some(&b'/'));
-    ensure!(absolute, "use an absolute worktree path");
+    require(absolute, CoordinationFailure::PathNotAbsolute)?;
     let prefix = match (path.starts_with("//"), windows) {
         (true, _) => "//",
         (false, true) => "",
@@ -51,7 +154,7 @@ pub fn normalize_path(path: &str) -> Result<String> {
                 } else {
                     usize::from(windows)
                 };
-                ensure!(parts.len() > root_depth, "path escapes its root");
+                require(parts.len() > root_depth, CoordinationFailure::PathEscapes)?;
                 parts.pop();
             }
             part => parts.push(part),
@@ -92,10 +195,10 @@ impl Resource {
                 } else {
                     format!("{worktree}/{path}")
                 })?;
-                ensure!(
+                require(
                     contains_path(&worktree, &path),
-                    "resource path must remain inside its worktree"
-                );
+                    CoordinationFailure::OutsideWorktree,
+                )?;
                 Ok(Self::Path {
                     worktree,
                     path,
@@ -105,13 +208,13 @@ impl Resource {
             Self::Named { namespace, key } => {
                 let namespace = namespace.trim().to_owned();
                 let key = key.trim().to_owned();
-                ensure!(
+                require(
                     !namespace.is_empty()
                         && namespace.len() <= 128
                         && !key.is_empty()
                         && key.len() <= 4096,
-                    "named resource needs a namespace and key"
-                );
+                    CoordinationFailure::NamedResourceInvalid,
+                )?;
                 Ok(Self::Named { namespace, key })
             }
         }
@@ -333,15 +436,15 @@ fn get(conn: &Connection, id: &str) -> Result<Option<Record>> {
         row.get::<_, String>(0)
     })
     .optional()?
-    .map(|body| serde_json::from_str(&body).context("decode coordination record"))
+    .map(|body| Ok(read::from_body(&body)?))
     .transpose()
 }
 
 fn save(conn: &Connection, record: &Record) -> Result<()> {
-    ensure!(
-        serde_json::to_vec(record)?.len() <= 192 * 1024,
-        "coordination record exceeds 192 KiB; narrow its scope or evidence"
-    );
+    require(
+        read::to_body(record)?.len() <= 192 * 1024,
+        CoordinationFailure::RecordTooLarge,
+    )?;
     conn.execute(
         include_str!("sql/coordination/save.sql"),
         params![
@@ -351,7 +454,7 @@ fn save(conn: &Connection, record: &Record) -> Result<()> {
             record.content.kind(),
             record.revision,
             record.updated_at,
-            serde_json::to_string(record)?
+            read::to_body(record)?
         ],
     )?;
     conn.execute(
@@ -373,29 +476,34 @@ fn validate_dependencies(
     caller: &ThreadId,
     dependencies: &[ThreadId],
 ) -> Result<()> {
-    ensure!(dependencies.len() <= 64, "at most 64 work dependencies");
+    require(
+        dependencies.len() <= 64,
+        CoordinationFailure::TooManyDependencies,
+    )?;
     let mut statement = conn.prepare(include_str!("sql/coordination/dependencies.sql"))?;
     let mut graph = BTreeMap::new();
     for row in statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })? {
         let (owner, body) = row?;
-        let record: Record = serde_json::from_str(&body)?;
+        let record: Record = read::from_body(&body)?;
         if let Content::Work { dependencies, .. } = record.content {
             graph.insert(ThreadId::from(owner), dependencies);
         }
     }
     for dependency in dependencies {
-        ensure!(
+        require(
             graph.contains_key(dependency),
-            "dependency {dependency} must publish work first"
-        );
+            CoordinationFailure::DependencyUnpublished {
+                dependency: dependency.clone(),
+            },
+        )?;
     }
     graph.insert(caller.clone(), dependencies.to_vec());
     let mut pending = dependencies.to_vec();
     let mut visited = BTreeSet::new();
     while let Some(next) = pending.pop() {
-        ensure!(&next != caller, "work dependency would create a cycle");
+        require(&next != caller, CoordinationFailure::DependencyCycle)?;
         if visited.insert(next.clone()) {
             pending.extend(graph.get(&next).into_iter().flatten().cloned());
         }
@@ -404,11 +512,20 @@ fn validate_dependencies(
 }
 
 impl Store {
-    pub async fn coordination_get(&self, id: String) -> Result<Option<Record>> {
-        self.read(move |conn| get(conn, &id)).await
+    pub async fn coordination_get(
+        &self,
+        id: String,
+    ) -> Result<Option<Record>, CoordinationGetError> {
+        let wanted = id.clone();
+        self.read(move |conn| get(conn, &id))
+            .await
+            .map_err(|cause| CoordinationGetError {
+                id: wanted,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn coordination_list(&self, query: Query) -> Result<Page> {
+    pub async fn coordination_list(&self, query: Query) -> Result<Page, CoordinationListError> {
         self.read(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let event_cursor =
@@ -430,14 +547,14 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )?;
             let mut records = rows
-                .map(|row| Ok(serde_json::from_str::<Record>(&row?)?))
+                .map(|row| Ok(read::from_body::<Record>(&row?)?))
                 .collect::<Result<Vec<_>>>()?;
             let next_cursor = if records.len() > limit {
                 records.truncate(limit);
                 records
                     .last()
                     .map(|r| {
-                        serde_json::to_string(&Cursor {
+                        read::to_body(&Cursor {
                             updated_at: r.updated_at,
                             id: r.id.clone(),
                         })
@@ -453,6 +570,9 @@ impl Store {
             })
         })
         .await
+        .map_err(|cause| CoordinationListError {
+            cause: Box::new(cause),
+        })
     }
 
     #[expect(
@@ -465,9 +585,13 @@ impl Store {
         id: Option<String>,
         mut content: Content,
         expected_revision: Option<u64>,
-    ) -> Result<Record> {
+    ) -> Result<Record, CoordinationPutError> {
+        let putting = caller.clone();
         self.write_acknowledged(move |tx| {
-            let thread = read::thread(tx, &caller)?.context("calling thread no longer exists")?;
+            let thread =
+                read::thread(tx, &caller)?.ok_or_else(|| CoordinationFailure::CallerGone {
+                    thread: caller.clone(),
+                })?;
             match &mut content {
                 Content::Work {
                     objective,
@@ -478,19 +602,19 @@ impl Store {
                     evidence,
                     ..
                 } => {
-                    ensure!(
+                    require(
                         !objective.trim().is_empty()
                             && objective.len() <= 4096
                             && summary.len() <= 8192,
-                        "work needs a concise objective and summary"
-                    );
+                        CoordinationFailure::WorkInvalid,
+                    )?;
                     *worktree = normalize_path(worktree)?;
-                    ensure!(
+                    require(
                         resources.len() <= 64
                             && evidence.len() <= 32
                             && evidence.iter().all(|s| s.len() <= 4096),
-                        "too much work metadata"
-                    );
+                        CoordinationFailure::WorkMetadataTooLarge,
+                    )?;
                     *resources = resources
                         .drain(..)
                         .map(Resource::normalize)
@@ -503,19 +627,19 @@ impl Store {
                     expires_at,
                     state,
                 } => {
-                    ensure!(
+                    require(
                         !resources.is_empty()
                             && resources.len() <= 64
                             && !purpose.trim().is_empty()
                             && purpose.len() <= 4096,
-                        "claim needs resources and a concise purpose"
-                    );
-                    ensure!(
+                        CoordinationFailure::ClaimInvalid,
+                    )?;
+                    require(
                         *state == ClaimState::Active
                             && *expires_at > now()
                             && *expires_at <= now() + 86_400_000,
-                        "claim lifetime must be at most 24 hours"
-                    );
+                        CoordinationFailure::ClaimLifetime,
+                    )?;
                     *resources = resources
                         .drain(..)
                         .map(Resource::normalize)
@@ -527,28 +651,28 @@ impl Store {
                     state,
                     ..
                 } => {
-                    ensure!(
+                    require(
                         recipient != &caller && read::thread(tx, recipient)?.is_some(),
-                        "recipient must be another existing thread"
-                    );
-                    ensure!(
+                        CoordinationFailure::RecipientInvalid,
+                    )?;
+                    require(
                         !text.trim().is_empty()
                             && text.len() <= 16_384
                             && *state == MessageState::Prepared,
-                        "message needs 1..16384 bytes and prepared state"
-                    );
+                        CoordinationFailure::MessageInvalid,
+                    )?;
                 }
                 Content::Watch { target, state, .. } => {
-                    ensure!(
+                    require(
                         target != &caller
                             && read::thread(tx, target)?.is_some()
                             && *state == WatchState::Pending,
-                        "watch needs another existing thread"
-                    );
-                    ensure!(
+                        CoordinationFailure::WatchInvalid,
+                    )?;
+                    require(
                         get(tx, &format!("work:{target}"))?.is_some(),
-                        "target must publish work before it can be watched"
-                    );
+                        CoordinationFailure::WatchTargetUnpublished,
+                    )?;
                 }
             }
             let id = match &content {
@@ -559,26 +683,25 @@ impl Store {
             };
             let previous = get(tx, &id)?;
             if let Some(previous) = &previous {
-                ensure!(
+                require(
                     previous.owner == caller && previous.content.kind() == content.kind(),
-                    "coordination record belongs to another worker or kind"
-                );
+                    CoordinationFailure::RecordOfAnother,
+                )?;
                 if expected_revision != Some(previous.revision) {
-                    return Err(Conflict {
+                    return Err(CoordinationFailure::Stale(Conflict {
                         id,
                         current_revision: previous.revision,
-                    }
-                    .into());
+                    }));
                 }
-                ensure!(
+                require(
                     matches!(content, Content::Work { .. }),
-                    "use the record's transition tool instead of replacing it"
-                );
+                    CoordinationFailure::UseTransition,
+                )?;
             } else {
-                ensure!(
+                require(
                     expected_revision.is_none_or(|r| r == 0),
-                    "record no longer exists"
-                );
+                    CoordinationFailure::RecordGone,
+                )?;
             }
             let record = Record {
                 id,
@@ -592,6 +715,10 @@ impl Store {
             Ok(record)
         })
         .await
+        .map_err(|cause| CoordinationPutError {
+            caller: putting,
+            cause: Box::new(cause),
+        })
     }
 
     #[expect(
@@ -604,22 +731,20 @@ impl Store {
         id: String,
         revision: u64,
         update: Update,
-    ) -> Result<Record> {
+    ) -> Result<Record, CoordinationUpdateError> {
+        let (updating, record_id) = (caller.clone(), id.clone());
         self.write_acknowledged(move |tx| {
-            let mut record = get(tx, &id)?.context("coordination record not found")?;
+            let mut record =
+                get(tx, &id)?.ok_or_else(|| CoordinationFailure::NotFound { id: id.clone() })?;
             if record.revision != revision {
-                return Err(Conflict {
+                return Err(CoordinationFailure::Stale(Conflict {
                     id,
                     current_revision: record.revision,
-                }
-                .into());
+                }));
             }
             match (&mut record.content, update) {
                 (Content::Claim { state, .. }, Update::ReleaseClaim) => {
-                    ensure!(
-                        record.owner == caller,
-                        "only the claimant can release a claim"
-                    );
+                    require(record.owner == caller, CoordinationFailure::NotClaimant)?;
                     *state = ClaimState::Released;
                 }
                 (
@@ -630,10 +755,10 @@ impl Store {
                     },
                     Update::RenewClaim { seconds },
                 ) => {
-                    ensure!(
+                    require(
                         record.owner == caller && (1..=86_400).contains(&seconds),
-                        "only the claimant can renew for 1..86400 seconds"
-                    );
+                        CoordinationFailure::RenewalInvalid,
+                    )?;
                     *expires_at = now() + i64::from(seconds) * 1000;
                 }
                 (
@@ -648,7 +773,7 @@ impl Store {
                         reply: response,
                     },
                 ) => {
-                    ensure!(
+                    require(
                         *recipient == caller
                             && matches!(
                                 next,
@@ -656,19 +781,19 @@ impl Store {
                                     | MessageState::Resolved
                                     | MessageState::Declined
                             ),
-                        "only the recipient can acknowledge, resolve, or decline a message"
-                    );
-                    ensure!(
+                        CoordinationFailure::NotRecipient,
+                    )?;
+                    require(
                         !matches!(
                             state,
                             MessageState::Resolved | MessageState::Declined | MessageState::Failed
                         ),
-                        "message is already settled"
-                    );
-                    ensure!(
+                        CoordinationFailure::MessageSettled,
+                    )?;
+                    require(
                         response.as_ref().is_none_or(|text| text.len() <= 8192),
-                        "reply exceeds 8192 bytes"
-                    );
+                        CoordinationFailure::ReplyTooLong,
+                    )?;
                     *state = next;
                     *reply = response;
                 }
@@ -680,20 +805,17 @@ impl Store {
                     },
                     Update::MessageDelivered { item },
                 ) => {
-                    ensure!(
-                        record.owner == caller,
-                        "only the sender can record delivery"
-                    );
+                    require(record.owner == caller, CoordinationFailure::NotSender)?;
                     if *state == MessageState::Prepared {
                         *state = MessageState::Delivered;
                     }
                     *delivery_item = Some(item);
                 }
                 (Content::Message { state, reply, .. }, Update::MessageFailed { error }) => {
-                    ensure!(
+                    require(
                         record.owner == caller && *state == MessageState::Prepared,
-                        "message cannot be marked failed"
-                    );
+                        CoordinationFailure::CannotFail,
+                    )?;
                     *state = MessageState::Failed;
                     *reply = Some(error);
                 }
@@ -703,10 +825,10 @@ impl Store {
                     },
                     Update::ReceiptDelivered,
                 ) => {
-                    ensure!(
+                    require(
                         record.owner == caller,
-                        "only the sender can record a receipt notification"
-                    );
+                        CoordinationFailure::NotReceiptSender,
+                    )?;
                     *receipt_revision = record.revision + 1;
                 }
                 (
@@ -717,10 +839,7 @@ impl Store {
                     },
                     Update::PrepareWatch { outcome: result },
                 ) => {
-                    ensure!(
-                        record.owner == caller,
-                        "only the subscriber can prepare its notification"
-                    );
+                    require(record.owner == caller, CoordinationFailure::NotSubscriber)?;
                     *state = WatchState::Ready;
                     *outcome = Some(result);
                 }
@@ -731,16 +850,16 @@ impl Store {
                         outcome: result,
                     },
                 ) => {
-                    ensure!(
+                    require(
                         record.owner == caller
                             && matches!(*state, WatchState::Pending | WatchState::Ready)
                             && !matches!(next, WatchState::Pending | WatchState::Ready),
-                        "only the owner can settle a pending watch"
-                    );
+                        CoordinationFailure::WatchNotOwner,
+                    )?;
                     *state = next;
                     *outcome = Some(result);
                 }
-                _ => anyhow::bail!("transition does not apply to this coordination record"),
+                _ => return Err(CoordinationFailure::TransitionInvalid),
             }
             record.revision += 1;
             record.updated_at = now();
@@ -748,6 +867,11 @@ impl Store {
             Ok(record)
         })
         .await
+        .map_err(|cause| CoordinationUpdateError {
+            id: record_id,
+            caller: updating,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn coordination_changes(
@@ -755,7 +879,7 @@ impl Store {
         after: u64,
         project: Option<ProjectId>,
         limit: u32,
-    ) -> Result<Vec<Change>> {
+    ) -> Result<Vec<Change>, CoordinationChangesError> {
         self.read(move |conn| {
             let mut statement = conn.prepare(include_str!("sql/coordination/events.sql"))?;
             Ok(statement
@@ -776,27 +900,37 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
+        .map_err(|cause| CoordinationChangesError {
+            after,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn coordination_watches(&self) -> Result<Vec<Record>> {
+    pub async fn coordination_watches(&self) -> Result<Vec<Record>, CoordinationWatchesError> {
         self.read(move |conn| {
             let mut statement = conn.prepare(include_str!("sql/coordination/watches.sql"))?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
-                .map(|row| Ok(serde_json::from_str(&row?)?))
+                .map(|row| read::from_body(&row?))
                 .collect()
         })
         .await
+        .map_err(|cause| CoordinationWatchesError {
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn coordination_receipts(&self) -> Result<Vec<Record>> {
+    pub async fn coordination_receipts(&self) -> Result<Vec<Record>, CoordinationReceiptsError> {
         self.read(move |conn| {
             let mut statement = conn.prepare(include_str!("sql/coordination/receipts.sql"))?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
-                .map(|row| Ok(serde_json::from_str(&row?)?))
+                .map(|row| read::from_body(&row?))
                 .collect()
         })
         .await
+        .map_err(|cause| CoordinationReceiptsError {
+            cause: Box::new(cause),
+        })
     }
 }

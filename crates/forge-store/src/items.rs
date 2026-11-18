@@ -1,11 +1,10 @@
-//! Items: engine output, accepted input, answers and transcript pages.
-
-use crate::writer::Tx;
+use crate::content::ContentError;
+use crate::error::{StorageError, operation_error};
+use crate::writer::{InputFailure, Tx, WriteFailure, valid_config};
 use crate::{
-    ItemNotFound, NewItem, PendingInputs, Refused, SendRejected, Store, collection, content,
-    fresh_item, read,
+    AnswerRefused, CreateThreadError, NewItem, PendingInputs, SendRejected, Store, collection,
+    content, fresh_item, read,
 };
-use anyhow::{Context, Result, ensure};
 use artisan_api::{
     CreateThread, EngineId, Item, ItemId, ItemKind, ItemsPage, ItemsQuery, Run, RunId, RunStatus,
     SendMessage, Seq, Status, Thread, ThreadId,
@@ -14,31 +13,146 @@ use rusqlite::{OptionalExtension as _, params};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Acceptance {
-    /// Becomes the thread's title when it has none.
     pub title: Option<String>,
-    /// Saves the thread's resulting config as `default_engine_config`.
     pub remember_config: bool,
-    /// The message reports this agent's result (see `ItemKind::UserMessage`).
     pub from_agent: Option<ItemId>,
-    /// Another thread's agent wrote the message (see `ItemKind::UserMessage`).
     pub sender: Option<artisan_api::Sender>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnFailure {
+    #[error(transparent)]
+    Thread(#[from] CreateThreadError),
+    #[error(transparent)]
+    Input(#[from] InputFailure),
+}
+
+impl From<StorageError> for SpawnFailure {
+    fn from(error: StorageError) -> Self {
+        Self::Input(error.into())
+    }
+}
+
+impl From<WriteFailure> for SpawnFailure {
+    fn from(error: WriteFailure) -> Self {
+        Self::Input(error.into())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AnswerFailure {
+    #[error("the item does not exist")]
+    NotFound,
+    #[error(transparent)]
+    Refused(AnswerRefused),
+    #[error(transparent)]
+    Content(ContentError),
+    #[error(transparent)]
+    Input(#[from] InputFailure),
+}
+
+impl From<ContentError> for AnswerFailure {
+    fn from(error: ContentError) -> Self {
+        if let ContentError::Refused(refused) = error {
+            Self::Refused(refused)
+        } else {
+            Self::Content(error)
+        }
+    }
+}
+
+impl From<AnswerRefused> for AnswerFailure {
+    fn from(refused: AnswerRefused) -> Self {
+        Self::Refused(refused)
+    }
+}
+
+impl From<StorageError> for AnswerFailure {
+    fn from(error: StorageError) -> Self {
+        Self::Content(error.into())
+    }
+}
+
+impl From<rusqlite::Error> for AnswerFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Content(error.into())
+    }
+}
+
+impl From<WriteFailure> for AnswerFailure {
+    fn from(error: WriteFailure) -> Self {
+        if let WriteFailure::Content(content) = error {
+            content.into()
+        } else {
+            Self::Input(error.into())
+        }
+    }
+}
+
+operation_error!(UpsertItemError(WriteFailure), "save item {item} of thread {thread}", item: ItemId, thread: ThreadId);
+operation_error!(ReopenAgentError(WriteFailure), "reopen agent {item} in run {run}", item: ItemId, run: RunId);
+operation_error!(InsertMessageError(InputFailure), "insert message {item} into thread {thread}", item: ItemId, thread: ThreadId);
+operation_error!(SendMessageError(InputFailure), "send message {item} to thread {thread}", item: ItemId, thread: ThreadId);
+operation_error!(SettleAgentError(InputFailure), "report an agent's end to thread {thread}", thread: ThreadId);
+operation_error!(SpawnAgentError(SpawnFailure), "spawn agent {agent} of thread {thread}", agent: ItemId, thread: ThreadId);
+operation_error!(AcceptInputsError(WriteFailure), "accept the inputs of thread {thread} into run {run}", thread: ThreadId, run: RunId);
+operation_error!(SetItemStatusError(WriteFailure), "set the status of item {item}", item: ItemId);
+operation_error!(RequestContinueError(StorageError), "ask thread {thread} to continue", thread: ThreadId);
+operation_error!(ReadContinueError(StorageError), "read the continue request of thread {thread}", thread: ThreadId);
+operation_error!(BeginRunError(WriteFailure), "begin run {run} of thread {thread}", run: RunId, thread: ThreadId);
+operation_error!(TakeContinueError(StorageError), "take the continue request of thread {thread}", thread: ThreadId);
+operation_error!(UnparkError(StorageError), "unpark thread {thread}", thread: ThreadId);
+operation_error!(ContinuationChainError(StorageError), "count the continuations of thread {thread}", thread: ThreadId);
+operation_error!(
+    NextParkedError(StorageError),
+    "read when the next parked turn is due"
+);
+operation_error!(ContinuePendingError(StorageError), "read whether thread {thread} waits to continue", thread: ThreadId);
+operation_error!(CancelledItemsError(StorageError), "read the items run {run} left open", run: RunId);
+operation_error!(RestoreInputsError(WriteFailure), "restore the undelivered inputs of thread {thread}", thread: ThreadId);
+operation_error!(CancelInputsError(WriteFailure), "cancel the inputs of thread {thread} through seq {through}", thread: ThreadId, through: Seq);
+operation_error!(SettleRunError(WriteFailure), "settle run {run} of thread {thread}", run: RunId, thread: ThreadId);
+operation_error!(AnswerQuestionError(AnswerFailure), "answer question {item}", item: ItemId);
+operation_error!(ValidateAnswersError(AnswerFailure), "check the answers to question {item}", item: ItemId);
+operation_error!(ResolveCollectionsError(ContentError), "resolve the collections of item {item}", item: ItemId);
+operation_error!(ReadItemError(StorageError), "read item {item}", item: ItemId);
+operation_error!(NativeIdError(StorageError), "read the engine id of item {item}", item: ItemId);
+operation_error!(AgentByAddressError(StorageError), "find the agent thread {thread}'s engine calls {address}", thread: ThreadId, address: String);
+operation_error!(ItemByNativeError(StorageError), "find item {native:?} of thread {thread}", thread: ThreadId, native: String);
+operation_error!(ItemsPageError(StorageError), "page the items of thread {thread}", thread: ThreadId);
+operation_error!(TranscriptPageError(StorageError), "page the transcript of thread {thread}", thread: ThreadId);
+operation_error!(TranscriptRowsError(StorageError), "page the transcript rows of thread {thread}", thread: ThreadId);
+operation_error!(WorkPageError(StorageError), "page the work of thread {thread}", thread: ThreadId);
+operation_error!(
+    AwaitingItemsError(StorageError),
+    "read the items waiting on the user"
+);
+operation_error!(
+    PendingThreadsError(StorageError),
+    "read the threads with pending input"
+);
+operation_error!(RunnableInputError(StorageError), "read whether thread {thread} has runnable input", thread: ThreadId);
+operation_error!(PendingInputsError(StorageError), "read the pending inputs of thread {thread}", thread: ThreadId);
+
 impl Store {
-    pub async fn upsert_item(&self, new: NewItem) -> Result<Item> {
-        let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
+    pub async fn upsert_item(&self, new: NewItem) -> Result<Item, UpsertItemError> {
+        let (item, thread) = (new.id.clone(), new.thread_id.clone());
         self.write(move |tx| tx.upsert_item(new))
             .await
-            .with_context(|| format!("upsert item {id} in thread {thread_id}"))
+            .map_err(|cause| UpsertItemError {
+                item,
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    /// A subagent an earlier run left stopped is working again in `run`
-    /// (resumed by a message to it): it reopens there, so it reads as
-    /// working and the run settles it. Statuses otherwise never leave a
-    /// terminal state. Returns the stored agent.
-    pub async fn reopen_agent(&self, id: &ItemId, run: &RunId) -> Result<Option<Item>> {
+    pub async fn reopen_agent(
+        &self,
+        id: &ItemId,
+        run: &RunId,
+    ) -> Result<Option<Item>, ReopenAgentError> {
+        let (item, reopened_in) = (id.clone(), run.clone());
         let (id, run) = (id.clone(), run.clone());
-        let what = id.clone();
         self.write(move |tx| {
             let Some(old) = read::item(tx, &id)? else {
                 return Ok(None);
@@ -54,12 +168,19 @@ impl Store {
             tx.save_item(item, Some(old)).map(Some)
         })
         .await
-        .with_context(|| format!("reopen agent {what}"))
+        .map_err(|cause| ReopenAgentError {
+            item,
+            run: reopened_in,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Inserts accepted input once and records its thread activity in the same commit.
-    pub async fn insert_user_message(&self, new: NewItem) -> Result<(Item, bool)> {
+    pub async fn insert_user_message(
+        &self,
+        new: NewItem,
+    ) -> Result<(Item, bool), InsertMessageError> {
         let blob_dir = self.inner.blob_dir.clone();
+        let (item, thread) = (new.id.clone(), new.thread_id.clone());
         self.write_acknowledged(move |tx| {
             let (item, created) = tx.insert_input(new, &blob_dir)?;
             if created {
@@ -68,6 +189,11 @@ impl Store {
             Ok((item, created))
         })
         .await
+        .map_err(|cause| InsertMessageError {
+            item,
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn send_message(
@@ -76,19 +202,25 @@ impl Store {
         message: SendMessage,
         steer: bool,
         acceptance: Acceptance,
-    ) -> Result<(Item, bool, EngineId)> {
+    ) -> Result<(Item, bool, EngineId), SendMessageError> {
         let blob_dir = self.inner.blob_dir.clone();
+        let (item, thread) = (message.id.clone(), thread_id.clone());
         self.write_acknowledged(move |tx| {
             tx.send_message(thread_id, message, steer, acceptance, &blob_dir)
         })
         .await
+        .map_err(|cause| SendMessageError {
+            item,
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn settle_agent(
         &self,
         agent: Option<NewItem>,
         report: crate::AgentReport,
-    ) -> Result<(Item, EngineId)> {
+    ) -> Result<(Item, EngineId), SettleAgentError> {
         let blob_dir = self.inner.blob_dir.clone();
         let parent = report.thread.clone();
         self.write(move |tx| {
@@ -106,7 +238,10 @@ impl Store {
             Ok((item, engine))
         })
         .await
-        .with_context(|| format!("report an agent's end to thread {parent}"))
+        .map_err(|cause| SettleAgentError {
+            thread: parent,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn spawn_agent(
@@ -115,7 +250,7 @@ impl Store {
         child: CreateThread,
         prompt: SendMessage,
         acceptance: Acceptance,
-    ) -> Result<(Item, Thread, Item)> {
+    ) -> Result<(Item, Thread, Item), SpawnAgentError> {
         let blob_dir = self.inner.blob_dir.clone();
         let (agent_id, parent) = (agent.id.clone(), agent.thread_id.clone());
         self.write_acknowledged(move |tx| {
@@ -126,7 +261,11 @@ impl Store {
             Ok((agent, child, prompt))
         })
         .await
-        .with_context(|| format!("spawn agent {agent_id} of thread {parent}"))
+        .map_err(|cause| SpawnAgentError {
+            agent: agent_id,
+            thread: parent,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn accept_inputs(
@@ -134,14 +273,21 @@ impl Store {
         thread: ThreadId,
         run: RunId,
         ids: Vec<ItemId>,
-    ) -> Result<()> {
+    ) -> Result<(), AcceptInputsError> {
+        let (accepting, into) = (thread.clone(), run.clone());
         self.write(move |tx| {
             for id in ids {
                 if let Some(old) = read::item(tx, &id)? {
-                    ensure!(
-                        old.thread_id == thread && matches!(old.kind, ItemKind::UserMessage { .. }),
-                        "input {id} does not belong to thread {thread}"
-                    );
+                    if old.thread_id != thread {
+                        return Err(WriteFailure::ItemMoved {
+                            item: id,
+                            stored: old.thread_id,
+                            requested: thread,
+                        });
+                    }
+                    if !matches!(old.kind, ItemKind::UserMessage { .. }) {
+                        return Err(WriteFailure::NotAnInput { item: id });
+                    }
                     if matches!(old.status, Status::Running | Status::Cancelled) {
                         let item = Item {
                             run_id: Some(run.clone()),
@@ -155,10 +301,19 @@ impl Store {
             Ok(())
         })
         .await
+        .map_err(|cause| AcceptInputsError {
+            thread: accepting,
+            run: into,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Status changes read the durable kind, instead of retaining another full copy in a run.
-    pub async fn set_item_status(&self, id: ItemId, status: Status) -> Result<Option<Item>> {
+    pub async fn set_item_status(
+        &self,
+        id: ItemId,
+        status: Status,
+    ) -> Result<Option<Item>, SetItemStatusError> {
+        let item = id.clone();
         self.write(move |tx| {
             let Some(old) = read::item(tx, &id)? else {
                 return Ok(None);
@@ -170,62 +325,91 @@ impl Store {
             tx.save_item(item, Some(old)).map(Some)
         })
         .await
+        .map_err(|cause| SetItemStatusError {
+            item,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Asks for the thread's stopped turn to carry on with no new message.
-    pub async fn request_continue(&self, thread: ThreadId) -> Result<()> {
+    pub async fn request_continue(&self, thread: ThreadId) -> Result<(), RequestContinueError> {
+        let asked = thread.clone();
         self.write_acknowledged(move |tx| {
             tx.request_continue(&thread, artisan_api::Continuation::Requested)
         })
         .await
+        .map_err(|cause| RequestContinueError {
+            thread: asked,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn continue_request(
         &self,
         thread: &ThreadId,
-    ) -> Result<Option<artisan_api::Continuation>> {
+    ) -> Result<Option<artisan_api::Continuation>, ReadContinueError> {
+        let asked = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| read::continue_request(conn, &thread))
             .await
+            .map_err(|cause| ReadContinueError {
+                thread: asked,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn begin_run(&self, run: Run) -> Result<Run> {
+    pub async fn begin_run(&self, run: Run) -> Result<Run, BeginRunError> {
         let (id, thread) = (run.id.clone(), run.thread_id.clone());
         self.write(move |tx| {
             tx.take_continue(&run.thread_id)?;
             tx.upsert_run(run)
         })
         .await
-        .with_context(|| format!("begin run {id} of thread {thread}"))
+        .map_err(|cause| BeginRunError {
+            run: id,
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Takes the thread's continue request, if it has one.
     pub async fn take_continue(
         &self,
         thread: ThreadId,
-    ) -> Result<Option<artisan_api::Continuation>> {
-        self.write(move |tx| tx.take_continue(&thread)).await
+    ) -> Result<Option<artisan_api::Continuation>, TakeContinueError> {
+        let taken = thread.clone();
+        self.write(move |tx| tx.take_continue(&thread))
+            .await
+            .map_err(|cause| TakeContinueError {
+                thread: taken,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Drops the thread's parked turn; returns whether it had one.
-    pub async fn unpark(&self, thread: ThreadId) -> Result<bool> {
-        self.write_acknowledged(move |tx| tx.unpark(&thread)).await
+    pub async fn unpark(&self, thread: ThreadId) -> Result<bool, UnparkError> {
+        let unparked = thread.clone();
+        self.write_acknowledged(move |tx| tx.unpark(&thread))
+            .await
+            .map_err(|cause| UnparkError {
+                thread: unparked,
+                cause: Box::new(cause),
+            })
     }
 
-    /// How many runs in a row, newest first, carried the thread's turn on
-    /// for `continuation`, counting at most `limit`.
     pub async fn continuation_chain(
         &self,
         thread: ThreadId,
         continuation: artisan_api::Continuation,
         limit: usize,
-    ) -> Result<usize> {
+    ) -> Result<usize, ContinuationChainError> {
+        let counted = thread.clone();
         self.write(move |tx| tx.continuation_chain(&thread, continuation, limit))
             .await
+            .map_err(|cause| ContinuationChainError {
+                thread: counted,
+                cause: Box::new(cause),
+            })
     }
 
-    /// When the earliest parked turn is due.
-    pub async fn next_parked(&self) -> Result<Option<artisan_api::Timestamp>> {
+    pub async fn next_parked(&self) -> Result<Option<artisan_api::Timestamp>, NextParkedError> {
         self.read(|conn| {
             Ok(conn.query_row(
                 "SELECT min(due_at) FROM continues WHERE due_at IS NOT NULL",
@@ -234,10 +418,13 @@ impl Store {
             )?)
         })
         .await
+        .map_err(|cause| NextParkedError {
+            cause: Box::new(cause),
+        })
     }
 
-    /// Whether the thread's stopped turn is waiting to carry on.
-    pub async fn continue_pending(&self, thread: &ThreadId) -> Result<bool> {
+    pub async fn continue_pending(&self, thread: &ThreadId) -> Result<bool, ContinuePendingError> {
+        let asked = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| {
             Ok(conn.query_row(
@@ -247,10 +434,17 @@ impl Store {
             )?)
         })
         .await
+        .map_err(|cause| ContinuePendingError {
+            thread: asked,
+            cause: Box::new(cause),
+        })
     }
 
-    /// The items a run left open when it stopped, in order.
-    pub async fn cancelled_items(&self, run: &artisan_api::RunId) -> Result<Vec<Item>> {
+    pub async fn cancelled_items(
+        &self,
+        run: &artisan_api::RunId,
+    ) -> Result<Vec<Item>, CancelledItemsError> {
+        let stopped = run.clone();
         let run = run.clone();
         self.read(move |conn| {
             read::items(
@@ -260,21 +454,21 @@ impl Store {
             )
         })
         .await
+        .map_err(|cause| CancelledItemsError {
+            run: stopped,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Puts the messages a stop cancelled before the engine read them back
-    /// in line: the cancelled ones after the last message it did read.
-    /// Returns how many.
-    pub async fn restore_undelivered_inputs(&self, thread: ThreadId) -> Result<usize> {
+    pub async fn restore_undelivered_inputs(
+        &self,
+        thread: ThreadId,
+    ) -> Result<usize, RestoreInputsError> {
+        let restored = thread.clone();
         self.write_acknowledged(move |tx| {
             let inputs: Vec<Item> = read::items(
                 tx,
-                "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL
-                    AND kind_type='user_message' AND status='cancelled'
-                    AND position > (SELECT coalesce(max(position), 0) FROM items
-                        WHERE thread_id=?1 AND parent_id IS NULL
-                        AND kind_type='user_message' AND status!='cancelled')
-                    ORDER BY position",
+                include_str!("sql/pending/undelivered_inputs.sql"),
                 params![thread.as_str()],
             )?;
             let mut activity = None;
@@ -291,11 +485,18 @@ impl Store {
             Ok(inputs.len())
         })
         .await
+        .map_err(|cause| RestoreInputsError {
+            thread: restored,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Cancels the thread's undelivered messages through `through`, and a
-    /// waiting continue request.
-    pub async fn cancel_pending_inputs(&self, thread: ThreadId, through: Seq) -> Result<()> {
+    pub async fn cancel_pending_inputs(
+        &self,
+        thread: ThreadId,
+        through: Seq,
+    ) -> Result<(), CancelInputsError> {
+        let cancelled = thread.clone();
         self.write_acknowledged(move |tx| {
             tx.take_continue(&thread)?;
             let inputs: Vec<Item> = read::items(
@@ -318,9 +519,17 @@ impl Store {
             Ok(())
         })
         .await
+        .map_err(|cause| CancelInputsError {
+            thread: cancelled,
+            through,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn settle_run(&self, settlement: crate::Settlement) -> Result<(Run, bool)> {
+    pub async fn settle_run(
+        &self,
+        settlement: crate::Settlement,
+    ) -> Result<(Run, bool), SettleRunError> {
         let crate::Settlement {
             run,
             open,
@@ -341,10 +550,13 @@ impl Store {
                 if let Some(old) = read::item(tx, &id)?
                     && !old.status.is_terminal()
                 {
-                    ensure!(
-                        old.thread_id == run.thread_id,
-                        "output belongs to another thread"
-                    );
+                    if old.thread_id != run.thread_id {
+                        return Err(WriteFailure::ItemMoved {
+                            item: id,
+                            stored: old.thread_id,
+                            requested: run.thread_id,
+                        });
+                    }
                     if run.status() != RunStatus::Cancelled
                         && old.status == Status::AwaitingUser
                         && matches!(
@@ -380,175 +592,148 @@ impl Store {
             Ok((run, parked))
         })
         .await
-        .with_context(|| format!("settle run {id} of thread {thread}"))
+        .map_err(|cause| SettleRunError {
+            run: id,
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Answers an asynchronous question after its process exits, as a durable next-turn input.
     pub async fn answer_question(
         &self,
         id: ItemId,
         answers: Vec<Option<artisan_api::QuestionAnswer>>,
-    ) -> Result<Item> {
+    ) -> Result<Item, AnswerQuestionError> {
         let blob_dir = self.inner.blob_dir.clone();
-        self.write_acknowledged(move |tx| {
-            let old = read::item(tx, &id)?.ok_or_else(|| ItemNotFound(id.clone()))?;
-            let mut item = old.clone();
-            let ItemKind::Question {
-                blocking: false,
-                questions,
-                answers: saved,
-                ..
-            } = &mut item.kind
-            else {
-                return Err(
-                    Refused("This question needs its engine, which has stopped.".into()).into(),
-                );
-            };
-            collection::validate_answers(tx, questions, &answers)?;
-            let input_id = ItemId(format!("answer-{id}"));
-            if item.status.is_terminal() {
-                ensure!(
-                    collection::answers_equal(tx, saved.as_ref(), &answers)?,
-                    Refused("This question was already answered differently.".into())
-                );
-                return read::item(tx, &input_id)?.context("question answer input is missing");
-            }
-            ensure!(
-                item.status == Status::AwaitingUser,
-                Refused("This question is not waiting for an answer.".into())
-            );
-            let mut text = String::from("Answers to the agent's questions:\n");
-            collection::visit_questions(tx, questions, |index, question| {
-                text.push_str(&content::resolve(tx, &question.text)?);
-                text.push_str("\nAnswer: ");
-                match &answers[index] {
-                    Some(answer) => text.push_str(&collection::answer_text(tx, question, answer)?),
-                    None => text.push_str("Skipped"),
-                }
-                text.push_str("\n\n");
-                Ok(())
-            })?;
-            *saved = Some(answers.into());
-            item.status = Status::Done;
-            tx.save_item(item.clone(), Some(old))?;
-            let (input, _) = tx.insert_input(
-                NewItem {
-                    id: input_id,
-                    thread_id: item.thread_id,
-                    run_id: None,
-                    parent_id: None,
-                    native_id: None,
-                    status: Status::Running,
-                    kind: ItemKind::UserMessage {
-                        text: text.into(),
-                        images: Vec::new(),
-                        steer: false,
-                        from_agent: None,
-                        sender: None,
-                    },
-                },
-                &blob_dir,
-            )?;
-            tx.mark_activity(&input.thread_id, input.seq)?;
-            Ok(input)
-        })
-        .await
+        let item = id.clone();
+        self.write_acknowledged(move |tx| answer(tx, &id, answers, &blob_dir))
+            .await
+            .map_err(|cause| AnswerQuestionError {
+                item,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Validate selected opaque IDs through the immutable record-key index.
-    /// A native callback never needs to load every question option.
     pub async fn validate_question_answers(
         &self,
         id: &ItemId,
         answers: &[Option<artisan_api::QuestionAnswer>],
-    ) -> Result<()> {
+    ) -> Result<(), ValidateAnswersError> {
+        let question = id.clone();
         let id = id.clone();
         let answers = answers.to_vec();
         self.read(move |conn| {
-            let item = read::item(conn, &id)?.ok_or_else(|| ItemNotFound(id.clone()))?;
+            let item = read::item(conn, &id)?.ok_or(AnswerFailure::NotFound)?;
             let ItemKind::Question { questions, .. } = item.kind else {
-                return Err(Refused(format!("Item {id} is not a question.")).into());
+                return Err(AnswerRefused::NotAQuestion { item: id }.into());
             };
-            collection::validate_answers(conn, &questions, &answers)
+            Ok(collection::validate_answers(conn, &questions, &answers)?)
         })
         .await
+        .map_err(|cause| ValidateAnswersError {
+            item: question,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Native callbacks use complete admitted canonical records. Rendering and
-    /// state/bootstrap endpoints must use collection_range instead.
-    pub async fn resolve_item_collections(&self, mut item: Item) -> Result<Item> {
+    pub async fn resolve_item_collections(
+        &self,
+        mut item: Item,
+    ) -> Result<Item, ResolveCollectionsError> {
+        let id = item.id.clone();
         self.read(move |conn| {
             collection::hydrate_item(conn, &mut item.kind)?;
             Ok(item)
         })
         .await
+        .map_err(|cause| ResolveCollectionsError {
+            item: id,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn item(&self, id: &ItemId) -> Result<Option<Item>> {
+    pub async fn item(&self, id: &ItemId) -> Result<Option<Item>, ReadItemError> {
+        let item = id.clone();
         let id = id.clone();
-        self.read(move |conn| read::item(conn, &id).with_context(|| format!("read item {id}")))
+        self.read(move |conn| read::item(conn, &id))
             .await
+            .map_err(|cause| ReadItemError {
+                item,
+                cause: Box::new(cause),
+            })
     }
 
-    /// The engine's own id for an item: what an answer to it is routed by.
-    pub async fn native_id(&self, id: &ItemId) -> Result<Option<String>> {
+    pub async fn native_id(&self, id: &ItemId) -> Result<Option<String>, NativeIdError> {
+        let item = id.clone();
         let id = id.clone();
         self.read(move |conn| {
-            conn.prepare_cached("SELECT native_id FROM items WHERE id=?1")?
+            Ok(conn
+                .prepare_cached("SELECT native_id FROM items WHERE id=?1")?
                 .query_row([id.as_str()], |row| row.get::<_, Option<String>>(0))
                 .optional()
-                .map(Option::flatten)
-                .with_context(|| format!("read the engine id of item {id}"))
+                .map(Option::flatten)?)
         })
         .await
+        .map_err(|cause| NativeIdError {
+            item,
+            cause: Box::new(cause),
+        })
     }
 
-    /// The `Agent` item of `thread_id` an engine addresses as `address`.
     pub async fn agent_by_address(
         &self,
         thread_id: &ThreadId,
         address: &str,
-    ) -> Result<Option<ItemId>> {
+    ) -> Result<Option<ItemId>, AgentByAddressError> {
+        let (thread, called) = (thread_id.clone(), address.to_owned());
         let (thread_id, address) = (thread_id.clone(), address.to_owned());
         self.read(move |conn| read::agent_by_address(conn, &thread_id, &address))
             .await
+            .map_err(|cause| AgentByAddressError {
+                thread,
+                address: called,
+                cause: Box::new(cause),
+            })
     }
 
-    /// The item an engine knows as `native_id`, within `run` when given.
     pub async fn item_by_native(
         &self,
         thread_id: &ThreadId,
         run: Option<&RunId>,
         native_id: &str,
-    ) -> Result<Option<Item>> {
+    ) -> Result<Option<Item>, ItemByNativeError> {
+        let (thread, native) = (thread_id.clone(), native_id.to_owned());
         let (thread_id, run, native_id) = (thread_id.clone(), run.cloned(), native_id.to_owned());
-        self.read(move |conn| {
-            read::item_by_native(conn, &thread_id, run.as_ref(), &native_id)
-                .with_context(|| format!("read item {native_id:?} of thread {thread_id}"))
-        })
-        .await
+        self.read(move |conn| read::item_by_native(conn, &thread_id, run.as_ref(), &native_id))
+            .await
+            .map_err(|cause| ItemByNativeError {
+                thread,
+                native,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Items by position. Without `after`, the page is the newest items
-    /// before `before` (or the thread's tail); `more` says items exist past
-    /// the far end of the page.
-    pub async fn items_page(&self, thread_id: &ThreadId, query: ItemsQuery) -> Result<ItemsPage> {
+    pub async fn items_page(
+        &self,
+        thread_id: &ThreadId,
+        query: ItemsQuery,
+    ) -> Result<ItemsPage, ItemsPageError> {
+        let thread = thread_id.clone();
         let thread_id = thread_id.clone();
-        self.read(move |conn| {
-            read::items_page(conn, &thread_id, &query)
-                .with_context(|| format!("page items of thread {thread_id}"))
-        })
-        .await
+        self.read(move |conn| read::items_page(conn, &thread_id, &query))
+            .await
+            .map_err(|cause| ItemsPageError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    /// A bounded root transcript or one agent's direct children, never the
-    /// other agent transcripts that happen to share this thread's positions.
     pub async fn transcript_page(
         &self,
         thread_id: &ThreadId,
         parent: Option<&ItemId>,
         query: ItemsQuery,
-    ) -> Result<ItemsPage> {
+    ) -> Result<ItemsPage, TranscriptPageError> {
         let thread = thread_id.clone();
         let tail = crate::hot::Tail::items(parent, &query);
         let parent = parent.cloned();
@@ -556,68 +741,163 @@ impl Store {
             read::scoped_items_page(conn, &thread, &query, Some(parent.as_ref()))
         })
         .await
+        .map_err(|cause| TranscriptPageError {
+            thread: thread_id.clone(),
+            cause: Box::new(cause),
+        })
     }
 
-    /// A page of the root transcript in rows, the work between them as
-    /// spans (see `read::transcript_page`).
     pub async fn transcript_rows(
         &self,
         thread_id: &ThreadId,
         query: ItemsQuery,
-    ) -> Result<ItemsPage> {
+    ) -> Result<ItemsPage, TranscriptRowsError> {
         let thread = thread_id.clone();
         let tail = crate::hot::Tail::rows(&query);
         self.tail_page(thread_id, tail, move |conn| {
             read::transcript_page(conn, &thread, &query)
-                .with_context(|| format!("page the transcript of thread {thread}"))
         })
         .await
+        .map_err(|cause| TranscriptRowsError {
+            thread: thread_id.clone(),
+            cause: Box::new(cause),
+        })
     }
 
-    /// Root work between `after` and `before`, newest first.
-    pub async fn work_page(&self, thread_id: &ThreadId, query: ItemsQuery) -> Result<ItemsPage> {
+    pub async fn work_page(
+        &self,
+        thread_id: &ThreadId,
+        query: ItemsQuery,
+    ) -> Result<ItemsPage, WorkPageError> {
+        let thread = thread_id.clone();
         let thread_id = thread_id.clone();
-        self.read(move |conn| {
-            read::work_page(conn, &thread_id, &query)
-                .with_context(|| format!("page work of thread {thread_id}"))
-        })
-        .await
-    }
-
-    /// Approvals and questions waiting on the user, across threads.
-    pub async fn items_awaiting_user(&self) -> Result<Vec<artisan_api::PendingItem>> {
-        self.read(|conn| read::items_awaiting_user(conn).context("read items awaiting the user"))
+        self.read(move |conn| read::work_page(conn, &thread_id, &query))
             .await
+            .map_err(|cause| WorkPageError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    /// At most `limit` eligible threads; the pending Item index is the queue.
+    pub async fn items_awaiting_user(
+        &self,
+    ) -> Result<Vec<artisan_api::PendingItem>, AwaitingItemsError> {
+        self.read(read::items_awaiting_user)
+            .await
+            .map_err(|cause| AwaitingItemsError {
+                cause: Box::new(cause),
+            })
+    }
+
     pub async fn pending_threads(
         &self,
         limit: usize,
         excluded: Vec<ThreadId>,
-    ) -> Result<Vec<ThreadId>> {
+    ) -> Result<Vec<ThreadId>, PendingThreadsError> {
         let limit = limit.min(8);
         self.read(move |conn| read::pending_threads(conn, limit, &excluded))
             .await
+            .map_err(|cause| PendingThreadsError {
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn has_runnable_input(&self, thread_id: &ThreadId) -> Result<bool> {
+    pub async fn has_runnable_input(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<bool, RunnableInputError> {
+        let asked = thread_id.clone();
         let thread = thread_id.clone();
         self.read(move |conn| read::has_runnable_input(conn, &thread))
             .await
+            .map_err(|cause| RunnableInputError {
+                thread: asked,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Reads a bounded initial batch and all observed pending input's sequence boundary in one snapshot.
-    pub async fn pending_inputs(&self, thread_id: &ThreadId) -> Result<PendingInputs> {
+    pub async fn pending_inputs(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<PendingInputs, PendingInputsError> {
+        let asked = thread_id.clone();
         let thread = thread_id.clone();
         let blob_dir = self.inner.blob_dir.clone();
         self.read(move |conn| read::pending_inputs(conn, &thread, &blob_dir))
             .await
+            .map_err(|cause| PendingInputsError {
+                thread: asked,
+                cause: Box::new(cause),
+            })
     }
 }
 
+fn answer(
+    tx: &mut Tx<'_>,
+    id: &ItemId,
+    answers: Vec<Option<artisan_api::QuestionAnswer>>,
+    blob_dir: &std::path::Path,
+) -> Result<Item, AnswerFailure> {
+    let old = read::item(tx, id)?.ok_or(AnswerFailure::NotFound)?;
+    let mut item = old.clone();
+    let ItemKind::Question {
+        blocking: false,
+        questions,
+        answers: saved,
+        ..
+    } = &mut item.kind
+    else {
+        return Err(AnswerRefused::EngineStopped.into());
+    };
+    collection::validate_answers(tx, questions, &answers)?;
+    let input_id = ItemId(format!("answer-{id}"));
+    if item.status.is_terminal() {
+        if !collection::answers_equal(tx, saved.as_ref(), &answers)? {
+            return Err(AnswerRefused::AnsweredDifferently.into());
+        }
+        return read::item(tx, &input_id)?.ok_or(AnswerFailure::NotFound);
+    }
+    if item.status != Status::AwaitingUser {
+        return Err(AnswerRefused::NotWaiting.into());
+    }
+    let mut text = String::from("Answers to the agent's questions:\n");
+    collection::visit_questions(tx, questions, |index, question| {
+        text.push_str(&content::resolve(tx, &question.text)?);
+        text.push_str("\nAnswer: ");
+        match &answers[index] {
+            Some(answer) => text.push_str(&collection::answer_text(tx, question, answer)?),
+            None => text.push_str("Skipped"),
+        }
+        text.push_str("\n\n");
+        Ok(())
+    })?;
+    *saved = Some(answers.into());
+    item.status = Status::Done;
+    tx.save_item(item.clone(), Some(old))?;
+    let (input, _) = tx.insert_input(
+        NewItem {
+            id: input_id,
+            thread_id: item.thread_id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Running,
+            kind: ItemKind::UserMessage {
+                text: text.into(),
+                images: Vec::new(),
+                steer: false,
+                from_agent: None,
+                sender: None,
+            },
+        },
+        blob_dir,
+    )?;
+    tx.mark_activity(&input.thread_id, input.seq)?;
+    Ok(input)
+}
+
 impl Tx<'_> {
-    pub(crate) fn upsert_item(&mut self, mut new: NewItem) -> Result<Item> {
+    pub(crate) fn upsert_item(&mut self, mut new: NewItem) -> Result<Item, WriteFailure> {
         let native_id = new.native_id.clone();
         let old = read::item(self, &new.id)?;
         if let ItemKind::Agent { label, .. } = &mut new.kind
@@ -647,11 +927,13 @@ impl Tx<'_> {
             }
         }
         let item = if let Some(old) = old {
-            ensure!(
-                old.thread_id == new.thread_id,
-                "item belongs to thread {}",
-                old.thread_id
-            );
+            if old.thread_id != new.thread_id {
+                return Err(WriteFailure::ItemMoved {
+                    item: new.id,
+                    stored: old.thread_id,
+                    requested: new.thread_id,
+                });
+            }
             let mut kind = new.kind;
             if let (
                 ItemKind::Agent {
@@ -716,7 +998,7 @@ impl Tx<'_> {
         steer: bool,
         acceptance: Acceptance,
         blob_dir: &std::path::Path,
-    ) -> Result<(Item, bool, EngineId)> {
+    ) -> Result<(Item, bool, EngineId), InputFailure> {
         let mut thread = read::thread(self, &thread_id)?
             .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
         let engine = thread.config.engine;
@@ -740,6 +1022,9 @@ impl Tx<'_> {
         )?;
         if created {
             if let Some(config) = message.config {
+                if !valid_config(&config) {
+                    return Err(SendRejected::InvalidConfig.into());
+                }
                 thread.config = config;
             }
             if thread.title.is_none() {

@@ -1,13 +1,5 @@
-//! Recall: what an agent finds across every thread.
-//!
-//! Each item's readable text (messages, plans, commands, paths, errors) is
-//! kept in `item_text` beside the item, under the item's rowid, and indexed
-//! for ranked search in `item_search`. Tool output has its own column: it is
-//! scanned only when a search asks for it, so logs don't drown the
-//! conversation. Both are written in the transaction that saves the item.
-
 use crate::Store;
-use anyhow::{Context, Result};
+use crate::content::ContentError;
 use artisan_api::{
     Collection, ContentQuery, EngineId, FileOp, Item, ItemId, ItemKind, ProjectId, Status,
     TextContent, ThreadId, Timestamp, ToolKind,
@@ -15,17 +7,40 @@ use artisan_api::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-/// The most of one text field an item keeps searchable.
+type Result<T, E = ContentError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum GrepFailure {
+    #[error("That pattern doesn't compile")]
+    Pattern(#[source] regex::Error),
+    #[error(transparent)]
+    Content(#[from] ContentError),
+}
+
+crate::error::operation_error!(RecallSearchError(ContentError), "search recall for {query:?}", query: String);
+crate::error::operation_error!(RecallGrepError(GrepFailure), "grep recall for {pattern:?}", pattern: String);
+crate::error::operation_error!(RecallTouchingError(ContentError), "find the items touching {path:?}", path: String);
+
+impl From<crate::StorageError> for GrepFailure {
+    fn from(error: crate::StorageError) -> Self {
+        Self::Content(error.into())
+    }
+}
+
+impl From<rusqlite::Error> for GrepFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Content(error.into())
+    }
+}
+
 const FIELD_BYTES: usize = 64 * 1024;
-/// Rows one grep reads before it hands back a cursor.
+const FIELD_RANGE: u32 = 64 * 1024;
 const GREP_SCAN_ROWS: usize = 20_000;
 
-/// What one item contributes to recall.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Searchable {
     pub(crate) text: String,
     pub(crate) output: String,
-    /// One `<op>\t<path>` line per path the item read or changed.
     pub(crate) paths: String,
 }
 
@@ -50,7 +65,6 @@ fn push(field: &mut String, text: &str) {
     field.push_str(&text[..end]);
 }
 
-/// The first [`FIELD_BYTES`] of a text, inline or stored.
 fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
     match text {
         TextContent::Inline(text) => Ok(text.clone()),
@@ -59,7 +73,7 @@ fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
             &source.id,
             &ContentQuery {
                 offset: 0,
-                limit: Some(u32::try_from(FIELD_BYTES)?),
+                limit: Some(FIELD_RANGE),
             },
         )?
         .map(|range| range.text)
@@ -79,7 +93,6 @@ fn entries<T: serde::de::DeserializeOwned + Clone>(
 
 pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
     let mut found = Searchable::default();
-    // Recall's own calls would only find themselves.
     if artisan_call(item) {
         return Ok(found);
     }
@@ -100,7 +113,6 @@ pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
             push_tool(conn, tool, text, &mut found.paths)?;
             if let Some(output) = output.as_ref().filter(|_| item.status.is_terminal()) {
                 let output = text_of(conn, &output.text)?;
-                // A failed command's output is what someone searches for.
                 if exit_code.is_some_and(|code| code != 0) || item.status == Status::Failed {
                     push(text, &output);
                 }
@@ -161,7 +173,6 @@ pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
     Ok(found)
 }
 
-/// What a tool call adds to the searchable text and the paths it touched.
 fn push_tool(
     conn: &Connection,
     tool: &ToolKind,
@@ -219,14 +230,10 @@ fn push_tool(
     Ok(())
 }
 
-/// Brings the item's recall rows in line with its saved body. Unchanged text
-/// writes nothing.
-/// A call to Artisan's own MCP server.
 fn artisan_call(item: &Item) -> bool {
     matches!(&item.kind, ItemKind::Tool { tool: ToolKind::Mcp { server, .. }, .. } if server == "artisan")
 }
 
-/// Takes the Artisan calls the first index kept out of it.
 pub fn forget_artisan_calls(conn: &Connection) -> Result<()> {
     let mut rows = conn.prepare(
         "SELECT body FROM items WHERE kind_type='tool'
@@ -236,7 +243,7 @@ pub fn forget_artisan_calls(conn: &Connection) -> Result<()> {
     let bodies = rows.query_map([], |row| row.get::<_, String>(0))?;
     for body in bodies {
         if let Ok(item) = serde_json::from_str::<Item>(&body?) {
-            index(conn, &item).with_context(|| format!("unindex Artisan call {}", item.id))?;
+            index(conn, &item)?;
         }
     }
     Ok(())
@@ -245,8 +252,7 @@ pub fn forget_artisan_calls(conn: &Connection) -> Result<()> {
 pub fn index(conn: &Connection, item: &Item) -> Result<()> {
     let rowid: i64 = conn
         .prepare_cached("SELECT rowid FROM items WHERE id=?1")?
-        .query_row([item.id.as_str()], |row| row.get(0))
-        .with_context(|| format!("find item {} to index", item.id))?;
+        .query_row([item.id.as_str()], |row| row.get(0))?;
     let next = searchable(conn, item)?;
     let previous = conn
         .prepare_cached("SELECT text,output,paths FROM item_text WHERE rowid=?1")?
@@ -291,7 +297,6 @@ pub fn index(conn: &Connection, item: &Item) -> Result<()> {
     Ok(())
 }
 
-/// The kind as an agent filters by it.
 const fn kind_name(kind: &ItemKind) -> &'static str {
     match kind {
         ItemKind::UserMessage { .. } => "user",
@@ -307,7 +312,6 @@ const fn kind_name(kind: &ItemKind) -> &'static str {
     }
 }
 
-/// Indexes every item already stored (the migration that adds recall).
 pub fn backfill(conn: &Connection) -> Result<()> {
     let mut rows = conn.prepare("SELECT body FROM items ORDER BY rowid")?;
     let bodies = rows.query_map([], |row| row.get::<_, String>(0))?;
@@ -318,7 +322,7 @@ pub fn backfill(conn: &Connection) -> Result<()> {
             skipped += 1;
             continue;
         };
-        index(conn, &item).with_context(|| format!("index item {}", item.id))?;
+        index(conn, &item)?;
     }
     if skipped > 0 {
         tracing::warn!(
@@ -329,25 +333,20 @@ pub fn backfill(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Which threads a recall query looks in.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecallScope {
     pub thread: Option<ThreadId>,
     pub project: Option<ProjectId>,
     pub engine: Option<EngineId>,
-    /// Item kinds ("user", "assistant", "tool", "agent", "plan", ...).
     #[serde(default)]
     pub kinds: Vec<String>,
     pub since: Option<Timestamp>,
     pub until: Option<Timestamp>,
-    /// Leave archived threads out.
     #[serde(default)]
     pub skip_archived: bool,
 }
 
 impl RecallScope {
-    /// The scope as SQL over `item_text t` joined to `threads h`, with its
-    /// parameters starting at `?first`.
     fn sql(&self, first: usize) -> (String, Vec<rusqlite::types::Value>) {
         use rusqlite::types::Value;
         let mut clauses = Vec::new();
@@ -378,7 +377,8 @@ impl RecallScope {
             add("t.created_at<?", Value::Integer(until));
         }
         if !self.kinds.is_empty() {
-            let list = serde_json::to_string(&self.kinds).unwrap_or_default();
+            let list =
+                serde_json::to_string(&self.kinds).expect("invariant: kind names always encode");
             add(
                 "t.kind IN (SELECT value FROM json_each(?))",
                 Value::Text(list),
@@ -403,19 +403,15 @@ pub struct SearchHit {
     pub item_id: ItemId,
     pub kind: String,
     pub created_at: Timestamp,
-    /// The matching text around the match, `[`marked`]`.
     pub snippet: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchPage {
     pub hits: Vec<SearchHit>,
-    /// Pass back as `offset` for the next page; `None` at the end.
     pub next: Option<u32>,
 }
 
-/// An FTS query matching every word of `query` anywhere, or `None` when no
-/// word is long enough for the trigram index.
 fn fts_query(query: &str) -> Option<String> {
     let words: Vec<String> = query
         .split_whitespace()
@@ -432,9 +428,7 @@ pub struct GrepMatch {
     pub item_id: ItemId,
     pub kind: String,
     pub created_at: Timestamp,
-    /// "text" or "output".
     pub field: String,
-    /// 1-based, within the field.
     pub line: u32,
     pub before: Vec<String>,
     pub text: String,
@@ -444,8 +438,6 @@ pub struct GrepMatch {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepPage {
     pub matches: Vec<GrepMatch>,
-    /// Pass back as `cursor` to keep going (older items); `None` once every
-    /// item in scope was read.
     pub next: Option<i64>,
 }
 
@@ -454,13 +446,11 @@ pub struct GrepQuery {
     pub pattern: String,
     #[serde(default)]
     pub ignore_case: bool,
-    /// Also read tool output.
     #[serde(default)]
     pub output: bool,
     #[serde(default)]
     pub context: u32,
     pub max_matches: Option<u32>,
-    /// Items older than this rowid; from a previous page's `next`.
     pub cursor: Option<i64>,
 }
 
@@ -474,12 +464,16 @@ pub struct Touch {
     pub created_at: Timestamp,
 }
 
-fn grep_rows(conn: &Connection, scope: &RecallScope, query: &GrepQuery) -> Result<GrepPage> {
+fn grep_rows(
+    conn: &Connection,
+    scope: &RecallScope,
+    query: &GrepQuery,
+) -> Result<GrepPage, GrepFailure> {
     let regex = regex::RegexBuilder::new(&query.pattern)
         .case_insensitive(query.ignore_case)
         .size_limit(1 << 20)
         .build()
-        .map_err(|error| crate::Refused(format!("That pattern doesn't compile: {error}")))?;
+        .map_err(GrepFailure::Pattern)?;
     let max = query.max_matches.unwrap_or(50).clamp(1, 500) as usize;
     let context = query.context.min(10) as usize;
     let (filter, mut values) = scope.sql(2);
@@ -567,8 +561,6 @@ fn search_rows(
 ) -> Result<SearchPage> {
     let limit = limit.clamp(1, 100);
     let (filter, scope_values) = scope.sql(5);
-    // The whole query as typed ranks first: an exact phrase beats its words
-    // scattered through a long tool call.
     let mut values = vec![
         rusqlite::types::Value::Null,
         rusqlite::types::Value::Integer(i64::from(limit) + 1),
@@ -588,7 +580,6 @@ fn search_rows(
                  LIMIT ?2 OFFSET ?3"
             )
     } else {
-        // Too short for the index: a plain scan, newest first.
         values[0] = rusqlite::types::Value::Text(query.trim().to_owned());
         format!(
             "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
@@ -601,11 +592,13 @@ fn search_rows(
     values.extend(scope_values);
     let mut hits = read_hits(conn, &sql, &values)?;
     if output && hits.len() <= limit as usize {
-        // Output has no index; scan it for the plain text, newest first.
         let (filter, scope_values) = scope.sql(3);
         let mut values = vec![
             rusqlite::types::Value::Text(query.trim().to_owned()),
-            rusqlite::types::Value::Integer(i64::from(limit) + 1 - i64::try_from(hits.len())?),
+            rusqlite::types::Value::Integer(
+                i64::from(limit) + 1
+                    - i64::try_from(hits.len()).expect("invariant: at most `limit` hits"),
+            ),
         ];
         values.extend(scope_values);
         let sql = format!(
@@ -717,8 +710,6 @@ fn touching_rows(
 }
 
 impl Store {
-    /// Ranked full-text search over every item's readable text; with
-    /// `output`, tool output too.
     pub async fn recall_search(
         &self,
         scope: RecallScope,
@@ -726,24 +717,42 @@ impl Store {
         output: bool,
         limit: u32,
         offset: u32,
-    ) -> Result<SearchPage> {
+    ) -> Result<SearchPage, RecallSearchError> {
+        let searched = query.clone();
         self.scan(move |conn| search_rows(conn, &scope, &query, output, limit, offset))
             .await
+            .map_err(|cause| RecallSearchError {
+                query: searched,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Lines matching a regex, newest items first.
-    pub async fn recall_grep(&self, scope: RecallScope, query: GrepQuery) -> Result<GrepPage> {
-        self.scan(move |conn| grep_rows(conn, &scope, &query)).await
+    pub async fn recall_grep(
+        &self,
+        scope: RecallScope,
+        query: GrepQuery,
+    ) -> Result<GrepPage, RecallGrepError> {
+        let pattern = query.pattern.clone();
+        self.scan(move |conn| grep_rows(conn, &scope, &query))
+            .await
+            .map_err(|cause| RecallGrepError {
+                pattern,
+                cause: Box::new(cause),
+            })
     }
 
-    /// The items that read or changed a path containing `path`, newest first.
     pub async fn recall_touching(
         &self,
         scope: RecallScope,
         path: String,
         limit: u32,
-    ) -> Result<Vec<Touch>> {
+    ) -> Result<Vec<Touch>, RecallTouchingError> {
+        let touched = path.clone();
         self.scan(move |conn| touching_rows(conn, &scope, &path, limit))
             .await
+            .map_err(|cause| RecallTouchingError {
+                path: touched,
+                cause: Box::new(cause),
+            })
     }
 }

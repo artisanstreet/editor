@@ -1,23 +1,59 @@
-//! Projects, threads and runs, and the state a client starts from.
-
-use crate::{Snapshot, Store, read};
-use anyhow::{Context, Result};
+use crate::error::{Staged, StorageError, operation_error};
+use crate::writer::{UpdateThreadFailure, WriteFailure};
+use crate::{CreateThreadError, Snapshot, Store, read};
 use artisan_api::{
     CreateProject, CreateThread, Envelope, Project, ProjectId, Run, RunId, Seq, Thread, ThreadId,
     UpdateThread,
 };
 
+const STATE_THREADS: u32 = 200;
+
+operation_error!(CreateProjectError(StorageError), "create project {project}", project: ProjectId);
+operation_error!(RemoveProjectError(StorageError), "remove project {project}", project: ProjectId);
+operation_error!(UpdateThreadError(UpdateThreadFailure), "update thread {thread}", thread: ThreadId);
+operation_error!(ReplaceTitleError(WriteFailure), "replace the title of thread {thread}", thread: ThreadId);
+operation_error!(
+    ThreadsPageError(read::ThreadsPageFailure),
+    "page the threads"
+);
+operation_error!(MarkUnreadError(WriteFailure), "mark thread {thread} unread", thread: ThreadId);
+operation_error!(SettleThreadError(WriteFailure), "settle thread {thread} at seq {seq}", thread: ThreadId, seq: Seq);
+operation_error!(UpsertRunError(WriteFailure), "save run {run} of thread {thread}", run: RunId, thread: ThreadId);
+operation_error!(
+    StateError(StorageError),
+    "read the state a client starts from"
+);
+operation_error!(ChangesSinceError(StorageError), "read the changes since seq {since}", since: Seq);
+operation_error!(ReadProjectError(StorageError), "read project {project}", project: ProjectId);
+operation_error!(ReadThreadError(StorageError), "read thread {thread}", thread: ThreadId);
+operation_error!(ReadRunError(StorageError), "read run {run}", run: RunId);
+operation_error!(LatestRunError(StorageError), "read the latest run of thread {thread}", thread: ThreadId);
+operation_error!(InspectorError(crate::ContentError), "summarize thread {thread} for the inspector", thread: ThreadId);
+operation_error!(ThreadTitlesError(StorageError), "read the thread titles");
+operation_error!(AgentThreadsError(StorageError), "read the agent threads of thread {thread}", thread: ThreadId);
+operation_error!(WorkingAgentsError(StorageError), "read the working agents");
+operation_error!(LastReplyError(crate::ContentError), "read the last reply of thread {thread}", thread: ThreadId);
+operation_error!(AwaitsUserError(StorageError), "read whether thread {thread} waits on the user", thread: ThreadId);
+
 impl Store {
-    /// Creating an existing id returns the stored project unchanged.
-    pub async fn create_project(&self, request: CreateProject) -> Result<Project> {
-        let id = request.id.clone();
+    pub async fn create_project(
+        &self,
+        request: CreateProject,
+    ) -> Result<Project, CreateProjectError> {
+        let project = request.id.clone();
         self.write_acknowledged(move |tx| tx.create_project(request))
-            .await
-            .with_context(|| format!("create project {id}"))
+        .await
+        .map_err(|cause| CreateProjectError {
+            project,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Marks the project removed. `None` if it does not exist.
-    pub async fn remove_project(&self, id: &ProjectId) -> Result<Option<Project>> {
+    pub async fn remove_project(
+        &self,
+        id: &ProjectId,
+    ) -> Result<Option<Project>, RemoveProjectError> {
+        let project = id.clone();
         let id = id.clone();
         self.write_acknowledged(move |tx| {
             let Some(mut project) = read::project(tx, &id)? else {
@@ -30,35 +66,44 @@ impl Store {
             tx.save_project(project).map(Some)
         })
         .await
+        .map_err(|cause| RemoveProjectError {
+            project,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Creating an existing id returns the stored thread unchanged.
-    pub async fn create_thread(&self, request: CreateThread) -> Result<Thread> {
-        let id = request.id.clone();
-        self.write_acknowledged(move |tx| tx.create_thread(request))
+    pub async fn create_thread(&self, request: CreateThread) -> Result<Thread, CreateThreadError> {
+        let thread = request.id.clone();
+        self.write_acknowledged(move |tx| tx.create_thread(request).map_err(Staged::Failed))
             .await
-            .with_context(|| format!("create thread {id}"))
+            .map_err(|staged| match staged {
+                Staged::Failed(error) => error,
+                Staged::Storage(source) => CreateThreadError::Storage { thread, source },
+            })
     }
 
-    /// `None` if the thread does not exist.
     pub async fn update_thread(
         &self,
         id: &ThreadId,
         update: UpdateThread,
-    ) -> Result<Option<Thread>> {
+    ) -> Result<Option<Thread>, UpdateThreadError> {
+        let thread = id.clone();
         let id = id.clone();
         self.write_acknowledged(move |tx| tx.update_thread(&id, update))
             .await
+            .map_err(|cause| UpdateThreadError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Replaces a fallback title only if it has not changed while generation ran.
-    /// `None` means the thread disappeared or another title won the race.
     pub async fn replace_thread_title(
         &self,
         id: &ThreadId,
         expected: Option<String>,
         title: String,
-    ) -> Result<Option<Thread>> {
+    ) -> Result<Option<Thread>, ReplaceTitleError> {
+        let thread = id.clone();
         let id = id.clone();
         self.write_acknowledged(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
@@ -68,15 +113,19 @@ impl Store {
                 return Ok(None);
             }
             thread.title = Some(title);
-            tx.save_thread(thread).map(Some)
+            Ok(Some(tx.save_thread(thread)?))
         })
         .await
+        .map_err(|cause| ReplaceTitleError {
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn threads_page(
         &self,
         query: artisan_api::ThreadsQuery,
-    ) -> Result<artisan_api::ThreadsPage> {
+    ) -> Result<artisan_api::ThreadsPage, ThreadsPageError> {
         self.read(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let page = read::threads_page(&tx, &query)?;
@@ -84,25 +133,34 @@ impl Store {
             Ok(page)
         })
         .await
+        .map_err(|cause| ThreadsPageError {
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn mark_unread(&self, id: &ThreadId) -> Result<Option<Thread>> {
+    pub async fn mark_unread(&self, id: &ThreadId) -> Result<Option<Thread>, MarkUnreadError> {
+        let thread = id.clone();
         let id = id.clone();
         self.write_acknowledged(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
                 return Ok(None);
             };
             thread.marked_unread = true;
-            tx.save_thread(thread).map(Some)
+            Ok(Some(tx.save_thread(thread)?))
         })
         .await
+        .map_err(|cause| MarkUnreadError {
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn settle_thread(
         &self,
         id: &ThreadId,
         observed_seq: artisan_api::Seq,
-    ) -> Result<Option<Thread>> {
+    ) -> Result<Option<Thread>, SettleThreadError> {
+        let thread = id.clone();
         let id = id.clone();
         self.write(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
@@ -111,88 +169,52 @@ impl Store {
             thread.settled_seq = thread
                 .settled_seq
                 .max(observed_seq.min(thread.activity_seq));
-            tx.save_thread(thread).map(Some)
+            Ok(Some(tx.save_thread(thread)?))
         })
         .await
+        .map_err(|cause| SettleThreadError {
+            thread,
+            seq: observed_seq,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn upsert_run(&self, run: Run) -> Result<Run> {
-        let (id, thread_id) = (run.id.clone(), run.thread_id.clone());
+    pub async fn upsert_run(&self, run: Run) -> Result<Run, UpsertRunError> {
+        let (id, thread) = (run.id.clone(), run.thread_id.clone());
         self.write(move |tx| tx.upsert_run(run))
             .await
-            .with_context(|| format!("save run {id} of thread {thread_id}"))
+            .map_err(|cause| UpsertRunError {
+                run: id,
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn state(&self) -> Result<Snapshot> {
-        // Head first: everything up to it is committed, so the snapshot holds
-        // at least that much and events after it fill in the rest.
+    pub async fn state(&self) -> Result<Snapshot, StateError> {
         let head = self.head();
         self.read(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let projects: Vec<Project> =
-                read::many(&tx, "SELECT body FROM projects ORDER BY rowid", [])?;
-            let page = read::threads_page(
-                &tx,
-                &artisan_api::ThreadsQuery {
-                    limit: Some(200),
-                    ..Default::default()
-                },
-            )?;
-            let mut threads = page.threads;
-            let ids = serde_json::to_string(
-                &threads.iter().map(|thread| &thread.id).collect::<Vec<_>>(),
-            )?;
-            let pinned: Vec<Thread> = read::many(
-                &tx,
-                "SELECT body FROM threads WHERE id IN (
-                    SELECT thread_id FROM runs WHERE status='running'
-                    UNION SELECT thread_id FROM items WHERE status='awaiting_user')
-                  AND id NOT IN (SELECT value FROM json_each(?1))",
-                [ids],
-            )?;
-            threads.extend(pinned);
-            let mut runs = page.runs;
-            let live: Vec<Run> =
-                read::many(&tx, "SELECT body FROM runs WHERE status='running'", [])?;
-            for run in live {
-                if !runs.iter().any(|known| known.id == run.id) {
-                    runs.push(run);
-                }
-            }
-            let mut settings = serde_json::Map::new();
-            let mut statement = tx.prepare("SELECT key, value FROM kv")?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let key: String = row.get(0)?;
-                let value: String = row.get(1)?;
-                let value =
-                    serde_json::from_str(&value).with_context(|| format!("parse setting {key}"))?;
-                settings.insert(key, value);
-            }
-            Ok(Snapshot {
-                head,
-                projects: projects
-                    .into_iter()
-                    .filter(|project| !project.removed)
-                    .collect(),
-                threads,
-                threads_next: page.next,
-                runs,
-                settings,
-            })
+            let snapshot = snapshot(&tx, head)?;
+            tx.commit()?;
+            Ok(snapshot)
         })
         .await
-        .context("read state")
+        .map_err(|cause| StateError {
+            cause: Box::new(cause),
+        })
     }
 
-    /// Every stored entity changed after `since`, in seq order, or `None` when
-    /// there are more than `limit` (the client should refetch the state).
-    pub async fn changes_since(&self, since: Seq, limit: usize) -> Result<Option<Vec<Envelope>>> {
-        self.read(move |conn| {
-            read::changes_since(conn, since, limit, false, None)
-                .with_context(|| format!("read changes since {since}"))
-        })
-        .await
+    pub async fn changes_since(
+        &self,
+        since: Seq,
+        limit: usize,
+    ) -> Result<Option<Vec<Envelope>>, ChangesSinceError> {
+        self.read(move |conn| read::changes_since(conn, since, limit, false, None))
+            .await
+            .map_err(|cause| ChangesSinceError {
+                since,
+                cause: Box::new(cause),
+            })
     }
 
     pub async fn changes_since_scoped(
@@ -201,124 +223,208 @@ impl Store {
         limit: usize,
         summary: bool,
         observed: Option<ThreadId>,
-    ) -> Result<Option<Vec<Envelope>>> {
+    ) -> Result<Option<Vec<Envelope>>, ChangesSinceError> {
         self.read(move |conn| read::changes_since(conn, since, limit, summary, observed.as_ref()))
             .await
+            .map_err(|cause| ChangesSinceError {
+                since,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn project(&self, id: &ProjectId) -> Result<Option<Project>> {
+    pub async fn project(&self, id: &ProjectId) -> Result<Option<Project>, ReadProjectError> {
+        let project = id.clone();
         let id = id.clone();
-        self.read(move |conn| {
-            read::project(conn, &id).with_context(|| format!("read project {id}"))
-        })
-        .await
-    }
-
-    pub async fn thread(&self, id: &ThreadId) -> Result<Option<Thread>> {
-        let id = id.clone();
-        self.read(move |conn| read::thread(conn, &id).with_context(|| format!("read thread {id}")))
+        self.read(move |conn| read::project(conn, &id))
             .await
+            .map_err(|cause| ReadProjectError {
+                project,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn run(&self, id: &RunId) -> Result<Option<Run>> {
+    pub async fn thread(&self, id: &ThreadId) -> Result<Option<Thread>, ReadThreadError> {
+        let thread = id.clone();
         let id = id.clone();
-        self.read(move |conn| read::run(conn, &id).with_context(|| format!("read run {id}")))
+        self.read(move |conn| read::thread(conn, &id))
             .await
+            .map_err(|cause| ReadThreadError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn latest_run(&self, thread_id: &ThreadId) -> Result<Option<Run>> {
+    pub async fn run(&self, id: &RunId) -> Result<Option<Run>, ReadRunError> {
+        let run = id.clone();
+        let id = id.clone();
+        self.read(move |conn| read::run(conn, &id))
+            .await
+            .map_err(|cause| ReadRunError {
+                run,
+                cause: Box::new(cause),
+            })
+    }
+
+    pub async fn latest_run(&self, thread_id: &ThreadId) -> Result<Option<Run>, LatestRunError> {
+        let thread = thread_id.clone();
         let thread_id = thread_id.clone();
-        self.read(move |conn| {
-            read::latest_run(conn, &thread_id)
-                .with_context(|| format!("read latest run of thread {thread_id}"))
-        })
-        .await
+        self.read(move |conn| read::latest_run(conn, &thread_id))
+            .await
+            .map_err(|cause| LatestRunError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn inspector(&self, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
+    pub async fn inspector(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<artisan_api::InspectorSummary, InspectorError> {
+        let id = thread.clone();
         let thread = thread.clone();
-        self.scan(move |conn| read::inspector(conn, &thread)).await
+        self.scan(move |conn| read::inspector(conn, &id))
+            .await
+            .map_err(|cause| InspectorError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    /// Every titled thread's id and title, the most recently active first:
-    /// what `@title` mentions resolve against.
-    pub async fn thread_titles(&self) -> Result<Vec<(ThreadId, String)>> {
+    pub async fn thread_titles(&self) -> Result<Vec<(ThreadId, String)>, ThreadTitlesError> {
         self.read(move |conn| {
-            let mut statement = conn.prepare_cached(
-                "SELECT id, json_extract(body,'$.title') FROM threads
-                    WHERE json_extract(body,'$.title') IS NOT NULL
-                    ORDER BY json_extract(body,'$.activity_seq') DESC, seq DESC",
-            )?;
+            let mut statement = conn.prepare_cached(include_str!("sql/state/titles.sql"))?;
             let rows = statement.query_map([], |row| {
                 Ok((ThreadId::from(row.get::<_, String>(0)?), row.get(1)?))
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .context("read the thread titles")
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
+        .map_err(|cause| ThreadTitlesError {
+            cause: Box::new(cause),
+        })
     }
 
-    /// The threads running agents a thread started (`spawned_by` set).
-    pub async fn agent_threads(&self, parent: &ThreadId) -> Result<Vec<Thread>> {
+    pub async fn agent_threads(&self, parent: &ThreadId) -> Result<Vec<Thread>, AgentThreadsError> {
+        let thread = parent.clone();
         let parent = parent.clone();
         self.read(move |conn| {
             read::many(
                 conn,
-                "SELECT body FROM threads WHERE json_extract(body,'$.parent_thread_id')=?1
-                    AND json_extract(body,'$.spawned_by') IS NOT NULL ORDER BY seq",
+                include_str!("sql/state/agent_threads.sql"),
                 [parent.as_str()],
             )
         })
         .await
+        .map_err(|cause| AgentThreadsError {
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Every agent item still marked working, across threads.
-    pub async fn working_agents(&self) -> Result<Vec<artisan_api::Item>> {
-        self.read(|conn| {
-            read::items(
+    pub async fn working_agents(&self) -> Result<Vec<artisan_api::Item>, WorkingAgentsError> {
+        self.read(|conn| read::items(conn, include_str!("sql/state/working_agents.sql"), []))
+            .await
+            .map_err(|cause| WorkingAgentsError {
+                cause: Box::new(cause),
+            })
+    }
+
+    pub async fn last_reply(&self, thread: &ThreadId) -> Result<Option<String>, LastReplyError> {
+        let id = thread.clone();
+        let thread = thread.clone();
+        self.read(move |conn| {
+            let item = read::items(
                 conn,
-                "SELECT body FROM items WHERE kind_type='agent' AND status IN ('running','awaiting_user')
-                    AND json_extract(body,'$.kind.thread') IS NOT NULL",
-                [],
-            )
+                include_str!("sql/state/last_reply.sql"),
+                [id.as_str()],
+            )?
+            .pop();
+            match item.map(|item| item.kind) {
+                Some(artisan_api::ItemKind::AssistantMessage { text, .. }) => {
+                    Ok(Some(crate::content::resolve(conn, &text)?))
+                }
+                _ => Ok(None),
+            }
         })
         .await
+        .map_err(|cause| LastReplyError {
+            thread,
+            cause: Box::new(cause),
+        })
     }
 
-    /// The thread's latest top-level reply, resolved.
-    pub async fn last_reply(&self, thread: &ThreadId) -> Result<Option<String>> {
-        let thread = thread.clone();
-        let item = self
-            .read(move |conn| {
-                Ok(read::items(
-                    conn,
-                    "SELECT body FROM items WHERE thread_id=?1 AND kind_type='assistant_message'
-                        AND parent_id IS NULL ORDER BY position DESC LIMIT 1",
-                    [thread.as_str()],
-                )?
-                .pop())
-            })
-            .await?;
-        match item.map(|item| item.kind) {
-            Some(artisan_api::ItemKind::AssistantMessage { text, .. }) => {
-                Ok(Some(self.resolve_text(&text).await?))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Whether anything in the thread waits on the user.
-    pub async fn awaits_user(&self, thread: &ThreadId) -> Result<bool> {
+    pub async fn awaits_user(&self, thread: &ThreadId) -> Result<bool, AwaitsUserError> {
+        let id = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| {
             Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=?1 AND status='awaiting_user')",
-                [thread.as_str()],
+                [id.as_str()],
                 |row| row.get(0),
             )?)
         })
         .await
+        .map_err(|cause| AwaitsUserError {
+            thread,
+            cause: Box::new(cause),
+        })
     }
+}
+
+fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageError> {
+    let projects: Vec<Project> = read::many(conn, include_str!("sql/state/projects.sql"), [])?;
+    let mut settings = serde_json::Map::new();
+    let mut statement = conn.prepare(include_str!("sql/state/settings.sql"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let value: String = row.get(1)?;
+        settings.insert(key, read::from_body(&value)?);
+    }
+    drop(rows);
+    drop(statement);
+    let page = read::threads_page(
+        conn,
+        &artisan_api::ThreadsQuery {
+            limit: Some(STATE_THREADS),
+            ..Default::default()
+        },
+    )
+    .map_err(|failure| match failure {
+        read::ThreadsPageFailure::Storage(error) => error,
+        read::ThreadsPageFailure::SearchTooLong { .. } => {
+            unreachable!("invariant: the state's thread page has no search")
+        }
+    })?;
+    let ids = read::to_body(
+        &page
+            .threads
+            .iter()
+            .map(|thread| &thread.id)
+            .collect::<Vec<_>>(),
+    )?;
+    let pinned: Vec<Thread> = read::many(
+        conn,
+        include_str!("sql/state/pinned_threads.sql"),
+        [ids],
+    )?;
+    let live: Vec<Run> = read::many(conn, include_str!("sql/state/live_runs.sql"), [])?;
+    let mut threads = page.threads;
+    threads.extend(pinned);
+    let mut runs = page.runs;
+    for run in live {
+        if !runs.iter().any(|known| known.id == run.id) {
+            runs.push(run);
+        }
+    }
+    Ok(Snapshot {
+        head,
+        projects,
+        threads,
+        threads_next: page.next,
+        runs,
+        settings,
+    })
 }
 
 #[cfg(test)]

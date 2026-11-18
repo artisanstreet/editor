@@ -148,9 +148,11 @@ async fn overlapping_claims_are_advisory_and_updates_preserve_ownership_and_revi
         .await
         .unwrap_err();
     assert!(
-        stale
-            .downcast_ref::<forge_store::coordination::Conflict>()
-            .is_some()
+        matches!(
+            *stale.cause,
+            forge_store::coordination::CoordinationFailure::Stale(_)
+        ),
+        "a stale revision is refused as stale: {stale}"
     );
     let released = store
         .coordination_update(

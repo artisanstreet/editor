@@ -1,6 +1,6 @@
+use crate::error::{StorageError, operation_error};
 use crate::writer::Tx;
 use crate::{Store, read};
-use anyhow::{Context, Result};
 use artisan_api::{Event, Thread, ThreadId, Timestamp};
 use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
@@ -8,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 const THREADS: &str = include_str!("retention/threads.sql");
 const REMOVE: &str = include_str!("retention/remove.sql");
 const TOMBSTONE: &str = include_str!("retention/tombstone.sql");
+
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
+operation_error!(RemoveInactiveError(StorageError), "remove the threads inactive since {cutoff}", cutoff: Timestamp);
 
 struct Candidate {
     parent: Option<ThreadId>,
@@ -20,7 +24,7 @@ impl Store {
         cutoff: Timestamp,
         live: HashSet<ThreadId>,
         limit: usize,
-    ) -> Result<Vec<Thread>> {
+    ) -> Result<Vec<Thread>, RemoveInactiveError> {
         self.write(move |tx| {
             let removable = removable_families(tx, cutoff, &live)?;
             let mut removed = Vec::new();
@@ -37,7 +41,10 @@ impl Store {
             Ok(removed)
         })
         .await
-        .context("remove inactive threads")
+        .map_err(|cause| RemoveInactiveError {
+            cutoff,
+            cause: Box::new(cause),
+        })
     }
 }
 
@@ -51,16 +58,12 @@ impl Tx<'_> {
             .map(str::trim)
             .filter(|sql| !sql.is_empty())
         {
-            self.sql
-                .prepare_cached(statement)?
-                .execute([id.as_str()])
-                .with_context(|| format!("remove thread {id}"))?;
+            self.sql.prepare_cached(statement)?.execute([id.as_str()])?;
         }
         let seq = self.next_seq();
         self.sql
             .prepare_cached(TOMBSTONE)?
-            .execute(params![id.as_str(), seq])
-            .with_context(|| format!("record removed thread {id}"))?;
+            .execute(params![id.as_str(), seq])?;
         self.emit(
             seq,
             Event::ThreadRemoved {

@@ -192,7 +192,7 @@ async fn authorize(
             ErrorCode::Unauthorized,
             "this device is not paired with Forge",
         ),
-        Err(failure) => internal(failure.context("authorize the client certificate")),
+        Err(failure) => internal(anyhow::Error::new(failure)),
     }
 }
 
@@ -200,31 +200,76 @@ pub struct Failure(anyhow::Error, StatusCode, ErrorCode);
 
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
-        let (status, code) =
-            if let Some(rejected) = error.downcast_ref::<forge_store::CreateThreadError>() {
-                match rejected {
-                    forge_store::CreateThreadError::ProjectNotFound { .. }
-                    | forge_store::CreateThreadError::ParentNotFound { .. } => {
-                        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
-                    }
-                    forge_store::CreateThreadError::ProjectRemoved { .. } => {
-                        (StatusCode::CONFLICT, ErrorCode::Conflict)
-                    }
-                    forge_store::CreateThreadError::AgentWithoutParent { .. }
-                    | forge_store::CreateThreadError::AgentNotInParent { .. } => {
-                        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
-                    }
-                }
-            } else if error.downcast_ref::<forge_store::ItemNotFound>().is_some() {
-                (StatusCode::NOT_FOUND, ErrorCode::NotFound)
-            } else if error.downcast_ref::<forge_runs::Refused>().is_some() {
-                (StatusCode::CONFLICT, ErrorCode::Conflict)
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
-            };
+        let (status, code) = classify(&error);
         Self(error, status, code)
     }
 }
+
+fn classify(error: &anyhow::Error) -> (StatusCode, ErrorCode) {
+    let not_found = (StatusCode::NOT_FOUND, ErrorCode::NotFound);
+    let conflict = (StatusCode::CONFLICT, ErrorCode::Conflict);
+    let bad_request = (StatusCode::BAD_REQUEST, ErrorCode::BadRequest);
+    let internal = (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal);
+    for cause in error.chain() {
+        if let Some(rejected) = cause.downcast_ref::<forge_store::CreateThreadError>() {
+            return match rejected {
+                forge_store::CreateThreadError::ProjectNotFound { .. }
+                | forge_store::CreateThreadError::ParentNotFound { .. } => not_found,
+                forge_store::CreateThreadError::ProjectRemoved { .. } => conflict,
+                forge_store::CreateThreadError::AgentWithoutParent { .. }
+                | forge_store::CreateThreadError::AgentNotInParent { .. }
+                | forge_store::CreateThreadError::InvalidConfig { .. } => bad_request,
+                forge_store::CreateThreadError::Storage { .. } => internal,
+            };
+        }
+        if cause.is::<forge_store::ItemNotFound>() {
+            return not_found;
+        }
+    }
+    if forge_runs::refusal(error).is_some() {
+        conflict
+    } else {
+        internal
+    }
+}
+
+macro_rules! store_failures {
+    ($($error:ident),* $(,)?) => {
+        $(
+            impl From<forge_store::$error> for Failure {
+                fn from(error: forge_store::$error) -> Self {
+                    anyhow::Error::new(error).into()
+                }
+            }
+        )*
+    };
+}
+
+store_failures!(
+    AwaitingItemsError,
+    CreateProjectError,
+    CreateThreadError,
+    InspectorError,
+    MarkUnreadError,
+    PairDeviceError,
+    PutBlobError,
+    ReadDraftError,
+    ReadItemError,
+    ReadProjectError,
+    ReadThreadError,
+    RemoveProjectError,
+    SetDefaultModelError,
+    SetDraftError,
+    SetModelConfigError,
+    SetModelGroupError,
+    SetSettingError,
+    SettleThreadError,
+    StateError,
+    TextSearchError,
+    TranscriptPageError,
+    TranscriptRowsError,
+    WorkPageError,
+);
 
 impl From<forge_runs::McpStoreError> for Failure {
     fn from(error: forge_runs::McpStoreError) -> Self {
@@ -288,8 +333,8 @@ fn not_found(what: impl std::fmt::Display) -> Failure {
     )
 }
 
-const fn bad_request(error: anyhow::Error) -> Failure {
-    Failure(error, StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+fn bad_request(error: impl Into<anyhow::Error>) -> Failure {
+    Failure(error.into(), StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
 }
 
 fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
@@ -781,17 +826,18 @@ async fn send_message(
     let id = ThreadId(id);
     match app.hub.send_message(&id, message).await {
         Ok(item) => Ok(Json(item)),
-        Err(error) => match error.downcast_ref::<forge_store::SendRejected>() {
-            Some(forge_store::SendRejected::ThreadNotFound(_)) => {
+        Err(error) => {
+            let rejected = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<forge_store::SendRejected>());
+            if let Some(forge_store::SendRejected::ThreadNotFound(_)) = rejected {
                 Err(not_found(format!("thread {id}")))
+            } else if rejected.is_some() || forge_runs::refusal(&error).is_some() {
+                Err(bad_request(error))
+            } else {
+                Err(error.into())
             }
-            Some(
-                forge_store::SendRejected::IdConflict(_)
-                | forge_store::SendRejected::Payload(_)
-                | forge_store::SendRejected::MissingBlob(_),
-            ) => Err(bad_request(error)),
-            None => Err(error.into()),
-        },
+        }
     }
 }
 
@@ -1013,7 +1059,7 @@ async fn put_blob(AppState(app): AppState<App>, body: Bytes) -> Result<Json<arti
         .await
         .map(Json)
         .map_err(|error| {
-            if error.downcast_ref::<forge_store::BlobRejected>().is_some() {
+            if let forge_store::BlobFailure::Rejected(_) = *error.cause {
                 bad_request(error)
             } else {
                 Failure::from(error)

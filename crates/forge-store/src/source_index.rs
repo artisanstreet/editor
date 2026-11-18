@@ -1,6 +1,5 @@
-//! Immutable derived Markdown topology attached to the existing source owner.
-//! No Item, harness, rendering style or pixel layout participates in this scan.
-use anyhow::{Result, ensure};
+use crate::content::ContentError;
+use crate::error::StorageError;
 use artisan_api::{
     ContentId, ContentRef, SourceIndexFormat, SourceIndexHeader, SourceIndexQuery,
     SourceIndexRange, SourceLeafDescriptor, TextContent,
@@ -8,12 +7,63 @@ use artisan_api::{
 use rusqlite::{Connection, OptionalExtension, params};
 const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
 
+type Result<T, E = SourceIndexError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SourceIndexError {
+    #[error("{source_id} is not a source identity")]
+    InvalidIdentity { source_id: ContentId },
+    #[error("a page of {limit} leaves is outside 1..64")]
+    PageLimit { limit: u32 },
+    #[error("leaf offset {offset} is past the {leaves} leaves of source {source_id}")]
+    OffsetPastEnd {
+        source_id: ContentId,
+        offset: u64,
+        leaves: u64,
+    },
+    #[error("the bytes of source {source_id} do not match its identity")]
+    IdentityMismatch { source_id: ContentId },
+    #[error("index the Markdown of source {source_id}")]
+    Markdown {
+        source_id: ContentId,
+        #[source]
+        source: artisan_markdown_index::BuildIndexError,
+    },
+    #[error("the Markdown index of source {source_id} has no record for leaf {ordinal}")]
+    MissingRecord {
+        source_id: ContentId,
+        ordinal: usize,
+    },
+    #[error("the serialized index of source {source_id} exceeds 32 MiB")]
+    MetadataTooLarge { source_id: ContentId },
+    #[error("the derived index of source {source_id} would own itself")]
+    SelfOwned { source_id: ContentId },
+    #[error("the stored topology of source {source_id} has a gap")]
+    TopologyGap { source_id: ContentId },
+    #[error("the stored topology ordinals of source {source_id} are inconsistent")]
+    TopologyOrdinals { source_id: ContentId },
+    #[error(transparent)]
+    Content(#[from] ContentError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for SourceIndexError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
 pub fn header(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
 ) -> Result<Option<SourceIndexHeader>> {
-    ensure!(id.is_valid(), "invalid source identity");
+    if !id.is_valid() {
+        return Err(SourceIndexError::InvalidIdentity {
+            source_id: id.clone(),
+        });
+    }
     conn.query_row("SELECT s.bytes,s.lines,m.id,m.bytes,m.lines,i.leaf_count FROM source_indexes i JOIN content s ON s.id=i.source_id JOIN content m ON m.id=i.metadata_id WHERE i.source_id=?1 AND i.version=?2 AND i.format=?3", params![id.as_str(),artisan_api::SOURCE_INDEX_VERSION,format.as_str()], |row| Ok(SourceIndexHeader {
         format, source: ContentRef { id:id.clone(),bytes:row.get(0)?,lines:row.get(1)? },
         metadata: ContentRef { id:ContentId(row.get(2)?),bytes:row.get(3)?,lines:row.get(4)? },
@@ -28,9 +78,7 @@ pub struct PreparedIndex {
 }
 
 pub enum Prepared {
-    /// The source does not exist.
     Missing,
-    /// Another request built the index meanwhile.
     Indexed,
     Built(PreparedIndex),
 }
@@ -56,15 +104,22 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
         return Ok(Prepared::Missing);
     };
     let text = crate::content::resolve(conn, &TextContent::Stored(source.clone()))?;
-    ensure!(
-        ContentRef::from_text(&text) == source,
-        "source identity does not match immutable bytes"
-    );
+    if ContentRef::from_text(&text) != source {
+        return Err(SourceIndexError::IdentityMismatch {
+            source_id: id.clone(),
+        });
+    }
     let index = match format {
-        SourceIndexFormat::Markdown => Some(artisan_markdown_index::MarkdownIndex::build(&text)?),
+        SourceIndexFormat::Markdown => Some(
+            artisan_markdown_index::MarkdownIndex::build(&text).map_err(|source| {
+                SourceIndexError::Markdown {
+                    source_id: id.clone(),
+                    source,
+                }
+            })?,
+        ),
         SourceIndexFormat::Literal => None,
     };
-    // Literal scanning stores offsets only, never parser events derived from syntax.
     let mut literal_start = Some(0);
     let literal_ranges = std::iter::from_fn(|| {
         let start = literal_start?;
@@ -82,7 +137,10 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
             Box::new((0..index.leaves().len()).map(|ordinal| {
                 index
                     .record(ordinal)
-                    .ok_or_else(|| anyhow::anyhow!("indexed ordinal {ordinal} has no record"))
+                    .ok_or_else(|| SourceIndexError::MissingRecord {
+                        source_id: id.clone(),
+                        ordinal,
+                    })
             }))
         } else {
             Box::new(
@@ -93,11 +151,12 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
     let mut leaves = Vec::new();
     for (ordinal, record) in records.enumerate() {
         let record = record?;
-        let json = serde_json::to_string(&record)?;
-        ensure!(
-            metadata.len().saturating_add(json.len() + 1) <= MAX_METADATA_BYTES,
-            "serialized source index exceeds 32 MiB"
-        );
+        let json = crate::read::to_body(&record)?;
+        if metadata.len().saturating_add(json.len() + 1) > MAX_METADATA_BYTES {
+            return Err(SourceIndexError::MetadataTooLarge {
+                source_id: id.clone(),
+            });
+        }
         let range = record.leaf.source_range();
         let start = metadata.len() as u64;
         metadata.push_str(&json);
@@ -131,17 +190,15 @@ pub fn persist(conn: &Connection, prepared: PreparedIndex) -> Result<Option<Sour
         ],
         |row| row.get(0),
     )?;
-    // GC may have removed an unowned original while its index worker ran.
     if !exists {
         return Ok(None);
     }
-    // Even tiny derived indexes must belong to the same immutable content owner.
     let metadata_ref = crate::content::store_source(conn, &prepared.metadata)?;
-    ensure!(
-        metadata_ref.id != prepared.source.id,
-        "derived index cannot own itself"
-    );
-    // Preserve ownership and cleanup through the existing dependency trigger.
+    if metadata_ref.id == prepared.source.id {
+        return Err(SourceIndexError::SelfOwned {
+            source_id: prepared.source.id,
+        });
+    }
     conn.execute(
         "INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING",
         params![prepared.source.id.as_str(), metadata_ref.id.as_str()],
@@ -180,17 +237,19 @@ pub fn range(
         return Ok(None);
     };
     let limit = query.limit.unwrap_or(artisan_api::SOURCE_INDEX_PAGE_LEAVES);
-    ensure!(
-        (1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&limit),
-        "source index page limit must be 1..64 leaves"
-    );
+    if !(1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&limit) {
+        return Err(SourceIndexError::PageLimit { limit });
+    }
     let start = query
         .offset
         .unwrap_or_else(|| index.leaves.saturating_sub(u64::from(limit)));
-    ensure!(
-        start <= index.leaves,
-        "source leaf offset exceeds index length"
-    );
+    if start > index.leaves {
+        return Err(SourceIndexError::OffsetPastEnd {
+            source_id: id.clone(),
+            offset: start,
+            leaves: index.leaves,
+        });
+    }
     let mut select=conn.prepare_cached("SELECT ordinal,source_start,source_end,metadata_start,metadata_end FROM source_index_leaves WHERE source_id=?1 AND version=?2 AND ordinal>=?3 AND format=?5 ORDER BY ordinal LIMIT ?4")?;
     let leaves = select
         .query_map(
@@ -213,17 +272,20 @@ pub fn range(
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let end = start + leaves.len() as u64;
-    ensure!(
-        end == start.saturating_add(u64::from(limit)).min(index.leaves),
-        "source topology contains a gap"
-    );
-    ensure!(
-        leaves
-            .iter()
-            .enumerate()
-            .all(|(n, leaf)| leaf.ordinal == start + n as u64),
-        "source topology ordinals are inconsistent"
-    );
+    if end != start.saturating_add(u64::from(limit)).min(index.leaves) {
+        return Err(SourceIndexError::TopologyGap {
+            source_id: id.clone(),
+        });
+    }
+    if !leaves
+        .iter()
+        .enumerate()
+        .all(|(n, leaf)| leaf.ordinal == start + n as u64)
+    {
+        return Err(SourceIndexError::TopologyOrdinals {
+            source_id: id.clone(),
+        });
+    }
     Ok(Some(SourceIndexRange {
         index,
         start,

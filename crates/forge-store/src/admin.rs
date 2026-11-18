@@ -1,5 +1,5 @@
+use crate::error::StorageError;
 use crate::{BUSY_TIMEOUT, Device, schema};
-use anyhow::{Context, Result};
 use artisan_api::{DeviceId, Timestamp};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ pub enum AdminError {
     Open {
         path: PathBuf,
         #[source]
-        source: rusqlite::Error,
+        source: Box<rusqlite::Error>,
     },
     #[error("{} is at schema {found} but this ae works with schema {expected}; update or restart Forge so they match", path.display())]
     Schema {
@@ -32,9 +32,26 @@ pub enum AdminError {
     Migrate {
         path: PathBuf,
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: schema::SchemaError,
     },
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum RevokeError {
+    #[error("{id:?} matches {matches} devices; give more of the id")]
+    Ambiguous { id: String, matches: usize },
+    #[error("revoke device {id:?}")]
+    Storage {
+        id: String,
+        #[source]
+        source: StorageError,
+    },
+}
+
+crate::error::operation_error!(ReadSecretError(StorageError), "read secret {key}", key: String);
+crate::error::operation_error!(SaveSecretError(StorageError), "save secret {key}", key: String);
+crate::error::operation_error!(PairCodeError(StorageError), "look up or save a pair code");
+crate::error::operation_error!(DevicesError(StorageError), "list the paired devices");
 
 pub struct Admin {
     conn: Connection,
@@ -68,100 +85,113 @@ impl Admin {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|source| AdminError::Open {
                 path: path.clone(),
-                source,
+                source: Box::new(source),
             })?;
-        schema::migrate(&mut conn).map_err(|error| AdminError::Migrate {
+        schema::migrate(&mut conn).map_err(|source| AdminError::Migrate {
             path: path.clone(),
-            source: error.into(),
+            source,
         })?;
         Ok(Self { conn })
     }
 
-    pub fn secret(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
+    pub fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
+        self.conn
             .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
                 row.get(0)
             })
-            .optional()?)
-    }
-
-    /// Inserts an unsequenced secret only when absent.
-    pub fn secret_or_insert(&mut self, key: &str, value: &str) -> Result<String> {
-        self.conn.execute(
-            "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-            rusqlite::params![key, value],
-        )?;
-        Ok(self
-            .conn
-            .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })?)
-    }
-
-    pub fn pair_code_pending(&self, code_sha256: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT 1 FROM pair_codes WHERE code_sha256 = ?1",
-                [code_sha256],
-                |_row| Ok(()),
-            )
             .optional()
-            .context("look up pair code")?
-            .is_some())
+            .map_err(|source| ReadSecretError {
+                key: key.to_owned(),
+                cause: Box::new(source.into()),
+            })
     }
 
-    pub fn add_pair_code(&self, code_sha256: &str, expires_at: Timestamp) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("begin saving a pair code")?;
-        crate::pairing::add_pair_code(&tx, code_sha256, expires_at)?;
-        tx.commit().context("commit the pair code")
-    }
-
-    pub fn devices(&self) -> Result<Vec<Device>> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, name, public_key, created_at, last_seen FROM authorized_keys ORDER BY created_at",
-        )?;
-        let devices = statement
-            .query_map([], |row| {
-                Ok(Device {
-                    id: DeviceId(row.get(0)?),
-                    name: row.get(1)?,
-                    public_key: row.get(2)?,
-                    created_at: row.get(3)?,
-                    last_seen: row.get(4)?,
+    pub fn secret_or_insert(&mut self, key: &str, value: &str) -> Result<String, SaveSecretError> {
+        let saved = || -> Result<String, rusqlite::Error> {
+            self.conn.execute(
+                "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+                rusqlite::params![key, value],
+            )?;
+            self.conn
+                .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
+                    row.get(0)
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()
-            .context("list devices")?;
-        Ok(devices)
+        };
+        saved().map_err(|source| SaveSecretError {
+            key: key.to_owned(),
+            cause: Box::new(source.into()),
+        })
     }
 
-    /// Revokes the device whose id is `id` or starts with it (ids are long).
-    /// Returns the revoked device, `None` when nothing matched.
-    pub fn revoke_device(&self, id: &str) -> Result<Option<Device>> {
+    pub fn pair_code_pending(&self, code: &str) -> Result<bool, PairCodeError> {
+        crate::pairing::pair_code_pending(&self.conn, code).map_err(|cause| PairCodeError {
+            cause: Box::new(cause),
+        })
+    }
+
+    pub fn add_pair_code(
+        &self,
+        code: &str,
+        expires_at: Timestamp,
+    ) -> Result<(), PairCodeError> {
+        let saved = || -> Result<(), StorageError> {
+            let tx = self.conn.unchecked_transaction()?;
+            crate::pairing::add_pair_code(&tx, code, expires_at)?;
+            tx.commit()?;
+            Ok(())
+        };
+        saved().map_err(|cause| PairCodeError {
+            cause: Box::new(cause),
+        })
+    }
+
+    pub fn devices(&self) -> Result<Vec<Device>, DevicesError> {
+        let listed = || -> Result<Vec<Device>, rusqlite::Error> {
+            let mut statement = self.conn.prepare(include_str!("sql/pairing/devices.sql"))?;
+            statement
+                .query_map([], |row| {
+                    Ok(Device {
+                        id: DeviceId(row.get(0)?),
+                        name: row.get(1)?,
+                        public_key: row.get(2)?,
+                        created_at: row.get(3)?,
+                        last_seen: row.get(4)?,
+                    })
+                })?
+                .collect()
+        };
+        listed().map_err(|source| DevicesError {
+            cause: Box::new(source.into()),
+        })
+    }
+
+    pub fn revoke_device(&self, id: &str) -> Result<Option<Device>, RevokeError> {
+        let storage = |source: StorageError| RevokeError::Storage {
+            id: id.to_owned(),
+            source,
+        };
         let matches: Vec<Device> = self
-            .devices()?
+            .devices()
+            .map_err(|error| storage(*error.cause))?
             .into_iter()
             .filter(|device| device.id.as_str().starts_with(id))
             .collect();
         let device = match matches.as_slice() {
             [] => return Ok(None),
             [device] => device.clone(),
-            _ => anyhow::bail!(
-                "{id:?} matches {} devices; give more of the id",
-                matches.len()
-            ),
+            _ => {
+                return Err(RevokeError::Ambiguous {
+                    id: id.to_owned(),
+                    matches: matches.len(),
+                });
+            }
         };
         self.conn
             .execute(
                 "DELETE FROM authorized_keys WHERE id = ?1",
                 [device.id.as_str()],
             )
-            .with_context(|| format!("revoke device {}", device.id))?;
+            .map_err(|source| storage(source.into()))?;
         Ok(Some(device))
     }
 }
@@ -192,7 +222,7 @@ fn existing(dir: &Path) -> Result<PathBuf, AdminError> {
 fn connect(path: &Path, flags: OpenFlags) -> Result<Connection, AdminError> {
     let open = |source| AdminError::Open {
         path: path.to_owned(),
-        source,
+        source: Box::new(source),
     };
     let conn = Connection::open_with_flags(path, flags).map_err(open)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(open)?;
@@ -203,7 +233,7 @@ fn version(path: &Path, conn: &Connection) -> Result<usize, AdminError> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|source| AdminError::Open {
             path: path.to_owned(),
-            source,
+            source: Box::new(source),
         })
 }
 

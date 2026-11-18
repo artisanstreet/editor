@@ -5,12 +5,13 @@
 //! these permissions itself, as it does an engine's.
 
 use crate::Hub;
+use crate::Refused;
 use anyhow::Result;
 use artisan_api::{
     Approval, ApprovalRequest, Decision, ItemId, ItemKind, Permissions, RunStatus, Status,
     ThreadId, ToolKind,
 };
-use forge_store::{NewItem, Refused};
+use forge_store::NewItem;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -125,7 +126,7 @@ impl Hub {
         };
         if let Err(error) = store.upsert_item(card(Status::AwaitingUser, None)).await {
             self.approvals_lock().remove(&id);
-            return Err(error);
+            return Err(error.into());
         }
         let decision = tokio::select! {
             decision = answered => decision.unwrap_or(Decision::Cancelled),

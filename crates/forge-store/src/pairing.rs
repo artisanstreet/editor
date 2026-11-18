@@ -1,14 +1,13 @@
-//! Paired Editors: pairing codes, device keys and revocation.
-
 use crate::Store;
-use anyhow::{Context, Result};
+use crate::error::{StorageError, operation_error};
 use artisan_api::{DeviceId, Timestamp, now};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::sync::PoisonError;
 use tokio::sync::broadcast;
 
-/// A paired Editor.
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub id: DeviceId,
@@ -18,10 +17,6 @@ pub struct Device {
     pub last_seen: Option<Timestamp>,
 }
 
-/// The paired keys, in memory so authorizing a request reads no table. The
-/// set reloads only when SQLite's `data_version` says another connection
-/// committed: this Forge's writer, or `ae forge devices revoke` in another
-/// process, whose revocation must refuse the device's next request.
 pub struct Devices {
     conn: Connection,
     data_version: i64,
@@ -39,12 +34,10 @@ impl Devices {
         Ok(devices)
     }
 
-    /// Reloads the keys if the database changed; returns devices that are gone.
     fn refresh(&mut self) -> Result<Vec<DeviceId>> {
         let version: i64 = self
             .conn
-            .query_row("PRAGMA data_version", [], |row| row.get(0))
-            .context("read the database version")?;
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?;
         if version == self.data_version {
             return Ok(Vec::new());
         }
@@ -52,8 +45,7 @@ impl Devices {
             .conn
             .prepare_cached("SELECT public_key, id FROM authorized_keys")?
             .query_map([], |row| Ok((row.get(0)?, DeviceId(row.get(1)?))))?
-            .collect::<rusqlite::Result<HashMap<String, DeviceId>>>()
-            .context("load the paired device keys")?;
+            .collect::<rusqlite::Result<HashMap<String, DeviceId>>>()?;
         let gone = self
             .keys
             .values()
@@ -66,18 +58,25 @@ impl Devices {
     }
 }
 
+operation_error!(PairDeviceError(StorageError), "pair device {name}", name: String);
+operation_error!(AddDeviceError(StorageError), "add device {name}", name: String);
+operation_error!(RevokeDeviceError(StorageError), "revoke device {device}", device: DeviceId);
+operation_error!(TouchDeviceError(StorageError), "record that device {device} was seen", device: DeviceId);
+operation_error!(AddPairCodeError(StorageError), "save a pair code");
+operation_error!(AuthorizeError(StorageError), "check a client certificate");
+
 impl Store {
     pub fn subscribe_revocations(&self) -> broadcast::Receiver<DeviceId> {
         self.inner.revocations.subscribe()
     }
 
-    /// Consuming the invitation and authorizing its device are one decision.
     pub async fn pair_device(
         &self,
         code: String,
         name: String,
         certificate: String,
-    ) -> Result<Option<DeviceId>> {
+    ) -> Result<Option<DeviceId>, PairDeviceError> {
+        let device = name.clone();
         self.write_acknowledged(move |tx| {
             if tx.execute(
                 "DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2",
@@ -87,51 +86,59 @@ impl Store {
                 return Ok(None);
             }
             let id: String = tx.query_row(
-                "INSERT INTO authorized_keys (id, name, public_key, created_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(public_key) DO UPDATE SET name = excluded.name RETURNING id",
+                include_str!("sql/pairing/authorize.sql"),
                 params![DeviceId::new().as_str(), name, certificate, now()],
                 |row| row.get(0),
             )?;
             Ok(Some(DeviceId(id)))
         })
         .await
-        .context("pair device")
+        .map_err(|cause| PairDeviceError {
+            name: device,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Pairing the same key again renames the device and keeps its id.
-    pub async fn add_device(&self, name: String, public_key: String) -> Result<DeviceId> {
+    pub async fn add_device(
+        &self,
+        name: String,
+        certificate: String,
+    ) -> Result<DeviceId, AddDeviceError> {
+        let device = name.clone();
         self.write_acknowledged(move |tx| {
             let id: String = tx.query_row(
-                "INSERT INTO authorized_keys (id, name, public_key, created_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (public_key) DO UPDATE SET name = excluded.name
-                 RETURNING id",
-                params![DeviceId::new().as_str(), name, public_key, now()],
+                include_str!("sql/pairing/authorize.sql"),
+                params![DeviceId::new().as_str(), name, certificate, now()],
                 |row| row.get(0),
             )?;
             Ok(DeviceId(id))
         })
         .await
-        .context("add device")
+        .map_err(|cause| AddDeviceError {
+            name: device,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Whether a device was revoked.
-    pub async fn revoke_device(&self, id: &DeviceId) -> Result<bool> {
+    pub async fn revoke_device(&self, id: &DeviceId) -> Result<bool, RevokeDeviceError> {
         let key = id.clone();
         let revoked = self
             .write_acknowledged(move |tx| {
                 Ok(tx.execute("DELETE FROM authorized_keys WHERE id = ?1", [key.as_str()])? > 0)
             })
-            .await?;
+            .await
+            .map_err(|cause| RevokeDeviceError {
+                device: id.clone(),
+                cause: Box::new(cause),
+            })?;
         if revoked {
-            // No open connections means nothing to close.
             self.inner.revocations.send(id.clone()).ok();
         }
         Ok(revoked)
     }
 
-    pub async fn touch_device(&self, id: &DeviceId) -> Result<()> {
+    pub async fn touch_device(&self, id: &DeviceId) -> Result<(), TouchDeviceError> {
+        let device = id.clone();
         let id = id.clone();
         self.write(move |tx| {
             tx.execute(
@@ -142,39 +149,58 @@ impl Store {
             Ok(())
         })
         .await
+        .map_err(|cause| TouchDeviceError {
+            device,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn add_pair_code(&self, code_sha256: String, expires_at: Timestamp) -> Result<()> {
-        self.write_acknowledged(move |tx| add_pair_code(tx, &code_sha256, expires_at))
+    pub async fn add_pair_code(
+        &self,
+        code: String,
+        expires_at: Timestamp,
+    ) -> Result<(), AddPairCodeError> {
+        self.write_acknowledged(move |tx| add_pair_code(tx, &code, expires_at))
             .await
+            .map_err(|cause| AddPairCodeError {
+                cause: Box::new(cause),
+            })
     }
 
-    /// The device a client certificate belongs to. Answered from memory;
-    /// see [`Devices`].
-    pub fn is_authorized(&self, public_key: &str) -> Result<Option<DeviceId>> {
+    pub fn is_authorized(
+        &self,
+        certificate: &str,
+    ) -> Result<Option<DeviceId>, AuthorizeError> {
         let mut devices = self
             .inner
             .devices
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        for revoked in devices.refresh()? {
-            // No open connections means nothing to close.
+        for revoked in devices.refresh().map_err(|cause| AuthorizeError {
+            cause: Box::new(cause),
+        })? {
             self.inner.revocations.send(revoked).ok();
         }
-        Ok(devices.keys.get(public_key).cloned())
+        Ok(devices.keys.get(certificate).cloned())
     }
 }
 
 pub(crate) fn add_pair_code(
-    conn: &rusqlite::Connection,
-    code_sha256: &str,
+    conn: &Connection,
+    code: &str,
     expires_at: Timestamp,
 ) -> Result<()> {
     conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))?
-        .execute([now()])
-        .context("collect expired pair codes")?;
+        .execute([now()])?;
     conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))?
-        .execute(params![code_sha256, expires_at])
-        .context("save pair code")?;
+        .execute(params![code, expires_at])?;
     Ok(())
+}
+
+pub(crate) fn pair_code_pending(conn: &Connection, code: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pair_codes WHERE code_sha256 = ?1)",
+        [code],
+        |row| row.get(0),
+    )?)
 }

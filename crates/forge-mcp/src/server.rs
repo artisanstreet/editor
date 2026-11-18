@@ -161,8 +161,8 @@ async fn call<T: ToolSet>(
     let (result, is_error) = match set.call_result(caller, name, arguments).await {
         Ok(result) => (result, false),
         Err(error) => {
-            let text = if error.downcast_ref::<forge_runs::Refused>().is_some() {
-                format!("{error}")
+            let text = if let Some(refusal) = forge_runs::refusal(&error) {
+                refusal
             } else {
                 tracing::error!(
                     thread = %caller,
@@ -172,7 +172,7 @@ async fn call<T: ToolSet>(
                 );
                 format!("Forge couldn't do that: {error:#}")
             };
-            let details = error.downcast_ref::<forge_store::coordination::Conflict>().map_or_else(
+            let details = error.chain().find_map(|cause| match cause.downcast_ref::<forge_store::coordination::CoordinationFailure>() { Some(forge_store::coordination::CoordinationFailure::Stale(conflict)) => Some(conflict), _ => None }).map_or_else(
                 || json!({"code":"tool_failed","message":text,"retryable":false}),
                 |conflict| json!({"code":"stale_revision","message":text,"retryable":true,"record":conflict.id,"current_revision":conflict.current_revision,"recovery":"get_coordination_record"}),
             );

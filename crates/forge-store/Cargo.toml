@@ -16,7 +16,6 @@ qualification = []
 artisan-markdown-index.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
-anyhow.workspace = true
 artisan-api.workspace = true
 artisan-paths.workspace = true
 forge-content.workspace = true

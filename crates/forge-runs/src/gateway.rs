@@ -4,9 +4,9 @@
 //! the caller: a request carrying it acts for that thread, on every server.
 
 use crate::Hub;
+use crate::Refused;
 use anyhow::Result;
 use artisan_api::{EditorCall, EditorReply, Event, Secret, ThreadId};
-use forge_store::Refused;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::oneshot;

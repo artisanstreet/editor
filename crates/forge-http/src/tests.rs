@@ -508,6 +508,20 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(stale.status(), 409);
+    let not_a_question = editor
+        .http
+        .post(editor.url(&format!("/items/{}/answer", said.id)))
+        .json(&artisan_api::Answer::Question {
+            answers: Vec::new(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        not_a_question.status(),
+        409,
+        "the store's refusal reaches the Editor as a conflict"
+    );
 
     let raw = editor
         .http

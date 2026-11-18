@@ -1,8 +1,13 @@
+use crate::error::{StorageError, operation_error};
 use crate::{Store, coordination::Record};
-use anyhow::Result;
 use artisan_api::{Project, ProjectId, Run, Thread, ThreadCursor, ThreadId};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
+operation_error!(FileActivityError(StorageError), "discover file activity");
+operation_error!(DiscoverWorkersError(StorageError), "discover workers");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileCursor {
@@ -65,14 +70,14 @@ impl Store {
         contains: bool,
         cursor: Option<FileCursor>,
         limit: u32,
-    ) -> Result<FilePage> {
+    ) -> Result<FilePage, FileActivityError> {
         self.read(move |conn| {
             let limit = limit.clamp(1, 200) as usize;
             let mut statement = conn.prepare(include_str!("sql/coordination/files.sql"))?;
             let rows = statement.query_map(
                 params![
                     project.map(|id| id.to_string()),
-                    serde_json::to_string(&paths)?,
+                    crate::read::to_body(&paths)?,
                     contains,
                     cursor.as_ref().map(|c| c.row_id),
                     cursor.as_ref().map(|c| &c.line),
@@ -100,7 +105,7 @@ impl Store {
                 entries.truncate(limit);
                 entries
                     .last()
-                    .map(|entry| serde_json::to_string(&entry.0))
+                    .map(|entry| crate::read::to_body(&entry.0))
                     .transpose()?
             } else {
                 None
@@ -111,9 +116,12 @@ impl Store {
             })
         })
         .await
+        .map_err(|cause| FileActivityError {
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn discover_workers(&self, query: Query) -> Result<Page> {
+    pub async fn discover_workers(&self, query: Query) -> Result<Page, DiscoverWorkersError> {
         self.read(move |conn| {
             let limit = query.limit.clamp(1, 200) as usize;
             let mut statement = conn.prepare(include_str!("sql/coordination/discovery.sql"))?;
@@ -123,7 +131,7 @@ impl Store {
                     query.parent.map(|p| p.to_string()),
                     query.include_agents,
                     query.active,
-                    serde_json::to_string(&query.live_threads)?,
+                    crate::read::to_body(&query.live_threads)?,
                     query.archived,
                     query.title,
                     query.target,
@@ -147,20 +155,20 @@ impl Store {
                 .map(|row| {
                     let (thread, project, run, awaiting_user, work) = row?;
                     Ok(Worker {
-                        thread: serde_json::from_str(&thread)?,
-                        project: serde_json::from_str(&project)?,
-                        latest_run: run.map(|s| serde_json::from_str(&s)).transpose()?,
+                        thread: crate::read::from_body(&thread)?,
+                        project: crate::read::from_body(&project)?,
+                        latest_run: run.map(|s| crate::read::from_body(&s)).transpose()?,
                         awaiting_user,
-                        work: work.map(|s| serde_json::from_str(&s)).transpose()?,
+                        work: work.map(|s| crate::read::from_body(&s)).transpose()?,
                     })
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>, StorageError>>()?;
             let next_cursor = if workers.len() > limit {
                 workers.truncate(limit);
                 workers
                     .last()
                     .map(|w| {
-                        serde_json::to_string(&ThreadCursor {
+                        crate::read::to_body(&ThreadCursor {
                             activity_seq: w.thread.activity_seq,
                             id: w.thread.id.clone(),
                         })
@@ -175,5 +183,8 @@ impl Store {
             })
         })
         .await
+        .map_err(|cause| DiscoverWorkersError {
+            cause: Box::new(cause),
+        })
     }
 }

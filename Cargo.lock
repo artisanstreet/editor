@@ -2276,7 +2276,6 @@ dependencies = [
 name = "forge-store"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "artisan-api",
  "artisan-markdown-index",
  "artisan-paths",

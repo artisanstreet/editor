@@ -7,7 +7,7 @@ use artisan_api::{
     Collection, CreateProject, CreateThread, EngineConfig, EngineId, FileChange, FileOp, ItemId,
     ItemKind, Output, Phase, ProjectId, Status, ThreadId, ToolKind,
 };
-use forge_store::{GrepQuery, NewItem, RecallScope, Store};
+use forge_store::{GrepFailure, GrepQuery, NewItem, RecallScope, Store};
 use std::path::PathBuf;
 
 struct TempDir(PathBuf);
@@ -241,5 +241,5 @@ async fn a_pattern_that_does_not_compile_says_so() {
         )
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("doesn't compile"), "{error:#}");
+    assert!(matches!(*error.cause, GrepFailure::Pattern(_)), "{error:#}");
 }

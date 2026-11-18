@@ -207,8 +207,7 @@ impl SeedSnapshot {
                     .blob_dir()
                     .parent()
                     .context("Forge data directory is unavailable")?
-            )?
-                == logical_path,
+            )? == logical_path,
             "Forge server does not own the pinned logical path"
         );
         let store = fixture.seed(&server.store).await?;
@@ -315,8 +314,7 @@ fn marked_directory(path: &Path) -> Result<PathBuf> {
         path.is_absolute(),
         "qualification directory must be absolute"
     );
-    let canonical =
-        canonical_path(path).with_context(|| format!("resolve {}", path.display()))?;
+    let canonical = canonical_path(path).with_context(|| format!("resolve {}", path.display()))?;
     ensure!(
         std::fs::read(canonical.join(".artisan-qualification"))? == b"artisan-qualification-v1\n",
         "qualification directory marker is invalid"
@@ -502,7 +500,7 @@ impl ForgeServer {
         })
         .await
         .context("Forge store still has live handles")?;
-        store.shutdown_unique()
+        Ok(store.shutdown_unique()?)
     }
 }
 

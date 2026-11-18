@@ -1,34 +1,96 @@
-//! Forge settings, drafts and secrets. Settings sync to clients; secrets
-//! never leave Forge.
-
+use crate::error::{StorageError, operation_error};
+use crate::writer::WriteFailure;
 use crate::{Store, read};
-use anyhow::{Context, Result, ensure};
 use artisan_api::EngineId;
 use rusqlite::{OptionalExtension, params};
 
+#[derive(Debug, thiserror::Error)]
+pub enum SettingFailure {
+    #[error("the model customizations are invalid")]
+    Customizations(#[source] artisan_api::ModelCustomizationsError),
+    #[error("the revision is exhausted")]
+    RevisionExhausted,
+    #[error("MCP entry {server} changed; reload before saving")]
+    McpChanged { server: String },
+    #[error("MCP server needs a name")]
+    McpUnnamed,
+    #[error("MCP server {server} needs a command or URL")]
+    McpTargetMissing { server: String },
+    #[error("MCP name {server} already exists")]
+    McpNameTaken { server: String },
+    #[error(transparent)]
+    Write(#[from] WriteFailure),
+}
+
+impl From<StorageError> for SettingFailure {
+    fn from(error: StorageError) -> Self {
+        Self::Write(error.into())
+    }
+}
+
+impl From<rusqlite::Error> for SettingFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Write(error.into())
+    }
+}
+
+operation_error!(ReadSettingError(StorageError), "read setting {key}", key: String);
+operation_error!(SetSettingError(SettingFailure), "save setting {key}", key: String);
+operation_error!(BumpRevisionError(SettingFailure), "bump revision {key}", key: String);
+operation_error!(MutateMcpError(SettingFailure), "change the MCP servers");
+operation_error!(SetDefaultModelError(SettingFailure), "make {model} the default {engine} model", engine: EngineId, model: String);
+operation_error!(SetModelConfigError(SettingFailure), "remember the config of {engine} model {model}", engine: EngineId, model: String);
+operation_error!(SetModelGroupError(WriteFailure), "remember {engine} model group {group}", engine: EngineId, group: String);
+operation_error!(SetSkillEnabledError(WriteFailure), "turn skill {skill} on or off", skill: String);
+operation_error!(SavePromptError(WriteFailure), "save the global prompt over version {base}", base: u64);
+operation_error!(
+    PromptVersionError(StorageError),
+    "read the global prompt's version"
+);
+operation_error!(ReadDraftError(StorageError), "read draft {scope}", scope: String);
+operation_error!(SetDraftError(SettingFailure), "save draft {scope}", scope: String);
+operation_error!(SetMcpSecretError(StorageError), "save a secret of MCP server {server}", server: String);
+operation_error!(ReadSecretError(StorageError), "read secret {key}", key: String);
+operation_error!(SetSecretError(StorageError), "save secret {key}", key: String);
+
 impl Store {
-    pub async fn setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
+    pub async fn setting(&self, key: &str) -> Result<Option<serde_json::Value>, ReadSettingError> {
+        let read_key = key.to_owned();
         let key = key.to_owned();
-        self.read(move |conn| {
-            read::setting(conn, &key).with_context(|| format!("read setting {key}"))
+        self.read(move |conn| read::setting(conn, &read_key))
+            .await
+            .map_err(|cause| ReadSettingError {
+                key,
+                cause: Box::new(cause),
+            })
+    }
+
+    pub async fn set_setting(
+        &self,
+        key: String,
+        value: serde_json::Value,
+    ) -> Result<(), SetSettingError> {
+        let saved = key.clone();
+        self.write_acknowledged(move |tx| {
+            if key == artisan_api::MODEL_CUSTOMIZATIONS_KEY {
+                artisan_api::model_customizations(&value)
+                    .map_err(SettingFailure::Customizations)?;
+            }
+            Ok(tx.save_setting(key, value)?)
         })
         .await
+        .map_err(|cause| SetSettingError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn set_setting(&self, key: String, value: serde_json::Value) -> Result<()> {
-        if key == artisan_api::MODEL_CUSTOMIZATIONS_KEY {
-            artisan_api::model_customizations(&value).map_err(anyhow::Error::msg)?;
-        }
-        self.write_acknowledged(move |tx| tx.save_setting(key, value))
-            .await
-    }
-
-    /// Sets a setting unless it exists; returns whether it was set.
     pub async fn set_setting_if_absent(
         &self,
         key: String,
         value: serde_json::Value,
-    ) -> Result<bool> {
+    ) -> Result<bool, SetSettingError> {
+        let saved = key.clone();
         self.write_acknowledged(move |tx| {
             if read::setting(tx, &key)?.is_some() {
                 return Ok(false);
@@ -37,59 +99,69 @@ impl Store {
             Ok(true)
         })
         .await
-        .context("set a setting unless present")
+        .map_err(|cause| SetSettingError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Metadata invalidation is small and durable, independent of a text value changing.
-    pub async fn bump_revision(&self, key: String) -> Result<u64> {
+    pub async fn bump_revision(&self, key: String) -> Result<u64, BumpRevisionError> {
+        let bumped = key.clone();
         self.write(move |tx| {
             let revision = read::setting(tx, &key)?
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0)
                 .checked_add(1)
-                .context("revision overflow")?;
+                .ok_or(SettingFailure::RevisionExhausted)?;
             tx.save_setting(key, serde_json::json!(revision))?;
             Ok(revision)
         })
         .await
+        .map_err(|cause| BumpRevisionError {
+            key: bumped,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Compare and change one MCP entry inside the canonical setting transaction.
     pub async fn mutate_mcp(
         &self,
         mutation: artisan_api::McpMutation,
-    ) -> Result<Vec<artisan_api::McpServer>> {
+    ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
         self.write_acknowledged(move |tx| {
             use artisan_api::McpMutation;
             let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
-                .map(serde_json::from_value)
+                .map(read::from_value)
                 .transpose()?
                 .unwrap_or_default();
             let previous = match &mutation {
                 McpMutation::Upsert { previous, .. } => previous.as_ref(),
                 McpMutation::Remove { previous } => Some(previous),
             };
-            if let Some(previous) = previous {
-                ensure!(
-                    servers.iter().find(|server| server.name == previous.name) == Some(previous),
-                    "MCP entry changed; reload before saving"
-                );
+            if let Some(previous) = previous
+                && servers.iter().find(|server| server.name == previous.name) != Some(previous)
+            {
+                return Err(SettingFailure::McpChanged {
+                    server: previous.name.clone(),
+                });
             }
             if let McpMutation::Upsert { server, .. } = &mutation {
-                ensure!(!server.name.trim().is_empty(), "MCP server needs a name");
-                ensure!(
-                    !server.command.trim().is_empty()
-                        || server
-                            .url
-                            .as_ref()
-                            .is_some_and(|url| !url.trim().is_empty()),
-                    "MCP server needs a command or URL"
-                );
-                ensure!(
-                    !servers.iter().any(|other| other.name == server.name
-                        && previous.is_none_or(|old| old.name != other.name)),
-                    "MCP name already exists"
-                );
+                if server.name.trim().is_empty() {
+                    return Err(SettingFailure::McpUnnamed);
+                }
+                if server.command.trim().is_empty()
+                    && server.url.as_ref().is_none_or(|url| url.trim().is_empty())
+                {
+                    return Err(SettingFailure::McpTargetMissing {
+                        server: server.name.clone(),
+                    });
+                }
+                if servers.iter().any(|other| {
+                    other.name == server.name && previous.is_none_or(|old| old.name != other.name)
+                }) {
+                    return Err(SettingFailure::McpNameTaken {
+                        server: server.name.clone(),
+                    });
+                }
             }
             if let Some(previous) = previous {
                 servers.retain(|server| server.name != previous.name);
@@ -107,10 +179,13 @@ impl Store {
                 servers.push(server);
             }
             servers.sort_by(|a, b| a.name.cmp(&b.name));
-            tx.save_setting("mcp_servers".into(), serde_json::to_value(&servers)?)?;
+            tx.save_setting("mcp_servers".into(), read::to_value(&servers)?)?;
             Ok(servers)
         })
         .await
+        .map_err(|cause| MutateMcpError {
+            cause: Box::new(cause),
+        })
     }
 
     /// Changes the model against the latest config instead of a client's
@@ -119,7 +194,8 @@ impl Store {
         &self,
         engine: EngineId,
         model: artisan_api::Model,
-    ) -> Result<artisan_api::EngineConfig> {
+    ) -> Result<artisan_api::EngineConfig, SetDefaultModelError> {
+        let chosen = model.id.clone();
         self.write_acknowledged(move |tx| {
             let saved = read::setting(tx, artisan_api::MODEL_CONFIGS_KEY)?
                 .and_then(|configs| artisan_api::saved_model_config(&configs, engine, &model.id));
@@ -128,7 +204,7 @@ impl Store {
                 None => read::setting(tx, artisan_api::HARNESS_CONFIGS_KEY)?
                     .and_then(|configs| configs.get(engine.as_str()).cloned())
                     .or(read::setting(tx, "default_engine_config")?)
-                    .map(serde_json::from_value::<artisan_api::EngineConfig>)
+                    .map(read::from_value::<artisan_api::EngineConfig>)
                     .transpose()?
                     .filter(|config| config.engine == engine)
                     .unwrap_or_else(|| artisan_api::EngineConfig::new(engine)),
@@ -138,17 +214,19 @@ impl Store {
                 .as_ref()
                 .map(artisan_api::model_customizations)
                 .transpose()
-                .map_err(anyhow::Error::msg)?
+                .map_err(SettingFailure::Customizations)?
                 .unwrap_or_default();
             config = model.resolve_config(&config, &customizations).effective;
-            tx.save_setting(
-                "default_engine_config".into(),
-                serde_json::to_value(&config)?,
-            )?;
+            tx.save_setting("default_engine_config".into(), read::to_value(&config)?)?;
             tx.remember_model_config(&config)?;
             Ok(config)
         })
         .await
+        .map_err(|cause| SetDefaultModelError {
+            engine,
+            model: chosen,
+            cause: Box::new(cause),
+        })
     }
 
     /// Remembers `config` as the one its model comes back with, fitted to
@@ -157,22 +235,27 @@ impl Store {
         &self,
         mut config: artisan_api::EngineConfig,
         model: &artisan_api::Model,
-    ) -> Result<artisan_api::EngineConfig> {
+    ) -> Result<artisan_api::EngineConfig, SetModelConfigError> {
         config.model = Some(model.id.clone());
+        let (engine, chosen) = (config.engine, model.id.clone());
         let model = model.clone();
         self.write_acknowledged(move |tx| {
             let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
                 .as_ref()
                 .map(artisan_api::model_customizations)
                 .transpose()
-                .map_err(anyhow::Error::msg)?
+                .map_err(SettingFailure::Customizations)?
                 .unwrap_or_default();
             config = model.resolve_config(&config, &customizations).effective;
             tx.remember_model_config(&config)?;
             Ok(config)
         })
         .await
-        .context("remember a model's config")
+        .map_err(|cause| SetModelConfigError {
+            engine,
+            model: chosen,
+            cause: Box::new(cause),
+        })
     }
 
     /// Remembers whether the user opened or closed one of `engine`'s model
@@ -181,7 +264,8 @@ impl Store {
         &self,
         engine: EngineId,
         group: artisan_api::ModelGroup,
-    ) -> Result<()> {
+    ) -> Result<(), SetModelGroupError> {
+        let name = group.name.clone();
         self.write_acknowledged(move |tx| {
             let mut groups = match read::setting(tx, artisan_api::MODEL_GROUPS_KEY)? {
                 Some(serde_json::Value::Object(groups)) => groups,
@@ -200,14 +284,23 @@ impl Store {
             )
         })
         .await
-        .context("remember a model group")
+        .map_err(|cause| SetModelGroupError {
+            engine,
+            group: name,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn set_skill_enabled(&self, id: String, enabled: bool) -> Result<()> {
+    pub async fn set_skill_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<(), SetSkillEnabledError> {
+        let skill = id.clone();
         self.write_acknowledged(move |tx| {
             let mut disabled: std::collections::BTreeSet<String> =
                 read::setting(tx, "disabled_skills")?
-                    .map(serde_json::from_value)
+                    .map(read::from_value)
                     .transpose()?
                     .unwrap_or_default();
             if enabled {
@@ -215,9 +308,13 @@ impl Store {
             } else {
                 disabled.insert(id);
             }
-            tx.save_setting("disabled_skills".into(), serde_json::to_value(disabled)?)
+            tx.save_setting("disabled_skills".into(), read::to_value(&disabled)?)
         })
         .await
+        .map_err(|cause| SetSkillEnabledError {
+            skill,
+            cause: Box::new(cause),
+        })
     }
 
     /// Saves a new version of the global prompt and makes it the
@@ -227,7 +324,7 @@ impl Store {
         &self,
         base: u64,
         text: String,
-    ) -> Result<std::result::Result<u64, u64>> {
+    ) -> Result<Result<u64, u64>, SavePromptError> {
         self.write_acknowledged(move |tx| {
             let latest = read::prompt_version(tx)?;
             if latest != base {
@@ -247,22 +344,29 @@ impl Store {
             Ok(Ok(version))
         })
         .await
-        .context("save the global prompt")
+        .map_err(|cause| SavePromptError {
+            base,
+            cause: Box::new(cause),
+        })
     }
 
-    /// The latest saved version of the global prompt; `0` before the first.
-    pub async fn prompt_version(&self) -> Result<u64> {
+    pub async fn prompt_version(&self) -> Result<u64, PromptVersionError> {
         self.read(read::prompt_version)
             .await
-            .context("read the global prompt's version")
+            .map_err(|cause| PromptVersionError {
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn draft(&self, scope: &str) -> Result<artisan_api::DraftSnapshot> {
+    pub async fn draft(&self, scope: &str) -> Result<artisan_api::DraftSnapshot, ReadDraftError> {
+        let read_scope = scope.to_owned();
         let scope = scope.to_owned();
-        self.read(move |conn| {
-            read::draft(conn, &scope).with_context(|| format!("read draft {scope}"))
-        })
-        .await
+        self.read(move |conn| read::draft(conn, &read_scope))
+            .await
+            .map_err(|cause| ReadDraftError {
+                scope,
+                cause: Box::new(cause),
+            })
     }
 
     /// Compare-and-swap prevents delayed writes and clears from overwriting newer input.
@@ -270,7 +374,8 @@ impl Store {
         &self,
         scope: String,
         request: artisan_api::WriteDraft,
-    ) -> Result<artisan_api::DraftWriteResult> {
+    ) -> Result<artisan_api::DraftWriteResult, SetDraftError> {
+        let saved = scope.clone();
         self.write_acknowledged(move |tx| {
             let current = read::draft(tx, &scope)?;
             if current.revision != request.expected_revision {
@@ -289,7 +394,7 @@ impl Store {
                 revision: current
                     .revision
                     .checked_add(1)
-                    .context("draft revision exhausted")?,
+                    .ok_or(SettingFailure::RevisionExhausted)?,
                 body: request.body,
             };
             tx.execute(
@@ -303,7 +408,10 @@ impl Store {
             })
         })
         .await
-        .context("save draft")
+        .map_err(|cause| SetDraftError {
+            scope: saved,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn set_mcp_secret(
@@ -312,10 +420,11 @@ impl Store {
         url: String,
         secret: McpSecret,
         value: String,
-    ) -> Result<bool> {
+    ) -> Result<bool, SetMcpSecretError> {
+        let named = server.clone();
         self.write_acknowledged(move |tx| {
             let servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
-                .map(serde_json::from_value)
+                .map(read::from_value)
                 .transpose()?
                 .unwrap_or_default();
             let listed = servers
@@ -331,24 +440,33 @@ impl Store {
             Ok(listed)
         })
         .await
-        .context("save an MCP secret")
+        .map_err(|cause| SetMcpSecretError {
+            server: named,
+            cause: Box::new(cause),
+        })
     }
 
-    pub async fn secret(&self, key: &str) -> Result<Option<String>> {
+    pub async fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
+        let read_key = key.to_owned();
         let key = key.to_owned();
         self.read(move |conn| {
             Ok(conn
-                .query_row("SELECT value FROM secrets WHERE key = ?1", [&key], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT value FROM secrets WHERE key = ?1",
+                    [&read_key],
+                    |row| row.get(0),
+                )
                 .optional()?)
         })
         .await
+        .map_err(|cause| ReadSecretError {
+            key,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Replaces a value only Forge reads, or deletes it with `None`. Not
-    /// synced to clients.
-    pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<()> {
+    pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<(), SetSecretError> {
+        let saved = key.to_owned();
         let key = key.to_owned();
         self.write_acknowledged(move |tx| {
             match value {
@@ -362,12 +480,18 @@ impl Store {
             Ok(())
         })
         .await
-        .context("save secret")
+        .map_err(|cause| SetSecretError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 
-    /// Stores a value only Forge reads (its identity), unless one is there
-    /// already; returns whichever is stored. Not synced to clients.
-    pub async fn secret_or_insert(&self, key: &str, value: String) -> Result<String> {
+    pub async fn secret_or_insert(
+        &self,
+        key: &str,
+        value: String,
+    ) -> Result<String, SetSecretError> {
+        let saved = key.to_owned();
         let key = key.to_owned();
         self.write_acknowledged(move |tx| {
             tx.execute(
@@ -381,7 +505,10 @@ impl Store {
             )
         })
         .await
-        .context("save secret")
+        .map_err(|cause| SetSecretError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 }
 
@@ -555,12 +682,11 @@ impl McpSecret {
     }
 }
 
-fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<()> {
+fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<(), StorageError> {
     tx.prepare_cached(include_str!("sql/mcp/forget.sql"))?
         .execute(params![
             McpSecret::Tokens.key(server),
             McpSecret::Client.key(server)
-        ])
-        .with_context(|| format!("forget the sign-in of MCP server {server}"))?;
+        ])?;
     Ok(())
 }

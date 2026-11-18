@@ -35,6 +35,7 @@ mod handoff;
 mod mcp_auth;
 mod mcp_reach;
 mod park;
+mod refusal;
 pub mod resources;
 mod retention;
 mod run;
@@ -44,9 +45,9 @@ mod side;
 
 pub use agents::{AgentInfo, AgentState, MAX_AGENT_DEPTH, SpawnAgent};
 pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY};
-pub use forge_store::Refused;
 pub use gateway::COMPUTER_USE_KEY;
 pub use mcp_auth::{McpSignInFinishError, McpSignInStartError, McpStoreError};
+pub use refusal::{Refused, refusal};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
 use anyhow::{Context, Result, bail};
@@ -268,7 +269,7 @@ impl Hub {
                 .unwrap_or(requested);
             // A command the engine can't read fails the send, not the run.
             forge_engines::normalize_command(engine, &message.text)
-                .map_err(|error| forge_store::SendRejected::Payload(error.to_string()))?;
+                .map_err(|error| Refused(error.to_string()))?;
         }
         // The first line names an untitled thread; the config a message
         // runs with becomes the default for new threads.

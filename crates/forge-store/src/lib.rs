@@ -1,12 +1,3 @@
-//! Forge's durable state: one SQLite file plus content-addressed blobs.
-//!
-//! Every stored change (project, thread, item, run, setting) takes the next
-//! value of one global seq. A single writer thread commits changes and
-//! publishes them to [`Store::subscribe`] in commit order; reads go through a
-//! small pool of read connections.
-//!
-//! `threads`, `items`, `sources`, `settings`, `pairing` and `blobs` hold the
-//! [`Store`] operations of each part; `read` and `writer` hold the SQL.
 #![expect(
     clippy::field_scoped_visibility_modifiers,
     clippy::iter_over_hash_type,
@@ -31,6 +22,7 @@ mod collection;
 mod content;
 pub mod coordination;
 pub mod discovery;
+mod error;
 pub mod hot;
 mod items;
 mod pairing;
@@ -48,7 +40,6 @@ mod text_search;
 mod threads;
 mod writer;
 
-use anyhow::{Context, Result, anyhow, ensure};
 use artisan_api::{
     BlobHash, DeviceId, Envelope, Event, Item, ItemId, ItemKind, Project, ProjectId, Run, RunId,
     Seq, Status, Thread, ThreadId, Timestamp,
@@ -62,12 +53,59 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 use writer::{Durability, Job, Tx, Writer};
 
-pub use blobs::{BlobRejected, MAX_BLOB_BYTES};
-pub use items::Acceptance;
-pub use pairing::Device;
-pub use recall::{GrepMatch, GrepPage, GrepQuery, RecallScope, SearchHit, SearchPage, Touch};
-pub use resources::{MAX_RESOURCE_SNAPSHOT_BYTES, keep as keep_resource_snapshot};
-pub use settings::McpSecret;
+pub use blobs::{
+    BlobFailure, BlobFileError, BlobRejected, CollectBlobsError, InputImagesError, MAX_BLOB_BYTES,
+    PutBlobError, PutImageError,
+};
+pub use collection::AnswerRefused;
+pub use content::{ContentError, Damage};
+pub use error::StorageError;
+pub use items::{
+    AcceptInputsError, Acceptance, AgentByAddressError, AnswerFailure, AnswerQuestionError,
+    AwaitingItemsError, BeginRunError, CancelInputsError, CancelledItemsError,
+    ContinuationChainError, ContinuePendingError, InsertMessageError, ItemByNativeError,
+    ItemsPageError, NativeIdError, NextParkedError, PendingInputsError, PendingThreadsError,
+    ReadContinueError, ReadItemError, ReopenAgentError, RequestContinueError,
+    ResolveCollectionsError, RestoreInputsError, RunnableInputError, SendMessageError,
+    SetItemStatusError, SettleAgentError, SettleRunError, SpawnAgentError, SpawnFailure,
+    TakeContinueError, TranscriptPageError, TranscriptRowsError, UnparkError, UpsertItemError,
+    ValidateAnswersError, WorkPageError,
+};
+pub use pairing::{
+    AddDeviceError, AddPairCodeError, AuthorizeError, Device, PairDeviceError, RevokeDeviceError, TouchDeviceError,
+};
+pub use read::ThreadsPageFailure;
+pub use recall::{
+    GrepFailure, GrepMatch, GrepPage, GrepQuery, RecallGrepError, RecallScope, RecallSearchError,
+    RecallTouchingError, SearchHit, SearchPage, Touch,
+};
+pub use resources::{
+    CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
+    keep as keep_resource_snapshot,
+};
+pub use retention::RemoveInactiveError;
+pub use schema::{BackupError, MigrationFailure, QuestionPart, RollbackError, SchemaError};
+pub use settings::{
+    BumpRevisionError, McpSecret, MutateMcpError, PromptVersionError, ReadDraftError,
+    ReadSecretError, ReadSettingError, SavePromptError, SetDefaultModelError, SetDraftError,
+    SetMcpSecretError, SetModelConfigError, SetModelGroupError, SetSecretError, SetSettingError,
+    SetSkillEnabledError, SettingFailure,
+};
+pub use source_index::SourceIndexError;
+pub use sources::{
+    CollectContentError, CollectionRangeError, ContentRangeError, ResolveTextError,
+    SourceIndexPageError,
+};
+pub use text_search::TextSearchError;
+pub use threads::{
+    AgentThreadsError, AwaitsUserError, ChangesSinceError, CreateProjectError,
+    InspectorError, LastReplyError, LatestRunError, MarkUnreadError, ReadProjectError,
+    ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError, UpdateThreadError,
+    UpsertRunError, WorkingAgentsError,
+};
+pub use writer::{InputFailure, UpdateThreadFailure, WriteFailure};
+
+type Result<T, E = StorageError> = std::result::Result<T, E>;
 
 const EVENT_CAPACITY: usize = 8192;
 const READ_SLOTS: usize = 4;
@@ -80,25 +118,17 @@ const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-/// Whether runs a restart cut short carry on by themselves; default on.
 pub const CONTINUE_AFTER_RESTART_KEY: &str = "continue_after_restart";
-/// How many restarts in a row a turn carries on through before it waits
-/// for the user: one that keeps taking Forge down would otherwise loop.
 pub const MAX_RESTART_CONTINUATIONS: usize = 3;
-/// Whether a turn the provider's capacity failed is retried; default on.
 pub const RETRY_WHEN_OVERLOADED_KEY: &str = "retry_when_overloaded";
-/// Whether a turn the usage limit stopped carries on once it resets;
-/// default on.
 pub const CONTINUE_AFTER_USAGE_LIMIT_KEY: &str = "continue_after_usage_limit";
 
-/// A failed turn Forge picks up again by itself at `due_at`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Park {
     pub continuation: artisan_api::Continuation,
     pub due_at: artisan_api::Timestamp,
 }
 
-/// The setting that turns parking for `continuation` on and off.
 #[must_use]
 pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'static str> {
     match continuation {
@@ -124,8 +154,6 @@ pub struct Settlement {
     pub note: Option<NewItem>,
 }
 
-/// An item as an engine adapter or the HTTP layer reports it; the store
-/// fills in position, seq and timestamps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewItem {
     pub id: ItemId,
@@ -159,6 +187,14 @@ pub enum CreateThreadError {
         parent: ThreadId,
         agent: ItemId,
     },
+    #[error("create thread {thread}: the config sets a context window its engine does not offer")]
+    InvalidConfig { thread: ThreadId },
+    #[error("create thread {thread}")]
+    Storage {
+        thread: ThreadId,
+        #[source]
+        source: StorageError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -173,34 +209,32 @@ pub struct RunMoved {
 #[error("item {0} not found")]
 pub struct ItemNotFound(pub ItemId);
 
-/// A request the stored state turns down, such as an answer to a question
-/// that is no longer waiting. The message is for the user.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct Refused(pub String);
-
 #[derive(Debug, thiserror::Error)]
 pub enum SendRejected {
     #[error("thread {0} not found")]
     ThreadNotFound(ThreadId),
     #[error("message id {0} was already used with different content or thread")]
     IdConflict(ItemId),
-    #[error("{0}")]
-    Payload(String),
+    #[error("the message text is {bytes} bytes; the limit is 32 MiB")]
+    TextTooLarge { bytes: u64 },
+    #[error("the message has {count} image references; the limit is 128")]
+    TooManyImages { count: usize },
+    #[error("image blob {blob} is {bytes} bytes; the limit is 32 MiB")]
+    ImageTooLarge { blob: BlobHash, bytes: u64 },
+    #[error("the message's images total {bytes} bytes; the limit is 128 MiB")]
+    ImagesTooLarge { bytes: u64 },
     #[error("image blob {0} is missing or invalid")]
     MissingBlob(BlobHash),
+    #[error("the message config sets a context window its engine does not offer")]
+    InvalidConfig,
 }
 
-/// Everything stored that a client needs on connect, besides item windows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
-    /// Every change up to here is included; resume events after it.
     pub head: Seq,
-    /// Projects not removed.
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
     pub threads_next: Option<artisan_api::ThreadCursor>,
-    /// Live runs plus the latest run of every thread.
     pub runs: Vec<Run>,
     pub settings: serde_json::Map<String, serde_json::Value>,
 }
@@ -230,22 +264,98 @@ struct Inner {
     read_slots: Arc<Semaphore>,
     scan_slots: Arc<Semaphore>,
     hot: Arc<hot::HotPages>,
-    /// One source index build at a time; see [`Store::source_index`].
     index_build: Arc<Semaphore>,
     devices: Mutex<Devices>,
     database: PathBuf,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
-    /// Orders uploads against blob deletion.
     blob_lock: Mutex<()>,
 }
 
 fn open_database(path: &Path) -> Result<Connection> {
-    let conn =
-        Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    Ok(conn)
+    let opened = Connection::open(path).and_then(|conn| {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        Ok(conn)
+    });
+    opened.map_err(|source| StorageError::Open {
+        database: path.to_path_buf(),
+        source: Box::new(source),
+    })
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenStoreError {
+    #[error("secure the database in {}", dir.display())]
+    Secure {
+        dir: PathBuf,
+        #[source]
+        source: SecureDatabaseError,
+    },
+    #[error("create the blob folder {}", path.display())]
+    BlobFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("name the blob files in {}", path.display())]
+    NameBlobs {
+        path: PathBuf,
+        #[source]
+        source: blobs::BlobFileError,
+    },
+    #[error("roll {} back to a schema this Forge supports", database.display())]
+    RollBack {
+        database: PathBuf,
+        #[source]
+        source: RollbackError,
+    },
+    #[error("upgrade {}", database.display())]
+    Migrate {
+        database: PathBuf,
+        #[source]
+        source: SchemaError,
+    },
+    #[error("there is no running Forge store to join at {}", database.display())]
+    NotRunning { database: PathBuf },
+    #[error(
+        "online upgrade requires database schema {expected}, the running store uses {found}; the current Forge was left running"
+    )]
+    Schema { expected: usize, found: usize },
+    #[error("{} refused WAL journaling (mode {mode})", database.display())]
+    Wal { database: PathBuf, mode: String },
+    #[error("start the store's {thread} thread")]
+    Spawn {
+        thread: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("recover the runs the last Forge left live")]
+    Recover(#[source] WriteFailure),
+    #[error("prepare the database {}", database.display())]
+    Database {
+        database: PathBuf,
+        #[source]
+        source: StorageError,
+    },
+}
+
+#[cfg(feature = "qualification")]
+#[derive(Debug, thiserror::Error)]
+pub enum ShutdownError {
+    #[error("the Forge store still has live handles")]
+    Shared,
+    #[error("the Forge store writer panicked")]
+    WriterPanicked,
+    #[error("the Forge store checkpointer panicked")]
+    CheckpointerPanicked,
+}
+
+error::operation_error!(SynchronizeError(StorageError), "catch up from seq {cursor}", cursor: Seq);
+error::operation_error!(RecoverThreadError(WriteFailure), "recover thread {thread}", thread: ThreadId);
+error::operation_error!(
+    RunningThreadsError(StorageError),
+    "list the threads with live runs"
+);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecureDatabaseError {
@@ -303,21 +413,32 @@ fn secure_database(dir: &Path, database: &Path) -> Result<(), SecureDatabaseErro
     Ok(())
 }
 
-/// A bounded delivery batch; cutoff is the newest pending input observed in the same snapshot.
 pub struct PendingInputs {
     pub items: Vec<Item>,
     pub cutoff: Seq,
 }
 
 impl Store {
-    pub fn open(dir: &Path) -> Result<Self> {
+    pub fn open(dir: &Path) -> Result<Self, OpenStoreError> {
         let database = dir.join("forge.sqlite3");
-        secure_database(dir, &database)?;
+        secure_database(dir, &database).map_err(|source| OpenStoreError::Secure {
+            dir: dir.to_path_buf(),
+            source,
+        })?;
         let blob_dir = dir.join("blobs");
-        std::fs::create_dir_all(&blob_dir)
-            .with_context(|| format!("create {}", blob_dir.display()))?;
-        blobs::name_files(&blob_dir)?;
-        match schema::roll_back(&database)? {
+        std::fs::create_dir_all(&blob_dir).map_err(|source| OpenStoreError::BlobFolder {
+            path: blob_dir.clone(),
+            source,
+        })?;
+        blobs::name_files(&blob_dir).map_err(|source| OpenStoreError::NameBlobs {
+            path: blob_dir.clone(),
+            source,
+        })?;
+        let rollback = schema::roll_back(&database).map_err(|source| OpenStoreError::RollBack {
+            database: database.clone(),
+            source,
+        })?;
+        match rollback {
             schema::Rollback::Current => {}
             schema::Rollback::Restored {
                 found,
@@ -334,19 +455,25 @@ impl Store {
         Self::start(database, blob_dir, dir.join("resources"), true)
     }
 
-    pub fn join(dir: &Path) -> Result<Self> {
+    pub fn join(dir: &Path) -> Result<Self, OpenStoreError> {
         let database = dir.join("forge.sqlite3");
-        ensure!(
-            database.is_file(),
-            "there is no running Forge store to join"
-        );
-        let conn = open_database(&database)?;
-        let version: usize = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(
-            version == schema::version(),
-            "online upgrade requires database schema {}, running store uses {version}; the current Forge was left running",
-            schema::version()
-        );
+        if !database.is_file() {
+            return Err(OpenStoreError::NotRunning { database });
+        }
+        let prepare = |source| OpenStoreError::Database {
+            database: database.clone(),
+            source,
+        };
+        let conn = open_database(&database).map_err(prepare)?;
+        let found: usize = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|source| prepare(source.into()))?;
+        if found != schema::version() {
+            return Err(OpenStoreError::Schema {
+                expected: schema::version(),
+                found,
+            });
+        }
         drop(conn);
         Self::start(database, dir.join("blobs"), dir.join("resources"), false)
     }
@@ -360,21 +487,28 @@ impl Store {
         blob_dir: PathBuf,
         resource_dir: PathBuf,
         recover: bool,
-    ) -> Result<Self> {
-        let mut conn = open_database(&database)?;
-        {
-            let mode: String = conn
-                .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-                .context("enable WAL")?;
-            ensure!(
-                mode.eq_ignore_ascii_case("wal"),
-                "database refused WAL (mode {mode})"
-            );
+    ) -> Result<Self, OpenStoreError> {
+        let prepare = |source| OpenStoreError::Database {
+            database: database.clone(),
+            source,
+        };
+        let sql = |source: rusqlite::Error| prepare(source.into());
+        let mut conn = open_database(&database).map_err(prepare)?;
+        let mode: String = conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+            .map_err(sql)?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(OpenStoreError::Wal { database, mode });
         }
-        conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
-        conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)?;
+        conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
+            .map_err(sql)?;
+        conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
+            .map_err(sql)?;
         if recover {
-            schema::migrate(&mut conn)?;
+            schema::migrate(&mut conn).map_err(|source| OpenStoreError::Migrate {
+                database: database.clone(),
+                source,
+            })?;
         }
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -387,31 +521,39 @@ impl Store {
             recover.then(|| events.clone()),
             Arc::clone(&hot),
             Arc::clone(&commits),
-        )?;
+        )
+        .map_err(prepare)?;
         if recover {
             writer
                 .transact(Durability::Background, |tx| tx.recover_threads(None))
-                .context("recover live runs")?;
+                .map_err(OpenStoreError::Recover)?;
         }
 
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
         let writer_thread = std::thread::Builder::new()
             .name("forge-store-writer".into())
             .spawn(move || writer.run(queue))
-            .context("spawn the store writer")?;
+            .map_err(|source| OpenStoreError::Spawn {
+                thread: "writer",
+                source,
+            })?;
         #[cfg(not(feature = "qualification"))]
         drop(writer_thread);
 
         let (checkpoints, stopped) = std::sync::mpsc::channel();
-        let checkpoint_conn = open_database(&database)?;
+        let checkpoint_conn = open_database(&database).map_err(prepare)?;
         let checkpointer_thread = std::thread::Builder::new()
             .name("forge-store-checkpoint".into())
             .spawn(move || checkpoint_when_due(&checkpoint_conn, &commits, &stopped))
-            .context("spawn the store checkpointer")?;
+            .map_err(|source| OpenStoreError::Spawn {
+                thread: "checkpointer",
+                source,
+            })?;
         #[cfg(not(feature = "qualification"))]
         drop(checkpointer_thread);
 
-        let first_reader = open_database(&database)?;
+        let first_reader = open_database(&database).map_err(prepare)?;
+        let devices = Devices::open(open_database(&database).map_err(prepare)?).map_err(prepare)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 #[cfg(feature = "qualification")]
@@ -430,7 +572,7 @@ impl Store {
                 scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
                 hot,
                 index_build: Arc::new(Semaphore::new(1)),
-                devices: Mutex::new(Devices::open(open_database(&database)?)?),
+                devices: Mutex::new(devices),
                 database,
                 blob_dir,
                 resource_dir,
@@ -445,9 +587,8 @@ impl Store {
     }
 
     #[cfg(feature = "qualification")]
-    pub fn shutdown_unique(self) -> Result<()> {
-        let inner = Arc::try_unwrap(self.inner)
-            .map_err(|_shared| anyhow!("Forge store still has live handles"))?;
+    pub fn shutdown_unique(self) -> Result<(), ShutdownError> {
+        let inner = Arc::try_unwrap(self.inner).map_err(|_shared| ShutdownError::Shared)?;
         let Inner {
             jobs,
             writer,
@@ -462,21 +603,19 @@ impl Store {
         drop(jobs);
         writer
             .join()
-            .map_err(|_panic| anyhow!("Forge store writer panicked"))?;
+            .map_err(|_panic| ShutdownError::WriterPanicked)?;
         drop(checkpoints);
         checkpointer
             .join()
-            .map_err(|_panic| anyhow!("Forge store checkpointer panicked"))?;
+            .map_err(|_panic| ShutdownError::CheckpointerPanicked)?;
         Ok(())
     }
 
-    /// Envelopes with `seq: Some` arrive in seq order, after their commit.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
         self.inner.events.subscribe()
     }
 
-    /// Fans out a memory-only event (streaming text, shell output).
     pub fn publish_live(&self, event: Event) {
         self.inner
             .local_live
@@ -495,7 +634,6 @@ impl Store {
 
     pub fn relay_live(&self, event: Event) {
         let live_revision = self.inner.live_revision.fetch_add(1, Ordering::AcqRel) + 1;
-        // No subscribers is fine: live events are not replayed.
         self.inner
             .events
             .send(Envelope {
@@ -511,14 +649,22 @@ impl Store {
         self.inner.live_revision.load(Ordering::Acquire)
     }
 
-    /// The last committed seq.
     #[must_use]
     pub fn head(&self) -> Seq {
         self.inner.head.load(Ordering::Acquire)
     }
 
-    pub async fn synchronize(&self, cursor: &mut Seq) -> Result<()> {
-        if let Some(changes) = self.changes_since(*cursor, 20_000).await? {
+    pub async fn synchronize(&self, cursor: &mut Seq) -> Result<(), SynchronizeError> {
+        let from = *cursor;
+        let failed = |cause| SynchronizeError {
+            cursor: from,
+            cause: Box::new(cause),
+        };
+        let changes = self
+            .read(move |conn| read::changes_since(conn, from, 20_000, false, None))
+            .await
+            .map_err(failed)?;
+        if let Some(changes) = changes {
             self.inner.hot.committed(&changes);
             for envelope in changes {
                 if let Some(seq) = envelope.seq {
@@ -527,7 +673,7 @@ impl Store {
                 self.inner.events.send(envelope).ok();
             }
         } else {
-            *cursor = self.read(read::max_seq).await?;
+            *cursor = self.read(read::max_seq).await.map_err(failed)?;
             self.inner.hot.reset();
             self.relay_live(Event::Reset);
         }
@@ -535,12 +681,17 @@ impl Store {
         Ok(())
     }
 
-    pub async fn recover_thread(&self, thread: ThreadId) -> Result<()> {
-        self.write(move |tx| tx.recover_threads(Some(vec![thread])))
+    pub async fn recover_thread(&self, thread: ThreadId) -> Result<(), RecoverThreadError> {
+        let recovered = thread.clone();
+        self.write(move |tx| tx.recover_threads(Some(vec![recovered])))
             .await
+            .map_err(|cause| RecoverThreadError {
+                thread,
+                cause: Box::new(cause),
+            })
     }
 
-    pub async fn running_threads(&self) -> Result<Vec<ThreadId>> {
+    pub async fn running_threads(&self) -> Result<Vec<ThreadId>, RunningThreadsError> {
         self.read(|conn| {
             let mut statement = conn.prepare(include_str!("sql/recovery/threads.sql"))?;
             Ok(statement
@@ -548,28 +699,34 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
+        .map_err(|cause| RunningThreadsError {
+            cause: Box::new(cause),
+        })
     }
 
-    async fn write<R, F>(&self, job: F) -> Result<R>
+    async fn write<R, E, F>(&self, job: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
         self.write_with(Durability::Background, job).await
     }
 
-    async fn write_acknowledged<R, F>(&self, job: F) -> Result<R>
+    async fn write_acknowledged<R, E, F>(&self, job: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
         self.write_with(Durability::Acknowledged, job).await
     }
 
-    async fn write_with<R, F>(&self, durability: Durability, job: F) -> Result<R>
+    async fn write_with<R, E, F>(&self, durability: Durability, job: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
         let (reply, result) = oneshot::channel();
         self.inner
@@ -578,18 +735,19 @@ impl Store {
                 reply.send(writer.transact(durability, job)).ok();
             }))
             .await
-            .map_err(|_unsent_job| anyhow!("the store writer stopped"))?;
-        result.await.context("the store writer dropped a write")?
+            .map_err(|_unsent_job| StorageError::WriterStopped)?;
+        result.await.map_err(StorageError::WriteDropped)?
     }
 
-    async fn tail_page<F>(
+    async fn tail_page<E, F>(
         &self,
         thread: &ThreadId,
         tail: Option<hot::Tail>,
         query: F,
-    ) -> Result<artisan_api::ItemsPage>
+    ) -> Result<artisan_api::ItemsPage, E>
     where
-        F: FnOnce(&Connection) -> Result<artisan_api::ItemsPage> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<artisan_api::ItemsPage, E> + Send + 'static,
     {
         let Some(tail) = tail else {
             return self.read(query).await;
@@ -604,30 +762,36 @@ impl Store {
         }
     }
 
-    async fn read<R, F>(&self, query: F) -> Result<R>
+    async fn read<R, E, F>(&self, query: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<R, E> + Send + 'static,
     {
         self.read_in(&self.inner.read_slots, query).await
     }
 
-    async fn scan<R, F>(&self, query: F) -> Result<R>
+    async fn scan<R, E, F>(&self, query: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<R, E> + Send + 'static,
     {
         self.read_in(&self.inner.scan_slots, query).await
     }
 
-    async fn read_in<R, F>(&self, slots: &Arc<Semaphore>, query: F) -> Result<R>
+    async fn read_in<R, E, F>(&self, slots: &Arc<Semaphore>, query: F) -> Result<R, E>
     where
         R: Send + 'static,
-        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<R, E> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
         let asked = std::time::Instant::now();
-        let slot = Arc::clone(slots).acquire_owned().await?;
+        let slot = Arc::clone(slots)
+            .acquire_owned()
+            .await
+            .map_err(StorageError::ReadSlot)?;
         let queued = asked.elapsed();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
@@ -646,12 +810,15 @@ impl Store {
             result
         })
         .await
-        .context("store read task")?
+        .map_err(StorageError::Task)?
     }
 }
 
 impl Inner {
-    fn with_reader<R>(&self, query: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
+    fn with_reader<R, E: From<StorageError>>(
+        &self,
+        query: impl FnOnce(&Connection) -> Result<R, E>,
+    ) -> Result<R, E> {
         let pooled = self
             .readers
             .lock()
@@ -709,7 +876,7 @@ fn checkpoint_when_due(
                 pending,
                 "store checkpoint was partial; it stays pending"
             ),
-            Err(error) => tracing::warn!(pending, "checkpoint the store: {error:#}"),
+            Err(error) => tracing::warn!(pending, "checkpoint the store: {error}"),
         }
     }
 }

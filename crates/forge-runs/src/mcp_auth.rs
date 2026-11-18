@@ -69,10 +69,10 @@ pub enum McpStoreError {
     },
 }
 
-fn store_error<'a>(
+fn store_error<'a, E: Into<BoxError>>(
     server: &'a str,
     step: &'static str,
-) -> impl FnOnce(anyhow::Error) -> McpStoreError + 'a {
+) -> impl FnOnce(E) -> McpStoreError + 'a {
     move |source| McpStoreError::Credentials {
         server: server.to_owned(),
         step,
@@ -542,6 +542,7 @@ impl Hub {
         self.store()
             .set_setting(MCP_AUTH_KEY.to_owned(), serde_json::to_value(&statuses)?)
             .await
+            .map_err(Into::into)
     }
 
     async fn saved(&self, name: &str, url: &str) -> Result<Option<Saved>, McpStoreError> {

@@ -1316,7 +1316,7 @@ async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Res
         }
         Err(error) => {
             hub.keep_unsettled(settlement);
-            Err(error)
+            Err(error.into())
         }
     }
 }

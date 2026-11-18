@@ -521,9 +521,12 @@ async fn blobs_are_stored_once_by_content_and_only_webp_is_accepted() {
 
     let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     let error = store.put_blob(png).await.unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<BlobRejected>(),
-        Some(&BlobRejected::NotWebp)
+    assert!(
+        matches!(
+            *error.cause,
+            forge_store::BlobFailure::Rejected(BlobRejected::NotWebp)
+        ),
+        "a PNG is refused as not WebP: {error}"
     );
 
     assert_eq!(store.blob_path(&BlobHash("../../etc/passwd".into())), None);
@@ -536,22 +539,45 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     let store = Store::open(&dir.0).unwrap();
     let now = now();
     store
-        .add_pair_code("fresh".into(), now + 600_000)
+        .add_pair_code(String::from("fresh"), now + 600_000)
         .await
         .unwrap();
-    store.add_pair_code("stale".into(), now - 1).await.unwrap();
+    store
+        .add_pair_code(String::from("stale"), now - 1)
+        .await
+        .unwrap();
 
-    let pair =
-        |code: &str, key: &str| store.pair_device(code.to_owned(), "Laptop".into(), key.to_owned());
+    let pair = |code: &str, key: &str| {
+        store.pair_device(
+            String::from(code),
+            "Laptop".into(),
+            key.to_owned(),
+        )
+    };
     let device = pair("fresh", "key-a").await.unwrap().unwrap();
     assert_eq!(pair("fresh", "key-b").await.unwrap(), None);
     assert_eq!(pair("stale", "key-c").await.unwrap(), None);
-    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
-    assert_eq!(store.is_authorized("key-b").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&String::from("key-a"))
+            .unwrap(),
+        Some(device.clone())
+    );
+    assert_eq!(
+        store
+            .is_authorized(&String::from("key-b"))
+            .unwrap(),
+        None
+    );
 
     let mut revocations = store.subscribe_revocations();
     assert!(store.revoke_device(&device).await.unwrap());
-    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&String::from("key-a"))
+            .unwrap(),
+        None
+    );
     assert_eq!(revocations.recv().await.unwrap(), device);
 }
 
@@ -562,17 +588,17 @@ async fn abandoned_pairing_codes_do_not_pile_up() {
     let now = now();
     for attempt in 0..20 {
         store
-            .add_pair_code(format!("abandoned-{attempt}"), now - 1)
+            .add_pair_code(String::from(&format!("abandoned-{attempt}")), now - 1)
             .await
             .unwrap();
     }
     store
-        .add_pair_code("current".into(), now + 600_000)
+        .add_pair_code(String::from("current"), now + 600_000)
         .await
         .unwrap();
     forge_store::admin::Admin::open(&dir.0)
         .unwrap()
-        .add_pair_code("from-ae", now + 600_000)
+        .add_pair_code(&String::from("from-ae"), now + 600_000)
         .unwrap();
 
     let stored: i64 = rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
@@ -591,14 +617,24 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     let dir = TempDir::new();
     let store = Store::open(&dir.0).unwrap();
     let device = store
-        .add_device("Laptop".into(), "key-a".into())
+        .add_device("Laptop".into(), String::from("key-a"))
         .await
         .unwrap();
-    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
+    assert_eq!(
+        store
+            .is_authorized(&String::from("key-a"))
+            .unwrap(),
+        Some(device.clone())
+    );
     let mut revocations = store.subscribe_revocations();
     let admin = forge_store::admin::Admin::open(&dir.0).unwrap();
     assert!(admin.revoke_device(device.as_str()).unwrap().is_some());
-    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&String::from("key-a"))
+            .unwrap(),
+        None
+    );
     assert_eq!(revocations.try_recv().unwrap(), device);
 }
 
@@ -667,8 +703,8 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
     let head = store.head();
     let error = store.create_thread(request.clone()).await.unwrap_err();
     assert!(matches!(
-        error.downcast_ref::<forge_store::CreateThreadError>(),
-        Some(forge_store::CreateThreadError::ProjectNotFound { project, .. }) if *project == missing_project
+        error,
+        forge_store::CreateThreadError::ProjectNotFound { ref project, .. } if *project == missing_project
     ));
     assert_eq!(store.head(), head);
     assert!(store.thread(&request.id).await.unwrap().is_none());
@@ -720,10 +756,7 @@ async fn threads_are_refused_under_removed_projects_and_with_impossible_lineage(
         parent_thread_id,
         spawned_by,
     };
-    let refusal = |error: anyhow::Error| match error.downcast::<forge_store::CreateThreadError>() {
-        Ok(rejected) => rejected,
-        Err(other) => panic!("not a typed refusal: {other:#}"),
-    };
+    let refusal = |error: forge_store::CreateThreadError| error;
     let head = store.head();
 
     let mut own_parent = request(None, None);
@@ -787,7 +820,10 @@ async fn a_run_stays_in_the_thread_it_started_in() {
 
     let error = store.upsert_run(moved).await.unwrap_err();
 
-    assert!(error.downcast_ref::<forge_store::RunMoved>().is_some());
+    assert!(
+        matches!(*error.cause, forge_store::WriteFailure::RunMoved(_)),
+        "a run that changes thread is refused as moved: {error}"
+    );
     assert_eq!(store.latest_run(&thread).await.unwrap(), Some(started));
     assert_eq!(store.latest_run(&other).await.unwrap(), None);
 }
@@ -931,7 +967,7 @@ async fn pairing_failure_does_not_consume_the_invitation() {
     let dir = TempDir::new();
     let store = Store::open(&dir.0).unwrap();
     store
-        .add_pair_code("invite".into(), now() + 60_000)
+        .add_pair_code(String::from("invite"), now() + 60_000)
         .await
         .unwrap();
     let conn = rusqlite::Connection::open(dir.0.join("forge.sqlite3")).unwrap();
@@ -939,20 +975,37 @@ async fn pairing_failure_does_not_consume_the_invitation() {
         .unwrap();
     assert!(
         store
-            .pair_device("invite".into(), "Laptop".into(), "certificate".into())
+            .pair_device(
+                String::from("invite"),
+                "Laptop".into(),
+                String::from("certificate"),
+            )
             .await
             .is_err()
     );
     conn.execute_batch("DROP TRIGGER reject_device;").unwrap();
     let id = store
-        .pair_device("invite".into(), "Laptop".into(), "certificate".into())
+        .pair_device(
+            String::from("invite"),
+            "Laptop".into(),
+            String::from("certificate"),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(store.is_authorized("certificate").unwrap(), Some(id));
+    assert_eq!(
+        store
+            .is_authorized(&String::from("certificate"))
+            .unwrap(),
+        Some(id)
+    );
     assert!(
         store
-            .pair_device("invite".into(), "Laptop".into(), "certificate".into())
+            .pair_device(
+                String::from("invite"),
+                "Laptop".into(),
+                String::from("certificate"),
+            )
             .await
             .unwrap()
             .is_none()

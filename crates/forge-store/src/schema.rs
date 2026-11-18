@@ -1,23 +1,71 @@
-use anyhow::{Context, Result, bail};
+use crate::content::ContentError;
+use crate::error::StorageError;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 mod backup;
 
-pub use backup::{Rollback, RollbackError};
+pub use backup::{BackupError, Rollback, RollbackError};
+
+type Result<T, E = MigrationFailure> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationFailure {
+    #[error("question item {item} has no {part}")]
+    Question { item: String, part: QuestionPart },
+    #[error(transparent)]
+    Content(#[from] ContentError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for MigrationFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum QuestionPart {
+    #[error("kind")]
+    Kind,
+    #[error("questions")]
+    Questions,
+    #[error("option list")]
+    Options,
+    #[error("text answer")]
+    TextAnswer,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    #[error("read the database's schema version")]
+    Version(#[source] rusqlite::Error),
+    #[error("the database's schema {found} is newer than this Forge's {supported}")]
+    Newer { found: usize, supported: usize },
+    #[error("back the database up before migrating from schema {version}")]
+    Backup {
+        version: usize,
+        #[source]
+        source: BackupError,
+    },
+    #[error("apply schema migration {migration}")]
+    Step {
+        migration: usize,
+        #[source]
+        source: MigrationFailure,
+    },
+}
 
 #[cfg(test)]
 #[path = "../tests/schema/model.rs"]
 mod model_migration_tests;
 
-/// One step of a migration: SQL, or a data translation SQL cannot express.
 enum Step {
     Sql(&'static str),
     Rust(fn(&Connection) -> Result<()>),
 }
 
-/// Applied in order; `PRAGMA user_version` counts how many have run.
-/// Never edit a released entry, append a new one.
 const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(
         r"
@@ -203,16 +251,12 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         ),
         Step::Rust(backfill_edit_totals),
     ],
-    // Canonical engine settings and question identities. This was an SQL
-    // no-op plus a Rust translation; the translation is the whole step.
     &[Step::Rust(migrate_payloads)],
     &[Step::Sql(
         r"UPDATE runs SET body=json_set(body,'$.input_cutoff',seq);
        CREATE INDEX items_pending_inputs ON items(thread_id,seq)
         WHERE status='running' AND json_extract(body,'$.kind.type')='user_message';",
     )],
-    // Delivered inputs keep their original position while their revision advances.
-    // A lost historical revision cannot be recovered from metadata updated_at.
     &[Step::Sql(
         r"UPDATE threads SET body=json_set(body,'$.activity_at',COALESCE(
        (SELECT json_extract(i.body,'$.updated_at') FROM items i
@@ -225,7 +269,6 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         ORDER BY r.seq DESC LIMIT 1),
        json_extract(body,'$.created_at'),0));",
     )],
-    // `item_content_delete` and `content_delete` are defined once, below.
     &[
         Step::Sql(
             r"CREATE TABLE content(id TEXT PRIMARY KEY, bytes INTEGER NOT NULL, lines INTEGER NOT NULL,
@@ -245,8 +288,6 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
     ],
     &[Step::Sql(COLLECTIONS), Step::Rust(migrate_collections)],
     &[Step::Sql(SOURCE_INDEXES)],
-    // Kind and parent are columns, so indexes and queries no longer have to
-    // repeat the same `json_extract` text to match.
     &[Step::Sql(
         r"ALTER TABLE items ADD COLUMN kind_type TEXT;
        ALTER TABLE items ADD COLUMN parent_id TEXT;
@@ -263,8 +304,6 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
        CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
         WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
     )],
-    // Approvals live on the item they gate, and a message to an agent names
-    // its Agent item instead of carrying display text.
     &[
         Step::Rust(migrate_approvals),
         Step::Sql(
@@ -282,18 +321,12 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
         ),
     ],
-    // Claude repeats its `compacting` status as progress, and each repeat
-    // used to start another compaction item. Keep one per compaction: the
-    // one that has token counts, otherwise the first.
     &[Step::Sql(
         r"DELETE FROM items WHERE kind_type='compaction'
          AND json_extract(body,'$.kind.tokens_before') IS NULL
          AND EXISTS(SELECT 1 FROM items c WHERE c.run_id=items.run_id AND c.kind_type='compaction'
            AND (json_extract(c.body,'$.kind.tokens_before') IS NOT NULL OR c.position<items.position));",
     )],
-    // Recall: every item's readable text under the item's rowid, ranked
-    // search over it, and tool output kept apart (see `recall`). The index is
-    // derived, so it is rebuilt whole from the items.
     &[
         Step::Sql(
             r"DROP TRIGGER IF EXISTS item_text_owner_delete;
@@ -308,18 +341,12 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
          DELETE FROM item_text WHERE rowid=OLD.rowid;
        END;",
         ),
-        Step::Rust(crate::recall::backfill),
+        Step::Rust(backfill_recall),
     ],
-    // Calls to Artisan's own tools leave recall: a search found its own query.
-    &[Step::Rust(crate::recall::forget_artisan_calls)],
-    // Threads whose stopped turn should carry on with no new message; the
-    // dispatcher starts them like threads with pending input.
+    &[Step::Rust(forget_artisan_calls)],
     &[Step::Sql(
         "CREATE TABLE IF NOT EXISTS continues(thread_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, reason TEXT NOT NULL);",
     )],
-    // Transcript pages count the rows a reader sees and summarise the work
-    // between them, so they need to know, by index, which items fold into
-    // work (`Item::folds_into_work`).
     &[
         Step::Sql("ALTER TABLE items ADD COLUMN work INTEGER NOT NULL DEFAULT 0;"),
         Step::Rust(backfill_work),
@@ -327,15 +354,9 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
             "CREATE INDEX items_transcript_rows ON items(thread_id,position) WHERE parent_id IS NULL AND work=0;",
         ),
     ],
-    // A failed turn waits in `continues` until `due_at` (ms) when Forge
-    // picks it up again by itself (the provider was overloaded, or the
-    // usage limit resets); requests without one go at once.
     &[Step::Sql(
         "ALTER TABLE continues ADD COLUMN due_at INTEGER;",
     )],
-    // Each model comes back with the config last chosen for it; the old
-    // Editor's entries still say access and approvals, which became one
-    // choice (see the default config's step above).
     &[Step::Rust(migrate_model_permissions)],
     &[Step::Sql(
         "CREATE TABLE IF NOT EXISTS removed_threads(id TEXT PRIMARY KEY, seq INTEGER NOT NULL);
@@ -360,7 +381,7 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     else {
         return Ok(());
     };
-    let mut configs: Value = serde_json::from_str(&text).context("read the model configs")?;
+    let mut configs: Value = crate::read::from_body(&text)?;
     let Some(configs_map) = configs.as_object_mut() else {
         return Ok(());
     };
@@ -395,8 +416,6 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Marks the root items that fold into work. An item whose body no longer
-/// parses ships as a row, where the fold still places it.
 fn backfill_work(conn: &Connection) -> Result<()> {
     let mut select = conn.prepare("SELECT id,body FROM items WHERE parent_id IS NULL")?;
     let mut rows = select.query([])?;
@@ -411,11 +430,6 @@ fn backfill_work(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// An approval stored as its own item (`{"type":"approval", target,
-/// approval}`, written by Codex and ACP runs before approvals moved onto the
-/// item they gate) as a standalone tool that carries it. Migration 17 first
-/// moves each one onto its target; this keeps the rest, and old databases
-/// whose earlier migrations read every item, loadable.
 pub fn legacy_approval(item: &mut serde_json::Value) {
     let Some(kind) = item.get_mut("kind") else {
         return;
@@ -437,10 +451,6 @@ pub fn legacy_approval(item: &mut serde_json::Value) {
     });
 }
 
-/// Moves each stored approval onto the tool or plan it gated, when that
-/// item has none of its own, and drops the approval's own row; any other
-/// approval becomes the standalone tool [`legacy_approval`] makes. Bodies
-/// change in place: no seq, no event.
 fn migrate_approvals(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let approvals: Vec<(String, String, String)> = conn
@@ -450,8 +460,7 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (id, thread, body) in approvals {
-        let mut value: Value =
-            serde_json::from_str(&body).with_context(|| format!("read approval {id}"))?;
+        let mut value: Value = crate::read::from_body(&body)?;
         let target = value
             .pointer("/kind/target")
             .and_then(Value::as_str)
@@ -465,36 +474,31 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()?
-                .map(|(id, body)| serde_json::from_str(&body).map(|body| (id, body)))
-                .transpose()
-                .with_context(|| format!("read the item approval {id} gated"))?,
+                .map(|(id, body)| crate::read::from_body(&body).map(|body| (id, body)))
+                .transpose()?,
             None => None,
         };
         if let Some((target, mut gated)) = gated {
             gated["kind"]["approval"] = value["kind"]["approval"].take();
-            let item: artisan_api::Item = serde_json::from_value(gated)
-                .with_context(|| format!("move approval {id} onto item {target}"))?;
+            let item: artisan_api::Item = crate::read::from_value(gated)?;
             conn.execute(
                 "UPDATE items SET body=?2 WHERE id=?1",
-                rusqlite::params![target, serde_json::to_string(&item)?],
+                rusqlite::params![target, crate::read::to_body(&item)?],
             )?;
             crate::content::own(conn, &item)?;
             conn.execute("DELETE FROM items WHERE id=?1", [&id])?;
         } else {
             legacy_approval(&mut value);
-            let item: artisan_api::Item = serde_json::from_value(value)
-                .with_context(|| format!("keep approval {id} as a tool"))?;
+            let item: artisan_api::Item = crate::read::from_value(value)?;
             conn.execute(
                 "UPDATE items SET body=?2,kind_type='tool' WHERE id=?1",
-                rusqlite::params![id, serde_json::to_string(&item)?],
+                rusqlite::params![id, crate::read::to_body(&item)?],
             )?;
         }
     }
     Ok(())
 }
 
-/// Collection records with their dependency graph. A source stays while an
-/// item or a parent source references it; `content_delete` cascades.
 const COLLECTIONS: &str = r"
 CREATE TABLE content_collections(content_id TEXT PRIMARY KEY, count INTEGER NOT NULL, authored_bytes INTEGER NOT NULL, structural_bytes INTEGER NOT NULL);
 CREATE TABLE content_records(content_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
@@ -528,7 +532,6 @@ CREATE TRIGGER content_delete AFTER DELETE ON content BEGIN
 END;
 ";
 
-/// Persisted Markdown leaf indexes, removed with their source.
 const SOURCE_INDEXES: &str = r"
 CREATE TABLE source_indexes(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL,
  metadata_id TEXT NOT NULL, leaf_count INTEGER NOT NULL, PRIMARY KEY(source_id,format,version)) WITHOUT ROWID;
@@ -541,7 +544,7 @@ CREATE TRIGGER source_index_delete AFTER DELETE ON content BEGIN
 END;
 ";
 
-pub fn migrate(conn: &mut Connection) -> Result<()> {
+pub fn migrate(conn: &mut Connection) -> Result<(), SchemaError> {
     migrate_to(conn, MIGRATIONS.len())
 }
 
@@ -549,39 +552,44 @@ pub fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
     backup::roll_back(database, MIGRATIONS.len())
 }
 
-fn migrate_to(conn: &mut Connection, target: usize) -> Result<()> {
+fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), SchemaError> {
     let version: usize = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .context("read schema version")?;
+        .map_err(SchemaError::Version)?;
     if version > MIGRATIONS.len() {
-        bail!(
-            "database schema version {version} is newer than this Forge ({})",
-            MIGRATIONS.len()
-        );
+        return Err(SchemaError::Newer {
+            found: version,
+            supported: MIGRATIONS.len(),
+        });
     }
     if version < target {
-        backup::before_migrating(conn, version)?;
+        backup::before_migrating(conn, version)
+            .map_err(|source| SchemaError::Backup { version, source })?;
     }
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;
         tracing::info!("upgrading the database to schema {next} of {target}");
-        let tx = conn.transaction()?;
-        for step in *steps {
-            match step {
-                Step::Sql(sql) => tx.execute_batch(sql).map_err(Into::into),
-                Step::Rust(translate) => translate(&tx),
-            }
-            .with_context(|| format!("apply schema migration {next}"))?;
-        }
-        tx.pragma_update(None, "user_version", next)?;
-        tx.commit()
-            .with_context(|| format!("commit schema migration {next}"))?;
+        apply(conn, next, steps).map_err(|source| SchemaError::Step {
+            migration: next,
+            source,
+        })?;
     }
     Ok(())
 }
 
-/// Existing edit history is counted once, one row at a time, without
-/// manufacturing Item revisions or stream events.
+fn apply(conn: &mut Connection, next: usize, steps: &[Step]) -> Result<()> {
+    let tx = conn.transaction()?;
+    for step in steps {
+        match step {
+            Step::Sql(sql) => tx.execute_batch(sql)?,
+            Step::Rust(translate) => translate(&tx)?,
+        }
+    }
+    tx.pragma_update(None, "user_version", next)?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn backfill_edit_totals(conn: &Connection) -> Result<()> {
     let mut select = conn.prepare(
         "SELECT id,body FROM items WHERE status='done' AND json_extract(body,'$.kind.tool.kind')='edit'",
@@ -590,9 +598,9 @@ fn backfill_edit_totals(conn: &Connection) -> Result<()> {
     let mut update = conn.prepare("UPDATE items SET edit_added=?2,edit_removed=?3 WHERE id=?1")?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        let body: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
         if let Some(tool) = body.pointer("/kind/tool") {
-            let tool: artisan_api::ToolKind = serde_json::from_value(tool.clone())?;
+            let tool: artisan_api::ToolKind = crate::read::from_value(tool.clone())?;
             if let Some(stats) = crate::content::inline_edit_totals(&tool) {
                 update.execute(rusqlite::params![id, stats.added, stats.removed])?;
             }
@@ -601,15 +609,22 @@ fn backfill_edit_totals(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn backfill_recall(conn: &Connection) -> Result<()> {
+    Ok(crate::recall::backfill(conn)?)
+}
+
+fn forget_artisan_calls(conn: &Connection) -> Result<()> {
+    Ok(crate::recall::forget_artisan_calls(conn)?)
+}
+
 fn migrate_sources(conn: &Connection) -> Result<()> {
-    crate::content::migrate(conn, false)
+    Ok(crate::content::migrate(conn, false)?)
 }
 
 fn migrate_collections(conn: &Connection) -> Result<()> {
-    crate::content::migrate(conn, true)
+    Ok(crate::content::migrate(conn, true)?)
 }
 
-/// One-time persisted-data translation, never a runtime provider fallback.
 fn canonical_config(config: &mut serde_json::Value) {
     use serde_json::Value;
     let engine = config
@@ -659,18 +674,24 @@ fn canonical_config(config: &mut serde_json::Value) {
         _ => {}
     }
 }
-fn canonical_question(body: &mut serde_json::Value) -> Result<()> {
+fn canonical_question(item: &str, body: &mut serde_json::Value) -> Result<()> {
     use serde_json::{Value, json};
-    let kind = body.get_mut("kind").context("question has no kind")?;
+    let lacks = |part| MigrationFailure::Question {
+        item: item.to_owned(),
+        part,
+    };
+    let kind = body
+        .get_mut("kind")
+        .ok_or_else(|| lacks(QuestionPart::Kind))?;
     let questions = kind
         .get_mut("questions")
         .and_then(Value::as_array_mut)
-        .context("question has no questions")?;
+        .ok_or_else(|| lacks(QuestionPart::Questions))?;
     for question in questions.iter_mut() {
         for (index, option) in question
             .get_mut("options")
             .and_then(Value::as_array_mut)
-            .context("question options are not an array")?
+            .ok_or_else(|| lacks(QuestionPart::Options))?
             .iter_mut()
             .enumerate()
         {
@@ -679,8 +700,6 @@ fn canonical_question(body: &mut serde_json::Value) -> Result<()> {
             }
         }
     }
-    // Already-canonical answers remain untouched. Old label arrays cannot
-    // recover duplicate-choice identity; preserve their first-match behavior once.
     let questions = questions.clone();
     if let Some(answers) = kind.get_mut("answers").and_then(Value::as_array_mut) {
         for (question, answer) in questions.iter().zip(answers) {
@@ -693,11 +712,15 @@ fn canonical_question(body: &mut serde_json::Value) -> Result<()> {
             }
             let labels: Vec<_> = old
                 .iter()
-                .map(|value| value.as_str().context("old question answer is not text"))
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| lacks(QuestionPart::TextAnswer))
+                })
                 .collect::<Result<_>>()?;
             let options = question["options"]
                 .as_array()
-                .context("question options are not an array")?;
+                .ok_or_else(|| lacks(QuestionPart::Options))?;
             let ids: Option<Vec<_>> = labels
                 .iter()
                 .map(|label| {
@@ -722,7 +745,7 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let text: String = row.get(1)?;
-        let mut value: serde_json::Value = serde_json::from_str(&text)?;
+        let mut value: serde_json::Value = crate::read::from_body(&text)?;
         if let Some(config) = value.get_mut("config") {
             canonical_config(config);
         }
@@ -733,7 +756,7 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
             .query_row("SELECT value FROM kv WHERE key=?1", [key], |row| row.get(0))
             .optional()?;
         if let Some(value) = value {
-            let mut value: serde_json::Value = serde_json::from_str(&value)?;
+            let mut value: serde_json::Value = crate::read::from_body(&value)?;
             if key == "model_engine_configs" {
                 if let Some(configs) = value.as_object_mut() {
                     for config in configs.values_mut() {
@@ -755,8 +778,8 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
     let mut update = conn.prepare("UPDATE items SET body=?2 WHERE id=?1")?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        let mut value: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
-        canonical_question(&mut value)?;
+        let mut value: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
+        canonical_question(&id, &mut value)?;
         update.execute(rusqlite::params![id, value.to_string()])?;
     }
     Ok(())
@@ -813,7 +836,6 @@ mod canonical_migration_tests {
             .unwrap();
         assert_eq!(settings[0].1, 18);
         assert_eq!(settings[1].1, 19);
-        // Cursor is retired; its old config is still translated, as JSON.
         let default: Value = serde_json::from_str(&settings[0].2).unwrap();
         assert_eq!(default["speed"], "fast");
         assert!(default["options"].get("fast").is_none());
@@ -946,8 +968,6 @@ mod item_column_migration_tests {
         }
     }
 
-    /// Items stored before kind and parent became columns still start runs
-    /// and still show in their agent's transcript.
     #[test]
     fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -981,7 +1001,7 @@ mod item_column_migration_tests {
                 rusqlite::params![
                     row.id.as_str(),
                     seq + 1,
-                    crate::read::tag(&row.status).unwrap(),
+                    crate::read::tag(&row.status),
                     serde_json::to_string(row).unwrap()
                 ],
             )
@@ -1018,8 +1038,6 @@ mod item_column_migration_tests {
         );
     }
 
-    /// A Claude compaction stored once per progress frame shows once: the
-    /// thread keeps the item with token counts and its other compactions.
     #[test]
     fn repeated_compaction_items_collapse_to_one_per_compaction() {
         use serde_json::json;
@@ -1050,9 +1068,6 @@ mod item_column_migration_tests {
         assert_eq!(ids, ["boundary", "interrupted-1", "other-run"]);
     }
 
-    /// Threads Codex and ACP ran before approvals moved onto the item they
-    /// gate still load: each approval shows on its command, and a message to
-    /// an agent still shows in that agent's transcript.
     #[test]
     fn stored_approvals_move_onto_their_items_and_agent_messages_name_their_agent() {
         use serde_json::json;

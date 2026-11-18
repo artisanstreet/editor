@@ -65,7 +65,7 @@ impl Hub {
                         .await?
                         .context("message disappeared")?;
                     if latest.revision == current.revision {
-                        return Err(error);
+                        return Err(error.into());
                     }
                 }
             }

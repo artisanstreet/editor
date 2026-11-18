@@ -1,5 +1,4 @@
-//! Indexed canonical collections in the existing immutable content owner.
-use anyhow::{Context, Result, ensure};
+use crate::content::{ContentError, Damage, to_usize};
 use artisan_api::{CollectionQuery, CollectionRange, CollectionRef, ContentId, ContentRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -8,17 +7,55 @@ use std::fmt::Write as _;
 
 const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
 
+type Result<T, E = ContentError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AnswerRefused {
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("submitted choices must be inline")]
+    StoredChoices,
+    #[error("unknown question choice")]
+    UnknownChoice,
+    #[error("answer count does not match questions")]
+    CountMismatch,
+    #[error("This question needs its engine, which has stopped.")]
+    EngineStopped,
+    #[error("This question was already answered differently.")]
+    AnsweredDifferently,
+    #[error("This question is not waiting for an answer.")]
+    NotWaiting,
+    #[error("Item {item} is not a question.")]
+    NotAQuestion { item: artisan_api::ItemId },
+}
+
+fn damaged(content: &ContentId, damage: Damage) -> ContentError {
+    ContentError::Damaged {
+        content: content.clone(),
+        damage,
+    }
+}
+
+fn missing(content: &ContentId) -> ContentError {
+    ContentError::Missing {
+        content: content.clone(),
+    }
+}
+
+fn written(result: std::fmt::Result) {
+    result.expect("invariant: writing to a String cannot fail");
+}
+
 fn encode<T: Serialize>(record: &T) -> Result<String> {
-    let json = serde_json::to_string(record)?;
-    ensure!(
-        json.len() <= forge_content::INLINE_COLLECTION_BYTES,
-        "canonical record metadata exceeds 64 KiB; authored text must use a source reference"
-    );
+    let json = crate::read::to_body(record)?;
+    if json.len() > forge_content::INLINE_COLLECTION_BYTES {
+        return Err(ContentError::RecordTooLarge { bytes: json.len() });
+    }
     Ok(json)
 }
 
 fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
-    let value: serde_json::Value = serde_json::from_str(encoded)?;
+    let value: serde_json::Value = crate::read::from_body(encoded)?;
     let key = match &value {
         serde_json::Value::String(key) => Some(key.clone()),
         serde_json::Value::Object(record) => record
@@ -30,11 +67,12 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
         | serde_json::Value::Number(_)
         | serde_json::Value::Array(_) => None,
     };
-    ensure!(
-        key.as_ref()
-            .is_none_or(|key| !key.is_empty() && key.len() <= 4096),
-        "invalid canonical record identity"
-    );
+    if !key
+        .as_ref()
+        .is_none_or(|key| !key.is_empty() && key.len() <= 4096)
+    {
+        return Err(ContentError::RecordIdentity);
+    }
     let label = value
         .get("label")
         .and_then(|label| label.as_str())
@@ -49,31 +87,35 @@ pub fn store<T: Serialize>(
     authored_bytes: u64,
     nested_structural_bytes: u64,
 ) -> Result<CollectionRef> {
-    // First pass computes identity with at most one encoded record in memory.
-    // Existing immutable collections do not incur chunk or record writes.
-    let reference = forge_content::collection_ref(records)?;
+    let reference = forge_content::collection_ref(records)
+        .map_err(crate::error::StorageError::encode::<[T]>)?;
     let source = reference.source;
-    ensure!(
-        source
-            .bytes
-            .saturating_add(authored_bytes)
-            .saturating_add(nested_structural_bytes)
-            <= MAX_COLLECTION_BYTES,
-        "canonical collection authored and structural data exceeds 64 MiB"
-    );
+    let bytes = source
+        .bytes
+        .saturating_add(authored_bytes)
+        .saturating_add(nested_structural_bytes);
+    if bytes > MAX_COLLECTION_BYTES {
+        return Err(ContentError::CollectionTooLarge { bytes });
+    }
     for child in dependencies {
-        ensure!(child != &source.id, "source cannot depend on itself");
+        if child == &source.id {
+            return Err(ContentError::SelfDependency {
+                content: child.clone(),
+            });
+        }
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1)",
             [child.as_str()],
             |row| row.get(0),
         )?;
-        ensure!(exists, "collection source dependency is missing");
+        if !exists {
+            return Err(ContentError::MissingDependency {
+                content: child.clone(),
+            });
+        }
     }
     let inserted = conn.execute("INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,0,0,?4) ON CONFLICT(id) DO NOTHING",
         params![source.id.as_str(), source.bytes, source.lines, artisan_api::now()])? != 0;
-    // A pre-existing ordinary text source with identical NDJSON bytes can become
-    // an indexed collection. It still has one content identity and one lifecycle.
     let indexed = conn.execute("INSERT INTO content_collections(content_id,count,authored_bytes,structural_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(content_id) DO NOTHING",
         params![source.id.as_str(), records.len() as u64,authored_bytes,source.bytes.saturating_add(nested_structural_bytes)])? != 0;
     if inserted || indexed {
@@ -132,10 +174,9 @@ pub fn store<T: Serialize>(
         [source.id.as_str()],
         |row| row.get(0),
     )?;
-    ensure!(
-        known == records.len() as u64,
-        "collection descriptor mismatch"
-    );
+    if known != records.len() as u64 {
+        return Err(damaged(&source.id, Damage::DescriptorMismatch));
+    }
     for child in dependencies {
         conn.execute("INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING", params![source.id.as_str(),child.as_str()])?;
     }
@@ -150,17 +191,23 @@ pub fn range<T: DeserializeOwned>(
     id: &ContentId,
     query: CollectionQuery,
 ) -> Result<Option<CollectionRange<T>>> {
-    ensure!(id.is_valid(), "invalid collection identity");
+    if !id.is_valid() {
+        return Err(ContentError::InvalidIdentity {
+            content: id.clone(),
+        });
+    }
     let limit = query.limit.unwrap_or(artisan_api::COLLECTION_RANGE_ENTRIES);
-    ensure!(
-        (1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit),
-        "collection limit must be 1..64"
-    );
+    if !(1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit) {
+        return Err(ContentError::CollectionLimit { limit });
+    }
     let Some((bytes, lines, total)) = conn.query_row("SELECT c.bytes,c.lines,r.count FROM content c JOIN content_collections r ON r.content_id=c.id WHERE c.id=?1", [id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?))).optional()? else { return Ok(None) };
-    ensure!(
-        query.offset <= total,
-        "collection offset exceeds record count"
-    );
+    if query.offset > total {
+        return Err(ContentError::RecordOffsetPastEnd {
+            content: id.clone(),
+            offset: query.offset,
+            total,
+        });
+    }
     let mut select = conn.prepare_cached("SELECT ordinal,start,end FROM content_records WHERE content_id=?1 AND ordinal>=?2 ORDER BY ordinal LIMIT ?3")?;
     let mut rows = select.query(params![id.as_str(), query.offset, limit])?;
     let mut records = Vec::new();
@@ -170,15 +217,13 @@ pub fn range<T: DeserializeOwned>(
         let ordinal: u64 = row.get(0)?;
         let start: u64 = row.get(1)?;
         let end: u64 = row.get(2)?;
-        ensure!(
-            ordinal == query.offset + records.len() as u64 && end >= start && end <= bytes,
-            "collection index is missing or inconsistent"
-        );
-        let size = usize::try_from(end - start)?;
-        ensure!(
-            size <= forge_content::INLINE_COLLECTION_BYTES,
-            "stored record exceeds range budget"
-        );
+        if !(ordinal == query.offset + records.len() as u64 && end >= start && end <= bytes) {
+            return Err(damaged(id, Damage::RecordIndex));
+        }
+        let size = to_usize(end - start);
+        if size > forge_content::INLINE_COLLECTION_BYTES {
+            return Err(damaged(id, Damage::OversizedRecord));
+        }
         if loaded_bytes + size > artisan_api::COLLECTION_RANGE_BYTES {
             byte_limited = true;
             break;
@@ -195,27 +240,26 @@ pub fn range<T: DeserializeOwned>(
                 ),
             },
         )?
-        .context("collection source is missing")?;
-        ensure!(
-            source.start == start && source.end >= end,
-            "collection record source is incomplete"
-        );
-        records.push(
-            serde_json::from_str::<T>(&source.text[..size])
-                .context("canonical collection record has the wrong shape")?,
-        );
+        .ok_or_else(|| missing(id))?;
+        if !(source.start == start && source.end >= end) {
+            return Err(damaged(id, Damage::IncompleteRecord));
+        }
+        let record = source
+            .text
+            .get(..size)
+            .ok_or_else(|| damaged(id, Damage::IncompleteRecord))?;
+        records.push(crate::read::from_body::<T>(record)?);
         loaded_bytes += size;
     }
-    ensure!(
-        query.offset == total || !records.is_empty(),
-        "collection index is missing"
-    );
-    ensure!(
-        byte_limited
-            || query.offset + records.len() as u64
-                == query.offset.saturating_add(u64::from(limit)).min(total),
-        "collection index has a missing trailing record"
-    );
+    if query.offset != total && records.is_empty() {
+        return Err(damaged(id, Damage::RecordIndex));
+    }
+    if !(byte_limited
+        || query.offset + records.len() as u64
+            == query.offset.saturating_add(u64::from(limit)).min(total))
+    {
+        return Err(damaged(id, Damage::MissingTrailingRecord));
+    }
     Ok(Some(CollectionRange {
         source: ContentRef {
             id: id.clone(),
@@ -238,17 +282,16 @@ pub fn validate_answer(
     question: &artisan_api::Question,
     answer: &Option<artisan_api::QuestionAnswer>,
 ) -> Result<()> {
-    let refused = |message: &str| crate::Refused(message.to_owned());
     question
         .validate_answer_structure(answer)
-        .map_err(refused)?;
+        .map_err(AnswerRefused::Invalid)?;
     if let Some(artisan_api::QuestionAnswer::Choices { ids }) = answer {
-        let ids = ids
-            .inline()
-            .ok_or_else(|| refused("submitted choices must be inline"))?;
+        let ids = ids.inline().ok_or(AnswerRefused::StoredChoices)?;
         match &question.options {
             artisan_api::Collection::Inline(_) => {
-                question.validate_answer(answer).map_err(refused)?;
+                question
+                    .validate_answer(answer)
+                    .map_err(AnswerRefused::Invalid)?;
             }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
@@ -256,7 +299,9 @@ pub fn validate_answer(
                 for id in ids {
                     let known: bool = exists
                         .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))?;
-                    ensure!(known, refused("unknown question choice"));
+                    if !known {
+                        return Err(AnswerRefused::UnknownChoice.into());
+                    }
                 }
             }
         }
@@ -269,13 +314,13 @@ pub fn answer_text(
     answer: &artisan_api::QuestionAnswer,
 ) -> Result<String> {
     let artisan_api::Collection::Stored(reference) = &question.options else {
-        return question.answer_text(answer).map_err(anyhow::Error::msg);
+        return Ok(question
+            .answer_text(answer)
+            .map_err(AnswerRefused::Invalid)?);
     };
-    let artisan_api::QuestionAnswer::Choices { ids } = answer else {
-        let artisan_api::QuestionAnswer::Text { text } = answer else {
-            unreachable!()
-        };
-        return Ok(text.clone());
+    let ids = match answer {
+        artisan_api::QuestionAnswer::Choices { ids } => ids,
+        artisan_api::QuestionAnswer::Text { text } => return Ok(text.clone()),
     };
     metrics(conn, reference)?;
     let loaded;
@@ -300,7 +345,7 @@ pub fn answer_text(
                 Ok((row.get(0)?, row.get(1)?))
             })
             .optional()?
-            .context("unknown question choice")?;
+            .ok_or(AnswerRefused::UnknownChoice)?;
         let duplicates = if let Some(value) = duplicate_counts.get(&label) {
             *value
         } else {
@@ -316,18 +361,20 @@ pub fn answer_text(
         }
         labels.push_str(&label);
         if duplicates > 1 {
-            write!(labels, " (option {} of {})", index + 1, reference.count)?;
+            written(write!(
+                labels,
+                " (option {} of {})",
+                index + 1,
+                reference.count
+            ));
         }
-        ensure!(
-            labels.len() as u64 <= MAX_COLLECTION_BYTES,
-            "answer display exceeds 64 MiB"
-        );
+        if labels.len() as u64 > MAX_COLLECTION_BYTES {
+            return Err(ContentError::AnswerDisplayTooLarge);
+        }
     }
     Ok(labels)
 }
 
-/// Runs once when answers are first persisted or during the historical data
-/// migration. Status-only native events inherit the same immutable display.
 pub fn derive_answer_text(
     conn: &Connection,
     kind: &mut artisan_api::ItemKind,
@@ -357,10 +404,12 @@ pub fn derive_answer_text(
         *display = Some(text.clone());
         return Ok(());
     }
-    ensure!(
-        answers.len() == questions.len(),
-        "saved answer count does not match questions"
-    );
+    if answers.len() != questions.len() {
+        return Err(ContentError::SavedAnswerCount {
+            questions: questions.len(),
+            answers: answers.len(),
+        });
+    }
     let mut cached: Option<CollectionRange<Option<artisan_api::QuestionAnswer>>> = None;
     let mut text = String::new();
     visit_questions(conn, questions, |index, question| {
@@ -381,27 +430,28 @@ pub fn derive_answer_text(
                                 limit: None,
                             },
                         )?
-                        .context("saved answer source is missing")?,
+                        .ok_or_else(|| missing(&reference.source.id))?,
                     );
                 }
-                let page = cached.as_ref().context("saved answer page is missing")?;
-                &page.records[usize::try_from(index64 - page.start)?]
+                let page = cached
+                    .as_ref()
+                    .expect("invariant: the saved answer page was just loaded");
+                &page.records[to_usize(index64 - page.start)]
             }
         };
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         if questions.len() > 1 {
-            write!(text, "Question {}: ", index + 1)?;
+            written(write!(text, "Question {}: ", index + 1));
         }
         match answer {
             Some(answer) => text.push_str(&answer_text(conn, question, answer)?),
             None => text.push_str("You skipped this question."),
         }
-        ensure!(
-            text.len() as u64 <= MAX_COLLECTION_BYTES,
-            "answer display exceeds 64 MiB"
-        );
+        if text.len() as u64 > MAX_COLLECTION_BYTES {
+            return Err(ContentError::AnswerDisplayTooLarge);
+        }
         Ok(())
     })?;
     *display = Some(text.into());
@@ -414,18 +464,21 @@ pub struct Metrics {
     pub structural: u64,
 }
 pub fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
-    ensure!(
-        reference.source.id.is_valid(),
-        "invalid collection source identity"
-    );
+    if !reference.source.id.is_valid() {
+        return Err(ContentError::InvalidIdentity {
+            content: reference.source.id.clone(),
+        });
+    }
     let value = conn.query_row("SELECT r.count,c.bytes,c.lines,r.authored_bytes,r.structural_bytes FROM content_collections r JOIN content c ON c.id=r.content_id WHERE r.content_id=?1",
-        [reference.source.id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?,row.get::<_,u64>(3)?,row.get::<_,u64>(4)?))).optional()?.context("collection source is missing")?;
-    ensure!(
-        reference.count == value.0
-            && reference.source.bytes == value.1
-            && reference.source.lines == value.2,
-        "collection descriptor mismatch"
-    );
+        [reference.source.id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?,row.get::<_,u64>(3)?,row.get::<_,u64>(4)?))).optional()?.ok_or_else(|| missing(&reference.source.id))?;
+    if !(reference.count == value.0
+        && reference.source.bytes == value.1
+        && reference.source.lines == value.2)
+    {
+        return Err(ContentError::UnknownReference {
+            content: reference.source.id.clone(),
+        });
+    }
     Ok(Metrics {
         authored: value.3,
         structural: value.4,
@@ -454,16 +507,15 @@ fn normalize<T: Serialize>(
         total.authored = total.authored.saturating_add(record_total.authored);
         total.structural = total.structural.saturating_add(record_total.structural);
         let encoded = encode(record)?;
-        crate::content::validate_metadata(&serde_json::from_str(&encoded)?, "")?;
+        crate::content::validate_metadata(&crate::read::from_body(&encoded)?, "")?;
         encoded_bytes = encoded_bytes.saturating_add(encoded.len() as u64 + 1);
-        ensure!(
-            total
-                .authored
-                .saturating_add(total.structural)
-                .saturating_add(encoded_bytes)
-                <= MAX_COLLECTION_BYTES,
-            "collection data exceeds 64 MiB"
-        );
+        let bytes = total
+            .authored
+            .saturating_add(total.structural)
+            .saturating_add(encoded_bytes);
+        if bytes > MAX_COLLECTION_BYTES {
+            return Err(ContentError::CollectionTooLarge { bytes });
+        }
     }
     if records.len() > forge_content::INLINE_COLLECTION_ENTRIES
         || encoded_bytes.saturating_add(1) > forge_content::INLINE_COLLECTION_BYTES as u64
@@ -572,7 +624,7 @@ pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics>
         )
         .optional()?
     else {
-        anyhow::bail!("collection source is missing")
+        return Err(missing(&source.id));
     };
     metrics(
         conn,
@@ -583,15 +635,13 @@ pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics>
     )
 }
 
-/// Resolving all records is reserved for admitted Forge operations such as a
-/// native question callback. HTTP and the Client use indexed range reads.
 pub fn resolve<T: DeserializeOwned>(
     conn: &Connection,
     collection: &artisan_api::Collection<T>,
 ) -> Result<Vec<T>> {
     let reference = collection
         .stored()
-        .context("only stored collections need resolving")?;
+        .expect("invariant: only stored collections are resolved");
     metrics(conn, reference)?;
     let mut records = Vec::new();
     let mut offset = 0;
@@ -604,11 +654,10 @@ pub fn resolve<T: DeserializeOwned>(
                 limit: None,
             },
         )?
-        .context("collection source is missing")?;
-        ensure!(
-            page.total == reference.count && page.end > offset,
-            "collection descriptor changed"
-        );
+        .ok_or_else(|| missing(&reference.source.id))?;
+        if !(page.total == reference.count && page.end > offset) {
+            return Err(damaged(&reference.source.id, Damage::DescriptorMismatch));
+        }
         offset = page.end;
         records.extend(page.records);
     }
@@ -638,13 +687,12 @@ pub fn visit_questions(
                         limit: None,
                     },
                 )?
-                .context("question collection is missing")?;
-                ensure!(
-                    page.end > offset && page.total == reference.count,
-                    "question collection page is inconsistent"
-                );
+                .ok_or_else(|| missing(&reference.source.id))?;
+                if !(page.end > offset && page.total == reference.count) {
+                    return Err(damaged(&reference.source.id, Damage::DescriptorMismatch));
+                }
                 for (index, question) in page.records.iter().enumerate() {
-                    visit(usize::try_from(offset)? + index, question)?;
+                    visit(to_usize(offset) + index, question)?;
                 }
                 offset = page.end;
             }
@@ -657,10 +705,9 @@ pub fn validate_answers(
     questions: &artisan_api::Collection<artisan_api::Question>,
     answers: &[Option<artisan_api::QuestionAnswer>],
 ) -> Result<()> {
-    ensure!(
-        questions.len() == answers.len() as u64,
-        crate::Refused("answer count does not match questions".into())
-    );
+    if questions.len() != answers.len() as u64 {
+        return Err(AnswerRefused::CountMismatch.into());
+    }
     visit_questions(conn, questions, |index, question| {
         validate_answer(conn, question, &answers[index])
     })
@@ -885,8 +932,6 @@ mod tests {
             0
         );
         assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 1);
-        // Deleting the parent marks its last nested owner as unreferenced now,
-        // so in-flight windows retain the child for the same full-day grace.
         assert_eq!(
             crate::content::collect(&conn, artisan_api::now()).unwrap(),
             0

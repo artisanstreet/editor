@@ -1,5 +1,6 @@
-use crate::{Store, writer::Stamp};
-use anyhow::{Context, Result};
+use crate::error::Staged;
+use crate::writer::{Stamp, UpdateThreadFailure, WriteFailure};
+use crate::{CreateThreadError, Store};
 use artisan_api::{CreateThread, Run, Thread, ThreadId, UpdateThread};
 
 impl Store {
@@ -7,11 +8,17 @@ impl Store {
         &self,
         request: CreateThread,
         stamp: Stamp,
-    ) -> Result<Thread> {
-        let id = request.id.clone();
-        self.write(move |tx| tx.with_stamp(stamp, |tx| tx.create_thread(request)))
-            .await
-            .with_context(|| format!("create thread {id}"))
+    ) -> Result<Thread, CreateThreadError> {
+        let thread = request.id.clone();
+        self.write(move |tx| {
+            tx.with_stamp(stamp, |tx| tx.create_thread(request))
+                .map_err(Staged::Failed)
+        })
+        .await
+        .map_err(|staged| match staged {
+            Staged::Failed(error) => error,
+            Staged::Storage(source) => CreateThreadError::Storage { thread, source },
+        })
     }
 
     pub(crate) async fn update_thread_at(
@@ -19,16 +26,14 @@ impl Store {
         id: &ThreadId,
         update: UpdateThread,
         stamp: Stamp,
-    ) -> Result<Option<Thread>> {
+    ) -> Result<Option<Thread>, UpdateThreadFailure> {
         let id = id.clone();
         self.write(move |tx| tx.with_stamp(stamp, |tx| tx.update_thread(&id, update)))
             .await
     }
 
-    pub(crate) async fn upsert_run_at(&self, run: Run, stamp: Stamp) -> Result<Run> {
-        let (id, thread_id) = (run.id.clone(), run.thread_id.clone());
+    pub(crate) async fn upsert_run_at(&self, run: Run, stamp: Stamp) -> Result<Run, WriteFailure> {
         self.write(move |tx| tx.with_stamp(stamp, |tx| tx.upsert_run(run)))
             .await
-            .with_context(|| format!("save run {id} of thread {thread_id}"))
     }
 }

@@ -387,7 +387,7 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
         let resources = resources
             .into_iter()
             .map(Resource::normalize)
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         if resources.is_empty() {
             let page = store.coordination_list(query).await?;
             json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"records":page.records.into_iter().map(|record|json!({"active":record.active_claim(now()),"record":record})).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"event_cursor":page.event_cursor})
