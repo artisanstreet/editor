@@ -2,7 +2,7 @@
 source: crates/editor-aqua/tests/scenario/states.rs
 expression: "editor.settle(\"the load failure\", |view|\n{\n    view.shows(\"Couldn't load this thread\") &&\n    view.find(Role::Button, \"Try again\").is_some()\n})"
 ---
-Group [focused]
+Group "Artisan Editor" [focused]
   Button "Hide sidebar"
   TextInput "Search threads"
   Button "New thread"

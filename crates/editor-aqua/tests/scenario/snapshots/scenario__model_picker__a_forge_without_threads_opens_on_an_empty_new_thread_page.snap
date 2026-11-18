@@ -2,7 +2,7 @@
 source: crates/editor-aqua/tests/scenario/model_picker.rs
 expression: "editor.settle(\"the new thread page\", |view|\n{\n    view.shows(\"No threads yet.\") &&\n    view.find(Role::ComboBox, \"Project\").is_some()\n})"
 ---
-Group [focused]
+Group "Artisan Editor" [focused]
   Button "Hide sidebar"
   TextInput "Search threads"
   Button "New thread"

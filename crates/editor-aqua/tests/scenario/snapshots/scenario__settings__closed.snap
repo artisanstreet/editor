@@ -2,7 +2,7 @@
 source: crates/editor-aqua/tests/scenario/settings.rs
 expression: "editor.settle(\"settings to close\", |view|\n{ view.find(Role::Dialog, \"Settings\").is_none() })"
 ---
-Group [focused]
+Group "Artisan Editor" [focused]
   Button "Hide sidebar"
   TextInput "Search threads"
   Button "New thread"

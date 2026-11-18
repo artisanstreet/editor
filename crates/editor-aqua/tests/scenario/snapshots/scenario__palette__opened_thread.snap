@@ -2,7 +2,7 @@
 source: crates/editor-aqua/tests/scenario/palette.rs
 expression: "editor.settle(\"the chosen thread to open\", |view|\n{\n    view.find(Role::Dialog, \"Search threads and commands\").is_none() &&\n    view.shows(\"In the parser module.\")\n})"
 ---
-Group [focused]
+Group "Artisan Editor" [focused]
   Button "Hide sidebar"
   TextInput "Search threads"
   Button "New thread"

@@ -463,7 +463,7 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(build_span);
         aqua_core::checkpoint::reach();
         let element = match built {
-            Ok(element) => element.aria_language(crate::shell::host::INTERFACE_LANGUAGE),
+            Ok(element) => window_root(element),
             Err(error) => {
                 let chain = ::diagnostics::chain(&error);
                 tracing::error!(error = %chain, "could not build Editor view");
@@ -1359,18 +1359,26 @@ fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element
     let card = Surface::Callout(Tone::Danger)
         .build(&theme, vec![body])
         .style(Style::new().width(Length::Px(WIDTH)));
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .layout("column")
-        .style(
-            Style::new()
-                .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER),
-        )
-        .style(sheet(&theme))
-        .child(card)
-        .build()
+    window_root(
+        UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .layout("column")
+            .style(
+                Style::new()
+                    .align(aqua_ui::AlignItems::CENTER)
+                    .justify(aqua_ui::JustifyContent::CENTER),
+            )
+            .style(sheet(&theme))
+            .child(card)
+            .build(),
+    )
+}
+
+fn window_root(element: Element) -> Element {
+    element
+        .role(aqua_core::Role::Group)
+        .aria_label(crate::shell::host::WINDOW_NAME)
         .aria_language(crate::shell::host::INTERFACE_LANGUAGE)
 }
 

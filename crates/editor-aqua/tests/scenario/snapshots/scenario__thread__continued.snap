@@ -2,39 +2,40 @@
 source: crates/editor-aqua/tests/scenario/thread.rs
 expression: "editor.settle(\"the continued turn to finish\", |view|\n{\n    view.shows(\"Picked the parser refactor back up.\") &&\n    view.find(Role::Button, \"Stop\").is_none()\n})"
 ---
-Button "Hide sidebar"
-TextInput "Search threads"
-Button "New thread"
-List
-  ListItem
-    Group "Project"
-      Label "Project"
-  ListItem
-    Button "Parser" [selected]
-      Label "Parser"
-Button "Search threads"
-Button "New thread"
-Button "Test" [collapsed]
-  Label "Test"
-Group "Project / Parser"
+Group "Artisan Editor"
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Parser" [selected]
+        Label "Parser"
+  Button "Search threads"
+  Button "New thread"
+  Button "Test" [collapsed]
+    Label "Test"
   Group "Project / Parser"
-    Button "New thread in Project"
-      Label "Project"
-    Label "/"
-    Label "Parser"
-Button "Minimize window"
-Button "Maximize window"
-Button "Close window"
-List
-  ListItem
-    Label "Refactor the parser"
-  ListItem
-    Label "Thought for [duration]"
-  ListItem
-    Label "Picked the parser refactor back up."
-Label "Reply finished"
-ComboBox "No model" [collapsed]
-  Label "No model"
-ScrollView
-  TextInput "Make anything" [focused]
-Button "Send message" [disabled]
+    Group "Project / Parser"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Parser"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Label "Refactor the parser"
+    ListItem
+      Label "Thought for [duration]"
+    ListItem
+      Label "Picked the parser refactor back up."
+  Label "Reply finished"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Make anything" [focused]
+  Button "Send message" [disabled]
