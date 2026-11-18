@@ -324,7 +324,7 @@ fn stored_conversation_transaction(
     let observations = TranscriptObservations::default();
     let ids = Rc::new(Cell::new(1000));
     let allocated = ids.clone();
-    let factory = Rc::new(RowFactory::new(vec![RealizedRow { model, disclosure: Default::default(), held: false }], scope.clone(), markdown.clone(), Rc::new(RefCell::new(StatusShimmers::default())), *ArtisanTheme::for_mode(ThemeMode::Dark), true, std::time::Instant::now(), Rc::new(move || { let id = allocated.get() + 1; allocated.set(id); SelectionSourceId(id) }), Rc::new(|| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}))
+    let factory = Rc::new(RowFactory::new(vec![RealizedRow { model, disclosure: Default::default(), held: false }], scope.clone(), markdown.clone(), Rc::new(RefCell::new(StatusShimmers::default())), *ArtisanTheme::for_mode(ThemeMode::Dark), true, Instant::now(), Rc::new(move || { let id = allocated.get() + 1; allocated.set(id); SelectionSourceId(id) }), Rc::new(|| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}))
         .with_sources(provider.clone(), document, Rc::new(|_| {})).unwrap()
         .with_stored(stored.clone(), provider).unwrap()
         .with_observations(observations.clone()));

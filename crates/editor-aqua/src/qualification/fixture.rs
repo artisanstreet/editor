@@ -624,7 +624,7 @@ impl Fixture {
                 "run refers to an unknown thread"
             );
             ensure!(
-                !run.status.is_live(),
+                !run.status().is_live(),
                 "live runs are not supported in a restart-stable seed"
             );
         }
