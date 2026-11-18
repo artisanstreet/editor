@@ -67,15 +67,6 @@ pub struct Motion {
     pub busy: Glide,
     pub email_feedback: Glide,
     pub code_feedback: Glide,
-    pub spin: u32,
-}
-
-pub const SPIN_STEPS: u32 = 24;
-const SPIN_PERIOD_MS: u32 = 800;
-
-#[must_use]
-pub const fn spin_step(clock_ms: u32) -> u32 {
-    clock_ms % SPIN_PERIOD_MS * SPIN_STEPS / SPIN_PERIOD_MS
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -108,7 +99,6 @@ impl Default for SignIn {
                 busy: Glide::Resting(0.0),
                 email_feedback: Glide::Resting(0.0),
                 code_feedback: Glide::Resting(0.0),
-                spin: 0,
             },
             shown: Page::Email,
             sizes: None,
@@ -145,9 +135,11 @@ impl SignIn {
         let rgba = decoded.to_rgba8();
         let mask = dither::dither(dither::Source::new(&rgba), ART_BOX.0, ART_BOX.1, ART_PARAMS);
         let pixels = dither::paint(&mask, ART_PAINT);
-        let Ok(image) =
-            aqua::images::DecodedImage::from_rgba(pixels.width(), pixels.height(), pixels.into_raw())
-        else {
+        let Ok(image) = aqua::images::DecodedImage::from_rgba(
+            pixels.width(),
+            pixels.height(),
+            pixels.into_raw(),
+        ) else {
             return;
         };
         self.art = assets.insert(image).ok().map(Arc::new);
@@ -183,7 +175,10 @@ impl SignIn {
         reduced: bool,
     ) -> bool {
         let mut changed = false;
-        for (current, last) in [(feedback.0, &mut self.last.0), (feedback.1, &mut self.last.1)] {
+        for (current, last) in [
+            (feedback.0, &mut self.last.0),
+            (feedback.1, &mut self.last.1),
+        ] {
             if !matches!(current, Feedback::None) && current != last {
                 *last = current.clone();
                 changed = true;
@@ -208,8 +203,16 @@ impl SignIn {
             PAGE,
         );
         aim(&mut self.motion.busy, f32::from(u8::from(busy)), SWAP);
-        aim(&mut self.motion.email_feedback, f32::from(u8::from(shown.0)), REVEAL);
-        aim(&mut self.motion.code_feedback, f32::from(u8::from(shown.1)), REVEAL);
+        aim(
+            &mut self.motion.email_feedback,
+            f32::from(u8::from(shown.0)),
+            REVEAL,
+        );
+        aim(
+            &mut self.motion.code_feedback,
+            f32::from(u8::from(shown.1)),
+            REVEAL,
+        );
         if self.shown != page {
             self.shown = page;
             changed |= self.resize(now, reduced);
@@ -253,27 +256,17 @@ impl SignIn {
         let motion = &self.motion;
         motion.page.running()
             || motion.busy.running()
-            || self.spinning()
             || motion.email_feedback.running()
             || motion.code_feedback.running()
             || motion.height.is_some_and(|height| height.running())
     }
 
-    fn spinning(&self) -> bool {
-        !self.reduced && self.motion.busy.target() > 0.5
-    }
-
     pub fn tick(&mut self, now: Instant) -> bool {
-        let spun = self.spinning() && {
-            let step = spin_step(crate::ui::clock::pulse_ms());
-            std::mem::replace(&mut self.motion.spin, step) != step
-        };
         let moving = self.motion.page.running()
             || self.motion.busy.running()
             || self.motion.email_feedback.running()
             || self.motion.code_feedback.running()
-            || self.motion.height.is_some_and(|height| height.running())
-            || spun;
+            || self.motion.height.is_some_and(|height| height.running());
         let motion = &mut self.motion;
         motion.page = motion.page.settle(now);
         motion.busy = motion.busy.settle(now);
