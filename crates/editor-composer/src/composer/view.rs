@@ -125,7 +125,7 @@ const fn primary_icon(face: Primary) -> AssetId {
 pub fn primary(
     theme: ArtisanTheme,
     face: Primary,
-    outgoing: Option<(Primary, f32)>,
+    outgoing: Option<super::swap::SwapFrame>,
     disabled: bool,
     dispatch: Dispatch,
 ) -> Element {
@@ -151,7 +151,7 @@ pub fn primary(
     };
     let content = super::swap::face(
         icon,
-        outgoing.map(|(previous, progress)| (primary_icon(previous), progress)),
+        outgoing.map(|frame| (primary_icon(frame.previous), frame)),
     );
     Key::new(id, theme, label, KeySize::Md, KeyFace::Content(content))
         .primary()
@@ -1821,10 +1821,10 @@ impl ComposerOwner {
 
     pub fn advance_primary(&self, app: &mut aqua::UiApp, now: std::time::Instant) {
         let mut swap = self.primary_swap.get();
-        if let Some((_, progress)) = swap.progress(now) {
-            super::swap::advance(app, progress);
+        if let Some(frame) = swap.progress(now) {
+            super::swap::advance(app, Some(frame));
         } else if swap.settle(now) {
-            super::swap::advance(app, 1.0);
+            super::swap::advance(app, None);
         }
         self.primary_swap.set(swap);
         let cleared = self.controller.borrow().cleared;

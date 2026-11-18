@@ -58,40 +58,70 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Swap {
+    previous: Primary,
+    started: Instant,
+    previous_level: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwapFrame {
+    pub previous: Primary,
+    pub progress: f32,
+    previous_level: f32,
+}
+
+impl SwapFrame {
+    #[must_use]
+    pub fn incoming(self) -> Layer {
+        Layer::incoming(self.progress)
+    }
+
+    #[must_use]
+    pub fn outgoing(self) -> Layer {
+        Layer::incoming(self.previous_level * (1.0 - self.progress))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PrimarySwap {
     face: Option<Primary>,
-    from: Option<(Primary, Instant)>,
+    swap: Option<Swap>,
 }
 
 impl PrimarySwap {
     pub fn observe(&mut self, face: Primary, now: Instant, reduced_motion: bool) {
         match self.face.replace(face) {
             Some(previous) if previous != face && !reduced_motion => {
-                self.from = Some((previous, now));
+                let previous_level = self.progress(now).map_or(1.0, |frame| frame.progress);
+                self.swap = Some(Swap {
+                    previous,
+                    started: now,
+                    previous_level,
+                });
             }
-            Some(previous) if previous != face => self.from = None,
+            Some(previous) if previous != face => self.swap = None,
             _ => {}
         }
     }
 
     #[must_use]
-    pub fn progress(&self, now: Instant) -> Option<(Primary, f32)> {
-        let (from, at) = self.from?;
-        let elapsed = now.saturating_duration_since(at);
-        (elapsed < DURATION).then(|| {
-            (
-                from,
-                MotionCurve::EaseInOut
-                    .sample_f32(elapsed.as_secs_f64() / DURATION.as_secs_f64()),
-            )
+    pub fn progress(&self, now: Instant) -> Option<SwapFrame> {
+        let swap = self.swap?;
+        let elapsed = now.saturating_duration_since(swap.started);
+        (elapsed < DURATION).then(|| SwapFrame {
+            previous: swap.previous,
+            progress: MotionCurve::EaseInOut
+                .sample_f32(elapsed.as_secs_f64() / DURATION.as_secs_f64()),
+            previous_level: swap.previous_level,
         })
     }
 
     pub fn settle(&mut self, now: Instant) -> bool {
-        let moving = self.from.is_some();
+        let moving = self.swap.is_some();
         if self.progress(now).is_none() {
-            self.from = None;
+            self.swap = None;
         }
         moving
     }
@@ -113,23 +143,25 @@ fn glyph(icon: AssetId, key: &'static str, layer: Layer) -> Element {
 }
 
 #[must_use]
-pub fn face(icon: AssetId, outgoing: Option<(AssetId, f32)>) -> Element {
+pub fn face(icon: AssetId, outgoing: Option<(AssetId, SwapFrame)>) -> Element {
     let edge = EDGE.px();
-    let progress = outgoing.map_or(1.0, |(_, progress)| progress);
     let mut stack = UiBox::new().width(edge).height(edge);
-    if let Some((previous, progress)) = outgoing {
-        stack = stack.child(glyph(previous, OUTGOING, Layer::outgoing(progress)));
-    }
-    stack
-        .child(glyph(icon, INCOMING, Layer::incoming(progress)))
-        .build()
+    let incoming = match outgoing {
+        Some((previous, frame)) => {
+            stack = stack.child(glyph(previous, OUTGOING, frame.outgoing()));
+            frame.incoming()
+        }
+        None => Layer::incoming(1.0),
+    };
+    stack.child(glyph(icon, INCOMING, incoming)).build()
 }
 
-pub fn advance(app: &mut aqua::UiApp, progress: f32) {
-    for (key, layer) in [
-        (INCOMING, Layer::incoming(progress)),
-        (OUTGOING, Layer::outgoing(progress)),
-    ] {
+pub fn advance(app: &mut aqua::UiApp, frame: Option<SwapFrame>) {
+    let (incoming, outgoing) = frame.map_or_else(
+        || (Layer::incoming(1.0), Layer::outgoing(1.0)),
+        |frame| (frame.incoming(), frame.outgoing()),
+    );
+    for (key, layer) in [(INCOMING, incoming), (OUTGOING, outgoing)] {
         let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
         let Some(node) = app.tree().sole_node_with_key(hash) else {
             continue;
@@ -147,9 +179,8 @@ pub fn advance(app: &mut aqua::UiApp, progress: f32) {
 #[must_use]
 pub fn settle_progress(cleared: Instant, now: Instant) -> Option<f32> {
     let elapsed = now.saturating_duration_since(cleared);
-    (elapsed < SETTLE).then(|| {
-        MotionCurve::EaseOut.sample_f32(elapsed.as_secs_f64() / SETTLE.as_secs_f64())
-    })
+    (elapsed < SETTLE)
+        .then(|| MotionCurve::EaseOut.sample_f32(elapsed.as_secs_f64() / SETTLE.as_secs_f64()))
 }
 
 pub fn advance_prompt(app: &mut aqua::UiApp, progress: f32) {
