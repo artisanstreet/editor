@@ -926,13 +926,12 @@ async fn edit(call: &Call, cwd: &Path) -> Answer {
     ))
 }
 
-/// The walk Glob and Grep share: .gitignore honoured, hidden files skipped,
-/// bounded.
 fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(root)
         .max_depth(Some(32))
         .follow_links(false)
         .require_git(false)
+        .sort_by_file_name(std::cmp::Ord::cmp)
         .build()
         .take(MAX_WALKED)
         .filter_map(Result::ok)
@@ -2149,6 +2148,32 @@ mod tests {
             answer.text.contains("not a regular file"),
             "{}",
             answer.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_glob_lists_the_first_files_by_name() {
+        let work = tempfile::tempdir().expect("a dir");
+        for index in (0..MAX_MATCHES + 100).rev() {
+            std::fs::write(work.path().join(format!("f{index:05}.txt")), "").expect("file");
+        }
+        let cancel = CancellationToken::new();
+        let (found, _) = execute(
+            &call("Glob", json!({ "pattern": "*.txt" })),
+            work.path(),
+            &cancel,
+            &runtime(),
+        )
+        .await;
+        let listed = found.text.lines().take(MAX_MATCHES).collect::<Vec<_>>();
+        let first = (0..MAX_MATCHES)
+            .map(|index| format!("f{index:05}.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(listed, first);
+        assert!(
+            found.text.ends_with("narrow the pattern]"),
+            "{}",
+            found.text
         );
     }
 
