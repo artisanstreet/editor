@@ -241,8 +241,13 @@ fn repository_root() -> Option<PathBuf> {
 }
 
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
-    path.to_str()
-        .and_then(|text| text.strip_prefix(r"\\?\"))
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
+    text.strip_prefix(r"\\?\")
         .map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
@@ -1675,3 +1680,7 @@ mod quarantine_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/customise/skills.rs"]
+mod replacement_tests;
