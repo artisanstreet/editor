@@ -53,7 +53,16 @@ data-url.workspace = true
 editor-core.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
 editor-ui = { path = ".", features = ["test-support"] }
+
+[[bench]]
+name = "markdown"
+harness = false
+
+[[bench]]
+name = "charts"
+harness = false
 
 [lints]
 workspace = true

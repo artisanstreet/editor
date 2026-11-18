@@ -1849,6 +1849,7 @@ dependencies = [
  "chrono",
  "color",
  "data-url",
+ "divan",
  "editor-assets",
  "editor-audio",
  "editor-core",
