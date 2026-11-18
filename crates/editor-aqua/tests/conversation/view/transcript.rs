@@ -42,12 +42,7 @@ fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
     });
     conversation.rows = vec![
         (
-            Row::Work {
-                run: Some(RunId::from("done")),
-                segment: 0,
-                entries: Vec::new(),
-                unloaded: Vec::new(),
-            },
+            Row::WorkHeader(RunId::from("done")),
             1,
         ),
         (Row::Status(RunId::from("live")), 1),

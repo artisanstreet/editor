@@ -6,6 +6,7 @@ pub fn immediate(row: &Row) -> bool {
     matches!(
         row.semantic(),
         Row::Work { .. }
+            | Row::WorkHeader(_)
             | Row::Text {
                 slot: Slot::Text(TextSection::User),
                 ..

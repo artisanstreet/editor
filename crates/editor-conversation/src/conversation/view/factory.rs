@@ -322,7 +322,11 @@ pub fn row_settles_statically(model: &RowModel, now: Instant) -> bool {
     (status
         || matches!(
             model.row.semantic(),
-            Row::Text { .. } | Row::Chain { .. } | Row::WorkEntry { .. } | Row::Work { .. }
+            Row::Text { .. }
+                | Row::Chain { .. }
+                | Row::WorkEntry { .. }
+                | Row::Work { .. }
+                | Row::WorkHeader(_)
         ))
         && model
             .items
@@ -1317,10 +1321,13 @@ impl RowFactory {
                     self.projection_versions.get(&key).copied()
                 }
             }
-            Row::Work { .. } if model.run.as_ref().is_some_and(|run| run.live()) => self
-                .work
-                .as_ref()
-                .and_then(|work| u64::try_from(work.timestamp / 1_000).ok()),
+            Row::Work { .. } | Row::WorkHeader(_)
+                if model.run.as_ref().is_some_and(|run| run.live()) =>
+            {
+                self.work
+                    .as_ref()
+                    .and_then(|work| u64::try_from(work.timestamp / 1_000).ok())
+            }
             _ => None,
         };
         Some(
@@ -1845,12 +1852,20 @@ impl RowFactory {
                     .ok_or(RealizeRowError::Missing(Service::Actions))?;
                 super::load_row(&row.model.row, self.theme, Rc::clone(dispatch))
             }
-            Row::Work {
-                run,
-                segment,
-                entries,
-                unloaded,
-            } => {
+            header @ (Row::Work { .. } | Row::WorkHeader(_)) => {
+                let (run, segment, has_members) = match header {
+                    Row::Work {
+                        run,
+                        segment,
+                        members,
+                    } => (
+                        run.as_ref(),
+                        *segment,
+                        !members.entries().is_empty() || !members.spans().is_empty(),
+                    ),
+                    Row::WorkHeader(run) => (Some(run), 0, false),
+                    _ => unreachable!("invariant: the arm matched only work rows"),
+                };
                 let work = self
                     .work
                     .as_ref()
@@ -1859,7 +1874,7 @@ impl RowFactory {
                     .dispatch
                     .as_ref()
                     .ok_or(RealizeRowError::Missing(Service::Actions))?;
-                if *segment != 0 || row.model.run.is_none() {
+                if segment != 0 || row.model.run.is_none() {
                     None
                 } else {
                     let summary = row
@@ -1867,10 +1882,7 @@ impl RowFactory {
                         .run
                         .as_ref()
                         .ok_or(RealizeRowError::Unavailable(Part::Run))?;
-                    let key = format!(
-                        "work-{}",
-                        run.as_ref().map_or_else(String::new, ToString::to_string)
-                    );
+                    let key = format!("work-{}", run.map_or_else(String::new, ToString::to_string));
                     let label = row_owner.motion.borrow_mut().phrase(
                         &format!("{key}-label"),
                         work::section_title(summary, work.timestamp),
@@ -1880,9 +1892,9 @@ impl RowFactory {
                         self.reduced_motion,
                     );
                     work::header(
-                        run.as_ref(),
-                        *segment,
-                        !entries.is_empty() || !unloaded.is_empty(),
+                        run,
+                        segment,
+                        has_members,
                         Some(summary),
                         label,
                         |open| {
@@ -1909,16 +1921,15 @@ impl RowFactory {
                     .dispatch
                     .as_ref()
                     .ok_or(RealizeRowError::Missing(Service::Actions))?;
-                let open = ids
-                    .first()
-                    .and_then(|id| row.model.ui.get(id))
+                let open = row
+                    .model
+                    .ui
+                    .get(ids.first())
                     .and_then(|ui| ui.chain_open)
                     .unwrap_or(false);
-                let key = ids
-                    .first()
-                    .map_or_else(String::new, |id| format!("chain-{id}"));
+                let key = format!("chain-{}", ids.first());
                 work::chain(
-                    ids,
+                    ids.as_slice(),
                     &row.model.items,
                     open,
                     self.theme,
@@ -2600,7 +2611,7 @@ impl RowFactory {
             (Some(element), Some(_)) => {
                 let (id, standalone) = match row.model.row.semantic() {
                     Row::WorkEntry { id, .. } => (Some(id), false),
-                    Row::Chain { ids, .. } => (ids.first(), false),
+                    Row::Chain { ids, .. } => (Some(ids.first()), false),
                     Row::Prompt(id) | Row::Image(id) | Row::AgentResult(id) => (Some(id), true),
                     Row::Text {
                         id, slot, block: 0, ..
@@ -2670,7 +2681,7 @@ impl RowFactory {
         editor_core::diagnostics::rebuild_stats::record_event(match row.model.row.semantic() {
             Row::Text { .. } => "rz_kind_text",
             Row::Chain { .. } | Row::WorkEntry { .. } => "rz_kind_chain",
-            Row::Work { .. } => "rz_kind_work",
+            Row::Work { .. } | Row::WorkHeader(_) => "rz_kind_work",
             Row::Status(_) => "rz_kind_status",
             _ => "rz_kind_other",
         });

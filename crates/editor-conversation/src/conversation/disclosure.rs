@@ -1,7 +1,7 @@
 use super::fold::{self, Row, RowKey};
 use super::thread::ThreadView;
-use editor_ui::motion::MotionCurve;
 use artisan_api::ItemId;
+use editor_ui::motion::MotionCurve;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -96,13 +96,18 @@ impl DisclosureState {
             return;
         };
         let members: HashSet<_> = match &rows[index].0 {
-            Row::Work {
-                entries, unloaded, ..
-            } => entries
+            Row::Work { members, .. } => members
+                .entries()
                 .iter()
                 .cloned()
-                .chain(unloaded.iter().map(|first| fold::span_member(*first)))
+                .chain(
+                    members
+                        .spans()
+                        .iter()
+                        .map(|first| fold::span_member(*first)),
+                )
                 .collect(),
+            Row::WorkHeader(_) => HashSet::new(),
             Row::Chain { ids, .. } => ids.iter().cloned().collect(),
             Row::Projected { .. }
             | Row::EarlierWork { .. }

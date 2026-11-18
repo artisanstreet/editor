@@ -17,9 +17,9 @@ pub enum Row {
     Work {
         run: Option<RunId>,
         segment: usize,
-        entries: Vec<ItemId>,
-        unloaded: Vec<Seq>,
+        members: WorkMembers,
     },
+    WorkHeader(RunId),
     EarlierWork {
         run: Option<RunId>,
         first: Seq,
@@ -30,7 +30,7 @@ pub enum Row {
         run: Option<RunId>,
     },
     Chain {
-        ids: Vec<ItemId>,
+        ids: NonEmpty<ItemId>,
         run: Option<RunId>,
     },
     Text {
@@ -46,6 +46,107 @@ pub enum Row {
     Status(RunId),
     AgentResult(ItemId),
     AgentStatus(ItemId, Option<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NonEmpty<T>(Vec<T>);
+
+impl<T> NonEmpty<T> {
+    #[must_use]
+    pub fn new(first: T) -> Self {
+        Self(vec![first])
+    }
+
+    #[must_use]
+    pub fn from_vec(items: Vec<T>) -> Option<Self> {
+        (!items.is_empty()).then_some(Self(items))
+    }
+
+    pub fn push(&mut self, item: T) {
+        self.0.push(item);
+    }
+
+    #[must_use]
+    pub fn first(&self) -> &T {
+        self.0
+            .first()
+            .expect("invariant: a non-empty list has a first member")
+    }
+
+    #[must_use]
+    pub fn last(&self) -> &T {
+        self.0
+            .last()
+            .expect("invariant: a non-empty list has a last member")
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a NonEmpty<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WorkMembers {
+    entries: Vec<ItemId>,
+    spans: Vec<Seq>,
+}
+
+impl WorkMembers {
+    #[must_use]
+    pub fn from_item(first: ItemId) -> Self {
+        Self {
+            entries: vec![first],
+            spans: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_span(first: Seq) -> Self {
+        Self {
+            entries: Vec::new(),
+            spans: vec![first],
+        }
+    }
+
+    pub fn push_item(&mut self, id: ItemId) {
+        self.entries.push(id);
+    }
+
+    pub fn push_span(&mut self, first: Seq) {
+        self.spans.push(first);
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[ItemId] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn spans(&self) -> &[Seq] {
+        &self.spans
+    }
+
+    fn loose_key(&self) -> RowKey {
+        match (self.entries.first(), self.spans.first()) {
+            (Some(entry), _) => RowKey::Loose(entry.clone()),
+            (None, Some(first)) => RowKey::LooseSpan(*first),
+            (None, None) => unreachable!("invariant: work members start with an item or a span"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -313,6 +414,7 @@ impl Row {
         match self {
             Self::Projected { row, .. } => row,
             Self::Work { .. }
+            | Self::WorkHeader(_)
             | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Chain { .. }
@@ -330,6 +432,7 @@ impl Row {
         match self {
             Self::Projected { visual, .. } => Some(*visual),
             Self::Work { .. }
+            | Self::WorkHeader(_)
             | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Chain { .. }
@@ -352,18 +455,23 @@ impl Row {
             | Self::Compaction(id)
             | Self::Image(id)
             | Self::AgentResult(id) => Some(id),
-            Self::Work { entries, .. } => entries.first(),
-            Self::Chain { ids, .. } => ids.first(),
-            Self::Gap | Self::Status(_) | Self::AgentStatus(..) | Self::EarlierWork { .. } => None,
+            Self::Work { members, .. } => members.entries().first(),
+            Self::Chain { ids, .. } => Some(ids.first()),
+            Self::WorkHeader(_)
+            | Self::Gap
+            | Self::Status(_)
+            | Self::AgentStatus(..)
+            | Self::EarlierWork { .. } => None,
         }
     }
 
     pub(crate) fn last_anchor(&self) -> Option<&ItemId> {
         match self {
             Self::Projected { row, .. } => row.last_anchor(),
-            Self::Work { entries, .. } => entries.last(),
-            Self::Chain { ids, .. } => ids.last(),
-            row @ (Self::EarlierWork { .. }
+            Self::Work { members, .. } => members.entries().last(),
+            Self::Chain { ids, .. } => Some(ids.last()),
+            row @ (Self::WorkHeader(_)
+            | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Text { .. }
             | Self::Prompt(_)
@@ -378,7 +486,7 @@ impl Row {
 
     pub(crate) fn member(&self) -> Option<&ItemId> {
         match self.semantic() {
-            Self::Work { .. } => None,
+            Self::Work { .. } | Self::WorkHeader(_) => None,
             Self::EarlierWork { member, .. } => Some(member),
             row @ (Self::Projected { .. }
             | Self::WorkEntry { .. }
@@ -422,30 +530,24 @@ impl Row {
             Self::Text {
                 id, slot, block, ..
             } => RowKey::Text(id.clone(), *slot, *block),
-            Self::Chain { ids, .. } => RowKey::Chain(ids.first().cloned().unwrap_or_default()),
+            Self::Chain { ids, .. } => RowKey::Chain(ids.first().clone()),
             Self::Work {
                 run: Some(run),
                 segment,
                 ..
             } => RowKey::Work(run.clone(), *segment),
+            Self::WorkHeader(run) => RowKey::Work(run.clone(), 0),
             Self::Work {
-                run: None,
-                entries,
-                unloaded,
-                ..
-            } => match (entries.first(), unloaded.first()) {
-                (Some(entry), _) => RowKey::Loose(entry.clone()),
-                (None, Some(first)) => RowKey::LooseSpan(*first),
-                (None, None) => RowKey::Loose(ItemId::default()),
-            },
+                run: None, members, ..
+            } => members.loose_key(),
             Self::EarlierWork { first, .. } => RowKey::EarlierWork(*first),
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
             Self::AgentStatus(id, _) => RowKey::AgentStatus(id.clone()),
-            other @ (Self::WorkEntry { .. }
-            | Self::Prompt(_)
-            | Self::Compaction(_)
-            | Self::Image(_)) => RowKey::Item(other.anchor().cloned().unwrap_or_default()),
+            Self::WorkEntry { id, .. }
+            | Self::Prompt(id)
+            | Self::Compaction(id)
+            | Self::Image(id) => RowKey::Item(id.clone()),
         }
     }
 
@@ -461,7 +563,7 @@ impl Row {
             | Self::Chain { run, .. }
             | Self::EarlierWork { run, .. }
             | Self::Text { run, .. } => run.as_ref(),
-            Self::Status(run) => Some(run),
+            Self::Status(run) | Self::WorkHeader(run) => Some(run),
             Self::Prompt(_)
             | Self::Compaction(_)
             | Self::Image(_)
@@ -583,7 +685,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
     let runs = summaries(view, &shown, &unloaded, latest);
     let turn = |run: &Option<RunId>| run.as_ref().map(|run| turn_of(view, latest, run));
     let mut rows: Vec<Row> = Vec::new();
-    let mut work: Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)> = None;
+    let mut work: Option<(Option<RunId>, WorkMembers)> = None;
     let mut segments: HashMap<Option<RunId>, usize> = HashMap::new();
     let mut run_starts: HashMap<RunId, Seq> = HashMap::new();
     for item in &shown {
@@ -593,15 +695,13 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
             run_starts.entry(run).or_insert(item.position);
         }
     }
-    let mut flush = |work: &mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>,
-                     rows: &mut Vec<Row>| {
-        if let Some((run, entries, unloaded)) = work.take() {
+    let mut flush = |work: &mut Option<(Option<RunId>, WorkMembers)>, rows: &mut Vec<Row>| {
+        if let Some((run, members)) = work.take() {
             let next = segments.entry(run.clone()).or_default();
             rows.push(Row::Work {
                 run,
                 segment: *next,
-                entries,
-                unloaded,
+                members,
             });
             *next += 1;
         }
@@ -694,10 +794,10 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         };
         context.clone_from(&run);
         match &mut work {
-            Some((current, entries, _)) if *current == run => entries.push(item.id.clone()),
+            Some((current, members)) if *current == run => members.push_item(item.id.clone()),
             _ => {
                 flush(&mut work, &mut rows);
-                work = Some((run, vec![item.id.clone()], Vec::new()));
+                work = Some((run, WorkMembers::from_item(item.id.clone())));
             }
         }
     }
@@ -762,7 +862,7 @@ fn head_every_run(
     let headed: HashSet<RunId> = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Work { run: Some(run), .. } => Some(run.clone()),
+            Row::Work { run: Some(run), .. } | Row::WorkHeader(run) => Some(run.clone()),
             Row::Projected { .. }
             | Row::Work { .. }
             | Row::EarlierWork { .. }
@@ -778,12 +878,7 @@ fn head_every_run(
             | Row::AgentStatus(..) => None,
         })
         .collect();
-    let work_header = |run: RunId| Row::Work {
-        run: Some(run),
-        segment: 0,
-        entries: Vec::new(),
-        unloaded: Vec::new(),
-    };
+    let work_header = Row::WorkHeader;
     let mut inserts: Vec<(usize, RunId)> = run_starts
         .iter()
         .filter(|(run, _)| !headed.contains(*run))
@@ -824,9 +919,9 @@ fn fold_span(
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
     run_starts: &HashMap<RunId, Seq>,
     context: &mut Option<RunId>,
-    work: &mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>,
+    work: &mut Option<(Option<RunId>, WorkMembers)>,
     rows: &mut Vec<Row>,
-    flush: &mut impl FnMut(&mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>, &mut Vec<Row>),
+    flush: &mut impl FnMut(&mut Option<(Option<RunId>, WorkMembers)>, &mut Vec<Row>),
 ) {
     let run = if turn(&span.run_id)
         .and_then(|run| run_starts.get(&run))
@@ -838,10 +933,10 @@ fn fold_span(
     };
     context.clone_from(&run);
     match work {
-        Some((current, _, unloaded)) if *current == run => unloaded.push(span.first),
+        Some((current, members)) if *current == run => members.push_span(span.first),
         _ => {
             flush(work, rows);
-            *work = Some((run, Vec::new(), vec![span.first]));
+            *work = Some((run, WorkMembers::from_span(span.first)));
         }
     }
 }
@@ -862,8 +957,7 @@ pub fn expanded(
             Row::Work {
                 run,
                 segment,
-                entries,
-                unloaded,
+                members,
             } => {
                 let open = run
                     .as_ref()
@@ -873,15 +967,14 @@ pub fn expanded(
                     emit(Row::Work {
                         run: run.clone(),
                         segment,
-                        entries: entries.clone(),
-                        unloaded: unloaded.clone(),
+                        members: members.clone(),
                     });
                 }
                 if !open {
                     continue;
                 }
-                let mut rest = entries.as_slice();
-                for first in &unloaded {
+                let mut rest = members.entries();
+                for first in members.spans() {
                     let before = rest
                         .iter()
                         .take_while(|id| view.position_of(id).is_some_and(|at| at < *first))
@@ -931,6 +1024,7 @@ pub fn expanded(
                 }
             }
             other @ (Row::Projected { .. }
+            | Row::WorkHeader(_)
             | Row::EarlierWork { .. }
             | Row::WorkEntry { .. }
             | Row::Chain { .. }
@@ -975,7 +1069,8 @@ fn expand_entries(
                 .and_then(|ui| ui.chain_open)
                 .unwrap_or(false);
             emit(Row::Chain {
-                ids: ids.clone(),
+                ids: NonEmpty::from_vec(ids.clone())
+                    .expect("invariant: a chain starts at a counted activity entry"),
                 run: run.cloned(),
             });
             if chain_open {
@@ -1243,6 +1338,7 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
             | Row::WorkEntry { run, .. }
             | Row::Chain { run, .. }
             | Row::EarlierWork { run, .. } => run.clone(),
+            Row::WorkHeader(run) => Some(run.clone()),
             Row::Text {
                 slot: slot @ Slot::Text(_),
                 run,
@@ -1304,6 +1400,7 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
             (_, Row::Text { block: 1.., .. }) => 0.0,
             (
                 Row::Work { .. }
+                | Row::WorkHeader(_)
                 | Row::WorkEntry { .. }
                 | Row::Chain { .. }
                 | Row::EarlierWork { .. }
@@ -1320,12 +1417,12 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                 },
             ) if run == previous_run && !row.is_bubble() && !previous.is_bubble() => 8.0,
             (
-                Row::Work { .. },
+                Row::Work { .. } | Row::WorkHeader(_),
                 Row::Text {
                     slot: Slot::Prose, ..
                 },
             ) => REPLY_SEAM,
-            (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
+            (Row::Work { .. } | Row::WorkHeader(_), Row::Status(_)) => STATUS_AFTER_WORK,
             (_, Row::Status(_)) => STATUS_GAP,
             (
                 _,
@@ -1364,7 +1461,7 @@ fn version(
     row.hash(&mut hasher);
     row.run().and_then(|run| runs.get(run)).hash(&mut hasher);
     let mut stack: Vec<&ItemId> = match row {
-        Row::Work { .. } => Vec::new(),
+        Row::Work { .. } | Row::WorkHeader(_) => Vec::new(),
         Row::Chain { ids, .. } => ids.iter().collect(),
         Row::Status(run) => {
             runs.get(run)

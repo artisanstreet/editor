@@ -1094,7 +1094,12 @@ impl Conversation {
                 .filter_map(|(row, _)| match row {
                     Row::Work {
                         run: Some(row_run), ..
-                    } if row_run == run => Some(row.key()),
+                    }
+                    | Row::WorkHeader(row_run)
+                        if row_run == run =>
+                    {
+                        Some(row.key())
+                    }
                     _ => None,
                 })
                 .collect();

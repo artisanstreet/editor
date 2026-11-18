@@ -218,8 +218,8 @@ fn row_model_from(
 ) -> Option<RowModel> {
     let (row, version) = rows.get(index)?;
     let ids: Vec<ItemId> = match row {
-        Row::Work { .. } => Vec::new(),
-        Row::Chain { ids, .. } => ids.clone(),
+        Row::Work { .. } | Row::WorkHeader(_) => Vec::new(),
+        Row::Chain { ids, .. } => ids.as_slice().to_vec(),
         other => other.anchor().cloned().into_iter().collect(),
     };
     let items: HashMap<ItemId, Arc<Item>> = ids
