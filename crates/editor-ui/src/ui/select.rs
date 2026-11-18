@@ -36,6 +36,7 @@ pub struct SelectState<V> {
     pub keyed: bool,
     query: String,
     typed_at: Instant,
+    scroll: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +56,7 @@ impl<V: Clone + Eq> SelectState<V> {
             keyed: false,
             query: String::new(),
             typed_at: now,
+            scroll: 0.0,
         }
     }
 
@@ -218,6 +220,16 @@ impl<V: Clone + Eq> SelectState<V> {
         }
     }
 
+    fn reveal(&mut self, index: usize, viewport: f32) {
+        let top = OPTION_HEIGHT * index as f32;
+        let bottom = top + OPTION_HEIGHT;
+        if top < self.scroll {
+            self.scroll = top;
+        } else if bottom > self.scroll + viewport {
+            self.scroll = bottom - viewport;
+        }
+    }
+
     fn highlight(&mut self, entries: &[SelectEntry<V>], index: usize) -> SelectKeyResult<V> {
         self.set_open(true);
         self.keyed = true;
@@ -242,6 +254,10 @@ fn select_key_name(key: &InputKey) -> Option<&'static str> {
         InputKey::Named(NamedKey::End) => Some("end"),
         _ => None,
     }
+}
+
+fn menu_height(theme: &ArtisanTheme, count: usize) -> f32 {
+    (OPTION_HEIGHT * count.max(1) as f32).min(theme.density.command_list_max_height)
 }
 
 fn typeahead_form(text: &str) -> String {
@@ -418,6 +434,9 @@ impl<V: Clone + Eq + 'static> Select<V> {
                             ) => state.type_text(text, now, &entries),
                             _ => return InputResponse::default(),
                         };
+                        if let Some(index) = result.reveal {
+                            state.reveal(index, menu_height(&theme, entries.len()));
+                        }
                         (result, before, state.open)
                     };
                     if before != after {
@@ -508,9 +527,9 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
     pub fn build(self) -> Element {
         use aqua_ui::element::Scroll;
         let theme = self.theme;
-        let (keyed, highlighted) = {
+        let (keyed, highlighted, offset) = {
             let state = self.state.borrow();
-            (state.keyed, state.highlighted.clone())
+            (state.keyed, state.highlighted.clone(), state.scroll)
         };
         let count = self.entries.len();
         let check = IconSize::Md;
@@ -560,11 +579,11 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             }
             rows = rows.child(row.build().aria_selected(chosen).focusable(false));
         }
-        let height =
-            (OPTION_HEIGHT * count.max(1) as f32).min(theme.density.command_list_max_height);
         let scroll = Scroll::new()
+            .layout("column")
             .width(Length::Pct(100.0))
-            .height(height)
+            .height(menu_height(&theme, count))
+            .offset(aqua_core::Point::new(0.0, offset))
             .child(rows.build())
             .build();
         MENU.build(&theme, vec![scroll])
@@ -572,3 +591,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .role(Role::ListBox)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/select.rs"]
+mod tests;
