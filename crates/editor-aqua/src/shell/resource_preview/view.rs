@@ -1,4 +1,4 @@
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 use aqua_text::document::{
     SelectionDocumentId, SelectionSource, SelectionSourceError, SelectionSourceId, SourceSlice,
@@ -9,7 +9,7 @@ use aqua_ui::{
     style::{Length, Style},
 };
 
-use super::{PreviewText, ResourcePreview};
+use super::{LineWindow, PreviewError, ResourcePreview};
 use crate::ui::{
     dialog::Dialog,
     kit::{Button, ButtonTone, Hover, Space, Spaced, Surface, TextRole},
@@ -30,10 +30,14 @@ pub enum Action {
 }
 
 struct Prepared {
-    text: Arc<str>,
-    ranges: Vec<Range<usize>>,
-    start_line: usize,
+    window: LineWindow,
     target_line: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the preview of {path} was shown before its lines were registered for selection")]
+pub struct UnpreparedError {
+    path: String,
 }
 
 pub struct ViewState {
@@ -63,27 +67,32 @@ impl ViewState {
         let Some(Ok(content)) = &preview.content else {
             return Ok(false);
         };
+        let Some(window) = content.window() else {
+            return Ok(false);
+        };
         if self.prepared.is_some() {
             return Ok(false);
         }
-        let prepared = Arc::new(prepare_text(content, preview.target_line));
         app.register_selection_source_in(
             self.document,
             SelectionSource {
                 id: self.source,
                 order: vec![0],
-                text: Arc::clone(&prepared.text),
+                text: Arc::clone(window.text()),
                 separator: Arc::from(""),
                 copies: Vec::new(),
             },
         )?;
-        self.jump = (!content.offsets.is_empty()).then(|| {
+        self.jump = Some(
             preview
                 .target_line
-                .saturating_sub(content.start_line)
-                .min(content.offsets.len() - 1)
-        });
-        self.prepared = Some(prepared);
+                .saturating_sub(window.start_line())
+                .min(window.len() - 1),
+        );
+        self.prepared = Some(Arc::new(Prepared {
+            window: window.clone(),
+            target_line: preview.target_line,
+        }));
         Ok(true)
     }
 
@@ -125,7 +134,7 @@ impl ViewState {
         theme: ArtisanTheme,
         viewport_height: f32,
         emit: Rc<dyn Fn(Action)>,
-    ) -> Result<Element, &'static str> {
+    ) -> Result<Element, UnpreparedError> {
         let generation = self.generation;
         let path = preview.path.clone();
         let copy_path = Rc::clone(&emit);
@@ -146,12 +155,9 @@ impl ViewState {
         );
         match &preview.content {
             None => body = body.child(body_text(&theme, "Reading source…")),
-            Some(Err(error)) => body = body.child(body_text(&theme, error)),
+            Some(Err(error)) => body = body.child(body_text(&theme, &failure(error))),
             Some(Ok(content)) => {
-                let Some(prepared) = &self.prepared else {
-                    return Err("Resource preview selection has not been registered.");
-                };
-                let full: Arc<str> = Arc::from(content.text.as_str());
+                let full = Arc::clone(content.full());
                 let copy_file = Rc::clone(&emit);
                 body = body
                     .child(
@@ -169,14 +175,19 @@ impl ViewState {
                         })
                         .build(),
                     )
-                    .child(body_text(&theme, &content.note()))
-                    .child(lines_view(
+                    .child(body_text(&theme, &content.note()));
+                if content.window().is_some() {
+                    let prepared = self.prepared.as_ref().ok_or_else(|| UnpreparedError {
+                        path: preview.path.clone(),
+                    })?;
+                    body = body.child(lines_view(
                         &theme,
                         viewport_height,
                         self.document,
                         self.source,
                         Arc::clone(prepared),
                     ));
+                }
             }
         }
         Ok(body.build())
@@ -188,7 +199,7 @@ impl ViewState {
         theme: ArtisanTheme,
         viewport_height: f32,
         emit: Rc<dyn Fn(Action)>,
-    ) -> Result<Dialog, &'static str> {
+    ) -> Result<Dialog, UnpreparedError> {
         let content = self.content(preview, theme, viewport_height, Rc::clone(&emit))?;
         let generation = self.generation;
         Ok(
@@ -199,22 +210,18 @@ impl ViewState {
     }
 }
 
-fn prepare_text(content: &PreviewText, target_line: usize) -> Prepared {
-    let mut text = String::new();
-    let mut ranges = Vec::with_capacity(content.offsets.len());
-    for (index, range) in content.offsets.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
+fn failure(error: &PreviewError) -> String {
+    match error {
+        PreviewError::Unpaired { .. } => {
+            "This reference has no available paired Forge. You can copy its path.".to_owned()
         }
-        let start = text.len();
-        text.push_str(&content.text[range.clone()]);
-        ranges.push(start..text.len());
-    }
-    Prepared {
-        text: Arc::from(text),
-        ranges,
-        start_line: content.start_line,
-        target_line,
+        PreviewError::Read { source, .. } => {
+            format!(
+                "Couldn't read this resource: {}",
+                ::diagnostics::chain(source)
+            )
+        }
+        PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.".to_owned(),
     }
 }
 
@@ -233,14 +240,14 @@ fn lines_view(
     prepared: Arc<Prepared>,
 ) -> Element {
     let theme = *theme;
-    let count = prepared.ranges.len();
+    let count = prepared.window.len();
     let lines = List::new()
         .items(0..count)
         .key(|index| *index)
         .row(move |index| {
-            let line = prepared.start_line + *index;
-            let range = &prepared.ranges[*index];
-            let text = &prepared.text[range.clone()];
+            let line = prepared.window.start_line() + *index;
+            let range = prepared.window.range(*index);
+            let text = prepared.window.line(*index);
             let visible = &text[..text.floor_char_boundary(text.len().min(16 * 1024))];
             let target = line == prepared.target_line;
             let mut row = UiBox::new()

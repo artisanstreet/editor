@@ -1,4 +1,5 @@
 use super::*;
+use crate::shell::resource_preview::PreviewText;
 
 #[test]
 fn preview_selection_includes_full_clipped_and_offscreen_lines() {
@@ -6,15 +7,15 @@ fn preview_selection_includes_full_clipped_and_offscreen_lines() {
     let long = "x".repeat(16 * 1024 + 12);
     let input = format!("first\n{long}\nlast\n");
     let content = PreviewText::new(input.clone(), 1);
-    let prepared = prepare_text(&content, 1);
-    assert_eq!(prepared.ranges.len(), 3);
-    assert_eq!(prepared.text.as_ref(), input.trim_end_matches('\n'));
+    let window = content.window().unwrap();
+    assert_eq!(window.len(), 3);
+    assert_eq!(window.text().as_ref(), input.trim_end_matches('\n'));
     let mut selection = SelectionDocument::new();
     selection
         .register(SelectionSource {
             id: SelectionSourceId(3),
             order: vec![0],
-            text: Arc::clone(&prepared.text),
+            text: Arc::clone(window.text()),
             separator: Arc::from(""),
             copies: Vec::new(),
         })
@@ -24,16 +25,64 @@ fn preview_selection_includes_full_clipped_and_offscreen_lines() {
         selection.selected_text().as_deref(),
         Some(input.trim_end_matches('\n'))
     );
-    assert_eq!(&prepared.text[prepared.ranges[1].clone()], long);
+    assert_eq!(window.line(1), long);
 }
 
 #[test]
 fn selected_window_is_bounded_and_keeps_target() {
     let content = PreviewText::new("x\n".repeat(100_000), 80_000);
-    let prepared = prepare_text(&content, 80_000);
-    assert_eq!(prepared.start_line, 77_500);
-    assert_eq!(prepared.ranges.len(), 5_000);
-    assert_eq!(&prepared.text[prepared.ranges[2_500].clone()], "x");
+    let window = content.window().unwrap();
+    assert_eq!(window.start_line(), 77_500);
+    assert_eq!(window.len(), 5_000);
+    assert_eq!(window.line(2_500), "x");
+}
+
+#[test]
+fn multibyte_lines_are_previewed_whole() {
+    let content = PreviewText::new("ære\nø\n日本語\n".to_owned(), 0);
+    let window = content.window().unwrap();
+    assert_eq!(
+        (0..window.len())
+            .map(|index| window.line(index))
+            .collect::<Vec<_>>(),
+        ["ære", "ø", "日本語"]
+    );
+    assert_eq!(content.full().as_ref(), "ære\nø\n日本語\n");
+}
+
+#[test]
+fn an_empty_file_says_it_is_empty_instead_of_an_inverted_range() {
+    use aqua_text::{SharedFonts, SharedRuns};
+    let mut preview = ResourcePreview::new("src/empty.rs".into(), Some(3), None);
+    preview.content = Some(Ok(PreviewText::new(String::new(), 2)));
+    let Some(Ok(content)) = &preview.content else {
+        unreachable!("the preview was just given its content")
+    };
+    assert_eq!(content.note(), "This file is empty.");
+    let mut state = ViewState::new(5, SelectionDocumentId(41), SelectionSourceId(42));
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    assert!(!state.prepare(&preview, &mut app).unwrap());
+    assert_eq!(state.pending_jump(), None);
+    let content = state
+        .content(&preview, ArtisanTheme::resolved(), 600.0, Rc::new(|_| {}))
+        .unwrap();
+    app.mount(|_| content).unwrap();
+    app.set_viewport(800.0, 600.0, 1.0);
+    app.build_frame().unwrap();
+    let said: Vec<String> = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .filter_map(|node| match &app.tree().get(node)?.kind {
+            aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().any(|line| line == "This file is empty."),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|line| line.contains("1–0")), "{said:?}");
 }
 
 #[test]

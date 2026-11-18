@@ -1,52 +1,134 @@
+use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::sync::Arc;
+
+const WINDOW_BEFORE_TARGET: usize = 2_500;
+const WINDOW_LINES: usize = 5_000;
 
 #[derive(Clone, Debug)]
 pub struct PreviewText {
-    pub text: String,
-    pub start_line: usize,
-    pub offsets: Vec<Range<usize>>,
-    pub total_lines: usize,
+    full: Arc<str>,
+    window: Option<LineWindow>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LineWindow {
+    text: Arc<str>,
+    ranges: Arc<[Range<usize>]>,
+    start_line: usize,
+    total_lines: NonZeroUsize,
 }
 
 impl PreviewText {
+    #[must_use]
     pub fn new(text: String, target_line: usize) -> Self {
         let total_lines = text.lines().count();
-        let start_line = target_line
-            .min(total_lines.saturating_sub(1))
-            .saturating_sub(2_500);
-        let base = text.as_ptr() as usize;
-        let offsets = text
-            .lines()
-            .skip(start_line)
-            .take(5_000)
-            .map(|line| {
-                let start = line.as_ptr() as usize - base;
-                start..start + line.len()
-            })
-            .collect();
+        let window = NonZeroUsize::new(total_lines).map(|total_lines| {
+            let start_line = target_line
+                .min(total_lines.get() - 1)
+                .saturating_sub(WINDOW_BEFORE_TARGET);
+            let mut joined = String::new();
+            let mut ranges = Vec::new();
+            for (index, line) in text.lines().skip(start_line).take(WINDOW_LINES).enumerate() {
+                if index > 0 {
+                    joined.push('\n');
+                }
+                let start = joined.len();
+                joined.push_str(line);
+                ranges.push(start..joined.len());
+            }
+            LineWindow {
+                text: Arc::from(joined),
+                ranges: Arc::from(ranges),
+                start_line,
+                total_lines,
+            }
+        });
         Self {
-            text,
-            start_line,
-            offsets,
-            total_lines,
+            full: Arc::from(text),
+            window,
         }
     }
 
-    pub fn note(&self) -> String {
-        format!(
-            "Lines {}–{} of {}. Long lines are clipped visually. Select All copies these preview lines; Copy file copies the full file.",
-            self.start_line + 1,
-            self.start_line + self.offsets.len(),
-            self.total_lines
-        )
+    #[must_use]
+    pub fn full(&self) -> &Arc<str> {
+        &self.full
     }
+
+    #[must_use]
+    pub const fn window(&self) -> Option<&LineWindow> {
+        self.window.as_ref()
+    }
+
+    #[must_use]
+    pub fn note(&self) -> String {
+        match &self.window {
+            None => "This file is empty.".to_owned(),
+            Some(window) => format!(
+                "Lines {}–{} of {}. Long lines are clipped visually. Select All copies these preview lines; Copy file copies the full file.",
+                window.start_line + 1,
+                window.start_line + window.ranges.len(),
+                window.total_lines
+            ),
+        }
+    }
+}
+
+impl LineWindow {
+    #[must_use]
+    pub fn text(&self) -> &Arc<str> {
+        &self.text
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    #[must_use]
+    pub const fn start_line(&self) -> usize {
+        self.start_line
+    }
+
+    #[must_use]
+    pub fn range(&self, index: usize) -> Range<usize> {
+        self.ranges[index].clone()
+    }
+
+    #[must_use]
+    pub fn line(&self, index: usize) -> &str {
+        &self.text[self.range(index)]
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PreviewError {
+    #[error("no paired Forge can read {path}")]
+    Unpaired { path: String },
+    #[error("read {path} from Forge")]
+    Read {
+        path: String,
+        #[source]
+        source: crate::core::client::CallError,
+    },
+    #[error("{path} is not UTF-8 text")]
+    NotText {
+        path: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
 }
 
 pub struct ResourcePreview {
     pub path: String,
     pub target_line: usize,
-    pub content: Option<Result<PreviewText, String>>,
-    delivery: crate::core::delivery::Delivery<Result<PreviewText, String>>,
+    pub content: Option<Result<PreviewText, PreviewError>>,
+    delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
     request: Option<tokio_util::task::AbortOnDropHandle<()>>,
     source: Option<(crate::core::HostId, crate::core::HostInstance)>,
 }
@@ -73,22 +155,23 @@ impl ResourcePreview {
             let sender = delivery.sender();
             Some(tokio_util::task::AbortOnDropHandle::new(
                 crate::core::runtime::runtime().spawn(async move {
-                    let result = client
-                        .resource(&thread, &fetch_path, false, None)
-                        .await
-                        .map_err(|error| format!("Couldn't read this resource: {error:#}"))
-                        .and_then(|bytes| {
-                            String::from_utf8(bytes)
-                                .map_err(|_| "This resource is not a UTF-8 text file.".to_owned())
-                        })
-                        .map(|text| PreviewText::new(text, target_line));
+                    let result = match client.resource(&thread, &fetch_path, false, None).await {
+                        Ok(bytes) => String::from_utf8(bytes)
+                            .map(|text| PreviewText::new(text, target_line))
+                            .map_err(|source| PreviewError::NotText {
+                                path: fetch_path,
+                                source,
+                            }),
+                        Err(source) => Err(PreviewError::Read {
+                            path: fetch_path,
+                            source,
+                        }),
+                    };
                     let _ = sender.send(result).await;
                 }),
             ))
         } else {
-            content = Some(Err(
-                "This reference has no available paired Forge. You can copy its path.".to_owned(),
-            ));
+            content = Some(Err(PreviewError::Unpaired { path: path.clone() }));
             None
         };
         Self {
