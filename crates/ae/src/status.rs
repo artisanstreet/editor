@@ -57,6 +57,31 @@ fn paired_devices(problems: &mut Vec<String>) -> Value {
     }
 }
 
+#[cfg(unix)]
+fn health(problems: &mut Vec<String>, log: Option<&str>) -> Value {
+    let checked = App::Forge
+        .data()
+        .map_err(|error| format!("{error}"))
+        .and_then(|data| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("start the health check runtime: {error}"))?
+                .block_on(forge_http::upgrade::health(&data))
+                .map_err(|error| diagnostics::chain(&error))
+        });
+    match checked {
+        Ok(_) => json!(true),
+        Err(error) => {
+            problems.push(format!(
+                "Forge isn't healthy: {error}; see {}",
+                log.unwrap_or("its log")
+            ));
+            json!(false)
+        }
+    }
+}
+
 fn local() -> Value {
     let apps: Vec<Value> = App::ALL
         .iter()
@@ -91,6 +116,14 @@ fn local() -> Value {
                 None
             }
         };
+        #[cfg(unix)]
+        let healthy = if running {
+            health(&mut problems, log.as_deref())
+        } else {
+            Value::Null
+        };
+        #[cfg(not(unix))]
+        let healthy = Value::Null;
         if !running {
             problems.push("Forge isn't running; run `ae forge start`".to_owned());
         } else if let Some(address) = address.filter(|_| !listening) {
@@ -124,6 +157,7 @@ fn local() -> Value {
             "pid": service::running_pid(),
             "address": address.map(|address| address.to_string()),
             "listening": listening,
+            "healthy": healthy,
             "log": log,
             "devices": devices,
             "engines": engines,
@@ -185,8 +219,13 @@ fn print(report: &Value, distro: Option<&str>) {
                 .as_u64()
                 .map(|pid| format!(", pid {pid}"))
                 .unwrap_or_default();
+            let health = if forge["healthy"].as_bool() == Some(false) {
+                ", unhealthy"
+            } else {
+                ""
+            };
             format!(
-                "● running on {}{pid}",
+                "● running on {}{pid}{health}",
                 forge["address"].as_str().unwrap_or_default()
             )
         } else {

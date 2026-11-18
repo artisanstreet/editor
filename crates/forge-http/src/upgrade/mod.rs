@@ -1,4 +1,5 @@
 mod controller;
+mod health;
 mod process;
 
 use anyhow::{Context, Result, ensure};
@@ -93,3 +94,4 @@ pub async fn serve(
 }
 
 pub use forge_runs::runtime::{read, write};
+pub use health::{HealthError, health};
