@@ -249,3 +249,73 @@ async fn cancellation_rejects_answers_and_goal_updates_while_cleanup_is_pending(
         "cleanup must still complete cancellation after rejecting inputs"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
+    let asked = Asked::default();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let script: Script = {
+        let asked = Arc::clone(&asked);
+        let started = Arc::clone(&started);
+        Arc::new(move |turn, io| {
+            let asked = Arc::clone(&asked);
+            let started = Arc::clone(&started);
+            Box::pin(async move {
+                let first = {
+                    let mut asked = asked.lock().unwrap();
+                    asked.push((turn.input.text.clone(), turn.session_id.clone()));
+                    asked.len() == 1
+                };
+                io.emit(EngineEvent::Session {
+                    id: "session".to_owned(),
+                })
+                .await;
+                if first {
+                    started.notify_one();
+                    io.cancel.cancelled().await;
+                    io.emit(EngineEvent::InputAccepted {
+                        id: turn.input.id.clone(),
+                    })
+                    .await;
+                    return Outcome::cancelled();
+                }
+                io.emit(EngineEvent::InputAccepted {
+                    id: turn.input.id.clone(),
+                })
+                .await;
+                io.emit(reply("done", "carried on")).await;
+                Outcome::done()
+            })
+        })
+    };
+    let harness: Arc<dyn Harness> = Arc::new(Unscripted(script));
+    let fixture = fixture_with_harness(Arc::new(move |_| Arc::clone(&harness))).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("rename the module"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .unwrap();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
+
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    let continued = fixture.settled().await.remove(0);
+
+    assert_eq!(
+        continued.continuation,
+        Some(artisan_api::Continuation::Requested)
+    );
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2);
+    assert!(
+        !asked[1].0.contains("rename the module"),
+        "the engine got the message twice: {asked:?}"
+    );
+    let items = fixture.items().await;
+    assert!(items.iter().any(
+        |item| matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+    ));
+}

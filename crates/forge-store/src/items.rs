@@ -104,7 +104,6 @@ impl Store {
         .with_context(|| format!("spawn agent {agent_id} of thread {parent}"))
     }
 
-    /// Delivery acknowledgment is atomic for the entire initial batch or one steer.
     pub async fn accept_inputs(
         &self,
         thread: ThreadId,
@@ -118,7 +117,7 @@ impl Store {
                         old.thread_id == thread && matches!(old.kind, ItemKind::UserMessage { .. }),
                         "input {id} does not belong to thread {thread}"
                     );
-                    if old.status == Status::Running {
+                    if matches!(old.status, Status::Running | Status::Cancelled) {
                         let item = Item {
                             run_id: Some(run.clone()),
                             status: Status::Done,
