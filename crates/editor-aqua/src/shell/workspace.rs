@@ -72,8 +72,8 @@ pub struct Workspace {
     terminal_dismissed: Rc<Cell<bool>>,
     pub sidebar: crate::sidebar::controller::Sidebar,
     pub settings_sidebar: crate::sidebar::controller::Sidebar,
-    pub usage: crate::sidebar::usage_controller::UsagePage,
-    usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage_page::Action>>>,
+    pub usage: crate::sidebar::usage::controller::UsagePage,
+    usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage::view::Action>>>,
     pub conversation: crate::conversation::controller::Conversation,
     pub composer: Option<crate::composer::view::ComposerOwner>,
     composer_target: Option<(
@@ -154,7 +154,7 @@ impl Workspace {
             terminal_dismissed: Rc::new(Cell::new(false)),
             sidebar: crate::sidebar::controller::Sidebar::new(true),
             settings_sidebar: crate::sidebar::controller::Sidebar::new(false),
-            usage: crate::sidebar::usage_controller::UsagePage::default(),
+            usage: crate::sidebar::usage::controller::UsagePage::default(),
             usage_actions: Rc::new(RefCell::new(VecDeque::new())),
             sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
             settings_sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
@@ -1321,7 +1321,7 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage_page::Action)> {
+    pub fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage::view::Action)> {
         let actions = Rc::clone(&self.usage_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
@@ -1360,7 +1360,7 @@ impl Workspace {
         theme: crate::ui::theme::ArtisanTheme,
         viewport: aqua_core::Size,
     ) -> aqua_ui::element::Element {
-        crate::sidebar::usage_page::build(
+        crate::sidebar::usage::view::build(
             &self.usage,
             core,
             theme,
@@ -1425,7 +1425,7 @@ impl Workspace {
         changed |= self.dispatch_sidebar_actions(core);
         let usage = std::mem::take(&mut *self.usage_actions.borrow_mut());
         for action in usage {
-            changed |= crate::sidebar::usage_page::dispatch(&mut self.usage, core, action);
+            changed |= crate::sidebar::usage::view::dispatch(&mut self.usage, core, action);
         }
         let marketplace = std::mem::take(&mut *self.marketplace_actions.borrow_mut());
         for action in marketplace {

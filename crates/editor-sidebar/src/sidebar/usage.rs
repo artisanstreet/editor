@@ -1,3 +1,6 @@
+pub mod controller;
+pub mod view;
+
 use artisan_api::{Timestamp, UsageCadence, UsageLimits, UsageWindow};
 
 pub const METER_SEGMENTS: usize = 14;

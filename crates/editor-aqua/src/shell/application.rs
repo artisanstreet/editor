@@ -515,7 +515,7 @@ impl<V: SectionViews> ShellApplication<V> {
                     crate::core::Screen::Usage
                 ) {
                     let deadline = *self.usage_deadline.get_or_insert_with(|| {
-                        ctx.now() + crate::sidebar::usage_controller::CLOCK_INTERVAL
+                        ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL
                     });
                     ctx.request_animation_deadline(id, deadline);
                 } else {
@@ -994,7 +994,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         refresh |= causes.note(Cause::UsageClock, usage_elapsed);
         if usage_elapsed {
             self.usage_deadline =
-                Some(ctx.now() + crate::sidebar::usage_controller::CLOCK_INTERVAL);
+                Some(ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL);
         }
         if let Some(workspace) = self.shell.entry.workspace_mut() {
             if workspace.sync_composer_tooltip(self.ui.ui_mut(), theme, std::time::Instant::now()) {

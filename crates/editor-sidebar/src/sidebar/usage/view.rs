@@ -1,6 +1,6 @@
 use super::{
-    usage::{METER_SEGMENTS, checked_label, groups, lit_of, remaining_percent, reset_duration},
-    usage_controller::UsagePage,
+    METER_SEGMENTS, checked_label, controller::UsagePage, groups, lit_of, remaining_percent,
+    reset_duration,
 };
 use aqua_core::Size;
 use aqua_ui::{
