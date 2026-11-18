@@ -325,12 +325,12 @@ pub fn sync_questionnaires(
     conversation: &Conversation,
     core: &Core,
     composer: &mut editor_composer::controller::Composer,
-) {
+) -> bool {
     if !conversation.host_is_current(core) {
-        return;
+        return false;
     }
     let Some((host_id, thread)) = conversation.open.as_ref() else {
-        return;
+        return false;
     };
     if composer.target
         != (editor_composer::controller::ComposerTarget::Thread {
@@ -338,15 +338,23 @@ pub fn sync_questionnaires(
             thread: thread.clone(),
         })
     {
-        return;
+        return false;
     }
     let Some(summary) = core
         .host(host_id)
         .and_then(|host| host.thread_summary(thread))
         .and_then(|summary| summary.value.as_ref())
     else {
-        return;
+        return false;
     };
+    if composer.questionnaire.holds(
+        summary
+            .questions
+            .iter()
+            .map(|question| (&question.id, &question.questions)),
+    ) {
+        return false;
+    }
     let questionnaires = summary
         .questions
         .iter()
@@ -361,9 +369,11 @@ pub fn sync_questionnaires(
     composer
         .questionnaire
         .set_questionnaires(questionnaires, &mut text);
-    if composer.editor.borrow().text() != text {
+    let changed = composer.editor.borrow().text() != text;
+    if changed {
         composer.editor.borrow_mut().set_text(&text);
     }
+    changed
 }
 
 pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {

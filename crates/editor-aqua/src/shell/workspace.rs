@@ -867,13 +867,11 @@ impl Workspace {
     pub fn sync_question_pages(&mut self, core: &Core) {
         if let Some(owner) = &self.composer {
             let mut composer = owner.controller.borrow_mut();
-            let before = composer.editor.borrow().text().to_owned();
-            crate::conversation::adapter::sync_questionnaires(
+            if crate::conversation::adapter::sync_questionnaires(
                 &self.conversation,
                 core,
                 &mut composer,
-            );
-            if composer.editor.borrow().text() != before {
+            ) {
                 self.composer_editor_dirty = true;
             }
             self.conversation

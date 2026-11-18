@@ -107,6 +107,18 @@ impl QuestionnairePanel {
         }
     }
 
+    pub fn holds<'a>(
+        &self,
+        questionnaires: impl ExactSizeIterator<Item = (&'a ItemId, &'a Collection<Question>)>,
+    ) -> bool {
+        self.questionnaires.len() == questionnaires.len()
+            && self
+                .questionnaires
+                .iter()
+                .zip(questionnaires)
+                .all(|(held, (item, questions))| &held.item == item && &held.questions == questions)
+    }
+
     pub fn set_questionnaires(
         &mut self,
         questionnaires: Vec<ComposerQuestionnaire>,
@@ -274,3 +286,7 @@ impl QuestionnairePanel {
         self.sync_mode(text);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/questionnaire.rs"]
+mod tests;
