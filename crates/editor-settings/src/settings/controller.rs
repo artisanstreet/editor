@@ -449,11 +449,16 @@ impl SettingsController {
         self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
             runtime::runtime().spawn(async move {
                 let result = async {
-                    let session =
-                        claude_ai_browser::capture(claude_ai_browser::Mode::SignIn).await?;
+                    let session = claude_ai_browser::sign_in().await?;
                     client
-                        .engine_action(EngineId::Claude, &EngineCommand::ClaudeAiSignIn { session })
+                        .engine_action(
+                            EngineId::Claude,
+                            &EngineCommand::ClaudeAiSignIn {
+                                session: session.clone(),
+                            },
+                        )
                         .await?;
+                    claude_ai_browser::authorize(&id.0, &session)?;
                     Ok::<(), anyhow::Error>(())
                 }
                 .await

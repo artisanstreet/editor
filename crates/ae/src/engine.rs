@@ -147,16 +147,16 @@ async fn capture_here() -> Result<artisan_api::ClaudeAiSession> {
 }
 
 async fn capture_in_browser() -> Result<artisan_api::ClaudeAiSession> {
-    if !claude_ai_browser::can_renew() {
+    if !claude_ai_browser::has_profile() {
         ui::note(
             "A browser window opens on claude.ai",
             "Sign in there as you normally would. The window closes by itself once you're signed in.\nArtisan keeps this browser profile so it can renew the session later without asking.",
         );
     }
     let progress = ui::Progress::spinner("Waiting for you to sign in to claude.ai");
-    let session = claude_ai_browser::capture(claude_ai_browser::Mode::SignIn).await;
+    let session = claude_ai_browser::sign_in().await;
     progress.clear();
-    session
+    Ok(session?)
 }
 
 /// Runs Windows' `ae` to capture the session, from WSL.

@@ -1,3 +1,4 @@
+mod claude_ai;
 mod images;
 mod pages;
 pub use images::{BlobImage, BlobImages};
@@ -219,6 +220,11 @@ pub(super) enum HostCompletion {
         u64,
         anyhow::Result<Option<artisan_api::ProjectRepository>>,
     ),
+    ClaudeAiCaptured(
+        claude_ai_browser::Ticket,
+        Result<artisan_api::ClaudeAiSession, claude_ai_browser::RenewError>,
+    ),
+    ClaudeAiHanded(claude_ai_browser::Ticket, anyhow::Result<()>),
 }
 
 #[cfg(feature = "test-support")]
@@ -365,7 +371,7 @@ pub struct HostData {
     retry: Arc<Notify>,
     delivery: Delivery<HostMessage>,
     _connection: AbortOnDropHandle<()>,
-    claude_ai_renewed: Option<std::time::Instant>,
+    claude_ai: claude_ai_browser::Renewal<AbortOnDropHandle<()>>,
     repositories: HashMap<ProjectId, RepositoryEntry>,
     repository_reads: HashMap<ProjectId, (u64, AbortOnDropHandle<()>)>,
     repository_order: VecDeque<ProjectId>,
@@ -457,41 +463,13 @@ impl HostData {
             retry,
             delivery,
             _connection: connection,
-            claude_ai_renewed: None,
+            claude_ai: claude_ai_browser::Renewal::default(),
             repositories: HashMap::new(),
             repository_reads: HashMap::new(),
             repository_order: VecDeque::new(),
             repository_generation: 0,
         }
     }
-    fn renew_claude_ai(&mut self) {
-        const EVERY: std::time::Duration = std::time::Duration::from_mins(10);
-        let needs = self.engines.get(&EngineId::Claude).is_some_and(|status| {
-            matches!(
-                status.claude_ai,
-                Some(artisan_api::ClaudeAiState::NeedsRenewal { .. })
-            )
-        });
-        if !needs
-            || self
-                .claude_ai_renewed
-                .is_some_and(|at| at.elapsed() < EVERY)
-            || !claude_ai_browser::can_renew()
-        {
-            return;
-        }
-        self.claude_ai_renewed = Some(std::time::Instant::now());
-        let client = self.client.clone();
-        let host = self.id.clone();
-        crate::core::runtime::runtime().spawn(async move {
-            let session = match claude_ai_browser::capture(claude_ai_browser::Mode::Renew).await {
-                Ok(session) => session,
-                Err(error) => { tracing::warn!(%host, "renewing the claude.ai session failed: {error:#}"); return; }
-            };
-            if let Err(error) = client.engine_action(EngineId::Claude, &artisan_api::EngineCommand::ClaudeAiSignIn { session }).await { tracing::warn!(%host, "the Forge did not take the renewed claude.ai session: {error:#}"); }
-        });
-    }
-
     #[cfg(feature = "test-support")]
     pub fn test_stop_connection(&mut self) {
         self._connection.abort();
@@ -1072,6 +1050,12 @@ impl HostData {
         }
         for completion in completion.into_iter() {
             match completion {
+                HostCompletion::ClaudeAiCaptured(ticket, result) => {
+                    self.finish_claude_ai_capture(ticket, result);
+                }
+                HostCompletion::ClaudeAiHanded(ticket, result) => {
+                    self.finish_claude_ai_handover(ticket, result);
+                }
                 HostCompletion::DecodedImage(hash, generation, result) => {
                     if self.finish_decoded_image(hash, generation, result) {
                         events.push(HostEvent::ImagesChanged);

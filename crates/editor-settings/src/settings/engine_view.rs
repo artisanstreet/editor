@@ -427,7 +427,7 @@ fn claude(
     let (mut description, signed_in) = match &state {
         ClaudeAiState::SignedOut => ("Not signed in. Signing in opens claude.ai in a browser window; it closes by itself once you're in.".to_owned(), false),
         ClaudeAiState::SignedIn { account } => (account.as_ref().map_or_else(|| "Signed in.".into(), |account| format!("Signed in as {account}.")), true),
-        ClaudeAiState::NeedsRenewal { .. } => (if claude_ai_browser::can_renew() { "claude.ai asked for a browser check. Artisan is renewing the session in the background." } else { "claude.ai asked for a browser check. Sign in again on this device, or wait for the device that signed in to renew it." }.to_owned(), false),
+        ClaudeAiState::NeedsRenewal { .. } => (if claude_ai_browser::can_renew(&host.id.0) { "claude.ai asked for a browser check. Artisan is renewing the session in the background." } else { "claude.ai asked for a browser check. Sign in again on this device, or wait for the device that signed in to renew it." }.to_owned(), false),
         ClaudeAiState::Expired { reason } => (format!("The session stopped working: {reason}"), false),
     };
     if busy {
