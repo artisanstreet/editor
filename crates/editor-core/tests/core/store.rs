@@ -1,7 +1,7 @@
 use artisan_api::ThreadId;
 use editor_core::{
     Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen, SetSettingError,
-    SettingsPage, ThreadUnavailable,
+    SettingsPage, SettingsSave, ThreadUnavailable,
 };
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -10,6 +10,17 @@ fn files(directory: &tempfile::TempDir) -> EditorFiles {
     EditorFiles {
         dir: directory.path().to_owned(),
     }
+}
+
+fn settle(core: &mut Core) {
+    test_support::wait::wait_until(
+        "the settings save to finish",
+        Duration::from_secs(10),
+        || {
+            core.drain();
+            !matches!(core.settings_save(), SettingsSave::Saving)
+        },
+    );
 }
 
 #[test]
@@ -36,6 +47,7 @@ fn unreadable_settings_are_kept_and_block_saves_until_recovered() {
     assert!(core.settings.unreadable().is_none());
     core.set_setting("dark_mode", json!(true))
         .expect("saves resume after recovery");
+    settle(&mut core);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("settings.json")).expect("json");
     assert_eq!(saved, json!({"dark_mode": true, "font_set": "system"}));
@@ -48,13 +60,115 @@ fn a_settings_file_that_breaks_later_is_not_overwritten() {
     let mut core = Core::for_tests(files(&directory)).expect("core opens");
     core.set_setting("dark_mode", json!(true))
         .expect("first save");
+    settle(&mut core);
     std::fs::write(&path, b"not json").expect("another program breaks the file");
-    assert!(core.set_setting("font_set", json!("system")).is_err());
+    core.set_setting("font_set", json!("system"))
+        .expect("the value is taken while the file is read in the background");
+    settle(&mut core);
+    assert!(matches!(
+        core.settings_save(),
+        SettingsSave::Failed(failure) if matches!(**failure, SetSettingError::Unreadable { .. })
+    ));
     assert_eq!(
         std::fs::read(&path).expect("settings.json kept"),
         b"not json"
     );
     assert!(core.settings.unreadable().is_some());
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum SettingsRelease {
+    WhileWaiting,
+    AfterGivingUp,
+}
+
+#[cfg(unix)]
+#[test]
+fn changing_a_setting_does_not_wait_for_a_slow_disk() {
+    use std::io::Write as _;
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("settings.json");
+    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    let (opened_tx, opened) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release) = std::sync::mpsc::channel::<()>();
+    let slow_disk = std::thread::spawn({
+        let path = path.clone();
+        move || {
+            let mut fifo = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open the slow settings.json");
+            opened_tx.send(()).expect("the test waits for the open");
+            let released = match release.recv_timeout(Duration::from_secs(10)) {
+                Ok(()) => SettingsRelease::WhileWaiting,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => SettingsRelease::AfterGivingUp,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    unreachable!("the test holds the release sender until it releases")
+                }
+            };
+            fifo.write_all(b"{\"font_set\": \"system\"}")
+                .expect("write the slow settings.json");
+            released
+        }
+    });
+
+    core.set_setting("dark_mode", json!(true))
+        .expect("the change is taken at once");
+    assert_eq!(core.settings.get("dark_mode"), Some(&json!(true)));
+    assert!(matches!(core.settings_save(), SettingsSave::Saving));
+    opened
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the save reads settings.json in the background");
+    release_tx.send(()).expect("the slow disk is still waiting");
+    settle(&mut core);
+
+    assert_eq!(
+        slow_disk.join().expect("the slow disk finishes"),
+        SettingsRelease::WhileWaiting
+    );
+    assert!(matches!(core.settings_save(), SettingsSave::Saved));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("settings.json")).expect("json");
+    assert_eq!(saved, json!({"dark_mode": true, "font_set": "system"}));
+    assert_eq!(core.settings.get("font_set"), Some(&json!("system")));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_setting_that_cannot_be_saved_says_why_and_goes_back() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("settings.json");
+    std::fs::write(&path, b"{\"dark_mode\": false}").expect("seed settings.json");
+    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let writable = std::fs::metadata(directory.path())
+        .expect("folder metadata")
+        .permissions();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make the settings folder read-only");
+
+    core.set_setting("dark_mode", json!(true))
+        .expect("the change is taken at once");
+    settle(&mut core);
+    std::fs::set_permissions(directory.path(), writable).expect("restore the settings folder");
+
+    assert!(matches!(
+        core.settings_save(),
+        SettingsSave::Failed(failure)
+            if matches!(&**failure, SetSettingError::Save { key, .. } if key == "dark_mode")
+    ));
+    assert_eq!(core.settings.get("dark_mode"), Some(&json!(false)));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("settings.json")).expect("json");
+    assert_eq!(saved, json!({"dark_mode": false}));
 }
 
 #[test]
@@ -65,9 +179,11 @@ fn two_editors_changing_different_settings_keep_both() {
     first
         .set_setting("dark_mode", json!(false))
         .expect("first save");
+    settle(&mut first);
     second
         .set_setting("font_set", json!("system"))
         .expect("second save");
+    settle(&mut second);
     let saved: serde_json::Value = serde_json::from_slice(
         &std::fs::read(directory.path().join("settings.json")).expect("settings.json"),
     )

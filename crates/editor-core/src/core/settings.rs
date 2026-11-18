@@ -94,6 +94,27 @@ impl Settings {
         }
     }
 
+    pub(crate) fn values(&self) -> crate::core::hosts::EditorSettings {
+        match self {
+            Self::Loaded { values, .. } => values.clone(),
+            Self::Unreadable(_) => crate::core::hosts::EditorSettings::new(),
+        }
+    }
+
+    pub(crate) fn put(&mut self, key: &str, value: Option<serde_json::Value>) {
+        match (self, value) {
+            (Self::Loaded { values, rejected }, Some(value)) => {
+                rejected.remove(key);
+                values.insert(key.to_owned(), value);
+            }
+            (Self::Loaded { values, rejected }, None) => {
+                rejected.remove(key);
+                values.remove(key);
+            }
+            (Self::Unreadable(_), _) => {}
+        }
+    }
+
     #[must_use]
     pub fn unreadable(&self) -> Option<&ReadConfigError> {
         match self {

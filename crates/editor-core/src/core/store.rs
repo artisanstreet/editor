@@ -12,6 +12,7 @@ use crate::core::{
     screen::{Screen, SettingsPage},
     services::{self, Services},
     settings::{SetSettingError, Settings},
+    settings_writer::{SettingsSave, SettingsSaves},
 };
 use artisan_api::tls::Identity;
 use std::{
@@ -145,6 +146,7 @@ pub struct Core {
     mcp_sign_ins: McpSignIns,
     wake: aqua::mailbox::Mailbox<()>,
     opened: Delivery<Opened>,
+    saves: SettingsSaves,
     admission: AdmissionOrder,
     dials: HashMap<HostId, Dial>,
     dial_generations: HashMap<HostId, u64>,
@@ -231,6 +233,7 @@ impl Core {
             wake.sender(),
             admission.clone(),
         );
+        let saves = SettingsSaves::new(files.clone(), wake.sender(), admission.clone(), &settings);
         let mut core = Self {
             files,
             identity,
@@ -249,6 +252,7 @@ impl Core {
             mcp_sign_ins,
             wake,
             opened,
+            saves,
             admission,
             dials: HashMap::new(),
             dial_generations: HashMap::new(),
@@ -378,6 +382,7 @@ impl Core {
             let admitted = self.account.peek_order().is_some()
                 || self.mcp_sign_ins.peek_order().is_some()
                 || self.opened.peek_order().is_some()
+                || self.saves.peek_order().is_some()
                 || self
                     .hosts
                     .values_mut()
@@ -597,32 +602,17 @@ impl Core {
             key: key.to_owned(),
             source,
         })?;
-        let saved = self.files.update_settings(|settings| {
-            settings.insert(key.to_owned(), value);
-        });
-        match saved {
-            Ok(settings) => {
-                self.settings = Settings::validated(settings);
-                self.events.push(CoreEvent::SettingsChanged);
-                Ok(())
-            }
-            Err(crate::core::config_file::UpdateConfigError::Read(error)) => {
-                let error = std::sync::Arc::new(error);
-                self.settings = Settings::Unreadable(error.clone());
-                self.events.push(CoreEvent::SettingsChanged);
-                Err(SetSettingError::Unreadable {
-                    key: key.to_owned(),
-                    source: error,
-                })
-            }
-            Err(source) => Err(SetSettingError::Save {
-                key: key.to_owned(),
-                source,
-            }),
-        }
+        self.settings.put(key, Some(value.clone()));
+        self.saves.submit(key.to_owned(), value);
+        self.events.push(CoreEvent::SettingsChanged);
+        Ok(())
+    }
+    pub const fn settings_save(&self) -> &SettingsSave {
+        self.saves.state()
     }
     pub fn reload_settings(&mut self) {
         self.settings = Settings::read(self.files.settings());
+        self.saves.confirm(&self.settings);
         if let Some(error) = self.settings.unreadable() {
             tracing::warn!(
                 error = %::diagnostics::chain(error),
@@ -974,6 +964,7 @@ impl Core {
             Account,
             Mcp,
             Opened,
+            Saved,
             Host(HostId),
         }
         let admission = self.admission.clone();
@@ -989,6 +980,7 @@ impl Core {
             consider(self.account.peek_order(), Source::Account);
             consider(self.mcp_sign_ins.peek_order(), Source::Mcp);
             consider(self.opened.peek_order(), Source::Opened);
+            consider(self.saves.peek_order(), Source::Saved);
             for (id, host) in &mut self.hosts {
                 consider(host.peek_order(), Source::Host(id.clone()));
             }
@@ -1000,6 +992,12 @@ impl Core {
             Some(Source::Opened) => {
                 if let Some(opened) = self.opened.drain_one() {
                     self.finish_dial(opened);
+                }
+                self.dispatch_events(&mut receive);
+            }
+            Some(Source::Saved) => {
+                if self.saves.settle(&mut self.settings) {
+                    self.events.push(CoreEvent::SettingsChanged);
                 }
                 self.dispatch_events(&mut receive);
             }
@@ -1015,6 +1013,7 @@ impl Core {
             self.account.peek_order().is_some()
                 || self.mcp_sign_ins.peek_order().is_some()
                 || self.opened.peek_order().is_some()
+                || self.saves.peek_order().is_some()
                 || self
                     .hosts
                     .values_mut()

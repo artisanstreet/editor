@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod screen;
 pub mod services;
 pub mod settings;
+mod settings_writer;
 pub mod store;
 #[cfg(feature = "test-support")]
 mod testing;
@@ -53,5 +54,6 @@ pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSec
 pub use services::RelayScript;
 pub use services::{RelayDialRequest, Services};
 pub use settings::{SetSettingError, Settings, StoredSettingError};
+pub use settings_writer::SettingsSave;
 pub use store::{Core, CoreEvent, OpenCoreError};
 pub mod diagnostics;

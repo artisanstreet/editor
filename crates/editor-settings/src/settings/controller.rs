@@ -237,6 +237,13 @@ impl SettingsController {
     }
 
     pub fn core_event(&mut self, core: &mut Core, event: &editor_core::CoreEvent) {
+        if matches!(event, editor_core::CoreEvent::SettingsChanged)
+            && let editor_core::SettingsSave::Failed(failure) = core.settings_save()
+        {
+            let cause = ::diagnostics::chain(&**failure);
+            tracing::error!(error = %cause, "saving an Editor setting");
+            self.editor_setting_error = Some(format!("Couldn't save: {cause}"));
+        }
         if matches!(event, editor_core::CoreEvent::ScreenChanged) {
             self.engines.errors.clear();
         }
