@@ -1,0 +1,6 @@
+{
+  "idle_wakeups_per_ten_minutes": {
+    "limit": 4500,
+    "reason": "coordination delivery still polls the store once a second (forge-runs coordination.rs) and each tick wakes the runtime for its queries; measured 3,429 to 3,611, and the budget only allows it to shrink"
+  }
+}

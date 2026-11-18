@@ -58,9 +58,13 @@ rusqlite.workspace = true
 test-support = { workspace = true, features = ["http", "sse", "transcript"] }
 reqwest = { workspace = true, features = ["json", "zstd"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 ed25519-dalek.workspace = true
 webp.workspace = true
+
+[[test]]
+name = "budgets"
+path = "tests/budgets.rs"
 
 [lints]
 workspace = true
