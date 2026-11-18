@@ -5,7 +5,8 @@ use forge_store::{CreateProjectError, ReadProjectError};
 use std::path::{Path, PathBuf};
 
 const FOLDER_WORDS: usize = 4;
-const FOLDER_KEY: usize = 12;
+const FOLDER_WORDS_BYTES: usize = 48;
+const LEGACY_KEY: usize = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnsureScratchProjectError {
@@ -168,26 +169,63 @@ fn inside_work_tree(path: &Path) -> bool {
     path.ancestors().any(|dir| dir.join(".git").exists())
 }
 
-fn folder_key(thread: &Thread) -> String {
-    let key: String = thread
-        .id
-        .as_str()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    key[key.len().saturating_sub(FOLDER_KEY)..].to_owned()
+enum FolderKey {
+    Canonical { key: String, legacy: String },
+    Hashed(String),
 }
 
-fn existing_scratch_folder(root: &Path, key: &str) -> std::io::Result<Option<PathBuf>> {
-    let suffix = format!("-{key}");
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().ends_with(&suffix) && entry.file_type()?.is_dir() {
-            return Ok(Some(entry.path()));
+impl FolderKey {
+    fn of(thread: &ThreadId) -> Self {
+        let id = thread.as_str();
+        match uuid::Uuid::try_parse(id) {
+            Ok(parsed) if parsed.hyphenated().to_string() == id => {
+                let key = parsed.simple().to_string();
+                let legacy = key[key.len() - LEGACY_KEY..].to_owned();
+                Self::Canonical { key, legacy }
+            }
+            Ok(_) | Err(_) => {
+                use sha2::Digest as _;
+                let digest = hex::encode(sha2::Sha256::digest(id.as_bytes()));
+                Self::Hashed(format!("x{}", &digest[..32]))
+            }
         }
     }
-    Ok(None)
+
+    fn current(&self) -> &str {
+        match self {
+            Self::Canonical { key, .. } | Self::Hashed(key) => key,
+        }
+    }
+}
+
+fn existing_scratch_folder(root: &Path, thread: &Thread) -> std::io::Result<Option<PathBuf>> {
+    let key = FolderKey::of(&thread.id);
+    let current = format!("-{}", key.current());
+    let legacy = match &key {
+        FolderKey::Canonical { legacy, .. } => {
+            Some((date(thread.created_at), format!("-{legacy}")))
+        }
+        FolderKey::Hashed(_) => None,
+    };
+    let mut found_legacy = None;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if name.ends_with(&current) {
+            return Ok(Some(entry.path()));
+        }
+        if let Some((date, suffix)) = &legacy
+            && name.starts_with(date.as_str())
+            && name.ends_with(suffix.as_str())
+        {
+            found_legacy = Some(entry.path());
+        }
+    }
+    Ok(found_legacy)
 }
 
 pub(crate) fn remove_scratch_folder(
@@ -197,12 +235,11 @@ pub(crate) fn remove_scratch_folder(
     if !root.is_dir() {
         return Ok(());
     }
-    let found = existing_scratch_folder(root, &folder_key(thread)).map_err(|source| {
-        RemoveScratchFolderError::List {
+    let found =
+        existing_scratch_folder(root, thread).map_err(|source| RemoveScratchFolderError::List {
             path: root.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let Some(folder) = found else {
         return Ok(());
     };
@@ -213,16 +250,16 @@ pub(crate) fn remove_scratch_folder(
 }
 
 fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf, ScratchFolderError> {
-    let key = folder_key(thread);
-    let key = key.as_str();
+    let key = FolderKey::of(&thread.id);
     std::fs::create_dir_all(root).map_err(|source| ScratchFolderError::Create {
         path: root.to_path_buf(),
         source,
     })?;
-    let found = existing_scratch_folder(root, key).map_err(|source| ScratchFolderError::List {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let found =
+        existing_scratch_folder(root, thread).map_err(|source| ScratchFolderError::List {
+            path: root.to_path_buf(),
+            source,
+        })?;
     if let Some(folder) = found {
         return Ok(folder);
     }
@@ -231,7 +268,7 @@ fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf, ScratchFolder
         .as_deref()
         .map(folder_words)
         .unwrap_or_default();
-    let name = [date(thread.created_at), words, key.to_owned()]
+    let name = [date(thread.created_at), words, key.current().to_owned()]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -245,15 +282,18 @@ fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf, ScratchFolder
 }
 
 fn folder_words(text: &str) -> String {
-    text.split(|c: char| !c.is_ascii_alphanumeric())
+    let mut words = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .take(FOLDER_WORDS)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    words.truncate(FOLDER_WORDS_BYTES);
+    words.trim_end_matches('-').to_owned()
 }
 
-fn date(at: Timestamp) -> String {
+pub(crate) fn date(at: Timestamp) -> String {
     let days = at.div_euclid(86_400_000);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

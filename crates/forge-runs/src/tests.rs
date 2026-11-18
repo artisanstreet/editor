@@ -39,6 +39,8 @@ mod resume;
 mod retention_tests;
 #[path = "../tests/runtime/registry.rs"]
 mod runtime_registry;
+#[path = "../tests/scratch/folders.rs"]
+mod scratch_folders;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,
