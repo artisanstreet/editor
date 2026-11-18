@@ -6,6 +6,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const DEFAULT_FEED: &str =
     "https://github.com/artisanstreet/editor/releases/latest/download/release.json";
@@ -159,11 +160,166 @@ pub struct Carried {
     pub linux_ae: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub connect: Duration,
+    pub idle: Duration,
+    pub metadata: Duration,
+    pub metadata_bytes: u64,
+    pub artifact: Duration,
+    pub artifact_bytes: u64,
+}
+
+pub const LIMITS: Limits = Limits {
+    connect: Duration::from_secs(15),
+    idle: Duration::from_secs(30),
+    metadata: Duration::from_secs(60),
+    metadata_bytes: 1024 * 1024,
+    artifact: Duration::from_mins(30),
+    artifact_bytes: 1024 * 1024 * 1024,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    #[error("start the HTTP client")]
+    Client(#[source] reqwest::Error),
+    #[error("download {location}")]
+    Request {
+        location: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{location} is larger than the {limit} bytes it may be")]
+    TooLarge { location: String, limit: u64 },
+    #[error("downloading {location} took longer than {after:?}")]
+    TimedOut { location: String, after: Duration },
+    #[error("save the download from {location} in {}", path.display())]
+    Save {
+        location: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn http_client(limits: &Limits) -> Result<reqwest::Client, DownloadError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("ae/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(limits.connect)
+        .read_timeout(limits.idle)
+        .build()
+        .map_err(DownloadError::Client)
+}
+
+async fn download(
+    http: &reqwest::Client,
+    location: &str,
+    limit: u64,
+    deadline: Duration,
+    mut sink: impl FnMut(&[u8]) -> Result<(), DownloadError>,
+) -> Result<(), DownloadError> {
+    let request = |source| DownloadError::Request {
+        location: location.to_owned(),
+        source,
+    };
+    let too_large = || DownloadError::TooLarge {
+        location: location.to_owned(),
+        limit,
+    };
+    let transfer = async {
+        let mut response = http
+            .get(location)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(request)?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(too_large());
+        }
+        let mut received: u64 = 0;
+        while let Some(chunk) = response.chunk().await.map_err(request)? {
+            received = received.saturating_add(chunk.len() as u64);
+            if received > limit {
+                return Err(too_large());
+            }
+            sink(&chunk)?;
+        }
+        Ok(())
+    };
+    match tokio::time::timeout(deadline, transfer).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(DownloadError::TimedOut {
+            location: location.to_owned(),
+            after: deadline,
+        }),
+    }
+}
+
+pub async fn fetch_metadata(
+    http: &reqwest::Client,
+    location: &str,
+    limits: &Limits,
+) -> Result<Vec<u8>, DownloadError> {
+    let mut bytes = Vec::new();
+    download(
+        http,
+        location,
+        limits.metadata_bytes,
+        limits.metadata,
+        |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(bytes)
+}
+
+pub async fn fetch_artifact(
+    http: &reqwest::Client,
+    location: &str,
+    limits: &Limits,
+    folder: &Path,
+    progress: Option<&Progress>,
+) -> Result<(tempfile::NamedTempFile, String), DownloadError> {
+    use std::io::Write as _;
+    let save = |source| DownloadError::Save {
+        location: location.to_owned(),
+        path: folder.to_owned(),
+        source,
+    };
+    let mut file = tempfile::Builder::new()
+        .prefix(".download-")
+        .tempfile_in(folder)
+        .map_err(save)?;
+    let mut hasher = Sha256::new();
+    download(
+        http,
+        location,
+        limits.artifact_bytes,
+        limits.artifact,
+        |chunk| {
+            file.write_all(chunk).map_err(save)?;
+            hasher.update(chunk);
+            if let Some(progress) = progress {
+                progress.advance(chunk.len() as u64);
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    Ok((file, hex::encode(hasher.finalize())))
+}
+
 pub struct Feed {
     manifest: Manifest,
     source: Source,
     assets: Source,
     http: reqwest::Client,
+    limits: Limits,
 }
 
 pub enum Release {
@@ -172,14 +328,15 @@ pub enum Release {
     Bundled(Carried),
 }
 
-pub async fn resolve(source: &Source, carried: Carried) -> Result<Release> {
-    resolve_signed(source, carried, &release_key()?).await
+pub async fn resolve(source: &Source, carried: Carried, limits: Limits) -> Result<Release> {
+    resolve_signed(source, carried, &release_key()?, limits).await
 }
 
 async fn resolve_signed(
     source: &Source,
     carried: Carried,
     key: &ed25519_dalek::VerifyingKey,
+    limits: Limits,
 ) -> Result<Release> {
     match source {
         Source::Bundled => return Ok(Release::Bundled(carried)),
@@ -193,11 +350,8 @@ async fn resolve_signed(
         }
         Source::Dir(_) | Source::Url(_) | Source::Pinned(_) => {}
     }
-    let http = reqwest::Client::builder()
-        .user_agent(concat!("ae/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("start the HTTP client")?;
-    let raw = fetch(&http, source, MANIFEST, None).await?;
+    let http = http_client(&limits)?;
+    let raw = fetch(&http, source, MANIFEST, &limits).await?;
     let manifest: Manifest = serde_json::from_slice(&raw).context("read release.json")?;
     ensure!(
         usable_name(&manifest.version),
@@ -205,7 +359,7 @@ async fn resolve_signed(
         manifest.version
     );
     let assets = source.immutable(&manifest.version)?;
-    let signature = fetch(&http, &assets, &format!("{MANIFEST}.sig"), None).await?;
+    let signature = fetch(&http, &assets, &format!("{MANIFEST}.sig"), &limits).await?;
     verify_signature(&raw, &signature, key)
         .with_context(|| format!("verify the release from {}", source.argument()))?;
     if let Source::Pinned(pin) = source {
@@ -221,6 +375,7 @@ async fn resolve_signed(
         source: source.clone(),
         assets,
         http,
+        limits,
     }))
 }
 
@@ -228,32 +383,13 @@ async fn fetch(
     http: &reqwest::Client,
     source: &Source,
     name: &str,
-    progress: Option<&Progress>,
+    limits: &Limits,
 ) -> Result<Vec<u8>> {
     let location = source.file(name);
     match source {
         Source::Bundled => bail!("this installer carries no {name}"),
         Source::Dir(_) => std::fs::read(&location).with_context(|| format!("read {location}")),
-        Source::Url(_) | Source::Pinned(_) => {
-            let mut response = http
-                .get(&location)
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                .with_context(|| format!("download {location}"))?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .with_context(|| format!("download {location}"))?
-            {
-                if let Some(progress) = progress {
-                    progress.advance(chunk.len() as u64);
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            Ok(bytes)
-        }
+        Source::Url(_) | Source::Pinned(_) => Ok(fetch_metadata(http, &location, limits).await?),
     }
 }
 
@@ -318,28 +454,28 @@ impl Feed {
             artifact.file
         );
         let label = format!("Downloading Artisan {}", self.manifest.version);
-        let length = match &self.assets {
-            Source::Url(_) | Source::Pinned(_) => self
-                .http
-                .head(self.assets.file(&artifact.file))
-                .send()
-                .await
-                .ok()
-                .and_then(|response| response.content_length()),
-            Source::Dir(_) | Source::Bundled => None,
+        std::fs::create_dir_all(folder).with_context(|| format!("create {}", folder.display()))?;
+        let location = self.assets.file(&artifact.file);
+        let progress = match &self.assets {
+            Source::Url(_) | Source::Pinned(_) => match self.announced_length(&location).await {
+                Some(length) => Progress::download(&label, length),
+                None => Progress::spinner(&label),
+            },
+            Source::Dir(_) | Source::Bundled => Progress::spinner(&label),
         };
-        let progress = length.map_or_else(
-            || Progress::spinner(&label),
-            |length| Progress::download(&label, length),
-        );
-        let bytes = match fetch(&self.http, &self.assets, &artifact.file, Some(&progress)).await {
-            Ok(bytes) => bytes,
+        let downloaded = match &self.assets {
+            Source::Url(_) | Source::Pinned(_) => {
+                fetch_artifact(&self.http, &location, &self.limits, folder, Some(&progress)).await
+            }
+            Source::Dir(_) | Source::Bundled => copy_artifact(&location, folder),
+        };
+        let (file, actual) = match downloaded {
+            Ok(downloaded) => downloaded,
             Err(error) => {
-                progress.fail(format!("{error:#}"));
-                return Err(error);
+                progress.fail(diagnostics::chain(&error));
+                return Err(error.into());
             }
         };
-        let actual = hex::encode(Sha256::digest(&bytes));
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
             let message = format!(
                 "{} is corrupt or was tampered with (SHA-256 {actual}, expected {})",
@@ -348,13 +484,57 @@ impl Feed {
             progress.fail(&message);
             bail!(message);
         }
-        std::fs::create_dir_all(folder).with_context(|| format!("create {}", folder.display()))?;
         let path = folder.join(&artifact.file);
-        std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+        file.persist(&path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("write {}", path.display()))?;
         make_runnable(&path)?;
         progress.done(format!("Downloaded Artisan {}", self.manifest.version));
         Ok(path)
     }
+
+    async fn announced_length(&self, location: &str) -> Option<u64> {
+        let head = self.http.head(location).send();
+        match tokio::time::timeout(self.limits.metadata, head).await {
+            Ok(Ok(response)) => response.content_length(),
+            Ok(Err(error)) => {
+                tracing::debug!(location, "asking for the download's size failed: {error}");
+                None
+            }
+            Err(_elapsed) => {
+                tracing::debug!(location, "asking for the download's size timed out");
+                None
+            }
+        }
+    }
+}
+
+fn copy_artifact(
+    location: &str,
+    folder: &Path,
+) -> Result<(tempfile::NamedTempFile, String), DownloadError> {
+    let save = |source| DownloadError::Save {
+        location: location.to_owned(),
+        path: folder.to_owned(),
+        source,
+    };
+    let mut file = tempfile::Builder::new()
+        .prefix(".download-")
+        .tempfile_in(folder)
+        .map_err(save)?;
+    let mut source = std::fs::File::open(location).map_err(save)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        use std::io::{Read as _, Write as _};
+        let read = source.read(&mut buffer).map_err(save)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        file.write_all(&buffer[..read]).map_err(save)?;
+    }
+    Ok((file, hex::encode(hasher.finalize())))
 }
 
 #[cfg_attr(
@@ -384,10 +564,15 @@ impl Release {
             Self::Bundled(_) => Ok(env!("CARGO_PKG_VERSION").to_owned()),
             Self::Local { dir } => {
                 let path = dir.join(os).join("VERSION");
-                let version = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|_| "0.0.0-local".to_owned())
-                    .trim()
-                    .to_owned();
+                let version = match std::fs::read_to_string(&path) {
+                    Ok(text) => text.trim().to_owned(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        "0.0.0-local".to_owned()
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("read {}", path.display()));
+                    }
+                };
                 ensure!(
                     usable_name(&version),
                     "unusable version in {}",

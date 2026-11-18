@@ -1,4 +1,5 @@
 use super::*;
+use futures::StreamExt as _;
 
 #[test]
 fn updates_keep_nightly_and_custom_feeds_but_release_pins_follow_stable() {
@@ -159,6 +160,7 @@ impl SignedRelease {
             &source,
             Carried::default(),
             &self.key.verifying_key(),
+            LIMITS,
         ))? {
             Release::Feed(feed) => Ok(feed.version().to_owned()),
             Release::Local { .. } | Release::Bundled(_) => bail!("not a signed release"),
@@ -206,4 +208,118 @@ fn altered_or_foreign_signatures_are_rejected() {
     );
     let error = release.resolve().expect_err("foreign signature");
     assert!(format!("{error:#}").contains("not signed by Artisan's release key"));
+}
+
+fn limits(deadline: Duration, bytes: u64) -> Limits {
+    Limits {
+        connect: Duration::from_secs(5),
+        idle: Duration::from_secs(30),
+        metadata: deadline,
+        metadata_bytes: bytes,
+        artifact: deadline,
+        artifact_bytes: bytes,
+    }
+}
+
+async fn feed_serving(
+    body: impl Fn() -> axum::body::Body + Clone + Send + Sync + 'static,
+) -> test_support::http::StubServer {
+    test_support::http::StubServer::serve(axum::Router::new().route(
+        "/release.json",
+        axum::routing::get(move || {
+            let body = body.clone();
+            async move { body() }
+        }),
+    ))
+    .await
+}
+
+fn stalled() -> axum::body::Body {
+    axum::body::Body::from_stream(
+        futures::stream::iter([Ok::<_, std::io::Error>(vec![b'{'])])
+            .chain(futures::stream::pending()),
+    )
+}
+
+fn endless() -> axum::body::Body {
+    axum::body::Body::from_stream(futures::stream::repeat_with(|| {
+        Ok::<_, std::io::Error>(vec![b' '; 1024])
+    }))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_feed_that_stops_sending_gives_up_at_its_deadline() {
+    let server = feed_serving(stalled).await;
+    let limits = limits(Duration::from_millis(300), 1024 * 1024);
+    let http = http_client(&limits).unwrap();
+
+    let fetched = test_support::wait::within(
+        "the stalled download to give up",
+        Duration::from_secs(10),
+        fetch_metadata(&http, &format!("{}/release.json", server.url()), &limits),
+    )
+    .await;
+
+    assert!(
+        matches!(fetched, Err(DownloadError::TimedOut { .. })),
+        "{fetched:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endless_manifest_is_cut_off_at_its_size_limit() {
+    let server = feed_serving(endless).await;
+    let limits = limits(Duration::from_secs(30), 64 * 1024);
+    let http = http_client(&limits).unwrap();
+
+    let fetched = test_support::wait::within(
+        "the endless download to be cut off",
+        Duration::from_secs(10),
+        fetch_metadata(&http, &format!("{}/release.json", server.url()), &limits),
+    )
+    .await;
+
+    assert!(
+        matches!(fetched, Err(DownloadError::TooLarge { .. })),
+        "{fetched:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_artifact_leaves_no_file_behind() {
+    let server = feed_serving(|| axum::body::Body::from(vec![b'x'; 8 * 1024])).await;
+    let limits = limits(Duration::from_secs(30), 4 * 1024);
+    let http = http_client(&limits).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+
+    let fetched = fetch_artifact(
+        &http,
+        &format!("{}/release.json", server.url()),
+        &limits,
+        folder.path(),
+        None,
+    )
+    .await;
+
+    assert!(matches!(fetched, Err(DownloadError::TooLarge { .. })));
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn an_unreadable_local_version_is_reported_instead_of_invented() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("linux/VERSION")).unwrap();
+    let release = Release::Local {
+        dir: dir.path().to_owned(),
+    };
+
+    assert!(release.version("linux").is_err());
+    assert_eq!(
+        Release::Local {
+            dir: dir.path().join("elsewhere"),
+        }
+        .version("linux")
+        .unwrap(),
+        "0.0.0-local"
+    );
 }

@@ -193,10 +193,10 @@ fn resolve(
     carried: Carried,
 ) -> Result<Release> {
     if matches!(source, Source::Bundled) {
-        return runtime.block_on(release::resolve(source, carried));
+        return runtime.block_on(release::resolve(source, carried, release::LIMITS));
     }
     let release = ui::task("Checking the release", "Checked the release", || {
-        runtime.block_on(release::resolve(source, carried))
+        runtime.block_on(release::resolve(source, carried, release::LIMITS))
     })?;
     if release.is_local() {
         ui::info(format!(
