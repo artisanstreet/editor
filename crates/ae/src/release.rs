@@ -1,6 +1,5 @@
 use crate::bundle;
 use crate::ui::Progress;
-use anyhow::{Context, Result, bail, ensure};
 use artisan_paths::App;
 use base64::Engine as _;
 use serde::Deserialize;
@@ -86,22 +85,53 @@ fn pins(pin: &semver::Version, version: &str) -> bool {
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SourceError {
+    #[error("pass either --from or --version")]
+    Both,
+    #[error("resolve {value}")]
+    Resolve {
+        value: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("unusable version {version:?}")]
+    Version {
+        version: String,
+        #[source]
+        source: semver::Error,
+    },
+}
+
 impl Source {
-    pub fn new(from: Option<&str>, version: Option<&str>, bundled: bool) -> Result<Self> {
+    pub fn new(
+        from: Option<&str>,
+        version: Option<&str>,
+        bundled: bool,
+    ) -> Result<Self, SourceError> {
         Ok(match (from, version) {
-            (Some(_), Some(_)) => bail!("pass either --from or --version"),
+            (Some(_), Some(_)) => return Err(SourceError::Both),
             (Some(value), None)
                 if value.starts_with("https://") || value.starts_with("http://") =>
             {
                 Self::Url(value.to_owned())
             }
             (Some(value), None) => {
-                Self::Dir(std::path::absolute(value).with_context(|| format!("resolve {value}"))?)
+                Self::Dir(
+                    std::path::absolute(value).map_err(|source| SourceError::Resolve {
+                        value: value.to_owned(),
+                        source,
+                    })?,
+                )
             }
-            (None, Some(version)) => Self::Pinned(
-                semver::Version::parse(version)
-                    .with_context(|| format!("unusable version {version:?}"))?,
-            ),
+            (None, Some(version)) => {
+                Self::Pinned(semver::Version::parse(version).map_err(|source| {
+                    SourceError::Version {
+                        version: version.to_owned(),
+                        source,
+                    }
+                })?)
+            }
             (None, None) if bundled || bundle::FORGE.present() => Self::Bundled,
             (None, None) => Self::Url(feed_for(env!("CARGO_PKG_VERSION")).to_owned()),
         })
@@ -143,11 +173,13 @@ impl Source {
         }
     }
 
-    fn immutable(&self, version: &str) -> Result<Self> {
+    fn immutable(&self, version: &str) -> Result<Self, ResolveError> {
         match self {
             Self::Url(url) if url.starts_with(RELEASES) => Ok(Self::Pinned(
-                semver::Version::parse(version)
-                    .with_context(|| format!("unusable release version {version:?}"))?,
+                semver::Version::parse(version).map_err(|source| ResolveError::Version {
+                    version: version.to_owned(),
+                    source,
+                })?,
             )),
             Self::Bundled | Self::Url(_) | Self::Pinned(_) | Self::Dir(_) => Ok(self.clone()),
         }
@@ -328,8 +360,177 @@ pub enum Release {
     Bundled(Carried),
 }
 
-pub async fn resolve(source: &Source, carried: Carried, limits: Limits) -> Result<Release> {
-    resolve_signed(source, carried, &release_key()?, limits).await
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("read Artisan's release key")]
+    Key(#[source] ReleaseKeyError),
+    #[error("{} is neither a release nor a local build", dir.display())]
+    NotARelease { dir: PathBuf },
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(transparent)]
+    Fetch(#[from] FetchError),
+    #[error("read release.json from {from}")]
+    Manifest {
+        from: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("unusable release version {version:?}")]
+    UnusableVersion { version: String },
+    #[error("unusable release version {version:?}")]
+    Version {
+        version: String,
+        #[source]
+        source: semver::Error,
+    },
+    #[error("verify the release from {from}")]
+    Signature {
+        from: String,
+        #[source]
+        source: SignatureError,
+    },
+    #[error("{from} holds release {found}, not the requested {pin}")]
+    WrongPin {
+        from: String,
+        found: String,
+        pin: semver::Version,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error("this installer carries no {name}")]
+    Bundled { name: String },
+    #[error("read {location}")]
+    Read {
+        location: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseKeyError {
+    #[error("the release public key isn't hex")]
+    Hex(#[source] hex::FromHexError),
+    #[error("the release key is not 32 bytes but {length}")]
+    Length { length: usize },
+    #[error("the release key isn't an Ed25519 key")]
+    Key(#[source] ed25519_dalek::SignatureError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SignatureError {
+    #[error("decode release.json.sig")]
+    Decode(#[source] base64::DecodeError),
+    #[error("read release.json.sig")]
+    Read(#[source] ed25519_dalek::SignatureError),
+    #[error("release.json is not signed by Artisan's release key")]
+    Unsigned(#[source] ed25519_dalek::SignatureError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FetchCarrierError {
+    #[error("release {version} has no installer for {os} {arch}")]
+    NoInstaller {
+        version: String,
+        os: String,
+        arch: &'static str,
+    },
+    #[error("unusable file name {file:?}")]
+    UnusableName { file: String },
+    #[error("create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error("{file} is corrupt or was tampered with (SHA-256 {actual}, expected {expected})")]
+    Corrupt {
+        file: String,
+        actual: String,
+        expected: String,
+    },
+    #[error("write {}", path.display())]
+    Persist {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Runnable(#[from] MakeRunnableError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("make {} runnable", path.display())]
+pub struct MakeRunnableError {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseVersionError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("unusable version in {}", path.display())]
+    Unusable { path: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UnpackError {
+    #[error("create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("there is no {}", path.display())]
+    Missing { path: PathBuf },
+    #[error("copy {} to {}", from.display(), to.display())]
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Runnable(#[from] MakeRunnableError),
+    #[error("a release feed installs through its own installer")]
+    Feed,
+    #[error("find this ae")]
+    CurrentExe(#[source] std::io::Error),
+    #[error("write {}", path.display())]
+    WriteForge {
+        path: PathBuf,
+        #[source]
+        source: artisan_payload::WritePayloadError,
+    },
+    #[error("this installer carries no {} for {os}", app.display_name())]
+    NotCarried { app: App, os: String },
+}
+
+pub async fn resolve(
+    source: &Source,
+    carried: Carried,
+    limits: Limits,
+) -> Result<Release, ResolveError> {
+    resolve_signed(
+        source,
+        carried,
+        &release_key().map_err(ResolveError::Key)?,
+        limits,
+    )
+    .await
 }
 
 async fn resolve_signed(
@@ -337,38 +538,43 @@ async fn resolve_signed(
     carried: Carried,
     key: &ed25519_dalek::VerifyingKey,
     limits: Limits,
-) -> Result<Release> {
+) -> Result<Release, ResolveError> {
     match source {
         Source::Bundled => return Ok(Release::Bundled(carried)),
         Source::Dir(dir) if !dir.join(MANIFEST).is_file() => {
-            ensure!(
-                dir.is_dir(),
-                "{} is neither a release nor a local build",
-                dir.display()
-            );
+            if !dir.is_dir() {
+                return Err(ResolveError::NotARelease { dir: dir.clone() });
+            }
             return Ok(Release::Local { dir: dir.clone() });
         }
         Source::Dir(_) | Source::Url(_) | Source::Pinned(_) => {}
     }
     let http = http_client(&limits)?;
     let raw = fetch(&http, source, MANIFEST, &limits).await?;
-    let manifest: Manifest = serde_json::from_slice(&raw).context("read release.json")?;
-    ensure!(
-        usable_name(&manifest.version),
-        "unusable release version {:?}",
-        manifest.version
-    );
+    let manifest: Manifest =
+        serde_json::from_slice(&raw).map_err(|error| ResolveError::Manifest {
+            from: source.argument(),
+            source: error,
+        })?;
+    if !usable_name(&manifest.version) {
+        return Err(ResolveError::UnusableVersion {
+            version: manifest.version,
+        });
+    }
     let assets = source.immutable(&manifest.version)?;
     let signature = fetch(&http, &assets, &format!("{MANIFEST}.sig"), &limits).await?;
-    verify_signature(&raw, &signature, key)
-        .with_context(|| format!("verify the release from {}", source.argument()))?;
-    if let Source::Pinned(pin) = source {
-        ensure!(
-            pins(pin, &manifest.version),
-            "{} holds release {}, not the requested {pin}",
-            source.argument(),
-            manifest.version
-        );
+    verify_signature(&raw, &signature, key).map_err(|error| ResolveError::Signature {
+        from: source.argument(),
+        source: error,
+    })?;
+    if let Source::Pinned(pin) = source
+        && !pins(pin, &manifest.version)
+    {
+        return Err(ResolveError::WrongPin {
+            from: source.argument(),
+            found: manifest.version,
+            pin: pin.clone(),
+        });
     }
     Ok(Release::Feed(Feed {
         manifest,
@@ -384,16 +590,21 @@ async fn fetch(
     source: &Source,
     name: &str,
     limits: &Limits,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>, FetchError> {
     let location = source.file(name);
     match source {
-        Source::Bundled => bail!("this installer carries no {name}"),
-        Source::Dir(_) => std::fs::read(&location).with_context(|| format!("read {location}")),
+        Source::Bundled => Err(FetchError::Bundled {
+            name: name.to_owned(),
+        }),
+        Source::Dir(_) => std::fs::read(&location).map_err(|error| FetchError::Read {
+            location,
+            source: error,
+        }),
         Source::Url(_) | Source::Pinned(_) => Ok(fetch_metadata(http, &location, limits).await?),
     }
 }
 
-fn release_key() -> Result<ed25519_dalek::VerifyingKey> {
+fn release_key() -> Result<ed25519_dalek::VerifyingKey, ReleaseKeyError> {
     let key_hex = if cfg!(debug_assertions) {
         std::env::var("ARTISAN_RELEASE_PUBLIC_KEY_HEX")
             .unwrap_or_else(|_| PUBLIC_KEY_HEX.to_owned())
@@ -401,23 +612,24 @@ fn release_key() -> Result<ed25519_dalek::VerifyingKey> {
         PUBLIC_KEY_HEX.to_owned()
     };
     let key: [u8; 32] = hex::decode(key_hex.trim())
-        .context("invalid release public key hex")?
+        .map_err(ReleaseKeyError::Hex)?
         .try_into()
-        .map_err(|key: Vec<u8>| {
-            anyhow::anyhow!("the release key is not 32 bytes but {}", key.len())
-        })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&key).context("read the release key")
+        .map_err(|key: Vec<u8>| ReleaseKeyError::Length { length: key.len() })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(ReleaseKeyError::Key)
 }
 
-fn verify_signature(raw: &[u8], signature: &[u8], key: &ed25519_dalek::VerifyingKey) -> Result<()> {
+fn verify_signature(
+    raw: &[u8],
+    signature: &[u8],
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), SignatureError> {
     let text = String::from_utf8_lossy(signature);
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(text.trim())
-        .context("decode release.json.sig")?;
-    let signature =
-        ed25519_dalek::Signature::from_slice(&bytes).context("read release.json.sig")?;
+        .map_err(SignatureError::Decode)?;
+    let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(SignatureError::Read)?;
     key.verify_strict(raw, &signature)
-        .context("release.json is not signed by Artisan's release key")
+        .map_err(SignatureError::Unsigned)
 }
 
 impl Feed {
@@ -440,21 +652,28 @@ impl Feed {
         })
     }
 
-    pub async fn fetch_carrier(&self, os: &str, folder: &Path) -> Result<PathBuf> {
-        let artifact = self.artifact(os).with_context(|| {
-            format!(
-                "release {} has no installer for {os} {}",
-                self.manifest.version,
-                std::env::consts::ARCH
-            )
-        })?;
-        ensure!(
-            usable_name(&artifact.file),
-            "unusable file name {:?}",
-            artifact.file
-        );
+    pub async fn fetch_carrier(
+        &self,
+        os: &str,
+        folder: &Path,
+    ) -> Result<PathBuf, FetchCarrierError> {
+        let artifact = self
+            .artifact(os)
+            .ok_or_else(|| FetchCarrierError::NoInstaller {
+                version: self.manifest.version.clone(),
+                os: os.to_owned(),
+                arch: std::env::consts::ARCH,
+            })?;
+        if !usable_name(&artifact.file) {
+            return Err(FetchCarrierError::UnusableName {
+                file: artifact.file.clone(),
+            });
+        }
         let label = format!("Downloading Artisan {}", self.manifest.version);
-        std::fs::create_dir_all(folder).with_context(|| format!("create {}", folder.display()))?;
+        std::fs::create_dir_all(folder).map_err(|source| FetchCarrierError::CreateDir {
+            path: folder.to_owned(),
+            source,
+        })?;
         let location = self.assets.file(&artifact.file);
         let progress = match &self.assets {
             Source::Url(_) | Source::Pinned(_) => match self.announced_length(&location).await {
@@ -477,17 +696,20 @@ impl Feed {
             }
         };
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
-            let message = format!(
-                "{} is corrupt or was tampered with (SHA-256 {actual}, expected {})",
-                artifact.file, artifact.sha256
-            );
-            progress.fail(&message);
-            bail!(message);
+            let error = FetchCarrierError::Corrupt {
+                file: artifact.file.clone(),
+                actual,
+                expected: artifact.sha256.clone(),
+            };
+            progress.fail(&error);
+            return Err(error);
         }
         let path = folder.join(&artifact.file);
         file.persist(&path)
-            .map_err(|error| error.error)
-            .with_context(|| format!("write {}", path.display()))?;
+            .map_err(|error| FetchCarrierError::Persist {
+                path: path.clone(),
+                source: error.error,
+            })?;
         make_runnable(&path)?;
         progress.done(format!("Downloaded Artisan {}", self.manifest.version));
         Ok(path)
@@ -498,7 +720,11 @@ impl Feed {
         match tokio::time::timeout(self.limits.metadata, head).await {
             Ok(Ok(response)) => response.content_length(),
             Ok(Err(error)) => {
-                tracing::debug!(location, "asking for the download's size failed: {error}");
+                tracing::debug!(
+                    location,
+                    "asking for the download's size failed: {}",
+                    diagnostics::chain(&error)
+                );
                 None
             }
             Err(_elapsed) => {
@@ -545,12 +771,16 @@ fn copy_artifact(
         reason = "only Unix marks a file runnable"
     )
 )]
-fn make_runnable(path: &Path) -> Result<()> {
+fn make_runnable(path: &Path) -> Result<(), MakeRunnableError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("make {} runnable", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(
+            |source| MakeRunnableError {
+                path: path.to_owned(),
+                source,
+            },
+        )?;
     }
     #[cfg(not(unix))]
     let _ = path;
@@ -558,7 +788,7 @@ fn make_runnable(path: &Path) -> Result<()> {
 }
 
 impl Release {
-    pub fn version(&self, os: &str) -> Result<String> {
+    pub fn version(&self, os: &str) -> Result<String, ReleaseVersionError> {
         match self {
             Self::Feed(feed) => Ok(feed.manifest.version.clone()),
             Self::Bundled(_) => Ok(env!("CARGO_PKG_VERSION").to_owned()),
@@ -569,15 +799,11 @@ impl Release {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         "0.0.0-local".to_owned()
                     }
-                    Err(error) => {
-                        return Err(error).with_context(|| format!("read {}", path.display()));
-                    }
+                    Err(source) => return Err(ReleaseVersionError::Read { path, source }),
                 };
-                ensure!(
-                    usable_name(&version),
-                    "unusable version in {}",
-                    path.display()
-                );
+                if !usable_name(&version) {
+                    return Err(ReleaseVersionError::Unusable { path });
+                }
                 Ok(version)
             }
         }
@@ -608,39 +834,47 @@ impl Release {
         }
     }
 
-    pub fn unpack(&self, app: App, os: &str, dest: &Path) -> Result<()> {
+    pub fn unpack(&self, app: App, os: &str, dest: &Path) -> Result<(), UnpackError> {
         let binary = app.binary_name_on(os);
         let here = os == std::env::consts::OS;
-        std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
+        std::fs::create_dir_all(dest).map_err(|source| UnpackError::CreateDir {
+            path: dest.to_owned(),
+            source,
+        })?;
         let target = dest.join(&binary);
-        let copy = |from: &Path| -> Result<()> {
-            ensure!(from.is_file(), "there is no {}", from.display());
-            std::fs::copy(from, &target).with_context(|| format!("copy {}", from.display()))?;
-            make_runnable(&target)
+        let copy = |from: &Path| -> Result<(), UnpackError> {
+            if !from.is_file() {
+                return Err(UnpackError::Missing {
+                    path: from.to_owned(),
+                });
+            }
+            std::fs::copy(from, &target).map_err(|source| UnpackError::Copy {
+                from: from.to_owned(),
+                to: target.clone(),
+                source,
+            })?;
+            Ok(make_runnable(&target)?)
+        };
+        let not_carried = || UnpackError::NotCarried {
+            app,
+            os: os.to_owned(),
         };
         match self {
-            Self::Feed(_) => bail!("a release feed installs through its own installer"),
+            Self::Feed(_) => Err(UnpackError::Feed),
             Self::Local { dir } => copy(&dir.join(os).join(&binary)),
             Self::Bundled(carried) => match (app, here) {
-                (App::Ae, true) => copy(&std::env::current_exe().context("find this ae")?),
-                (App::Ae, false) => copy(
-                    carried
-                        .linux_ae
-                        .as_deref()
-                        .context("this installer carries no ae for Linux")?,
-                ),
-                (App::Forge, true) => bundle::FORGE
-                    .write_program(&target)
-                    .with_context(|| format!("write {}", target.display())),
-                (App::Editor, true) => copy(
-                    carried
-                        .editor
-                        .as_deref()
-                        .context("this installer carries no Editor")?,
-                ),
-                (App::Forge | App::Editor, false) => {
-                    bail!("this installer carries no {} for {os}", app.display_name())
+                (App::Ae, true) => copy(&std::env::current_exe().map_err(UnpackError::CurrentExe)?),
+                (App::Ae, false) => copy(carried.linux_ae.as_deref().ok_or_else(not_carried)?),
+                (App::Forge, true) => {
+                    bundle::FORGE
+                        .write_program(&target)
+                        .map_err(|source| UnpackError::WriteForge {
+                            path: target.clone(),
+                            source,
+                        })
                 }
+                (App::Editor, true) => copy(carried.editor.as_deref().ok_or_else(not_carried)?),
+                (App::Forge | App::Editor, false) => Err(not_carried()),
             },
         }
     }

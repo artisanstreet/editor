@@ -1,16 +1,34 @@
-//! `ae open [<path>]`.
-
-use crate::{install, sys, ui};
-use anyhow::{Context, Result};
+use crate::install::{self, InstallEditorError};
+use crate::paths::{self, LocateError};
+use crate::sys::{self, SpawnError};
+use crate::ui::{self, AskError};
 use artisan_paths::App;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Starts the installed Editor, detached from this terminal, on a folder
-/// or an `artisan://` link. Offers to install it when it isn't.
-pub fn open(path: Option<&Path>) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error("the Editor isn't installed here; run `ae install --editor here`")]
+    NotInstalled,
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error(transparent)]
+    Install(#[from] InstallEditorError),
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("resolve {}", path.display())]
+    Resolve {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+}
+
+pub fn open(path: Option<&Path>) -> Result<(), OpenError> {
     if install::installed(App::Editor).is_none() {
         if !ui::interactive() {
-            anyhow::bail!("the Editor isn't installed here; run `ae install --editor here`");
+            return Err(OpenError::NotInstalled);
         }
         let go = cliclack::confirm("The Editor isn't installed here. Install it?")
             .initial_value(true)
@@ -19,9 +37,9 @@ pub fn open(path: Option<&Path>) -> Result<()> {
         if !go {
             return Ok(());
         }
-        return install::install_editor();
+        return Ok(install::install_editor()?);
     }
-    let mut command = std::process::Command::new(App::Editor.binary()?);
+    let mut command = std::process::Command::new(paths::binary(App::Editor)?);
     if let Some(path) = path {
         let is_link = path
             .to_str()
@@ -29,7 +47,10 @@ pub fn open(path: Option<&Path>) -> Result<()> {
         command.arg(if is_link {
             path.to_owned()
         } else {
-            std::path::absolute(path).with_context(|| format!("resolve {}", path.display()))?
+            std::path::absolute(path).map_err(|source| OpenError::Resolve {
+                path: path.to_owned(),
+                source,
+            })?
         });
     }
     command

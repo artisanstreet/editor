@@ -2,9 +2,9 @@
 //! Editor's launcher entry and `artisan://` handler, the Settings → Apps
 //! entries on Windows, and closing running Editors before replacing them.
 
-use crate::sys::{self, ps_quote, ps_string};
-use anyhow::{Context, Result};
-use artisan_paths::App;
+use crate::paths::{self, LocateError};
+use crate::sys::{self, RemoveError, RunError, SpawnError, WriteError, ps_quote, ps_string};
+use artisan_paths::{App, EnvPathError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,14 +14,92 @@ const SHORTCUT: &str = "Artisan Editor.lnk";
 const PROTOCOL_KEY: &str = r"HKCU:\Software\Classes\artisan";
 const KEEP_OTHER_ENTRIES: &str = r"$_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\')";
 
-/// Puts `ae` on PATH: its folder on the user `Path` on Windows,
-/// `~/.local/bin/ae` elsewhere. Returns a hint when the shell won't see it.
-pub fn add_to_path() -> Result<Option<String>> {
+#[derive(Debug, thiserror::Error)]
+pub enum AddToPathError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("add ae's folder to the user Path")]
+    PowerShell(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[cfg(unix)]
+    #[error("link {}", path.display())]
+    Link {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveFromPathError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("drop ae's folder from the user Path")]
+    PowerShell(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error(transparent)]
+    Remove(#[from] RemoveError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IntegrateEditorError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("APPDATA is not set")]
+    NoAppData,
+    #[error("find the user data folder")]
+    Data(#[source] EnvPathError),
+    #[error("add the Editor's Start menu entry and artisan:// handler")]
+    PowerShell(#[source] RunError),
+    #[error(transparent)]
+    Write(#[from] WriteError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveEditorIntegrationError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("APPDATA is not set")]
+    NoAppData,
+    #[error("find the user data folder")]
+    Data(#[source] EnvPathError),
+    #[error("remove the Editor's artisan:// handler")]
+    PowerShell(#[source] RunError),
+    #[error(transparent)]
+    Remove(#[from] RemoveError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterUninstallError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("add {} to Settings → Apps", app.display_name())]
+    PowerShell {
+        app: App,
+        #[source]
+        source: RunError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchEditorError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+}
+
+pub fn add_to_path() -> Result<Option<String>, AddToPathError> {
     if cfg!(windows) {
-        let dir = ps_quote(&App::Ae.dir()?);
-        // Keeps the value's REG_EXPAND_SZ type and other entries' %VARS%;
-        // setting a throwaway variable broadcasts WM_SETTINGCHANGE so new
-        // terminals see the change.
+        let dir = ps_quote(&paths::dir(App::Ae)?);
         sys::powershell(&format!(
             "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
              $old = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); \
@@ -29,19 +107,25 @@ pub fn add_to_path() -> Result<Option<String>> {
              $key.SetValue('Path', ((@($dir) + $parts) -join ';'), 'ExpandString'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', '1', 'User'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', $null, 'User')"
-        ))?;
+        ))
+        .map_err(AddToPathError::PowerShell)?;
         Ok(None)
     } else {
-        // A file of someone else's here was confirmed away (`foreign_ae`).
-        let link = unix_link()?;
+        let link = unix_link().map_err(AddToPathError::Home)?;
         if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|source| AddToPathError::CreateDir {
+                path: parent.to_owned(),
+                source,
+            })?;
         }
         std::fs::remove_file(&link).ok();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(App::Ae.binary()?, &link)
-            .with_context(|| format!("link {}", link.display()))?;
+        std::os::unix::fs::symlink(paths::binary(App::Ae)?, &link).map_err(|source| {
+            AddToPathError::Link {
+                path: link.clone(),
+                source,
+            }
+        })?;
         let dir = link.parent().unwrap_or(&link);
         Ok((!on_path(dir)).then(|| {
             format!(
@@ -52,7 +136,6 @@ pub fn add_to_path() -> Result<Option<String>> {
     }
 }
 
-/// A `~/.local/bin/ae` that isn't Artisan's link, which installing replaces.
 pub fn foreign_ae() -> Option<PathBuf> {
     if cfg!(windows) {
         return None;
@@ -63,11 +146,11 @@ pub fn foreign_ae() -> Option<PathBuf> {
         .then_some(link)
 }
 
-pub fn remove_from_path() -> Result<()> {
+pub fn remove_from_path() -> Result<(), RemoveFromPathError> {
     if cfg!(windows) {
-        remove_path_entry(&App::Ae.dir()?)
+        remove_path_entry(&paths::dir(App::Ae)?).map_err(RemoveFromPathError::PowerShell)
     } else {
-        let link = unix_link()?;
+        let link = unix_link().map_err(RemoveFromPathError::Home)?;
         if std::fs::read_link(&link)
             .is_ok_and(|target| target == App::Ae.binary().unwrap_or_default())
         {
@@ -77,8 +160,7 @@ pub fn remove_from_path() -> Result<()> {
     }
 }
 
-/// Drops one folder from the user `Path` (Windows).
-pub fn remove_path_entry(dir: &Path) -> Result<()> {
+pub fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
     let dir = ps_quote(dir);
     sys::powershell(&format!(
         "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
@@ -89,7 +171,6 @@ pub fn remove_path_entry(dir: &Path) -> Result<()> {
     .map(drop)
 }
 
-/// Whether a new terminal finds this `ae`.
 pub fn path_ok() -> bool {
     if cfg!(windows) {
         let Ok(dir) = App::Ae.dir() else {
@@ -113,7 +194,7 @@ pub fn path_ok() -> bool {
     }
 }
 
-pub fn unix_link() -> Result<PathBuf> {
+pub fn unix_link() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::home()?.join(".local/bin/ae"))
 }
 
@@ -122,12 +203,12 @@ fn on_path(dir: &Path) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == dir))
 }
 
-/// The Start menu entry and `artisan://` handler (Windows), or the
-/// `.desktop` entry (Linux), pointing at the Editor's fixed path.
-pub fn integrate_editor() -> Result<()> {
-    let editor = App::Editor.binary()?;
+pub fn integrate_editor() -> Result<(), IntegrateEditorError> {
+    let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
-        let link = start_menu()?.join(SHORTCUT);
+        let link = start_menu()
+            .ok_or(IntegrateEditorError::NoAppData)?
+            .join(SHORTCUT);
         let command = protocol_command(&editor);
         sys::powershell(&format!(
             "$shell = New-Object -ComObject WScript.Shell; $s = $shell.CreateShortcut({link}); \
@@ -144,19 +225,26 @@ pub fn integrate_editor() -> Result<()> {
             protocol = ps_string(PROTOCOL_KEY),
         ))
         .map(drop)
+        .map_err(IntegrateEditorError::PowerShell)
     } else if cfg!(target_os = "linux") {
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=Artisan Editor\nExec=\"{}\" %u\nIcon=artisan-editor\nTerminal=false\n\
              Categories=Development;TextEditor;\nMimeType=x-scheme-handler/artisan;\nStartupWMClass=artisan-editor\n",
             editor.display()
         );
-        sys::write(&desktop_file()?, &entry)?;
-        sys::write(&icon_file()?, EDITOR_ICON)?;
+        sys::write(&desktop_file().map_err(IntegrateEditorError::Data)?, &entry)?;
+        sys::write(
+            &icon_file().map_err(IntegrateEditorError::Data)?,
+            EDITOR_ICON,
+        )?;
         if let Err(error) = sys::run(
             "xdg-mime",
             &["default", DESKTOP_FILE, "x-scheme-handler/artisan"],
         ) {
-            tracing::debug!("couldn't register artisan:// links: {error:#}");
+            tracing::debug!(
+                "couldn't register artisan:// links: {}",
+                diagnostics::chain(&error)
+            );
         }
         Ok(())
     } else {
@@ -164,23 +252,31 @@ pub fn integrate_editor() -> Result<()> {
     }
 }
 
-pub fn remove_editor_integration() -> Result<()> {
+pub fn remove_editor_integration() -> Result<(), RemoveEditorIntegrationError> {
     if cfg!(windows) {
-        sys::remove(&start_menu()?.join(SHORTCUT))?;
+        sys::remove(
+            &start_menu()
+                .ok_or(RemoveEditorIntegrationError::NoAppData)?
+                .join(SHORTCUT),
+        )?;
         let registered = sys::powershell(&format!(
             "$v = (Get-ItemProperty -LiteralPath {key} -ErrorAction SilentlyContinue).'(default)'; if ($v) {{ $v }}",
             key = ps_string(&format!(r"{PROTOCOL_KEY}\shell\open\command")),
-        ))?;
-        if registered.trim() == protocol_command(&App::Editor.binary()?) {
+        ))
+        .map_err(RemoveEditorIntegrationError::PowerShell)?;
+        if registered.trim() == protocol_command(&paths::binary(App::Editor)?) {
             sys::powershell(&format!(
                 "Remove-Item -LiteralPath {} -Recurse -Force",
                 ps_string(PROTOCOL_KEY)
-            ))?;
+            ))
+            .map_err(RemoveEditorIntegrationError::PowerShell)?;
         }
         Ok(())
     } else if cfg!(target_os = "linux") {
-        sys::remove(&icon_file()?)?;
-        sys::remove(&desktop_file()?)
+        sys::remove(&icon_file().map_err(RemoveEditorIntegrationError::Data)?)?;
+        Ok(sys::remove(
+            &desktop_file().map_err(RemoveEditorIntegrationError::Data)?,
+        )?)
     } else {
         Ok(())
     }
@@ -190,18 +286,18 @@ fn protocol_command(editor: &Path) -> String {
     format!("\"{}\" \"%1\"", editor.display())
 }
 
-pub fn start_menu() -> Result<PathBuf> {
-    let app_data = PathBuf::from(std::env::var_os("APPDATA").context("APPDATA is not set")?);
-    Ok(app_data.join(r"Microsoft\Windows\Start Menu\Programs"))
+fn start_menu() -> Option<PathBuf> {
+    let app_data = PathBuf::from(std::env::var_os("APPDATA")?);
+    Some(app_data.join(r"Microsoft\Windows\Start Menu\Programs"))
 }
 
-fn desktop_file() -> Result<PathBuf> {
+fn desktop_file() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::xdg_data()?
         .join("applications")
         .join(DESKTOP_FILE))
 }
 
-fn icon_file() -> Result<PathBuf> {
+fn icon_file() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::xdg_data()?
         .join("icons/hicolor/scalable/apps")
         .join("artisan-editor.svg"))
@@ -214,9 +310,7 @@ fn uninstall_key(app: App) -> String {
     )
 }
 
-/// The app's entry in Settings → Apps (Windows); uninstalling there runs
-/// `ae uninstall <app> --yes`.
-pub fn register_uninstall(app: App, version: &str) -> Result<()> {
+pub fn register_uninstall(app: App, version: &str) -> Result<(), RegisterUninstallError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -225,7 +319,7 @@ pub fn register_uninstall(app: App, version: &str) -> Result<()> {
         App::Forge => "Artisan Forge",
         App::Editor => "Artisan Editor",
     };
-    let ae = App::Ae.binary()?;
+    let ae = paths::binary(App::Ae)?;
     let uninstall = format!("\"{}\" uninstall {} --yes", ae.display(), app.id());
     sys::powershell(&format!(
         "$key = {key}; New-Item -Path $key -Force | Out-Null; \
@@ -241,14 +335,15 @@ pub fn register_uninstall(app: App, version: &str) -> Result<()> {
         key = ps_string(&uninstall_key(app)),
         name = ps_string(name),
         version = ps_string(version),
-        location = ps_quote(&app.dir()?),
-        icon = ps_quote(&app.binary()?),
+        location = ps_quote(&paths::dir(app)?),
+        icon = ps_quote(&paths::binary(app)?),
         uninstall = ps_string(&uninstall),
     ))
     .map(drop)
+    .map_err(|source| RegisterUninstallError::PowerShell { app, source })
 }
 
-pub fn unregister_uninstall(app: App) -> Result<()> {
+pub fn unregister_uninstall(app: App) -> Result<(), RunError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -259,10 +354,8 @@ pub fn unregister_uninstall(app: App) -> Result<()> {
     .map(drop)
 }
 
-/// Starts the installed Editor, detached and outside this process's job
-/// (Explorer starts it on Windows, so it outlives a WSL terminal).
-pub fn launch_editor() -> Result<()> {
-    let editor = App::Editor.binary()?;
+pub fn launch_editor() -> Result<(), LaunchEditorError> {
+    let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
         sys::spawn_detached(std::process::Command::new("explorer.exe").arg(&editor))?;
     } else {
@@ -389,7 +482,8 @@ fn request_close(process: &Running) {
     if let Err(error) = requested {
         tracing::debug!(
             pid = process.pid,
-            "asking the process to close failed: {error:#}"
+            "asking the process to close failed: {}",
+            diagnostics::chain(&error)
         );
     }
 }
@@ -404,19 +498,18 @@ fn force_close(process: &Running) {
     if let Err(error) = forced {
         tracing::debug!(
             pid = process.pid,
-            "force-stopping the process failed: {error:#}"
+            "force-stopping the process failed: {}",
+            diagnostics::chain(&error)
         );
     }
 }
 
-/// Whether a desktop is here to show the Editor.
 pub fn has_desktop() -> bool {
     cfg!(any(windows, target_os = "macos"))
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Inside WSL (Linux with Windows interop).
 pub fn in_wsl() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some()
 }

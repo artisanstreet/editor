@@ -27,6 +27,7 @@ mod engine;
 mod forge;
 mod install;
 mod legacy;
+mod paths;
 mod platform;
 mod release;
 mod service;
@@ -35,7 +36,6 @@ mod sys;
 mod ui;
 mod wsl;
 
-use anyhow::Result;
 use artisan_api::EngineId;
 use artisan_paths::App;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -201,21 +201,68 @@ fn main() -> std::process::ExitCode {
             recent,
         }
         .install(),
-        Err(error) => tracing::warn!("crash reports are off: find ae's data folder: {error}"),
+        Err(error) => tracing::warn!(
+            "crash reports are off: find ae's data folder: {}",
+            diagnostics::chain(&error)
+        ),
     }
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!("error: {}", diagnostics::chain(&error));
             std::process::ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum AeError {
+    #[error(transparent)]
+    ForgeTarget(#[from] wsl::ForgeTargetError),
+    #[error(transparent)]
+    Forward(#[from] wsl::ForwardError),
+    #[error(transparent)]
+    ClaudeAiIntoWsl(#[from] engine::IntoWslError),
+    #[error(transparent)]
+    Install(#[from] install::InstallError),
+    #[error(transparent)]
+    Update(#[from] install::UpdateError),
+    #[error(transparent)]
+    Uninstall(#[from] install::UninstallError),
+    #[error(transparent)]
+    Open(#[from] editor::OpenError),
+    #[error(transparent)]
+    ForgeService(#[from] ForgeServiceError),
+    #[error(transparent)]
+    Pair(#[from] forge::PairError),
+    #[error(transparent)]
+    Devices(#[from] forge::ListDevicesError),
+    #[error(transparent)]
+    Unpair(#[from] forge::UnpairError),
+    #[error(transparent)]
+    Account(#[from] account::AccountError),
+    #[error(transparent)]
+    Engine(#[from] engine::EngineError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ForgeServiceError {
+    #[error(transparent)]
+    Locate(#[from] paths::LocateError),
+    #[error("Forge isn't installed here; run `ae install`")]
+    NotInstalled,
+    #[error(transparent)]
+    Address(#[from] service::AddressError),
+    #[error(transparent)]
+    Start(#[from] service::StartError),
+    #[error(transparent)]
+    Stop(#[from] service::StopError),
+    #[error(transparent)]
+    Restart(#[from] service::RestartError),
+}
+
+fn run(cli: Cli) -> Result<(), AeError> {
     let apps = |apps: Vec<AppArg>| -> Vec<App> { apps.into_iter().map(App::from).collect() };
-    // Forge's commands go to WSL when Forge is there rather than here.
-    // A claude.ai capture runs where the browser is, never forwarded.
     let forge_command = matches!(
         cli.command,
         Command::Forge { .. }
@@ -233,8 +280,6 @@ fn run(cli: Cli) -> Result<()> {
         }
     );
     if forge_command && let Some(distro) = wsl::forge_target(cli.distro.as_deref())? {
-        // The browser is on this side: sign in here, and hand the session
-        // to the `ae` beside the Forge.
         if let Command::Engine {
             command:
                 EngineCommand::Login {
@@ -244,39 +289,38 @@ fn run(cli: Cli) -> Result<()> {
                 },
         } = &cli.command
         {
-            return engine::claude_ai_into_wsl(&distro);
+            return Ok(engine::claude_ai_into_wsl(&distro)?);
         }
-        return wsl::forward(&distro);
+        return Ok(wsl::forward(&distro)?);
     }
     match cli.command {
-        Command::Install(args) => install::install(&args),
-        Command::Update { yes } => install::update(yes),
+        Command::Install(args) => Ok(install::install(&args)?),
+        Command::Update { yes } => Ok(install::update(yes)?),
         Command::Uninstall {
             apps: chosen,
             purge,
             yes,
-        } => install::uninstall(&apps(chosen), purge, yes),
+        } => Ok(install::uninstall(&apps(chosen), purge, yes)?),
         Command::Status { json } => {
             status::status(json);
             Ok(())
         }
-        Command::Open { path } => editor::open(path.as_deref()),
-        Command::Forge { command } => forge_service(&command),
-        Command::Pair { json } => forge::pair(json),
+        Command::Open { path } => Ok(editor::open(path.as_deref())?),
+        Command::Forge { command } => Ok(forge_service(&command)?),
+        Command::Pair { json } => Ok(forge::pair(json)?),
         Command::Devices { json, command } => match command {
-            None => forge::devices(json),
-            Some(DevicesCommand::Revoke { id, yes }) => forge::revoke(id.as_deref(), yes),
+            None => Ok(forge::devices(json)?),
+            Some(DevicesCommand::Revoke { id, yes }) => Ok(forge::revoke(id.as_deref(), yes)?),
         },
-        Command::Account(args) => account::run(&args),
-        Command::Engine { command } => engine::run(command),
+        Command::Account(args) => Ok(account::run(&args)?),
+        Command::Engine { command } => Ok(engine::run(command)?),
     }
 }
 
-fn forge_service(command: &ForgeCommand) -> Result<()> {
-    anyhow::ensure!(
-        App::Forge.binary()?.is_file(),
-        "Forge isn't installed here; run `ae install`"
-    );
+fn forge_service(command: &ForgeCommand) -> Result<(), ForgeServiceError> {
+    if !paths::binary(App::Forge)?.is_file() {
+        return Err(ForgeServiceError::NotInstalled);
+    }
     let address = service::address()?;
     let started = |pid: Option<u32>| {
         let pid = pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
@@ -288,8 +332,9 @@ fn forge_service(command: &ForgeCommand) -> Result<()> {
                 ui::success(format!("Forge is already running on {address}"));
                 return Ok(());
             }
-            ui::task("Starting Forge", "Forge started", service::start)
-                .map(|pid| ui::success(started(pid)))
+            let pid = ui::task("Starting Forge", "Forge started", service::start)?;
+            ui::success(started(pid));
+            Ok(())
         }
         ForgeCommand::Stop => {
             let was = ui::task("Stopping Forge", "Forge stopped", service::stop)?;
@@ -298,7 +343,10 @@ fn forge_service(command: &ForgeCommand) -> Result<()> {
             }
             Ok(())
         }
-        ForgeCommand::Restart => ui::task("Restarting Forge", "Forge restarted", service::restart)
-            .map(|pid| ui::success(started(pid))),
+        ForgeCommand::Restart => {
+            let pid = ui::task("Restarting Forge", "Forge restarted", service::restart)?;
+            ui::success(started(pid));
+            Ok(())
+        }
     }
 }

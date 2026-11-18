@@ -228,5 +228,27 @@ fn a_local_build_installs_with_its_version() {
     );
 }
 
+#[test]
+fn a_failed_install_says_why_not_only_what_failed() {
+    let home = tempfile::tempdir().unwrap();
+    let release = home.path().join("release");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::write(release.join("release.json"), "not json").unwrap();
+    let output = install(home.path(), &release, &SigningKey::from_bytes(&[7; 32]));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.lines().last(),
+        Some(
+            format!(
+                "error: read release.json from {}: expected ident at line 1 column 2",
+                release.display()
+            )
+            .as_str()
+        ),
+        "{stderr}"
+    );
+}
+
 #[path = "ae/release-feed.rs"]
 mod release_feed;

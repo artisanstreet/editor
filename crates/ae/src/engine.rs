@@ -2,22 +2,125 @@
 //! Installs take the engine install lock, so they are safe beside a running
 //! Forge (which notices the new version at its next refresh).
 
-use crate::{EngineCommand, ui};
-use anyhow::{Context, Result};
+use crate::EngineCommand;
+use crate::paths::{self, LocateError};
+use crate::ui::{self, AskError};
 use artisan_api::{ClaudeAiState, EngineId, EngineStatus, InstallState, SignInState};
 use artisan_paths::App;
-use forge_engines::{EngineChange, Engines};
+use claude_ai_browser::SignInError;
+use forge_engines::{ClaudeAiSignInError, EngineChange, Engines, NotInstalled, SubmitCodeError};
 use std::io::IsTerminal;
+use std::path::PathBuf;
+use std::process::ExitStatus;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast::error::RecvError;
 
-pub fn run(command: EngineCommand) -> Result<()> {
-    let data = App::Forge.data()?;
-    anyhow::ensure!(
-        App::Forge.binary()?.is_file() || data.exists(),
-        "Forge isn't installed here; run `ae install`"
-    );
-    let runtime = tokio::runtime::Runtime::new().context("start the async runtime")?;
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("Forge isn't installed here; run `ae install`")]
+    ForgeNotInstalled,
+    #[error("start the async runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error("install {}", engine.display_name())]
+    Install {
+        engine: EngineId,
+        #[source]
+        source: forge_engines::InstallError,
+    },
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    #[error("read the claude.ai session")]
+    ReadSession(#[source] std::io::Error),
+    #[error("the claude.ai session is not JSON")]
+    ParseSession(#[source] serde_json::Error),
+    #[error("--claude-ai is for Claude")]
+    OnlyClaude,
+    #[error("check the session with claude.ai")]
+    KeepSession(#[source] ClaudeAiSignInError),
+    #[error("sign out of claude.ai")]
+    SignOutClaudeAi(#[source] forge_engines::claudeai::RemoveSessionError),
+    #[error(transparent)]
+    NotInstalled(#[from] NotInstalled),
+    #[error(transparent)]
+    Login(#[from] LoginError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CaptureError {
+    #[error("sign in to claude.ai in a browser")]
+    Browser(#[source] SignInError),
+    #[error("ask Windows where its apps live")]
+    LocalAppData(#[source] std::io::Error),
+    #[error("run wslpath")]
+    Wslpath(#[source] std::io::Error),
+    #[error(
+        "no browser in WSL, and no Windows `ae` to open Windows' browser; run `ae engine login claude --claude-ai` in Windows instead"
+    )]
+    NoWindowsAe,
+    #[error("run {}", ae.display())]
+    RunWindowsAe {
+        ae: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Windows' ae could not capture the session ({status})")]
+    WindowsAeFailed { status: ExitStatus },
+    #[error("Windows' ae printed no session")]
+    NoSession(#[source] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoginError {
+    #[error(transparent)]
+    NotInstalled(#[from] NotInstalled),
+    #[error("the sign-in to {} stopped reporting", engine.display_name())]
+    StoppedReporting { engine: EngineId },
+    #[error("{} is still signed out", engine.display_name())]
+    SignedOut { engine: EngineId },
+    #[error("sign-in to {} failed: {message}", engine.display_name())]
+    Failed { engine: EngineId, message: String },
+    #[error("read the code")]
+    ReadCode(#[source] std::io::Error),
+    #[error("hand the code to {}", engine.display_name())]
+    SubmitCode {
+        engine: EngineId,
+        #[source]
+        source: SubmitCodeError,
+    },
+    #[error("sign-in cancelled")]
+    Cancelled,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IntoWslError {
+    #[error("start the async runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error("sign in to claude.ai in a browser")]
+    Capture(#[source] SignInError),
+    #[error("run ae in {distro} (WSL)")]
+    Run {
+        distro: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("hand the claude.ai session to ae in {distro} (WSL)")]
+    Hand {
+        distro: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn run(command: EngineCommand) -> Result<(), EngineError> {
+    let data = paths::data(App::Forge)?;
+    if !paths::binary(App::Forge)?.is_file() && !data.exists() {
+        return Err(EngineError::ForgeNotInstalled);
+    }
+    let runtime = tokio::runtime::Runtime::new().map_err(EngineError::Runtime)?;
     let engines = Engines::new(&data);
     runtime.block_on(async move {
         match command {
@@ -29,7 +132,9 @@ pub fn run(command: EngineCommand) -> Result<()> {
                     chosen
                 };
                 for engine in chosen {
-                    let version = with_progress(&engines, engine, engines.update(engine)).await?;
+                    let version = with_progress(&engines, engine, engines.update(engine))
+                        .await
+                        .map_err(|source| EngineError::Install { engine, source })?;
                     ui::success(format!("{} {version} is installed", engine.display_name()));
                 }
                 Ok(())
@@ -38,9 +143,8 @@ pub fn run(command: EngineCommand) -> Result<()> {
                 capture_only: true,
                 ..
             } => {
-                // Another `ae` keeps it; only the session goes to stdout.
                 let session = capture_in_browser().await?;
-                println!("{}", serde_json::to_string(&session)?);
+                println!("{}", session_json(&session));
                 Ok(())
             }
             EngineCommand::Login {
@@ -53,8 +157,8 @@ pub fn run(command: EngineCommand) -> Result<()> {
                 let session = if session_stdin {
                     let mut text = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-                        .context("read the claude.ai session")?;
-                    serde_json::from_str(&text).context("the claude.ai session is not JSON")?
+                        .map_err(EngineError::ReadSession)?;
+                    serde_json::from_str(&text).map_err(EngineError::ParseSession)?
                 } else {
                     ui::intro("Sign in to claude.ai");
                     capture_here().await?
@@ -63,14 +167,14 @@ pub fn run(command: EngineCommand) -> Result<()> {
             }
             EngineCommand::Login { engine, .. } => {
                 let engine = pick_engine(&engines, engine, "Sign in to", "which engine to sign in to")?;
-                login(&engines, engine).await
+                Ok(login(&engines, engine).await?)
             }
             EngineCommand::Logout {
                 engine,
                 claude_ai: true,
             } => {
                 only_claude(engine)?;
-                engines.claude_ai_sign_out()?;
+                engines.claude_ai_sign_out().map_err(EngineError::SignOutClaudeAi)?;
                 ui::success("Signed out of claude.ai. claude.ai mode runs on Claude Code until you sign in again.");
                 Ok(())
             }
@@ -84,13 +188,17 @@ pub fn run(command: EngineCommand) -> Result<()> {
     })
 }
 
-/// The engine named, or the one the user picks.
+fn session_json(session: &artisan_api::ClaudeAiSession) -> String {
+    serde_json::to_string(session)
+        .expect("invariant: a claude.ai session always serializes as JSON")
+}
+
 fn pick_engine(
     engines: &Engines,
     engine: Option<EngineId>,
     prompt: &str,
     question: &str,
-) -> Result<EngineId> {
+) -> Result<EngineId, AskError> {
     match engine {
         Some(engine) => Ok(engine),
         None if ui::interactive() => {
@@ -108,23 +216,24 @@ fn pick_engine(
     }
 }
 
-/// claude.ai is Claude's alone.
-fn only_claude(engine: Option<EngineId>) -> Result<()> {
-    anyhow::ensure!(
-        engine.is_none_or(|engine| engine == EngineId::Claude),
-        "--claude-ai is for Claude"
-    );
-    Ok(())
+fn only_claude(engine: Option<EngineId>) -> Result<(), EngineError> {
+    if engine.is_none_or(|engine| engine == EngineId::Claude) {
+        Ok(())
+    } else {
+        Err(EngineError::OnlyClaude)
+    }
 }
 
-/// Checks a captured claude.ai session and keeps it in the Forge's data.
-async fn keep_claude_ai(engines: &Engines, session: artisan_api::ClaudeAiSession) -> Result<()> {
+async fn keep_claude_ai(
+    engines: &Engines,
+    session: artisan_api::ClaudeAiSession,
+) -> Result<(), EngineError> {
     let progress = ui::Progress::spinner("Checking the session with claude.ai");
     let state = engines.claude_ai_sign_in(session).await;
     progress.clear();
     if let ClaudeAiState::SignedIn {
         account: Some(account),
-    } = state?
+    } = state.map_err(EngineError::KeepSession)?
     {
         ui::outro(format!(
             "Signed in to claude.ai as {account}. Turn on claude.ai mode in the Editor's settings to use it."
@@ -137,16 +246,18 @@ async fn keep_claude_ai(engines: &Engines, session: artisan_api::ClaudeAiSession
     Ok(())
 }
 
-/// Captures a claude.ai session in a browser on this device. In WSL
-/// without a Linux browser, Windows' `ae` opens Windows' browser.
-async fn capture_here() -> Result<artisan_api::ClaudeAiSession> {
+async fn capture_here() -> Result<artisan_api::ClaudeAiSession, CaptureError> {
     if crate::platform::in_wsl() && claude_ai_browser::find_browser().is_none() {
         return capture_through_windows().await;
     }
     capture_in_browser().await
 }
 
-async fn capture_in_browser() -> Result<artisan_api::ClaudeAiSession> {
+async fn capture_in_browser() -> Result<artisan_api::ClaudeAiSession, CaptureError> {
+    sign_in_here().await.map_err(CaptureError::Browser)
+}
+
+async fn sign_in_here() -> Result<artisan_api::ClaudeAiSession, SignInError> {
     if !claude_ai_browser::has_profile() {
         ui::note(
             "A browser window opens on claude.ai",
@@ -156,51 +267,53 @@ async fn capture_in_browser() -> Result<artisan_api::ClaudeAiSession> {
     let progress = ui::Progress::spinner("Waiting for you to sign in to claude.ai");
     let session = claude_ai_browser::sign_in().await;
     progress.clear();
-    Ok(session?)
+    session
 }
 
-/// Runs Windows' `ae` to capture the session, from WSL.
-async fn capture_through_windows() -> Result<artisan_api::ClaudeAiSession> {
+async fn capture_through_windows() -> Result<artisan_api::ClaudeAiSession, CaptureError> {
     let local = tokio::process::Command::new("cmd.exe")
         .args(["/c", "echo %LOCALAPPDATA%"])
         .current_dir("/mnt/c")
         .output()
         .await
-        .context("ask Windows where its apps live")?;
+        .map_err(CaptureError::LocalAppData)?;
     let local = String::from_utf8_lossy(&local.stdout).trim().to_owned();
     let converted = tokio::process::Command::new("wslpath")
         .args(["-u", &local])
         .output()
         .await
-        .context("run wslpath")?;
+        .map_err(CaptureError::Wslpath)?;
     let ae = std::path::PathBuf::from(String::from_utf8_lossy(&converted.stdout).trim())
         .join("Artisan Street")
         .join("ae")
         .join("ae.exe");
-    anyhow::ensure!(
-        ae.is_file(),
-        "no browser in WSL, and no Windows `ae` to open Windows' browser; run `ae engine login claude --claude-ai` in Windows instead"
-    );
+    if !ae.is_file() {
+        return Err(CaptureError::NoWindowsAe);
+    }
     let output = tokio::process::Command::new(&ae)
         .args(["engine", "login", "claude", "--claude-ai", "--capture-only"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .output()
         .await
-        .with_context(|| format!("run {}", ae.display()))?;
-    anyhow::ensure!(
-        output.status.success(),
-        "Windows' ae could not capture the session"
-    );
-    serde_json::from_slice(&output.stdout).context("Windows' ae printed no session")
+        .map_err(|source| CaptureError::RunWindowsAe {
+            ae: ae.clone(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(CaptureError::WindowsAeFailed {
+            status: output.status,
+        });
+    }
+    serde_json::from_slice(&output.stdout).map_err(CaptureError::NoSession)
 }
 
-/// From Windows, for a Forge in WSL: signs in with Windows' browser and
-/// hands the session to the `ae` beside the Forge.
-pub fn claude_ai_into_wsl(distro: &str) -> Result<()> {
-    let runtime = tokio::runtime::Runtime::new().context("start the async runtime")?;
+pub fn claude_ai_into_wsl(distro: &str) -> Result<(), IntoWslError> {
+    let runtime = tokio::runtime::Runtime::new().map_err(IntoWslError::Runtime)?;
     ui::intro("Sign in to claude.ai");
-    let session = runtime.block_on(capture_in_browser())?;
+    let session = runtime
+        .block_on(sign_in_here())
+        .map_err(IntoWslError::Capture)?;
     let mut child = crate::wsl::ae(distro)
         .args([
             "engine",
@@ -211,12 +324,26 @@ pub fn claude_ai_into_wsl(distro: &str) -> Result<()> {
         ])
         .stdin(std::process::Stdio::piped())
         .spawn()
-        .context("run wsl.exe")?;
+        .map_err(|source| IntoWslError::Run {
+            distro: distro.to_owned(),
+            source,
+        })?;
     {
-        let mut stdin = child.stdin.take().context("the WSL ae has no stdin")?;
-        std::io::Write::write_all(&mut stdin, serde_json::to_string(&session)?.as_bytes())?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("invariant: the WSL ae was started with a piped stdin");
+        std::io::Write::write_all(&mut stdin, session_json(&session).as_bytes()).map_err(
+            |source| IntoWslError::Hand {
+                distro: distro.to_owned(),
+                source,
+            },
+        )?;
     }
-    let status = child.wait().context("wait for the WSL ae")?;
+    let status = child.wait().map_err(|source| IntoWslError::Run {
+        distro: distro.to_owned(),
+        source,
+    })?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -232,7 +359,7 @@ fn claude_ai_line(state: &ClaudeAiState) -> String {
     }
 }
 
-async fn list(engines: &Engines, json: bool) -> Result<()> {
+async fn list(engines: &Engines, json: bool) -> Result<(), EngineError> {
     let progress = if json {
         None
     } else {
@@ -280,7 +407,7 @@ async fn list(engines: &Engines, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn pick_engines(engines: &Engines) -> Result<Vec<EngineId>> {
+fn pick_engines(engines: &Engines) -> Result<Vec<EngineId>, AskError> {
     if !ui::interactive() {
         return Err(ui::needs_flag(
             "which engines to install",
@@ -332,7 +459,6 @@ fn sign_in_line(sign_in: &SignInState) -> String {
     }
 }
 
-/// Shows download progress while `work` runs.
 async fn with_progress<T, E: std::error::Error>(
     engines: &Engines,
     engine: EngineId,
@@ -384,12 +510,10 @@ async fn with_progress<T, E: std::error::Error>(
     result
 }
 
-/// Runs the engine's own sign-in and shows its link and code here.
-async fn login(engines: &Engines, engine: EngineId) -> Result<()> {
+async fn login(engines: &Engines, engine: EngineId) -> Result<(), LoginError> {
     let mut statuses = engines.subscribe();
     engines.login(engine)?;
     ui::intro(format!("Sign in to {}", engine.display_name()));
-    // Claude asks for a code shown in the browser after signing in.
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let interactive = std::io::stdin().is_terminal();
     let mut reads_code = false;
@@ -400,7 +524,7 @@ async fn login(engines: &Engines, engine: EngineId) -> Result<()> {
                 let status = match status {
                     Ok(EngineChange::Full(status)) => status,
                     Ok(EngineChange::Install {..}) | Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => anyhow::bail!("the sign-in stopped reporting"),
+                    Err(RecvError::Closed) => return Err(LoginError::StoppedReporting { engine }),
                 };
                 if status.engine != engine {
                     continue;
@@ -428,30 +552,32 @@ async fn login(engines: &Engines, engine: EngineId) -> Result<()> {
                         ui::outro(format!("Signed in{}", account.map(|account| format!(" as {account}")).unwrap_or_default()));
                         return Ok(());
                     }
-                    SignInState::SignedOut => anyhow::bail!("{} is still signed out", engine.display_name()),
-                    SignInState::Failed { message } => anyhow::bail!("sign-in failed: {message}"),
+                    SignInState::SignedOut => return Err(LoginError::SignedOut { engine }),
+                    SignInState::Failed { message } => return Err(LoginError::Failed { engine, message }),
                     SignInState::Unknown => {}
                 }
             }
             line = stdin.next_line(), if reads_code => {
-                match line.context("read the code")? {
-                    Some(code) if !code.trim().is_empty() => engines.submit_login_code(engine, &code).await?,
+                match line.map_err(LoginError::ReadCode)? {
+                    Some(code) if !code.trim().is_empty() => engines
+                        .submit_login_code(engine, &code)
+                        .await
+                        .map_err(|source| LoginError::SubmitCode { engine, source })?,
                     Some(_) => {}
                     None => {
                         engines.cancel_login(engine);
-                        anyhow::bail!("sign-in cancelled");
+                        return Err(LoginError::Cancelled);
                     }
                 }
             }
             _ = tokio::signal::ctrl_c() => {
                 engines.cancel_login(engine);
-                anyhow::bail!("sign-in cancelled");
+                return Err(LoginError::Cancelled);
             }
         }
     }
 }
 
-/// Opens the sign-in link where a browser is at hand (best effort).
 fn open_browser(link: &str) {
     if !ui::interactive() {
         return;

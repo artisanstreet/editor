@@ -6,7 +6,6 @@
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 
-use anyhow::{Context as _, Result};
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId, Run,
     RunId, RunOutcome, RunState, Status, ThreadId, Usage,
@@ -14,32 +13,97 @@ use artisan_api::{
 };
 use forge_store::NewItem;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, thiserror::Error)]
+enum FixtureError {
+    #[error("provide a new fixture directory")]
+    NoDirectory,
+    #[error("fixture directory {} must be absolute", path.display())]
+    Relative { path: PathBuf },
+    #[error("create {}; the fixture directory must not already exist", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("start the fixture Forge")]
+    Start(#[from] forge_http::StartError),
+    #[error("read the fixture Forge's address")]
+    Address(#[source] std::io::Error),
+    #[error(transparent)]
+    Identity(#[from] artisan_api::tls::GenerateIdentityError),
+    #[error(transparent)]
+    Certificate(#[from] forge_store::CertificateError),
+    #[error(transparent)]
+    AddDevice(#[from] forge_store::AddDeviceError),
+    #[error(transparent)]
+    ForgeIdentity(#[from] forge_http::IdentityError),
+    #[error(transparent)]
+    Fingerprint(#[from] artisan_api::tls::DecodeCertificateError),
+    #[error(transparent)]
+    Project(#[from] forge_store::CreateProjectError),
+    #[error(transparent)]
+    Thread(#[from] forge_store::CreateThreadError),
+    #[error(transparent)]
+    Run(#[from] forge_store::UpsertRunError),
+    #[error(transparent)]
+    Item(#[from] forge_store::UpsertItemError),
+}
+
+fn write(path: &Path, bytes: &[u8]) -> Result<(), FixtureError> {
+    std::fs::write(path, bytes).map_err(|source| FixtureError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn create(path: &Path) -> Result<(), FixtureError> {
+    std::fs::create_dir(path).map_err(|source| FixtureError::Create {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn to_json(value: &impl serde::Serialize) -> Vec<u8> {
+    serde_json::to_vec_pretty(value).expect("invariant: fixture JSON always serializes")
+}
 
 #[tokio::main(flavor = "current_thread")]
 #[expect(
     clippy::too_many_lines,
     reason = "the fixture is built step by step in one readable script"
 )]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), FixtureError> {
     let root = PathBuf::from(
         std::env::args_os()
             .nth(1)
-            .context("provide a new fixture directory")?,
+            .ok_or(FixtureError::NoDirectory)?,
     );
-    anyhow::ensure!(root.is_absolute(), "fixture directory must be absolute");
-    std::fs::create_dir(&root).context("fixture directory must not already exist")?;
+    if !root.is_absolute() {
+        return Err(FixtureError::Relative { path: root });
+    }
+    create(&root)?;
     let editor = root.join("editor");
     let project = root.join("project");
-    std::fs::create_dir(&editor)?;
-    std::fs::create_dir(&project)?;
+    create(&editor)?;
+    create(&project)?;
     let server = forge_http::start(forge_http::ServeConfig {
         data_dir: root.join("forge"),
-        listen: "127.0.0.1:0".parse()?,
+        listen: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
     })
     .await?;
     let store = server.store();
-    let address = server.local_addr()?.to_string();
+    let address = server
+        .local_addr()
+        .map_err(FixtureError::Address)?
+        .to_string();
     let identity = Identity::generate("artisan-idle-fixture")?;
     store
         .add_device(
@@ -48,16 +112,16 @@ async fn main() -> Result<()> {
         )
         .await?;
     let fingerprint = fingerprint_of(&forge_http::identity(store).await?.certificate)?;
-    std::fs::write(editor.join("identity.json"), serde_json::to_vec(&identity)?)?;
-    std::fs::write(
-        editor.join("hosts.json"),
-        serde_json::to_vec_pretty(&json!({
+    write(&editor.join("identity.json"), &to_json(&identity))?;
+    write(
+        &editor.join("hosts.json"),
+        &to_json(&json!({
             "hosts": [{
                 "id": "idle-fixture", "name": "Performance fixture", "address": address,
                 "fingerprint": fingerprint, "kind": {"type": "remote"}
             }],
             "last": "idle-fixture"
-        }))?,
+        })),
     )?;
     let project_id = ProjectId::from("idle-project");
     let thread_id = ThreadId::from("idle-conversation");
@@ -144,10 +208,7 @@ async fn main() -> Result<()> {
         "address": address,
         "fixture_pid": std::process::id()
     });
-    std::fs::write(
-        root.join("fixture.json"),
-        serde_json::to_vec_pretty(&metadata)?,
-    )?;
+    write(&root.join("fixture.json"), &to_json(&metadata))?;
     println!("{metadata}");
     server.run().await;
     Ok(())

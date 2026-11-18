@@ -11,19 +11,30 @@ pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// A prompt's error: Ctrl+C or Esc becomes "cancelled".
-pub fn prompt_error(error: std::io::Error) -> anyhow::Error {
+#[derive(Debug, thiserror::Error)]
+pub enum AskError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error("read the answer")]
+    Read(#[source] std::io::Error),
+    #[error("no terminal to ask {question}; pass {flag}")]
+    NoTerminal { question: String, flag: String },
+}
+
+pub fn prompt_error(error: std::io::Error) -> AskError {
     if error.kind() == std::io::ErrorKind::Interrupted {
         cliclack::outro_cancel("Cancelled").ok();
-        anyhow::anyhow!("cancelled")
+        AskError::Cancelled
     } else {
-        anyhow::Error::new(error).context("read the answer")
+        AskError::Read(error)
     }
 }
 
-/// What to say when a choice can't be asked.
-pub fn needs_flag(question: &str, flag: &str) -> anyhow::Error {
-    anyhow::anyhow!("no terminal to ask {question}; pass {flag}")
+pub fn needs_flag(question: &str, flag: &str) -> AskError {
+    AskError::NoTerminal {
+        question: question.to_owned(),
+        flag: flag.to_owned(),
+    }
 }
 
 pub fn intro(title: impl Display) {
@@ -143,12 +154,11 @@ impl Progress {
     }
 }
 
-/// Runs `work` under a spinner that ends with its outcome.
-pub fn task<T>(
+pub fn task<T, E: std::error::Error>(
     message: impl Display,
     done: impl Display,
-    work: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
+    work: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     let progress = Progress::spinner(message);
     match work() {
         Ok(value) => {
@@ -156,7 +166,7 @@ pub fn task<T>(
             Ok(value)
         }
         Err(error) => {
-            progress.fail(format!("{error:#}"));
+            progress.fail(diagnostics::chain(&error));
             Err(error)
         }
     }

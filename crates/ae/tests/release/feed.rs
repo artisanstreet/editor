@@ -153,7 +153,7 @@ impl SignedRelease {
             .expect("write signature");
     }
 
-    fn resolve(&self) -> Result<String> {
+    fn resolve(&self) -> Result<String, ResolveError> {
         let source = Source::Dir(self.folder.path().to_owned());
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         match runtime.block_on(resolve_signed(
@@ -163,7 +163,7 @@ impl SignedRelease {
             LIMITS,
         ))? {
             Release::Feed(feed) => Ok(feed.version().to_owned()),
-            Release::Local { .. } | Release::Bundled(_) => bail!("not a signed release"),
+            Release::Local { .. } | Release::Bundled(_) => panic!("not a signed release"),
         }
     }
 }
@@ -185,7 +185,17 @@ fn a_manifest_changed_after_signing_is_rejected() {
     )
     .expect("tamper");
     let error = release.resolve().expect_err("tampered manifest");
-    assert!(format!("{error:#}").contains("not signed by Artisan's release key"));
+    assert!(
+        matches!(
+            error,
+            ResolveError::Signature {
+                source: SignatureError::Unsigned(_),
+                ..
+            }
+        ),
+        "{}",
+        diagnostics::chain(&error)
+    );
 }
 
 #[test]
@@ -207,7 +217,17 @@ fn altered_or_foreign_signatures_are_rejected() {
         &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
     );
     let error = release.resolve().expect_err("foreign signature");
-    assert!(format!("{error:#}").contains("not signed by Artisan's release key"));
+    assert!(
+        matches!(
+            error,
+            ResolveError::Signature {
+                source: SignatureError::Unsigned(_),
+                ..
+            }
+        ),
+        "{}",
+        diagnostics::chain(&error)
+    );
 }
 
 fn limits(deadline: Duration, bytes: u64) -> Limits {

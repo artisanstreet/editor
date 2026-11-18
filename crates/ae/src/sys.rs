@@ -1,5 +1,4 @@
-use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -82,40 +81,64 @@ fn joined(
     )
 }
 
-/// Runs `program` and fails with its stderr when it fails.
-pub fn run(program: &str, args: &[&str]) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("run {program}")]
+    Start {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{program} {args} failed ({status}): {stderr}")]
+    Failed {
+        program: String,
+        args: String,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("PowerShell failed ({status}): {stderr}")]
+    PowerShell {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+}
+
+pub fn run(program: &str, args: &[&str]) -> Result<(), RunError> {
     output(program, args).map(drop)
 }
 
-/// Runs `program` and returns its stdout. System tools run without
-/// `LD_LIBRARY_PATH`: a Nix shell's libraries in it break the system's glibc
-/// programs, systemctl among them.
-pub fn output(program: &str, args: &[&str]) -> Result<String> {
+pub fn output(program: &str, args: &[&str]) -> Result<String, RunError> {
     let output = quiet(Command::new(program).args(args))
         .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("run {program}"))?;
+        .map_err(|source| RunError::Start {
+            program: program.to_owned(),
+            source,
+        })?;
     if !output.status.success() {
-        bail!(
-            "{program} {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        return Err(RunError::Failed {
+            program: program.to_owned(),
+            args: args.join(" "),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Runs a PowerShell script and fails with its error output.
-pub fn powershell(script: &str) -> Result<String> {
+pub fn powershell(script: &str) -> Result<String, RunError> {
     let output = powershell_command(script)
         .output()
-        .context("run PowerShell")?;
+        .map_err(|source| RunError::Start {
+            program: "PowerShell".to_owned(),
+            source,
+        })?;
     if !output.status.success() {
-        bail!(
-            "PowerShell failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        return Err(RunError::PowerShell {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -136,7 +159,6 @@ pub fn powershell_command(script: &str) -> Command {
     command
 }
 
-/// A PowerShell single-quoted string.
 pub fn ps_quote(value: &Path) -> String {
     ps_string(&value.display().to_string())
 }
@@ -145,7 +167,6 @@ pub fn ps_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// No console window flashes up for helper processes on Windows.
 #[allow(
     clippy::missing_const_for_fn,
     reason = "const only off Windows, where the body sets no flags"
@@ -160,9 +181,15 @@ pub fn quiet(command: &mut Command) -> &mut Command {
     command
 }
 
-/// Starts `command` detached from this terminal: its own process group,
-/// no console window on Windows.
-pub fn spawn_detached(command: &mut Command) -> Result<u32> {
+#[derive(Debug, thiserror::Error)]
+#[error("start {}", program.display())]
+pub struct SpawnError {
+    pub program: PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
+
+pub fn spawn_detached(command: &mut Command) -> Result<u32, SpawnError> {
     command.stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -176,30 +203,76 @@ pub fn spawn_detached(command: &mut Command) -> Result<u32> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command
-        .spawn()
-        .with_context(|| format!("start {}", command.get_program().display()))?;
+    let child = command.spawn().map_err(|source| SpawnError {
+        program: PathBuf::from(command.get_program()),
+        source,
+    })?;
     Ok(child.id())
 }
 
-pub fn remove(path: &Path) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    #[error("inspect {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn remove(path: &Path) -> Result<(), RemoveError> {
     let metadata = match path.symlink_metadata() {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+        Err(source) => {
+            return Err(RemoveError::Inspect {
+                path: path.to_owned(),
+                source,
+            });
+        }
     };
     if metadata.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
     }
-    .with_context(|| format!("remove {}", path.display()))
+    .map_err(|source| RemoveError::Remove {
+        path: path.to_owned(),
+        source,
+    })
 }
 
-/// Writes a file, creating its folder.
-pub fn write(path: &Path, contents: &str) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn write(path: &Path, contents: &str) -> Result<(), WriteError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|source| WriteError::CreateDir {
+            path: parent.to_owned(),
+            source,
+        })?;
     }
-    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+    std::fs::write(path, contents).map_err(|source| WriteError::Write {
+        path: path.to_owned(),
+        source,
+    })
 }

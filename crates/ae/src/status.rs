@@ -14,11 +14,14 @@ pub fn status(json_output: bool) {
                 .map(|probe| {
                     let report = probe
                         .report
-                        .unwrap_or_else(|error| json!({ "error": format!("{error:#}") }));
+                        .unwrap_or_else(|error| json!({ "error": diagnostics::chain(&error) }));
                     (probe.distro, report)
                 })
                 .collect(),
-            Err(error) => vec![("WSL".to_owned(), json!({ "error": format!("{error:#}") }))],
+            Err(error) => vec![(
+                "WSL".to_owned(),
+                json!({ "error": diagnostics::chain(&error) }),
+            )],
         }
     } else {
         Vec::new()
@@ -39,12 +42,12 @@ pub fn status(json_output: bool) {
 fn paired_devices(problems: &mut Vec<String>) -> Value {
     let counted = App::Forge
         .data()
-        .map_err(|error| format!("{error}"))
+        .map_err(|error| diagnostics::chain(&error))
         .and_then(|data| match Admin::open_read_only(&data) {
             Ok(admin) => admin
                 .devices()
                 .map(|devices| devices.len())
-                .map_err(|error| format!("{error:#}")),
+                .map_err(|error| diagnostics::chain(&error)),
             Err(AdminError::Missing { .. }) => Ok(0),
             Err(error) => Err(diagnostics::chain(&error)),
         });
@@ -61,12 +64,17 @@ fn paired_devices(problems: &mut Vec<String>) -> Value {
 fn health(problems: &mut Vec<String>, log: Option<&str>) -> Value {
     let checked = App::Forge
         .data()
-        .map_err(|error| format!("{error}"))
+        .map_err(|error| diagnostics::chain(&error))
         .and_then(|data| {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| format!("start the health check runtime: {error}"))?
+                .map_err(|error| {
+                    format!(
+                        "start the health check runtime: {}",
+                        diagnostics::chain(&error)
+                    )
+                })?
                 .block_on(forge_http::upgrade::health(&data))
                 .map_err(|error| diagnostics::chain(&error))
         });
@@ -104,7 +112,7 @@ fn local() -> Value {
         let address = match service::address() {
             Ok(address) => Some(address),
             Err(error) => {
-                problems.push(format!("{error:#}"));
+                problems.push(diagnostics::chain(&error));
                 None
             }
         };
@@ -112,7 +120,10 @@ fn local() -> Value {
         let log = match service::log_hint() {
             Ok(log) => Some(log),
             Err(error) => {
-                problems.push(format!("Couldn't find Forge's log: {error:#}"));
+                problems.push(format!(
+                    "Couldn't find Forge's log: {}",
+                    diagnostics::chain(&error)
+                ));
                 None
             }
         };

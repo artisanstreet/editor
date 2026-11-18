@@ -6,10 +6,13 @@
 //! operator explicitly approves the shown accountId + verified email —
 //! confirms the exact account/key binding. No parallel enrollment logic.
 
-use anyhow::{Context, Result, bail};
-use artisan_account::MachineKeypair;
+use crate::paths::{self, LocateError};
+use crate::service::RestartError;
+use crate::ui::AskError;
+use artisan_account::{MachineKeyError, MachineKeypair};
 use artisan_paths::App;
 use clap::{Args, Subcommand};
+use forge_http::core::{BuildCoreClientError, CoreCallError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -105,7 +108,7 @@ enum Account {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum AccountFileError {
+pub enum AccountFileError {
     #[error("read {}", path.display())]
     Read {
         path: PathBuf,
@@ -205,6 +208,145 @@ impl Account {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AccountError {
+    #[error(transparent)]
+    Enroll(#[from] EnrollError),
+    #[error(transparent)]
+    Status(#[from] StatusError),
+    #[error(transparent)]
+    Confirm(#[from] ConfirmError),
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EnrollError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error("this Forge is already enrolled; see `ae account status`")]
+    AlreadyEnrolled,
+    #[error("generate a machine key")]
+    Key(#[source] MachineKeyError),
+    #[error("give this machine a label with --label")]
+    NoLabel,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("start an enrollment for {label:?}")]
+    Start {
+        label: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("restart Forge with the new machine key")]
+    Restart(#[source] RestartError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StatusError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error("no enrollment started; run `ae account enroll`")]
+    NotStarted,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("read the status of enrollment {enrollment_id}")]
+    Status {
+        enrollment_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfirmError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error(transparent)]
+    Mismatch(#[from] AccountMismatch),
+    #[error("no enrollment started; run `ae account enroll`")]
+    NotStarted,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("read the status of enrollment {enrollment_id}")]
+    Status {
+        enrollment_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("the enrollment is not claimed yet; claim the code in a signed-in session first")]
+    Unclaimed,
+    #[error(
+        "refusing to enroll without explicit approval: re-run with --yes to confirm account {account_id}"
+    )]
+    NeedsApproval { account_id: String },
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error("confirm enrollment {enrollment_id} into account {account_id}")]
+    Confirm {
+        enrollment_id: String,
+        account_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("restart Forge as an enrolled machine")]
+    Restart(#[source] RestartError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccountMismatch {
+    #[error("--account-id must not be blank")]
+    Blank,
+    #[error("account mismatch: expected {expected}, found {actual}; refusing to confirm")]
+    Other { expected: String, actual: String },
+    #[error("account mismatch: expected {expected}, found none; refusing to confirm")]
+    Missing { expected: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("read this machine's identity")]
+    Identity(#[source] forge_http::sync::MachineIdentityError),
+    #[error("this Forge is not enrolled; run `ae account enroll` first")]
+    NotEnrolled,
+    #[error("no account recorded; re-run `ae account confirm`")]
+    NoAccount,
+    #[error("restart Forge to sync the account config")]
+    Restart(#[source] RestartError),
+    #[error(transparent)]
+    Lock(#[from] forge_http::LockDataDirError),
+    #[error("open the Forge store in {}", data.display())]
+    Store {
+        data: PathBuf,
+        #[source]
+        source: Box<forge_store::OpenStoreError>,
+    },
+    #[error("build the Core HTTP client")]
+    Http(#[source] reqwest::Error),
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error("sync the account config of machine {machine_id}")]
+    Sync {
+        machine_id: String,
+        #[source]
+        source: forge_http::sync::SyncConfigError,
+    },
+}
+
 fn decode_key(path: &Path, secret: &str, public: &str) -> Result<MachineKeypair, AccountFileError> {
     use base64::Engine as _;
     let problem = |problem| AccountFileError::Key {
@@ -229,8 +371,8 @@ fn decode_key(path: &Path, secret: &str, public: &str) -> Result<MachineKeypair,
     Ok(key)
 }
 
-fn account_path() -> Result<PathBuf> {
-    Ok(App::Forge.data()?.join("ast_account.json"))
+fn account_path() -> Result<PathBuf, LocateError> {
+    Ok(paths::data(App::Forge)?.join("ast_account.json"))
 }
 
 fn load_account(path: &Path) -> Result<Account, AccountFileError> {
@@ -277,40 +419,42 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("start the account runtime")
 }
 
-fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
-    Ok(forge_http::core::CoreClient::new(
-        &forge_http::core::core_base_url(core),
-    )?)
+fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient, BuildCoreClientError> {
+    forge_http::core::CoreClient::new(&forge_http::core::core_base_url(core))
 }
 
-pub fn run(args: &AccountArgs) -> Result<()> {
+pub fn run(args: &AccountArgs) -> Result<(), AccountError> {
     match &args.command {
         AccountCommand::Enroll {
             label,
             json,
             replace,
-        } => enroll(args.core.as_deref(), label.as_deref(), *json, *replace),
-        AccountCommand::Status { json } => status(args.core.as_deref(), *json),
+        } => Ok(enroll(
+            args.core.as_deref(),
+            label.as_deref(),
+            *json,
+            *replace,
+        )?),
+        AccountCommand::Status { json } => Ok(status(args.core.as_deref(), *json)?),
         AccountCommand::Confirm { yes, account_id } => {
-            confirm(args.core.as_deref(), *yes, account_id.as_deref())
+            Ok(confirm(args.core.as_deref(), *yes, account_id.as_deref())?)
         }
-        AccountCommand::Sync => sync_config_now(args.core.as_deref()),
+        AccountCommand::Sync => Ok(sync_config_now(args.core.as_deref())?),
     }
 }
 
-fn keyed(path: &Path, account: Account) -> Result<(Account, MachineKeypair)> {
+fn keyed(path: &Path, account: Account) -> Result<(Account, MachineKeypair), EnrollError> {
     if let Some(key) = account.key() {
         let key = key.clone();
         return Ok((account, key));
     }
-    let key = MachineKeypair::generate().context("generate a machine key")?;
+    let key = MachineKeypair::generate().map_err(EnrollError::Key)?;
     let account = Account::Keyed { key: key.clone() };
     save_account(path, &account)?;
     Ok((account, key))
@@ -334,30 +478,36 @@ fn label_default(label: Option<&str>) -> String {
         .to_owned()
 }
 
-fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) -> Result<()> {
+fn enroll(
+    core: Option<&str>,
+    label: Option<&str>,
+    json: bool,
+    replace: bool,
+) -> Result<(), EnrollError> {
     let path = account_path()?;
     let account = load_account(&path)?;
     let enrolled = matches!(account, Account::Enrolled { .. });
     if enrolled && !replace {
-        bail!("this Forge is already enrolled; see `ae account status`");
+        return Err(EnrollError::AlreadyEnrolled);
     }
     let restart = replace && enrolled && crate::service::is_running();
     let key = if replace {
-        MachineKeypair::generate().context("generate a machine key")?
+        MachineKeypair::generate().map_err(EnrollError::Key)?
     } else {
         keyed(&path, account)?.1
     };
     let label = label_default(label);
     if label.is_empty() {
-        bail!("give this machine a label with --label");
+        return Err(EnrollError::NoLabel);
     }
-    let created = runtime()?.block_on(async {
-        Ok::<_, anyhow::Error>(
-            client(core)?
-                .enroll_start(key.public(), &label, key.secret())
-                .await?,
-        )
-    })?;
+    let client = client(core)?;
+    let created = runtime()
+        .map_err(EnrollError::Runtime)?
+        .block_on(client.enroll_start(key.public(), &label, key.secret()))
+        .map_err(|source| EnrollError::Start {
+            label: label.clone(),
+            source,
+        })?;
     save_account(
         &path,
         &Account::Pending {
@@ -366,7 +516,7 @@ fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) ->
         },
     )?;
     if restart {
-        crate::service::restart()?;
+        crate::service::restart().map_err(EnrollError::Restart)?;
     }
     if json {
         println!("{}", enroll_report(&created));
@@ -391,7 +541,7 @@ fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::V
     })
 }
 
-fn status(core: Option<&str>, json: bool) -> Result<()> {
+fn status(core: Option<&str>, json: bool) -> Result<(), StatusError> {
     let (key, enrollment_id) = match load_account(&account_path()?)? {
         Account::Enrolled {
             machine_id,
@@ -410,17 +560,18 @@ fn status(core: Option<&str>, json: bool) -> Result<()> {
                 println!("{}", no_enrollment_report());
                 return Ok(());
             }
-            bail!("no enrollment started; run `ae account enroll`");
+            return Err(StatusError::NotStarted);
         }
         Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
-    let status = runtime()?.block_on(async {
-        Ok::<_, anyhow::Error>(
-            client(core)?
-                .enrollment_status(&enrollment_id, key.secret())
-                .await?,
-        )
-    })?;
+    let client = client(core)?;
+    let status = runtime()
+        .map_err(StatusError::Runtime)?
+        .block_on(client.enrollment_status(&enrollment_id, key.secret()))
+        .map_err(|source| StatusError::Status {
+            enrollment_id: enrollment_id.clone(),
+            source,
+        })?;
     if json {
         println!("{}", pending_report(&enrollment_id, &status));
         return Ok(());
@@ -442,7 +593,11 @@ fn status(core: Option<&str>, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Result<()> {
+fn confirm(
+    core: Option<&str>,
+    yes: bool,
+    expected_account: Option<&str>,
+) -> Result<(), ConfirmError> {
     let path = account_path()?;
     let (key, enrollment_id) = match load_account(&path)? {
         Account::Enrolled {
@@ -454,21 +609,18 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
             println!("Already enrolled as {machine_id}.");
             return Ok(());
         }
-        Account::Unkeyed | Account::Keyed { .. } => {
-            bail!("no enrollment started; run `ae account enroll`")
-        }
+        Account::Unkeyed | Account::Keyed { .. } => return Err(ConfirmError::NotStarted),
         Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
-    let status = runtime()?.block_on(async {
-        Ok::<_, anyhow::Error>(
-            client(core)?
-                .enrollment_status(&enrollment_id, key.secret())
-                .await?,
-        )
-    })?;
-    let account_id = status.account_id.clone().context(
-        "the enrollment is not claimed yet; claim the code in a signed-in session first",
-    )?;
+    let client = client(core)?;
+    let runtime = runtime().map_err(ConfirmError::Runtime)?;
+    let status = runtime
+        .block_on(client.enrollment_status(&enrollment_id, key.secret()))
+        .map_err(|source| ConfirmError::Status {
+            enrollment_id: enrollment_id.clone(),
+            source,
+        })?;
+    let account_id = status.account_id.clone().ok_or(ConfirmError::Unclaimed)?;
     check_expected_account(expected_account, Some(&account_id))?;
     println!("Enrollment claimed by account: {account_id}");
     if let Some(email) = status.email.as_deref() {
@@ -480,9 +632,7 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
     let approved = if yes {
         true
     } else if !crate::ui::interactive() {
-        bail!(
-            "refusing to enroll without explicit approval: re-run with --yes to confirm account {account_id}"
-        );
+        return Err(ConfirmError::NeedsApproval { account_id });
     } else {
         ask(&account_id)?
     };
@@ -490,13 +640,18 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
         println!("Not confirmed.");
         return Ok(());
     }
-    let confirmed = runtime()?.block_on(async {
-        Ok::<_, anyhow::Error>(
-            client(core)?
-                .confirm_enrollment(&enrollment_id, &account_id, key.public(), key.secret())
-                .await?,
-        )
-    })?;
+    let confirmed = runtime
+        .block_on(client.confirm_enrollment(
+            &enrollment_id,
+            &account_id,
+            key.public(),
+            key.secret(),
+        ))
+        .map_err(|source| ConfirmError::Confirm {
+            enrollment_id: enrollment_id.clone(),
+            account_id: account_id.clone(),
+            source,
+        })?;
     let machine_id = confirmed.machine_id.clone();
     save_account(
         &path,
@@ -507,29 +662,32 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
         },
     )?;
     if crate::service::is_running() {
-        crate::service::restart()?;
+        crate::service::restart().map_err(ConfirmError::Restart)?;
     }
     crate::ui::success(format!("Enrolled this Forge as {machine_id}."));
     Ok(())
 }
 
-/// Refuses to confirm into an unexpected account. `None` expected means no
-/// constraint (standalone CLI); a blank flag never silently disables the
-/// check, and a missing stored/claimed id never satisfies a constraint.
-fn check_expected_account(expected: Option<&str>, actual: Option<&str>) -> Result<()> {
+fn check_expected_account(
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), AccountMismatch> {
     let Some(expected) = expected else {
         return Ok(());
     };
     let expected = expected.trim();
     if expected.is_empty() {
-        bail!("--account-id must not be blank");
+        return Err(AccountMismatch::Blank);
     }
     match actual {
         Some(actual) if actual == expected => Ok(()),
-        Some(actual) => {
-            bail!("account mismatch: expected {expected}, found {actual}; refusing to confirm")
-        }
-        None => bail!("account mismatch: expected {expected}, found none; refusing to confirm"),
+        Some(actual) => Err(AccountMismatch::Other {
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        }),
+        None => Err(AccountMismatch::Missing {
+            expected: expected.to_owned(),
+        }),
     }
 }
 
@@ -571,7 +729,7 @@ fn pending_report(enrollment_id: &str, status: &artisan_account::PairStatus) -> 
     })
 }
 
-fn ask(account_id: &str) -> Result<bool> {
+fn ask(account_id: &str) -> Result<bool, AskError> {
     cliclack::confirm(format!(
         "Enroll this Forge into account {account_id}? The code alone is not enough: this binds the local key."
     ))
@@ -580,44 +738,51 @@ fn ask(account_id: &str) -> Result<bool> {
     .map_err(crate::ui::prompt_error)
 }
 
-/// Fetch and apply the latest account config bundle now (same path the
-/// Forge daemon runs on its interval).
-fn sync_config_now(core: Option<&str>) -> Result<()> {
-    let data_dir = artisan_paths::App::Forge.data()?;
-    let Some(identity) = forge_http::sync::load_machine_identity(&data_dir)? else {
-        bail!("this Forge is not enrolled; run `ae account enroll` first");
+fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
+    let data_dir = paths::data(App::Forge)?;
+    let Some(identity) =
+        forge_http::sync::load_machine_identity(&data_dir).map_err(SyncError::Identity)?
+    else {
+        return Err(SyncError::NotEnrolled);
     };
     if identity.account_id.is_none() {
-        bail!("no account recorded; re-run `ae account confirm`");
+        return Err(SyncError::NoAccount);
     }
-    // A serving Forge owns the store and syncs on startup; opening the store
-    // here would recover (cancel) its live runs.
     if crate::service::is_running() {
-        crate::service::restart()?;
+        crate::service::restart().map_err(SyncError::Restart)?;
         crate::ui::success("Restarted Forge; it syncs the account config on startup.");
         return Ok(());
     }
     let _lock = forge_http::lock_data_dir(&data_dir)?;
-    let store = forge_store::Store::open(&data_dir).context("open the Forge store")?;
+    let store = forge_store::Store::open(&data_dir).map_err(|source| SyncError::Store {
+        data: data_dir.clone(),
+        source: Box::new(source),
+    })?;
     let engines = forge_engines::Engines::new(&data_dir);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("build the Core HTTP client")?;
-    let outcome = runtime()?.block_on(async {
-        let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
-        let outcome = forge_http::sync::sync_config(
-            &http,
-            &forge_http::core::core_base_url(core),
-            &identity.machine_id,
-            &identity.secret,
-            &hub,
-            &data_dir,
-        )
-        .await;
-        hub.shutdown();
-        outcome
-    })?;
+        .map_err(SyncError::Http)?;
+    let outcome = runtime()
+        .map_err(SyncError::Runtime)?
+        .block_on(async {
+            let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
+            let outcome = forge_http::sync::sync_config(
+                &http,
+                &forge_http::core::core_base_url(core),
+                &identity.machine_id,
+                &identity.secret,
+                &hub,
+                &data_dir,
+            )
+            .await;
+            hub.shutdown();
+            outcome
+        })
+        .map_err(|source| SyncError::Sync {
+            machine_id: identity.machine_id.clone(),
+            source,
+        })?;
     match outcome {
         forge_http::sync::ConfigOutcome::Updated { state, kept_local } => {
             crate::ui::success(format!("Applied config bundle version {}.", state.version));
