@@ -8,7 +8,7 @@ use artisan_api::{
 };
 use forge_engines::{EngineEvent, Input, LiveKind, Outcome, RunIo, Turn, UserInput};
 use forge_store::NewItem;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1001,16 +1001,57 @@ async fn claude_transport(
     ))
 }
 
-/// Work of this run by adapter key.
+const RECENT_KEYS: usize = 1024;
+
+struct Recent<V> {
+    entries: HashMap<String, V>,
+    order: VecDeque<String>,
+    forgot: bool,
+}
+
+impl<V> Default for Recent<V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            forgot: false,
+        }
+    }
+}
+
+impl<V> Recent<V> {
+    fn insert(&mut self, key: String, value: V) {
+        if self.entries.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > RECENT_KEYS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+            self.forgot = true;
+        }
+    }
+
+    fn take(&mut self, key: &str) -> Option<V> {
+        let value = self.entries.remove(key)?;
+        self.order.retain(|kept| kept != key);
+        Some(value)
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+}
+
 #[derive(Default)]
 struct Work {
     binary: Option<forge_engines::BinaryLease>,
     by_key: HashMap<String, Tracked>,
+    settled: Recent<Tracked>,
     initial: Option<(ItemId, Vec<ItemId>)>,
     /// What the run's finished items weigh toward a "You should know" check.
     weighed: crate::side::Work,
-    /// Keys of calls Forge shows another way (see [`spawns_agent`]).
-    hidden: HashSet<String>,
+    hidden: Recent<()>,
     /// The engine reported an error of its own.
     errored: bool,
     /// The original request, to name adapters without native background titles.
@@ -1134,6 +1175,15 @@ impl Compaction<'_> {
 }
 
 impl Work {
+    fn settle(&mut self, key: &str) {
+        if key == crate::handoff::COMPACTION_KEY {
+            return;
+        }
+        if let Some(tracked) = self.by_key.remove(key) {
+            self.settled.insert(key.to_owned(), tracked);
+        }
+    }
+
     fn id(&mut self, key: &str) -> ItemId {
         self.by_key
             .entry(key.to_owned())
@@ -1146,6 +1196,39 @@ impl Work {
             .id
             .clone()
     }
+}
+
+async fn identify(
+    store: &forge_store::Store,
+    run: &Run,
+    items: &mut Work,
+    key: &str,
+) -> Result<ItemId, ApplyError> {
+    if let Some(tracked) = items.by_key.get(key) {
+        return Ok(tracked.id.clone());
+    }
+    if let Some(tracked) = items.settled.take(key) {
+        let id = tracked.id.clone();
+        items.by_key.insert(key.to_owned(), tracked);
+        return Ok(id);
+    }
+    if items.settled.forgot
+        && let Some(found) = store
+            .item_by_native(&run.thread_id, Some(&run.id), key)
+            .await?
+    {
+        items.by_key.insert(
+            key.to_owned(),
+            Tracked {
+                id: found.id.clone(),
+                parent: found.parent_id,
+                status: found.status,
+                persisted: true,
+            },
+        );
+        return Ok(found.id);
+    }
+    Ok(items.id(key))
 }
 
 async fn known_item(
@@ -1277,7 +1360,7 @@ async fn apply(
             if items.hidden.contains(&key) {
                 return Ok(());
             }
-            let id = items.id(&key);
+            let id = identify(store, run, items, &key).await?;
             let tracked = items.by_key.get_mut(&key).unwrap_or_else(|| {
                 unreachable!(
                     "invariant: item {id} of run {} is tracked once named",
@@ -1293,6 +1376,9 @@ async fn apply(
                 if asked {
                     hub.agent_attention(&thread_id).await;
                 }
+                if item.status.is_terminal() && !matches!(item.kind, ItemKind::Agent { .. }) {
+                    items.settle(&key);
+                }
             }
         }
         EngineEvent::Live {
@@ -1300,21 +1386,25 @@ async fn apply(
             text,
             append,
         } => {
+            if let LiveKind::Text { key } | LiveKind::Shell { key } | LiveKind::Progress { key } =
+                &target
+                && !items.by_key.contains_key(key)
+                && !hub.live_has_room(&thread_id)
+            {
+                return Ok(());
+            }
             let target = match target {
                 LiveKind::Text { key } => LiveTarget::Text {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
-                // The provider's recap is the run's reasoning line, and it
-                // is already a line: it is not trimmed the way the model's
-                // own prose is.
                 LiveKind::Reasoning | LiveKind::Narration => LiveTarget::Reasoning {
                     run_id: run.id.clone(),
                 },
                 LiveKind::Shell { key } => LiveTarget::Shell {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
                 LiveKind::Progress { key } => LiveTarget::Progress {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
                 LiveKind::Status => LiveTarget::Status {
                     run_id: run.id.clone(),
@@ -1389,7 +1479,7 @@ async fn apply_item(
     // Forge stores the agent an `agent_spawn` call starts; the call
     // itself would only repeat it.
     if items.hidden.contains(&key) || spawns_agent(&kind) {
-        items.hidden.insert(key);
+        items.hidden.insert(key, ());
         return Ok(());
     }
     // A message to an agent names the agent's item: the engine
@@ -1442,7 +1532,7 @@ async fn apply_item(
             None => items.id(&key),
         }
     } else {
-        items.id(&key)
+        identify(store, run, items, &key).await?
     };
     if matches!(kind, ItemKind::Agent { .. })
         && status == Status::Running
@@ -1493,13 +1583,16 @@ async fn apply_item(
             &thread_id,
             Some(&run.id),
             tracked.parent.clone(),
-            Some(key),
+            Some(key.clone()),
             status,
             kind,
         ))
         .await?;
     let asked = (tracked.status == Status::AwaitingUser) != (saved.status == Status::AwaitingUser);
     tracked.status = saved.status;
+    if saved.status.is_terminal() && !matches!(saved.kind, ItemKind::Agent { .. }) {
+        items.settle(&key);
+    }
     if asked {
         hub.agent_attention(&thread_id).await;
     }

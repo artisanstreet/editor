@@ -176,7 +176,8 @@ fn keep_newest(text: &mut String, bytes: usize) -> usize {
 
 impl LiveRun {
     fn terminal_share(&self, admitting: bool) -> usize {
-        let terminals = self.live.keys().filter(|target| terminal(target)).count() + usize::from(admitting);
+        let terminals =
+            self.live.keys().filter(|target| terminal(target)).count() + usize::from(admitting);
         LIVE_TARGET_BYTES.min(LIVE_TERMINAL_BYTES / terminals.max(1))
     }
 
@@ -1340,7 +1341,10 @@ impl Hub {
             run.shrink_terminals(share);
             share
         } else {
-            let before = run.live.get(&target).map_or(0, |preview| preview.text.len());
+            let before = run
+                .live
+                .get(&target)
+                .map_or(0, |preview| preview.text.len());
             LIVE_TARGET_BYTES.min(
                 LIVE_FOREGROUND_BYTES.saturating_sub(run.foreground_bytes.saturating_sub(before)),
             )
@@ -1402,6 +1406,12 @@ impl Hub {
             append,
             coverage,
         });
+    }
+
+    fn live_has_room(&self, thread_id: &ThreadId) -> bool {
+        self.lock()
+            .get(thread_id)
+            .is_some_and(|run| run.live.len() < LIVE_TARGETS)
     }
 
     /// Empties memory-only text that clients still show.

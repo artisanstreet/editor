@@ -3414,6 +3414,68 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
     fixture.settled().await;
 }
 
+fn shell_call(title: &str) -> ItemKind {
+    ItemKind::Tool {
+        tool: ToolKind::Shell {
+            command: "ls".into(),
+            cwd: None,
+            background: false,
+            watch: false,
+        },
+        title: Some(title.to_owned()),
+        output: None,
+        exit_code: None,
+        approval: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_update_to_a_long_settled_call_lands_on_its_own_item() {
+    let fixture = fixture(Arc::new(|_turn, io| {
+        Box::pin(async move {
+            for n in 0..1500 {
+                for status in [Status::Running, Status::Done] {
+                    io.emit(EngineEvent::Item {
+                        key: format!("call-{n}"),
+                        parent: None,
+                        status,
+                        kind: shell_call("ls"),
+                    })
+                    .await;
+                }
+            }
+            io.emit(EngineEvent::Item {
+                key: "call-0".into(),
+                parent: None,
+                status: Status::Done,
+                kind: shell_call("late"),
+            })
+            .await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("go"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let first = fixture
+        .hub
+        .store()
+        .item_by_native(&fixture.thread_id, None, "call-0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(&first.kind, ItemKind::Tool { title: Some(title), .. } if title == "late"));
+    let newest = fixture.items().await;
+    assert!(
+        !newest.iter().any(|item| matches!(&item.kind, ItemKind::Tool { title: Some(title), .. } if title == "late")),
+        "the late update made a second item instead of updating the first"
+    );
+}
+
 async fn running_fixture() -> Fixture {
     let started = Arc::new(Notify::new());
     let script_started = Arc::clone(&started);
@@ -3451,7 +3513,20 @@ fn previewed(fixture: &Fixture, target: &LiveTarget) -> String {
                 text,
                 ..
             } if &shown == target => Some(text),
-            _ => None,
+            Event::Hello { .. }
+            | Event::Project { .. }
+            | Event::Thread { .. }
+            | Event::ThreadRemoved { .. }
+            | Event::Item { .. }
+            | Event::Run { .. }
+            | Event::ItemState { .. }
+            | Event::Setting { .. }
+            | Event::Live { .. }
+            | Event::Suggestion { .. }
+            | Event::Engine { .. }
+            | Event::EngineInstall { .. }
+            | Event::EditorCall { .. }
+            | Event::Reset => None,
         })
         .unwrap_or_default()
 }
@@ -3474,9 +3549,12 @@ async fn busy_background_shells_never_starve_the_reply_streaming_beside_them() {
     fixture
         .hub
         .publish_live(&fixture.thread_id, reply.clone(), "Here is".into(), true);
-    fixture
-        .hub
-        .publish_live(&fixture.thread_id, reply.clone(), " the answer".into(), true);
+    fixture.hub.publish_live(
+        &fixture.thread_id,
+        reply.clone(),
+        " the answer".into(),
+        true,
+    );
     assert_eq!(previewed(&fixture, &reply), "Here is the answer");
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     fixture.settled().await;
@@ -3497,14 +3575,20 @@ async fn a_full_shell_preview_is_not_resent_whole_for_every_small_chunk() {
             }
         }
     };
-    fixture
-        .hub
-        .publish_live(&fixture.thread_id, shell.clone(), "s".repeat(256 * 1024), true);
+    fixture.hub.publish_live(
+        &fixture.thread_id,
+        shell.clone(),
+        "s".repeat(256 * 1024),
+        true,
+    );
     drain(&mut events);
     for n in 0..2000 {
-        fixture
-            .hub
-            .publish_live(&fixture.thread_id, shell.clone(), format!("line {n:>94}\n"), true);
+        fixture.hub.publish_live(
+            &fixture.thread_id,
+            shell.clone(),
+            format!("line {n:>94}\n"),
+            true,
+        );
         drain(&mut events);
     }
     assert!(
