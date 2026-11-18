@@ -342,6 +342,19 @@ impl MarketplaceSearchError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum MarketplaceInstallError {
+    #[error("make a staging folder in {} for listing {listing}", path.display())]
+    Staging {
+        listing: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("run the staging folder task for listing {listing}")]
+    StagingTask {
+        listing: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("Couldn't fetch listing {listing}")]
     Fetch {
         listing: String,
@@ -366,6 +379,7 @@ impl MarketplaceInstallError {
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self {
+            Self::Staging { .. } | Self::StagingTask { .. } => ErrorClass::Internal,
             Self::Fetch { .. } => ErrorClass::Conflict,
             Self::Install { source, .. } => source.class(),
             Self::Catalog { source, .. } => source.class(),
@@ -724,10 +738,25 @@ impl Extensions {
         &self,
         id: &str,
     ) -> Result<Vec<CatalogSkill>, MarketplaceInstallError> {
-        let scratch = self
-            .data_dir()
-            .join("scratch")
-            .join(format!("marketplace-{}", artisan_api::now()));
+        let root = self.data_dir().join("marketplace");
+        let staging_root = root.clone();
+        let staging = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&staging_root)?;
+            tempfile::Builder::new()
+                .prefix("install-")
+                .tempdir_in(&staging_root)
+        })
+        .await
+        .map_err(|source| MarketplaceInstallError::StagingTask {
+            listing: id.to_owned(),
+            source,
+        })?
+        .map_err(|source| MarketplaceInstallError::Staging {
+            listing: id.to_owned(),
+            path: root,
+            source,
+        })?;
+        let scratch = staging.path().to_path_buf();
         let installed = match forge_engines::fetch_skill(self.engines().http(), id, &scratch).await
         {
             Ok(folder) => self
@@ -743,11 +772,13 @@ impl Extensions {
                 source: Box::new(source),
             }),
         };
-        match tokio::fs::remove_dir_all(&scratch).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        match tokio::task::spawn_blocking(move || staging.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(listing = %id, path = %scratch.display(), "remove the marketplace staging folder: {error}");
+            }
             Err(error) => {
-                tracing::warn!(listing = %id, path = %scratch.display(), "remove the marketplace scratch folder: {error}");
+                tracing::warn!(listing = %id, path = %scratch.display(), "remove the marketplace staging folder task: {error}");
             }
         }
         installed?;
