@@ -200,13 +200,12 @@ impl Store {
         &self,
         thread_id: ThreadId,
         message: SendMessage,
-        steer: bool,
         acceptance: Acceptance,
     ) -> Result<(Item, bool, EngineId), SendMessageError> {
         let blob_dir = self.inner.blob_dir.clone();
         let (item, thread) = (message.id.clone(), thread_id.clone());
         self.write_acknowledged(move |tx| {
-            tx.send_message(thread_id, message, steer, acceptance, &blob_dir)
+            tx.send_message(thread_id, message, acceptance, &blob_dir)
         })
         .await
         .map_err(|cause| SendMessageError {
@@ -230,11 +229,9 @@ impl Store {
             let crate::AgentReport {
                 thread,
                 message,
-                steer,
                 acceptance,
             } = report;
-            let (item, _, engine) =
-                tx.send_message(thread, message, steer, acceptance, &blob_dir)?;
+            let (item, _, engine) = tx.send_message(thread, message, acceptance, &blob_dir)?;
             Ok((item, engine))
         })
         .await
@@ -257,7 +254,7 @@ impl Store {
             let agent = tx.upsert_item(agent)?;
             let child = tx.create_thread(child)?;
             let (prompt, _, _) =
-                tx.send_message(child.id.clone(), prompt, false, acceptance, &blob_dir)?;
+                tx.send_message(child.id.clone(), prompt, acceptance, &blob_dir)?;
             Ok((agent, child, prompt))
         })
         .await
@@ -273,6 +270,7 @@ impl Store {
         thread: ThreadId,
         run: RunId,
         ids: Vec<ItemId>,
+        delivered: crate::Delivered,
     ) -> Result<(), AcceptInputsError> {
         let (accepting, into) = (thread.clone(), run.clone());
         self.write(move |tx| {
@@ -289,9 +287,14 @@ impl Store {
                         return Err(WriteFailure::NotAnInput { item: id });
                     }
                     if matches!(old.status, Status::Running | Status::Cancelled) {
+                        let mut kind = old.kind.clone();
+                        if let ItemKind::UserMessage { steer, .. } = &mut kind {
+                            *steer = delivered == crate::Delivered::Steer;
+                        }
                         let item = Item {
                             run_id: Some(run.clone()),
                             status: Status::Done,
+                            kind,
                             ..old.clone()
                         };
                         tx.save_item(item, Some(old))?;
@@ -995,7 +998,6 @@ impl Tx<'_> {
         &mut self,
         thread_id: ThreadId,
         message: SendMessage,
-        steer: bool,
         acceptance: Acceptance,
         blob_dir: &std::path::Path,
     ) -> Result<(Item, bool, EngineId), InputFailure> {
@@ -1013,7 +1015,7 @@ impl Tx<'_> {
                 kind: ItemKind::UserMessage {
                     text: message.text.into(),
                     images: message.images,
-                    steer,
+                    steer: false,
                     from_agent: acceptance.from_agent.clone(),
                     sender: acceptance.sender.clone(),
                 },

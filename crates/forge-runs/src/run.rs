@@ -1231,11 +1231,13 @@ async fn apply(
             *run = store.upsert_run(run.clone()).await?;
         }
         EngineEvent::InputAccepted { id } => {
-            let ids = items
-                .initial
-                .take_if(|(ack, _)| *ack == id)
-                .map_or_else(|| vec![id], |(_, ids)| ids);
-            store.accept_inputs(thread_id, run.id.clone(), ids).await?;
+            let (ids, delivered) = items.initial.take_if(|(ack, _)| *ack == id).map_or_else(
+                || (vec![id], forge_store::Delivered::Steer),
+                |(_, ids)| (ids, forge_store::Delivered::Initial),
+            );
+            store
+                .accept_inputs(thread_id, run.id.clone(), ids, delivered)
+                .await?;
         }
     }
     Ok(())

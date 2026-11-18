@@ -346,11 +346,10 @@ impl Hub {
         message: SendMessage,
         acceptance: forge_store::Acceptance,
     ) -> Result<Item, SendError> {
-        let steer = self.is_live(thread_id);
         let (item, created, saved_engine) = self
             .inner
             .store
-            .send_message(thread_id.clone(), message, steer, acceptance)
+            .send_message(thread_id.clone(), message, acceptance)
             .await?;
         if !created {
             return Ok(item);

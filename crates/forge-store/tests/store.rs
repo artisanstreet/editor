@@ -1027,7 +1027,6 @@ async fn replaying_a_send_cannot_change_config_or_title() {
         .send_message(
             thread.clone(),
             command.clone(),
-            false,
             forge_store::Acceptance {
                 title: Some("First title".into()),
                 remember_config: true,
@@ -1045,7 +1044,6 @@ async fn replaying_a_send_cannot_change_config_or_title() {
         .send_message(
             thread.clone(),
             replay,
-            true,
             forge_store::Acceptance {
                 title: Some("Replayed title".into()),
                 remember_config: true,
@@ -1231,12 +1229,7 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
         }),
     };
     store
-        .send_message(
-            thread.clone(),
-            command.clone(),
-            false,
-            Acceptance::default(),
-        )
+        .send_message(thread.clone(), command.clone(), Acceptance::default())
         .await
         .unwrap();
     assert_eq!(store.draft("scope").await.unwrap(), newer.current);
@@ -1244,7 +1237,7 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
     accepted.id = ItemId::new();
     accepted.draft.as_mut().unwrap().revision = newer.current.revision;
     store
-        .send_message(thread, accepted, false, Acceptance::default())
+        .send_message(thread, accepted, Acceptance::default())
         .await
         .unwrap();
     let cleared = store.draft("scope").await.unwrap();

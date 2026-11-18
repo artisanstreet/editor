@@ -1152,7 +1152,6 @@ impl Hub {
                         config: None,
                         draft: None,
                     },
-                    steer: self.is_live(&parent),
                     acceptance: forge_store::Acceptance {
                         title: None,
                         remember_config: false,

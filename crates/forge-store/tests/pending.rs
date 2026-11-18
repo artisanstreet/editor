@@ -6,7 +6,7 @@ use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, RunId,
     SendMessage, ThreadId,
 };
-use forge_store::{Acceptance, InputFailure, SendRejected, Store};
+use forge_store::{Acceptance, Delivered, InputFailure, SendRejected, Store};
 
 #[expect(
     clippy::unwrap_used,
@@ -54,7 +54,6 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
             .send_message(
                 thread.clone(),
                 message("queued".into(), Vec::new()),
-                false,
                 Acceptance::default(),
             )
             .await
@@ -68,7 +67,7 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
     assert!(pending.cutoff > pending.items.last().unwrap().seq);
     let ids = pending.items.iter().map(|item| item.id.clone()).collect();
     store
-        .accept_inputs(thread.clone(), RunId::new(), ids)
+        .accept_inputs(thread.clone(), RunId::new(), ids, Delivered::Initial)
         .await
         .unwrap();
     let rest = store.pending_inputs(&thread).await.unwrap();
@@ -85,7 +84,6 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
         .send_message(
             thread.clone(),
             message(text.clone(), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
@@ -95,7 +93,6 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
         .send_message(
             thread.clone(),
             message("tail".into(), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
@@ -106,7 +103,12 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
     assert_eq!(pending.items[0], first);
     assert_eq!(pending.cutoff, later.seq);
     store
-        .accept_inputs(thread.clone(), RunId::new(), vec![first.id])
+        .accept_inputs(
+            thread.clone(),
+            RunId::new(),
+            vec![first.id],
+            Delivered::Initial,
+        )
         .await
         .unwrap();
     assert_eq!(store.pending_inputs(&thread).await.unwrap().items, [later]);
@@ -121,7 +123,6 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread.clone(),
             message("x".repeat(32 * 1024 * 1024 + 1), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
@@ -136,7 +137,6 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread.clone(),
             message("missing".into(), vec![hash.clone()]),
-            false,
             Acceptance::default(),
         )
         .await
@@ -150,7 +150,6 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread.clone(),
             message("too many".into(), vec![hash; 129]),
-            false,
             Acceptance::default(),
         )
         .await
@@ -180,7 +179,6 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread,
             message("too much image data".into(), hashes),
-            false,
             Acceptance::default(),
         )
         .await
@@ -215,7 +213,6 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             .send_message(
                 thread.clone(),
                 message(format!("image-{n}"), vec![hash]),
-                false,
                 Acceptance::default(),
             )
             .await
@@ -231,6 +228,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             thread.clone(),
             RunId::new(),
             pending.items.into_iter().map(|item| item.id).collect(),
+            Delivered::Initial,
         )
         .await
         .unwrap();
@@ -250,7 +248,6 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         .send_message(
             thread,
             message("invalid oversized blob".into(), vec![hash]),
-            false,
             Acceptance::default(),
         )
         .await

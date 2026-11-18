@@ -145,8 +145,13 @@ pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'s
 pub struct AgentReport {
     pub thread: ThreadId,
     pub message: artisan_api::SendMessage,
-    pub steer: bool,
     pub acceptance: Acceptance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    Initial,
+    Steer,
 }
 
 #[derive(Clone, Debug)]

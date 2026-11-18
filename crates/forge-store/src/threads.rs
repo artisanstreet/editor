@@ -637,12 +637,7 @@ mod activity_time_tests {
             draft: None,
         };
         let (item, accepted, _) = store
-            .send_message(
-                thread.id.clone(),
-                input.clone(),
-                false,
-                Acceptance::default(),
-            )
+            .send_message(thread.id.clone(), input.clone(), Acceptance::default())
             .await
             .unwrap();
         assert!(accepted);
@@ -652,7 +647,7 @@ mod activity_time_tests {
         assert!(accepted_thread.activity_at > 30);
         assert!(
             !store
-                .send_message(thread.id.clone(), input, false, Acceptance::default())
+                .send_message(thread.id.clone(), input, Acceptance::default())
                 .await
                 .unwrap()
                 .1

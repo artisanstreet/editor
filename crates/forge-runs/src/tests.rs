@@ -754,11 +754,18 @@ async fn a_steer_reaches_the_live_run() {
         .send_message(&fixture.thread_id, message("also add tests"))
         .await
         .unwrap();
+    let runs = fixture.settled().await;
     assert!(matches!(
-        steer.kind,
+        fixture
+            .hub
+            .store()
+            .item(&steer.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .kind,
         ItemKind::UserMessage { steer: true, .. }
     ));
-    let runs = fixture.settled().await;
     assert_eq!(runs.len(), 1, "the steer joined the live run");
     let items = texts(&fixture.items().await);
     assert!(items.contains(&("also add tests".to_owned(), Status::Done)));
@@ -873,6 +880,10 @@ async fn a_message_the_ending_run_never_took_starts_the_next_run() {
     assert_ne!(
         items[0].run_id, items[1].run_id,
         "the second message got its own run"
+    );
+    assert!(
+        matches!(items[1].kind, ItemKind::UserMessage { steer: false, .. }),
+        "the second message opened its run, so the transcript shows it"
     );
 }
 
@@ -1623,7 +1634,6 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         .send_message(
             fixture.thread_id.clone(),
             command,
-            false,
             forge_store::Acceptance::default(),
         )
         .await

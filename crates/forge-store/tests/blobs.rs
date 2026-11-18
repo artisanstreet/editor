@@ -84,7 +84,6 @@ async fn collection_never_deletes_an_image_a_message_just_referenced() {
                     config: None,
                     draft: None,
                 },
-                false,
                 forge_store::Acceptance::default(),
             )
             .await;

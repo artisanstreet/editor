@@ -908,12 +908,7 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     };
     let input_id = input.id.clone();
     store
-        .send_message(
-            thread.id.clone(),
-            input,
-            false,
-            forge_store::Acceptance::default(),
-        )
+        .send_message(thread.id.clone(), input, forge_store::Acceptance::default())
         .await
         .unwrap();
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
