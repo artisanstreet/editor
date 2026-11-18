@@ -1780,11 +1780,11 @@ dependencies = [
 name = "editor-sources"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-text",
  "aqua-ui",
  "artisan-api",
+ "diagnostics",
  "editor-core",
  "editor-ui",
  "serde",

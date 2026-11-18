@@ -2,7 +2,9 @@ use super::{page_record, raw_rows};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, TextContent};
 use editor_core::{
     CollectionWindow, ContentWindow, Core, ForgeClient, HostData, HostId, HostInstance, RangeState,
-    delivery::Delivery, runtime::runtime,
+    client::{CopyContentError, ExportContentError},
+    delivery::Delivery,
+    runtime::runtime,
 };
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
 use tokio_util::task::AbortOnDropHandle;
@@ -12,10 +14,10 @@ static COPIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 enum Completion {
     Copy(
         ContentRef,
-        anyhow::Result<String>,
+        Result<String, CopyContentError>,
         tokio::sync::SemaphorePermit<'static>,
     ),
-    Export(ContentRef, anyhow::Result<()>),
+    Export(ContentRef, Result<(), ExportContentError>),
 }
 
 pub struct CopiedSource {
@@ -233,13 +235,7 @@ impl ContentText {
         self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let permit = COPIES.acquire().await.expect("copy semaphore stays open");
             let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-            let _ = sender
-                .send(Completion::Copy(
-                    source,
-                    result.map_err(anyhow::Error::from),
-                    permit,
-                ))
-                .await;
+            let _ = sender.send(Completion::Copy(source, result, permit)).await;
         })));
     }
 
@@ -284,12 +280,7 @@ impl ContentText {
         let sender = self.delivery.sender();
         self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = client.export_content(&source, path).await;
-            let _ = sender
-                .send(Completion::Export(
-                    source,
-                    result.map_err(anyhow::Error::from),
-                ))
-                .await;
+            let _ = sender.send(Completion::Export(source, result)).await;
         })));
     }
 
@@ -314,13 +305,21 @@ impl ContentText {
                                 _permit: permit,
                             })
                         }
-                        Err(error) => self.error = Some(format!("Couldn't copy source: {error:#}")),
+                        Err(error) => {
+                            self.error = Some(format!(
+                                "Couldn't copy source: {}",
+                                diagnostics::chain(&error)
+                            ))
+                        }
                     }
                 }
                 Completion::Export(source, result) if &source == self.window.source() => {
                     self.action = None;
                     if let Err(error) = result {
-                        self.error = Some(format!("Couldn't export source: {error:#}"));
+                        self.error = Some(format!(
+                            "Couldn't export source: {}",
+                            diagnostics::chain(&error)
+                        ));
                     }
                 }
                 _ => {}
