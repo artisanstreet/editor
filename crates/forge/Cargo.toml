@@ -26,7 +26,8 @@ diagnostics.workspace = true
 forge-http.workspace = true
 forge-isolation.workspace = true
 forge-runs.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+forge-store.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing.workspace = true
 
 [build-dependencies]
@@ -35,7 +36,6 @@ build-info.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 artisan-api = { workspace = true, features = ["tls"] }
-forge-store.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 
 [lints]

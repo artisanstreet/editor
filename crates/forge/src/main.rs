@@ -48,6 +48,8 @@ struct Cli {
     /// Append the log to this file instead of the terminal.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    schema_version: bool,
     #[cfg(unix)]
     #[arg(long, hide = true)]
     backend: bool,
@@ -61,6 +63,20 @@ struct Cli {
 
 fn main() -> std::process::ExitCode {
     let mut cli = Cli::parse();
+    if cli.schema_version {
+        use std::io::Write as _;
+        return match writeln!(
+            std::io::stdout(),
+            "{}",
+            forge_store::Store::schema_version()
+        ) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: print the schema version: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if cfg!(windows) && cli.log.is_none() {
         cli.log = cli
             .data
@@ -172,7 +188,46 @@ fn run(cli: &Cli, data_dir: PathBuf) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        runtime.block_on(forge_http::serve(config, stop))
+        runtime.block_on(serve_recorded(config, stop))
+    }
+}
+
+#[cfg(not(unix))]
+async fn serve_recorded(
+    config: forge_http::ServeConfig,
+    stop: impl Future<Output = ()>,
+) -> Result<()> {
+    let stop_file = config.data_dir.join("forge.stop");
+    let pid_file = config.data_dir.join("forge.pid");
+    let forge = forge_http::start(config).await?;
+    remove_if_present(&stop_file)?;
+    std::fs::write(&pid_file, std::process::id().to_string())
+        .with_context(|| format!("write {}", pid_file.display()))?;
+    let outcome = forge
+        .run_until(async {
+            tokio::select! {
+                () = stop => {},
+                () = stop_file_appears(&stop_file) => tracing::info!("asked to stop by {}", stop_file.display()),
+            }
+        })
+        .await;
+    remove_if_present(&pid_file)?;
+    outcome
+}
+
+#[cfg(not(unix))]
+fn remove_if_present(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+#[cfg(not(unix))]
+async fn stop_file_appears(path: &std::path::Path) {
+    while !path.exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
