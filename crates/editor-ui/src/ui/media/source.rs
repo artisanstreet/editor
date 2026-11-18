@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use super::resource_cache::ResourceCache;
 use serde::Deserialize;
@@ -46,6 +47,25 @@ impl MediaBytes {
     }
 }
 
+#[derive(Default)]
+struct RemoteConsent(Mutex<HashSet<Arc<str>>>);
+
+impl RemoteConsent {
+    fn allows(&self, item: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(item)
+    }
+
+    fn allow(&self, item: Arc<str>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(item);
+    }
+}
+
 #[derive(Clone)]
 pub struct MediaFetcher {
     scope: String,
@@ -54,6 +74,7 @@ pub struct MediaFetcher {
     revision: u64,
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
     resources: Arc<ResourceCache>,
+    remote: Arc<RemoteConsent>,
 }
 
 impl MediaFetcher {
@@ -68,6 +89,21 @@ impl MediaFetcher {
             revision: 0,
             fetch: Arc::new(fetch),
             resources: ResourceCache::new(),
+            remote: Arc::default(),
+        }
+    }
+
+    pub fn waits_for_consent(&self, source: &MediaSource) -> bool {
+        matches!(source.parsed, Parsed::Url(_))
+            && !self
+                .item
+                .as_deref()
+                .is_some_and(|item| self.remote.allows(item))
+    }
+
+    pub fn allow_remote(&self) {
+        if let Some(item) = &self.item {
+            self.remote.allow(Arc::clone(item));
         }
     }
 
@@ -363,3 +399,7 @@ pub async fn load_image_bytes(
     }?;
     Ok(MediaBytes { bytes, permit })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/media/source.rs"]
+mod tests;

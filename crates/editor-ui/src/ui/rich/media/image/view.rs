@@ -41,6 +41,7 @@ pub(crate) enum Action {
         image: ImageHandle,
     },
     Retry(usize),
+    AllowRemote,
     CopyPath {
         index: usize,
         position: aqua_core::Point,
@@ -113,12 +114,19 @@ impl ImageState {
         changed
     }
 
+    pub(crate) fn allow_remote(&mut self) -> bool {
+        self.fetcher.allow_remote();
+        self.refresh()
+    }
+
     pub(crate) fn retry(&mut self, index: usize) -> bool {
         let Some(source) = self.sources.get(index) else {
             return false;
         };
-        if !matches!(self.loaded[index], Loaded::Failed(error) if error != ImageError::Load(MediaLoadError::Invalid))
-        {
+        if !matches!(
+            self.loaded[index],
+            Loaded::Failed(ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode)
+        ) {
             return false;
         }
         let key = cache_key(&self.fetcher, source, &format!("image-{index}"));
@@ -251,9 +259,40 @@ impl ImageState {
                                 InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
                             });
                     }
-                    Loaded::Failed(error)
-                        if *error != ImageError::Load(MediaLoadError::Invalid) =>
-                    {
+                    Loaded::Failed(ImageError::NeedsConsent) => {
+                        let click = Rc::clone(&emit);
+                        let key = Rc::clone(&emit);
+                        let access = Rc::clone(&emit);
+                        frame = frame
+                            .role(aqua_core::Role::Button)
+                            .aria_label(format!("{alt}. Load remote images"))
+                            .focusable(true)
+                            .cursor(aqua_core::CursorIcon::Pointer)
+                            .on_accessibility_activate(move || access(Action::AllowRemote))
+                            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                                if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(pressed)) if matches!(pressed.key, aqua_core::Key::Char(' ') | aqua_core::Key::Named(aqua_core::NamedKey::Enter))) {
+                                    key(Action::AllowRemote);
+                                    InputResponse { stop_propagation: true, ..InputResponse::handled() }
+                                } else { InputResponse::default() }
+                            })
+                            .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
+                                if matches!(
+                                    &event.input,
+                                    RoutedInput::Native(InputEvent::PointerUp(
+                                        _,
+                                        PointerButton::Primary
+                                    ))
+                                ) {
+                                    click(Action::AllowRemote);
+                                    InputResponse::handled()
+                                } else {
+                                    InputResponse::default()
+                                }
+                            });
+                    }
+                    Loaded::Failed(
+                        ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode,
+                    ) => {
                         let retry = Rc::clone(&emit);
                         frame = frame.cursor(aqua_core::CursorIcon::Pointer).on_input(
                             InputKind::PointerUp,
@@ -274,7 +313,8 @@ impl ImageState {
                             },
                         );
                     }
-                    _ => {}
+                    Loaded::Loading | Loaded::Failed(ImageError::Load(MediaLoadError::Invalid)) => {
+                    }
                 }
                 let mut column = UiBox::new()
                     .layout("column")
@@ -381,6 +421,7 @@ fn content(
             };
             if let Loaded::Failed(error) = image {
                 let title = match error {
+                    ImageError::NeedsConsent => "Remote image",
                     ImageError::Load(MediaLoadError::Invalid) => "Not a valid image path",
                     ImageError::Load(MediaLoadError::Fetch(
                         crate::ui::media::source::MediaFailure::Missing,
@@ -393,15 +434,25 @@ fn content(
                     )) => "Couldn't read the file",
                     ImageError::Decode => "Not a supported image",
                 };
-                panel = panel
-                    .child(IconSize::Lg.glyph(
+                let (icon, hint) = match error {
+                    ImageError::NeedsConsent => (
+                        editor_assets::AssetId::TABLER_WORLD,
+                        Some("Load remote images"),
+                    ),
+                    ImageError::Load(MediaLoadError::Invalid) => {
+                        (editor_assets::AssetId::TABLER_FILE_OFF, None)
+                    }
+                    ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode => (
                         editor_assets::AssetId::TABLER_FILE_OFF,
-                        theme.colors.text_muted.to_reference_paint(),
-                    ))
+                        Some("Click to retry"),
+                    ),
+                };
+                panel = panel
+                    .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
                     .child(text(title.to_owned(), theme.colors.text))
                     .child(text(source.trim().to_owned(), theme.colors.text_muted));
-                if *error != ImageError::Load(MediaLoadError::Invalid) {
-                    panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
+                if let Some(hint) = hint {
+                    panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
                 }
             } else {
                 panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));

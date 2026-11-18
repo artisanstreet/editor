@@ -1597,6 +1597,10 @@ impl MarkdownPresenter {
                                 refresh();
                             }
                         }
+                        crate::ui::rich::media::image::Action::AllowRemote => {
+                            state.borrow_mut().allow_remote();
+                            refresh();
+                        }
                         crate::ui::rich::media::image::Action::CopyPath { index, position } => {
                             if let Some(source) = state.borrow().preview_sources().1.get(index) {
                                 effect(crate::ui::media::preview::Effect::ShowCopyMenu(

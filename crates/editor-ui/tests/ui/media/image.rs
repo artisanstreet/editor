@@ -204,3 +204,33 @@ fn url_cache_entries_are_scoped_to_item_revision() {
         Load::Ready(Err(ImageError::Decode))
     ));
 }
+
+#[test]
+fn a_remote_image_loads_only_after_its_message_allows_remote_images() {
+    let loader = Images::new();
+    let fetcher = fetcher();
+    let message = fetcher.clone().owned_by(&[1], 1).showing("item-1");
+    let other = fetcher.clone().owned_by(&[2], 1).showing("item-2");
+    let source = MediaSource::from("http://127.0.0.1:9/pixel.png".to_owned());
+    let wake: aqua::mailbox::Wake = Arc::new(|| {});
+    assert!(matches!(
+        loader.request(&message, &source, "image", 1, Arc::clone(&wake)),
+        Some(Err(ImageError::NeedsConsent))
+    ));
+    assert!(
+        loader.state.borrow().jobs.is_empty(),
+        "the image was fetched before the user allowed it"
+    );
+    message.allow_remote();
+    assert!(
+        loader
+            .request(&message, &source, "image", 1, Arc::clone(&wake))
+            .is_none()
+    );
+    assert_eq!(loader.state.borrow().jobs.len(), 1);
+    assert!(matches!(
+        loader.request(&other, &source, "image", 2, wake),
+        Some(Err(ImageError::NeedsConsent))
+    ));
+    loader.clear();
+}

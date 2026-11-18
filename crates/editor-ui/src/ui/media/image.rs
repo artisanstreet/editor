@@ -11,6 +11,7 @@ use editor_core::{delivery::Delivery, media_http, runtime};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageError {
+    NeedsConsent,
     Load(MediaLoadError),
     Decode,
 }
@@ -99,6 +100,9 @@ impl Images {
         wake: aqua::mailbox::Wake,
     ) -> Option<Result<ImageHandle, ImageError>> {
         self.discard_stale();
+        if fetcher.waits_for_consent(source) {
+            return Some(Err(ImageError::NeedsConsent));
+        }
         let key = cache_key(fetcher, source, part);
         let source_bytes = match &source.parsed {
             Parsed::Data(payload) => payload.bytes.len(),

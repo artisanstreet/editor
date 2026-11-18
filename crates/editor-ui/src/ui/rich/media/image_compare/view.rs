@@ -28,6 +28,7 @@ pub(crate) enum Side {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
+    NeedsConsent,
     Invalid,
     Fetch(MediaFailure),
     Undecodable,
@@ -36,6 +37,7 @@ pub(crate) enum Failure {
 impl Failure {
     fn title(self) -> &'static str {
         match self {
+            Self::NeedsConsent => "Remote image",
             Self::Invalid => "Not a valid image path",
             Self::Fetch(MediaFailure::Missing) => "File not found",
             Self::Fetch(MediaFailure::Unreachable) => "The host didn't answer",
@@ -132,6 +134,7 @@ impl CompareState {
             let next = match result {
                 None => ImageState::Loading,
                 Some(Ok(image)) => ImageState::Decoding(image),
+                Some(Err(ImageError::NeedsConsent)) => ImageState::Failed(Failure::NeedsConsent),
                 Some(Err(ImageError::Load(MediaLoadError::Invalid))) => {
                     ImageState::Failed(Failure::Invalid)
                 }
@@ -191,7 +194,27 @@ impl CompareState {
         width.is_finite() && width > 0.0 && x.is_finite() && self.set_split(x / width)
     }
 
+    fn waits_for_consent(&self) -> bool {
+        self.images
+            .iter()
+            .any(|image| matches!(image, ImageState::Failed(Failure::NeedsConsent)))
+    }
+
     pub(crate) fn dispatch(&mut self, action: Action) -> bool {
+        if self.waits_for_consent()
+            && matches!(
+                action,
+                Action::Press { .. }
+                    | Action::Key {
+                        key: Key::Char(' ') | Key::Named(NamedKey::Enter),
+                        ..
+                    }
+            )
+        {
+            self.fetcher.allow_remote();
+            self.refresh();
+            return true;
+        }
         match action {
             Action::Mode(index) => {
                 let Some(mode) = Mode::ALL.get(index).copied() else {
@@ -267,6 +290,9 @@ impl CompareState {
         let before_label = model.before.label_or("Before");
         let after_label = model.after.label_or("After");
         let view = if self.mode == Mode::SideBySide {
+            let consent = self
+                .waits_for_consent()
+                .then(|| (self.mode, self.split, true, emit.clone()));
             let width = available_width.min(max_width * 2.0 + 8.0);
             let half = ((width - 8.0) / 2.0).max(0.0);
             UiBox::new()
@@ -284,7 +310,7 @@ impl CompareState {
                         half / aspect,
                     ),
                     vec![corner(&theme, before_label.clone(), true, false, half)],
-                    None,
+                    consent.clone(),
                 ))
                 .child(frame(
                     &theme,
@@ -298,7 +324,7 @@ impl CompareState {
                         half / aspect,
                     ),
                     vec![corner(&theme, after_label.clone(), true, false, half)],
-                    None,
+                    consent,
                 ))
                 .build()
         } else {
@@ -392,7 +418,12 @@ impl CompareState {
                 aspect,
                 UiBox::new().build(),
                 layers,
-                Some((self.mode, self.split, emit.clone())),
+                Some((
+                    self.mode,
+                    self.split,
+                    self.waits_for_consent(),
+                    emit.clone(),
+                )),
             );
             frame.with_key(format!("{id}-frame"))
         };
@@ -512,15 +543,23 @@ fn image_layer(
             .build()
     };
     if let Some(error) = status {
-        panel = panel
-            .child(IconSize::Lg.glyph(
+        let (icon, hint) = match error {
+            Failure::NeedsConsent => (
+                editor_assets::AssetId::TABLER_WORLD,
+                Some("Load remote images"),
+            ),
+            Failure::Invalid => (editor_assets::AssetId::TABLER_FILE_OFF, None),
+            Failure::Fetch(_) | Failure::Undecodable => (
                 editor_assets::AssetId::TABLER_FILE_OFF,
-                theme.colors.text_muted.to_reference_paint(),
-            ))
+                Some("Click to retry"),
+            ),
+        };
+        panel = panel
+            .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
             .child(text(error.title().to_owned(), theme.colors.text))
             .child(text(source.trim().to_owned(), theme.colors.text_muted));
-        if error != Failure::Invalid {
-            panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
+        if let Some(hint) = hint {
+            panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
         }
     } else {
         panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
@@ -622,7 +661,7 @@ fn frame(
     aspect: f32,
     base: aqua_ui::element::Element,
     layers: Vec<aqua_ui::element::Element>,
-    interactive: Option<(Mode, f32, Rc<dyn Fn(Action)>)>,
+    interactive: Option<(Mode, f32, bool, Rc<dyn Fn(Action)>)>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{input::EventPhase, style::Style};
     let mut children = vec![base];
@@ -632,14 +671,14 @@ fn frame(
             .width(aqua_ui::style::Length::Px(width))
             .height(aqua_ui::style::Length::Px(width / aspect)),
     );
-    let Some((mode, split, emit)) = interactive else {
+    let Some((mode, split, consent, emit)) = interactive else {
         return root;
     };
     let press = Rc::clone(&emit);
     let drag = Rc::clone(&emit);
     let release = Rc::clone(&emit);
     root.focusable(true)
-        .cursor(if mode == Mode::Toggle {
+        .cursor(if consent || mode == Mode::Toggle {
             aqua_core::CursorIcon::Pointer
         } else {
             aqua_core::CursorIcon::ColResize
@@ -686,19 +725,22 @@ fn frame(
             let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
                 return InputResponse::default();
             };
-            let changed = match (mode, key.key) {
-                (
-                    Mode::Toggle,
-                    Key::Char(' ') | Key::Named(NamedKey::Enter | NamedKey::Left | NamedKey::Right),
-                ) => true,
-                (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Left | NamedKey::Home)) => {
-                    split > 0.0
-                }
-                (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Right | NamedKey::End)) => {
-                    split < 1.0
-                }
-                _ => false,
-            };
+            let allows = consent && matches!(key.key, Key::Char(' ') | Key::Named(NamedKey::Enter));
+            let changed = allows
+                || match (mode, key.key) {
+                    (
+                        Mode::Toggle,
+                        Key::Char(' ')
+                        | Key::Named(NamedKey::Enter | NamedKey::Left | NamedKey::Right),
+                    ) => true,
+                    (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Left | NamedKey::Home)) => {
+                        split > 0.0
+                    }
+                    (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Right | NamedKey::End)) => {
+                        split < 1.0
+                    }
+                    _ => false,
+                };
             if !changed {
                 return InputResponse::default();
             }
