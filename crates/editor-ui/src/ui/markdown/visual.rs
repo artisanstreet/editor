@@ -638,6 +638,9 @@ fn interactive_leaf_impl(
     if let Some(level) = heading {
         element = element.role(aqua_core::Role::Heading(level));
     }
+    if !source.copies.is_empty() {
+        element = element.aria_label(accessible_text(&source));
+    }
     if let Some(on_link) = on_link {
         let prepared = prepared.clone();
         element = element.on_input(
@@ -670,6 +673,22 @@ fn interactive_leaf_impl(
         );
     }
     Ok(ProseLeaf { element, source })
+}
+
+fn accessible_text(source: &SelectionSource) -> String {
+    let mut text = String::with_capacity(source.text.len());
+    let mut cursor = 0;
+    for copy in &source.copies {
+        if let Some(kept) = source.text.get(cursor..copy.range.start) {
+            text.push_str(kept);
+        }
+        text.push_str(&copy.replacement);
+        cursor = cursor.max(copy.range.end);
+    }
+    if let Some(rest) = source.text.get(cursor..) {
+        text.push_str(rest);
+    }
+    text
 }
 
 pub fn prose_leaf(

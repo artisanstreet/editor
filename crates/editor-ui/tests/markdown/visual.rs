@@ -51,3 +51,18 @@ fn answer_headings_are_exposed_with_their_level() {
         vec![(1, "Overview".to_owned()), (3, "Details".to_owned())]
     );
 }
+
+#[test]
+fn colour_swatches_keep_their_value_in_the_accessible_text() {
+    let app = answer("Use #ff0000 for errors.", Rc::new(|_| {}));
+    assert!(
+        semantics(&app)
+            .iter()
+            .any(|node| node.label == "Use #ff0000 for errors."),
+        "{:?}",
+        semantics(&app)
+            .iter()
+            .map(|node| node.label.clone())
+            .collect::<Vec<_>>()
+    );
+}
