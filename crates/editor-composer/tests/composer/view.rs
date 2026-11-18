@@ -1,7 +1,6 @@
-use super::{
-    ComposerAction, ComposerFailure, QUESTIONNAIRE_MAX_HEIGHT, draft_error, model_gate_row,
-    questionnaire,
-};
+use super::model_menu::model_gate_row;
+use super::questionnaire::QUESTIONNAIRE_MAX_HEIGHT;
+use super::{ComposerAction, ComposerFailure, draft_error, questionnaire};
 use crate::composer::picker::gate;
 use crate::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
@@ -297,7 +296,7 @@ fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sig
 
 #[test]
 fn a_gated_engine_explains_itself_on_keyboard_focus_and_to_assistive_tech() {
-    use super::{engine_reason, engine_tab};
+    use super::model_menu::{engine_reason, engine_tab};
     let signed_out = engine(
         r#"{"state":"signed_out"}"#,
         r#"{"state":"fresh","observed_at":0}"#,
