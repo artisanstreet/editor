@@ -1,8 +1,9 @@
 use super::Concentration;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of, f64_of, index_of, percent};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CursorIcon, GpuiHsla, InputEvent, Key, Modifiers, NamedKey, Role};
+use aqua_core::{CursorIcon, GpuiHsla, InputEvent, NamedKey};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
@@ -271,38 +272,26 @@ impl Concentration {
         }
         let keyboard = states.clone();
         let key = id.clone();
-        let mut nav = ui::Box::new()
-            .style(
-                Style::new()
-                    .width(Length::Pct(100.0))
-                    .height(Length::Pct(100.0)),
-            )
-            .child(plot)
-            .build()
-            .with_key(format!("{id}-navigation"))
-            .role(Role::Group)
-            .focusable(true)
-            .tab_index(0)
-            .aria_label(label)
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let Key::Named(code) = key_event.key else {
-                    return InputResponse::default();
-                };
-                if !keyboard.key(&key, code, key_event.modifiers.contains(Modifiers::ALT)) {
-                    return InputResponse::default();
+        let nav = navigation_group(
+            ui::Box::new()
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .height(Length::Pct(100.0)),
+                )
+                .child(plot)
+                .build(),
+            &id,
+            label,
+            selection_label,
+            move |code, alt| {
+                let handled = keyboard.key(&key, code, alt);
+                if handled {
+                    invalidate();
                 }
-                invalidate();
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            });
-        if let Some(selection) = selection_label {
-            nav = nav.aria_value(selection);
-        }
+                handled
+            },
+        );
         let nav = navigation_frame(nav, theme.colors.ring.to_reference_paint());
         frame(
             nav,

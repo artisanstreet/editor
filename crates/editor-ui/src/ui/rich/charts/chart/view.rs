@@ -4,11 +4,12 @@ use super::{
     plot::{self, EndLabel, Geometry, PlotLabel, Snapshot, Tick},
 };
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{Domain, f64_of, percent, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::slider::{Slider, SliderRange, SliderState};
 use crate::ui::theme::{ArtisanTheme, ThemeMode};
-use aqua_core::{CursorIcon, GpuiHsla, InputEvent, Key, Modifiers, NamedKey, Point, Role};
+use aqua_core::{CursorIcon, GpuiHsla, InputEvent, NamedKey, Point};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{CaptureRequest, EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
@@ -452,44 +453,26 @@ pub(crate) fn view(
     let keyboard = states.clone();
     let keyboard_id = id.clone();
     let keyboard_invalidate = invalidate.clone();
-    let mut nav = ui::Box::new()
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .child(plot)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(label)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key_event.key else {
-                return InputResponse::default();
-            };
-            if !keyboard.key(
-                &keyboard_id,
-                first,
-                end,
-                code,
-                key_event.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let nav = navigation_group(
+        ui::Box::new()
+            .style(
+                Style::new()
+                    .width(Length::Pct(100.0))
+                    .height(Length::Pct(100.0)),
+            )
+            .child(plot)
+            .build(),
+        &id,
+        label,
+        selection,
+        move |code, alt| {
+            let handled = keyboard.key(&keyboard_id, first, end, code, alt);
+            if handled {
+                keyboard_invalidate();
             }
-            keyboard_invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(value) = selection {
-        nav = nav.aria_value(value);
-    }
+            handled
+        },
+    );
     let nav = (services.navigation)(nav, theme.colors.ring.to_reference_paint());
     let framed = (services.frame)(
         nav,

@@ -1,10 +1,11 @@
 use super::{Heatmap, HeatmapData, Scale};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of, f32_of_count, f64_of, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::rich::kit::{diverging_color, sequential_color};
 use crate::ui::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
-use aqua_core::{GpuiBackground, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
+use aqua_core::{GpuiBackground, InputEvent, Insets, NamedKey};
 use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
@@ -335,38 +336,19 @@ impl Heatmap {
         let keyboard = states.clone();
         let key = id.clone();
         let keyboard_invalidate = invalidate.clone();
-        let mut navigation = content
-            .build()
-            .with_key(format!("{id}-navigation"))
-            .role(Role::Group)
-            .focusable(true)
-            .tab_index(0)
-            .aria_label(label)
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let Key::Named(code) = key_event.key else {
-                    return InputResponse::default();
-                };
-                if !keyboard.key(
-                    &key,
-                    rows,
-                    columns,
-                    code,
-                    key_event.modifiers.contains(Modifiers::ALT),
-                ) {
-                    return InputResponse::default();
+        let navigation = navigation_group(
+            content.build(),
+            &id,
+            label,
+            selection_label,
+            move |code, alt| {
+                let handled = keyboard.key(&key, rows, columns, code, alt);
+                if handled {
+                    keyboard_invalidate();
                 }
-                keyboard_invalidate();
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            });
-        if let Some(label) = selection_label {
-            navigation = navigation.aria_value(label);
-        }
+                handled
+            },
+        );
         let navigation = navigation_frame(navigation, theme.colors.ring.to_reference_paint());
         let (count, low, high) = match self.scale {
             Scale::Sequential => (7, "fewer".to_owned(), "more".to_owned()),

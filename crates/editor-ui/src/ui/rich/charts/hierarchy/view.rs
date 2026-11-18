@@ -1,12 +1,12 @@
 use super::{GROUP_HEADER, Layout, Tree, partition, treemap};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of_count, percent};
 use crate::ui::rich::charts::scene::{self, Probe};
 use crate::ui::rich::kit::{format_number, with_unit};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Insets, Key, Modifiers,
-    NamedKey, Point, Rect, Role,
+    CornerRadii, DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Insets, NamedKey, Point, Rect,
 };
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -588,40 +588,23 @@ pub(crate) fn view(
     let keyboard_id = id.clone();
     let keyboard_nodes = geometry.nodes.clone();
     let keyboard_invalidate = invalidate.clone();
-    let mut nav = ui::Box::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .child(plot)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(aria)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key.key else {
-                return InputResponse::default();
-            };
-            if !keyboard.key(
-                &keyboard_id,
-                &keyboard_nodes,
-                code,
-                key.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let nav = navigation_group(
+        ui::Box::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .child(plot)
+            .build(),
+        &id,
+        aria,
+        selection,
+        move |code, alt| {
+            let handled = keyboard.key(&keyboard_id, &keyboard_nodes, code, alt);
+            if handled {
+                keyboard_invalidate();
             }
-            keyboard_invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(value) = selection {
-        nav = nav.aria_value(value);
-    }
+            handled
+        },
+    );
     let nav = (services.navigation)(nav, theme.colors.ring.to_reference_paint());
     let path = tree.path(focus);
     let last = path.len() - 1;

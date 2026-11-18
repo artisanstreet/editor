@@ -15,6 +15,7 @@ pub(crate) mod heatmap;
 #[cfg(feature = "test-support")]
 pub use heatmap::HeatmapFixture;
 pub(crate) mod hierarchy;
+pub(crate) mod keyboard;
 #[cfg(feature = "test-support")]
 pub use hierarchy::HierarchyFixture;
 pub(crate) mod sankey;

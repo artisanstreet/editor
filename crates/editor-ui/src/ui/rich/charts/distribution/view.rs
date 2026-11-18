@@ -1,12 +1,13 @@
 use super::{Distribution, Mode, Summary, share_at_or_below};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{
     Domain, f32_of_count, f64_of, index_of, nice_ticks, percent, reading, ticks_within,
 };
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::slider::{Slider, SliderRange, SliderState};
 use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{GpuiBackground, GpuiHsla, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
+use aqua_core::{GpuiBackground, GpuiHsla, InputEvent, Insets, NamedKey};
 use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
@@ -583,39 +584,19 @@ fn navigation(
     if mode != Mode::Box {
         wrapper = wrapper.height(Length::Pct(100.0));
     }
-    let mut element = wrapper
-        .child(content)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(label)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key_event.key else {
-                return InputResponse::default();
-            };
-            if !states.key(
-                &key,
-                mode,
-                count,
-                code,
-                key_event.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let element = navigation_group(
+        wrapper.child(content).build(),
+        &id,
+        label,
+        selection,
+        move |code, alt| {
+            let handled = states.key(&key, mode, count, code, alt);
+            if handled {
+                invalidate();
             }
-            invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(label) = selection {
-        element = element.aria_value(label);
-    }
+            handled
+        },
+    );
     frame(element, ring)
 }
 
