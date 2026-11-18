@@ -40,7 +40,7 @@ use artisan_api::{
 };
 use requests::{Approvals, Questions};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The key of the run's plan (`turn/plan/updated`); one per run.
 const PLAN_KEY: &str = "plan";
@@ -67,6 +67,8 @@ pub struct Decoder {
     /// Child thread → text of its last agent message, the agent's result.
     child_replies: HashMap<String, TextContent>,
     items: HashMap<String, Tracked>,
+    retired: crate::retained::Retired,
+    awaiting_completion: HashSet<String>,
     /// Each thread's agent message still streaming. Codex finishes one
     /// before it starts the next, so a new one means it dropped the open
     /// one unfinished (a steer restarts its reply).
@@ -178,13 +180,44 @@ impl Decoder {
         }
         let out = self.reasoning_summary.normalize(out, false);
         let out = self.citations.normalize(out);
-        Ok(crate::retained::settle(self, out))
+        let out = crate::retained::settle(self, out);
+        self.retire_settled();
+        Ok(out)
     }
 
     /// The user's answer to the approval or question on `key`.
     pub fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
-        crate::retained::settle(self, events)
+        let events = crate::retained::settle(self, events);
+        self.retire_settled();
+        events
+    }
+
+    fn retire_settled(&mut self) {
+        let settled: Vec<String> = self
+            .items
+            .iter()
+            .filter(|(key, tracked)| {
+                tracked.status.is_terminal()
+                    && !matches!(
+                        tracked.kind,
+                        ItemKind::Agent { .. }
+                            | ItemKind::Plan { .. }
+                            | ItemKind::Notice {
+                                kind: NoticeKind::Goal { .. },
+                                ..
+                            }
+                    )
+                    && !self.approvals.contains_key(*key)
+                    && !self.questions.contains_key(*key)
+                    && !self.awaiting_completion.contains(*key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in settled {
+            self.items.remove(&key);
+            self.retired.insert(key);
+        }
     }
 
     fn response(
@@ -333,6 +366,9 @@ impl Decoder {
                         tracing::warn!(thread, "Codex text delta omitted itemId");
                         return;
                     };
+                    if self.retired.contains(&key) {
+                        return;
+                    }
                     out.push(live(LiveKind::Text { key }, text));
                 }
             }
@@ -639,6 +675,9 @@ impl Decoder {
                     tracing::warn!(thread, item = id, "Codex agentMessage omitted its text");
                     return;
                 };
+                if self.retired.contains(&id) {
+                    return;
+                }
                 let phase = match phase {
                     Some(MessagePhase::Commentary) => Phase::Commentary,
                     _ => Phase::Final,
@@ -805,6 +844,7 @@ impl Decoder {
                 ) {
                     if completed && let Some(status) = call_status(status, success, completed) {
                         self.questions.remove(&id);
+                        self.awaiting_completion.remove(&id);
                         if let Some(tracked) = self.items.get_mut(&id) {
                             let next = tracked.status.advance(status);
                             if next != tracked.status {
@@ -938,10 +978,14 @@ impl Decoder {
             tracing::warn!(thread, "Codex item supplied an empty id");
             return;
         }
+        if self.retired.contains(&key) {
+            return;
+        }
         if completed {
             // Codex ended the item; nothing it asked about it waits anymore.
             self.approvals.remove(&key);
             self.questions.remove(&key);
+            self.awaiting_completion.remove(&key);
         }
         let status = if !completed && self.approvals.contains_key(&key) {
             Status::AwaitingUser
@@ -1001,9 +1045,11 @@ impl Decoder {
             text: TextContent::default(),
             direction: MessageDirection::Sent,
         };
-        let kind = self.tool_kind(&activity.id, tool, None, None);
-        self.track(activity.id.clone(), scope.clone(), Status::Done, kind);
-        out.push(self.event(&activity.id));
+        if !self.retired.contains(&activity.id) {
+            let kind = self.tool_kind(&activity.id, tool, None, None);
+            self.track(activity.id.clone(), scope.clone(), Status::Done, kind);
+            out.push(self.event(&activity.id));
+        }
         recover
     }
 
@@ -1136,7 +1182,7 @@ impl Decoder {
                 }
                 CollabTool::SpawnAgent | CollabTool::Other => None,
             };
-            if let Some(tool) = tool {
+            if let Some(tool) = tool.filter(|_| !self.retired.contains(&key)) {
                 let kind = self.tool_kind(&key, tool, None, None);
                 self.track(key.clone(), scope, status, kind);
                 out.push(self.event(&key));
@@ -1293,6 +1339,9 @@ impl Decoder {
         text: impl Into<TextContent>,
         out: &mut Vec<EngineEvent>,
     ) {
+        if self.retired.contains(key) {
+            return;
+        }
         self.items.remove(key);
         let kind = ItemKind::Notice {
             kind,
@@ -1515,3 +1564,7 @@ fn display_command(command: &str) -> String {
         _ => command.to_owned(),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/codex/decoder.rs"]
+mod decoder_tests;

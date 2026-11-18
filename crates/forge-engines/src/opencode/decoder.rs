@@ -104,6 +104,8 @@ pub struct Decoder {
     tool_names: HashMap<String, String>,
     /// By OpenCode call id.
     tools: HashMap<String, Tool>,
+    retired: crate::retained::Retired,
+    awaiting_settle: HashSet<String>,
     /// Background shells awaiting their completion notification → starting call.
     /// `shell.exited` precedes notification admission and must not release this
     /// guard: the server still needs to wake the assistant with the result.
@@ -328,6 +330,7 @@ impl Decoder {
         let events = self.feed_raw(&event);
         let events = self.reasoning_summary.normalize(events, false);
         let mut events = crate::retained::settle(self, events);
+        self.retire_settled();
         let waiting =
             !self.turn_open && !self.shells.is_empty() && self.error.is_none() && !self.cancelled;
         if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
@@ -583,11 +586,31 @@ impl Decoder {
 
     pub fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
         match self.answer_raw(key, answer) {
-            Answered::Reply { reply, events } => Answered::Reply {
-                reply,
-                events: crate::retained::settle(self, events),
-            },
+            Answered::Reply { reply, events } => {
+                let events = crate::retained::settle(self, events);
+                self.retire_settled();
+                Answered::Reply { reply, events }
+            }
             refused @ (Answered::Invalid(_) | Answered::Unexpected) => refused,
+        }
+    }
+
+    fn retire_settled(&mut self) {
+        let settled: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(call, tool)| {
+                tool.status.is_terminal()
+                    && !matches!(tool.kind, ItemKind::Agent { .. })
+                    && !self.pending.contains_key(*call)
+                    && !self.awaiting_settle.contains(*call)
+                    && !self.shells.values().any(|shell| shell == *call)
+            })
+            .map(|(call, _)| call.clone())
+            .collect();
+        for call in settled {
+            self.tools.remove(&call);
+            self.retired.insert(call);
         }
     }
 
@@ -666,6 +689,7 @@ impl Decoder {
                     tool.status = if decision.allows() {
                         Status::Running
                     } else {
+                        self.awaiting_settle.insert(key.to_owned());
                         Status::Declined
                     };
                     out.push(self.tool_event(key));
@@ -678,6 +702,9 @@ impl Decoder {
             }
             (Pending::Form { session, form, .. }, Answer::Question { answers }) => {
                 let skipped = answers.iter().all(Option::is_none);
+                if form != key {
+                    self.awaiting_settle.insert(key.to_owned());
+                }
                 if let Some(tool) = self.tools.get_mut(key) {
                     if let ItemKind::Question {
                         answers: stored, ..
@@ -768,6 +795,9 @@ impl Decoder {
         let Some(call) = data["id"].as_str() else {
             return;
         };
+        if self.retired.contains(call) {
+            return;
+        }
         let Some(name) = self.tool_names.get(call).cloned() else {
             tracing::warn!(call, "OpenCode called a tool it never named");
             return;
@@ -856,6 +886,8 @@ impl Decoder {
         let Some(call) = data["id"].as_str() else {
             return;
         };
+        self.tool_names.remove(call);
+        self.awaiting_settle.remove(call);
         let cancelled = self.cancelled || data["error"]["type"] == "aborted";
         let Some(tool) = self.tools.get_mut(call) else {
             return;
@@ -1079,6 +1111,14 @@ impl Decoder {
         // Approvals live on the tool they gate; one asked before its call
         // is announced creates the item from what the permission says.
         let key = data["source"]["id"].as_str().unwrap_or(request).to_owned();
+        if self.retired.contains(&key) {
+            tracing::warn!(
+                call = key,
+                request,
+                "OpenCode asked to approve a settled call"
+            );
+            return;
+        }
         let tool = self.tools.entry(key.clone()).or_insert_with(|| Tool {
             session: session.to_owned(),
             status: Status::Running,
@@ -1149,6 +1189,9 @@ impl Decoder {
             .as_str()
             .unwrap_or(id)
             .to_owned();
+        if self.retired.contains(&key) {
+            return;
+        }
         let native = <Vec<NativeField> as serde::Deserialize>::deserialize(&form["fields"]);
         let asked = native.ok().and_then(|fields| {
             let asked: Option<Vec<_>> = fields
@@ -1604,3 +1647,7 @@ fn settle_changes(changes: &mut Collection<FileChange>, metadata: &Value) -> Res
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/opencode/decoder.rs"]
+mod decoder_tests;

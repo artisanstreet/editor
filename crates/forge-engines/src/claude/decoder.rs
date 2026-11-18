@@ -66,7 +66,7 @@ pub struct ClaudeDecoder {
     current: Option<String>,
     messages: HashMap<String, Message>,
     tools: HashMap<String, Tool>,
-    retired: Retired,
+    retired: crate::retained::Retired,
     /// Open `can_use_tool` requests by item key.
     pending: HashMap<String, Pending>,
     replies: Vec<Value>,
@@ -126,32 +126,6 @@ impl Said {
 
     fn folded(self) -> EngineEvent {
         assistant_text(self.key, None, self.text, Phase::Commentary)
-    }
-}
-
-const RETIRED_TOOLS: usize = 4096;
-
-#[derive(Default)]
-struct Retired {
-    order: VecDeque<String>,
-    ids: HashSet<String>,
-}
-
-impl Retired {
-    fn insert(&mut self, id: String) {
-        if !self.ids.insert(id.clone()) {
-            return;
-        }
-        self.order.push_back(id);
-        while self.order.len() > RETIRED_TOOLS
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.ids.remove(&oldest);
-        }
-    }
-
-    fn contains(&self, id: &str) -> bool {
-        self.ids.contains(id)
     }
 }
 

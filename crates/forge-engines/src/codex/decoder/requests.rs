@@ -289,8 +289,10 @@ impl Decoder {
         host: ToolKind,
         out: &mut Vec<EngineEvent>,
     ) {
-        if let Some(tracked) = self.items.get(key)
-            && (tracked.status.is_terminal() || !matches!(tracked.kind, ItemKind::Tool { .. }))
+        if self.retired.contains(key)
+            || self.items.get(key).is_some_and(|tracked| {
+                tracked.status.is_terminal() || !matches!(tracked.kind, ItemKind::Tool { .. })
+            })
         {
             tracing::warn!(item = key, request = %rpc, "Codex asked to approve an item that can't wait for it; declining");
             let decline = match reply {
@@ -412,6 +414,9 @@ impl Decoder {
             *slot = Some(approval);
         }
         tracked.status = tracked.status.advance(status);
+        if tracked.status.is_terminal() && !asked.standalone {
+            self.awaiting_completion.insert(key.to_owned());
+        }
         vec![self.event(key)]
     }
 
@@ -441,6 +446,7 @@ impl Decoder {
                     }
                 }
                 self.reply(rpc, json!({ "answers": map }));
+                self.awaiting_completion.insert(key.to_owned());
             }
             Asking::Message { texts } => {
                 let parts: Vec<String> = texts

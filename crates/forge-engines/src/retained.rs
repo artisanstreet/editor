@@ -1,29 +1,41 @@
-//! What decoders keep of settled items.
-//!
-//! A decoder keeps its own copy of each item it may still change: a tool's
-//! late status, an agent's next report, an answer to a question. Once an
-//! item has settled, Forge has stored its complete event, so the copy keeps
-//! its large texts and collections only as the descriptors the store gave
-//! them (`forge_content::compact_settled`). Settled work therefore costs a
-//! decoder a few hundred bytes per item however long the run, and what is
-//! still open is the engine's own working set, each frame of which
-//! `process::MAX_LINE_BYTES` caps. That is the whole memory bound: engines
-//! are local processes Forge launched, so there is no separate budget.
-//!
-//! [`settle`] wraps every decoder's output, so no decoder compacts by hand.
-
 use crate::EngineEvent;
 use artisan_api::ItemKind;
+use std::collections::{HashSet, VecDeque};
 
-/// A decoder that keeps copies of the items it emits.
+const RETIRED_IDS: usize = 4096;
+
+#[derive(Default)]
+pub struct Retired {
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl Retired {
+    pub fn insert(&mut self, id: String) {
+        if !self.ids.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > RETIRED_IDS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.ids.remove(&oldest);
+        }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
+
 pub trait Retains {
-    /// The decoder's copy of the item it emits as `key`, if it keeps one.
     fn retained(&mut self, key: &str) -> Option<&mut ItemKind>;
 }
 
-/// Passes a decoder's events on, compacting its copy of every item they
-/// settle. The events still carry the complete item: Forge stores it before
-/// any later event names the descriptors.
 pub fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
     for event in &events {
         let (EngineEvent::Item { key, status, .. } | EngineEvent::Status { key, status }) = event
@@ -36,8 +48,6 @@ pub fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<Engin
         if let Some(kind) = decoder.retained(key)
             && let Err(error) = forge_content::compact_settled(kind)
         {
-            // Only hashing a collection's records can fail, which plain data
-            // never does; the copy then stays as it was.
             tracing::warn!(key, %error, "keeping a settled item uncompacted");
         }
     }
