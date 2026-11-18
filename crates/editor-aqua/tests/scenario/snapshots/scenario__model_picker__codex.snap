@@ -8,8 +8,8 @@ Menu
     Label "Model"
   Image
   Button "Claude Code"
-  Button "Codex" [focused]
-  Button "OpenCode" [selected]
+  Button "Codex" [selected, focused]
+  Button "OpenCode"
   ScrollView
     Group "Claude Code"
       Label "Claude Code"

@@ -110,8 +110,16 @@ struct Jump {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Aim {
+    #[default]
+    Free,
+    Jumping(Jump),
+    Landed(EngineId),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ModelScroll {
-    jump: Option<Jump>,
+    aim: Aim,
     written: Option<f32>,
     saved: f32,
     hidden: bool,
@@ -120,7 +128,7 @@ pub struct ModelScroll {
 impl ModelScroll {
     pub fn open(&mut self, offset: f32) {
         *self = Self {
-            jump: None,
+            aim: Aim::Free,
             written: Some(offset),
             saved: offset,
             hidden: false,
@@ -128,7 +136,7 @@ impl ModelScroll {
     }
 
     pub fn jump(&mut self, engine: EngineId, to: f32) {
-        self.jump = Some(Jump {
+        self.aim = Aim::Jumping(Jump {
             engine,
             to,
             from: None,
@@ -137,19 +145,22 @@ impl ModelScroll {
     }
 
     pub fn hide(&mut self) {
-        self.jump = None;
+        self.aim = Aim::Free;
         self.written = None;
         self.hidden = true;
     }
 
     #[must_use]
     pub const fn jumping(&self) -> bool {
-        self.jump.is_some()
+        matches!(self.aim, Aim::Jumping(_))
     }
 
     #[must_use]
-    pub fn target(&self) -> Option<EngineId> {
-        self.jump.map(|jump| jump.engine)
+    pub const fn target(&self) -> Option<EngineId> {
+        match self.aim {
+            Aim::Free => None,
+            Aim::Jumping(Jump { engine, .. }) | Aim::Landed(engine) => Some(engine),
+        }
     }
 
     pub fn offset(&mut self, kept: f32, max: f32, now: Instant, reduced: bool) -> f32 {
@@ -161,12 +172,12 @@ impl ModelScroll {
         };
         let moved_by_reader = self.written.is_some_and(|written| (written - kept).abs() > 1.5);
         if moved_by_reader {
-            self.jump = None;
+            self.aim = Aim::Free;
         }
-        let value = match &mut self.jump {
-            None => kept,
-            Some(jump) if reduced => jump.to,
-            Some(jump) => {
+        let value = match &mut self.aim {
+            Aim::Free | Aim::Landed(_) => kept,
+            Aim::Jumping(jump) if reduced => jump.to,
+            Aim::Jumping(jump) => {
                 let (from, started) = *jump.from.get_or_insert((kept, now));
                 let progress = (now.saturating_duration_since(started).as_secs_f32()
                     / JUMP_DURATION.as_secs_f32())
@@ -175,11 +186,17 @@ impl ModelScroll {
             }
         }
         .clamp(0.0, max);
-        if self.jump.is_some_and(|jump| (value - jump.to.min(max)).abs() < 0.25) {
-            self.jump = None;
+        if let Aim::Jumping(jump) = self.aim
+            && (value - jump.to.min(max)).abs() < 0.25
+        {
+            self.aim = Aim::Landed(jump.engine);
         }
         self.written = Some(value);
         self.saved = value;
         value
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/model_list.rs"]
+mod tests;
