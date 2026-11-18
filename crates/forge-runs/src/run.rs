@@ -1139,6 +1139,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             if status.is_terminal() && !tracked.status.is_terminal() {
                 items.weighed.finished(&kind, status);
             }
+            hub.snapshot_resources(&thread_id, &id, shown).await;
             let saved = store
                 .upsert_item(new_item(
                     id.clone(),
@@ -1157,7 +1158,6 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
                 hub.agent_attention(&thread_id).await;
             }
             if finished_text {
-                hub.snapshot_resources(&thread_id, &id, shown);
                 hub.forget_live(
                     &thread_id,
                     &LiveTarget::Text {

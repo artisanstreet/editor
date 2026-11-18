@@ -135,3 +135,99 @@ async fn a_file_first_seen_when_viewed_is_kept_from_then_on() {
         Err(ResourceError::Missing)
     ));
 }
+
+fn kept_at(fixture: &Fixture, item: &ItemId, path: &str) -> std::path::PathBuf {
+    fixture
+        .hub
+        .store()
+        .resource_snapshot_target(&fixture.thread_id, item, path, false)
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_them() {
+    let outside = tempfile::tempdir().unwrap();
+    let key = outside.path().join("id_ed25519");
+    std::fs::write(&key, b"private key").unwrap();
+    let absolute = key.display().to_string();
+    let shown = absolute.clone();
+    let fixture = fixture(Arc::new(move |_, io| {
+        let text =
+            format!("![key]({shown}) ![linked](linked.png) ![env](secrets/env.png) ![ok](ok.png)");
+        Box::pin(async move {
+            io.emit(reply("reply", &text)).await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    let project = fixture.dir.path();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&key, project.join("linked.png")).unwrap();
+    std::fs::create_dir_all(project.join("secrets")).unwrap();
+    std::fs::write(project.join("secrets/env.png"), b"API_KEY=1").unwrap();
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::write(
+        project.join(".claude/settings.json"),
+        r#"{ "permissions": { "deny": ["Read(./secrets/**)"] } }"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("ok.png"), b"plot").unwrap();
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("show"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let item = fixture.by_native("reply").await.id;
+
+    assert!(kept_at(&fixture, &item, "ok.png").is_file());
+    for path in [absolute.as_str(), "linked.png", "secrets/env.png"] {
+        assert!(!kept_at(&fixture, &item, path).exists(), "{path} was kept");
+    }
+}
+
+#[tokio::test]
+async fn a_reply_keeps_the_file_as_it_was_when_the_reply_was_published() {
+    let overwritten = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::clone(&overwritten);
+    let fixture = fixture(Arc::new(move |_, io| {
+        let resume = Arc::clone(&resume);
+        Box::pin(async move {
+            io.emit(reply("reply", "![plot](plot.png)")).await;
+            resume.notified().await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    let file = fixture.dir.path().join("plot.png");
+    std::fs::write(&file, b"as replied").unwrap();
+    let mut events = fixture.hub.store().subscribe();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("plot"))
+        .await
+        .unwrap();
+    let item = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let artisan_api::Event::Item { item } = events.recv().await.unwrap().event
+                && matches!(item.kind, ItemKind::AssistantMessage { .. })
+            {
+                return item.id;
+            }
+        }
+    })
+    .await
+    .expect("the reply is published");
+    let kept_when_published = kept_at(&fixture, &item, "plot.png").is_file();
+    std::fs::write(&file, b"next turn's plot").unwrap();
+    overwritten.notify_one();
+    fixture.settled().await;
+
+    assert!(kept_when_published);
+    let written = Written {
+        path: "plot.png".to_owned(),
+        from_home: false,
+    };
+    assert_eq!(kept(&fixture, &item, &written).await, b"as replied");
+}

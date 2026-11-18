@@ -30,6 +30,9 @@ dirs.workspace = true
 pulldown-cmark.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 futures.workspace = true
 rusqlite.workspace = true

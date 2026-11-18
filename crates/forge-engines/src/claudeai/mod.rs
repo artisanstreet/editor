@@ -28,6 +28,7 @@ mod transport;
 
 pub use capabilities::{Capabilities, capabilities, usage};
 pub use decoder::ClaudeAiDecoder;
+pub use rules::Rules;
 pub use session::{CookieChange, Session, cookie_change};
 pub use tools::{Allowed, Answer, Call, Plan, Runtime};
 pub use transport::{Backend, Events, HOST, Refusal, Request, Transport};
@@ -648,7 +649,7 @@ async fn run_call(
                     key,
                     parent: None,
                     status: Status::Declined,
-                    kind: tools::refused(call, &ctx.turn.cwd, &ctx.runtime.mcp, &reason),
+                    kind: tools::preview(call, &ctx.turn.cwd, &ctx.runtime.mcp),
                 },
             )
             .await;

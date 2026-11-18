@@ -2251,6 +2251,7 @@ dependencies = [
  "pulldown-cmark",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

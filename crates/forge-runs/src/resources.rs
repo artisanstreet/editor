@@ -1,6 +1,7 @@
 use crate::Hub;
 use anyhow::Context as _;
-use artisan_api::{ItemId, Thread, ThreadId};
+use artisan_api::{EngineId, ItemId, Thread, ThreadId};
+use forge_engines::claudeai::Rules;
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ const WSL_CONFIG: &str = "/etc/wsl.conf";
 const WSL_DRIVES: &str = "/mnt";
 const BLOCK_PREFIX: &str = "artisan-";
 const WSL_DISTRIBUTION: &str = "WSL_DISTRO_NAME";
+const READ_TOOL: &str = "Read";
 
 static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 
@@ -286,29 +288,76 @@ pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBu
     })
 }
 
-fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
-    let missing = |error: std::io::Error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ResourceError::Missing
-        } else {
-            ResourceError::Failed(
-                anyhow::Error::from(error).context(format!("read resource {}", path.display())),
-            )
+pub struct Access {
+    root: Option<PathBuf>,
+    rules: Rules,
+}
+
+impl Access {
+    #[must_use]
+    pub fn load(engine_home: &Path, folder: &Path) -> Self {
+        let root = match std::fs::canonicalize(folder) {
+            Ok(root) => Some(root),
+            Err(error) => {
+                tracing::warn!(folder = %folder.display(), "resolve the thread folder for resources: {error}");
+                None
+            }
+        };
+        Self {
+            root,
+            rules: Rules::load(engine_home, folder),
         }
-    };
+    }
+
+    #[must_use]
+    pub fn permits(&self, resolved: &Path) -> bool {
+        self.root
+            .as_deref()
+            .is_some_and(|root| resolved.starts_with(root))
+            && !self.rules.hides(READ_TOOL, resolved)
+    }
+}
+
+fn io_failure(path: &Path, error: std::io::Error) -> ResourceError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ResourceError::Missing
+    } else {
+        ResourceError::Failed(
+            anyhow::Error::from(error).context(format!("read resource {}", path.display())),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
     let too_large = || {
         ResourceError::Refused("resource must be a regular file no larger than 128 MiB".to_owned())
     };
-    let metadata = std::fs::metadata(path).map_err(missing)?;
+    let file = open_resource(path).map_err(|error| io_failure(path, error))?;
+    let metadata = file.metadata().map_err(|error| io_failure(path, error))?;
     if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(missing)?
-        .take(MAX_RESOURCE_BYTES + 1)
+    file.take(MAX_RESOURCE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(missing)?;
+        .map_err(|error| io_failure(path, error))?;
     if bytes.len() as u64 > MAX_RESOURCE_BYTES {
         Err(too_large())
     } else {
@@ -316,7 +365,33 @@ fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
     }
 }
 
+fn resolved(live: &Path) -> Result<PathBuf, ResourceError> {
+    std::fs::canonicalize(live).map_err(|error| io_failure(live, error))
+}
+
+fn keep(target: &Path, bytes: &[u8]) {
+    if let Err(error) = forge_store::keep_resource_snapshot(target, bytes) {
+        tracing::warn!(path = %target.display(), "keep resource snapshot: {error:#}");
+    }
+}
+
+fn snapshot(live: &Path, access: &Access, target: &Path) -> Result<(), ResourceError> {
+    let resolved = resolved(live)?;
+    if !access.permits(&resolved) {
+        return Err(ResourceError::Refused(
+            "outside the thread's folder or covered by a permission rule".to_owned(),
+        ));
+    }
+    let bytes = read_regular(&resolved)?;
+    keep(target, &bytes);
+    Ok(())
+}
+
 impl Hub {
+    fn resource_access(&self, folder: &Path) -> Access {
+        Access::load(&self.engines().home(EngineId::Claude), folder)
+    }
+
     pub async fn read_resource(
         &self,
         thread: &Thread,
@@ -333,15 +408,17 @@ impl Hub {
         });
         let folder = self.thread_folder(thread).await?;
         let live = host_path(written, &folder, &HOST);
+        let hub = self.clone();
         tokio::task::spawn_blocking(move || {
             if let Some(kept) = snapshot.as_deref().filter(|kept| kept.is_file()) {
                 return read_regular(kept);
             }
-            let bytes = read_regular(&live?)?;
+            let resolved = resolved(&live?)?;
+            let bytes = read_regular(&resolved)?;
             if let Some(target) = &snapshot
-                && let Err(error) = forge_store::keep_resource_snapshot(target, &bytes)
+                && hub.resource_access(&folder).permits(&resolved)
             {
-                tracing::warn!(path = %target.display(), "keep resource snapshot: {error:#}");
+                keep(target, &bytes);
             }
             Ok(bytes)
         })
@@ -349,7 +426,7 @@ impl Hub {
         .context("resource read task")?
     }
 
-    pub(crate) fn snapshot_resources(
+    pub(crate) async fn snapshot_resources(
         &self,
         thread_id: &ThreadId,
         item_id: &ItemId,
@@ -358,21 +435,45 @@ impl Hub {
         if shown.is_empty() {
             return;
         }
-        let (hub, thread_id, item_id) = (self.clone(), thread_id.clone(), item_id.clone());
-        self.inner.tasks.spawn(async move {
-            let Ok(Some(thread)) = hub.store().thread(&thread_id).await else {
+        let thread = match self.store().thread(thread_id).await {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: the thread is gone");
                 return;
-            };
-            for written in shown.iter().take(SNAPSHOTS_PER_ITEM) {
-                if let Err(error) = hub.read_resource(&thread, Some(&item_id), written).await {
-                    tracing::debug!(
-                        thread = %thread_id,
-                        item = %item_id,
-                        path = %written.path,
-                        "resource not kept: {error:#}"
-                    );
+            }
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {error:#}");
+                return;
+            }
+        };
+        let folder = match self.thread_folder(&thread).await {
+            Ok(folder) => folder,
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {error:#}");
+                return;
+            }
+        };
+        let targets: Vec<_> = shown
+            .into_iter()
+            .take(SNAPSHOTS_PER_ITEM)
+            .filter_map(|written| {
+                self.store()
+                    .resource_snapshot_target(thread_id, item_id, &written.path, written.from_home)
+                    .map(|target| (host_path(&written, &folder, &HOST), target))
+            })
+            .collect();
+        let (hub, thread, item) = (self.clone(), thread_id.clone(), item_id.clone());
+        let kept = tokio::task::spawn_blocking(move || {
+            let access = hub.resource_access(&folder);
+            for (live, target) in targets {
+                if let Err(error) = live.and_then(|live| snapshot(&live, &access, &target)) {
+                    tracing::debug!(%thread, %item, "resource not kept: {error:#}");
                 }
             }
-        });
+        })
+        .await;
+        if let Err(error) = kept {
+            tracing::warn!(thread = %thread_id, item = %item_id, "resource snapshot task: {error}");
+        }
     }
 }
