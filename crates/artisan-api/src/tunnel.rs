@@ -96,12 +96,19 @@ pub struct TunnelChunk {
 
 pub const CHUNK_RAW_BYTES: usize = 40 * 1024;
 pub const TUNNEL_PLAINTEXT_BUDGET: usize = 60_000;
-pub const TRANSFER_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const TUNNEL_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
+const MESSAGE_ENVELOPE_BYTES: u64 = 64 * 1024;
+pub const TRANSFER_MAX_BYTES: u64 =
+    (TUNNEL_BODY_MAX_BYTES as u64).div_ceil(3) * 4 + MESSAGE_ENVELOPE_BYTES;
 pub const REASSEMBLY_MAX_BYTES_PER_CONN: u64 = 64 * 1024 * 1024;
-pub const TRANSFER_MAX_PARTS: u32 = 820;
+pub const TRANSFER_MAX_PARTS: u32 = 1094;
 const _: () = assert!(
     TRANSFER_MAX_PARTS as u64 == TRANSFER_MAX_BYTES.div_ceil(CHUNK_RAW_BYTES as u64),
     "TRANSFER_MAX_PARTS must be the div_ceil part count"
+);
+const _: () = assert!(
+    TRANSFER_MAX_BYTES <= REASSEMBLY_MAX_BYTES_PER_CONN,
+    "a connection must hold one transfer of the largest body"
 );
 pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
 

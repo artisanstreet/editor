@@ -122,3 +122,27 @@ fn in_flight_transfer_count_is_bounded() {
         None
     );
 }
+
+#[test]
+fn the_largest_blob_upload_fits_one_tunnel_transfer_once_encoded() {
+    use base64::Engine as _;
+    let blob: Vec<u8> = (0..crate::TUNNEL_BODY_MAX_BYTES)
+        .map(|index| u8::try_from(index % 251).unwrap_or(0))
+        .collect();
+    let request = crate::TunnelRequest {
+        id: "upload".into(),
+        method: "PUT".into(),
+        path: "/blobs".into(),
+        body: Some(serde_json::json!({"$bytes": {
+            "content_type": "image/webp",
+            "b64u": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&blob),
+        }})),
+    };
+    let message = serde_json::to_vec(&request).expect("encode the tunneled upload");
+    let mut reassembly = Reassembly::new();
+    let delivered = feed_all(&mut reassembly, "unary", &message);
+    let delivered: crate::TunnelRequest =
+        serde_json::from_slice(&delivered).expect("decode the tunneled upload");
+    let (_, body) = crate::request_body_bytes(delivered.body.as_ref()).expect("decode the blob");
+    assert_eq!(body, blob);
+}

@@ -59,7 +59,7 @@ impl Request {
 
 const RELAY_ORIGIN: &str = "https://relay.tunnel";
 const ANSWER_BYTES: usize = 32 * 1024 * 1024;
-const RELAY_BYTES: usize = 32 * 1024 * 1024;
+const RELAY_BYTES: usize = artisan_api::TUNNEL_BODY_MAX_BYTES;
 const RESOURCE_BYTES: usize = 128 * 1024 * 1024;
 const REFUSAL_BYTES: usize = 64 * 1024;
 
