@@ -1,15 +1,25 @@
-//! A thread's items as an agent reads them: one block per item, headed by
-//! its kind and id, the text cut to a readable length unless asked whole.
-
-use anyhow::Result;
-use artisan_api::{Collection, Item, ItemKind, Phase, TextContent, ToolKind};
+use artisan_api::{Collection, Item, ItemId, ItemKind, Phase, TextContent, ToolKind};
 use forge_store::Store;
 use std::fmt::Write as _;
 
-/// The most of one item's text a page shows.
 const CLIPPED: usize = 4_000;
-/// The most of one item's text a whole-item read shows.
 const WHOLE: usize = 64 * 1024;
+
+const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
+
+#[derive(Debug, thiserror::Error)]
+#[error("resolve the stored text")]
+pub struct ResolveError(#[source] anyhow::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("render item {item}")]
+pub struct RenderError {
+    item: ItemId,
+    #[source]
+    source: ResolveError,
+}
+
+type Result<T> = std::result::Result<T, ResolveError>;
 
 pub struct Options {
     pub whole: bool,
@@ -17,17 +27,28 @@ pub struct Options {
     pub unbounded: bool,
 }
 
-pub async fn render(store: &Store, items: &[Item], options: &Options) -> Result<String> {
+pub async fn render(
+    store: &Store,
+    items: &[Item],
+    options: &Options,
+) -> std::result::Result<String, RenderError> {
     let mut out = String::new();
     for item in items {
-        out.push_str(&block(store, item, options).await?);
+        out.push_str(
+            &block(store, item, options)
+                .await
+                .map_err(|source| RenderError {
+                    item: item.id.clone(),
+                    source,
+                })?,
+        );
         out.push('\n');
     }
     Ok(out)
 }
 
 async fn text(store: &Store, text: &TextContent, options: &Options) -> Result<String> {
-    let resolved = store.resolve_text(text).await?;
+    let resolved = store.resolve_text(text).await.map_err(|source| ResolveError(source.into()))?;
     Ok(clip(
         &resolved,
         match (options.unbounded, options.whole) {
@@ -57,7 +78,6 @@ pub fn time(ms: i64) -> String {
     let seconds = ms.div_euclid(1000);
     let days = seconds.div_euclid(86_400);
     let rest = seconds.rem_euclid(86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -74,7 +94,6 @@ pub fn time(ms: i64) -> String {
     )
 }
 
-/// How an item stands, after its kind; nothing when it is done.
 fn status_suffix(status: artisan_api::Status) -> String {
     match status {
         artisan_api::Status::Done => String::new(),
@@ -143,7 +162,8 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
                 thread.as_ref(),
             ));
             if let Some(result) = result {
-                writeln!(out, "result:\n{}", text(store, result, options).await?)?;
+                writeln!(out, "result:\n{}", text(store, result, options).await?)
+                    .expect(STRING_WRITE);
             }
             out
         }
@@ -193,7 +213,6 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
     })
 }
 
-/// A tool call under its head: what it did, its exit code and output.
 async fn tool_block(
     store: &Store,
     mut out: String,
@@ -204,11 +223,11 @@ async fn tool_block(
     options: &Options,
 ) -> Result<String> {
     if let Some(title) = title {
-        writeln!(out, "{title}")?;
+        writeln!(out, "{title}").expect(STRING_WRITE);
     }
     out.push_str(&tool_summary(store, tool, options).await?);
     if let Some(code) = exit_code {
-        writeln!(out, "exit code {code}")?;
+        writeln!(out, "exit code {code}").expect(STRING_WRITE);
     }
     let failed = exit_code.is_some_and(|code| code != 0);
     if let Some(output) = output
@@ -218,14 +237,14 @@ async fn tool_block(
             out,
             "output:\n{}",
             text(store, &output.text, options).await?
-        )?;
+        )
+        .expect(STRING_WRITE);
     } else if output.is_some() {
         out.push_str("_Output left out; include_output=true shows it._\n");
     }
     Ok(out)
 }
 
-/// An agent's name, then where and on what it runs, as one line.
 fn agent_line(
     label: Option<&str>,
     description: &TextContent,
@@ -249,7 +268,6 @@ fn agent_line(
     )
 }
 
-/// A question under its head: what it asked and the answer.
 async fn question_block(
     store: &Store,
     mut out: String,
@@ -259,16 +277,15 @@ async fn question_block(
 ) -> Result<String> {
     if let Collection::Inline(questions) = questions {
         for question in questions {
-            writeln!(out, "? {}", text(store, &question.text, options).await?)?;
+            writeln!(out, "? {}", text(store, &question.text, options).await?).expect(STRING_WRITE);
         }
     }
     if let Some(answer) = answer_text {
-        writeln!(out, "answer: {}", text(store, answer, options).await?)?;
+        writeln!(out, "answer: {}", text(store, answer, options).await?).expect(STRING_WRITE);
     }
     Ok(out)
 }
 
-/// A plan under its head: the proposal and its steps.
 async fn plan_block(
     store: &Store,
     mut out: String,
@@ -277,7 +294,7 @@ async fn plan_block(
     options: &Options,
 ) -> Result<String> {
     if let Some(proposal) = proposal {
-        writeln!(out, "{}", text(store, proposal, options).await?)?;
+        writeln!(out, "{}", text(store, proposal, options).await?).expect(STRING_WRITE);
     }
     if let Collection::Inline(steps) = steps {
         for step in steps {
@@ -286,13 +303,13 @@ async fn plan_block(
                 "- [{:?}] {}",
                 step.status,
                 text(store, &step.text, options).await?
-            )?;
+            )
+            .expect(STRING_WRITE);
         }
     }
     Ok(out)
 }
 
-/// One line saying what a tool call did.
 async fn tool_summary(store: &Store, tool: &ToolKind, options: &Options) -> Result<String> {
     Ok(match tool {
         ToolKind::Shell { command, .. } => {

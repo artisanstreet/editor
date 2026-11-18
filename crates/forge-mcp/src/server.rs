@@ -1,9 +1,11 @@
-use anyhow::Result;
 use artisan_api::ThreadId;
-use serde_json::{Value, json};
+use forge_store::coordination::{Conflict, CoordinationFailure};
+use serde_json::{Map, Number, Value, json};
 use std::future::Future;
 
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+const STRUCTURED_LIMIT: usize = 256 * 1024;
 
 pub struct Tool {
     pub name: &'static str,
@@ -24,18 +26,26 @@ pub enum Content {
     },
 }
 
+#[derive(Debug)]
 pub struct ToolResult {
     pub content: Vec<Content>,
     pub structured_content: Option<Value>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum StructuredError {
+    #[error("encode the structured result")]
+    Encode(#[source] serde_json::Error),
+    #[error("response is {bytes} bytes, over 256 KiB; use a smaller limit or narrower filters")]
+    TooLarge { bytes: usize },
+}
+
 impl ToolResult {
-    pub fn structured(value: Value) -> Result<Self> {
-        let text = serde_json::to_string(&value)?;
-        anyhow::ensure!(
-            text.len() <= 256 * 1024,
-            "response exceeds 256 KiB; use a smaller limit or narrower filters"
-        );
+    pub fn structured(value: Value) -> Result<Self, StructuredError> {
+        let text = serde_json::to_string(&value).map_err(StructuredError::Encode)?;
+        if text.len() > STRUCTURED_LIMIT {
+            return Err(StructuredError::TooLarge { bytes: text.len() });
+        }
         Ok(Self {
             content: vec![Content::Text(text)],
             structured_content: Some(value),
@@ -54,7 +64,35 @@ impl Content {
     }
 }
 
+#[derive(Debug)]
+pub enum Failure<'a> {
+    Refused(String),
+    Stale(&'a Conflict),
+    Broken,
+}
+
+impl<'a> Failure<'a> {
+    pub fn of_forge(error: &'a anyhow::Error) -> Self {
+        if let Some(refusal) = forge_runs::refusal(error) {
+            return Self::Refused(refusal);
+        }
+        error
+            .chain()
+            .find_map(|cause| match cause.downcast_ref::<CoordinationFailure>() {
+                Some(CoordinationFailure::Stale(conflict)) => Some(conflict),
+                Some(_) | None => None,
+            })
+            .map_or(Self::Broken, Self::Stale)
+    }
+}
+
+pub trait ToolError: std::error::Error + Send + Sync + 'static {
+    fn failure(&self) -> Failure<'_>;
+}
+
 pub trait ToolSet: Send + Sync {
+    type Error: ToolError;
+
     fn name(&self) -> &'static str;
     fn title(&self) -> &'static str;
     fn instructions(&self) -> &'static str;
@@ -64,7 +102,7 @@ pub trait ToolSet: Send + Sync {
         caller: &ThreadId,
         name: &str,
         arguments: Value,
-    ) -> impl Future<Output = Result<Vec<Content>>> + Send;
+    ) -> impl Future<Output = Result<Vec<Content>, Self::Error>> + Send;
 
     fn canonical_name<'a>(&self, name: &'a str) -> &'a str {
         name
@@ -75,7 +113,7 @@ pub trait ToolSet: Send + Sync {
         caller: &ThreadId,
         name: &str,
         arguments: Value,
-    ) -> impl Future<Output = Result<ToolResult>> + Send {
+    ) -> impl Future<Output = Result<ToolResult, Self::Error>> + Send {
         async move {
             Ok(ToolResult {
                 content: self.call(caller, name, arguments).await?,
@@ -85,12 +123,136 @@ pub trait ToolSet: Send + Sync {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RequestId {
+    Number(Number),
+    Text(String),
+}
+
+impl RequestId {
+    fn to_json(&self) -> Value {
+        match self {
+            Self::Number(number) => Value::Number(number.clone()),
+            Self::Text(text) => Value::String(text.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Invalid {
+    NotAnObject,
+    Version,
+    Id,
+    Method,
+    Params,
+}
+
+impl Invalid {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::NotAnObject => "A JSON-RPC message is an object.",
+            Self::Version => "A JSON-RPC message has jsonrpc \"2.0\".",
+            Self::Id => "A JSON-RPC id is a string or a number.",
+            Self::Method => "A JSON-RPC request has a method name.",
+            Self::Params => "JSON-RPC params are an object or an array.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Envelope {
+    Request {
+        id: RequestId,
+        method: String,
+        params: Value,
+    },
+    Notification,
+    Response,
+    Invalid {
+        id: Option<RequestId>,
+        reason: Invalid,
+    },
+}
+
+impl Envelope {
+    fn parse(message: &Value) -> Self {
+        let Some(object) = message.as_object() else {
+            return Self::Invalid {
+                id: None,
+                reason: Invalid::NotAnObject,
+            };
+        };
+        let id = match object.get("id") {
+            None => None,
+            Some(Value::Number(number)) => Some(RequestId::Number(number.clone())),
+            Some(Value::String(text)) => Some(RequestId::Text(text.clone())),
+            Some(Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_)) => {
+                return Self::Invalid {
+                    id: None,
+                    reason: Invalid::Id,
+                };
+            }
+        };
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Self::Invalid {
+                id,
+                reason: Invalid::Version,
+            };
+        }
+        Self::classify(object, id)
+    }
+
+    fn classify(object: &Map<String, Value>, id: Option<RequestId>) -> Self {
+        let method = match object.get("method") {
+            Some(Value::String(method)) => method.clone(),
+            None if id.is_some()
+                && (object.contains_key("result") || object.contains_key("error")) =>
+            {
+                return Self::Response;
+            }
+            Some(_) | None => {
+                return Self::Invalid {
+                    id,
+                    reason: Invalid::Method,
+                };
+            }
+        };
+        let params = match object.get("params") {
+            None => Value::Null,
+            Some(params @ (Value::Object(_) | Value::Array(_))) => params.clone(),
+            Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) => {
+                return Self::Invalid {
+                    id,
+                    reason: Invalid::Params,
+                };
+            }
+        };
+        match id {
+            Some(id) => Self::Request { id, method, params },
+            None => Self::Notification,
+        }
+    }
+}
+
+fn error_reply(id: Option<&RequestId>, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id.map_or(Value::Null, RequestId::to_json),
+        "error": { "code": code, "message": message },
+    })
+}
+
 pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Option<Value> {
     match body {
+        Value::Array(messages) if messages.is_empty() => Some(error_reply(
+            None,
+            -32600,
+            "A JSON-RPC batch holds at least one message.",
+        )),
         Value::Array(messages) => {
             let mut replies = Vec::new();
             for message in messages {
-                if let Some(reply) = one(set, caller, message).await {
+                if let Some(reply) = one(set, caller, &message).await {
                     replies.push(reply);
                 }
             }
@@ -100,16 +262,19 @@ pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Opti
         | Value::Bool(_)
         | Value::Number(_)
         | Value::String(_)
-        | Value::Object(_)) => one(set, caller, message).await,
+        | Value::Object(_)) => one(set, caller, &message).await,
     }
 }
 
-async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: Value) -> Option<Value> {
-    let id = message.get("id").cloned();
-    let method = message.get("method").and_then(Value::as_str)?;
-    let id = id?;
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let result = match method {
+async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: &Value) -> Option<Value> {
+    let (id, method, params) = match Envelope::parse(message) {
+        Envelope::Request { id, method, params } => (id, method, params),
+        Envelope::Notification | Envelope::Response => return None,
+        Envelope::Invalid { id, reason } => {
+            return Some(error_reply(id.as_ref(), -32600, reason.message()));
+        }
+    };
+    let result = match method.as_str() {
         "initialize" => Ok(initialize(set, &params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": list(&set.tools()) })),
@@ -117,10 +282,8 @@ async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: Value) -> Option<V
         _ => Err((-32601, format!("Unknown method {method}"))),
     };
     Some(match result {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err((code, message)) => {
-            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-        }
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id.to_json(), "result": result }),
+        Err((code, message)) => error_reply(Some(&id), code, &message),
     })
 }
 
@@ -160,30 +323,7 @@ async fn call<T: ToolSet>(
     }
     let (result, is_error) = match set.call_result(caller, name, arguments).await {
         Ok(result) => (result, false),
-        Err(error) => {
-            let text = if let Some(refusal) = forge_runs::refusal(&error) {
-                refusal
-            } else {
-                tracing::error!(
-                    thread = %caller,
-                    server = set.name(),
-                    tool = name,
-                    "MCP tool failed: {error:#}"
-                );
-                format!("Forge couldn't do that: {error:#}")
-            };
-            let details = error.chain().find_map(|cause| match cause.downcast_ref::<forge_store::coordination::CoordinationFailure>() { Some(forge_store::coordination::CoordinationFailure::Stale(conflict)) => Some(conflict), _ => None }).map_or_else(
-                || json!({"code":"tool_failed","message":text,"retryable":false}),
-                |conflict| json!({"code":"stale_revision","message":text,"retryable":true,"record":conflict.id,"current_revision":conflict.current_revision,"recovery":"get_coordination_record"}),
-            );
-            (
-                ToolResult {
-                    content: vec![Content::Text(text)],
-                    structured_content: Some(json!({ "error": details })),
-                },
-                true,
-            )
-        }
+        Err(error) => (failed(set.name(), caller, name, &error), true),
     };
     let content: Vec<Value> = result.content.iter().map(Content::to_json).collect();
     let mut response = json!({ "content": content, "isError": is_error });
@@ -191,6 +331,31 @@ async fn call<T: ToolSet>(
         response["structuredContent"] = structured;
     }
     Ok(response)
+}
+
+fn failed<E: ToolError>(server: &str, caller: &ThreadId, tool: &str, error: &E) -> ToolResult {
+    let (text, details) = match error.failure() {
+        Failure::Refused(text) => {
+            let details = json!({"code":"tool_failed","message":text,"retryable":false});
+            (text, details)
+        }
+        Failure::Stale(conflict) => {
+            let text = format!("Forge couldn't do that: {}", diagnostics::chain(error));
+            let details = json!({"code":"stale_revision","message":text,"retryable":true,"record":conflict.id,"current_revision":conflict.current_revision,"recovery":"get_coordination_record"});
+            (text, details)
+        }
+        Failure::Broken => {
+            let chain = diagnostics::chain(error);
+            tracing::error!(thread = %caller, server, tool, "MCP tool failed: {chain}");
+            let text = format!("Forge couldn't do that: {chain}");
+            let details = json!({"code":"tool_failed","message":text,"retryable":false});
+            (text, details)
+        }
+    };
+    ToolResult {
+        content: vec![Content::Text(text)],
+        structured_content: Some(json!({ "error": details })),
+    }
 }
 
 #[must_use]

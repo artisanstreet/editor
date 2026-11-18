@@ -8,9 +8,7 @@ use forge_runs::{AgentInfo, AgentState, Hub};
 use forge_store::{GrepPage, SearchPage, Touch};
 use std::fmt::Write as _;
 
-/// Serialize the shared catalog directly so new model settings are exposed
-/// without maintaining a second, incomplete representation for MCP.
-pub fn models(models: &[artisan_api::Model]) -> anyhow::Result<String> {
+pub fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
     Ok(format!(
         "Use effort, speed and variant ids exactly as listed. OpenCode reasoning choices use variant. \
          Defaults are default_effort, default_variant and speeds[].default. \
