@@ -69,6 +69,8 @@ pub enum ReadSkillsError {
         #[source]
         source: io::Error,
     },
+    #[error("recovering an interrupted skill replacement")]
+    Recover(#[source] RecoverSkillError),
     #[error("inspect managed skill {}", path.display())]
     Inspect {
         path: PathBuf,
@@ -159,12 +161,6 @@ fn unix_seconds() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Moves everything in `engine_skills` that Forge didn't place into the
-/// engine's quarantine, so an engine only ever reads what Artisan
-/// installed; a newer copy replaces an older one of the same name. Then
-/// drops quarantined skills older than [`QUARANTINE_DAYS`]. Hidden entries
-/// (Codex's own `.system`) stay. Never fails the launch: what can't be moved
-/// is logged and left.
 pub(super) fn quarantine_foreign(
     engine: EngineId,
     engine_skills: &Path,
@@ -172,6 +168,7 @@ pub(super) fn quarantine_foreign(
     owned: &[PathBuf],
 ) {
     let root = quarantine_root(skills_dir).join(engine.as_str());
+    recover_quarantine(engine, &root);
     if let Ok(entries) = fs::read_dir(engine_skills) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -181,12 +178,7 @@ pub(super) fn quarantine_foreign(
             }
             let to = root.join(&name);
             let moved = fs::create_dir_all(&root)
-                .and_then(|()| match fs::symlink_metadata(&to) {
-                    Ok(_) => super::remove_entry(&to),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error),
-                })
-                .and_then(|()| move_folder(&path, &to))
+                .and_then(|()| replace_quarantined(&path, &to, &root))
                 .and_then(|()| fs::write(quarantined_at(&root, &name), unix_seconds().to_string()));
             match moved {
                 Ok(()) => tracing::info!(
@@ -222,6 +214,59 @@ pub(super) fn quarantine_foreign(
             if let Err(error) = removed {
                 tracing::warn!(%engine, skill = %name, %error, "couldn't drop an expired quarantined skill");
             }
+        }
+    }
+}
+
+fn replace_quarantined(found: &Path, to: &Path, root: &Path) -> io::Result<()> {
+    let name = super::link_name(to);
+    let incoming = root.join(super::staged_name("incoming", name));
+    move_folder(found, &incoming)?;
+    let retired = root.join(super::staged_name("retired", name));
+    super::swap_in(&incoming, to, &retired).inspect_err(|_| {
+        if let Err(error) = move_folder(&incoming, found) {
+            tracing::warn!(skill = %found.display(), kept = %incoming.display(), %error, "couldn't put a skill back after a failed quarantine");
+        }
+    })
+}
+
+fn quarantine_leftovers(engine: EngineId, root: &Path, kind: &str) -> Vec<(PathBuf, String)> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(%engine, path = %root.display(), %error, "couldn't look for interrupted quarantines");
+            return Vec::new();
+        }
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let name = super::other_process_leftover(&file_name, kind)?.to_owned();
+            Some((entry.path(), name))
+        })
+        .collect()
+}
+
+fn recover_quarantine(engine: EngineId, root: &Path) {
+    let leftovers = |kind| quarantine_leftovers(engine, root, kind);
+    for (incoming, name) in leftovers("incoming") {
+        let to = root.join(&name);
+        let retired = root.join(super::staged_name("retired", super::link_name(&to)));
+        if let Err(error) = super::swap_in(&incoming, &to, &retired) {
+            tracing::warn!(%engine, skill = %name, kept = %incoming.display(), %error, "couldn't finish an interrupted quarantine");
+        }
+    }
+    for (retired, name) in leftovers("retired") {
+        let to = root.join(&name);
+        let settled = match fs::symlink_metadata(&to) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => fs::rename(&retired, &to),
+            Err(error) => Err(error),
+            Ok(_) => super::remove_entry(&retired),
+        };
+        if let Err(error) = settled {
+            tracing::warn!(%engine, skill = %name, path = %retired.display(), %error, "couldn't settle an interrupted quarantine");
         }
     }
 }
@@ -392,6 +437,7 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>, ReadSkillsError> {
 }
 
 pub(super) fn wanted(c: &Customisation) -> Result<BTreeMap<String, PathBuf>, ReadSkillsError> {
+    recover_replacements(&c.skills_dir).map_err(ReadSkillsError::Recover)?;
     if c.first_party {
         place_first_party(&c.skills_dir, true)?;
     }
@@ -1104,6 +1150,12 @@ pub enum InstallSkillError {
         #[source]
         source: io::Error,
     },
+    #[error("recording the replacement of {name}")]
+    Record {
+        name: String,
+        #[source]
+        source: artisan_paths::private::PrivateFileError,
+    },
     #[error("backing up the old {name}")]
     Backup {
         name: String,
@@ -1162,9 +1214,14 @@ pub fn install_skill(
         path: c.skills_dir.clone(),
         source,
     })?;
+    let _replacing = replacing();
     let stamp = artisan_api::now();
-    let staging = c.skills_dir.join(format!(".install-{name}-{stamp}"));
-    let backup = backups_root(&c.skills_dir).join(format!("{name}-{stamp}"));
+    let staging = c
+        .skills_dir
+        .join(format!("{INSTALL_STAGING}{name}-{stamp}"));
+    let backup_name = format!("{name}-{stamp}");
+    let backup = backups_root(&c.skills_dir).join(&backup_name);
+    let record = replacement_record(&c.skills_dir, &name);
     let result = (|| -> Result<(), InstallSkillError> {
         copy_dir(&from, &staging).map_err(|source| InstallSkillError::Copy {
             path: from.clone(),
@@ -1172,19 +1229,36 @@ pub fn install_skill(
         })?;
         let replaced = to.exists();
         if replaced {
-            move_folder(&to, &backup).map_err(|source| InstallSkillError::Backup {
-                name: name.clone(),
-                source,
-            })?;
+            artisan_paths::private::write_file(&record, backup_name.as_bytes()).map_err(
+                |source| InstallSkillError::Record {
+                    name: name.clone(),
+                    source,
+                },
+            )?;
+            if let Err(source) = move_folder(&to, &backup) {
+                forget_replacement(&record);
+                return Err(InstallSkillError::Backup {
+                    name: name.clone(),
+                    source,
+                });
+            }
         }
         if let Err(source) = fs::rename(&staging, &to) {
-            if replaced && let Err(restore) = move_folder(&backup, &to) {
-                tracing::warn!(skill = %name, backup = %backup.display(), %restore, "couldn't restore the old skill; it stays in the backups");
+            if replaced {
+                match move_folder(&backup, &to) {
+                    Ok(()) => forget_replacement(&record),
+                    Err(restore) => {
+                        tracing::warn!(skill = %name, backup = %backup.display(), %restore, "couldn't restore the old skill; the next launch restores it from the backups");
+                    }
+                }
             }
             return Err(InstallSkillError::Place {
                 name: name.clone(),
                 source,
             });
+        }
+        if replaced {
+            forget_replacement(&record);
         }
         Ok(())
     })();
@@ -1192,6 +1266,112 @@ pub fn install_skill(
         discard_leftover(&staging);
     }
     result.map(|()| name)
+}
+
+const REPLACING: &str = ".replacing-";
+const INSTALL_STAGING: &str = ".install-";
+
+fn replacing() -> std::sync::MutexGuard<'static, ()> {
+    static REPLACEMENTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    REPLACEMENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn replacement_record(skills_dir: &Path, name: &str) -> PathBuf {
+    skills_dir.join(format!("{REPLACING}{name}"))
+}
+
+fn forget_replacement(record: &Path) {
+    if let Err(error) = remove_file_if_present(record) {
+        tracing::warn!(record = %record.display(), %error, "couldn't remove a finished skill replacement record");
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecoverSkillError {
+    #[error("reading {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{} names no backup folder", path.display())]
+    Corrupt { path: PathBuf },
+    #[error("restoring {} from {}", skill.display(), backup.display())]
+    Restore {
+        skill: PathBuf,
+        backup: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("removing {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn recover_replacements(skills_dir: &Path) -> Result<(), RecoverSkillError> {
+    let _replacing = replacing();
+    let read = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| RecoverSkillError::Read { path, source }
+    };
+    let entries = match fs::read_dir(skills_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(read(skills_dir)(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(read(skills_dir))?;
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.starts_with(INSTALL_STAGING) {
+            super::remove_entry(&path)
+                .map_err(|source| RecoverSkillError::Remove { path, source })?;
+        } else if let Some(name) = file_name.strip_prefix(REPLACING) {
+            restore_replaced(skills_dir, name, &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_replaced(skills_dir: &Path, name: &str, record: &Path) -> Result<(), RecoverSkillError> {
+    let read = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| RecoverSkillError::Read { path, source }
+    };
+    let backup_name = fs::read_to_string(record).map_err(read(record))?;
+    let backup_name = Path::new(backup_name.trim());
+    if !matches!(
+        backup_name.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    ) {
+        return Err(RecoverSkillError::Corrupt {
+            path: record.to_path_buf(),
+        });
+    }
+    let backup = backups_root(skills_dir).join(backup_name);
+    let skill = skills_dir.join(name);
+    let missing = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(read(path)(error)),
+    };
+    if missing(&skill)? && !missing(&backup)? {
+        move_folder(&backup, &skill).map_err(|source| RecoverSkillError::Restore {
+            skill: skill.clone(),
+            backup: backup.clone(),
+            source,
+        })?;
+        tracing::info!(skill = %skill.display(), backup = %backup.display(), "restored a skill an interrupted replacement had backed up");
+    }
+    remove_file_if_present(record).map_err(|source| RecoverSkillError::Remove {
+        path: record.to_path_buf(),
+        source,
+    })
 }
 
 fn move_folder(from: &Path, to: &Path) -> io::Result<()> {

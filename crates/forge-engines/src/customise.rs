@@ -26,7 +26,7 @@ pub use prompt::{
 };
 pub use skills::{
     AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, ReadSkillsError,
-    adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog,
+    RecoverSkillError, adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog,
 };
 
 /// Marks a skill folder Forge copied (where symlinks are unavailable).
@@ -281,8 +281,6 @@ fn inspect(path: &Path, owned: &[PathBuf]) -> Entry {
     Entry::Theirs
 }
 
-/// Links every wanted skill (name → folder) into an engine's skills folder
-/// and removes Forge's links to anything else, including skills turned off.
 fn sync_skills(
     engine_skills: &Path,
     wanted: &BTreeMap<String, PathBuf>,
@@ -292,6 +290,8 @@ fn sync_skills(
         return Ok(());
     }
     fs::create_dir_all(engine_skills)?;
+    let staging = staging_root(engine_skills);
+    discard_other_processes_leftovers(&staging);
     for entry in fs::read_dir(engine_skills)? {
         let path = entry?.path();
         let keep = path
@@ -312,10 +312,9 @@ fn sync_skills(
             }
             Entry::Ours(Some(current)) if current == target => continue,
             Entry::Ours(None) if copied_skill_matches(&link, &target) => continue,
-            Entry::Ours(_) => remove_entry(&link)?,
-            Entry::Missing => {}
+            Entry::Ours(_) | Entry::Missing => {}
         }
-        place(&target, &link)?;
+        place(&target, &link, &staging)?;
     }
     Ok(())
 }
@@ -358,29 +357,125 @@ fn remove_entry(path: &Path) -> io::Result<()> {
     }
 }
 
-fn place(target: &Path, link: &Path) -> io::Result<()> {
+fn staging_root(engine_skills: &Path) -> PathBuf {
+    engine_skills.with_file_name(".artisan-skills-staging")
+}
+
+fn staged_name(kind: &str, name: &std::ffi::OsStr) -> String {
+    static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        ".{kind}-{}-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        name.to_string_lossy()
+    )
+}
+
+fn other_process_leftover<'name>(file_name: &'name str, kind: &str) -> Option<&'name str> {
+    let rest = file_name
+        .strip_prefix('.')?
+        .strip_prefix(kind)?
+        .strip_prefix('-')?;
+    let (process, rest) = rest.split_once('-')?;
+    let (_, name) = rest.split_once('-')?;
+    let process: u32 = process.parse().ok()?;
+    (process != std::process::id()).then_some(name)
+}
+
+fn discard_other_processes_leftovers(staging: &Path) {
+    let entries = match fs::read_dir(staging) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(path = %staging.display(), %error, "couldn't look for leftover staged skills");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let leftover = ["prepared", "copy", "retired"]
+            .iter()
+            .any(|kind| other_process_leftover(&file_name, kind).is_some());
+        if leftover && let Err(error) = remove_entry(&entry.path()) {
+            tracing::warn!(path = %entry.path().display(), %error, "couldn't remove a leftover staged skill");
+        }
+    }
+}
+
+fn link_name(link: &Path) -> &std::ffi::OsStr {
+    link.file_name()
+        .expect("invariant: a skill entry is <skills folder>/<name>")
+}
+
+fn swap_in(prepared: &Path, destination: &Path, retired: &Path) -> io::Result<()> {
+    match fs::rename(destination, retired) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return fs::rename(prepared, destination);
+        }
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = fs::rename(prepared, destination) {
+        return match fs::rename(retired, destination) {
+            Ok(()) => Err(error),
+            Err(restore) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the previous copy stays at {}: {restore}",
+                    retired.display()
+                ),
+            )),
+        };
+    }
+    if let Err(error) = remove_entry(retired) {
+        tracing::warn!(path = %retired.display(), %error, "couldn't remove a replaced skill copy");
+    }
+    Ok(())
+}
+
+fn publish(prepared: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    let retired = staging.join(staged_name("retired", link_name(link)));
+    swap_in(prepared, link, &retired).inspect_err(|_| {
+        if let Err(error) = remove_entry(prepared) {
+            tracing::warn!(path = %prepared.display(), %error, "couldn't remove a staged skill");
+        }
+    })
+}
+
+fn place(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    fs::create_dir_all(staging)?;
+    let prepared = staging.join(staged_name("prepared", link_name(link)));
     #[cfg(unix)]
-    let linked = std::os::unix::fs::symlink(target, link);
+    let linked = std::os::unix::fs::symlink(target, &prepared);
     #[cfg(windows)]
-    let linked = std::os::windows::fs::symlink_dir(target, link);
+    let linked = std::os::windows::fs::symlink_dir(target, &prepared);
     #[cfg(not(any(unix, windows)))]
     let linked: io::Result<()> = Err(io::ErrorKind::Unsupported.into());
     match linked {
-        Ok(()) => Ok(()),
-        // Windows without Developer Mode can't create symlinks.
+        Ok(()) => publish(&prepared, link, staging),
         Err(error) if cfg!(windows) => {
             tracing::debug!(error = %error, skill = %target.display(), "symlink refused; copying the skill");
-            copy_dir(target, link)?;
-            {
-                let (digest, _, _) = skills::measure(target)?;
-                fs::write(
-                    link.join(COPY_MARKER),
-                    format!("{}\n{digest}", target.display()),
-                )
-            }
+            publish_copy(target, link, staging)
         }
         Err(error) => Err(error),
     }
+}
+
+fn publish_copy(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    fs::create_dir_all(staging)?;
+    let prepared = staging.join(staged_name("copy", link_name(link)));
+    let copied = copy_dir(target, &prepared).and_then(|()| {
+        let (digest, _, _) = skills::measure(target)?;
+        fs::write(
+            prepared.join(COPY_MARKER),
+            format!("{}\n{digest}", target.display()),
+        )
+    });
+    if let Err(error) = copied {
+        discard_leftover(&prepared);
+        return Err(error);
+    }
+    publish(&prepared, link, staging)
 }
 
 /// Copies a folder; files come out writable even if the source was not.

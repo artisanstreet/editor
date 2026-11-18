@@ -66,6 +66,7 @@ pub use customise::{
 pub use customise::{
     AdoptSkillError, ApplyPromptError, DiscardSkillError, FindSkillError, ImportError,
     InstallSkillError, LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
+    RecoverSkillError,
 };
 pub use engines::host_entry;
 pub use harness::*;
