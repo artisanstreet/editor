@@ -28,6 +28,39 @@ pub struct Delivery<T> {
     sender: DeliverySender<T>,
 }
 
+pub struct OwnedDelivery<T> {
+    delivery: Delivery<T>,
+    mailbox: Mailbox<()>,
+}
+
+impl<T> OwnedDelivery<T> {
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        let mailbox = Mailbox::new(NonZeroUsize::MIN);
+        Self {
+            delivery: Delivery::with_wake(capacity, mailbox.sender()),
+            mailbox,
+        }
+    }
+
+    pub const fn mailbox(&self) -> &Mailbox<()> {
+        &self.mailbox
+    }
+}
+
+impl<T> std::ops::Deref for OwnedDelivery<T> {
+    type Target = Delivery<T>;
+
+    fn deref(&self) -> &Delivery<T> {
+        &self.delivery
+    }
+}
+
+impl<T> std::ops::DerefMut for OwnedDelivery<T> {
+    fn deref_mut(&mut self) -> &mut Delivery<T> {
+        &mut self.delivery
+    }
+}
+
 pub struct DeliverySender<T> {
     wake: aqua::mailbox::Sender<()>,
     sender: mpsc::Sender<Admitted<T>>,

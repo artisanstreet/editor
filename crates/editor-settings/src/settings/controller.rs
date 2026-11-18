@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc};
 use artisan_api::{EngineCommand, EngineId, GlobalPrompt};
 use serde_json::Value;
 
-use editor_core::delivery::Delivery;
+use editor_core::delivery::OwnedDelivery;
 use editor_core::{Core, HostId, HostInstance, Screen, SettingsPage, ThreadPageDirection, runtime};
 use editor_ui::text::editor::{Editor, Mode};
 
@@ -65,7 +65,7 @@ pub struct SettingsController {
     pub editor_setting_error: Option<String>,
     parked_prompts: HashMap<String, (PromptForm, String)>,
     setting_writes: SettingWrites,
-    completion: Delivery<HostCompletion>,
+    completion: OwnedDelivery<HostCompletion>,
     tasks: Vec<tokio_util::task::AbortOnDropHandle<()>>,
     active_instance: Option<HostInstance>,
 }
@@ -99,7 +99,7 @@ impl Default for SettingsController {
             editor_setting_error: None,
             parked_prompts: HashMap::new(),
             setting_writes: SettingWrites::default(),
-            completion: Delivery::new(NonZeroUsize::new(64).unwrap()),
+            completion: OwnedDelivery::new(NonZeroUsize::new(64).unwrap()),
             tasks: Vec::new(),
             active_instance: None,
         }
@@ -108,7 +108,7 @@ impl Default for SettingsController {
 
 impl SettingsController {
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.completion.wake_mailbox().unwrap()
+        self.completion.mailbox()
     }
 
     pub fn sync_editors(&self, ui: &mut aqua::UiApp) {

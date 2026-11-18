@@ -4,7 +4,7 @@ use std::time::Instant;
 use artisan_api::{CatalogSkill, Listing, McpServer};
 use tokio_util::task::AbortOnDropHandle;
 
-use editor_core::delivery::Delivery;
+use editor_core::delivery::OwnedDelivery;
 use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, runtime};
 use editor_ui::text::mount::{EditorController, EditorEvent};
 use editor_ui::text::{Editor, ListKey as EditorListKey, Mode};
@@ -53,7 +53,7 @@ pub(crate) struct ViewSnapshot {
 pub struct MarketplaceController {
     pub page: Marketplace,
     pub search: EditorController,
-    completion: Delivery<Completion>,
+    completion: OwnedDelivery<Completion>,
     search_task: Option<AbortOnDropHandle<()>>,
     host_instance: Option<HostInstance>,
     loading_started: Option<Instant>,
@@ -81,7 +81,7 @@ impl MarketplaceController {
         Self {
             page: Marketplace::default(),
             search,
-            completion: Delivery::new(NonZeroUsize::new(64).unwrap()),
+            completion: OwnedDelivery::new(NonZeroUsize::new(64).unwrap()),
             search_task: None,
             host_instance: None,
             loading_started: None,
@@ -115,7 +115,7 @@ impl MarketplaceController {
     }
 
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.completion.wake_mailbox().unwrap()
+        self.completion.mailbox()
     }
 
     pub fn sync(&mut self, core: &mut Core) {

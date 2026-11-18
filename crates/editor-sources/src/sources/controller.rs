@@ -3,7 +3,7 @@ use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, Text
 use editor_core::{
     CollectionWindow, ContentWindow, Core, ForgeClient, HostData, HostId, HostInstance, RangeState,
     client::{CopyContentError, ExportContentError},
-    delivery::Delivery,
+    delivery::OwnedDelivery,
     runtime::runtime,
 };
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
@@ -84,7 +84,7 @@ pub struct ContentText {
     action: Option<AbortOnDropHandle<()>>,
     picking: Option<u64>,
     picker_generation: u64,
-    delivery: Delivery<Completion>,
+    delivery: OwnedDelivery<Completion>,
 }
 
 impl ContentText {
@@ -122,7 +122,7 @@ impl ContentText {
             action: None,
             picking: None,
             picker_generation: 0,
-            delivery: Delivery::new(NonZeroUsize::MIN),
+            delivery: OwnedDelivery::new(NonZeroUsize::MIN),
         }
     }
 
@@ -151,9 +151,7 @@ impl ContentText {
     }
 
     pub fn action_wake(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.delivery
-            .wake_mailbox()
-            .expect("source action wake mailbox")
+        self.delivery.mailbox()
     }
 
     pub fn reconcile(&mut self, core: &Core) -> bool {

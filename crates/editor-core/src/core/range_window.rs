@@ -1,4 +1,4 @@
-use crate::core::{ForgeClient, client::RangeError, delivery::Delivery};
+use crate::core::{ForgeClient, client::RangeError, delivery::OwnedDelivery};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef};
 use futures::future::BoxFuture;
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
@@ -96,7 +96,7 @@ pub struct RangeWindow<R: RangePage + Send> {
     requested: u64,
     generation: u64,
     read: Option<AbortOnDropHandle<()>>,
-    delivery: Delivery<(u64, Result<R, RangeError>)>,
+    delivery: OwnedDelivery<(u64, Result<R, RangeError>)>,
 }
 
 pub type ContentWindow = RangeWindow<ContentRange>;
@@ -125,16 +125,14 @@ impl<R: RangePage + Send> RangeWindow<R> {
             requested: 0,
             generation: 0,
             read: None,
-            delivery: Delivery::new(NonZeroUsize::MIN),
+            delivery: OwnedDelivery::new(NonZeroUsize::MIN),
         };
         window.request(0);
         window
     }
 
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.delivery
-            .wake_mailbox()
-            .expect("range window owns its wake mailbox")
+        self.delivery.mailbox()
     }
 
     #[cfg(feature = "test-support")]
