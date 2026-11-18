@@ -1332,43 +1332,70 @@ impl HostData {
                     events.push(HostEvent::Changed);
                 }
                 HostCompletion::Repository(project, generation, result) => {
-                    if !self
-                        .repository_reads
-                        .get(&project)
-                        .is_some_and(|(current, _)| *current == generation)
-                    {
-                        continue;
+                    if self.finish_repository(project, generation, result) {
+                        events.push(HostEvent::Changed);
                     }
-                    self.repository_reads.remove(&project);
-                    let failed = result.is_err();
-                    let value = match result {
-                        Ok(value) => value,
-                        Err(error) => {
-                            tracing::debug!(%project, "repository read failed: {}", ::diagnostics::chain(&error));
-                            self.repositories
-                                .get(&project)
-                                .and_then(|entry| entry.value.clone())
-                        }
-                    };
-                    self.repositories.insert(
-                        project.clone(),
-                        RepositoryEntry {
-                            value,
-                            checked: std::time::Instant::now(),
-                            failed,
-                        },
-                    );
-                    self.repository_order.retain(|id| id != &project);
-                    self.repository_order.push_back(project);
-                    while self.repositories.len() > 128 {
-                        if let Some(oldest) = self.repository_order.pop_front() {
-                            self.repositories.remove(&oldest);
-                        }
-                    }
-                    events.push(HostEvent::Changed);
                 }
             }
         }
+    }
+    fn finish_repository(
+        &mut self,
+        project: ProjectId,
+        generation: u64,
+        result: Result<Option<artisan_api::ProjectRepository>, crate::core::client::CallError>,
+    ) -> bool {
+        if !self
+            .repository_reads
+            .get(&project)
+            .is_some_and(|(current, _)| *current == generation)
+        {
+            return false;
+        }
+        self.repository_reads.remove(&project);
+        let failed = result.is_err();
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(%project, "repository read failed: {}", ::diagnostics::chain(&error));
+                self.repositories
+                    .get(&project)
+                    .and_then(|entry| entry.value.clone())
+            }
+        };
+        let changed = self
+            .repositories
+            .get(&project)
+            .is_none_or(|entry| entry.value != value || entry.failed != failed);
+        self.repositories.insert(
+            project.clone(),
+            RepositoryEntry {
+                value,
+                checked: std::time::Instant::now(),
+                failed,
+            },
+        );
+        self.repository_order.retain(|id| id != &project);
+        self.repository_order.push_back(project);
+        while self.repositories.len() > 128 {
+            if let Some(oldest) = self.repository_order.pop_front() {
+                self.repositories.remove(&oldest);
+            }
+        }
+        changed
+    }
+    #[cfg(feature = "test-support")]
+    pub fn test_repository(
+        &mut self,
+        project: ProjectId,
+        repository: Option<artisan_api::ProjectRepository>,
+    ) -> bool {
+        self.repository_generation = self.repository_generation.wrapping_add(1);
+        let generation = self.repository_generation;
+        let task = crate::core::runtime::runtime().spawn(std::future::pending());
+        self.repository_reads
+            .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
+        self.finish_repository(project, generation, Ok(repository))
     }
     fn apply_event(&mut self, event: Event, events: &mut HostEffects) {
         match event {

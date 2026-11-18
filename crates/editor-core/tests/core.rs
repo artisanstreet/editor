@@ -10,6 +10,8 @@ mod media_http;
 mod pages;
 #[path = "core/host/preferences.rs"]
 mod preferences;
+#[path = "core/host.rs"]
+mod host;
 #[path = "core/host/project_icons.rs"]
 mod project_icons;
 #[path = "core/range_window.rs"]

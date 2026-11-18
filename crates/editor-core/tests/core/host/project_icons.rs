@@ -194,3 +194,22 @@ fn retrying_project_icons_reloads_an_icon_whose_image_failed() {
     );
     assert!(!data.project_icons_failed());
 }
+
+#[test]
+fn rereading_an_unchanged_project_icon_leaves_the_window_alone() {
+    let mut forge = forge();
+    let project = ProjectId("project".into());
+    let data = forge.core.host_mut(&forge.host).expect("host");
+    assert!(
+        data.test_project_icon(project.clone(), BlobHash("icon".into())),
+        "the first icon read shows the icon"
+    );
+    assert!(
+        !data.test_project_icon(project.clone(), BlobHash("icon".into())),
+        "a periodic re-read of the same icon must not rebuild the window"
+    );
+    assert!(
+        data.test_project_icon(project, BlobHash("new-icon".into())),
+        "a replaced icon is shown"
+    );
+}

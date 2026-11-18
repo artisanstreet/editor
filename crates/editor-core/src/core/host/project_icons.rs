@@ -58,17 +58,14 @@ impl ProjectIcons {
 }
 impl HostData {
     #[cfg(feature = "test-support")]
-    pub fn test_project_icon(&mut self, project: ProjectId, hash: BlobHash) {
+    pub fn test_project_icon(&mut self, project: ProjectId, hash: BlobHash) -> bool {
         self.project_icons.generation = self.project_icons.generation.wrapping_add(1);
         let generation = self.project_icons.generation;
         let task = crate::core::runtime::runtime().spawn(std::future::pending());
         self.project_icons
             .reading
             .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
-        assert!(
-            self.finish_project_icon(project, generation, Ok(Some(hash))),
-            "invariant: the test icon read is current"
-        );
+        self.finish_project_icon(project, generation, Ok(Some(hash)))
     }
     pub fn project_icon(&self, project: &ProjectId) -> Option<Arc<ImageHandle>> {
         let hash = self.project_icons.entries.get(project)?.hash.as_ref()?;
@@ -76,6 +73,10 @@ impl HostData {
             BlobImage::Ready(image) => Some(image),
             BlobImage::Loading | BlobImage::Failed(_) => None,
         }
+    }
+    #[must_use]
+    pub fn project_icon_checked(&self, project: &ProjectId) -> bool {
+        self.project_icons.entries.contains_key(project)
     }
     pub fn project_icons_failed(&self) -> bool {
         self.project_icons.entries.values().any(|entry| {
@@ -170,6 +171,9 @@ impl HostData {
                 last.as_ref().and_then(|entry| entry.hash.clone())
             }
         };
+        let changed = last
+            .as_ref()
+            .is_none_or(|entry| entry.hash != hash || entry.failed != failed);
         self.project_icons.entries.insert(
             project.clone(),
             Entry {
@@ -188,6 +192,6 @@ impl HostData {
         if let Some(hash) = hash {
             self.load_image(hash, false);
         }
-        true
+        changed
     }
 }
