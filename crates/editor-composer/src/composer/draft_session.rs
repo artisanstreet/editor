@@ -6,7 +6,7 @@ use artisan_api::{
 use serde_json::Value;
 use std::time::Duration;
 
-pub const SAVE_DELAY: Duration = Duration::from_millis(400);
+pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(400);
 
 #[derive(Clone)]
 pub struct Submission {
@@ -93,7 +93,7 @@ impl DraftSession {
         }
     }
 
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
 
@@ -143,7 +143,7 @@ impl DraftSession {
         !self.removed() && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
     }
 
-    pub fn recover(&mut self, body: Value) {
+    pub(crate) fn recover(&mut self, body: Value) {
         if self.removed() || body.is_null() {
             return;
         }
@@ -152,11 +152,11 @@ impl DraftSession {
         self.dirty = true;
     }
 
-    pub fn adopting(&mut self) {
+    pub(crate) fn adopting(&mut self) {
         self.adopting += 1;
     }
 
-    pub fn adopted(&mut self, result: Result<BlobHash, String>) -> Option<BlobHash> {
+    pub(crate) fn adopted(&mut self, result: Result<BlobHash, String>) -> Option<BlobHash> {
         self.adopting = self
             .adopting
             .checked_sub(1)

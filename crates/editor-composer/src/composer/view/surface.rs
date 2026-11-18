@@ -228,7 +228,7 @@ impl ComposerOwner {
         }
     }
 
-    pub(super) fn model(
+    fn model(
         &self,
         theme: ArtisanTheme,
         controller: &super::super::controller::Composer,

@@ -11,7 +11,7 @@ use editor_ui::{
 };
 use std::rc::Rc;
 
-pub(super) fn picker_tooltip_surface(
+fn picker_tooltip_surface(
     theme: &ArtisanTheme,
     tooltip: &super::super::picker::TooltipContent,
     width: f32,
@@ -87,7 +87,6 @@ impl ComposerOwner {
             }
         };
         Some(PickerTooltipSurface {
-            anchor: tooltip.anchor.clone(),
             placement,
             surface: Rc::new(move |width, fixed| {
                 picker_tooltip_surface(&theme, &tooltip, width, fixed)
@@ -97,35 +96,24 @@ impl ComposerOwner {
 
     pub fn tooltip_presentation(
         &self,
-        theme: ArtisanTheme,
         anchor: aqua_core::Rect,
         viewport: aqua_core::Size,
     ) -> Option<PickerTooltipPresentation> {
         use super::super::picker::TooltipPlacement;
         use aqua_ui::overlay::Side;
         let tooltip = self.shown_tooltip()?;
-        let (side, width, fixed, snap_to_window) = match tooltip.placement {
-            TooltipPlacement::Above => {
-                (Side::Above, 240.0_f32.min(viewport.w.max(1.0)), false, true)
-            }
+        let (side, snap_to_window) = match tooltip.placement {
+            TooltipPlacement::Above => (Side::Above, true),
             TooltipPlacement::Beside => {
                 let right = viewport.w.max(1.0) - anchor.right() - 8.0;
                 let left = anchor.x - 8.0;
                 let use_right = right >= 320.0 || right >= left;
-                let available = if use_right { right } else { left };
-                (
-                    if use_right { Side::After } else { Side::Before },
-                    320.0_f32.min(available.max(1.0)),
-                    true,
-                    false,
-                )
+                (if use_right { Side::After } else { Side::Before }, false)
             }
         };
         Some(PickerTooltipPresentation {
-            anchor: tooltip.anchor.clone(),
             side,
             snap_to_window,
-            content: picker_tooltip_surface(&theme, &tooltip, width, fixed),
         })
     }
 

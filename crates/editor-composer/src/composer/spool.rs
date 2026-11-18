@@ -36,7 +36,12 @@ impl DraftSpool {
         }
     }
 
-    pub fn keep(&self, host: &HostId, scope: &str, body: &Value) -> Result<(), WriteConfigError> {
+    pub(crate) fn keep(
+        &self,
+        host: &HostId,
+        scope: &str,
+        body: &Value,
+    ) -> Result<(), WriteConfigError> {
         config_file::write(
             &self.path(host, scope),
             &SpooledDraft {
@@ -54,7 +59,7 @@ impl DraftSpool {
             .map(|spooled| spooled.body))
     }
 
-    pub fn forget(&self, host: &HostId, scope: &str) -> Result<(), ForgetSpooledDraftError> {
+    pub(crate) fn forget(&self, host: &HostId, scope: &str) -> Result<(), ForgetSpooledDraftError> {
         let path = self.path(host, scope);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),

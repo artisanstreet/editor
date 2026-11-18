@@ -238,7 +238,6 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     }
     {
         use editor_aqua::composer::picker::{Menu, TooltipContent, TooltipPlacement};
-        use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
         owner.controller.borrow_mut().picker.menu = Some(Menu::Model);
         let generation = owner.controller.borrow().generation();
         let content = TooltipContent {
@@ -267,7 +266,6 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         assert!(owner.advance_tooltip(deadline));
         let tooltip = owner
             .tooltip_presentation(
-                *ArtisanTheme::for_mode(ThemeMode::Dark),
                 aqua_core::Rect {
                     x: 10.0,
                     y: 30.0,

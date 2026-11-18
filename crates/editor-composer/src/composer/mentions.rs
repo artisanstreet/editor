@@ -3,13 +3,13 @@ use std::ops::Range;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Trigger {
-    pub sigil: char,
-    pub range: Range<usize>,
-    pub query: String,
-    pub at_start: bool,
+    sigil: char,
+    range: Range<usize>,
+    query: String,
+    at_start: bool,
 }
 
-pub fn trigger(text: &str, caret: usize) -> Option<Trigger> {
+fn trigger(text: &str, caret: usize) -> Option<Trigger> {
     if caret > text.len() || !text.is_char_boundary(caret) {
         return None;
     }
@@ -46,7 +46,7 @@ pub enum Kind {
     Thread,
 }
 impl Kind {
-    pub const fn sigil(self) -> char {
+    const fn sigil(self) -> char {
         match self {
             Self::Skill => '$',
             Self::Connector | Self::Thread => '@',
@@ -57,10 +57,10 @@ impl Kind {
 
 #[derive(Clone, Debug)]
 pub struct Row {
-    pub kind: Kind,
-    pub name: String,
-    pub title: String,
-    pub description: String,
+    pub(crate) kind: Kind,
+    name: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
     search_name: String,
     search_title: String,
 }
@@ -95,8 +95,8 @@ enum Steering {
 #[derive(Default)]
 pub struct Mentions {
     pub catalog: Vec<Row>,
-    pub threads: Vec<String>,
-    pub current: Option<Trigger>,
+    threads: Vec<String>,
+    pub(crate) current: Option<Trigger>,
     pub rows: Vec<usize>,
     pub highlighted: usize,
     reveal: Option<Reveal>,
@@ -125,7 +125,7 @@ fn offered_threads<'a, T>(
 }
 
 impl Mentions {
-    pub fn refresh(
+    pub(crate) fn refresh(
         &mut self,
         host: &editor_core::HostData,
         engine: Option<artisan_api::EngineId>,
@@ -253,7 +253,7 @@ impl Mentions {
         self.highlighted = self.first_of_trigger();
         self.reveal_at(Reveal::Section);
     }
-    pub fn clear_trigger(&mut self) {
+    pub(crate) fn clear_trigger(&mut self) {
         if self.current.is_some() {
             self.current = None;
             self.dismissed = None;
@@ -262,13 +262,13 @@ impl Mentions {
         }
     }
 
-    pub fn dismiss(&mut self) {
+    pub(crate) fn dismiss(&mut self) {
         if let Some(trigger) = &self.current {
             self.dismissed = Some((trigger.range.start, trigger.query.clone()));
         }
         self.rebuild();
     }
-    pub fn up(&mut self) {
+    pub(crate) fn up(&mut self) {
         if !self.rows.is_empty() {
             self.highlighted = (self.highlighted + self.rows.len() - 1) % self.rows.len();
             self.steer_by_keys();
@@ -284,7 +284,7 @@ impl Mentions {
         self.steering = Steering::Keys;
         self.reveal_at(Reveal::Highlighted);
     }
-    pub fn hover(&mut self, index: usize, inside: bool) {
+    pub(crate) fn hover(&mut self, index: usize, inside: bool) {
         match inside {
             true if index < self.rows.len() => {
                 self.hovered = Some(index);
@@ -300,7 +300,7 @@ impl Mentions {
             }
         }
     }
-    pub fn pointer_at(&mut self, pointer: Option<aqua_core::Point>) -> bool {
+    pub(crate) fn pointer_at(&mut self, pointer: Option<aqua_core::Point>) -> bool {
         if pointer == self.pointer {
             return false;
         }
@@ -317,7 +317,7 @@ impl Mentions {
             Some(_) | None => false,
         }
     }
-    pub fn kinds(&self) -> Vec<Kind> {
+    fn kinds(&self) -> Vec<Kind> {
         self.rows
             .iter()
             .filter_map(|index| self.catalog.get(*index).map(|row| row.kind))
@@ -327,12 +327,12 @@ impl Mentions {
         self.reveal = Some(reveal);
     }
 
-    pub const fn mark_revealed(&mut self) {
+    pub(crate) const fn mark_revealed(&mut self) {
         self.reveal = None;
     }
 
     #[must_use]
-    pub fn scroll(&self, kept: f32, metrics: Metrics) -> f32 {
+    pub(crate) fn scroll(&self, kept: f32, metrics: Metrics) -> f32 {
         self.reveal.map_or(kept, |reveal| {
             scroll_offset(&self.kinds(), self.highlighted, reveal, kept, metrics)
         })
@@ -350,7 +350,7 @@ impl Mentions {
             })
             .unwrap_or(0)
     }
-    pub fn replacement(&self, text: &str, index: usize) -> Option<(Range<usize>, String)> {
+    pub(crate) fn replacement(&self, text: &str, index: usize) -> Option<(Range<usize>, String)> {
         let trigger = self.current.as_ref()?;
         let row = self.catalog.get(*self.rows.get(index)?)?;
         let tail = text.get(trigger.range.end..)?;
@@ -506,10 +506,10 @@ impl Mentions {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
-    pub divider: f32,
-    pub heading: f32,
-    pub row: f32,
-    pub viewport: f32,
+    pub(crate) divider: f32,
+    pub(crate) heading: f32,
+    pub(crate) row: f32,
+    pub(crate) viewport: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

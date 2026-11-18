@@ -1,5 +1,5 @@
 use artisan_api::BlobHash;
-pub enum Input {
+enum Input {
     Encoded,
     Uploaded(BlobHash),
     Failed(String),
@@ -12,19 +12,19 @@ pub enum State {
     Failed(String),
 }
 impl State {
-    pub const fn hash(&self) -> Option<&BlobHash> {
+    pub(crate) const fn hash(&self) -> Option<&BlobHash> {
         match self {
             Self::Ready(hash) => Some(hash),
             Self::Encoding | Self::Uploading | Self::Failed(_) => None,
         }
     }
-    pub fn failure(&self) -> Option<&str> {
+    pub(crate) fn failure(&self) -> Option<&str> {
         match self {
             Self::Failed(reason) => Some(reason),
             Self::Encoding | Self::Uploading | Self::Ready(_) => None,
         }
     }
-    pub fn accept(&mut self, input: &Input) -> bool {
+    fn accept(&mut self, input: &Input) -> bool {
         match (&self, input) {
             (Self::Encoding, Input::Encoded) => {
                 *self = Self::Uploading;
@@ -136,13 +136,13 @@ impl Source {
 
 pub struct Attachment {
     pub key: u64,
-    pub name: String,
-    pub state: State,
+    pub(crate) name: String,
+    pub(crate) state: State,
     pub preview: Option<ImageHandle>,
     pending_preview: Option<ImageHandle>,
-    pub preview_error: Option<String>,
-    pub revealed: Option<Instant>,
-    pub shown: bool,
+    pub(crate) preview_error: Option<String>,
+    pub(crate) revealed: Option<Instant>,
+    pub(crate) shown: bool,
     source: Option<(u64, usize)>,
     origin: Option<Arc<Source>>,
     encoded: Option<Vec<u8>>,
@@ -155,7 +155,7 @@ pub struct PendingUpload {
 }
 
 impl PendingUpload {
-    pub async fn upload(self) -> Result<BlobHash, String> {
+    pub(crate) async fn upload(self) -> Result<BlobHash, String> {
         let origin = self.origin;
         let webp = tokio::task::spawn_blocking(move || {
             let bytes = origin.read()?;
@@ -189,8 +189,8 @@ enum Completion {
 
 pub struct Attachments {
     pub items: Vec<Attachment>,
-    pub shake: Option<(u64, Instant)>,
-    pub notice: Option<String>,
+    pub(crate) shake: Option<(u64, Instant)>,
+    pub(crate) notice: Option<String>,
     next: u64,
     client: ForgeClient,
     delivery: Delivery<Completion>,
@@ -210,7 +210,7 @@ impl Attachments {
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
     }
-    pub fn ready_hashes(&self) -> Option<Vec<BlobHash>> {
+    pub(crate) fn ready_hashes(&self) -> Option<Vec<BlobHash>> {
         self.items
             .iter()
             .map(|item| item.state.hash().cloned())
@@ -260,7 +260,7 @@ impl Attachments {
         }
         true
     }
-    pub fn restore(&mut self, hash: BlobHash) {
+    pub(crate) fn restore(&mut self, hash: BlobHash) {
         if self.items.len() >= 8 {
             self.notice = Some("This draft exceeds the 8 image limit.".into());
             return;
@@ -294,7 +294,7 @@ impl Attachments {
             let _ = sender.send(Completion::Restored(key, result)).await;
         });
     }
-    pub fn retry_preview(&mut self, key: u64) {
+    pub(crate) fn retry_preview(&mut self, key: u64) {
         let Some(item) = self.items.iter_mut().find(|item| item.key == key) else {
             return;
         };
@@ -304,13 +304,13 @@ impl Attachments {
         item.preview_error = None;
         self.load_preview(key, hash);
     }
-    pub fn remove(&mut self, key: u64) {
+    pub(crate) fn remove(&mut self, key: u64) {
         self.items.retain(|item| item.key != key);
     }
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.items.clear();
     }
-    pub fn contains(&self, hash: &BlobHash) -> bool {
+    pub(crate) fn contains(&self, hash: &BlobHash) -> bool {
         self.items
             .iter()
             .any(|item| item.state.hash() == Some(hash))
@@ -326,7 +326,7 @@ impl Attachments {
             })
             .collect()
     }
-    pub fn drain(&mut self, assets: &ImageAssets) -> bool {
+    pub(crate) fn drain(&mut self, assets: &ImageAssets) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {
             let key = match &completion {

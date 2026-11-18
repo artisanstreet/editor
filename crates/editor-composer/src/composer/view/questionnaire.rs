@@ -131,7 +131,7 @@ pub(super) const QUESTIONNAIRE_MAX_HEIGHT: f32 = 280.0;
     clippy::too_many_arguments,
     reason = "a loaded question card needs the panel, its question and the parts mounted around it"
 )]
-pub(super) fn question_card(
+fn question_card(
     theme: ArtisanTheme,
     panel: &super::super::questionnaire::QuestionnairePanel,
     active: &super::super::questionnaire::ComposerQuestionnaire,
@@ -338,7 +338,7 @@ pub(super) fn question_card(
     card.build()
 }
 
-pub(super) fn other_questionnaires(
+fn other_questionnaires(
     theme: ArtisanTheme,
     panel: &super::super::questionnaire::QuestionnairePanel,
     active: &super::super::questionnaire::ComposerQuestionnaire,
@@ -396,7 +396,7 @@ pub(super) fn other_questionnaires(
     stack.build()
 }
 
-pub(super) fn choice(row: Element, selected: bool, sending: bool) -> Element {
+fn choice(row: Element, selected: bool, sending: bool) -> Element {
     let row = row
         .style(Style::new().height(Length::Auto))
         .style(Radius::Field.style())

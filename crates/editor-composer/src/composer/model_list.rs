@@ -11,13 +11,13 @@ const fn height(row: Row) -> f32 {
     }
 }
 
-pub const ENGINE_ROW_HEIGHT: f32 = height(Row::Heading);
-pub const GATE_ROW_HEIGHT: f32 = 84.0;
-pub const GROUP_ROW_HEIGHT: f32 = height(Row::Heading);
-pub const MODEL_ROW_HEIGHT: f32 = height(Row::MenuItem);
-pub const ROW_GAP: Space = Space::S2;
-pub const SECTION_SPACER: f32 = Space::S6.px();
-pub const PADDING: Space = Space::S6;
+const ENGINE_ROW_HEIGHT: f32 = height(Row::Heading);
+pub(crate) const GATE_ROW_HEIGHT: f32 = 84.0;
+pub(crate) const GROUP_ROW_HEIGHT: f32 = height(Row::Heading);
+const MODEL_ROW_HEIGHT: f32 = height(Row::MenuItem);
+pub(crate) const ROW_GAP: Space = Space::S2;
+pub(crate) const SECTION_SPACER: f32 = Space::S6.px();
+pub(crate) const PADDING: Space = Space::S6;
 const GAP: f32 = ROW_GAP.px();
 const PADDING_TOP: f32 = PADDING.px();
 const PADDING_BOTTOM: f32 = PADDING.px();
@@ -156,7 +156,7 @@ impl ModelScroll {
     }
 
     #[must_use]
-    pub const fn target(&self) -> Option<EngineId> {
+    pub(crate) const fn target(&self) -> Option<EngineId> {
         match self.aim {
             Aim::Free => None,
             Aim::Jumping(Jump { engine, .. }) | Aim::Landed(engine) => Some(engine),
@@ -170,7 +170,9 @@ impl ModelScroll {
         } else {
             kept
         };
-        let moved_by_reader = self.written.is_some_and(|written| (written - kept).abs() > 1.5);
+        let moved_by_reader = self
+            .written
+            .is_some_and(|written| (written - kept).abs() > 1.5);
         if moved_by_reader {
             self.aim = Aim::Free;
         }

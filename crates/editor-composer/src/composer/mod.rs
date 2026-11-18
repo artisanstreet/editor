@@ -9,7 +9,7 @@ pub mod model_line;
 pub mod model_list;
 pub mod persistence;
 pub mod picker;
-pub mod placeholder;
+mod placeholder;
 pub mod questionnaire;
 pub mod sliding_tab;
 pub mod spool;

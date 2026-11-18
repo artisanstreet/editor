@@ -14,7 +14,7 @@ use editor_ui::{
 };
 use std::rc::Rc;
 
-pub(super) fn mention_icon(kind: super::super::mentions::Kind) -> AssetId {
+fn mention_icon(kind: super::super::mentions::Kind) -> AssetId {
     use super::super::mentions::Kind;
     match kind {
         Kind::Command => AssetId::TABLER_TERMINAL_2,
@@ -24,7 +24,7 @@ pub(super) fn mention_icon(kind: super::super::mentions::Kind) -> AssetId {
     }
 }
 
-pub(super) fn mention_heading(kind: super::super::mentions::Kind) -> &'static str {
+fn mention_heading(kind: super::super::mentions::Kind) -> &'static str {
     use super::super::mentions::Kind;
     match kind {
         Kind::Command => "Commands",
@@ -34,7 +34,7 @@ pub(super) fn mention_heading(kind: super::super::mentions::Kind) -> &'static st
     }
 }
 
-pub(super) fn mention_metrics(viewport: aqua_core::Size) -> super::super::mentions::Metrics {
+fn mention_metrics(viewport: aqua_core::Size) -> super::super::mentions::Metrics {
     let row = Row::MenuItem.height().unwrap_or_default();
     let heading = Row::Heading.height().unwrap_or_default();
     let fits = viewport.h - 2.0 * MENU_VIEWPORT_MARGIN - 2.0 * MENTION_SURFACE.padding_px();
@@ -46,13 +46,13 @@ pub(super) fn mention_metrics(viewport: aqua_core::Size) -> super::super::mentio
     }
 }
 
-pub(super) const MENTION_SURFACE: Surface = Surface::Picker(Picker::List);
+const MENTION_SURFACE: Surface = Surface::Picker(Picker::List);
 
 #[expect(
     clippy::disallowed_methods,
     reason = "the scroll clips its content, so the list carries the menu's side inset and the section rules can reach the card edges"
 )]
-pub(super) fn inset_sides(style: Style, side: f32, ends: f32) -> Style {
+fn inset_sides(style: Style, side: f32, ends: f32) -> Style {
     style.padding_insets(aqua_core::Insets {
         left: side,
         right: side,
@@ -61,7 +61,7 @@ pub(super) fn inset_sides(style: Style, side: f32, ends: f32) -> Style {
     })
 }
 
-pub(super) fn mention_menu(
+fn mention_menu(
     theme: ArtisanTheme,
     mentions: &super::super::mentions::Mentions,
     viewport: aqua_core::Size,

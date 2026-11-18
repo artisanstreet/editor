@@ -20,10 +20,10 @@ pub struct SlidingTab {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
-    pub width: f32,
-    pub height: f32,
-    pub split: f32,
-    pub radius: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) split: f32,
+    pub(crate) radius: f32,
 }
 
 impl SlidingTab {
@@ -47,11 +47,11 @@ impl SlidingTab {
         }
     }
 
-    pub fn resize(&mut self, height: f32) {
+    pub(crate) fn resize(&mut self, height: f32) {
         self.height = height;
     }
 
-    pub fn snap(&mut self) {
+    pub(crate) fn snap(&mut self) {
         self.top = self.target;
         self.slide = None;
     }
@@ -80,7 +80,7 @@ impl SlidingTab {
     }
 
     #[must_use]
-    pub fn cutout(&self, bounds: Bounds, header: f32, inset: f32) -> Vec<PathCommand> {
+    pub(crate) fn cutout(&self, bounds: Bounds, header: f32, inset: f32) -> Vec<PathCommand> {
         let mut path = self.outline(bounds);
         if header <= 0.0 {
             return path;
@@ -109,7 +109,7 @@ impl SlidingTab {
     }
 
     #[must_use]
-    pub fn outline(&self, bounds: Bounds) -> Vec<PathCommand> {
+    pub(crate) fn outline(&self, bounds: Bounds) -> Vec<PathCommand> {
         let Bounds {
             width,
             height,

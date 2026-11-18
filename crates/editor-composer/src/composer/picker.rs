@@ -29,7 +29,7 @@ impl PickerTooltip {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if self.pending.take().is_some() {
             self.visible = false;
             self.revision = self.revision.wrapping_add(1);
@@ -74,7 +74,7 @@ impl PickerTooltip {
             .map(|(content, _)| content)
     }
 
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 }
@@ -106,7 +106,7 @@ pub enum ModelRow {
 
 impl ModelRow {
     #[must_use]
-    pub const fn engine(&self) -> EngineId {
+    pub(crate) const fn engine(&self) -> EngineId {
         match self {
             Self::Engine(engine) | Self::Gate(engine) => *engine,
             Self::Group { engine, .. } | Self::Model { engine, .. } => *engine,
@@ -136,7 +136,7 @@ pub enum GateAction {
 
 impl Gate {
     #[must_use]
-    pub const fn reason(self) -> &'static str {
+    pub(crate) const fn reason(self) -> &'static str {
         match self {
             Self::NotInstalled => "not installed",
             Self::Installing => "installing",
@@ -151,7 +151,7 @@ impl Gate {
     }
 
     #[must_use]
-    pub const fn action(self) -> Option<GateAction> {
+    pub(crate) const fn action(self) -> Option<GateAction> {
         match self {
             Self::NotInstalled | Self::InstallFailed => Some(GateAction::Install),
             Self::SignIn => Some(GateAction::SignIn),
@@ -162,7 +162,7 @@ impl Gate {
 }
 
 #[must_use]
-pub fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
+pub(crate) fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
     use artisan_api::{DiscoveryState, InstallState, SignInState};
     match &status.install {
         InstallState::Installed { .. } => {}
@@ -195,7 +195,7 @@ pub fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
 }
 
 #[must_use]
-pub fn offered_engines(host: &editor_core::HostData) -> Vec<&artisan_api::EngineStatus> {
+pub(crate) fn offered_engines(host: &editor_core::HostData) -> Vec<&artisan_api::EngineStatus> {
     host.engines.values().collect()
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,21 +236,25 @@ impl AxisCursor {
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct PickerState {
-    pub show_all_models: bool,
+    show_all_models: bool,
     pub hide_bad_model_options: bool,
-    pub customizations: Vec<artisan_api::ModelCustomization>,
+    pub(crate) customizations: Vec<artisan_api::ModelCustomization>,
     pub menu: Option<Menu>,
-    pub open_serial: u64,
-    pub axis: Option<Axis>,
+    pub(crate) open_serial: u64,
+    pub(crate) axis: Option<Axis>,
     pub axis_cursor: Option<AxisCursor>,
-    pub models: Vec<ModelRow>,
-    pub projects: Vec<artisan_api::ProjectId>,
-    pub project_edges: editor_ui::scroll_edge::ScrollEdges,
-    pub model_edges: editor_ui::scroll_edge::ScrollEdges,
+    pub(crate) models: Vec<ModelRow>,
+    pub(crate) projects: Vec<artisan_api::ProjectId>,
+    pub(crate) project_edges: editor_ui::scroll_edge::ScrollEdges,
+    pub(crate) model_edges: editor_ui::scroll_edge::ScrollEdges,
     groups: std::collections::HashMap<(EngineId, String), bool>,
 }
 impl PickerState {
-    pub fn refresh_settings(&mut self, core: &editor_core::Core, host: &editor_core::HostData) {
+    pub(crate) fn refresh_settings(
+        &mut self,
+        core: &editor_core::Core,
+        host: &editor_core::HostData,
+    ) {
         self.show_all_models = core
             .settings
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
@@ -264,7 +268,7 @@ impl PickerState {
         self.customizations = host.settings.model_customizations().to_vec();
     }
 
-    pub fn for_target(core: &editor_core::Core, host: &editor_core::HostId) -> Self {
+    pub(crate) fn for_target(core: &editor_core::Core, host: &editor_core::HostId) -> Self {
         let mut picker = Self::default();
         if let Some(host) = core.host(host) {
             picker.refresh_settings(core, host);
@@ -346,7 +350,7 @@ impl PickerState {
         AxisKeyResult::Moved
     }
 
-    pub fn refresh(&mut self, host: &editor_core::HostData, current: Option<&EngineConfig>) {
+    pub(crate) fn refresh(&mut self, host: &editor_core::HostData, current: Option<&EngineConfig>) {
         if self.menu.is_none() {
             return;
         }
@@ -388,10 +392,10 @@ impl PickerState {
             .map(|project| project.id.clone())
             .collect();
     }
-    pub fn toggle_group(&mut self, engine: EngineId, name: String, open: bool) {
+    pub(crate) fn toggle_group(&mut self, engine: EngineId, name: String, open: bool) {
         self.groups.insert((engine, name), !open);
     }
-    pub fn model_config(
+    pub(crate) fn model_config(
         host: &editor_core::HostData,
         current: Option<EngineConfig>,
         engine: EngineId,
@@ -428,7 +432,7 @@ impl PickerState {
         config = model.resolve_config(&config, customizations).effective;
         Some(config)
     }
-    pub fn pane_config(
+    pub(crate) fn pane_config(
         &self,
         host: &editor_core::HostData,
         current: Option<EngineConfig>,

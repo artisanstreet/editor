@@ -76,7 +76,7 @@ pub struct EngineLightImage {
     cached: Option<(ThemeMode, ImageHandle)>,
 }
 impl EngineLightImage {
-    pub fn element(
+    pub(crate) fn element(
         &mut self,
         theme: &ArtisanTheme,
         assets: &ImageAssets,

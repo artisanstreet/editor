@@ -6,7 +6,7 @@ use image::{
 
 const QUALITY: f32 = 85.0;
 const LONG_EDGE: u32 = 2576;
-pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_000_000;
 const MAX_FRAMES: usize = 120;
 const MAX_ANIMATION_BYTES: usize = 64 * 1024 * 1024;

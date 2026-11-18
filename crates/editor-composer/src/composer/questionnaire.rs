@@ -27,13 +27,13 @@ pub struct QuestionnairePanel {
     pub ticked: Vec<String>,
     aside: Option<String>,
     pub sending: Option<ItemId>,
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     drafts: HashMap<ItemId, AnswerDraft>,
     payloads: HashMap<ItemId, Vec<Option<QuestionAnswer>>>,
 }
 
 impl QuestionnairePanel {
-    pub fn visible(&self) -> impl Iterator<Item = &ComposerQuestionnaire> {
+    pub(crate) fn visible(&self) -> impl Iterator<Item = &ComposerQuestionnaire> {
         self.questionnaires
             .iter()
             .filter(|entry| !self.answered.contains(&entry.item))
@@ -46,13 +46,13 @@ impl QuestionnairePanel {
             .or_else(|| self.visible().next())
     }
 
-    pub fn writing_answer(&self) -> bool {
+    pub(crate) fn writing_answer(&self) -> bool {
         self.aside.is_some()
     }
-    pub fn aside_text(&self) -> Option<&str> {
+    pub(crate) fn aside_text(&self) -> Option<&str> {
         self.aside.as_deref()
     }
-    pub fn restore_aside_text(&mut self, text: &str) -> bool {
+    pub(crate) fn restore_aside_text(&mut self, text: &str) -> bool {
         match &mut self.aside {
             Some(aside) => {
                 text.clone_into(aside);
@@ -169,7 +169,7 @@ impl QuestionnairePanel {
         self.load(text);
     }
 
-    pub fn toggle(&mut self, id: String) {
+    pub(crate) fn toggle(&mut self, id: String) {
         if let Some(index) = self.ticked.iter().position(|known| known == &id) {
             self.ticked.remove(index);
         } else {
@@ -218,11 +218,11 @@ impl QuestionnairePanel {
         Some((item, Answer::Question { answers }))
     }
 
-    pub fn can_go_back(&self) -> bool {
+    pub(crate) fn can_go_back(&self) -> bool {
         self.step > 0 && self.sending.is_none()
     }
 
-    pub fn back(&mut self, text: &mut String) -> bool {
+    pub(crate) fn back(&mut self, text: &mut String) -> bool {
         if !self.can_go_back() {
             return false;
         }
@@ -240,7 +240,7 @@ impl QuestionnairePanel {
         true
     }
 
-    pub fn dismiss(&mut self, text: &mut String) -> Option<(ItemId, Answer)> {
+    pub(crate) fn dismiss(&mut self, text: &mut String) -> Option<(ItemId, Answer)> {
         if self.sending.is_some() {
             return None;
         }
@@ -251,20 +251,24 @@ impl QuestionnairePanel {
         self.prepare(item, vec![None; count])
     }
 
-    pub fn retry(&mut self) -> Option<(ItemId, Answer)> {
+    pub(crate) fn retry(&mut self) -> Option<(ItemId, Answer)> {
         let item = self.active()?.item.clone();
         let answers = self.payloads.get(&item)?.clone();
         self.prepare(item, answers)
     }
 
-    pub async fn send(client: &ForgeClient, item: &ItemId, answer: &Answer) -> Result<(), String> {
+    pub(crate) async fn send(
+        client: &ForgeClient,
+        item: &ItemId,
+        answer: &Answer,
+    ) -> Result<(), String> {
         client
             .answer(item, answer)
             .await
             .map_err(|error| format!("Couldn't send your answer: {error:#}"))
     }
 
-    pub fn settled(&mut self, item: &ItemId, error: Option<String>, text: &mut String) {
+    pub(crate) fn settled(&mut self, item: &ItemId, error: Option<String>, text: &mut String) {
         if self.sending.as_ref() != Some(item) {
             return;
         }

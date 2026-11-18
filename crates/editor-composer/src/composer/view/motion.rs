@@ -53,7 +53,7 @@ impl ComposerOwner {
         }
     }
 
-    pub(super) fn advance_picker_edges(
+    fn advance_picker_edges(
         &self,
         app: &mut aqua::UiApp,
         theme: &ArtisanTheme,

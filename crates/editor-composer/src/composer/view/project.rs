@@ -121,7 +121,7 @@ pub fn project_menu(
         .with_key("composer-project-menu")
 }
 
-pub fn project_tab(
+pub(crate) fn project_tab(
     theme: ArtisanTheme,
     controller: &super::super::controller::Composer,
     host: &editor_core::HostData,

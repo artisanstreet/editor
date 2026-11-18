@@ -39,7 +39,7 @@ impl ComposerOwner {
         (effects, changed)
     }
 
-    pub fn dispatch(
+    fn dispatch(
         &mut self,
         core: &mut editor_core::Core,
         action: ComposerAction,

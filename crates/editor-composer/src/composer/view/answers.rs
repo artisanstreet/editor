@@ -34,7 +34,7 @@ impl ComposerOwner {
         });
     }
 
-    pub fn drain_answers(&mut self, core: &editor_core::Core) -> Vec<ComposerEffect> {
+    fn drain_answers(&mut self, core: &editor_core::Core) -> Vec<ComposerEffect> {
         let mut effects = Vec::new();
         for completion in self.answers.drain() {
             let mut composer = self.controller.borrow_mut();

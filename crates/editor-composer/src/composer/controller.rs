@@ -71,17 +71,17 @@ enum Outbox {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DraftBody {
     #[serde(default)]
-    pub text: String,
+    pub(crate) text: String,
     #[serde(default)]
-    pub images: Vec<BlobHash>,
+    pub(crate) images: Vec<BlobHash>,
     #[serde(default)]
-    pub files: Vec<DraftFile>,
+    pub(crate) files: Vec<DraftFile>,
     #[serde(default)]
-    pub config: Option<EngineConfig>,
+    pub(crate) config: Option<EngineConfig>,
     #[serde(default)]
-    pub project: Option<ProjectId>,
+    pub(crate) project: Option<ProjectId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub follow_ups: Vec<Self>,
+    pub(crate) follow_ups: Vec<Self>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DraftFile {
@@ -99,7 +99,7 @@ pub struct DraftPath(String);
 #[derive(Debug, thiserror::Error)]
 #[error("{} is not a Unicode path, so it cannot be linked in a message", .path.display())]
 pub struct NonUnicodePath {
-    pub path: PathBuf,
+    path: PathBuf,
 }
 
 impl DraftPath {
@@ -123,27 +123,27 @@ pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,
     pub questionnaire: QuestionnairePanel,
-    pub strip: super::goal_strip::StripState,
+    pub(crate) strip: super::goal_strip::StripState,
     pub mentions: Mentions,
     pub picker: PickerState,
     pub config: Option<EngineConfig>,
-    pub project: Option<ProjectId>,
+    pub(crate) project: Option<ProjectId>,
     pub attachments: Option<Attachments>,
     pub files: Vec<DraftFile>,
     next_file_key: u64,
     placeholder_generation: u64,
     placeholder_was_visible: bool,
     pub file_shake: Option<(u64, std::time::Instant)>,
-    pub cleared: Option<std::time::Instant>,
+    pub(crate) cleared: Option<std::time::Instant>,
     outbox: Outbox,
     parked: Vec<DraftBody>,
     pub notice: Option<String>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
     target_generation: u64,
-    pub cancelling: bool,
+    pub(crate) cancelling: bool,
     failed_stops: Vec<ThreadId>,
-    pub continuing: bool,
+    pub(crate) continuing: bool,
     turn_completions: Delivery<TurnCompletion>,
     edit_revision: u64,
     restore_revision: Option<u64>,
@@ -276,7 +276,7 @@ impl Composer {
         self.host_instance
     }
 
-    pub fn matches_host(&self, host: &HostData) -> bool {
+    pub(crate) fn matches_host(&self, host: &HostData) -> bool {
         self.host_instance == Some(host.instance())
     }
 
@@ -284,7 +284,7 @@ impl Composer {
         self.target_generation
     }
 
-    pub fn mount_editor(
+    pub(crate) fn mount_editor(
         &self,
         event: impl Fn(editor_ui::text::mount::EditorEvent) + 'static,
     ) -> editor_ui::text::mount::EditorController {
@@ -295,22 +295,22 @@ impl Composer {
         self.turn_completions.wake_mailbox()
     }
 
-    pub fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
+    pub(crate) fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
         self.turn_action(host, TurnAction::Stop)
     }
 
-    pub fn take_failed_stops(&mut self) -> Vec<ThreadId> {
+    pub(crate) fn take_failed_stops(&mut self) -> Vec<ThreadId> {
         std::mem::take(&mut self.failed_stops)
     }
 
-    pub fn clear_goal(&mut self, host: &HostData) {
+    pub(crate) fn clear_goal(&mut self, host: &HostData) {
         self.turn_action(host, TurnAction::ClearGoal);
     }
-    pub fn unpark(&mut self, host: &HostData) {
+    pub(crate) fn unpark(&mut self, host: &HostData) {
         self.turn_action(host, TurnAction::Unpark);
     }
 
-    pub fn continue_turn(&mut self, host: &HostData) {
+    pub(crate) fn continue_turn(&mut self, host: &HostData) {
         self.turn_action(host, TurnAction::Continue);
     }
 
@@ -356,7 +356,7 @@ impl Composer {
         matches!(action, TurnAction::Stop).then_some(issued)
     }
 
-    pub fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
+    pub(crate) fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
             return;
         };
@@ -397,7 +397,7 @@ impl Composer {
         });
     }
 
-    pub fn drain_turn_actions(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_turn_actions(&mut self, core: &Core) -> bool {
         let before = (self.cancelling, self.continuing, self.notice.clone());
         for completion in self.turn_completions.drain() {
             if matches!(completion.action, TurnAction::Stop) && completion.error.is_some() {
@@ -442,13 +442,13 @@ impl Composer {
         before != (self.cancelling, self.continuing, self.notice.clone())
     }
 
-    pub fn draft_editable(&self) -> bool {
+    pub(crate) fn draft_editable(&self) -> bool {
         self.session
             .as_ref()
             .is_some_and(|session| session.read(|state| !state.sending()))
     }
 
-    pub fn metadata_ready(&self, host: &HostData) -> bool {
+    pub(crate) fn metadata_ready(&self, host: &HostData) -> bool {
         match &self.target {
             ComposerTarget::Thread { thread, .. } => host.threads.contains_key(thread),
             ComposerTarget::NewThread { .. } => true,
@@ -475,7 +475,7 @@ impl Composer {
         self.refresh_picker(host);
     }
 
-    pub fn refresh_picker(&mut self, host: &HostData) {
+    pub(crate) fn refresh_picker(&mut self, host: &HostData) {
         if self.host_instance != Some(host.instance()) {
             return;
         }
@@ -483,7 +483,7 @@ impl Composer {
         self.picker.refresh(host, config.as_ref());
     }
 
-    pub fn choose_model(
+    pub(crate) fn choose_model(
         &mut self,
         host: &HostData,
         engine: artisan_api::EngineId,
@@ -498,7 +498,7 @@ impl Composer {
         Some(config)
     }
 
-    pub fn choose_project(&mut self, id: ProjectId) {
+    pub(crate) fn choose_project(&mut self, id: ProjectId) {
         if self
             .session
             .as_ref()
@@ -511,7 +511,7 @@ impl Composer {
         self.edited();
     }
 
-    pub fn refresh_mentions(&mut self, host: &HostData) {
+    pub(crate) fn refresh_mentions(&mut self, host: &HostData) {
         if self.host_instance != Some(host.instance()) {
             return;
         }
@@ -524,7 +524,7 @@ impl Composer {
         self.sync_mentions();
     }
 
-    pub fn sync_mentions(&mut self) {
+    pub(crate) fn sync_mentions(&mut self) {
         let caret = {
             let editor = self.editor.borrow();
             (!editor.is_disabled()).then(|| editor.caret()).flatten()
@@ -539,7 +539,7 @@ impl Composer {
             .set_list_open(!self.mentions.rows.is_empty());
     }
 
-    pub fn mention_key(&mut self, key: ListKey) {
+    pub(crate) fn mention_key(&mut self, key: ListKey) {
         if self.mentions.rows.is_empty() {
             return;
         }
@@ -623,7 +623,7 @@ impl Composer {
         }
     }
 
-    pub fn remove_image(&mut self, key: u64) {
+    pub(crate) fn remove_image(&mut self, key: u64) {
         if self
             .session
             .as_ref()
@@ -648,7 +648,7 @@ impl Composer {
         self.edited();
     }
 
-    pub fn add_image(&mut self, source: Source, name: String) {
+    pub(crate) fn add_image(&mut self, source: Source, name: String) {
         if self
             .session
             .as_ref()
@@ -665,7 +665,11 @@ impl Composer {
         }
     }
 
-    pub fn drain_attachments(&mut self, core: &Core, assets: &aqua::images::ImageAssets) -> bool {
+    pub(crate) fn drain_attachments(
+        &mut self,
+        core: &Core,
+        assets: &aqua::images::ImageAssets,
+    ) -> bool {
         if core.host(self.target.host()).map(HostData::instance) != self.host_instance {
             return false;
         }
@@ -882,7 +886,7 @@ impl Composer {
         }
     }
 
-    pub fn effective_config(&self, host: &HostData) -> Option<EngineConfig> {
+    pub(crate) fn effective_config(&self, host: &HostData) -> Option<EngineConfig> {
         self.config.clone().or_else(|| match &self.target {
             ComposerTarget::Thread { thread, .. } => {
                 host.threads.get(thread).map(|thread| thread.config.clone())
@@ -918,7 +922,7 @@ impl Composer {
         answer.unwrap_or_else(|| super::placeholder::phrase(self.placeholder_generation))
     }
 
-    pub fn blocked(&self, host: &HostData) -> Option<&'static str> {
+    fn blocked(&self, host: &HostData) -> Option<&'static str> {
         if matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
         {
             return Some("Loading thread settings…");
@@ -961,7 +965,7 @@ impl Composer {
         None
     }
 
-    pub fn primary(&self, host: &HostData) -> (super::view::Primary, bool) {
+    pub(crate) fn primary(&self, host: &HostData) -> (super::view::Primary, bool) {
         let working = match &self.target {
             ComposerTarget::Thread { thread, .. } => host.is_working(thread),
             _ => false,

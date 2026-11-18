@@ -22,13 +22,14 @@ mod popups;
 mod project;
 mod questionnaire;
 mod surface;
-pub use self::model_menu::model_menu;
+pub(crate) use self::model_menu::model_menu;
 use self::model_menu::{
     MODEL_BAR_GAP, MODEL_BAR_HEIGHT, MODEL_EDGE_BOTTOM, MODEL_EDGE_TOP, MODEL_ITEM_GAP,
     MODEL_ITEM_HEIGHT, MODEL_LIST_HEIGHT, axis_options, choose_axis_config, engine_icon,
     model_item_height, model_menu_items,
 };
-pub use self::project::{project_menu, project_tab};
+pub use self::project::project_menu;
+pub(crate) use self::project::project_tab;
 pub use self::questionnaire::questionnaire;
 
 const MODEL_TRIGGER_WIDTH: f32 = 360.0;
@@ -121,7 +122,7 @@ pub enum ComposerAction {
 
 pub type Dispatch = Rc<dyn Fn(ComposerAction)>;
 
-pub const PROMPT_NAME: &str = "Message";
+pub(crate) const PROMPT_NAME: &str = "Message";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Primary {
@@ -138,7 +139,7 @@ const fn primary_icon(face: Primary) -> AssetId {
     }
 }
 
-pub fn primary(
+pub(crate) fn primary(
     theme: ArtisanTheme,
     face: Primary,
     outgoing: Option<super::swap::SwapFrame>,
@@ -177,13 +178,13 @@ pub fn primary(
         .debug_selector(id)
 }
 
-pub fn frame(theme: ArtisanTheme, nested: bool, content: Element) -> Element {
+fn frame(theme: ArtisanTheme, nested: bool, content: Element) -> Element {
     editor_ui::glass::ComposerFrame::new(theme, content)
         .nested(nested)
         .build()
 }
 
-pub fn model_trigger(
+pub(crate) fn model_trigger(
     theme: ArtisanTheme,
     config: Option<&artisan_api::EngineConfig>,
     model: Option<&artisan_api::Model>,
@@ -273,7 +274,7 @@ fn model_details(
         .collect()
 }
 
-pub fn controls(primary: Element) -> Element {
+fn controls(primary: Element) -> Element {
     UiBox::new()
         .height(KeySize::Md.edge())
         .spaced(Space::S8)
@@ -290,14 +291,14 @@ pub fn controls(primary: Element) -> Element {
 
 pub const MENTION_SCROLL: &str = "composer-mention-scroll";
 
-pub struct CardParts {
-    pub prompt: Element,
-    pub primary: Element,
-    pub questionnaires: Option<Element>,
-    pub attachments: Option<Element>,
-    pub mention_overlay: Option<Element>,
-    pub thread_error: Option<Element>,
-    pub draft_error: Option<Element>,
+pub(crate) struct CardParts {
+    prompt: Element,
+    primary: Element,
+    questionnaires: Option<Element>,
+    attachments: Option<Element>,
+    mention_overlay: Option<Element>,
+    thread_error: Option<Element>,
+    draft_error: Option<Element>,
 }
 
 const TEXT_INSET: f32 = Inset::Menu.px() + Space::S8.px();
@@ -308,7 +309,7 @@ const PROMPT_GUTTER: f32 = TEXT_INSET - editor_ui::tab_card::TAB_CARD_PADDING_PX
     clippy::disallowed_methods,
     reason = "the extras inset only the sides and top, and the prompt gutter only the sides; the kit pads all four sides alike"
 )]
-pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
+pub(crate) fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
     let extras: Vec<Element> = [
         parts.thread_error,
         parts.draft_error,
@@ -381,13 +382,13 @@ pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Ele
     frame(theme, nested, card).with_key("composer")
 }
 
-pub enum ComposerFailure<'a> {
+pub(crate) enum ComposerFailure<'a> {
     Draft { error: &'a str, conflict: bool },
     ModelChoice { error: &'a str },
     Notice { message: &'a str },
 }
 
-pub fn draft_error(
+pub(crate) fn draft_error(
     theme: ArtisanTheme,
     failure: ComposerFailure<'_>,
     dispatch: Dispatch,
@@ -455,7 +456,7 @@ pub fn draft_error(
         .build()
 }
 
-pub fn goal_label(
+pub(crate) fn goal_label(
     theme: ArtisanTheme,
     frame: &super::goal_strip::GoalStripFrame,
     ticker: Element,
@@ -649,14 +650,11 @@ pub struct ComposerDrain {
 }
 
 pub struct PickerTooltipPresentation {
-    pub anchor: String,
     pub side: aqua_ui::overlay::Side,
     pub snap_to_window: bool,
-    pub content: Element,
 }
 
 pub struct PickerTooltipSurface {
-    pub anchor: String,
     pub placement: editor_ui::hover_tooltip::TooltipPlacement,
     pub surface: Rc<dyn Fn(f32, bool) -> Element>,
 }
@@ -1035,7 +1033,7 @@ pub enum PopupKind {
     Mentions,
 }
 impl PopupKind {
-    pub const fn gap(self) -> f32 {
+    const fn gap(self) -> f32 {
         match self {
             Self::Project | Self::Model | Self::Mentions => Space::S8.px(),
         }
@@ -1044,9 +1042,9 @@ impl PopupKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelMenuItem {
-    pub pane: Option<super::picker::Axis>,
-    pub label: &'static str,
-    pub value: String,
+    pane: Option<super::picker::Axis>,
+    label: &'static str,
+    value: String,
 }
 
 impl ModelMenuItem {
@@ -1058,13 +1056,13 @@ impl ModelMenuItem {
     }
 }
 
-pub struct ModelMenuFrame {
-    pub items: Vec<ModelMenuItem>,
-    pub pane: Option<super::picker::Axis>,
-    pub scroll: f32,
-    pub spied: Option<artisan_api::EngineId>,
-    pub tab: super::sliding_tab::SlidingTab,
-    pub engine_light: Option<Element>,
+pub(crate) struct ModelMenuFrame {
+    items: Vec<ModelMenuItem>,
+    pane: Option<super::picker::Axis>,
+    scroll: f32,
+    spied: Option<artisan_api::EngineId>,
+    tab: super::sliding_tab::SlidingTab,
+    engine_light: Option<Element>,
 }
 
 #[cfg(test)]

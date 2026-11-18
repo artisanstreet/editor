@@ -157,8 +157,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
     for session in sessions {
         let mut changed = session.subscribe();
         loop {
-            let (pending, error) =
-                session.read(|state| (state.pending(), state.error().is_some()));
+            let (pending, error) = session.read(|state| (state.pending(), state.error().is_some()));
             if !pending {
                 break;
             }
@@ -299,29 +298,32 @@ impl DraftSessions {
 
 impl DraftHandle {
     fn deadline_outcome(&self) -> ShutdownOutcome {
-        self.read(
-            |state| match (state.pending(), state.error().is_some()) {
-                (false, _) => ShutdownOutcome::Saved,
-                (true, true) => ShutdownOutcome::Incomplete {
-                    failed: 1,
-                    timed_out: 0,
-                    kept_locally: 0,
-                },
-                (true, false) => {
-                    self.0.cancelled.cancel();
-                    ShutdownOutcome::Incomplete {
-                        failed: 0,
-                        timed_out: 1,
-                        kept_locally: 0,
-                    }
-                }
+        self.read(|state| match (state.pending(), state.error().is_some()) {
+            (false, _) => ShutdownOutcome::Saved,
+            (true, true) => ShutdownOutcome::Incomplete {
+                failed: 1,
+                timed_out: 0,
+                kept_locally: 0,
             },
-        )
+            (true, false) => {
+                self.0.cancelled.cancel();
+                ShutdownOutcome::Incomplete {
+                    failed: 0,
+                    timed_out: 1,
+                    kept_locally: 0,
+                }
+            }
+        })
     }
 
     fn keep_locally(&self) -> bool {
-        let (pending, scope, body) =
-            self.read(|state| (state.pending(), state.scope().to_owned(), state.body().clone()));
+        let (pending, scope, body) = self.read(|state| {
+            (
+                state.pending(),
+                state.scope().to_owned(),
+                state.body().clone(),
+            )
+        });
         let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
             return false;
         };
@@ -437,7 +439,7 @@ impl DraftHandle {
         self.0.changed.send_replace(version);
     }
 
-    pub fn flush(&self) {
+    pub(crate) fn flush(&self) {
         self.mutate(|shared| {
             if let Some(timer) = shared.timer.take() {
                 timer.abort();
@@ -456,12 +458,12 @@ impl DraftHandle {
         self.flush();
     }
 
-    pub fn keep_local(&self) {
+    pub(crate) fn keep_local(&self) {
         self.mutate(|shared| shared.state.keep_local());
         self.flush();
     }
 
-    pub fn use_remote(&self) {
+    pub(crate) fn use_remote(&self) {
         self.mutate(|shared| {
             shared.state.use_remote();
             shared.emit(SessionEvent::Reloaded);

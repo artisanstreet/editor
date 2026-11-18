@@ -114,7 +114,7 @@ pub struct GoalStripFrame {
 }
 
 impl GoalStrip {
-    pub fn set(&mut self, goal: Option<ComposerGoal>, now: Instant, reduced: bool) -> bool {
+    fn set(&mut self, goal: Option<ComposerGoal>, now: Instant, reduced: bool) -> bool {
         match (goal, self.shown.take()) {
             (None, None) => false,
             (None, Some((shown, phase @ Phase::Leaving { .. }))) => {

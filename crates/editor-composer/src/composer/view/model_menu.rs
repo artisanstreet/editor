@@ -14,26 +14,26 @@ use editor_ui::{
 };
 use std::rc::Rc;
 
-pub(super) const MODEL_MENU_WIDTH: f32 = 528.0;
+const MODEL_MENU_WIDTH: f32 = 528.0;
 
-pub(super) const MODEL_PANE_HEIGHT: f32 = 328.0;
+const MODEL_PANE_HEIGHT: f32 = 328.0;
 
-pub(super) const MODEL_SIDE_WIDTH: f32 = 164.0;
+const MODEL_SIDE_WIDTH: f32 = 164.0;
 
 pub(super) const MODEL_ITEM_HEIGHT: f32 = match Row::ListItem(Density::Tall).height() {
     Some(height) => height,
     None => 0.0,
 };
 
-pub(super) const MODEL_ITEM_GUTTER: f32 = Inset::Menu.px();
+const MODEL_ITEM_GUTTER: f32 = Inset::Menu.px();
 
 pub(super) const MODEL_ITEM_GAP: f32 = 1.0;
 
-pub(super) const MODEL_PANE_INSET: f32 = Inset::Menu.px();
+const MODEL_PANE_INSET: f32 = Inset::Menu.px();
 
-pub(super) const MODEL_PANE_PADDING: Space = super::super::model_list::PADDING;
+const MODEL_PANE_PADDING: Space = super::super::model_list::PADDING;
 
-pub(super) const MODEL_ENGINE_TAB: IconButtonSize = IconButtonSize::Md;
+const MODEL_ENGINE_TAB: IconButtonSize = IconButtonSize::Md;
 
 pub(super) const MODEL_BAR_HEIGHT: f32 = MODEL_ENGINE_TAB.edge();
 
@@ -102,7 +102,7 @@ pub(super) fn model_menu_items(
     clippy::disallowed_types,
     reason = "the sliding pane tab is a path-traced silhouette painted on a canvas, like TabCard; its fill and rim are path paints, not box styles"
 )]
-pub(super) fn model_menu_tab(
+fn model_menu_tab(
     theme: &ArtisanTheme,
     tab: super::super::sliding_tab::SlidingTab,
     radius: f32,
@@ -159,7 +159,7 @@ pub(super) fn model_menu_tab(
         .exclude_from_hit_testing()
 }
 
-pub(super) fn model_engine_bar(
+fn model_engine_bar(
     theme: ArtisanTheme,
     engines: &[&artisan_api::EngineStatus],
     spied: Option<artisan_api::EngineId>,
@@ -301,7 +301,7 @@ pub(super) fn model_gate_row(
     body.build()
 }
 
-pub(super) fn model_list_pane(
+fn model_list_pane(
     theme: ArtisanTheme,
     host: &editor_core::HostData,
     picker: &super::super::picker::PickerState,
@@ -476,7 +476,7 @@ pub(super) fn model_list_pane(
         .build()
 }
 
-pub(super) fn model_axis_pane(
+fn model_axis_pane(
     theme: ArtisanTheme,
     axis: super::super::picker::Axis,
     options: &[super::super::picker::AxisOption],
@@ -571,7 +571,7 @@ pub(super) fn model_axis_pane(
     clippy::disallowed_types,
     reason = "the model rail's 1 px item gap and the sheet's top-trimmed inset have no kit token"
 )]
-pub fn model_menu(
+pub(crate) fn model_menu(
     theme: ArtisanTheme,
     host: &editor_core::HostData,
     picker: &super::super::picker::PickerState,
@@ -790,7 +790,7 @@ pub(super) fn model_item_height(count: usize) -> f32 {
     MODEL_ITEM_HEIGHT.min((MODEL_PANE_HEIGHT - (count - 1.0) * MODEL_ITEM_GAP) / count)
 }
 
-pub(super) fn lab_icon(lab: &str) -> Option<AssetId> {
+fn lab_icon(lab: &str) -> Option<AssetId> {
     Some(match lab {
         "Alibaba" => AssetId::SVGL_QWEN,
         "Anthropic" => AssetId::SVGL_CLAUDE_AI,
