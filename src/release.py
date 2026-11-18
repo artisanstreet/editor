@@ -11,11 +11,13 @@ import tempfile
 from zoneinfo import ZoneInfo
 
 ANCHOR = "400a4b35cffdfa088227b9824176affb37b807fb26eb3c59b48ae56fbf5e4d8b"
+SPKI = "302a300506032b6570032100"
+NAMESPACE = "artisan-release"
 EXPECTED = {("ae", "linux", "x86_64"), ("ae", "linux", "aarch64"), ("ae", "macos", "aarch64"), ("editor", "windows", "x86_64")}
 OPTIONAL = {("editor", "windows", "aarch64")}
 SYSTEMS = {"linux": "Linux", "macos": "macOS", "windows": "Windows"}
 CHIPS = {("macos", "aarch64"): "Apple Silicon", ("linux", "aarch64"): "ARM64", ("windows", "aarch64"): "ARM64"}
-SUPPORT = {"release.json": "Signed release manifest", "release.json.sig": "Release manifest signature", "install.sh": "Install script for Linux and macOS"}
+SUPPORT = {"install.sh": "Install script for Linux and macOS", "release.json.sig": "Release manifest signature", "release.json.sshsig": "Release manifest signature for ssh-keygen", "release.json": "Signed release manifest"}
 LATEST = "releases/latest/download/release.json"
 NIGHTLY = "releases/download/nightly/release.json"
 
@@ -33,9 +35,36 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
+def ssh_string(data):
+    return len(data).to_bytes(4, "big") + data
+
+
+def ssh_public(anchor):
+    return ssh_string(b"ssh-ed25519") + ssh_string(bytes.fromhex(anchor))
+
+
+def allowed_signer(anchor):
+    return f"{NAMESPACE} ssh-ed25519 {base64.b64encode(ssh_public(anchor)).decode()}"
+
+
+def pem_public(anchor):
+    return base64.b64encode(bytes.fromhex(SPKI + anchor)).decode()
+
+
+def sshsig_message(manifest):
+    return b"SSHSIG" + ssh_string(NAMESPACE.encode()) + ssh_string(b"") + ssh_string(b"sha512") + ssh_string(hashlib.sha512(manifest).digest())
+
+
+def sshsig_armor(anchor, signature):
+    blob = b"SSHSIG" + (1).to_bytes(4, "big") + ssh_string(ssh_public(anchor)) + ssh_string(NAMESPACE.encode()) + ssh_string(b"") + ssh_string(b"sha512") + ssh_string(ssh_string(b"ssh-ed25519") + ssh_string(signature))
+    text = base64.b64encode(blob).decode()
+    lines = [text[index:index + 70] for index in range(0, len(text), 70)]
+    return "-----BEGIN SSH SIGNATURE-----\n" + "\n".join(lines) + "\n-----END SSH SIGNATURE-----\n"
+
+
 def public_key(value):
     value = value.strip().lower()
-    if value.startswith("302a300506032b6570032100"):
+    if value.startswith(SPKI):
         value = value[24:]
     if value != ANCHOR:
         raise ValueError("release public key does not match the compiled trust anchor")
@@ -106,7 +135,7 @@ def package(binaries, output, app, system, arch):
     return entry
 
 
-def assemble(root, source, output, version, sha):
+def assemble(root, source, output, version, sha, anchor):
     entries = []
     seen = set()
     output.mkdir(parents=True, exist_ok=False)
@@ -130,6 +159,8 @@ def assemble(root, source, output, version, sha):
     installer = (root / "scripts/install.sh").read_text(encoding="utf-8")
     if LATEST not in installer:
         raise ValueError("install.sh does not name the release feed")
+    if f"signer='{allowed_signer(anchor)}'" not in installer or f"public_key='{pem_public(anchor)}'" not in installer:
+        raise ValueError("install.sh does not pin the release trust anchor")
     if "-nightly." in version:
         installer = installer.replace(LATEST, NIGHTLY)
     (output / "install.sh").write_text(installer, encoding="utf-8")
@@ -159,12 +190,18 @@ def validate(output, sha=None):
 
 
 def verify(output, expected, sha):
-    validate(output, sha)
-    with tempfile.TemporaryDirectory() as temporary:
+    manifest = output / "release.json"
+    with tempfile.TemporaryDirectory() as temporary, manifest.open("rb") as signed:
         directory = Path(temporary)
-        (directory / "public.der").write_bytes(bytes.fromhex("302a300506032b6570032100" + expected))
-        (directory / "signature").write_bytes(base64.b64decode((output / "release.json.sig").read_bytes(), validate=True))
-        run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(output / "release.json"), "-sigfile", str(directory / "signature"))
+        (directory / "public.der").write_bytes(bytes.fromhex(SPKI + expected))
+        (directory / "signers").write_text(allowed_signer(expected) + "\n", encoding="utf-8")
+        try:
+            (directory / "signature").write_bytes(base64.b64decode((output / "release.json.sig").read_bytes(), validate=True))
+            run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(manifest), "-sigfile", str(directory / "signature"), stderr=subprocess.DEVNULL)
+            run("ssh-keygen", "-Y", "verify", "-f", str(directory / "signers"), "-I", NAMESPACE, "-n", NAMESPACE, "-s", str(output / "release.json.sshsig"), stdin=signed, stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, ValueError) as error:
+            raise ValueError("release.json is not signed by the release key") from error
+    return validate(output, sha)
 
 
 def sign(output, pem, expected):
@@ -175,14 +212,18 @@ def sign(output, pem, expected):
         key.write_text(pem, encoding="utf-8")
         key.chmod(0o600)
         public = subprocess.check_output(["openssl", "pkey", "-in", str(key), "-pubout", "-outform", "DER"])
-        if public != bytes.fromhex("302a300506032b6570032100" + expected):
+        if public != bytes.fromhex(SPKI + expected):
             raise ValueError("signing key does not match the release trust anchor")
-        (directory / "public.der").write_bytes(public)
         manifest = output / "release.json"
+        message = directory / "sshsig-message"
+        message.write_bytes(sshsig_message(manifest.read_bytes()))
         signature = directory / "signature"
+        sshsig = directory / "sshsig"
         run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(manifest), "-out", str(signature))
-        run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(manifest), "-sigfile", str(signature))
+        run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(message), "-out", str(sshsig))
         (output / "release.json.sig").write_bytes(base64.b64encode(signature.read_bytes()))
+        (output / "release.json.sshsig").write_text(sshsig_armor(expected, sshsig.read_bytes()), encoding="utf-8")
+    verify(output, expected, None)
 
 
 def main():
@@ -217,7 +258,7 @@ def main():
     elif args.command == "package":
         package(Path(args.binaries), Path(args.output), args.app, args.os, args.arch)
     elif args.command == "assemble":
-        assemble(root, Path(args.source), Path(args.output), args.version, args.sha)
+        assemble(root, Path(args.source), Path(args.output), args.version, args.sha, ANCHOR)
     elif args.command == "stamp":
         stamp(root, args.version)
     elif args.command == "verify":
