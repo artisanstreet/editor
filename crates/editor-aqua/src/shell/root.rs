@@ -3059,6 +3059,13 @@ impl SectionViews for RootViews {
             ),
             _ => center,
         };
+        let connection_lost = match &screen {
+            Screen::Thread { host, .. } => shell
+                .core
+                .host(host)
+                .and_then(|host| crate::shell::connection::lost(&host.status)),
+            _ => None,
+        };
         aqua_core::checkpoint::reach();
         if !matches!(screen, Screen::Thread { .. }) {
             self.replace_rows(None);
@@ -3306,6 +3313,7 @@ impl SectionViews for RootViews {
                             .layout("column")
                             .styles([aqua::Aqua::Style().flex_grow(1.0).min_width(aqua::pct(0.0))])
                             .child(center)
+                            .children(connection_lost)
                             .build(),
                     )
                     .children(overview)

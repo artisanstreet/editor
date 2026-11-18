@@ -26,3 +26,19 @@ fn a_message_sent_while_forge_is_down_stays_in_the_composer_with_a_retry() {
     }));
     assert_eq!(editor.engine().launches(), 0, "nothing reached the engine");
 }
+
+#[test]
+fn a_thread_tells_assistive_tech_when_forge_goes_offline() {
+    let mut editor = Scenario::replaying(EngineId::Claude, "reply")
+        .thread("thread-a", "Greeting")
+        .open(Opening::Thread("thread-a"));
+    editor.shows("No messages yet.");
+    assert!(
+        editor.view(|view| !view.shows("Lost the connection to Forge")),
+        "a live Forge is not reported as lost"
+    );
+    editor.stop_forge();
+    insta::assert_snapshot!(editor.settle("the offline status", |view| {
+        view.shows("Lost the connection to Forge")
+    }));
+}

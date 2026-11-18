@@ -1,7 +1,7 @@
 use crate::core::{ConnectionStatus, Core, HostData, HostId, HostInstance};
 use crate::ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
-use aqua_core::{DisplayItem, Rect, Role};
+use aqua_core::{DisplayItem, LiveRegion, Rect, Role};
 use aqua_text::StyledSpan;
 use aqua_ui::{
     AlignItems,
@@ -109,6 +109,25 @@ impl WordmarkLoader {
             && self
                 .mounted
                 .is_some_and(|mounted| now >= mounted + MARK_DELAY)
+    }
+}
+
+#[must_use]
+pub fn lost(status: &ConnectionStatus) -> Option<Element> {
+    match status {
+        ConnectionStatus::Live => None,
+        ConnectionStatus::Connecting | ConnectionStatus::Offline { .. } => Some(
+            UiBox::new()
+                .width(0.0)
+                .height(0.0)
+                .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
+                .build()
+                .exclude_from_hit_testing()
+                .with_key("forge-connection-lost")
+                .role(Role::Text)
+                .aria_label("Lost the connection to Forge. Reconnecting…")
+                .aria_live(LiveRegion::Polite),
+        ),
     }
 }
 

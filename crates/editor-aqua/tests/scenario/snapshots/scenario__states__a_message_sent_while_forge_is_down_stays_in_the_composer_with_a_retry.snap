@@ -34,3 +34,4 @@ Group "Artisan Editor"
   ScrollView
     TextInput "Message" value="Say hello"
   Button "Send message"
+  Label "Lost the connection to Forge. Reconnecting…"
