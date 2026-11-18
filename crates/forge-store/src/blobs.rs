@@ -210,12 +210,33 @@ impl Store {
         path(&self.inner.blob_dir, hash).filter(|path| path.is_file())
     }
 
-    /// Deletes blob files no item or draft references. Returns how many.
     pub async fn gc_blobs(&self) -> Result<usize> {
         let inner = std::sync::Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || inner.gc_blobs())
-            .await
-            .context("blob collection task")?
+        let (seen, candidates) = tokio::task::spawn_blocking(move || {
+            let (seen, referenced) = inner.with_reader(|conn| {
+                let snapshot = conn.unchecked_transaction()?;
+                let seen = crate::read::max_seq(&snapshot)?;
+                Ok((seen, referenced_since(&snapshot, 0)?))
+            })?;
+            Ok::<_, anyhow::Error>((seen, unreferenced(&inner.blob_dir, &referenced)?))
+        })
+        .await
+        .context("blob collection task")??;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let inner = std::sync::Arc::clone(&self.inner);
+        self.write(move |tx| {
+            let referenced = referenced_since(tx, seen)?;
+            let _guard = inner
+                .blob_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let _generation = inner.lock_blobs()?;
+            Ok(remove_unreferenced(candidates, &referenced))
+        })
+        .await
+        .context("collect unreferenced blobs")
     }
 }
 
@@ -231,43 +252,29 @@ impl Inner {
         file.lock_exclusive()?;
         Ok(file)
     }
-
-    fn gc_blobs(&self) -> Result<usize> {
-        // A plain snapshot suffices: a new reference names a blob uploaded
-        // within GC_MIN_AGE (an upload refreshes an existing file's age) or
-        // one already referenced, so it cannot name a file deleted here.
-        let referenced = self.with_reader(|conn| {
-            let mut hashes = HashSet::new();
-            // Only typed image ownership fields; prose and arbitrary 64-hex strings
-            // are never decoded or mistaken for references.
-            let mut statement = conn.prepare_cached(
-                "SELECT image.value FROM items i, json_each(i.body, '$.kind.images') image
-                    WHERE i.kind_type = 'user_message'
-                 UNION SELECT json_extract(body, '$.kind.blob') FROM items WHERE kind_type = 'image'
-                 UNION SELECT image.value FROM drafts d, json_each(d.body, '$.images') image",
-            )?;
-            for hash in statement.query_map([], |row| row.get::<_, Option<String>>(0))? {
-                if let Some(hash) = hash?
-                    && BlobHash(hash.clone()).is_valid()
-                {
-                    hashes.insert(hash);
-                }
-            }
-            Ok(hashes)
-        })?;
-        // Uploads wait, so a reused file cannot be deleted after its age was read.
-        let _guard = self
-            .blob_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _generation = self.lock_blobs()?;
-        gc(&self.blob_dir, &referenced)
-    }
 }
 
-pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
+fn referenced_since(conn: &rusqlite::Connection, seq: artisan_api::Seq) -> Result<HashSet<String>> {
+    let mut hashes = HashSet::new();
+    let mut statement = conn.prepare_cached(include_str!("sql/blobs/referenced.sql"))?;
+    for hash in statement.query_map([seq], |row| row.get::<_, Option<String>>(0))? {
+        if let Some(hash) = hash?
+            && BlobHash(hash.clone()).is_valid()
+        {
+            hashes.insert(hash);
+        }
+    }
+    Ok(hashes)
+}
+
+struct Candidate {
+    hash: String,
+    path: PathBuf,
+}
+
+fn unreferenced(dir: &Path, referenced: &HashSet<String>) -> Result<Vec<Candidate>> {
     let cutoff = SystemTime::now() - GC_MIN_AGE;
-    let mut removed = 0;
+    let mut candidates = Vec::new();
     for shard in fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
         let shard = shard?.path();
         if !shard.is_dir() {
@@ -277,20 +284,42 @@ pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
             let file = file?;
             let name = file.file_name();
             let name = name.to_string_lossy();
-            let name = name.strip_suffix(".webp").unwrap_or(&name);
-            let keep = referenced.contains(name) || file.metadata()?.modified()? > cutoff;
-            if keep {
-                continue;
-            }
-            match fs::remove_file(file.path()) {
-                Ok(()) => removed += 1,
-                Err(error) => {
-                    tracing::warn!(path = %file.path().display(), %error, "remove unreferenced blob");
-                }
+            let hash = name.strip_suffix(".webp").unwrap_or(&name);
+            if !referenced.contains(hash) && file.metadata()?.modified()? <= cutoff {
+                candidates.push(Candidate {
+                    hash: hash.to_owned(),
+                    path: file.path(),
+                });
             }
         }
     }
-    Ok(removed)
+    Ok(candidates)
+}
+
+fn remove_unreferenced(candidates: Vec<Candidate>, referenced: &HashSet<String>) -> usize {
+    let cutoff = SystemTime::now() - GC_MIN_AGE;
+    let mut removed = 0;
+    for candidate in candidates {
+        if referenced.contains(&candidate.hash) {
+            continue;
+        }
+        match fs::metadata(&candidate.path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) if modified <= cutoff => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %candidate.path.display(), %error, "read the age of an unreferenced blob");
+                continue;
+            }
+        }
+        match fs::remove_file(&candidate.path) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                tracing::warn!(path = %candidate.path.display(), %error, "remove unreferenced blob");
+            }
+        }
+    }
+    removed
 }
 
 pub fn is_webp(bytes: &[u8]) -> bool {
