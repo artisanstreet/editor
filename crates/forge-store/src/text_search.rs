@@ -2,7 +2,7 @@ use crate::Store;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ProjectId, Seq, TextHit, TextSearchQuery, ThreadId, Timestamp};
 use fff_grep::{LineTerminator, Match, Matcher, NoError, Searcher, Sink, SinkMatch};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use std::collections::HashMap;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
@@ -10,6 +10,8 @@ type Result<T, E = StorageError> = std::result::Result<T, E>;
 operation_error!(TextSearchError(StorageError), "search message text for {query:?}", query: String);
 
 const SCAN_ROWS: usize = 60_000;
+const SCAN_BYTES: usize = 32 * 1024 * 1024;
+const TRIGRAM_CHARS: usize = 3;
 const DEFAULT_HITS: u32 = 30;
 const MAX_HITS: u32 = 100;
 const HITS_PER_THREAD: usize = 3;
@@ -118,28 +120,9 @@ fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
     )
 }
 
-struct Home {
-    title: Option<String>,
-    project: ProjectId,
-    listed: bool,
-}
-
-fn home(conn: &Connection, thread: &ThreadId) -> Result<Option<Home>> {
-    conn.query_row(
-        "SELECT json_extract(body,'$.title'),json_extract(body,'$.project_id'),
-                COALESCE(json_extract(body,'$.archived'),0),json_extract(body,'$.parent_thread_id')
-         FROM threads WHERE id=?1",
-        params![thread.as_str()],
-        |row| {
-            Ok(Home {
-                title: row.get(0)?,
-                project: ProjectId::from(row.get::<_, String>(1)?),
-                listed: !row.get::<_, bool>(2)? && row.get::<_, Option<String>>(3)?.is_none(),
-            })
-        },
-    )
-    .optional()
-    .map_err(Into::into)
+fn indexed_phrase(wanted: &str) -> Option<String> {
+    (wanted.chars().count() >= TRIGRAM_CHARS)
+        .then(|| format!("text : \"{}\"", wanted.replace('"', "\"\"")))
 }
 
 fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>> {
@@ -150,56 +133,52 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
     let limit = query.limit.unwrap_or(DEFAULT_HITS).clamp(1, MAX_HITS) as usize;
     let needle = Literal::new(wanted);
     let searcher = Searcher::new();
-    let mut rows = conn.prepare_cached(&format!(
-        "SELECT thread_id,item_id,created_at,text FROM item_text
-         WHERE kind IN ('user','assistant') ORDER BY rowid DESC LIMIT {SCAN_ROWS}"
-    ))?;
-    let mut place = conn.prepare_cached(
-        "SELECT position FROM items WHERE id=?1 AND parent_id IS NULL AND work=0",
-    )?;
-    let mut homes: HashMap<ThreadId, Option<Home>> = HashMap::new();
+    let scan_rows = i64::try_from(SCAN_ROWS).expect("invariant: the scan bound fits in i64");
+    let (mut rows, values) = match indexed_phrase(wanted) {
+        Some(phrase) => (
+            conn.prepare_cached(include_str!("sql/search/messages_indexed.sql"))?,
+            vec![
+                rusqlite::types::Value::Text(phrase),
+                rusqlite::types::Value::Integer(scan_rows),
+            ],
+        ),
+        None => (
+            conn.prepare_cached(include_str!("sql/search/messages_scan.sql"))?,
+            vec![rusqlite::types::Value::Integer(scan_rows)],
+        ),
+    };
     let mut per_thread: HashMap<ThreadId, usize> = HashMap::new();
     let mut hits = Vec::new();
-    let mut scan = rows.query([])?;
+    let mut scanned_bytes = 0;
+    let mut scan = rows.query(rusqlite::params_from_iter(values))?;
     while let Some(row) = scan.next()? {
-        let text: String = row.get(3)?;
-        let Some((start, end)) = first_match(&searcher, &needle, &text) else {
-            continue;
-        };
+        if scanned_bytes >= SCAN_BYTES {
+            break;
+        }
         let thread_id = ThreadId::from(row.get::<_, String>(0)?);
         if per_thread.get(&thread_id).copied().unwrap_or(0) >= HITS_PER_THREAD {
             continue;
         }
-        if !homes.contains_key(&thread_id) {
-            let found = home(conn, &thread_id)?;
-            homes.insert(thread_id.clone(), found);
-        }
-        let known = &homes[&thread_id];
-        let Some(home) = known.as_ref().filter(|home| home.listed) else {
+        let text = row.get_ref(6)?.as_str().map_err(rusqlite::Error::from)?;
+        scanned_bytes += text.len();
+        let Some((start, end)) = first_match(&searcher, &needle, text) else {
             continue;
         };
-        let item_id = ItemId::from(row.get::<_, String>(1)?);
-        let Some(position) = place
-            .query_row(params![item_id.as_str()], |row| row.get::<_, Seq>(0))
-            .optional()?
-        else {
-            continue;
-        };
-        let created_at: Timestamp = row.get(2)?;
-        let (snippet, matched) = snippet(&text, start, end);
+        let (snippet, matched) = snippet(text, start, end);
         let narrow = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+        let length = narrow(text.len());
         *per_thread.entry(thread_id.clone()).or_default() += 1;
         hits.push(TextHit {
-            thread_title: home.title.clone(),
-            project_id: home.project.clone(),
+            thread_title: row.get(4)?,
+            project_id: ProjectId::from(row.get::<_, String>(5)?),
             thread_id,
-            item_id,
-            position,
-            created_at,
+            item_id: ItemId::from(row.get::<_, String>(1)?),
+            position: row.get::<_, Seq>(3)?,
+            created_at: row.get::<_, Timestamp>(2)?,
             snippet,
             matched,
             offset: (narrow(start), narrow(end)),
-            length: narrow(text.len()),
+            length,
         });
         if hits.len() >= limit {
             break;

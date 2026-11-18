@@ -5,7 +5,7 @@
 )]
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId,
-    Status, TextSearchQuery, ThreadId,
+    Status, TextSearchQuery, ThreadId, UpdateThread,
 };
 use forge_store::{NewItem, Store};
 use std::path::PathBuf;
@@ -160,4 +160,46 @@ async fn a_long_line_is_cut_around_the_match() {
         &hit.snippet[hit.matched.0 as usize..hit.matched.1 as usize],
         "needle"
     );
+}
+
+#[tokio::test]
+async fn archived_threads_never_crowd_out_listed_ones() {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
+    let listed = thread(&store, "Listed", None).await;
+    store
+        .upsert_item(said(&listed, "the pelican flew north", Phase::Final))
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        let archived = thread(&store, "Archived", None).await;
+        store
+            .upsert_item(said(&archived, "another pelican sighting", Phase::Final))
+            .await
+            .unwrap();
+        store
+            .update_thread(
+                &archived,
+                UpdateThread {
+                    title: None,
+                    archived: Some(true),
+                    config: None,
+                    read_seq: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let search = |query: &str| {
+        store.text_search(TextSearchQuery {
+            query: query.into(),
+            limit: Some(3),
+        })
+    };
+    let hits = search("PELICAN").await.unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].thread_id, listed);
+    let short = search("fl").await.unwrap();
+    assert_eq!(short.len(), 1, "{short:?}");
+    assert_eq!(short[0].thread_id, listed);
 }
