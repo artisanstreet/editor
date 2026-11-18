@@ -1,5 +1,5 @@
 use crate::core::{
-    ConnectionStatus, Core, HostId, Screen, SetSettingError, Settings, SettingsPage,
+    ConnectionStatus, Core, ForgeClient, HostId, Screen, SetSettingError, Settings, SettingsPage,
     config_file::ReadConfigError, store::RemoveHostError,
 };
 use artisan_api::{EditorCall, EditorReply, SettingOwner, setting_decl};
@@ -43,57 +43,93 @@ enum EditorCallError {
     NoPage { page: String, pages: String },
 }
 
+fn answer(client: ForgeClient, id: String, reply: EditorReply) {
+    crate::core::runtime::runtime().spawn(async move {
+        send_answer(&client, &id, &reply).await;
+    });
+}
+
+async fn send_answer(client: &ForgeClient, id: &str, reply: &EditorReply) {
+    if let Err(error) = client.reply_editor_call(id, reply).await {
+        tracing::warn!(call = %id, "answering Forge's call: {}", ::diagnostics::chain(&error));
+    }
+}
+
+enum ImmediateCall {
+    HostsList,
+    HostRemove { host: String },
+    HostSwitch { host: String },
+    SettingGet { key: String },
+    SettingSet { key: String, value: Value },
+    OpenThread { thread: artisan_api::ThreadId },
+    OpenSettings { page: String },
+}
+
 impl Core {
     pub(super) fn editor_call(&mut self, host_id: &HostId, id: String, call: EditorCall) {
         let Some(client) = self.host_any(host_id).map(|host| host.client.clone()) else {
             return;
         };
-        if matches!(call, EditorCall::HostAdd { .. }) {
-            let reply = EditorReply::Error("Forges join through the account: enroll this Forge from the Editor's Account page.".to_owned());
-            crate::core::runtime::runtime().spawn(async move {
-                if let Err(error) = client.reply_editor_call(&id, &reply).await {
-                    tracing::warn!(call = %id, "answering Forge's call: {}", ::diagnostics::chain(&error));
-                }
-            });
-            return;
-        }
-        if let EditorCall::McpSignIn {
-            server,
-            navigate_user,
-        } = call
-        {
-            if navigate_user {
-                self.navigate(Screen::Settings(SettingsPage::Extensions));
+        let call = match call {
+            EditorCall::HostAdd { .. } => {
+                answer(
+                    client,
+                    id,
+                    EditorReply::Error(
+                        "Forges join through the account: enroll this Forge from the Editor's Account page."
+                            .to_owned(),
+                    ),
+                );
+                return;
             }
-            let started = self.start_mcp_sign_in(host_id, &server, navigate_user);
-            crate::core::runtime::runtime().spawn(async move {
-                let reply = match started.await {
-                    Ok(Ok(url)) => EditorReply::Ok(json!({ "authorize_url": url })),
-                    Ok(Err(error)) => EditorReply::Error(::diagnostics::chain(&error)),
-                    Err(error) => EditorReply::Error(format!("The sign-in stopped: {error}")),
-                };
-                if let Err(error) = client.reply_editor_call(&id, &reply).await {
-                    tracing::warn!(call = %id, "answering Forge's call: {}", ::diagnostics::chain(&error));
-                }
-            });
-            return;
-        }
+            EditorCall::McpSignIn {
+                server,
+                navigate_user,
+            } => {
+                self.mcp_sign_in_call(host_id, client, id, &server, navigate_user);
+                return;
+            }
+            EditorCall::HostsList => ImmediateCall::HostsList,
+            EditorCall::HostRemove { host } => ImmediateCall::HostRemove { host },
+            EditorCall::HostSwitch { host } => ImmediateCall::HostSwitch { host },
+            EditorCall::SettingGet { key } => ImmediateCall::SettingGet { key },
+            EditorCall::SettingSet { key, value } => ImmediateCall::SettingSet { key, value },
+            EditorCall::OpenThread { thread } => ImmediateCall::OpenThread { thread },
+            EditorCall::OpenSettings { page } => ImmediateCall::OpenSettings { page },
+        };
         let reply = match self.run_call(host_id, call) {
             Ok(value) => EditorReply::Ok(value),
             Err(error) => EditorReply::Error(::diagnostics::chain(&error)),
         };
+        answer(client, id, reply);
+    }
+    fn mcp_sign_in_call(
+        &mut self,
+        host_id: &HostId,
+        client: ForgeClient,
+        id: String,
+        server: &str,
+        navigate_user: bool,
+    ) {
+        if navigate_user {
+            self.navigate(Screen::Settings(SettingsPage::Extensions));
+        }
+        let started = self.start_mcp_sign_in(host_id, server, navigate_user);
         crate::core::runtime::runtime().spawn(async move {
-            if let Err(error) = client.reply_editor_call(&id, &reply).await {
-                tracing::warn!(call = %id, "answering Forge's call: {}", ::diagnostics::chain(&error));
-            }
+            let reply = match started.await {
+                Ok(Ok(url)) => EditorReply::Ok(json!({ "authorize_url": url })),
+                Ok(Err(error)) => EditorReply::Error(::diagnostics::chain(&error)),
+                Err(error) => EditorReply::Error(format!("The sign-in stopped: {error}")),
+            };
+            send_answer(&client, &id, &reply).await;
         });
     }
-    fn run_call(&mut self, from: &HostId, call: EditorCall) -> Result<Value, EditorCallError> {
+    fn run_call(&mut self, from: &HostId, call: ImmediateCall) -> Result<Value, EditorCallError> {
         match call {
-            EditorCall::HostsList => Ok(Value::Array(self.hosts().map(|(config, host)| json!({ "id": config.id.0, "name": config.name, "address": config.address, "kind": config.kind, "connected": host.status == ConnectionStatus::Live, "is_caller": &config.id == from })).collect())),
-            EditorCall::HostRemove { host } => { let id = self.find_host(&host)?; self.remove_host(&id).map_err(|source| EditorCallError::Remove { host: id.clone(), source })?; Ok(json!({ "removed": id.0 })) },
-            EditorCall::HostSwitch { host } => { let id = self.find_host(&host)?; self.navigate(Screen::NewThread { host: id.clone(), project: None }); Ok(json!({ "switched_to": id.0 })) },
-            EditorCall::SettingGet { key } => {
+            ImmediateCall::HostsList => Ok(Value::Array(self.hosts().map(|(config, host)| json!({ "id": config.id.0, "name": config.name, "address": config.address, "kind": config.kind, "connected": host.status == ConnectionStatus::Live, "is_caller": &config.id == from })).collect())),
+            ImmediateCall::HostRemove { host } => { let id = self.find_host(&host)?; self.remove_host(&id).map_err(|source| EditorCallError::Remove { host: id.clone(), source })?; Ok(json!({ "removed": id.0 })) },
+            ImmediateCall::HostSwitch { host } => { let id = self.find_host(&host)?; self.navigate(Screen::NewThread { host: id.clone(), project: None }); Ok(json!({ "switched_to": id.0 })) },
+            ImmediateCall::SettingGet { key } => {
                 let decl = editor_setting(&key)?;
                 if let Settings::Unreadable(source) = &self.settings {
                     return Err(EditorCallError::Unreadable { key, source: source.clone() });
@@ -103,14 +139,13 @@ impl Core {
                 }
                 Ok(self.settings.get(&key).cloned().unwrap_or_else(|| decl.default_value()))
             }
-            EditorCall::SettingSet { key, value } => {
+            ImmediateCall::SettingSet { key, value } => {
                 editor_setting(&key)?;
                 self.set_setting(&key, value.clone()).map_err(|source| EditorCallError::Save { key: key.clone(), source })?;
                 Ok(json!({ "key": key, "value": value }))
             }
-            EditorCall::OpenThread { thread } => { self.navigate(Screen::Thread { host: from.clone(), thread: thread.clone() }); Ok(json!({ "opened": thread })) },
-            EditorCall::OpenSettings { page } => { let found = SettingsPage::from_name(&page).ok_or_else(|| { let names: Vec<_> = SettingsPage::ALL.iter().map(|(_, name)| *name).collect(); EditorCallError::NoPage { page: page.clone(), pages: names.join(", ") } })?; self.navigate(Screen::Settings(found)); Ok(json!({ "opened": page })) },
-            EditorCall::HostAdd { .. } | EditorCall::McpSignIn { .. } => unreachable!(),
+            ImmediateCall::OpenThread { thread } => { self.navigate(Screen::Thread { host: from.clone(), thread: thread.clone() }); Ok(json!({ "opened": thread })) },
+            ImmediateCall::OpenSettings { page } => { let found = SettingsPage::from_name(&page).ok_or_else(|| { let names: Vec<_> = SettingsPage::ALL.iter().map(|(_, name)| *name).collect(); EditorCallError::NoPage { page: page.clone(), pages: names.join(", ") } })?; self.navigate(Screen::Settings(found)); Ok(json!({ "opened": page })) },
         }
     }
     fn find_host(&self, name: &str) -> Result<HostId, EditorCallError> {

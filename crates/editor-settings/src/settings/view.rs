@@ -12,7 +12,7 @@ use super::{
     page,
     ui::{self, Ink},
 };
-use editor_core::{ConnectionStatus, Core, Screen, SettingsPage, SettingsSection};
+use editor_core::{ConnectionStatus, Core, HostData, Screen, SettingsPage, SettingsSection};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole, Tone},
     select::{Select, SelectEntry, SelectMenu},
@@ -277,47 +277,51 @@ pub fn build(
         return prompt(controller, core, &theme, emit);
     }
     let emit_for_error = emit.clone();
-    let content = match page.parent() {
-        SettingsPage::General if page == SettingsPage::General => ui::column()
+    let content = match (page.parent(), core.active_host()) {
+        (SettingsPage::General, _) if page == SettingsPage::General => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
             .child(appearance(controller, &theme, core, emit.clone(), false))
             .child(streaming(controller, &theme, core, emit.clone(), false))
             .child(notifications(&theme, core, emit.clone(), false))
             .child(performance(&theme, core, emit, false))
             .build(),
-        SettingsPage::General if page == SettingsPage::Section(SettingsSection::Appearance) => {
+        (SettingsPage::General, _)
+            if page == SettingsPage::Section(SettingsSection::Appearance) =>
+        {
             appearance(controller, &theme, core, emit, true)
         }
-        SettingsPage::General if page == SettingsPage::Section(SettingsSection::Streaming) => {
+        (SettingsPage::General, _) if page == SettingsPage::Section(SettingsSection::Streaming) => {
             streaming(controller, &theme, core, emit, true)
         }
-        SettingsPage::General if page == SettingsPage::Section(SettingsSection::Performance) => {
+        (SettingsPage::General, _)
+            if page == SettingsPage::Section(SettingsSection::Performance) =>
+        {
             performance(&theme, core, emit, true)
         }
-        SettingsPage::General if page == SettingsPage::Section(SettingsSection::Notifications) => {
+        (SettingsPage::General, _)
+            if page == SettingsPage::Section(SettingsSection::Notifications) =>
+        {
             notifications(&theme, core, emit, true)
         }
-        SettingsPage::Threads
-            if core.active_host().is_some()
-                && (page == SettingsPage::Threads
-                    || page == SettingsPage::Section(SettingsSection::Archive)) =>
+        (SettingsPage::Threads, Some(host))
+            if page == SettingsPage::Threads
+                || page == SettingsPage::Section(SettingsSection::Archive) =>
         {
-            let host = core.active_host().unwrap();
             let mut content =
                 ui::column().child(ui::header(&theme, page.label(), page::description(page)));
             if page == SettingsPage::Threads {
                 content = content
                     .child(thread_section(
                         &theme,
-                        core,
-                        SettingsPage::Section(SettingsSection::Automation),
+                        host,
+                        ThreadSection::Automation,
                         emit.clone(),
                         false,
                     ))
                     .child(thread_section(
                         &theme,
-                        core,
-                        SettingsPage::Section(SettingsSection::Assistance),
+                        host,
+                        ThreadSection::Assistance,
                         emit.clone(),
                         false,
                     ));
@@ -334,19 +338,20 @@ pub fn build(
                 ))
                 .build()
         }
-        SettingsPage::Threads
-            if core.active_host().is_some()
-                && (page == SettingsPage::Section(SettingsSection::Automation)
-                    || page == SettingsPage::Section(SettingsSection::Assistance)) =>
+        (SettingsPage::Threads, Some(host))
+            if page == SettingsPage::Section(SettingsSection::Automation) =>
         {
-            thread_section(&theme, core, page, emit, true)
+            thread_section(&theme, host, ThreadSection::Automation, emit, true)
         }
-        SettingsPage::Extensions
-            if core.active_host().is_some()
-                && (page == SettingsPage::Extensions
-                    || page == SettingsPage::Section(SettingsSection::McpServers)) =>
+        (SettingsPage::Threads, Some(host))
+            if page == SettingsPage::Section(SettingsSection::Assistance) =>
         {
-            let host = core.active_host().unwrap();
+            thread_section(&theme, host, ThreadSection::Assistance, emit, true)
+        }
+        (SettingsPage::Extensions, Some(host))
+            if page == SettingsPage::Extensions
+                || page == SettingsPage::Section(SettingsSection::McpServers) =>
+        {
             let mut content = ui::column()
                 .child(ui::header(&theme, page.label(), page::description(page)))
                 .child(super::mcp_view::section(
@@ -361,24 +366,17 @@ pub fn build(
             }
             content.build()
         }
-        SettingsPage::Extensions
-            if core.active_host().is_some()
-                && page == SettingsPage::Section(SettingsSection::Skills) =>
+        (SettingsPage::Extensions, Some(_))
+            if page == SettingsPage::Section(SettingsSection::Skills) =>
         {
             skills(&theme, emit)
         }
-        SettingsPage::Engine(engine) if core.active_host().is_some() => super::engine_view::page(
-            controller,
-            core,
-            core.active_host().unwrap(),
-            engine,
-            page,
-            &theme,
-            emit,
-        ),
-        SettingsPage::Account => super::account_view::page(controller, core, &theme, emit),
-        SettingsPage::About => about(&theme, build_info, emit),
-        SettingsPage::Hosts => hosts(&theme, core),
+        (SettingsPage::Engine(engine), Some(host)) => {
+            super::engine_view::page(controller, core, host, engine, page, &theme, emit)
+        }
+        (SettingsPage::Account, _) => super::account_view::page(controller, core, &theme, emit),
+        (SettingsPage::About, _) => about(&theme, build_info, emit),
+        (SettingsPage::Hosts, _) => hosts(&theme, core),
         _ => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
             .child(ui::text(
@@ -577,21 +575,33 @@ fn notifications(
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThreadSection {
+    Automation,
+    Assistance,
+}
+
+impl ThreadSection {
+    const fn page(self) -> SettingsPage {
+        SettingsPage::Section(match self {
+            Self::Automation => SettingsSection::Automation,
+            Self::Assistance => SettingsSection::Assistance,
+        })
+    }
+}
+
 fn thread_section(
     theme: &ArtisanTheme,
-    core: &Core,
-    page: SettingsPage,
+    host: &HostData,
+    section: ThreadSection,
     emit: Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
-    let Some(host) = core.active_host() else {
-        unreachable!()
-    };
     let (title, entries): (
         &str,
         &[(&'static str, &'static str, &'static str, &'static str)],
-    ) = match page {
-        SettingsPage::Section(SettingsSection::Automation) => (
+    ) = match section {
+        ThreadSection::Automation => (
             "Recovery & continuation",
             &[
                 (
@@ -614,7 +624,7 @@ fn thread_section(
                 ),
             ],
         ),
-        SettingsPage::Section(SettingsSection::Assistance) => (
+        ThreadSection::Assistance => (
             "Assistance",
             &[
                 (
@@ -637,7 +647,6 @@ fn thread_section(
                 ),
             ],
         ),
-        _ => unreachable!(),
     };
     let rows = entries
         .iter()
@@ -646,7 +655,7 @@ fn thread_section(
                 .setting(key)
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or_else(|| {
-                    if page == SettingsPage::Section(SettingsSection::Automation) {
+                    if section == ThreadSection::Automation {
                         artisan_api::setting_decl(key)
                             .and_then(|decl| decl.default_value().as_bool())
                             .unwrap_or(true)
@@ -677,7 +686,7 @@ fn thread_section(
         .collect();
     section_page(
         theme,
-        page,
+        section.page(),
         ui::section(theme, title, None, None, ui::card(theme, rows)),
         include_header,
     )
