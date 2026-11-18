@@ -769,6 +769,8 @@ fn tooltip(theme: &ArtisanTheme, text: &str) -> Element {
         .style(Style::new().max_width(Length::Px(TOOLTIP_MAX_WIDTH)))
 }
 
+pub const LOADING_KEY: &str = "marketplace-loading";
+
 fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: bool) -> Element {
     use aqua_core::{DisplayItem, Rect, Role};
     use aqua_ui::element::Canvas;
@@ -815,6 +817,7 @@ fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: b
             items
         })
         .build()
+        .with_key(LOADING_KEY)
         .role(Role::ProgressIndicator)
         .aria_label("Loading")
 }

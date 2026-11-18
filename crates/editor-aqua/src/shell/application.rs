@@ -976,11 +976,13 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 "landing_expiry",
                 workspace.conversation.expire_landing(),
             );
-            refresh |= mark(
-                &mut causes,
-                "marketplace_animation",
-                workspace.marketplace.needs_animation(),
-            );
+            if workspace.marketplace.needs_animation() {
+                crate::shell::wheel::repaint(
+                    self.ui.ui_mut(),
+                    crate::marketplace::view::LOADING_KEY,
+                );
+                ctx.request_frame(id, FrameReason::ANIMATION);
+            }
         }
         if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes))
         {

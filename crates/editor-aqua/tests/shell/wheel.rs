@@ -245,3 +245,49 @@ fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
     let kept = editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
     assert_eq!(kept, rested);
 }
+
+#[test]
+fn repainting_a_keyed_loader_advances_it_without_touching_its_ancestors() {
+    use aqua_ui::element::{Box as UiBox, Canvas};
+    use std::{cell::Cell, rc::Rc};
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let paints = Rc::new(Cell::new(0_u32));
+    let counted = Rc::clone(&paints);
+    app.mount(move |_| {
+        UiBox::new()
+            .width(200.0)
+            .height(200.0)
+            .child(
+                UiBox::new()
+                    .child(
+                        Canvas::new()
+                            .width(50.0)
+                            .height(50.0)
+                            .on_paint(move |_| {
+                                counted.set(counted.get() + 1);
+                                Vec::new()
+                            })
+                            .build()
+                            .with_key("loader"),
+                    )
+                    .build(),
+            )
+            .build()
+            .with_key("page")
+    })
+    .unwrap();
+    app.set_viewport(200.0, 200.0, 1.0);
+    app.build_frame().unwrap();
+    app.tree_mut().emit_scene();
+    let before = paints.get();
+    let since = app.tree().content_version();
+    let layout = app.tree().layout_version();
+    assert!(editor_aqua::shell::wheel::repaint(&mut app, "loader"));
+    app.build_frame().unwrap();
+    app.tree_mut().emit_scene();
+    let loader = editor_aqua::shell::wheel::keyed_node(&app, "loader").unwrap();
+    assert_eq!(app.tree().changed_paint(since), vec![loader]);
+    assert_eq!(app.tree().layout_version(), layout);
+    assert!(paints.get() > before, "the loader paints its next frame");
+    assert!(!editor_aqua::shell::wheel::repaint(&mut app, "missing"));
+}

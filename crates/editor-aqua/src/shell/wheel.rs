@@ -55,6 +55,10 @@ pub fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key_hash(key))
 }
 
+pub fn repaint(ui: &mut UiApp, key: &str) -> bool {
+    keyed_node(ui, key).is_some_and(|node| ui.tree_mut().get_mut(node).is_some())
+}
+
 #[must_use]
 pub fn viewport_height(ui: &UiApp, key: &str) -> Option<f32> {
     keyed_node(ui, key)
