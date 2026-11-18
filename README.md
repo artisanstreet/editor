@@ -1,10 +1,10 @@
 <img src="assets/repo-banner/lwq50comgxqmien3t3345tdp.png" alt="Artisan" width="100%">
 
-**Artisan Editor by Artisan Street.** A native app for Windows, Mac and Linux that brings Codex, Claude Code and OpenCode together in one interface, using the subscriptions you already have.
+**Artisan Editor by Artisan Street.** A native Windows app that brings Codex, Claude Code and OpenCode together in one interface, using the subscriptions you already have. Forge, which runs the harnesses, installs on Linux, WSL and macOS through the `ae` command line. The Editor for macOS and Linux is not available yet.
 
 **Every harness, first class.** Switch harness mid-thread, or let agents direct each other. Claude can ask Codex for a review and hand the implementation to OpenCode.
 
-**One account, every machine.** Sign in with your Artisan account and every machine you enroll shares the same credentials, skills, MCP servers and global prompts. Adding a machine takes one click.
+**One account, every machine.** Sign in with your Artisan account and every machine you enroll shares the same skills, MCP servers and global prompt. Each machine keeps its own harness sign-ins and MCP server credentials. Adding a machine takes one click.
 
 **Anywhere you are.** Your machines stay reachable from anywhere in the world. Open any thread from your phone's browser, check on it, and steer it.
 
@@ -23,7 +23,7 @@
 ---
 
 #### About contributing
-We welcome you to open issues for bugs and issues, or feature requests. Pull requests are closed and we do not
+We welcome you to open issues for bugs and feature requests. Pull requests are closed and we do not
 accept them from anyone but Artisan Street staff. AI written or assisted issues are welcome. Staff: building, running
 and testing are described in [docs/development.md](docs/development.md).
 
