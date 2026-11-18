@@ -188,7 +188,12 @@ impl AttachmentTile {
             .nested(radius, CORNER_INSET)
             .on_activate(move |_| action())
             .build()
-            .style(Style::new().absolute_at(Some(CORNER_INSET), None, None, Some(CORNER_INSET)));
+            .style(Style::new().absolute_at(
+                Some(CORNER_INSET),
+                None,
+                None,
+                Some(CORNER_INSET),
+            ));
             layers = layers.child(retry);
         }
         if let Some(action) = self.remove {

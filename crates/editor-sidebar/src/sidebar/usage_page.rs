@@ -2,13 +2,6 @@ use super::{
     usage::{METER_SEGMENTS, checked_label, groups, lit_of, remaining_percent, reset_duration},
     usage_controller::UsagePage,
 };
-use editor_core::{Core, HostId, HostInstance};
-use editor_ui::{
-    engine::{engine_accent, engine_icon},
-    kit::{Button, ButtonTone, IconSize, Space, Spaced, TextRole, surface::band::Band},
-    page,
-    theme::{ArtisanTheme, Opacity},
-};
 use aqua_core::Size;
 use aqua_ui::{
     AlignItems, JustifyContent,
@@ -17,6 +10,13 @@ use aqua_ui::{
 };
 use artisan_api::{
     EngineId, EngineStatus, SignInState, SpendLine, Timestamp, UsageLimits, UsageSpend,
+};
+use editor_core::{Core, HostId, HostInstance};
+use editor_ui::{
+    engine::{engine_accent, engine_icon},
+    kit::{Button, ButtonTone, IconSize, Space, Spaced, TextRole, surface::band::Band},
+    page,
+    theme::{ArtisanTheme, Opacity},
 };
 use std::rc::Rc;
 
@@ -90,7 +90,9 @@ fn meter_bar(theme: ArtisanTheme, engine: EngineId, used_percent: f64) -> Elemen
         .height(METER_HEIGHT)
         .spaced(Space::S2)
         .style(Style::new().flex_shrink(0.0))
-        .children((0..METER_SEGMENTS).map(|index| segment(if index < lit { accent } else { track })))
+        .children(
+            (0..METER_SEGMENTS).map(|index| segment(if index < lit { accent } else { track })),
+        )
         .build()
 }
 
@@ -117,10 +119,11 @@ fn line(label: Element, rest: Vec<Element>) -> Element {
 }
 
 fn group(theme: ArtisanTheme, title: impl Into<String>) -> UiBox {
-    UiBox::new()
-        .layout("column")
-        .spaced(Space::S6)
-        .child(text(theme, title, theme.colors.text.to_reference_text_color()))
+    UiBox::new().layout("column").spaced(Space::S6).child(text(
+        theme,
+        title,
+        theme.colors.text.to_reference_text_color(),
+    ))
 }
 
 fn meters(
@@ -316,10 +319,9 @@ fn bands(theme: ArtisanTheme, blocks: Vec<Element>) -> Element {
         .layout("column")
         .width(Length::Pct(100.0))
         .children(
-            blocks
-                .into_iter()
-                .enumerate()
-                .map(|(index, block)| Band::of(index == 0, index == last).build(&theme, false, block)),
+            blocks.into_iter().enumerate().map(|(index, block)| {
+                Band::of(index == 0, index == last).build(&theme, false, block)
+            }),
         )
         .build()
 }
@@ -392,9 +394,15 @@ pub fn build(
                 .collect()
         };
         content = content.child(
-            page::section_shell(&theme, &host.name, host.status_line(), refresh, bands(theme, blocks))
-                .build()
-                .with_key(format!("usage-host-{}", host.id.0)),
+            page::section_shell(
+                &theme,
+                &host.name,
+                host.status_line(),
+                refresh,
+                bands(theme, blocks),
+            )
+            .build()
+            .with_key(format!("usage-host-{}", host.id.0)),
         );
         if let Some(error) = controller.error(&host.id, host.instance()) {
             content = content.child(page::error_text(&theme, error).build());

@@ -87,15 +87,25 @@ impl Entry {
                     }
                 }
                 Event::SubmitCode
-                    if matches!(view, model::View::SecondFactor { .. }) && !model::locked(&view) =>
+                    if matches!(view, model::View::SecondFactor { .. })
+                        && !model::locked(&view) =>
                 {
-                    let typed = self.controller.sign_in.second_factor.borrow().text().to_owned();
-                    core.account_mut().finish_sign_in(SecondFactor::parse(&typed));
+                    let typed = self
+                        .controller
+                        .sign_in
+                        .second_factor
+                        .borrow()
+                        .text()
+                        .to_owned();
+                    core.account_mut()
+                        .finish_sign_in(SecondFactor::parse(&typed));
                 }
                 Event::Provider(provider) if !model::locked(&view) => {
                     self.sign_in.problem = None;
                     if let Some(url) = core.account_mut().sign_in_with(provider, AUTH_ORIGIN) {
-                        effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url));
+                        effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenUrl(
+                            url,
+                        ));
                     }
                 }
                 Event::SubmitEmail | Event::SubmitCode | Event::Provider(_) => {}
@@ -115,7 +125,11 @@ impl Entry {
                 Event::Cancel if model::cancellable(&view) => {
                     self.sign_in.problem = None;
                     core.account_mut().dismiss_error();
-                    self.controller.sign_in.second_factor.borrow_mut().set_text("");
+                    self.controller
+                        .sign_in
+                        .second_factor
+                        .borrow_mut()
+                        .set_text("");
                 }
                 Event::Cancel => {}
             }
@@ -194,7 +208,14 @@ impl Entry {
                 }
                 _ => {}
             })
-            .element_with_notice_keyed(key, Mode::SingleLine, theme, placeholder, true, false)
+            .element_with_notice_keyed(
+                key,
+                Mode::SingleLine,
+                theme,
+                placeholder,
+                true,
+                false,
+            )
         };
         let email = editor(
             self.controller.sign_in.email.clone(),

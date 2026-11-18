@@ -68,9 +68,11 @@ pub fn stack(space: Space) -> UiBox {
 }
 
 pub fn actions() -> UiBox {
-    UiBox::new()
-        .spaced(Space::S8)
-        .style(Style::new().align(AlignItems::CENTER).justify(JustifyContent::END))
+    UiBox::new().spaced(Space::S8).style(
+        Style::new()
+            .align(AlignItems::CENTER)
+            .justify(JustifyContent::END),
+    )
 }
 
 pub fn fixed(child: Element) -> Element {

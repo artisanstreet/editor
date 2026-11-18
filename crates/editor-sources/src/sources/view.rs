@@ -1,13 +1,13 @@
 use super::{ContentText, selection_source, source_slice};
-use editor_core::RangeState;
-use editor_ui::kit::{Button, ButtonTone, Spaced, Space, Surface, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::{
     collection::List,
     element::{Box as UiBox, Element},
     style::{Length, Style},
 };
+use editor_core::RangeState;
+use editor_ui::kit::{Button, ButtonTone, Space, Spaced, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::{rc::Rc, sync::Arc};
 
 const VISIBLE_ROWS: f32 = 12.0;
@@ -138,9 +138,13 @@ pub fn content_view(
                 UiBox::new()
                     .spaced(Space::S4)
                     .child(
-                        button("source-prev", theme, ButtonTone::Quiet, "Previous", move || {
-                            previous(ContentAction::Previous)
-                        })
+                        button(
+                            "source-prev",
+                            theme,
+                            ButtonTone::Quiet,
+                            "Previous",
+                            move || previous(ContentAction::Previous),
+                        )
                         .disabled(start == 0)
                         .build(),
                     )
@@ -172,9 +176,13 @@ pub fn content_view(
                 .build(),
             )
             .child(
-                button("source-export", theme, ButtonTone::Neutral, "Export source", move || {
-                    export(ContentAction::Export)
-                })
+                button(
+                    "source-export",
+                    theme,
+                    ButtonTone::Neutral,
+                    "Export source",
+                    move || export(ContentAction::Export),
+                )
                 .disabled(view.busy())
                 .build(),
             )
