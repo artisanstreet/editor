@@ -17,6 +17,7 @@ anyhow.workspace = true
 artisan-api.workspace = true
 artisan-paths.workspace = true
 artisan-mentions.workspace = true
+diagnostics.workspace = true
 forge-content.workspace = true
 forge-isolation.workspace = true
 base64.workspace = true
