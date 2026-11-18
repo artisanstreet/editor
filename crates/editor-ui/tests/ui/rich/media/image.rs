@@ -50,7 +50,6 @@ fn retry_refetches_the_failed_file_and_releases_the_cached_image() {
     assert!(!state.retry(0));
     drop(state);
     fetcher.retain_resources(&[]);
-    loader.retain_owners(&[]);
     assert_eq!(assets.stats().images, 0);
 }
 

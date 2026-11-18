@@ -25,7 +25,7 @@ impl MarkdownPresenter {
         self.prepare_with(engine, source, command)
     }
 
-    pub(super) fn prepare_with(
+    fn prepare_with(
         &mut self,
         engine: &MarkdownEngine,
         source: &str,

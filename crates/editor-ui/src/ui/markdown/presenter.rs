@@ -123,7 +123,7 @@ pub struct StoredProjectedMarkdown {
     pub element: Element,
     pub selection_batch: Arc<SelectionSourceBatch>,
     pub geometry: ProjectedGeometry,
-    pub source_range: std::ops::Range<usize>,
+    #[cfg(test)]
     pub list_depth: usize,
     pub proof: super::stored::LeafProof,
 }
@@ -184,20 +184,20 @@ pub struct MediaServices {
 }
 
 pub struct HeatmapServices {
-    pub empty: Rc<dyn Fn(&str) -> Element>,
-    pub readout: Rc<dyn Fn(f32, &str, &str) -> Element>,
-    pub navigation_frame: Rc<dyn Fn(Element, GpuiHsla) -> Element>,
-    pub concentration: ConcentrationServices,
+    empty: Rc<dyn Fn(&str) -> Element>,
+    readout: Rc<dyn Fn(f32, &str, &str) -> Element>,
+    navigation_frame: Rc<dyn Fn(Element, GpuiHsla) -> Element>,
+    concentration: ConcentrationServices,
 }
 
 pub struct ConcentrationServices {
-    pub frame: Rc<dyn Fn(Element, &str, &str) -> Element>,
-    pub plot_label: Rc<dyn Fn(f32, f32, &str, GpuiHsla) -> Element>,
-    pub readout: Rc<dyn Fn(f32, &str, &str, &str, GpuiHsla) -> Element>,
+    frame: Rc<dyn Fn(Element, &str, &str) -> Element>,
+    plot_label: Rc<dyn Fn(f32, f32, &str, GpuiHsla) -> Element>,
+    readout: Rc<dyn Fn(f32, &str, &str, &str, GpuiHsla) -> Element>,
 }
 
 impl ConcentrationServices {
-    pub fn new(theme: ArtisanTheme) -> Self {
+    fn new(theme: ArtisanTheme) -> Self {
         Self {
             frame: Rc::new(move |plot, y, x| {
                 charts::frame::concentration_frame(&theme, plot, y, x)

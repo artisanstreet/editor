@@ -20,14 +20,14 @@ pub enum BadgeVariant {
     Keycap,
 }
 
-pub struct Badge {
+pub(crate) struct Badge {
     theme: ArtisanTheme,
     label: String,
     variant: BadgeVariant,
 }
 
 impl Badge {
-    pub fn new(theme: ArtisanTheme, label: impl Into<String>) -> Self {
+    pub(crate) fn new(theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {
             theme,
             label: label.into(),
@@ -36,12 +36,12 @@ impl Badge {
     }
 
     #[must_use]
-    pub const fn variant(mut self, variant: BadgeVariant) -> Self {
+    pub(crate) const fn variant(mut self, variant: BadgeVariant) -> Self {
         self.variant = variant;
         self
     }
 
-    pub fn build(self) -> Element {
+    pub(crate) fn build(self) -> Element {
         match self.variant {
             BadgeVariant::Pill => pill(&self.theme, self.label),
             BadgeVariant::Keycap => keycap(&self.theme, self.label),

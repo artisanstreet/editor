@@ -63,7 +63,7 @@ impl MediaFrame {
         }
     }
 
-    pub fn attachment(id: impl Into<Key>, theme: ArtisanTheme, content: Element) -> Self {
+    pub(crate) fn attachment(id: impl Into<Key>, theme: ArtisanTheme, content: Element) -> Self {
         Self {
             size: FrameSize::Attachment,
             id: Some(id.into()),
@@ -131,7 +131,7 @@ impl MediaFrame {
         self
     }
 
-    pub const fn error(mut self, error: bool) -> Self {
+    pub(crate) const fn error(mut self, error: bool) -> Self {
         self.error = error;
         self
     }
@@ -141,11 +141,11 @@ impl MediaFrame {
         self
     }
 
-    pub fn thumb_radius() -> f32 {
+    pub(crate) fn thumb_radius() -> f32 {
         THUMB.radius_px()
     }
 
-    pub fn thumb_content_style() -> Style {
+    pub(crate) fn thumb_content_style() -> Style {
         Style::new().radius(Length::Px(concentric(THUMB.radius_px(), EDGE)))
     }
 

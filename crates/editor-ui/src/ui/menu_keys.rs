@@ -1,7 +1,7 @@
 use aqua::UiApp;
 use aqua_core::{InputEvent, Key, NamedKey, NodeId};
 
-pub const POPOVER_MENU: &str = "popover-menu";
+pub(crate) const POPOVER_MENU: &str = "popover-menu";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {

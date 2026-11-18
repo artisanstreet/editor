@@ -2,7 +2,7 @@ use std::time::Duration;
 
 pub const DROPDOWN_OPEN: Duration = Duration::from_millis(250);
 pub const DROPDOWN_CLOSE: Duration = Duration::from_millis(200);
-pub const DROPDOWN_PRE_SCALE: f32 = 0.97;
+pub(crate) const DROPDOWN_PRE_SCALE: f32 = 0.97;
 const HIDDEN_OFFSET: f32 = 8.0;
 #[must_use]
 pub fn smooth_out(progress: f32) -> f32 {
@@ -11,7 +11,7 @@ pub fn smooth_out(progress: f32) -> f32 {
 }
 
 #[must_use]
-pub fn eased(phase: MenuPhase, progress: f32) -> f32 {
+pub(crate) fn eased(phase: MenuPhase, progress: f32) -> f32 {
     let curve = match phase {
         MenuPhase::Closing => super::motion::MotionCurve::EaseInOut,
         MenuPhase::Hidden | MenuPhase::Opening | MenuPhase::Open => {
@@ -22,7 +22,7 @@ pub fn eased(phase: MenuPhase, progress: f32) -> f32 {
 }
 
 #[must_use]
-pub const fn travel_scale(phase: MenuPhase) -> f32 {
+pub(crate) const fn travel_scale(phase: MenuPhase) -> f32 {
     match phase {
         MenuPhase::Closing => DROPDOWN_PRE_SCALE,
         MenuPhase::Hidden | MenuPhase::Opening | MenuPhase::Open => 1.0,
@@ -65,15 +65,15 @@ impl Default for MenuMotion {
 }
 
 impl MenuMotion {
-    pub const fn frame(self) -> (f32, f32) {
+    pub(crate) const fn frame(self) -> (f32, f32) {
         (self.current_opacity, self.current_offset)
     }
     #[must_use]
-    pub const fn phase(self) -> MenuPhase {
+    pub(crate) const fn phase(self) -> MenuPhase {
         self.phase
     }
     #[must_use]
-    pub const fn transition(self) -> Option<(f32, f32, f32, f32, u64)> {
+    pub(crate) const fn transition(self) -> Option<(f32, f32, f32, f32, u64)> {
         match self.phase {
             MenuPhase::Opening | MenuPhase::Closing => Some((
                 self.from_opacity,
@@ -85,7 +85,7 @@ impl MenuMotion {
             MenuPhase::Hidden | MenuPhase::Open => None,
         }
     }
-    pub const fn begin_open(&mut self) -> u64 {
+    pub(crate) const fn begin_open(&mut self) -> u64 {
         self.from_opacity = self.current_opacity;
         self.from_offset = self.current_offset;
         self.to_opacity = 1.0;
@@ -94,7 +94,7 @@ impl MenuMotion {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
-    pub const fn begin_close(&mut self) -> u64 {
+    pub(crate) const fn begin_close(&mut self) -> u64 {
         self.from_opacity = self.current_opacity;
         self.from_offset = self.current_offset;
         self.to_opacity = 0.0;
@@ -104,7 +104,7 @@ impl MenuMotion {
         self.generation
     }
 
-    pub fn apply_progress(&mut self, generation: u64, progress: f32) {
+    pub(crate) fn apply_progress(&mut self, generation: u64, progress: f32) {
         if generation != self.generation {
             return;
         }
@@ -114,7 +114,7 @@ impl MenuMotion {
         self.current_offset =
             (self.to_offset - self.from_offset).mul_add(progress, self.from_offset);
     }
-    pub fn finish_open(&mut self, generation: u64) -> bool {
+    pub(crate) fn finish_open(&mut self, generation: u64) -> bool {
         if self.phase != MenuPhase::Opening || generation != self.generation {
             return false;
         }
@@ -123,7 +123,7 @@ impl MenuMotion {
         self.phase = MenuPhase::Open;
         true
     }
-    pub fn finish_close(&mut self, generation: u64) -> bool {
+    pub(crate) fn finish_close(&mut self, generation: u64) -> bool {
         if self.phase != MenuPhase::Closing || generation != self.generation {
             return false;
         }
@@ -132,7 +132,7 @@ impl MenuMotion {
         self.phase = MenuPhase::Hidden;
         true
     }
-    pub fn hide(&mut self) {
+    pub(crate) fn hide(&mut self) {
         *self = Self {
             generation: self.generation.wrapping_add(1),
             ..Self::default()

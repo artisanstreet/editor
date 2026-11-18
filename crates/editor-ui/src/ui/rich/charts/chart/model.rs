@@ -239,7 +239,7 @@ impl Model {
         }
     }
 
-    pub(crate) fn aligned(&self, index: usize) -> Vec<Option<f64>> {
+    fn aligned(&self, index: usize) -> Vec<Option<f64>> {
         let Some(series) = self.series.get(index) else {
             return vec![None; self.xs.len()];
         };

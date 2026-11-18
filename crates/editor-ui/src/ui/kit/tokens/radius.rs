@@ -9,10 +9,10 @@ pub enum Inset {
 }
 
 impl Inset {
-    pub const ALL: [Self; 3] = [Self::Edge, Self::Menu, Self::Frame];
+    const ALL: [Self; 3] = [Self::Edge, Self::Menu, Self::Frame];
 
     #[must_use]
-    pub fn of(px: f32) -> Option<Self> {
+    pub(crate) fn of(px: f32) -> Option<Self> {
         Self::ALL.into_iter().find(|inset| inset.px() == px)
     }
 
@@ -105,7 +105,7 @@ pub enum Corners {
 
 impl Corners {
     #[must_use]
-    pub fn radii(self, px: f32) -> CornerRadii {
+    fn radii(self, px: f32) -> CornerRadii {
         let none = CornerRadii::default();
         match self {
             Self::Top => CornerRadii {

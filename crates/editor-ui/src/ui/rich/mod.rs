@@ -23,7 +23,7 @@ pub(crate) enum Prepared {
 }
 
 impl Prepared {
-    pub(crate) fn resident_bytes(&self) -> usize {
+    fn resident_bytes(&self) -> usize {
         match self {
             Self::Chart(value) => value.resident_bytes(),
             Self::Callout(value) => value.resident_bytes(),

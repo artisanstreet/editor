@@ -29,9 +29,9 @@ pub enum Geometry {
 }
 
 pub struct LoadedModel {
-    pub geometry: Geometry,
-    pub triangles: usize,
-    pub format: Format,
+    pub(crate) geometry: Geometry,
+    pub(crate) triangles: usize,
+    pub(crate) format: Format,
     resident_bytes: usize,
 }
 
@@ -103,7 +103,7 @@ impl ModelAssets {
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
         self.loads.bind(ctx, window);
     }
-    pub fn request(
+    pub(crate) fn request(
         &self,
         fetcher: Option<&MediaFetcher>,
         source: &MediaSource,

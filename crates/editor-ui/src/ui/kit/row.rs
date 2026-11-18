@@ -49,7 +49,7 @@ impl Row {
     }
 
     #[must_use]
-    pub const fn title(self) -> TextRole {
+    const fn title(self) -> TextRole {
         match self {
             Self::Heading | Self::ListHeading => TextRole::Caption,
             _ => TextRole::Label,
@@ -75,7 +75,7 @@ impl Row {
     }
 
     #[must_use]
-    pub const fn wraps(self) -> bool {
+    const fn wraps(self) -> bool {
         matches!(self, Self::FormRow)
     }
 
@@ -247,7 +247,13 @@ impl RowItem {
         self
     }
 
-    fn text(theme: &ArtisanTheme, words: String, role: TextRole, color: Oklch, wraps: bool) -> Element {
+    fn text(
+        theme: &ArtisanTheme,
+        words: String,
+        role: TextRole,
+        color: Oklch,
+        wraps: bool,
+    ) -> Element {
         let text = Text::new(words)
             .text_style(role.style(theme))
             .gpui_source_color(color.to_reference_text_color());

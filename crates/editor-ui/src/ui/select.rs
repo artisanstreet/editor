@@ -2,19 +2,19 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-pub const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
+const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
     Some(height) => height,
     None => 0.0,
 };
-pub const MENU_MIN_WIDTH: f32 = 160.0;
+const MENU_MIN_WIDTH: f32 = 160.0;
 const MENU: super::kit::Surface = super::kit::Surface::Menu;
 const FIELD: super::kit::Surface = super::kit::Surface::Field;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectEntry<V> {
-    pub value: V,
-    pub label: String,
-    pub disabled: bool,
+    value: V,
+    label: String,
+    disabled: bool,
 }
 
 impl<V> SelectEntry<V> {
@@ -30,10 +30,10 @@ impl<V> SelectEntry<V> {
 #[derive(Clone, Debug)]
 pub struct SelectState<V> {
     pub open: bool,
-    pub shown: bool,
-    pub motion: MenuMotion,
+    shown: bool,
+    motion: MenuMotion,
     pub highlighted: Option<V>,
-    pub keyed: bool,
+    keyed: bool,
     query: String,
     typed_at: Instant,
     scroll: f32,
@@ -41,9 +41,9 @@ pub struct SelectState<V> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectKeyResult<V> {
-    pub handled: bool,
-    pub commit: Option<V>,
-    pub reveal: Option<usize>,
+    handled: bool,
+    commit: Option<V>,
+    reveal: Option<usize>,
 }
 
 impl<V: Clone + Eq> SelectState<V> {
@@ -60,7 +60,7 @@ impl<V: Clone + Eq> SelectState<V> {
         }
     }
 
-    pub fn reconcile(&mut self, entries: &[SelectEntry<V>], selected: Option<&V>, disabled: bool) {
+    fn reconcile(&mut self, entries: &[SelectEntry<V>], selected: Option<&V>, disabled: bool) {
         if !self.open
             || !self.highlighted.as_ref().is_some_and(|value| {
                 entries
@@ -101,14 +101,14 @@ impl<V: Clone + Eq> SelectState<V> {
         Some(generation)
     }
 
-    pub fn close_now(&mut self) {
+    fn close_now(&mut self) {
         self.open = false;
         self.shown = false;
         self.keyed = false;
         self.motion.hide();
     }
 
-    pub fn key(&mut self, key: &str, entries: &[SelectEntry<V>]) -> SelectKeyResult<V> {
+    fn key(&mut self, key: &str, entries: &[SelectEntry<V>]) -> SelectKeyResult<V> {
         let none = || SelectKeyResult {
             handled: false,
             commit: None,
@@ -178,7 +178,7 @@ impl<V: Clone + Eq> SelectState<V> {
         self.highlight(entries, enabled[target])
     }
 
-    pub fn type_text(
+    fn type_text(
         &mut self,
         text: &str,
         now: Instant,
@@ -524,7 +524,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         (self.build(), options)
     }
 
-    pub fn build(self) -> Element {
+    fn build(self) -> Element {
         use aqua_ui::element::Scroll;
         let theme = self.theme;
         let (keyed, highlighted, offset) = {

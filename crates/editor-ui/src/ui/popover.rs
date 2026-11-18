@@ -7,7 +7,7 @@ use super::{kit::Surface, theme::ArtisanTheme};
 
 const VIEWPORT_MARGIN: f32 = 16.0;
 
-pub struct PopoverPanel {
+struct PopoverPanel {
     id: Key,
     theme: ArtisanTheme,
     content: Element,
@@ -16,7 +16,7 @@ pub struct PopoverPanel {
 }
 
 impl PopoverPanel {
-    pub fn new(
+    fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         content: Element,
@@ -32,7 +32,7 @@ impl PopoverPanel {
         }
     }
 
-    pub fn build(self) -> Element {
+    fn build(self) -> Element {
         let width = Length::Px((self.viewport_width - VIEWPORT_MARGIN).max(1.0));
         let height = Length::Px(
             (self.viewport_height - VIEWPORT_MARGIN - 2.0 * Surface::Menu.padding_px()).max(1.0),
@@ -117,11 +117,11 @@ pub struct PickerPopupHost {
 }
 
 impl PickerPopupHost {
-    pub fn root(&self, app: &aqua::UiApp) -> Option<aqua_core::NodeId> {
+    fn root(&self, app: &aqua::UiApp) -> Option<aqua_core::NodeId> {
         app.host().popup_root(self.overlay)
     }
 
-    pub fn open_above(
+    fn open_above(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
         content: Element,
@@ -144,16 +144,16 @@ impl PickerPopupHost {
         Ok(Self { overlay })
     }
 
-    pub fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
+    fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
         app.refresh_popup(self.overlay, content)
             .map_err(|error| error.to_string())
     }
 
-    pub fn close(&self, app: &mut aqua::UiApp) {
+    fn close(&self, app: &mut aqua::UiApp) {
         app.close_popup(self.overlay);
     }
 
-    pub fn is_open(&self, app: &aqua::UiApp) -> bool {
+    fn is_open(&self, app: &aqua::UiApp) -> bool {
         app.host().is_open(self.overlay)
     }
 }
@@ -178,7 +178,7 @@ pub struct AnimatedPickerHost {
 }
 
 impl AnimatedPickerHost {
-    pub fn set_reduced_motion(&mut self, reduced: bool) {
+    pub(crate) fn set_reduced_motion(&mut self, reduced: bool) {
         self.open_duration = if reduced {
             std::time::Duration::ZERO
         } else {
@@ -191,7 +191,7 @@ impl AnimatedPickerHost {
         };
     }
 
-    pub fn overlay(&self) -> aqua_ui::overlay::OverlayId {
+    pub(crate) fn overlay(&self) -> aqua_ui::overlay::OverlayId {
         self.popup.overlay
     }
 

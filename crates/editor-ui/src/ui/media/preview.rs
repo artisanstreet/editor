@@ -122,7 +122,7 @@ pub struct Preview {
 }
 
 impl Preview {
-    pub fn new(
+    fn new(
         generation: u64,
         host: HostId,
         instance: HostInstance,

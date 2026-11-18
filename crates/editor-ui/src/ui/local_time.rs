@@ -2,7 +2,7 @@ use crate::ui::locale::{self, Formats};
 use artisan_api::Timestamp;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 
-pub fn occasion(at: Timestamp) -> String {
+pub(crate) fn occasion(at: Timestamp) -> String {
     let Some(local) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
         return String::new();
     };
@@ -11,7 +11,7 @@ pub fn occasion(at: Timestamp) -> String {
     })
 }
 
-pub fn occasion_on(formats: &Formats, at: NaiveDateTime, today: NaiveDate) -> String {
+pub(crate) fn occasion_on(formats: &Formats, at: NaiveDateTime, today: NaiveDate) -> String {
     let time = formats.clock(at);
     match (at.date() - today).num_days() {
         0 => format!("today at {time}"),

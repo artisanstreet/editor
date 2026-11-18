@@ -40,7 +40,7 @@ impl AnnotatedState {
         }
     }
 
-    pub(crate) fn update_model(&mut self, model: &AnnotatedCode) -> bool {
+    fn update_model(&mut self, model: &AnnotatedCode) -> bool {
         if Arc::ptr_eq(&self.model, &model.0) {
             return false;
         }

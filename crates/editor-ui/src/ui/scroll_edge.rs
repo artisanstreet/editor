@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-pub const SCROLL_EDGE_HEIGHT: f32 = 24.0;
+const SCROLL_EDGE_HEIGHT: f32 = 24.0;
 const SCROLL_EDGE_RAMP: f32 = 16.0;
 const SETTLED: f32 = 0.01;
 
@@ -24,7 +24,7 @@ pub enum EdgePaint {
 }
 
 #[must_use]
-pub fn target(hidden: f32) -> f32 {
+fn target(hidden: f32) -> f32 {
     (hidden / SCROLL_EDGE_RAMP).clamp(0.0, 1.0)
 }
 
@@ -286,7 +286,7 @@ pub struct Hidden {
 }
 
 #[must_use]
-pub fn hidden_in(ui: &aqua::UiApp, scroller: NodeId) -> Option<Hidden> {
+fn hidden_in(ui: &aqua::UiApp, scroller: NodeId) -> Option<Hidden> {
     let offset = ui.tree().scroll_offset(scroller)?;
     let viewport = ui.tree().rect(scroller)?;
     let content = ui.tree().content_size(scroller)?;
@@ -327,7 +327,7 @@ impl EdgeBands {
     }
 
     #[must_use]
-    pub fn bands(&self) -> [Element; 2] {
+    pub(crate) fn bands(&self) -> [Element; 2] {
         [
             self.edges.band(self.top, Edge::Top, self.color),
             self.edges.band(self.bottom, Edge::Bottom, self.color),

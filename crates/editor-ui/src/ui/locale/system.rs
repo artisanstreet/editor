@@ -8,7 +8,8 @@ pub struct SystemLocales {
 }
 
 impl SystemLocales {
-    pub fn from_environment(variable: impl Fn(&str) -> Option<String>) -> Self {
+    #[cfg(any(not(windows), test))]
+    pub(crate) fn from_environment(variable: impl Fn(&str) -> Option<String>) -> Self {
         let category = |name: &str| {
             ["LC_ALL", name, "LANG"]
                 .into_iter()
@@ -22,7 +23,8 @@ impl SystemLocales {
         }
     }
 
-    pub fn uniform(locale: Locale) -> Self {
+    #[cfg(any(windows, test))]
+    pub(crate) fn uniform(locale: Locale) -> Self {
         Self {
             numbers: locale.clone(),
             time: locale,
@@ -30,6 +32,7 @@ impl SystemLocales {
     }
 }
 
+#[cfg(any(not(windows), test))]
 pub fn posix_locale(value: &str) -> Option<Locale> {
     let name = value
         .split(['.', '@'])

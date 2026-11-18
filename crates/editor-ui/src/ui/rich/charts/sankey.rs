@@ -77,22 +77,22 @@ pub(crate) fn prepare(value: &serde_json::Value) -> Result<Graph, String> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Link {
-    pub(crate) from: usize,
-    pub(crate) to: usize,
-    pub(crate) value: f64,
+    from: usize,
+    to: usize,
+    value: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Graph {
-    pub(crate) labels: Vec<String>,
-    pub(crate) links: Vec<Link>,
-    pub(crate) ranks: Vec<usize>,
-    pub(crate) incoming: Vec<Vec<usize>>,
-    pub(crate) outgoing: Vec<Vec<usize>>,
+    labels: Vec<String>,
+    links: Vec<Link>,
+    ranks: Vec<usize>,
+    incoming: Vec<Vec<usize>>,
+    outgoing: Vec<Vec<usize>>,
     inflows: Vec<f64>,
     outflows: Vec<f64>,
     rank_count: usize,
-    pub(crate) tallest: usize,
+    tallest: usize,
 }
 
 impl Graph {
@@ -109,7 +109,7 @@ impl Graph {
             + retained_vec(&self.inflows)
             + retained_vec(&self.outflows)
     }
-    pub(crate) fn from_spec(spec: &SankeySpec) -> Self {
+    fn from_spec(spec: &SankeySpec) -> Self {
         let mut labels = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut node = |id: &str, label: Option<&str>, labels: &mut Vec<String>| -> usize {
@@ -170,19 +170,19 @@ impl Graph {
         }
     }
 
-    pub(crate) fn inflow(&self, node: usize) -> f64 {
+    fn inflow(&self, node: usize) -> f64 {
         self.inflows[node]
     }
 
-    pub(crate) fn outflow(&self, node: usize) -> f64 {
+    fn outflow(&self, node: usize) -> f64 {
         self.outflows[node]
     }
 
-    pub(crate) fn throughput(&self, node: usize) -> f64 {
+    fn throughput(&self, node: usize) -> f64 {
         self.inflow(node).max(self.outflow(node))
     }
 
-    pub(crate) const fn rank_count(&self) -> usize {
+    const fn rank_count(&self) -> usize {
         self.rank_count
     }
 }
@@ -254,37 +254,37 @@ fn ranks(count: usize, links: &[Link]) -> Vec<usize> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NodeBox {
-    pub(crate) rank: usize,
-    pub(crate) y0: f32,
-    pub(crate) y1: f32,
+    rank: usize,
+    y0: f32,
+    y1: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Band {
-    pub(crate) source: (f32, f32),
-    pub(crate) target: (f32, f32),
+    source: (f32, f32),
+    target: (f32, f32),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Layout {
-    pub(crate) ranks: usize,
-    pub(crate) nodes: Vec<NodeBox>,
-    pub(crate) bands: Vec<Band>,
-    pub(crate) columns: Vec<Vec<usize>>,
-    pub(crate) hit_groups: Vec<LinkGroup>,
+    ranks: usize,
+    nodes: Vec<NodeBox>,
+    bands: Vec<Band>,
+    columns: Vec<Vec<usize>>,
+    hit_groups: Vec<LinkGroup>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct LinkGroup {
-    pub(crate) from: usize,
-    pub(crate) to: usize,
-    pub(crate) links: Vec<usize>,
-    pub(crate) y0: f32,
-    pub(crate) y1: f32,
+    from: usize,
+    to: usize,
+    links: Vec<usize>,
+    y0: f32,
+    y1: f32,
 }
 
 impl Layout {
-    pub(crate) fn column(&self, rank: usize) -> f32 {
+    fn column(&self, rank: usize) -> f32 {
         if self.ranks < 2 {
             0.5
         } else {

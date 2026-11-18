@@ -41,12 +41,12 @@ impl Band {
     }
 
     #[must_use]
-    pub const fn opens(self) -> bool {
+    const fn opens(self) -> bool {
         matches!(self, Self::Only | Self::First)
     }
 
     #[must_use]
-    pub const fn closes(self) -> bool {
+    const fn closes(self) -> bool {
         matches!(self, Self::Only | Self::Last)
     }
 

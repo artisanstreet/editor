@@ -16,10 +16,10 @@ pub struct SrgbComponents {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Oklch {
-    pub(crate) l: f32,
-    pub(crate) c: f32,
-    pub(crate) h: f32,
-    pub(crate) a: f32,
+    l: f32,
+    c: f32,
+    h: f32,
+    a: f32,
     paint: Option<([f32; 4], palette::Hsla)>,
 }
 
@@ -206,7 +206,7 @@ impl Opacity {
 
 impl Oklch {
     #[must_use]
-    pub const fn new(l: f32, c: f32, h: f32) -> Self {
+    pub(crate) const fn new(l: f32, c: f32, h: f32) -> Self {
         Self {
             l,
             c,
@@ -253,10 +253,6 @@ impl Oklch {
         .with_alpha((to.a - self.a).mul_add(t, self.a))
     }
     #[must_use]
-    pub const fn alpha(self) -> f32 {
-        self.a
-    }
-    #[must_use]
     pub fn to_srgb(self) -> SrgbComponents {
         let [r, g, b, a] = color::AlphaColor::<color::Oklch>::new([self.l, self.c, self.h, self.a])
             .convert::<color::Srgb>()
@@ -295,7 +291,7 @@ impl Oklch {
         clippy::float_cmp,
         reason = "cache validity requires the exact source components"
     )]
-    pub fn to_palette_paint(self) -> palette::Hsla {
+    fn to_palette_paint(self) -> palette::Hsla {
         use palette::IntoColor;
         match self.paint {
             Some((source, paint)) if source == [self.l, self.c, self.h, self.a] => paint,
@@ -370,12 +366,12 @@ pub struct BannerColors {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SyntaxColors {
-    pub comment: Oklch,
-    pub string: Oklch,
-    pub number: Oklch,
-    pub keyword: Oklch,
-    pub r#type: Oklch,
-    pub function: Oklch,
+    pub(crate) comment: Oklch,
+    pub(crate) string: Oklch,
+    pub(crate) number: Oklch,
+    pub(crate) keyword: Oklch,
+    pub(crate) r#type: Oklch,
+    pub(crate) function: Oklch,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnsiColors(pub [Oklch; 16]);
@@ -804,7 +800,7 @@ pub enum FontSet {
 }
 
 impl FontSet {
-    pub const ALL: [Self; 2] = [Self::System, Self::Spline];
+    const ALL: [Self; 2] = [Self::System, Self::Spline];
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
@@ -813,7 +809,7 @@ impl FontSet {
         }
     }
     #[must_use]
-    pub fn from_key(key: Option<&str>) -> Self {
+    pub(crate) fn from_key(key: Option<&str>) -> Self {
         Self::ALL
             .into_iter()
             .find(|fonts| Some(fonts.key()) == key)
@@ -844,36 +840,36 @@ pub struct FontRole {
 pub struct ProseTypography;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProseHeading {
-    pub size_px: f32,
-    pub line_px: f32,
-    pub tracking_px: f32,
-    pub margin_top_px: f32,
-    pub margin_bottom_px: f32,
+    pub(crate) size_px: f32,
+    pub(crate) line_px: f32,
+    pub(crate) tracking_px: f32,
+    pub(crate) margin_top_px: f32,
+    pub(crate) margin_bottom_px: f32,
 }
 
 impl ProseTypography {
-    pub const BODY_SIZE_PX: f32 = 16.0;
-    pub const BODY_LINE_PX: f32 = 28.0;
-    pub const BODY_WEIGHT: FontWeight = FontWeight(410);
-    pub const TRACKING_EM: f32 = -0.04;
-    pub const HEADING_WEIGHT: FontWeight = FontWeight(630);
+    pub(crate) const BODY_SIZE_PX: f32 = 16.0;
+    pub(crate) const BODY_LINE_PX: f32 = 28.0;
+    pub(crate) const BODY_WEIGHT: FontWeight = FontWeight(410);
+    const TRACKING_EM: f32 = -0.04;
+    pub(crate) const HEADING_WEIGHT: FontWeight = FontWeight(630);
     pub const STRONG_WEIGHT: FontWeight = FontWeight(600);
-    pub const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
-    pub const CODE_SIZE_PX: f32 = 14.0;
-    pub const CODE_LINE_PX: f32 = 24.0;
-    pub const PARAGRAPH_MARGIN_PX: f32 = 20.0;
-    pub const FENCE_MARGIN_PX: f32 = 24.0;
-    pub const LIST_MARGIN_PX: f32 = 20.0;
-    pub const LIST_INDENT_PX: f32 = 26.0;
-    pub const ITEM_GAP_PX: f32 = 8.0;
-    pub const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
-    pub const NESTED_LIST_MARGIN_PX: f32 = 12.0;
-    pub const TABLE_SIZE_PX: f32 = 14.0;
-    pub const TABLE_LINE_PX: f32 = 24.0;
-    pub const TABLE_MARGIN_PX: f32 = 28.0;
-    pub const TABLE_CELL_PAD_PX: f32 = 8.0;
+    pub(crate) const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
+    pub(crate) const CODE_SIZE_PX: f32 = 14.0;
+    pub(crate) const CODE_LINE_PX: f32 = 24.0;
+    pub(crate) const PARAGRAPH_MARGIN_PX: f32 = 20.0;
+    pub(crate) const FENCE_MARGIN_PX: f32 = 24.0;
+    pub(crate) const LIST_MARGIN_PX: f32 = 20.0;
+    pub(crate) const LIST_INDENT_PX: f32 = 26.0;
+    pub(crate) const ITEM_GAP_PX: f32 = 8.0;
+    pub(crate) const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
+    pub(crate) const NESTED_LIST_MARGIN_PX: f32 = 12.0;
+    pub(crate) const TABLE_SIZE_PX: f32 = 14.0;
+    pub(crate) const TABLE_LINE_PX: f32 = 24.0;
+    pub(crate) const TABLE_MARGIN_PX: f32 = 28.0;
+    pub(crate) const TABLE_CELL_PAD_PX: f32 = 8.0;
     #[must_use]
-    pub const fn heading(level: u8) -> ProseHeading {
+    pub(crate) const fn heading(level: u8) -> ProseHeading {
         match level {
             1 => ProseHeading {
                 size_px: 30.0,
@@ -910,9 +906,9 @@ impl ProseTypography {
 pub struct SpacingTokens;
 
 impl SpacingTokens {
-    pub const BASE_PX: f32 = 4.0;
+    const BASE_PX: f32 = 4.0;
     #[must_use]
-    pub fn steps(self, count: f32) -> Pixels {
+    pub(crate) fn steps(self, count: f32) -> Pixels {
         px(Self::BASE_PX * count)
     }
 }
@@ -938,7 +934,7 @@ pub struct RadiusTokens;
 
 impl RadiusTokens {
     #[must_use]
-    pub const fn value(step: RadiusStep) -> Pixels {
+    pub(crate) const fn value(step: RadiusStep) -> Pixels {
         match step {
             RadiusStep::X3s => px(1.0),
             RadiusStep::X2s => px(2.0),
@@ -959,11 +955,11 @@ impl RadiusTokens {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowLayer {
-    pub color: Oklch,
-    pub offset_x: Pixels,
-    pub offset_y: Pixels,
-    pub blur_radius: Pixels,
-    pub spread_radius: Pixels,
+    pub(crate) color: Oklch,
+    pub(crate) offset_x: Pixels,
+    pub(crate) offset_y: Pixels,
+    pub(crate) blur_radius: Pixels,
+    pub(crate) spread_radius: Pixels,
 }
 
 impl From<ShadowLayer> for aqua::ShadowLayer {
@@ -994,42 +990,42 @@ impl From<ShadowLayer> for aqua_ui::style::GpuiShadowLayer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElevationTokens {
-    pub hairline: ShadowLayer,
-    pub raised: [ShadowLayer; 3],
-    pub floating: [ShadowLayer; 2],
-    pub overlay: [ShadowLayer; 2],
+    pub(crate) hairline: ShadowLayer,
+    pub(crate) raised: [ShadowLayer; 3],
+    pub(crate) floating: [ShadowLayer; 2],
+    pub(crate) overlay: [ShadowLayer; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cast {
-    pub dy: f32,
-    pub blur: f32,
-    pub spread: f32,
-    pub alpha: f32,
+    pub(crate) dy: f32,
+    pub(crate) blur: f32,
+    pub(crate) spread: f32,
+    pub(crate) alpha: f32,
 }
 
 impl Cast {
-    pub const KEY: [Self; 2] = [
+    pub(crate) const KEY: [Self; 2] = [
         Self::new(1.5, 3.5, -1.0, 0.06),
         Self::new(4.0, 9.0, -1.0, 0.06),
     ];
-    pub const REST: [Self; 2] = [
+    pub(crate) const REST: [Self; 2] = [
         Self::new(1.5, 4.0, -1.0, 0.05),
         Self::new(5.0, 12.0, -2.0, 0.06),
     ];
-    pub const FLOAT: [Self; 2] = [
+    const FLOAT: [Self; 2] = [
         Self::new(2.0, 5.0, -1.0, 0.05),
         Self::new(8.0, 20.0, -4.0, 0.07),
     ];
-    pub const OVERLAY: [Self; 2] = [
+    pub(crate) const OVERLAY: [Self; 2] = [
         Self::new(2.0, 6.0, -1.0, 0.05),
         Self::new(14.0, 32.0, -6.0, 0.08),
     ];
-    pub const PRESS: [Self; 2] = [
+    pub(crate) const PRESS: [Self; 2] = [
         Self::new(1.0, 2.5, -0.5, 0.10),
         Self::new(3.0, 6.0, -1.0, 0.08),
     ];
-    pub const LIFT: [Self; 2] = [
+    pub(crate) const LIFT: [Self; 2] = [
         Self::new(1.0, 2.5, -0.5, 0.10),
         Self::new(4.0, 10.0, -2.0, 0.12),
     ];
@@ -1038,7 +1034,7 @@ impl Cast {
     const ALPHA_CAP: f32 = 0.6;
 
     #[must_use]
-    pub const fn new(dy: f32, blur: f32, spread: f32, alpha: f32) -> Self {
+    const fn new(dy: f32, blur: f32, spread: f32, alpha: f32) -> Self {
         Self {
             dy,
             blur,
@@ -1048,7 +1044,7 @@ impl Cast {
     }
 
     #[must_use]
-    pub fn alpha_in(self, mode: ThemeMode) -> f32 {
+    pub(crate) fn alpha_in(self, mode: ThemeMode) -> f32 {
         match mode {
             ThemeMode::Light => self.alpha,
             ThemeMode::Dark => (self.alpha * Self::DARK_WEIGHT).min(Self::ALPHA_CAP),
@@ -1058,7 +1054,7 @@ impl Cast {
 
 impl ElevationTokens {
     #[must_use]
-    pub const fn drops(&self, elevation: Elevation) -> &[ShadowLayer] {
+    pub(crate) const fn drops(&self, elevation: Elevation) -> &[ShadowLayer] {
         match elevation {
             Elevation::Raised => &self.raised,
             Elevation::Floating => &self.floating,
@@ -1107,12 +1103,12 @@ pub enum Elevation {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DensityTokens {
-    pub control_default: Pixels,
-    pub command_list_max_height: Pixels,
-    pub control_sm: Pixels,
-    pub switch_default: (Pixels, Pixels),
-    pub badge_height: Pixels,
-    pub card_padding_compact: Pixels,
+    pub(crate) control_default: Pixels,
+    pub(crate) command_list_max_height: Pixels,
+    pub(crate) control_sm: Pixels,
+    pub(crate) switch_default: (Pixels, Pixels),
+    pub(crate) badge_height: Pixels,
+    pub(crate) card_padding_compact: Pixels,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InteractionTokens {
@@ -1156,7 +1152,7 @@ impl TypographyTokens {
     }
 
     #[must_use]
-    pub fn scaled(self, scale: f32) -> Self {
+    pub(crate) fn scaled(self, scale: f32) -> Self {
         Self {
             scale,
             control_text: px(14.0 * scale),
@@ -1167,11 +1163,11 @@ impl TypographyTokens {
     }
 
     #[must_use]
-    pub fn size(&self, px: f32) -> f32 {
+    pub(crate) fn size(&self, px: f32) -> f32 {
         px * self.scale
     }
     #[must_use]
-    pub const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
+    pub(crate) const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
         match self.fonts {
             FontSet::Spline => heading.tracking_px,
             FontSet::System => 0.0,
@@ -1204,7 +1200,7 @@ impl ArtisanTheme {
     }
 
     #[must_use]
-    pub const fn reduced_motion(&self) -> bool {
+    pub(crate) const fn reduced_motion(&self) -> bool {
         matches!(self.interaction.motion, Motion::Reduced)
     }
 

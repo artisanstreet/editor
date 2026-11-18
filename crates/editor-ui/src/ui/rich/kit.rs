@@ -110,7 +110,7 @@ pub(crate) enum CodeRefError {
 }
 
 impl CodeRef {
-    pub(crate) fn parse(text: &str) -> Result<Self, CodeRefError> {
+    fn parse(text: &str) -> Result<Self, CodeRefError> {
         let text = text.trim();
         let numbered = text.rsplit_once(':').and_then(|(path, lines)| {
             let (start, end): (u32, u32) = match lines.split_once('-') {

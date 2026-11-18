@@ -97,7 +97,7 @@ impl AudioAssets {
         let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
         Owned::new(owner, source.parsed().clone())
     }
-    pub fn forget(&self, fetcher: Option<&MediaFetcher>, source: &MediaSource, part: &str) {
+    pub(crate) fn forget(&self, fetcher: Option<&MediaFetcher>, source: &MediaSource, part: &str) {
         let key = Self::key(fetcher, source, part);
         self.loads.cache(fetcher).forget::<Loader>(&key);
     }

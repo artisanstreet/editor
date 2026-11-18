@@ -11,7 +11,7 @@ use aqua_ui::{
     tree::ActionEvent,
 };
 use editor_assets::AssetId;
-pub struct Button {
+pub(crate) struct Button {
     id: Key,
     theme: ArtisanTheme,
     icon: AssetId,
@@ -20,7 +20,7 @@ pub struct Button {
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 impl Button {
-    pub fn icon(
+    pub(crate) fn icon(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         icon: AssetId,
@@ -35,15 +35,15 @@ impl Button {
             on_activate: None,
         }
     }
-    pub fn on_activate(mut self, handler: impl Fn(ActionEvent) + 'static) -> Self {
+    pub(crate) fn on_activate(mut self, handler: impl Fn(ActionEvent) + 'static) -> Self {
         self.on_activate = Some(Box::new(handler));
         self
     }
-    pub fn icon_slot(mut self, icon: Element) -> Self {
+    pub(crate) fn icon_slot(mut self, icon: Element) -> Self {
         self.icon_slot = Some(icon);
         self
     }
-    pub fn build(self) -> Element {
+    pub(crate) fn build(self) -> Element {
         let t = self.theme;
         let icon_foreground = t.colors.text;
         let height = t.density.control_sm;

@@ -20,9 +20,9 @@ pub(crate) enum Shading {
 }
 
 impl Shading {
-    pub(crate) const ALL: [Self; 2] = [Self::Shaded, Self::Wireframe];
+    const ALL: [Self; 2] = [Self::Shaded, Self::Wireframe];
 
-    pub(crate) const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Shaded => "Shaded",
             Self::Wireframe => "Wireframe",

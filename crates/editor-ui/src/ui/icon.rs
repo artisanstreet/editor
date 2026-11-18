@@ -25,7 +25,7 @@ pub fn disclosure_chevron(fraction: f32, edge: f32, color: aqua_core::GpuiHsla) 
         .build()
 }
 
-pub fn file_icon(path: &std::path::Path) -> (AssetId, AssetId) {
+pub(crate) fn file_icon(path: &std::path::Path) -> (AssetId, AssetId) {
     (
         editor_assets::file_icons::file(path, false),
         editor_assets::file_icons::file(path, true),

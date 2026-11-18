@@ -100,7 +100,7 @@ impl MediaFetcher {
         }
     }
 
-    pub fn waits_for_consent(&self, source: &MediaSource) -> bool {
+    pub(crate) fn waits_for_consent(&self, source: &MediaSource) -> bool {
         matches!(source.parsed(), Parsed::Url(_))
             && !self
                 .item
@@ -108,13 +108,13 @@ impl MediaFetcher {
                 .is_some_and(|item| self.remote.allows(item))
     }
 
-    pub fn allow_remote(&self) {
+    pub(crate) fn allow_remote(&self) {
         if let Some(item) = &self.item {
             self.remote.allow(Arc::clone(item));
         }
     }
 
-    pub fn fetch(&self, request: MediaRequest) -> MediaFetch {
+    fn fetch(&self, request: MediaRequest) -> MediaFetch {
         (self.fetch)(request)
     }
 
@@ -133,7 +133,7 @@ impl MediaFetcher {
         &self.owner
     }
 
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
 
@@ -202,7 +202,7 @@ pub struct MediaProvider {
 }
 
 impl MediaProvider {
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
     pub fn fetch(&self, request: MediaRequest) -> MediaFetch {
@@ -225,8 +225,8 @@ impl Hash for MediaProvider {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Owned<T> {
-    pub owner: String,
-    pub source: T,
+    pub(crate) owner: String,
+    pub(crate) source: T,
 }
 
 impl<T> Owned<T> {
@@ -300,7 +300,7 @@ impl MediaSource {
                 Parsed::Invalid => 0,
             }
     }
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.raw.trim().is_empty()
     }
 }

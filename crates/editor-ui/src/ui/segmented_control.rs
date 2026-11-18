@@ -16,12 +16,12 @@ const SEGMENT: Row = Row::ListItem(Density::Dense);
 const SEGMENT_TEXT: TextRole = TextRole::Caption;
 const SEGMENT_HEIGHT: f32 = SEGMENT_TEXT.spec().line + 2.0 * SEGMENT.pad().y.px();
 
-pub struct Segment<T> {
+pub(crate) struct Segment<T> {
     value: T,
     label: String,
 }
 impl<T> Segment<T> {
-    pub fn new(value: T, label: impl Into<String>) -> Self {
+    pub(crate) fn new(value: T, label: impl Into<String>) -> Self {
         Self {
             value,
             label: label.into(),
@@ -31,7 +31,7 @@ impl<T> Segment<T> {
 
 type Change<T> = Rc<dyn Fn(T)>;
 
-pub struct SegmentedControl<T: Clone + Eq + 'static> {
+pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
     id: Key,
     theme: ArtisanTheme,
     label: String,
@@ -42,7 +42,7 @@ pub struct SegmentedControl<T: Clone + Eq + 'static> {
 }
 
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
-    pub fn new(
+    pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -59,7 +59,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             change: None,
         }
     }
-    pub fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
+    pub(crate) fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
         for option in options {
             if !self
                 .options
@@ -71,12 +71,12 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         }
         self
     }
-    pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
+    pub(crate) fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
         self.change = Some(Rc::new(handler));
         self
     }
 
-    pub fn build(self) -> Element {
+    pub(crate) fn build(self) -> Element {
         let theme = self.theme;
         let selected = self
             .options

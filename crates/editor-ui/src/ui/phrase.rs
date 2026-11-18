@@ -26,7 +26,6 @@ pub enum WordMotion {
 pub struct PhraseWord {
     pub text: String,
     pub motion: WordMotion,
-    pub elapsed: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -39,7 +38,7 @@ pub enum PhraseFit {
     },
 }
 
-pub fn phrase_fit(edges: &[f32], available: f32, ellipsis: f32) -> PhraseFit {
+fn phrase_fit(edges: &[f32], available: f32, ellipsis: f32) -> PhraseFit {
     match edges.last() {
         Some(end) if *end > available + 0.5 => {
             let words = edges
@@ -110,7 +109,6 @@ impl PhraseMotion {
         } else {
             &self.current
         };
-        let elapsed = elapsed.unwrap_or(0.66);
         let words = self
             .current
             .iter()
@@ -118,7 +116,6 @@ impl PhraseMotion {
             .map(|(index, text)| PhraseWord {
                 text: text.clone(),
                 motion: word_motion(previous.get(index).map(String::as_str), text),
-                elapsed,
             })
             .collect();
         (Some(words), self.changed.is_some())

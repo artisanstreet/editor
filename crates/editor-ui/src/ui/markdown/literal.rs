@@ -1,11 +1,10 @@
 use super::stored::{RangeCollector, StoredOwner, StoredSource};
 use aqua_text::document::{SelectionSource, SelectionSourceId};
-use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceLeafDescriptor};
+use artisan_api::{ContentRange, SourceIndexFormat, SourceLeafDescriptor};
 use editor_core::{delivery::Delivery, runtime};
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
-    ops::Range,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,7 +20,7 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FETCHES: usize = 4;
 const MAX_LEAF_BYTES: usize = 64 * 1024;
 const FETCH_HEADROOM: usize = 65_539;
-pub const MAX_NATIVE_SOURCE: usize = 16 * 1024;
+const MAX_NATIVE_SOURCE: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub enum LiteralPreparation {
@@ -42,10 +41,7 @@ impl Drop for Lease {
 }
 
 pub struct LiteralLeaf {
-    pub text: Arc<str>,
-    pub source_ref: ContentRef,
-    pub ordinal: usize,
-    pub source_range: Range<usize>,
+    text: Arc<str>,
     _lease: Lease,
 }
 
@@ -387,13 +383,8 @@ impl LiteralOwner {
             let retained = text.len().max(1);
             let release = permit.num_permits() - retained;
             drop(permit.split(release));
-            let start = usize::try_from(entry.descriptor.source_start).unwrap();
-            let end = usize::try_from(entry.descriptor.source_end).unwrap();
             let leaf = LiteralLeaf {
                 text: Arc::from(text),
-                source_ref: entry.source.source_ref().clone(),
-                ordinal: entry.descriptor.ordinal as usize,
-                source_range: start..end,
                 _lease: Lease {
                     permit: Some(permit),
                     wake: self.delivery.waker(),

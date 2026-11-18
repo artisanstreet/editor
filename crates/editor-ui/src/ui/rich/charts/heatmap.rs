@@ -102,14 +102,14 @@ impl TryFrom<HeatmapSpec> for Heatmap {
 }
 
 impl Heatmap {
-    pub(crate) fn rows(&self) -> usize {
+    fn rows(&self) -> usize {
         self.0.rows
     }
-    pub(crate) fn columns(&self) -> usize {
+    fn columns(&self) -> usize {
         self.0.columns
     }
 
-    pub(crate) fn cell(&self, row: usize, column: usize) -> Option<f64> {
+    fn cell(&self, row: usize, column: usize) -> Option<f64> {
         self.values
             .get(row)
             .and_then(|cells| cells.get(column).copied().flatten())
@@ -131,7 +131,7 @@ impl Heatmap {
         Self::label(&self.y, row)
     }
 
-    pub(crate) fn position(&self, value: f64) -> f32 {
+    fn position(&self, value: f64) -> f32 {
         match self.scale {
             Scale::Sequential => self.domain.fraction(value).clamp(0.0, 1.0),
             Scale::Diverging => {

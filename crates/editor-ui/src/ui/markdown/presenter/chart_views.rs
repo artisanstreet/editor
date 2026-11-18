@@ -13,7 +13,7 @@ use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub(super) fn legend_toggle(
+fn legend_toggle(
     key: String,
     theme: &ArtisanTheme,
     swatch: Element,

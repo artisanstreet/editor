@@ -149,9 +149,6 @@ impl Editor {
             .as_ref()
             .map(|composition| composition.marked.clone())
     }
-    pub fn is_composing(&self) -> bool {
-        self.composition.is_some()
-    }
     pub fn limit_notice(&self) -> bool {
         self.limit_notice
     }
@@ -279,7 +276,7 @@ impl Editor {
         self.typing_group_end = None;
         self.vertical_goal_column = None;
     }
-    pub fn replacement_range(&self, range: Option<Range<usize>>) -> Option<Range<usize>> {
+    fn replacement_range(&self, range: Option<Range<usize>>) -> Option<Range<usize>> {
         let range = match range {
             Some(range) => utf16_range_to_utf8(&self.text, range)?,
             None => self
@@ -508,7 +505,7 @@ impl Editor {
             EditOutcome::Unchanged
         }
     }
-    pub fn select_utf16(&mut self, range: Range<usize>, reversed: bool) -> bool {
+    pub(crate) fn select_utf16(&mut self, range: Range<usize>, reversed: bool) -> bool {
         if self.disabled || self.composition.is_some() {
             return false;
         }
@@ -524,7 +521,7 @@ impl Editor {
     pub fn marked_utf16(&self) -> Option<Range<usize>> {
         utf8_range_to_utf16(&self.text, self.marked_range()?)
     }
-    pub fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
+    fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
         self.text.get(utf16_range_to_utf8(&self.text, range)?)
     }
     pub fn paste(&mut self, item: &ClipboardPaste) -> PasteOutcome {
@@ -556,12 +553,12 @@ impl Editor {
         self.vertical_goal_column = None;
         PasteOutcome::Edit(self.replace_input(None, &text, None))
     }
-    pub fn copy(&self) -> Option<&str> {
+    fn copy(&self) -> Option<&str> {
         (!self.selection.is_empty())
             .then(|| self.text.get(self.selection.clone()))
             .flatten()
     }
-    pub fn cut(&mut self) -> Option<String> {
+    pub(crate) fn cut(&mut self) -> Option<String> {
         if self.disabled {
             return None;
         }
@@ -569,7 +566,7 @@ impl Editor {
         self.replace_range(self.selection.clone(), "", None);
         Some(text)
     }
-    pub fn token_target(&self, target: usize, forward: bool) -> usize {
+    fn token_target(&self, target: usize, forward: bool) -> usize {
         self.tokens()
             .into_iter()
             .find(|token| token.range.start < target && target < token.range.end)
@@ -581,7 +578,7 @@ impl Editor {
                 }
             })
     }
-    pub fn token_deletion(&self, cursor: usize, forward: bool) -> Option<Range<usize>> {
+    fn token_deletion(&self, cursor: usize, forward: bool) -> Option<Range<usize>> {
         self.tokens()
             .into_iter()
             .find(|token| {
@@ -626,11 +623,11 @@ impl Editor {
             Mode::SingleLine | Mode::Prompt => CommandOutcome::Propagate,
         }
     }
-    pub fn list_vertical(&self, up: bool) -> Option<ListKey> {
+    pub(crate) fn list_vertical(&self, up: bool) -> Option<ListKey> {
         self.list_open
             .then_some(if up { ListKey::Up } else { ListKey::Down })
     }
-    pub fn dismiss(&self) -> CommandOutcome {
+    pub(crate) fn dismiss(&self) -> CommandOutcome {
         if self.disabled {
             CommandOutcome::Ignored
         } else if self.list_open {
@@ -697,7 +694,7 @@ impl Editor {
         self.typing_group_end = None;
         self.vertical_goal_column = None;
     }
-    pub fn move_caret(&mut self, target: usize, extend: bool) {
+    pub(crate) fn move_caret(&mut self, target: usize, extend: bool) {
         if self.disabled {
             return;
         }
@@ -779,7 +776,7 @@ impl Editor {
     pub fn pointer_up(&mut self) {
         self.drag_origin = None;
     }
-    pub fn move_document_edge(&mut self, end: bool, extend: bool) {
+    pub(crate) fn move_document_edge(&mut self, end: bool, extend: bool) {
         let target = if end { self.text.len() } else { 0 };
         self.move_caret(target, extend);
     }
@@ -918,7 +915,7 @@ impl Editor {
     }
 }
 
-pub fn grapheme_prefix(text: &str, max: usize) -> &str {
+pub(crate) fn grapheme_prefix(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
     }
@@ -931,7 +928,7 @@ pub fn grapheme_prefix(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-pub fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
+fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
     let mut offset = 0usize;
     for (byte, character) in text.char_indices() {
         if offset == target {
@@ -944,13 +941,13 @@ pub fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
     }
     (offset == target).then_some(text.len())
 }
-pub fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     if range.start > range.end {
         return None;
     }
     Some(utf16_offset_to_utf8(text, range.start)?..utf16_offset_to_utf8(text, range.end)?)
 }
-pub fn utf8_range_to_utf16(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+pub(crate) fn utf8_range_to_utf16(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     if range.start > range.end {
         return None;
     }

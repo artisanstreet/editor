@@ -64,7 +64,7 @@ fn retained_loader_publishes_after_consumer_drops_and_releases_cache_lease() {
 }
 
 #[test]
-fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
+fn same_source_shares_pending_work_and_stops_when_the_last_owner_goes() {
     let loader = Images::new();
     let fetcher = fetcher();
     let first = fetcher.clone().owned_by(&[1], 1);
@@ -83,10 +83,10 @@ fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
     );
     assert_eq!(loader.state.borrow().jobs.len(), 1);
     fetcher.retain_resources(&[vec![2]]);
-    loader.retain_owners(&[vec![2]]);
+    loader.poll_assets();
     assert_eq!(loader.state.borrow().jobs.len(), 1);
     fetcher.retain_resources(&[]);
-    loader.retain_owners(&[]);
+    loader.poll_assets();
     assert!(loader.state.borrow().jobs.is_empty());
 }
 

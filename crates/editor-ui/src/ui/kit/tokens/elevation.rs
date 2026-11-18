@@ -14,7 +14,7 @@ pub enum Elevation {
 
 impl Elevation {
     #[must_use]
-    pub fn shadows(self, theme: &ArtisanTheme) -> Vec<ShadowLayer> {
+    pub(crate) fn shadows(self, theme: &ArtisanTheme) -> Vec<ShadowLayer> {
         match self {
             Self::Flat => Vec::new(),
             Self::Key => key_shadows(theme),

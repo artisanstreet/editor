@@ -5,7 +5,7 @@ pub struct SliderRange {
     step: f64,
 }
 impl SliderRange {
-    pub fn new(min: f64, max: f64, step: Option<f64>) -> Self {
+    pub(crate) fn new(min: f64, max: f64, step: Option<f64>) -> Self {
         let (min, max) = if min.is_finite() && max.is_finite() && (max - min).is_finite() {
             (min.min(max), min.max(max))
         } else {
@@ -26,7 +26,7 @@ impl SliderRange {
         clippy::float_cmp,
         reason = "the clamped ends are kept exactly, not snapped"
     )]
-    pub fn snap(self, value: f64) -> f64 {
+    fn snap(self, value: f64) -> f64 {
         let value = if value.is_finite() {
             value.clamp(self.min, self.max)
         } else {
@@ -43,7 +43,7 @@ impl SliderRange {
             value
         }
     }
-    pub fn command(self, value: f64, command: SliderCommand) -> f64 {
+    fn command(self, value: f64, command: SliderCommand) -> f64 {
         match command {
             SliderCommand::Start => self.min,
             SliderCommand::End => self.max,
@@ -85,7 +85,7 @@ pub struct SliderState {
 }
 
 impl SliderState {
-    pub fn new(range: SliderRange, value: f64) -> Self {
+    pub(crate) fn new(range: SliderRange, value: f64) -> Self {
         Self {
             range,
             value: range.snap(value),
@@ -93,11 +93,11 @@ impl SliderState {
         }
     }
 
-    pub fn value(&self) -> f64 {
+    pub(crate) fn value(&self) -> f64 {
         self.value
     }
 
-    pub fn reset(&mut self, range: SliderRange, value: f64) {
+    pub(crate) fn reset(&mut self, range: SliderRange, value: f64) {
         self.range = range;
         self.value = range.snap(value);
         self.dragging = false;
@@ -130,7 +130,7 @@ impl SliderState {
     }
 }
 
-pub struct Slider {
+pub(crate) struct Slider {
     id: Key,
     theme: ArtisanTheme,
     label: String,
@@ -141,7 +141,7 @@ pub struct Slider {
 }
 
 impl Slider {
-    pub fn new(
+    pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -159,12 +159,12 @@ impl Slider {
         }
     }
 
-    pub fn on_change(mut self, handler: impl Fn(f64) + 'static) -> Self {
+    pub(crate) fn on_change(mut self, handler: impl Fn(f64) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self
     }
 
-    pub fn build(self) -> Element {
+    pub(crate) fn build(self) -> Element {
         let theme = self.theme;
         let accent = theme.colors.amber.solid.to_reference_paint();
         let range = {

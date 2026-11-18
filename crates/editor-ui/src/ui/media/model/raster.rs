@@ -8,23 +8,23 @@ const FIT_MARGIN: f32 = 1.06;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
-    pub yaw: f32,
-    pub pitch: f32,
-    pub distance: f32,
-    pub pan: (f32, f32),
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) distance: f32,
+    pub(crate) pan: (f32, f32),
 }
 
 impl Camera {
-    pub const DEFAULT_YAW: f32 = 30.0;
-    pub const DEFAULT_PITCH: f32 = 18.0;
-    pub const NEAREST: f32 = 1.3;
-    pub const FARTHEST: f32 = 16.0;
+    pub(crate) const DEFAULT_YAW: f32 = 30.0;
+    pub(crate) const DEFAULT_PITCH: f32 = 18.0;
+    pub(crate) const NEAREST: f32 = 1.3;
+    pub(crate) const FARTHEST: f32 = 16.0;
 
-    pub fn fitted() -> f32 {
+    fn fitted() -> f32 {
         FIT_MARGIN / (FIELD_OF_VIEW.to_radians() * 0.5).sin()
     }
 
-    pub fn new(yaw: f32, pitch: f32) -> Self {
+    pub(crate) fn new(yaw: f32, pitch: f32) -> Self {
         Self {
             yaw,
             pitch: pitch.clamp(-89.0, 89.0),
@@ -33,11 +33,11 @@ impl Camera {
         }
     }
 
-    pub fn focal(width: f32, height: f32) -> f32 {
+    pub(crate) fn focal(width: f32, height: f32) -> f32 {
         0.5 * width.min(height) / (FIELD_OF_VIEW.to_radians() * 0.5).tan()
     }
 
-    pub fn view_matrix(&self) -> [[f32; 4]; 4] {
+    pub(crate) fn view_matrix(&self) -> [[f32; 4]; 4] {
         let r = self.rotation();
         [
             [r[0][0], r[1][0], r[2][0], 0.0],
@@ -47,7 +47,7 @@ impl Camera {
         ]
     }
 
-    pub fn projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
+    pub(crate) fn projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
         let focal = 1.0 / (FIELD_OF_VIEW.to_radians() * 0.5).tan();
         let short = width.min(height);
         let (near, far) = (NEAR, FAR);
@@ -78,14 +78,14 @@ impl Default for Camera {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
-    pub base: Vec3,
-    pub edges: Option<(Vec3, f32)>,
+    pub(crate) base: Vec3,
+    pub(crate) edges: Option<(Vec3, f32)>,
 }
 
 pub struct Frame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixels: Vec<u8>,
 }
 
 fn rotate(m: &[[f32; 3]; 3], v: Vec3) -> Vec3 {

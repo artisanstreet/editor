@@ -25,7 +25,7 @@ pub struct PageBlock {
     content: Element,
 }
 impl PageBlock {
-    pub const fn new(content: Element) -> Self {
+    const fn new(content: Element) -> Self {
         Self { content }
     }
     pub fn build(self) -> Element {

@@ -11,7 +11,7 @@ use aqua_ui::tree::ActionEvent;
 use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 
-pub const CORNER_INSET: f32 = 2.0;
+pub(crate) const CORNER_INSET: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum IconButtonSize {
@@ -31,7 +31,7 @@ impl IconButtonSize {
     }
 
     #[must_use]
-    pub const fn glyph(self) -> IconSize {
+    const fn glyph(self) -> IconSize {
         match self {
             Self::Sm => IconSize::Sm,
             Self::Md | Self::Lg => IconSize::Md,
@@ -85,7 +85,7 @@ impl IconButton {
         }
     }
 
-    pub fn corner_close(
+    pub(crate) fn corner_close(
         key: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,

@@ -1,7 +1,7 @@
 use crate::ui::chrome::card::hex;
 use crate::ui::theme::Oklch;
 
-pub const RIM: [(f32, [u8; 3]); 9] = [
+const RIM: [(f32, [u8; 3]); 9] = [
     (0.00, [0xea, 0xf4, 0xff]),
     (0.06, [0xa9, 0xc8, 0xe6]),
     (0.16, [0x4c, 0x7b, 0xb6]),
@@ -25,7 +25,7 @@ pub struct Wedge {
 }
 
 #[must_use]
-pub fn sample(fraction: f32) -> [u8; 3] {
+fn sample(fraction: f32) -> [u8; 3] {
     let fraction = fraction.rem_euclid(1.0);
     let upper = RIM
         .iter()

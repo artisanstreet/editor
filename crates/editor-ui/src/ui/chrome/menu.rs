@@ -1,4 +1,4 @@
-pub use crate::ui::kit::hover::{FAST, Highlight, QUICK, REST_SCALE};
+pub use crate::ui::kit::hover::{Highlight, REST_SCALE};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -11,7 +11,7 @@ pub enum Spot {
 }
 
 impl Spot {
-    pub const ALL: [Self; 5] = [
+    const ALL: [Self; 5] = [
         Self::Trigger,
         Self::Identity,
         Self::Theme,

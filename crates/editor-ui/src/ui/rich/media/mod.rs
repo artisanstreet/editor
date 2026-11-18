@@ -3,9 +3,9 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct SizeHint {
     #[serde(default)]
-    pub(crate) width: Option<f32>,
+    width: Option<f32>,
     #[serde(default)]
-    pub(crate) height: Option<f32>,
+    height: Option<f32>,
 }
 
 impl SizeHint {

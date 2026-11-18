@@ -10,7 +10,7 @@ use aqua_ui::tree::ActionEvent;
 use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 
-pub const PRESS: f32 = 1.5;
+const PRESS: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum KeySize {

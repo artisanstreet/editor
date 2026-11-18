@@ -47,9 +47,9 @@ impl TryFrom<FunnelSpec> for Funnel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StepReading {
-    pub(crate) value: f64,
-    pub(crate) of_first: Option<f64>,
-    pub(crate) drop: Option<(f64, Option<f64>)>,
+    value: f64,
+    of_first: Option<f64>,
+    drop: Option<(f64, Option<f64>)>,
 }
 
 impl Funnel {
@@ -79,7 +79,7 @@ impl Funnel {
         }
     }
 
-    pub(crate) fn reading(&self, index: usize) -> StepReading {
+    fn reading(&self, index: usize) -> StepReading {
         let value = self.value(index);
         let first = self.value(0);
         let share = |part: f64, whole: f64| (whole > 0.0).then(|| part / whole);

@@ -39,13 +39,13 @@ impl Corner {
 
 #[derive(Debug)]
 pub struct Mesh {
-    pub positions: Vec<Vec3>,
-    pub normals: Vec<Vec3>,
-    pub colors: Option<Vec<Vec3>>,
+    pub(crate) positions: Vec<Vec3>,
+    pub(crate) normals: Vec<Vec3>,
+    pub(crate) colors: Option<Vec<Vec3>>,
 }
 
 impl Mesh {
-    pub const fn triangles(&self) -> usize {
+    pub(crate) const fn triangles(&self) -> usize {
         self.positions.len() / 3
     }
 }

@@ -32,7 +32,7 @@ pub struct WheelGlide {
 }
 
 impl WheelGlide {
-    pub fn push(&mut self, current: f32, delta: f32, max: f32) {
+    fn push(&mut self, current: f32, delta: f32, max: f32) {
         if !self.active() {
             self.last_frame = Some(Instant::now());
         }
@@ -49,7 +49,7 @@ impl WheelGlide {
     }
 
     #[must_use]
-    pub fn step(&mut self, current: f32, max: f32) -> Option<f32> {
+    fn step(&mut self, current: f32, max: f32) -> Option<f32> {
         let now = Instant::now();
         let elapsed = self
             .last_frame
@@ -72,7 +72,7 @@ impl WheelGlide {
         self.step_elapsed(-offset, max, elapsed).map(|next| -next)
     }
 
-    pub fn step_elapsed(&mut self, current: f32, max: f32, elapsed: Duration) -> Option<f32> {
+    fn step_elapsed(&mut self, current: f32, max: f32, elapsed: Duration) -> Option<f32> {
         let current = current.clamp(-max.max(0.0), 0.0);
         let target = (current + self.remaining).clamp(-max.max(0.0), 0.0);
         let distance = target - current;

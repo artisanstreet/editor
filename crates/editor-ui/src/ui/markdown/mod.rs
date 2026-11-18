@@ -25,7 +25,7 @@ mod source_index;
 pub mod stored;
 mod table;
 mod table_view;
-pub use projected::{ShapedSource, leaf_signatures};
+pub use projected::ShapedSource;
 use source_index::normalize_record;
 pub use source_index::{
     BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,
@@ -75,36 +75,36 @@ pub enum CodeTokenKind {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CodeToken {
-    pub kind: CodeTokenKind,
-    pub range: Range<usize>,
+    kind: CodeTokenKind,
+    range: Range<usize>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DiagramSvg {
-    pub source: Arc<str>,
-    pub light_source: Arc<str>,
-    pub width_bits: u32,
-    pub height_bits: u32,
-    pub summary: Arc<str>,
+    source: Arc<str>,
+    light_source: Arc<str>,
+    width_bits: u32,
+    height_bits: u32,
+    summary: Arc<str>,
 }
 
 impl DiagramSvg {
-    pub fn width(&self) -> f32 {
+    fn width(&self) -> f32 {
         f32::from_bits(self.width_bits)
     }
 
-    pub fn height(&self) -> f32 {
+    fn height(&self) -> f32 {
         f32::from_bits(self.height_bits)
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CodeFence {
-    pub language: Option<String>,
-    pub closed: bool,
-    pub source: String,
-    pub tokens: Option<Arc<[CodeToken]>>,
-    pub diagram: Option<Arc<DiagramSvg>>,
+    language: Option<String>,
+    closed: bool,
+    source: String,
+    tokens: Option<Arc<[CodeToken]>>,
+    diagram: Option<Arc<DiagramSvg>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -123,7 +123,7 @@ pub enum Span {
 
 impl Span {
     #[must_use]
-    pub fn text_content(&self) -> String {
+    fn text_content(&self) -> String {
         match self {
             Self::Text(text) | Self::Code(text) | Self::Html(text) | Self::Command(text) => {
                 text.clone()
@@ -137,7 +137,7 @@ impl Span {
 }
 
 #[must_use]
-pub fn spans_text(spans: &[Span]) -> String {
+fn spans_text(spans: &[Span]) -> String {
     spans.iter().map(Span::text_content).collect()
 }
 
@@ -169,18 +169,18 @@ impl Block {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ListItem {
-    pub blocks: Vec<Block>,
-    pub task: Option<bool>,
+    blocks: Vec<Block>,
+    task: Option<bool>,
 }
 
 impl ListItem {}
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MarkdownDocument {
-    pub(crate) blocks: Vec<Block>,
+    blocks: Vec<Block>,
 }
 
-pub(crate) fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
+fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
     let Some(Span::Text(text)) = spans.first_mut() else {
         return;
     };
@@ -195,7 +195,7 @@ pub(crate) fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
 }
 
 impl MarkdownDocument {
-    pub(crate) fn resident_bytes(&self) -> usize {
+    fn resident_bytes(&self) -> usize {
         fn spans_bytes(spans: &Vec<Span>) -> usize {
             spans.capacity() * std::mem::size_of::<Span>()
                 + spans
@@ -263,7 +263,7 @@ impl MarkdownDocument {
     }
 
     #[must_use]
-    pub fn blocks(&self) -> &[Block] {
+    fn blocks(&self) -> &[Block] {
         &self.blocks
     }
 }
@@ -308,11 +308,7 @@ impl MarkdownEngine {
         })
     }
 
-    pub fn parse_document(&self, source: &str) -> Result<MarkdownDocument, MarkdownError> {
-        self.parse_document_with_fence_memo(source, &mut NoFenceTokenMemo)
-    }
-
-    pub(crate) fn parse_document_with_fence_memo(
+    fn parse_document_with_fence_memo(
         &self,
         source: &str,
         memo: &mut dyn FenceTokenMemo,
@@ -487,7 +483,7 @@ pub(crate) struct FenceTokenCache {
 }
 
 impl FenceTokenCache {
-    pub(crate) fn finish(&mut self) {
+    fn finish(&mut self) {
         self.kept = std::mem::take(&mut self.used);
     }
 }

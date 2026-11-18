@@ -47,7 +47,7 @@ pub(super) fn code_card(
     })
 }
 
-pub(super) fn reference_services<'a>(
+fn reference_services<'a>(
     code: Option<&'a CodeServices>,
     scope: Option<&crate::ui::rich::actions::ResourceScope>,
 ) -> Result<(&'a CodeServices, &'a ReferenceServices), PresenterError> {
@@ -62,7 +62,7 @@ pub(super) fn reference_services<'a>(
     Ok((services, reference))
 }
 
-pub(super) fn code_envelope(
+fn code_envelope(
     theme: &ArtisanTheme,
     envelope: &rich::Envelope,
     content: Element,

@@ -12,9 +12,9 @@ use std::sync::LazyLock;
 
 mod system;
 
-pub use system::{SystemLocales, posix_locale};
+pub(crate) use system::SystemLocales;
 
-pub const FALLBACK: Locale = locale!("en-US");
+pub(crate) const FALLBACK: Locale = locale!("en-US");
 const NOT_A_NUMBER: &str = "–";
 
 pub struct Formats {
@@ -35,7 +35,7 @@ thread_local! {
     static SYSTEM: Formats = Formats::for_system(&SYSTEM_LOCALES);
 }
 
-pub fn with_system<R>(format: impl FnOnce(&Formats) -> R) -> R {
+pub(crate) fn with_system<R>(format: impl FnOnce(&Formats) -> R) -> R {
     SYSTEM.with(format)
 }
 
@@ -51,16 +51,13 @@ pub fn decimal(value: f64, fraction_digits: usize) -> String {
     with_system(|formats| formats.decimal(value, fraction_digits))
 }
 
-pub fn trimmed(value: f64, max_fraction_digits: usize) -> String {
-    with_system(|formats| formats.trimmed(value, max_fraction_digits))
-}
-
 impl Formats {
-    pub fn new(locale: &Locale) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(locale: &Locale) -> Self {
         Self::for_system(&SystemLocales::uniform(locale.clone()))
     }
 
-    pub fn for_system(locales: &SystemLocales) -> Self {
+    fn for_system(locales: &SystemLocales) -> Self {
         Self {
             decimal: decimal_formatter(&locales.numbers),
             clock: clock_formatter(&locales.time),
@@ -68,11 +65,11 @@ impl Formats {
         }
     }
 
-    pub fn integer(&self, value: impl Into<Decimal>) -> String {
+    fn integer(&self, value: impl Into<Decimal>) -> String {
         self.decimal.format(&value.into()).to_string()
     }
 
-    pub fn count(&self, value: impl Into<Decimal>, one: &str, other: &str) -> String {
+    fn count(&self, value: impl Into<Decimal>, one: &str, other: &str) -> String {
         let value = value.into();
         let noun = match value == Decimal::from(1_u8) {
             true => one,
@@ -81,14 +78,14 @@ impl Formats {
         format!("{} {noun}", self.decimal.format(&value))
     }
 
-    pub fn decimal(&self, value: f64, fraction_digits: usize) -> String {
+    fn decimal(&self, value: f64, fraction_digits: usize) -> String {
         match fixed(value, fraction_digits) {
             Some(value) => self.decimal.format(&value).to_string(),
             None => NOT_A_NUMBER.to_owned(),
         }
     }
 
-    pub fn trimmed(&self, value: f64, max_fraction_digits: usize) -> String {
+    pub(crate) fn trimmed(&self, value: f64, max_fraction_digits: usize) -> String {
         match fixed(value, max_fraction_digits) {
             Some(mut value) => {
                 value.absolute.trim_end();
@@ -98,11 +95,11 @@ impl Formats {
         }
     }
 
-    pub fn clock(&self, at: NaiveDateTime) -> String {
+    pub(crate) fn clock(&self, at: NaiveDateTime) -> String {
         self.clock.format(&datetime(at)).to_string()
     }
 
-    pub fn date(&self, on: NaiveDate) -> String {
+    pub(crate) fn date(&self, on: NaiveDate) -> String {
         self.date.format(&date(on)).to_string()
     }
 }

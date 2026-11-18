@@ -18,7 +18,7 @@ impl MarkdownPresenter {
             .map(super::super::projected::ProjectedDocument::len)
     }
 
-    pub fn projected_range(&self, row: usize) -> Option<std::ops::Range<usize>> {
+    fn projected_range(&self, row: usize) -> Option<std::ops::Range<usize>> {
         self.projected.as_ref()?.range(row)
     }
 
@@ -31,7 +31,7 @@ impl MarkdownPresenter {
         })
     }
 
-    pub(super) fn leaf_proof(&self, row: usize) -> Option<PreparationProof> {
+    fn leaf_proof(&self, row: usize) -> Option<PreparationProof> {
         self.leaf_proofs
             .get(row)
             .map(|(_, proof)| PreparationProof(proof.clone()))

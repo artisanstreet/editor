@@ -15,9 +15,9 @@ pub enum WindowSetting {
 #[derive(Debug, thiserror::Error)]
 #[error("apply the {setting:?} preference to the window")]
 pub struct ApplyWindowError {
-    pub setting: WindowSetting,
+    setting: WindowSetting,
     #[source]
-    pub source: aqua_protocol::window::WindowError,
+    source: aqua_protocol::window::WindowError,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,7 +109,7 @@ impl Preferences {
     }
 
     #[must_use]
-    pub fn contrast(&self) -> Contrast {
+    fn contrast(&self) -> Contrast {
         match self.high_contrast.unwrap_or(self.system.high_contrast) {
             true => Contrast::High,
             false => Contrast::Standard,

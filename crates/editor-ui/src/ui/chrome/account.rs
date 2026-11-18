@@ -17,7 +17,7 @@ use std::{rc::Rc, sync::Arc, time::Instant};
 
 pub const TRIGGER: &str = "artisan-account-trigger";
 pub const TRIGGER_HEIGHT: f32 = 40.0;
-pub const AVATAR: f32 = 20.0;
+const AVATAR: f32 = 20.0;
 pub const AVATAR_INSET: f32 = (TRIGGER_HEIGHT - AVATAR) / 2.0;
 pub const MENU_GAP: f32 = 8.0;
 
@@ -67,7 +67,7 @@ impl Identity {
     }
 
     #[must_use]
-    pub fn label(&self) -> &str {
+    fn label(&self) -> &str {
         match self {
             Self::Named { name, .. } => name,
             Self::Unnamed { detail } => detail,
@@ -163,7 +163,7 @@ pub struct Sheet<'a> {
 }
 
 #[must_use]
-pub fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
+fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     Surface::Menu.build(theme, children)
 }
 

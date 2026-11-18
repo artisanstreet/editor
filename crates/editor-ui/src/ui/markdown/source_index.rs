@@ -25,20 +25,24 @@ pub enum IndexedLeafContent {
 #[derive(Debug)]
 pub struct MarkdownIndex(artisan_markdown_index::MarkdownIndex);
 impl MarkdownIndex {
-    pub fn build(source: &str) -> Result<Self, MarkdownIndexError> {
+    pub(crate) fn build(source: &str) -> Result<Self, MarkdownIndexError> {
         Ok(Self(artisan_markdown_index::MarkdownIndex::build(source)?))
     }
-    pub fn extend(self, previous: &str, source: &str) -> Result<(Self, usize), MarkdownIndexError> {
+    pub(crate) fn extend(
+        self,
+        previous: &str,
+        source: &str,
+    ) -> Result<(Self, usize), MarkdownIndexError> {
         let (index, kept) = self.0.extend(previous, source)?;
         Ok((Self(index), kept))
     }
-    pub fn resident_bytes(&self) -> usize {
+    pub(crate) fn resident_bytes(&self) -> usize {
         self.0.resident_bytes()
     }
-    pub fn leaves(&self) -> &[IndexedLeaf] {
+    pub(crate) fn leaves(&self) -> &[IndexedLeaf] {
         self.0.leaves()
     }
-    pub fn context(&self, leaf: usize) -> Option<&LeafContext> {
+    pub(crate) fn context(&self, leaf: usize) -> Option<&LeafContext> {
         self.0.context(leaf)
     }
     pub(crate) fn normalize_leaf(

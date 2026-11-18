@@ -349,7 +349,7 @@ pub struct ProseLeaf {
     pub source: SelectionSource,
 }
 
-pub fn raw_leaf(
+pub(crate) fn raw_leaf(
     raw: &str,
     theme: &ArtisanTheme,
     tone: BodyTone,
@@ -396,7 +396,7 @@ pub fn raw_leaf(
     }
 }
 
-pub fn interactive_leaf(
+pub(crate) fn interactive_leaf(
     spans: &[Span],
     theme: &ArtisanTheme,
     tone: BodyTone,
@@ -457,7 +457,7 @@ pub(super) fn interactive_leaf_with_opacity(
     )
 }
 
-pub fn interactive_table_leaf(
+pub(crate) fn interactive_table_leaf(
     spans: &[Span],
     theme: &ArtisanTheme,
     tone: BodyTone,

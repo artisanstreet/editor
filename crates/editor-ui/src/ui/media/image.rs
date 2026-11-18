@@ -18,7 +18,7 @@ pub enum ImageError {
 
 impl ImageError {
     #[must_use]
-    pub const fn summary(self) -> &'static str {
+    pub(crate) const fn summary(self) -> &'static str {
         match self {
             Self::NeedsConsent => "Remote image",
             Self::Load(MediaLoadError::Invalid) => "Not a valid image path",
@@ -35,7 +35,7 @@ impl ImageError {
     }
 
     #[must_use]
-    pub const fn retryable(self) -> bool {
+    pub(crate) const fn retryable(self) -> bool {
         matches!(self, Self::Load(MediaLoadError::Fetch(_)) | Self::Decode)
     }
 }
@@ -265,19 +265,6 @@ impl Images {
                 job.abort.abort();
             }
             current
-        });
-    }
-
-    pub fn retain_owners(&self, owners: &[Vec<u64>]) {
-        self.state.borrow_mut().jobs.retain(|_, job| {
-            job.owners
-                .retain(|known| owners.iter().any(|owner| known.starts_with(owner)));
-            let keep = !job.owners.is_empty();
-            if !keep {
-                job.ticket.cancel();
-                job.abort.abort();
-            }
-            keep
         });
     }
 

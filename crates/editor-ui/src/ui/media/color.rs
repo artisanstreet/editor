@@ -21,7 +21,7 @@ pub enum Notation {
 }
 
 impl Notation {
-    pub const ALL: [Self; 6] = [
+    const ALL: [Self; 6] = [
         Self::Hex,
         Self::Rgb,
         Self::Hsl,
@@ -30,7 +30,7 @@ impl Notation {
         Self::P3,
     ];
 
-    pub const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Hex => "HEX",
             Self::Rgb => "RGB",
@@ -49,7 +49,7 @@ impl Color {
         clippy::cast_possible_truncation,
         reason = "GPUI converts the clipped channels to f32 before HSL conversion"
     )]
-    pub fn reference_paint(self) -> aqua_core::GpuiHsla {
+    pub(crate) fn reference_paint(self) -> aqua_core::GpuiHsla {
         use palette::IntoColor;
         let c = self.clipped();
         let hsla: palette::Hsla =
@@ -65,7 +65,7 @@ impl Color {
         Self { r, g, b, alpha }
     }
 
-    pub const fn clipped(self) -> Self {
+    pub(crate) const fn clipped(self) -> Self {
         Self::srgb(
             self.r.clamp(0.0, 1.0),
             self.g.clamp(0.0, 1.0),
@@ -96,13 +96,13 @@ impl Color {
     fn to_p3(self) -> [f64; 3] {
         self.converted::<color::DisplayP3>()
     }
-    pub fn to_oklab(self) -> [f64; 3] {
+    fn to_oklab(self) -> [f64; 3] {
         self.converted::<color::Oklab>()
     }
-    pub fn to_oklch(self) -> [f64; 3] {
+    fn to_oklch(self) -> [f64; 3] {
         self.converted::<color::Oklch>()
     }
-    pub fn to_hsl(self) -> [f64; 3] {
+    fn to_hsl(self) -> [f64; 3] {
         let [h, s, l] = self.clipped().converted::<color::Hsl>();
         [h, s / 100.0, l / 100.0]
     }

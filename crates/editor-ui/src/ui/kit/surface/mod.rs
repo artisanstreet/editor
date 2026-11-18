@@ -67,7 +67,7 @@ pub enum Surface {
 
 impl Surface {
     #[must_use]
-    pub const fn corner(self) -> Corner {
+    const fn corner(self) -> Corner {
         match self {
             Self::Menu
             | Self::Picker(Picker::List)
@@ -105,7 +105,7 @@ impl Surface {
     }
 
     #[must_use]
-    pub const fn material(self) -> Material {
+    const fn material(self) -> Material {
         match self {
             Self::Menu
             | Self::Tooltip(_)
@@ -124,7 +124,7 @@ impl Surface {
     }
 
     #[must_use]
-    pub const fn elevation(self) -> Elevation {
+    pub(crate) const fn elevation(self) -> Elevation {
         match self {
             Self::Menu
             | Self::Picker(_)
@@ -224,7 +224,11 @@ pub fn tint(theme: &ArtisanTheme, tone: Tone) -> crate::ui::theme::Oklch {
 #[must_use]
 pub fn backdrop(theme: &ArtisanTheme) -> Style {
     Style::new().gpui_background(GpuiBackground::Solid(
-        theme.colors.background.at(Opacity::Backdrop).to_reference_paint(),
+        theme
+            .colors
+            .background
+            .at(Opacity::Backdrop)
+            .to_reference_paint(),
     ))
 }
 

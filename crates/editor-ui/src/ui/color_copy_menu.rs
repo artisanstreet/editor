@@ -178,7 +178,7 @@ impl ColorCopyMenuHost {
         Ok(Some(host))
     }
 
-    pub fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
+    fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
         app.host().popup_root(self.overlay)
     }
 

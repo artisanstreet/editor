@@ -1,4 +1,5 @@
-use super::{Formats, SystemLocales, posix_locale};
+use super::system::posix_locale;
+use super::{Formats, SystemLocales};
 use chrono::NaiveDate;
 use icu_locale_core::{Locale, locale};
 use std::collections::HashMap;

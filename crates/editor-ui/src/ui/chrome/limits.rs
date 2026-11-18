@@ -136,7 +136,7 @@ pub fn outlook(limit: &Limit, now: Timestamp) -> Outlook {
 }
 
 #[must_use]
-pub fn title(engine: EngineId, limit: &Limit) -> String {
+pub(crate) fn title(engine: EngineId, limit: &Limit) -> String {
     format!("{} usage for {}", limit.label, engine.display_name())
 }
 

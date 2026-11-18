@@ -2,18 +2,18 @@ use std::ops::Range;
 
 use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceIndexRange};
 
-pub const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
-pub const RANGE_BYTES: u32 = 65_536;
-pub const MAX_INDEX_ENTRIES: usize = 48;
+const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const RANGE_BYTES: u32 = 65_536;
+const MAX_INDEX_ENTRIES: usize = 48;
 pub const PAGE_LEAVES: usize = artisan_api::SOURCE_INDEX_PAGE_LEAVES as usize;
-pub const PAGES_PER_SOURCE: usize = 8;
-pub const MAX_CACHED_PAGES: usize = 64;
-pub const MAX_PREPARED_ENTRIES: usize = 128;
-pub const MAX_PENDING_JOBS: usize = 48;
-pub const PREPARED_BYTES: usize = 32 * 1024 * 1024;
-pub const QUEUE_DEPTH: usize = 8;
+const PAGES_PER_SOURCE: usize = 8;
+const MAX_CACHED_PAGES: usize = 64;
+const MAX_PREPARED_ENTRIES: usize = 128;
+const MAX_PENDING_JOBS: usize = 48;
+pub(crate) const PREPARED_BYTES: usize = 32 * 1024 * 1024;
+const QUEUE_DEPTH: usize = 8;
 
-pub fn validate_page(
+fn validate_page(
     reference: &ContentRef,
     format: SourceIndexFormat,
     offset: Option<u64>,
@@ -60,7 +60,7 @@ pub struct RangeCollector {
 }
 
 impl RangeCollector {
-    pub fn new(reference: ContentRef, range: Range<usize>) -> Result<Self, String> {
+    pub(crate) fn new(reference: ContentRef, range: Range<usize>) -> Result<Self, String> {
         if range.start > range.end
             || u64::try_from(range.end).map_or(true, |end| end > reference.bytes)
             || range.len() > MAX_SOURCE_BYTES
@@ -76,7 +76,7 @@ impl RangeCollector {
         })
     }
 
-    pub fn next_request(&self) -> Option<(u64, u32)> {
+    pub(crate) fn next_request(&self) -> Option<(u64, u32)> {
         (self.cursor < self.range.end).then(|| {
             let remaining = self.range.end - self.cursor;
             (
@@ -86,7 +86,7 @@ impl RangeCollector {
         })
     }
 
-    pub fn push(&mut self, page: ContentRange) -> Result<(), String> {
+    pub(crate) fn push(&mut self, page: ContentRange) -> Result<(), String> {
         let cursor = self.cursor as u64;
         if page.id != self.reference.id
             || page.total != self.reference.bytes
@@ -112,7 +112,7 @@ impl RangeCollector {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<String, String> {
+    pub(crate) fn finish(self) -> Result<String, String> {
         if self.cursor != self.range.end {
             return Err("Markdown source range is incomplete".to_owned());
         }
@@ -140,7 +140,7 @@ pub struct StoredSource {
 }
 
 impl StoredSource {
-    pub fn literal_content_range(
+    pub(crate) fn literal_content_range(
         &self,
         offset: u64,
         limit: u32,
@@ -166,9 +166,6 @@ impl StoredSource {
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn owner(&self) -> &str {
-        &self.owner
-    }
     fn holds(&self, provider: &ScopedSourceProvider, page: &SourceIndexRange) -> bool {
         StoredOwner::same_provider(&self.provider, provider) && page.index == *self.header
     }
@@ -181,7 +178,7 @@ pub enum PagePreparation {
     Failed { offset: u64, cause: String },
 }
 
-pub fn page_start(ordinal: usize) -> u64 {
+fn page_start(ordinal: usize) -> u64 {
     (ordinal - ordinal % PAGE_LEAVES) as u64
 }
 
@@ -212,10 +209,10 @@ impl Drop for PreparedLease {
 }
 
 pub struct StoredLeaf {
-    pub descriptor: SourceLeafDescriptor,
+    pub(crate) descriptor: SourceLeafDescriptor,
     pub source: Arc<str>,
     pub context: artisan_markdown_index::LeafContext,
-    pub table_continues: bool,
+    pub(crate) table_continues: bool,
     pub content: IndexedLeafContent,
     proof: LeafProof,
     _capacity: PreparedLease,
@@ -231,7 +228,7 @@ pub struct LeafProof {
 }
 
 impl LeafProof {
-    pub fn owner(&self) -> &str {
+    pub(crate) fn owner(&self) -> &str {
         &self.owner
     }
 }

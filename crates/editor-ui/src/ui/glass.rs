@@ -9,20 +9,20 @@ use super::theme::{ArtisanTheme, Elevation, Oklch, Opacity, ShadowLayer, ThemeMo
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gradient {
-    pub angle_degrees: f32,
-    pub start: Oklch,
-    pub end: Oklch,
-    pub end_position: f32,
+    pub(crate) angle_degrees: f32,
+    pub(crate) start: Oklch,
+    pub(crate) end: Oklch,
+    pub(crate) end_position: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlassShadow {
-    pub color: Oklch,
-    pub offset_x: f32,
-    pub offset_y: f32,
-    pub css_blur: f32,
-    pub spread: f32,
-    pub inset: bool,
+    color: Oklch,
+    offset_x: f32,
+    offset_y: f32,
+    css_blur: f32,
+    spread: f32,
+    inset: bool,
 }
 
 impl From<GlassShadow> for aqua::ShadowLayer {
@@ -51,7 +51,7 @@ impl From<GlassShadow> for aqua_ui::style::GpuiShadowLayer {
     }
 }
 
-pub fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
+pub(crate) fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
     let colors = &theme.colors;
     let (start, end) = match colors.mode {
         ThemeMode::Dark => (colors.hover, colors.background),
@@ -76,14 +76,14 @@ fn elevation_shadow(layer: ShadowLayer) -> GlassShadow {
     }
 }
 
-pub fn card_shadows(theme: &ArtisanTheme) -> Vec<GlassShadow> {
+pub(crate) fn card_shadows(theme: &ArtisanTheme) -> Vec<GlassShadow> {
     std::iter::once(theme.elevation.hairline)
         .chain(theme.elevation.drops(Elevation::Raised).iter().copied())
         .map(elevation_shadow)
         .collect()
 }
 
-pub fn glass_rims(theme: &ArtisanTheme) -> Vec<GlassShadow> {
+fn glass_rims(theme: &ArtisanTheme) -> Vec<GlassShadow> {
     let colors = &theme.colors;
     let shade = match colors.mode {
         ThemeMode::Light => colors.black.with_alpha(0.05),
@@ -106,7 +106,7 @@ pub fn glass_rims(theme: &ArtisanTheme) -> Vec<GlassShadow> {
     .collect()
 }
 
-pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<GlassShadow> {
+pub(crate) fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<GlassShadow> {
     let mut shadows = glass_rims(theme);
     shadows.push(elevation_shadow(theme.elevation.hairline));
     shadows.extend(
@@ -120,8 +120,8 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
     shadows
 }
 
-pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
-pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
+const COMPOSER_PADDING: f32 = Inset::Frame.px();
+const COMPOSER_RADIUS: f32 = Radius::Well.px();
 fn on_glass(content: Element) -> Element {
     use aqua_ui::style::{Axis, Length};
     UiBox::new()

@@ -34,8 +34,8 @@ pub(crate) enum SeriesData {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(try_from = "RawSeries")]
 pub(crate) struct SeriesSpec {
-    pub(crate) name: String,
-    pub(crate) data: SeriesData,
+    name: String,
+    data: SeriesData,
 }
 
 #[derive(Deserialize)]
@@ -78,25 +78,25 @@ impl TryFrom<RawSeries> for SeriesSpec {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct Axis {
     #[serde(default)]
-    pub(crate) label: Option<String>,
+    label: Option<String>,
     #[serde(default)]
-    pub(crate) unit: Option<String>,
+    unit: Option<String>,
     #[serde(default)]
-    pub(crate) min: Option<f64>,
+    min: Option<f64>,
     #[serde(default)]
-    pub(crate) max: Option<f64>,
+    max: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct Annotation {
     #[serde(default)]
-    pub(crate) x: Option<XValue>,
+    x: Option<XValue>,
     #[serde(default)]
-    pub(crate) y: Option<f64>,
+    y: Option<f64>,
     #[serde(default)]
-    pub(crate) x_end: Option<XValue>,
+    x_end: Option<XValue>,
     #[serde(default)]
-    pub(crate) label: String,
+    label: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -111,48 +111,48 @@ pub(crate) enum ParamKind {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct Param {
     #[serde(default)]
-    pub(crate) id: String,
+    id: String,
     #[serde(default)]
-    pub(crate) kind: ParamKind,
+    kind: ParamKind,
     #[serde(default)]
-    pub(crate) label: String,
-    pub(crate) min: f64,
-    pub(crate) max: f64,
+    label: String,
+    min: f64,
+    max: f64,
     #[serde(default)]
-    pub(crate) step: Option<f64>,
-    pub(crate) value: f64,
+    step: Option<f64>,
+    value: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct ChartSpec {
     #[serde(default)]
-    pub(crate) mark: Mark,
+    mark: Mark,
     #[serde(default)]
-    pub(crate) stacked: bool,
+    stacked: bool,
     #[serde(default)]
-    pub(crate) normalize: bool,
+    normalize: bool,
     #[serde(default)]
-    pub(crate) categories: Option<Vec<String>>,
-    pub(crate) series: Vec<SeriesSpec>,
+    categories: Option<Vec<String>>,
+    series: Vec<SeriesSpec>,
     #[serde(default)]
-    pub(crate) x: Axis,
+    x: Axis,
     #[serde(default)]
-    pub(crate) y: Axis,
+    y: Axis,
     #[serde(default)]
-    pub(crate) annotations: Vec<Annotation>,
+    annotations: Vec<Annotation>,
     #[serde(default)]
-    pub(crate) params: Vec<Param>,
+    params: Vec<Param>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChartStyle {
-    pub(crate) mark: Mark,
-    pub(crate) stacked: bool,
-    pub(crate) normalize: bool,
-    pub(crate) x: Axis,
-    pub(crate) y: Axis,
-    pub(crate) annotations: Vec<Annotation>,
-    pub(crate) params: Vec<Param>,
+    mark: Mark,
+    stacked: bool,
+    normalize: bool,
+    x: Axis,
+    y: Axis,
+    annotations: Vec<Annotation>,
+    params: Vec<Param>,
 }
 impl ChartStyle {
     pub(crate) fn resident_bytes(&self) -> usize {
@@ -200,11 +200,11 @@ impl From<ChartSpec> for ChartStyle {
 }
 
 impl ChartStyle {
-    pub(crate) const fn stacks(&self) -> bool {
+    const fn stacks(&self) -> bool {
         self.stacked || self.normalize
     }
 
-    pub(crate) fn thresholds(&self) -> impl Iterator<Item = (usize, &Param)> {
+    fn thresholds(&self) -> impl Iterator<Item = (usize, &Param)> {
         self.params
             .iter()
             .enumerate()

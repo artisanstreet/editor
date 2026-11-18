@@ -21,7 +21,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Obj => "OBJ",
             Self::Fbx => "FBX",
@@ -38,7 +38,7 @@ impl Format {
         }
     }
 
-    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+    fn sniff(bytes: &[u8]) -> Option<Self> {
         if gltf::is_glb(bytes) || gltf::is_json(bytes) {
             Some(Self::Gltf)
         } else if fbx::is_binary(bytes) || fbx::is_ascii(bytes) {

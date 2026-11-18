@@ -6,7 +6,7 @@ use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradien
 use aqua_ui::element::Element;
 use std::sync::Arc;
 
-pub const RADIUS: f32 = Radius::Shell.px();
+pub(crate) const RADIUS: f32 = Radius::Shell.px();
 
 const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
@@ -62,12 +62,12 @@ impl Surfaces {
 }
 
 #[must_use]
-pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
+pub(crate) fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
     crate::ui::kit::Divider::Rule.build(theme, bleed)
 }
 
 #[must_use]
-pub fn outlined(
+pub(crate) fn outlined(
     ink: Oklch,
     surface: Oklch,
     radius: f32,
@@ -111,7 +111,7 @@ fn layer(inset: f32, radius: f32, background: GpuiBackground) -> Element {
         .exclude_from_hit_testing()
 }
 
-pub(super) fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
+fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
     GpuiBackground::LinearGradient {
         angle: 180.0,
         color_space: GpuiGradientColorSpace::Srgb,
@@ -129,7 +129,7 @@ pub(super) fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
 }
 
 #[must_use]
-pub fn soft(theme: &ArtisanTheme, casts: [Cast; 2]) -> Vec<ShadowLayer> {
+pub(crate) fn soft(theme: &ArtisanTheme, casts: [Cast; 2]) -> Vec<ShadowLayer> {
     casts
         .into_iter()
         .map(|cast| ShadowLayer {
@@ -149,7 +149,7 @@ pub fn rest_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
 }
 
 #[must_use]
-pub fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
+pub(crate) fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
     soft(theme, Cast::KEY)
 }
 
@@ -180,7 +180,7 @@ pub fn polar_selection() -> GpuiBackground {
 }
 
 #[must_use]
-pub fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
+pub(crate) fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(2.0), bounds.h.max(2.0));
     let (face_w, face_h) = (w - 2.0, h - 2.0);
     let stop = |color: Oklch| hex(color.animate_to(POLAR_INK, lift));
@@ -210,7 +210,7 @@ pub fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
 }
 
 #[must_use]
-pub fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
+fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(1.0), bounds.h.max(1.0));
     let tint = hex(color);
     let source = format!(

@@ -24,7 +24,7 @@ pub(crate) enum Figure {
 }
 
 impl Figure {
-    pub(crate) fn text(&self, signed: bool) -> String {
+    fn text(&self, signed: bool) -> String {
         match self {
             Self::Number(value) if signed && *value > 0.0 => {
                 format!("+{}", kit::format_number(*value))
@@ -298,7 +298,7 @@ impl Tile {
             .or_else(|| self.delta.as_ref().and_then(Figure::direction))
     }
 
-    pub(crate) fn tone(&self) -> Tone {
+    fn tone(&self) -> Tone {
         let good = match self.good {
             Some(Trend::Down) => Trend::Down,
             _ => Trend::Up,

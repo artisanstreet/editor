@@ -42,7 +42,7 @@ impl MarkdownPresenter {
         )
     }
 
-    pub fn render_with_actions(
+    fn render_with_actions(
         &self,
         id: &str,
         theme: &ArtisanTheme,
@@ -68,7 +68,7 @@ impl MarkdownPresenter {
         )
     }
 
-    pub fn render_with_context(
+    pub(crate) fn render_with_context(
         &self,
         id: &str,
         theme: &ArtisanTheme,

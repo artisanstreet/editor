@@ -44,7 +44,7 @@ impl ButtonSize {
     }
 
     #[must_use]
-    pub const fn pad(self) -> Space {
+    const fn pad(self) -> Space {
         match self {
             Self::Md => Space::S12,
             Self::Sm => Space::S8,
@@ -140,7 +140,7 @@ impl Button {
     }
 
     #[must_use]
-    pub const fn ellipsis(mut self, ellipsis: Ellipsis) -> Self {
+    pub(crate) const fn ellipsis(mut self, ellipsis: Ellipsis) -> Self {
         self.ellipsis = Some(ellipsis);
         self
     }

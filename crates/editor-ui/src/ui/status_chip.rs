@@ -11,7 +11,7 @@ pub enum ChipTone {
 pub const fn tone_color(theme: &ArtisanTheme, tone: ChipTone) -> Oklch {
     tone_colors(theme, tone).text
 }
-pub const fn tone_colors(theme: &ArtisanTheme, tone: ChipTone) -> BannerColors {
+const fn tone_colors(theme: &ArtisanTheme, tone: ChipTone) -> BannerColors {
     let c = &theme.colors;
     match tone {
         ChipTone::Success => c.banner_success,

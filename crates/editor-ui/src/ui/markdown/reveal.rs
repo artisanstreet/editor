@@ -197,7 +197,7 @@ impl PreparedReveal {
         let alpha = 0.65_f32.mul_add(progress, 0.35);
         Some((alpha, 4.0 * (1.0 - alpha)))
     }
-    pub fn block_growth(&self, slot: usize) -> f32 {
+    fn block_growth(&self, slot: usize) -> f32 {
         if self.reduced.get() || self.swift.get() || self.rushed.get() {
             return 1.0;
         }

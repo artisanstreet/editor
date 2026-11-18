@@ -63,13 +63,6 @@ struct CachedSources {
     rows: Vec<Range<usize>>,
 }
 
-pub fn leaf_signatures(
-    source: &str,
-    command: Option<&str>,
-) -> Result<Vec<u64>, MarkdownIndexError> {
-    Ok(ShapedSource::new(source, command)?.signatures().to_vec())
-}
-
 pub struct ShapedSource {
     source: String,
     command: Option<String>,

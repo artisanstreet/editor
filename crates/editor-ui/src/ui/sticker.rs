@@ -57,7 +57,6 @@ impl StickerFrame {
             curl,
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,7 +70,11 @@ fn keys<T>(value: impl Fn(StickerFrame) -> T) -> Vec<Key<T>> {
     (0..=STEPS)
         .map(|step| {
             let at = step as f32 / STEPS as f32;
-            Key::new(at, value(StickerFrame::at(DURATION.mul_f32(at))), Easing::Linear)
+            Key::new(
+                at,
+                value(StickerFrame::at(DURATION.mul_f32(at))),
+                Easing::Linear,
+            )
         })
         .collect()
 }
@@ -96,7 +99,7 @@ impl Sticker {
     }
 
     #[must_use]
-    pub fn style(self) -> Style {
+    pub(crate) fn style(self) -> Style {
         Style::new().timeline(
             self.timeline()
                 .scale((1.0, 0.0), keys(|frame| frame.scale))
@@ -107,7 +110,12 @@ impl Sticker {
     }
 
     #[must_use]
-    pub fn layers(self, theme: &ArtisanTheme, corners: CornerRadii, curl: bool) -> Vec<Element> {
+    pub(crate) fn layers(
+        self,
+        theme: &ArtisanTheme,
+        corners: CornerRadii,
+        curl: bool,
+    ) -> Vec<Element> {
         let air = match theme.colors.mode.is_dark() {
             true => Oklch::new(1.0, 0.0, 0.0),
             false => Oklch::new(0.0, 0.0, 0.0),

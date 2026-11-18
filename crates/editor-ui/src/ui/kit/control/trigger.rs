@@ -18,7 +18,7 @@ pub enum TriggerSize {
 
 impl TriggerSize {
     #[must_use]
-    pub const fn height(self) -> f32 {
+    const fn height(self) -> f32 {
         match self {
             Self::Md => 32.0,
             Self::Sm => 28.0,

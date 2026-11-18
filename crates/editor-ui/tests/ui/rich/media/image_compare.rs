@@ -96,7 +96,6 @@ fn data_images_use_asset_decoder_and_release_leases_on_scope_change() {
     assert!(state.reconcile(&model, fetcher.clone(), true));
     drop(state);
     fetcher.retain_resources(&[]);
-    loader.retain_owners(&[]);
     assert_eq!(assets.stats().images, 0);
 }
 

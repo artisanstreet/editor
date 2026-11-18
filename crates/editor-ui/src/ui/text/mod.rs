@@ -1,5 +1,5 @@
 pub mod editor;
-pub mod metrics;
+pub(crate) mod metrics;
 pub mod mount;
 pub mod tokens;
 pub mod wheel_glide;

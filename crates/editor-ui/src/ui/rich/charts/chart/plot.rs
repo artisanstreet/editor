@@ -608,7 +608,7 @@ impl Marks<'_> {
     }
 }
 
-pub(super) fn runs(track: &Track) -> Vec<Vec<(f64, (f64, f64))>> {
+fn runs(track: &Track) -> Vec<Vec<(f64, (f64, f64))>> {
     let mut runs = Vec::new();
     let mut current = Vec::new();
     for (x, extent) in track {

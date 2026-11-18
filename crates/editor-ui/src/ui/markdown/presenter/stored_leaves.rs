@@ -216,15 +216,11 @@ impl MarkdownPresenter {
             Some(&rich),
             Some(&ordinary),
         )?;
-        let start = usize::try_from(entry.leaf.descriptor.source_start)
-            .map_err(|_| PresenterError::Unavailable("stored source range"))?;
-        let end = usize::try_from(entry.leaf.descriptor.source_end)
-            .map_err(|_| PresenterError::Unavailable("stored source range"))?;
         Ok(StoredProjectedMarkdown {
             element,
             selection_batch: entry.selection_batch.clone(),
             geometry,
-            source_range: start..end,
+            #[cfg(test)]
             list_depth: entry.leaf.context.lists.len(),
             proof: entry.leaf.proof().clone(),
         })

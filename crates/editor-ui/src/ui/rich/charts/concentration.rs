@@ -90,11 +90,11 @@ impl Concentration {
             .unwrap_or(0.1)
     }
 
-    pub(crate) fn curve(&self) -> Option<Arc<[(f64, f64)]>> {
+    fn curve(&self) -> Option<Arc<[(f64, f64)]>> {
         self.0.curve.clone()
     }
 
-    pub(crate) fn share_of_total(curve: &[(f64, f64)], share: f64) -> f64 {
+    fn share_of_total(curve: &[(f64, f64)], share: f64) -> f64 {
         let share = share.clamp(0.0, 1.0);
         let after = curve
             .partition_point(|(x, _)| *x < share)

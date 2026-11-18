@@ -78,9 +78,9 @@ pub(crate) enum RowKind {
 
 #[derive(Debug)]
 pub(crate) struct Row {
-    pub(crate) depth: usize,
-    pub(crate) name: String,
-    pub(crate) kind: RowKind,
+    depth: usize,
+    name: String,
+    kind: RowKind,
 }
 
 #[derive(Debug)]

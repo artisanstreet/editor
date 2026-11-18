@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 const MAX_LEVELS: usize = 12;
 
-pub(crate) const GROUP_PAD: f32 = 2.0;
+const GROUP_PAD: f32 = 2.0;
 pub(crate) const GROUP_HEADER: f32 = 18.0;
 
 const MIN_GROUP_SIDE: f32 = 40.0;
@@ -86,16 +86,16 @@ pub(crate) fn prepare(value: &serde_json::Value) -> Result<Prepared, String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TreeNode {
-    pub(crate) name: String,
-    pub(crate) size: f64,
-    pub(crate) parent: Option<usize>,
+    name: String,
+    size: f64,
+    parent: Option<usize>,
     sibling: usize,
-    pub(crate) children: Vec<usize>,
+    children: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Tree {
-    pub(crate) nodes: Vec<TreeNode>,
+    nodes: Vec<TreeNode>,
 }
 
 impl Tree {
@@ -143,11 +143,11 @@ impl Tree {
         index
     }
 
-    pub(crate) fn node(&self, index: usize) -> &TreeNode {
+    fn node(&self, index: usize) -> &TreeNode {
         &self.nodes[index]
     }
 
-    pub(crate) fn path(&self, index: usize) -> Vec<usize> {
+    fn path(&self, index: usize) -> Vec<usize> {
         let mut path = vec![index];
         let mut at = index;
         while let Some(parent) = self.nodes[at].parent {
@@ -158,7 +158,7 @@ impl Tree {
         path
     }
 
-    pub(crate) fn branch(&self, focus: usize, index: usize) -> Option<usize> {
+    fn branch(&self, focus: usize, index: usize) -> Option<usize> {
         let mut at = index;
         while let Some(parent) = self.nodes[at].parent {
             if parent == focus {
@@ -172,10 +172,10 @@ impl Tree {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) w: f32,
-    pub(crate) h: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
 impl Rect {
@@ -191,9 +191,9 @@ impl Rect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cell {
-    pub(crate) node: usize,
-    pub(crate) rect: Rect,
-    pub(crate) group: bool,
+    node: usize,
+    rect: Rect,
+    group: bool,
 }
 
 pub(crate) fn treemap(
@@ -261,7 +261,7 @@ fn place(tree: &Tree, parent: usize, rect: Rect, levels: usize, cells: &mut Vec<
     clippy::suspicious_operation_groupings,
     reason = "the squarified aspect ratio: max(w²·max/s², s²/(w²·min))"
 )]
-pub(crate) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)> {
+fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)> {
     let mut out = Vec::with_capacity(items.len());
     let mut rect = rect;
     let mut start = 0;
@@ -335,10 +335,10 @@ pub(crate) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Bar {
-    pub(crate) node: usize,
-    pub(crate) x0: f32,
-    pub(crate) x1: f32,
-    pub(crate) level: usize,
+    node: usize,
+    x0: f32,
+    x1: f32,
+    level: usize,
 }
 
 pub(crate) fn partition(tree: &Tree, focus: usize, levels: usize) -> Vec<Bar> {

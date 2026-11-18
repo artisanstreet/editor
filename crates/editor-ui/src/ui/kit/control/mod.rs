@@ -13,7 +13,7 @@ use aqua_ui::style::Style;
 use aqua_ui::tree::ActionEvent;
 
 #[must_use]
-pub fn focus_ring(theme: &ArtisanTheme) -> Style {
+pub(crate) fn focus_ring(theme: &ArtisanTheme) -> Style {
     Style::new()
         .border_of(1.0, theme.colors.ring.to_paint())
         .shadows(vec![ShadowLayer {

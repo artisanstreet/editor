@@ -16,7 +16,7 @@ pub enum Tone {
 
 impl Tone {
     #[must_use]
-    pub fn of(percent: f64) -> Self {
+    fn of(percent: f64) -> Self {
         if percent > 80.0 {
             Self::Danger
         } else if percent > 50.0 {

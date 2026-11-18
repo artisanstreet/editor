@@ -530,7 +530,7 @@ impl TerminalScreen {
     }
 
     #[must_use]
-    pub fn with_max_lines(max_lines: usize) -> Self {
+    fn with_max_lines(max_lines: usize) -> Self {
         Self {
             parser: Parser::default(),
             grid: Grid::new(max_lines),
@@ -550,7 +550,7 @@ impl TerminalScreen {
     }
 
     #[must_use]
-    pub fn lines(&self) -> impl DoubleEndedIterator<Item = &TerminalLine> + ExactSizeIterator {
+    fn lines(&self) -> impl DoubleEndedIterator<Item = &TerminalLine> + ExactSizeIterator {
         let styles = &self.grid.styles;
         self.grid
             .lines

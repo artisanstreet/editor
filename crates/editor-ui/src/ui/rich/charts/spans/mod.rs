@@ -44,38 +44,38 @@ pub(crate) fn prepare(value: &Value) -> Result<Layout, String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Span {
-    pub(crate) label: String,
-    pub(crate) start: f64,
-    pub(crate) end: f64,
-    pub(crate) row: usize,
-    pub(crate) lane: Option<usize>,
-    pub(crate) color: usize,
-    pub(crate) group: Option<String>,
+    label: String,
+    start: f64,
+    end: f64,
+    row: usize,
+    lane: Option<usize>,
+    color: usize,
+    group: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Lane {
-    pub(crate) name: String,
-    pub(crate) first_row: usize,
-    pub(crate) rows: usize,
+    name: String,
+    first_row: usize,
+    rows: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Marker {
-    pub(crate) at: f64,
-    pub(crate) label: String,
+    at: f64,
+    label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Layout {
-    pub(crate) spans: Vec<Span>,
-    pub(crate) row_spans: Vec<Vec<usize>>,
-    pub(crate) lanes: Vec<Lane>,
-    pub(crate) markers: Vec<Marker>,
-    pub(crate) rows: usize,
-    pub(crate) domain: Domain,
-    pub(crate) dates: bool,
-    pub(crate) unit: Option<String>,
+    spans: Vec<Span>,
+    row_spans: Vec<Vec<usize>>,
+    lanes: Vec<Lane>,
+    markers: Vec<Marker>,
+    rows: usize,
+    domain: Domain,
+    dates: bool,
+    unit: Option<String>,
 }
 impl Layout {
     pub(crate) fn resident_bytes(&self) -> usize {
@@ -308,7 +308,7 @@ impl Layout {
         })
     }
 
-    pub(crate) fn time(&self, value: f64) -> String {
+    fn time(&self, value: f64) -> String {
         if self.dates {
             Time::Date(value).to_string()
         } else {
@@ -316,7 +316,7 @@ impl Layout {
         }
     }
 
-    pub(crate) fn duration(&self, span: &Span) -> String {
+    fn duration(&self, span: &Span) -> String {
         let length = span.end - span.start;
         if self.dates {
             let days = length.round();

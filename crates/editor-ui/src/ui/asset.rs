@@ -2,7 +2,7 @@ use aqua_core::DisplayItem;
 use aqua_ui::element::{Canvas, Element};
 use editor_assets::{AssetId, Presentation};
 
-pub fn source_asset_glyph(id: AssetId, edge: f32, tint: aqua_core::GpuiHsla) -> Element {
+pub(crate) fn source_asset_glyph(id: AssetId, edge: f32, tint: aqua_core::GpuiHsla) -> Element {
     let asset = editor_assets::get(id);
     let source: std::sync::Arc<str> = asset.source.into();
     let tint = match asset.presentation {

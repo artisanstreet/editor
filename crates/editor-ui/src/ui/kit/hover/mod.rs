@@ -7,11 +7,11 @@ use aqua_ui::style::{GpuiShadowLayer, Style};
 use std::time::{Duration, Instant};
 
 const SMOOTH_OUT: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
-pub const QUICK: Transition = Transition {
+const QUICK: Transition = Transition {
     duration: Duration::from_millis(150),
     easing: SMOOTH_OUT,
 };
-pub const FAST: Transition = Transition {
+const FAST: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: SMOOTH_OUT,
 };
@@ -26,14 +26,14 @@ pub enum Hover {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
-    pub top: Oklch,
-    pub bottom: Oklch,
-    pub ring: Oklch,
+    top: Oklch,
+    bottom: Oklch,
+    ring: Oklch,
 }
 
 impl Material {
     #[must_use]
-    pub fn fill(self) -> GpuiBackground {
+    fn fill(self) -> GpuiBackground {
         GpuiBackground::LinearGradient {
             angle: 180.0,
             color_space: GpuiGradientColorSpace::Oklab,
@@ -51,7 +51,7 @@ impl Material {
     }
 
     #[must_use]
-    pub fn ring(self) -> GpuiShadowLayer {
+    fn ring(self) -> GpuiShadowLayer {
         GpuiShadowLayer {
             dx: 0.0,
             dy: 0.0,
@@ -63,7 +63,7 @@ impl Material {
     }
 
     #[must_use]
-    pub fn style(self) -> Style {
+    fn style(self) -> Style {
         Style::new()
             .gpui_background(self.fill())
             .gpui_shadows(vec![self.ring()])
@@ -71,7 +71,7 @@ impl Material {
 }
 
 #[must_use]
-pub fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
+pub(crate) fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
     match theme.colors.mode.is_dark() {
         true => (ink.with_alpha(0.09), ink.with_alpha(0.03)),
         false => (ink.with_alpha(0.02), ink.with_alpha(0.06)),
@@ -80,7 +80,7 @@ pub fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
 
 impl Hover {
     #[must_use]
-    pub fn material(self, theme: &ArtisanTheme) -> Material {
+    fn material(self, theme: &ArtisanTheme) -> Material {
         let dark = theme.colors.mode.is_dark();
         match self {
             Self::Neutral => {

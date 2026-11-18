@@ -192,7 +192,7 @@ pub trait ResourceLoader: 'static {
     type Output: Clone + Send + 'static;
 }
 
-pub enum Load<L: ResourceLoader> {
+pub(crate) enum Load<L: ResourceLoader> {
     Ready(L::Output),
     Pending,
     Start(LoadTicket<L>),
@@ -222,11 +222,11 @@ impl Default for ResourceCache {
 }
 
 impl ResourceCache {
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    pub fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
@@ -234,7 +234,7 @@ impl ResourceCache {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    pub fn load<L: ResourceLoader>(
+    pub(crate) fn load<L: ResourceLoader>(
         self: &Arc<Self>,
         owner: &Arc<[u64]>,
         source: &L::Source,
@@ -356,11 +356,11 @@ impl ResourceCache {
         any
     }
 
-    pub fn forget<L: ResourceLoader>(&self, source: &L::Source) {
+    pub(crate) fn forget<L: ResourceLoader>(&self, source: &L::Source) {
         self.remove(|entry| entry.matches::<L>(source));
     }
 
-    pub fn retain_owners(&self, owners: &[Vec<u64>]) {
+    pub(crate) fn retain_owners(&self, owners: &[Vec<u64>]) {
         self.remove(|entry| {
             entry
                 .owners
@@ -369,7 +369,7 @@ impl ResourceCache {
         });
     }
 
-    pub fn close(&self) {
+    pub(crate) fn close(&self) {
         let mut state = self.state();
         state.closed = true;
         let entries = std::mem::take(&mut state.entries);
@@ -385,7 +385,7 @@ impl ResourceCache {
 }
 
 impl<L: ResourceLoader> LoadTicket<L> {
-    pub fn current(&self) -> bool {
+    pub(crate) fn current(&self) -> bool {
         let Some(cache) = self.cache.upgrade() else {
             return false;
         };
@@ -396,7 +396,7 @@ impl<L: ResourceLoader> LoadTicket<L> {
             .any(|entry| entry.is_pending_ticket(self))
     }
 
-    pub fn cancel(&self) -> bool {
+    pub(crate) fn cancel(&self) -> bool {
         let Some(cache) = self.cache.upgrade() else {
             return false;
         };
@@ -408,7 +408,7 @@ impl<L: ResourceLoader> LoadTicket<L> {
         })
     }
 
-    pub fn attach(&self, abort: AbortHandle) -> bool {
+    pub(crate) fn attach(&self, abort: AbortHandle) -> bool {
         let Some(cache) = self.cache.upgrade() else {
             abort.abort();
             return false;
@@ -432,7 +432,7 @@ impl<L: ResourceLoader> LoadTicket<L> {
         }
     }
 
-    pub fn publish(
+    pub(crate) fn publish(
         self,
         output: L::Output,
         output_bytes: usize,
