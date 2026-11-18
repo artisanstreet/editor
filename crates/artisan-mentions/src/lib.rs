@@ -29,7 +29,7 @@ pub fn valid_mention_name(name: &str) -> bool {
 }
 
 #[must_use]
-pub fn named_mentions(text: &str, names: &[&str], sigil: char) -> Vec<Mention> {
+fn named_mentions(text: &str, names: &[&str], sigil: char) -> Vec<Mention> {
     MentionNames::new(names).mentions(text, sigil)
 }
 
@@ -97,7 +97,7 @@ impl MentionNames {
     }
 }
 
-pub const MAX_THREAD_TITLE_BYTES: usize = 512;
+const MAX_THREAD_TITLE_BYTES: usize = 512;
 
 #[must_use]
 pub fn valid_thread_title(title: &str) -> bool {
@@ -183,7 +183,7 @@ impl ThreadTitles {
 }
 
 #[must_use]
-pub fn leading_command(text: &str) -> Option<Range<usize>> {
+fn leading_command(text: &str) -> Option<Range<usize>> {
     let start = text.len() - text.trim_start().len();
     let rest = text[start..].strip_prefix('/')?;
     let name = rest
@@ -193,7 +193,7 @@ pub fn leading_command(text: &str) -> Option<Range<usize>> {
     (name > 0 && ends).then(|| start..start + 1 + name)
 }
 
-pub const SPECIAL_COMMANDS: &[&str] = &["goal", "ultracode", "ultrathink"];
+const SPECIAL_COMMANDS: &[&str] = &["goal", "ultracode", "ultrathink"];
 
 #[must_use]
 pub fn special_command(text: &str) -> Option<Range<usize>> {
