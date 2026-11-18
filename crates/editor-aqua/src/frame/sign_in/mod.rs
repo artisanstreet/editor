@@ -143,14 +143,11 @@ impl SignIn {
             return;
         };
         let rgba = decoded.to_rgba8();
-        let source = dither::Source {
-            width: rgba.width(),
-            height: rgba.height(),
-            rgba: rgba.as_raw(),
-        };
-        let mask = dither::dither(&source, ART_BOX.0, ART_BOX.1, ART_PARAMS);
+        let mask = dither::dither(dither::Source::new(&rgba), ART_BOX.0, ART_BOX.1, ART_PARAMS);
         let pixels = dither::paint(&mask, ART_PAINT);
-        let Ok(image) = aqua::images::DecodedImage::from_rgba(mask.width, mask.height, pixels) else {
+        let Ok(image) =
+            aqua::images::DecodedImage::from_rgba(pixels.width(), pixels.height(), pixels.into_raw())
+        else {
             return;
         };
         self.art = assets.insert(image).ok().map(Arc::new);

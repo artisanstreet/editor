@@ -1,9 +1,25 @@
 const THRESHOLDS: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
+use image::{GrayImage, Luma, RgbaImage};
+
+#[derive(Clone, Copy, Debug)]
 pub struct Source<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: &'a [u8],
+    image: &'a RgbaImage,
+}
+
+impl<'a> Source<'a> {
+    #[must_use]
+    pub const fn new(image: &'a RgbaImage) -> Self {
+        Self { image }
+    }
+
+    fn width(self) -> u32 {
+        self.image.width()
+    }
+
+    fn height(self) -> u32 {
+        self.image.height()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,11 +39,36 @@ pub struct Paint {
     pub fade_in_left: f32,
 }
 
+const LIT: Luma<u8> = Luma([u8::MAX]);
+const DARK: Luma<u8> = Luma([0]);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mask {
-    pub width: u32,
-    pub height: u32,
-    pub visible: Vec<bool>,
+    image: GrayImage,
+}
+
+impl Mask {
+    #[must_use]
+    pub fn from_fn(width: u32, height: u32, mut lit: impl FnMut(u32, u32) -> bool) -> Self {
+        Self {
+            image: GrayImage::from_fn(width, height, |x, y| if lit(x, y) { LIT } else { DARK }),
+        }
+    }
+
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.image.width()
+    }
+
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.image.height()
+    }
+
+    #[must_use]
+    pub fn lit(&self, x: u32, y: u32) -> bool {
+        self.image.get_pixel(x, y) == &LIT
+    }
 }
 
 #[must_use]
@@ -45,73 +86,60 @@ pub fn grid(box_width: f32, box_height: f32, params: Params) -> (u32, u32) {
 }
 
 #[must_use]
-pub fn dither(source: &Source<'_>, box_width: f32, box_height: f32, params: Params) -> Mask {
+pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Params) -> Mask {
     let (width, height) = grid(box_width, box_height, params);
-    let scale = (width as f32 / source.width as f32).min(height as f32 / source.height as f32);
-    let drawn = (source.width as f32 * scale, source.height as f32 * scale);
+    let scale = (width as f32 / source.width() as f32).min(height as f32 / source.height() as f32);
+    let drawn = (source.width() as f32 * scale, source.height() as f32 * scale);
     let top = height as f32 - drawn.1;
     let fade_right = params.fade_right.clamp(0.0, 1.0);
-    let visible = (0..height)
-        .flat_map(|y| (0..width).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            let Some([r, g, b, a]) = area(source, (x as f32) / scale, (y as f32 - top) / scale, 1.0 / scale) else {
-                return false;
-            };
-            let luminance = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
-            let threshold = (f32::from(THRESHOLDS[((y % 4) * 4 + x % 4) as usize]) + 0.5) / 16.0;
-            let fade = match fade_right > 0.0 {
-                true => 1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0),
-                false => 1.0,
-            };
-            let adjusted = ((luminance * params.brightness - 0.5) * params.contrast + 0.5).clamp(0.0, 1.0) * fade;
-            adjusted > threshold + params.threshold_bias && a > 0.0
-        })
-        .collect();
-    Mask {
-        width,
-        height,
-        visible,
-    }
+    Mask::from_fn(width, height, |x, y| {
+        let Some([r, g, b, a]) = area(source, (x as f32) / scale, (y as f32 - top) / scale, 1.0 / scale) else {
+            return false;
+        };
+        let luminance = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
+        let threshold = (f32::from(THRESHOLDS[((y % 4) * 4 + x % 4) as usize]) + 0.5) / 16.0;
+        let fade = match fade_right > 0.0 {
+            true => 1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0),
+            false => 1.0,
+        };
+        let adjusted = ((luminance * params.brightness - 0.5) * params.contrast + 0.5).clamp(0.0, 1.0) * fade;
+        adjusted > threshold + params.threshold_bias && a > 0.0
+    })
 }
 
 #[must_use]
-pub fn paint(mask: &Mask, paint: Paint) -> Vec<u8> {
-    let width = mask.width as f32;
-    mask.visible
-        .iter()
-        .enumerate()
-        .flat_map(|(index, visible)| {
-            let x = (index as u32 % mask.width) as f32;
-            let reveal = match paint.fade_in_left > 0.0 {
-                true => ((x + 0.5) / width / paint.fade_in_left).min(1.0),
-                false => 1.0,
-            };
-            let alpha = match visible {
-                true => (255.0 * paint.opacity * reveal).round() as u8,
-                false => 0,
-            };
-            [paint.rgb[0], paint.rgb[1], paint.rgb[2], alpha]
-        })
-        .collect()
+pub fn paint(mask: &Mask, paint: Paint) -> RgbaImage {
+    let width = mask.width() as f32;
+    RgbaImage::from_fn(mask.width(), mask.height(), |x, y| {
+        let reveal = match paint.fade_in_left > 0.0 {
+            true => ((x as f32 + 0.5) / width / paint.fade_in_left).min(1.0),
+            false => 1.0,
+        };
+        let alpha = match mask.lit(x, y) {
+            true => (255.0 * paint.opacity * reveal).round() as u8,
+            false => 0,
+        };
+        image::Rgba([paint.rgb[0], paint.rgb[1], paint.rgb[2], alpha])
+    })
 }
 
-fn area(source: &Source<'_>, left: f32, top: f32, span: f32) -> Option<[f32; 4]> {
+fn area(source: Source<'_>, left: f32, top: f32, span: f32) -> Option<[f32; 4]> {
     let right = left + span;
     let bottom = top + span;
-    if right <= 0.0 || bottom <= 0.0 || left >= source.width as f32 || top >= source.height as f32 {
+    if right <= 0.0 || bottom <= 0.0 || left >= source.width() as f32 || top >= source.height() as f32 {
         return None;
     }
-    let columns = (left.max(0.0).floor() as u32)..(right.min(source.width as f32).ceil() as u32);
-    let rows = (top.max(0.0).floor() as u32)..(bottom.min(source.height as f32).ceil() as u32);
+    let columns = (left.max(0.0).floor() as u32)..(right.min(source.width() as f32).ceil() as u32);
+    let rows = (top.max(0.0).floor() as u32)..(bottom.min(source.height() as f32).ceil() as u32);
     let mut total = [0.0_f32; 4];
     let mut weight = 0.0_f32;
     for y in rows {
         let cover_y = (bottom.min(y as f32 + 1.0) - top.max(y as f32)).max(0.0);
         for x in columns.clone() {
             let cover = cover_y * (right.min(x as f32 + 1.0) - left.max(x as f32)).max(0.0);
-            let at = ((y * source.width + x) * 4) as usize;
-            for (channel, sum) in total.iter_mut().enumerate() {
-                *sum += f32::from(source.rgba[at + channel]) * cover;
+            let pixel = source.image.get_pixel(x, y);
+            for (sum, channel) in total.iter_mut().zip(pixel.0) {
+                *sum += f32::from(channel) * cover;
             }
             weight += cover;
         }
