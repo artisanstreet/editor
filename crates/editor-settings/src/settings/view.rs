@@ -1361,7 +1361,10 @@ struct ViewSnapshot {
 impl ViewSnapshot {
     fn capture(controller: &SettingsController, core: &Core) -> Self {
         let host = core.active_host();
-        let preferences = editor_ui::preferences::Preferences::from_core(core);
+        let preferences = editor_ui::preferences::Preferences::from_core(
+            core,
+            editor_ui::preferences::SystemAccess::default(),
+        );
         let host_keys = [
             "retry_when_overloaded",
             "continue_after_usage_limit",

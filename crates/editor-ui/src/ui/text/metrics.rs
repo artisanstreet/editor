@@ -46,8 +46,8 @@ impl EditorMetrics {
         Self {
             text_style: TextStyle {
                 families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: size,
-                line_height_px: line_height,
+                size_px: theme.typography.size(size),
+                line_height_px: theme.typography.size(line_height),
                 weight: ProseTypography::BODY_WEIGHT,
                 letter_spacing_em: Some(theme.typography.tracking_em),
                 gpui_source_color: Some([
@@ -58,7 +58,7 @@ impl EditorMetrics {
                 ]),
                 ..TextStyle::default()
             },
-            line_height,
+            line_height: theme.typography.size(line_height),
             visible_lines,
             padding_x,
             padding_y,

@@ -69,8 +69,8 @@ impl TextRole {
         };
         TextStyle {
             families: vec![FontFamily::Named(family.to_owned())],
-            size_px: spec.size,
-            line_height_px: spec.line,
+            size_px: theme.typography.size(spec.size),
+            line_height_px: theme.typography.size(spec.line),
             weight: spec.weight,
             letter_spacing_em: match self {
                 Self::Prose => Some(theme.typography.tracking_em),

@@ -77,7 +77,8 @@ impl Shell {
         );
         let notifications = entry.sync(&core).into_iter().collect();
         entry.land(&mut core);
-        let preferences = Preferences::from_core(&core);
+        let preferences =
+            Preferences::from_core(&core, editor_ui::preferences::SystemAccess::default());
         (
             Self {
                 titlebar: crate::shell::titlebar::Titlebar::default(),
@@ -273,7 +274,7 @@ impl Shell {
         self.entry.finish_events(&mut self.core, ui);
         causes.note(Cause::EntryState, self.entry.drain(&mut self.core));
         if preferences_changed {
-            self.preferences = Preferences::from_core(&self.core);
+            self.preferences = Preferences::from_core(&self.core, self.preferences.system);
         }
         drop(tm_d);
         let tm_e = crate::shell::application::Tm::new("sd.domains");

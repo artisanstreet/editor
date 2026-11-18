@@ -204,6 +204,11 @@ impl IconButton {
                 .focus_visible_style(focus_ring(&theme))
                 .hover_style(hover),
         );
-        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
+        match theme.reduced_motion() {
+            true => element,
+            false => {
+                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
+            }
+        }
     }
 }

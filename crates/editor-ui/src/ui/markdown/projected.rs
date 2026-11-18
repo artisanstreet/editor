@@ -712,8 +712,8 @@ fn render_leaf(
         };
         let style = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: ProseTypography::BODY_SIZE_PX,
-            line_height_px: ProseTypography::BODY_LINE_PX,
+            size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+            line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
             weight: if level.number.is_some() {
                 FontWeight::NORMAL
             } else {

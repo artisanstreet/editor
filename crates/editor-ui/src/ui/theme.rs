@@ -318,6 +318,20 @@ impl Oklch {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Contrast {
+    #[default]
+    Standard,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Motion {
+    #[default]
+    Full,
+    Reduced,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ThemeMode {
     Light,
     #[default]
@@ -368,6 +382,7 @@ pub struct AnsiColors(pub [Oklch; 16]);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorTokens {
     pub mode: ThemeMode,
+    pub contrast: Contrast,
     pub gray: Scale,
     pub accent: Scale,
     pub accent_contrast: Oklch,
@@ -548,7 +563,45 @@ fn token(lch: (f32, f32, f32)) -> Oklch {
 }
 
 impl ColorTokens {
-    fn build(mode: ThemeMode) -> Self {
+    fn build(mode: ThemeMode, contrast: Contrast) -> Self {
+        let standard = Self::standard(mode);
+        match contrast {
+            Contrast::Standard => standard,
+            Contrast::High => standard.high_contrast(),
+        }
+    }
+
+    fn high_contrast(self) -> Self {
+        use polar::{
+            AMBER_300, BLUE_300, BLUE_700, BLUE_900, GRAY_200, GRAY_600, POLAR_300, POLAR_600,
+        };
+        let dark = self.mode.is_dark();
+        let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
+            token(if dark { dark_value } else { light })
+        };
+        Self {
+            contrast: Contrast::High,
+            text_muted: self.text,
+            text_muted_glass: self.text,
+            text_faint: self.text,
+            line: pick(GRAY_600, POLAR_300),
+            line_strong: self.text,
+            selected: pick(GRAY_200, POLAR_600),
+            ring: pick(BLUE_700, AMBER_300),
+            link: pick(BLUE_900, BLUE_300),
+            unread: pick(BLUE_900, BLUE_300),
+            thread_title_active: pick(BLUE_900, BLUE_300),
+            mention_skill: pick(BLUE_900, BLUE_300),
+            mention_connector: self.text,
+            syntax: SyntaxColors {
+                comment: self.text,
+                ..self.syntax
+            },
+            ..self
+        }
+    }
+
+    fn standard(mode: ThemeMode) -> Self {
         use polar::{
             AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
             BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
@@ -661,6 +714,7 @@ impl ColorTokens {
         };
         Self {
             mode,
+            contrast: Contrast::Standard,
             gray,
             accent,
             accent_contrast,
@@ -739,6 +793,7 @@ pub struct TypographyTokens {
     pub control_text: Pixels,
     pub editor_text_desktop: Pixels,
     pub label_text: Pixels,
+    pub scale: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -1062,6 +1117,7 @@ pub struct DensityTokens {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InteractionTokens {
     pub focus_ring_width: Pixels,
+    pub motion: Motion,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArtisanTheme {
@@ -1095,7 +1151,24 @@ impl TypographyTokens {
             control_text: px(14.0),
             editor_text_desktop: px(14.0),
             label_text: px(12.0),
+            scale: 1.0,
         }
+    }
+
+    #[must_use]
+    pub fn scaled(self, scale: f32) -> Self {
+        Self {
+            scale,
+            control_text: px(14.0 * scale),
+            editor_text_desktop: px(14.0 * scale),
+            label_text: px(12.0 * scale),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn size(&self, px: f32) -> f32 {
+        px * self.scale
     }
     #[must_use]
     pub const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
@@ -1112,16 +1185,31 @@ impl ArtisanTheme {
     }
     #[must_use]
     pub fn for_mode(mode: ThemeMode) -> &'static Self {
-        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
-        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
-        match mode {
-            ThemeMode::Light => LIGHT.get_or_init(|| Self::build(mode)),
-            ThemeMode::Dark => DARK.get_or_init(|| Self::build(mode)),
-        }
+        Self::for_mode_and_contrast(mode, Contrast::Standard)
     }
 
-    fn build(mode: ThemeMode) -> Self {
-        let colors = ColorTokens::build(mode);
+    #[must_use]
+    pub fn for_mode_and_contrast(mode: ThemeMode, contrast: Contrast) -> &'static Self {
+        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
+        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
+        static LIGHT_HIGH: OnceLock<ArtisanTheme> = OnceLock::new();
+        static DARK_HIGH: OnceLock<ArtisanTheme> = OnceLock::new();
+        let slot = match (mode, contrast) {
+            (ThemeMode::Light, Contrast::Standard) => &LIGHT,
+            (ThemeMode::Dark, Contrast::Standard) => &DARK,
+            (ThemeMode::Light, Contrast::High) => &LIGHT_HIGH,
+            (ThemeMode::Dark, Contrast::High) => &DARK_HIGH,
+        };
+        slot.get_or_init(|| Self::build(mode, contrast))
+    }
+
+    #[must_use]
+    pub const fn reduced_motion(&self) -> bool {
+        matches!(self.interaction.motion, Motion::Reduced)
+    }
+
+    fn build(mode: ThemeMode, contrast: Contrast) -> Self {
+        let colors = ColorTokens::build(mode, contrast);
         Self {
             colors,
             typography: TypographyTokens::new(FontSet::Spline),
@@ -1138,6 +1226,7 @@ impl ArtisanTheme {
             },
             interaction: InteractionTokens {
                 focus_ring_width: px(3.0),
+                motion: Motion::Full,
             },
         }
     }

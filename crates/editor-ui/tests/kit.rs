@@ -7,6 +7,8 @@
 mod divider;
 #[path = "ui/kit/hover.rs"]
 mod hover;
+#[path = "ui/kit/control/icon_button.rs"]
+mod icon_button;
 #[path = "ui/kit/tokens/radius.rs"]
 mod radius;
 #[path = "ui/kit/row.rs"]

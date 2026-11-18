@@ -1,4 +1,4 @@
-use editor_ui::theme::{ArtisanTheme, Oklch, ThemeMode};
+use editor_ui::theme::{ArtisanTheme, Contrast, Oklch, ThemeMode};
 
 fn luminance(color: Oklch) -> f64 {
     let srgb = color.to_srgb();
@@ -17,10 +17,10 @@ fn ratio(foreground: Oklch, background: Oklch) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-fn failures(text_floor: f64, ring_floor: f64) -> Vec<String> {
+fn failures(contrast: Contrast, text_floor: f64, ring_floor: f64) -> Vec<String> {
     let mut failed = Vec::new();
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        let colors = ArtisanTheme::for_mode(mode).colors;
+        let colors = ArtisanTheme::for_mode_and_contrast(mode, contrast).colors;
         let grounds = [
             ("background", colors.background),
             ("surface", colors.surface),
@@ -49,5 +49,10 @@ fn failures(text_floor: f64, ring_floor: f64) -> Vec<String> {
 
 #[test]
 fn text_and_focus_tokens_meet_wcag_aa_on_every_surface() {
-    assert_eq!(failures(4.5, 3.0), Vec::<String>::new());
+    assert_eq!(failures(Contrast::Standard, 4.5, 3.0), Vec::<String>::new());
+}
+
+#[test]
+fn the_high_contrast_palette_meets_wcag_aaa() {
+    assert_eq!(failures(Contrast::High, 7.0, 4.5), Vec::<String>::new());
 }

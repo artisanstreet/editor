@@ -314,6 +314,11 @@ impl Button {
             true => live::track(element),
             false => element,
         };
-        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
+        match theme.reduced_motion() {
+            true => element,
+            false => {
+                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
+            }
+        }
     }
 }

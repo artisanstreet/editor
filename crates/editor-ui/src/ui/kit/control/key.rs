@@ -159,6 +159,11 @@ impl Key {
         let element = element
             .cursor(CursorIcon::Pointer)
             .focus_visible_style(focus_ring(&theme));
-        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
+        match theme.reduced_motion() {
+            true => element,
+            false => {
+                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
+            }
+        }
     }
 }

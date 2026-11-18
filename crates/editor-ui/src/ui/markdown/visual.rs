@@ -99,8 +99,8 @@ impl PreparedInline {
     ) -> Vec<StyledSpan> {
         let mut base = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: ProseTypography::BODY_SIZE_PX,
-            line_height_px: ProseTypography::BODY_LINE_PX,
+            size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+            line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
             weight: ProseTypography::BODY_WEIGHT,
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
@@ -114,16 +114,16 @@ impl PreparedInline {
             base.families = vec![FontFamily::Named(
                 theme.typography.heading.family.to_owned(),
             )];
-            base.size_px = spec.size_px;
-            base.line_height_px = spec.line_px;
+            base.size_px = theme.typography.size(spec.size_px);
+            base.line_height_px = theme.typography.size(spec.line_px);
             base.weight = ProseTypography::HEADING_WEIGHT;
             base.letter_spacing_em =
                 Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
             base_color = theme.colors.text;
         }
         if let Some(header) = table_header {
-            base.size_px = ProseTypography::TABLE_SIZE_PX;
-            base.line_height_px = ProseTypography::TABLE_LINE_PX;
+            base.size_px = theme.typography.size(ProseTypography::TABLE_SIZE_PX);
+            base.line_height_px = theme.typography.size(ProseTypography::TABLE_LINE_PX);
             if header {
                 base.weight = ProseTypography::STRONG_WEIGHT;
                 base_color = theme.colors.text;
@@ -364,8 +364,8 @@ pub fn raw_leaf(
     };
     let style = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
@@ -543,8 +543,8 @@ fn interactive_leaf_impl(
     let styled = prepared.styled_spans_for(theme, tone, heading, table_header);
     let mut base = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
@@ -554,14 +554,14 @@ fn interactive_leaf_impl(
         base.families = vec![FontFamily::Named(
             theme.typography.heading.family.to_owned(),
         )];
-        base.size_px = spec.size_px;
-        base.line_height_px = spec.line_px;
+        base.size_px = theme.typography.size(spec.size_px);
+        base.line_height_px = theme.typography.size(spec.line_px);
         base.weight = ProseTypography::HEADING_WEIGHT;
         base.letter_spacing_em = Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
     }
     if let Some(header) = table_header {
-        base.size_px = ProseTypography::TABLE_SIZE_PX;
-        base.line_height_px = ProseTypography::TABLE_LINE_PX;
+        base.size_px = theme.typography.size(ProseTypography::TABLE_SIZE_PX);
+        base.line_height_px = theme.typography.size(ProseTypography::TABLE_LINE_PX);
         if header {
             base.weight = ProseTypography::STRONG_WEIGHT;
         }
@@ -694,8 +694,8 @@ pub fn prose_leaf(
     };
     let style = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
