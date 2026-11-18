@@ -1,6 +1,7 @@
 //! The Marketplace's directories: skills.sh's search, and fetching one of
 //! its skills from the GitHub repository that publishes it.
 
+use crate::expansion::{Expansion, ExpansionError, Limits};
 use artisan_api::Listing;
 use serde::Deserialize;
 use std::fs;
@@ -14,6 +15,12 @@ pub const SKILLS_SH_URL: &str = "https://skills.sh";
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 /// A file inside it; larger ones are skipped.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const UNPACK_LIMITS: Limits = Limits {
+    bytes: 512 * 1024 * 1024,
+    files: 50_000,
+    folders: 20_000,
+    spare_space: 256 * 1024 * 1024,
+};
 
 #[derive(Deserialize)]
 struct Search {
@@ -159,7 +166,7 @@ pub async fn fetch_skill(
     let bytes = download(response, MAX_ARCHIVE_BYTES, &repository).await?;
     let root = scratch.join("repository");
     let unpack_root = root.clone();
-    tokio::task::spawn_blocking(move || unpack(&bytes, &unpack_root))
+    tokio::task::spawn_blocking(move || unpack(&bytes, &unpack_root, UNPACK_LIMITS))
         .await
         .map_err(|source| FetchSkillError::Task {
             repository: repository.clone(),
@@ -238,6 +245,8 @@ pub enum UnpackError {
     },
     #[error("reading the repository")]
     Read(#[source] std::io::Error),
+    #[error("the repository is too large to unpack")]
+    TooLarge(#[source] ExpansionError),
     #[error("unpacking {}", member.display())]
     Member {
         member: PathBuf,
@@ -252,7 +261,7 @@ pub enum UnpackError {
     },
 }
 
-fn unpack(bytes: &[u8], root: &Path) -> Result<(), UnpackError> {
+fn unpack(bytes: &[u8], root: &Path, limits: Limits) -> Result<(), UnpackError> {
     let create = |path: &Path| {
         fs::create_dir_all(path).map_err(|source| UnpackError::Create {
             path: path.to_owned(),
@@ -261,6 +270,7 @@ fn unpack(bytes: &[u8], root: &Path) -> Result<(), UnpackError> {
     };
     create(root)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut expansion = Expansion::new(root, limits);
     for entry in archive.entries().map_err(UnpackError::Read)? {
         let mut entry = entry.map_err(UnpackError::Read)?;
         if !matches!(
@@ -281,6 +291,9 @@ fn unpack(bytes: &[u8], root: &Path) -> Result<(), UnpackError> {
         {
             continue;
         }
+        expansion
+            .admit_file(&relative, entry.size())
+            .map_err(UnpackError::TooLarge)?;
         let to = root.join(&relative);
         if let Some(parent) = to.parent() {
             create(parent)?;
@@ -364,10 +377,62 @@ mod tests {
                 "---\nname: pdf\ndescription: PDFs\n---\n",
             ),
         ]);
-        unpack(&bytes, dir.path()).unwrap();
+        unpack(&bytes, dir.path(), UNPACK_LIMITS).unwrap();
         let folder = find_skill(dir.path(), "frontend-design").unwrap().unwrap();
         assert_eq!(folder, dir.path().join("skills/frontend"));
         assert!(folder.join("notes.md").is_file());
         assert!(find_skill(dir.path(), "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_repository_of_many_small_files_stops_at_the_aggregate_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<(String, String)> = (0..6)
+            .map(|index| {
+                (
+                    format!("repo-abc/skills/s{index}/notes.md"),
+                    "x".repeat(400),
+                )
+            })
+            .collect();
+        let members: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let bytes = tarball(&members);
+        let limits = Limits {
+            bytes: 1000,
+            ..UNPACK_LIMITS
+        };
+        let error = unpack(&bytes, dir.path(), limits).unwrap_err();
+        assert!(
+            matches!(&error, UnpackError::TooLarge(ExpansionError::Bytes { member, limit: 1000 }) if member == Path::new("skills/s2/notes.md")),
+            "{error:?}"
+        );
+        assert!(!dir.path().join("skills/s2").exists());
+        let limits = Limits {
+            files: 4,
+            ..UNPACK_LIMITS
+        };
+        let error = unpack(&bytes, &dir.path().join("files"), limits).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                UnpackError::TooLarge(ExpansionError::Files { limit: 4, .. })
+            ),
+            "{error:?}"
+        );
+        let limits = Limits {
+            folders: 3,
+            ..UNPACK_LIMITS
+        };
+        let error = unpack(&bytes, &dir.path().join("folders"), limits).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                UnpackError::TooLarge(ExpansionError::Folders { limit: 3, .. })
+            ),
+            "{error:?}"
+        );
     }
 }

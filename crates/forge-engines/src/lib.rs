@@ -34,6 +34,7 @@ mod commands;
 mod compaction;
 mod customise;
 mod engines;
+mod expansion;
 mod harness;
 mod install;
 mod manager;

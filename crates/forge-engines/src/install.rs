@@ -1,6 +1,7 @@
 use crate::engines::{
     Archive, Artifact, CLAUDE_RELEASES, Feed, NPM_REGISTRY, compare_versions, host_spec,
 };
+use crate::expansion::{Expansion, ExpansionError, Limits};
 use artisan_api::{EngineId, InstallState};
 use base64::Engine as _;
 use sha2::Digest as _;
@@ -11,6 +12,12 @@ use tokio::io::AsyncWriteExt;
 
 /// Largest download we accept.
 const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const UNPACK_LIMITS: Limits = Limits {
+    bytes: 4 * 1024 * 1024 * 1024,
+    files: 10_000,
+    folders: 2_000,
+    spare_space: 256 * 1024 * 1024,
+};
 const PROGRESS_STEP_BYTES: u64 = 2 * 1024 * 1024;
 
 // ---------------------------------------------------------------- machine
@@ -987,7 +994,7 @@ pub async fn fetch(
         let switching = layout.clone();
         let switching_version = version.clone();
         let placed = tokio::task::spawn_blocking(move || -> Result<(), PlaceStep> {
-            unpack(artifact, &from, &to).map_err(PlaceStep::Unpack)?;
+            unpack(artifact, &from, &to, UNPACK_LIMITS).map_err(PlaceStep::Unpack)?;
             if target.exists() {
                 fs::remove_dir_all(&target)
                     .map_err(|source| PlaceStep::RemoveOld(target.clone(), source))?;
@@ -1216,6 +1223,8 @@ pub enum UnpackError {
     },
     #[error("unsafe archive member {}", member.display())]
     Unsafe { member: PathBuf },
+    #[error("the archive is too large to unpack")]
+    TooLarge(#[source] ExpansionError),
     #[error("the archive links {} elsewhere", member.display())]
     Link { member: PathBuf },
     #[error("unpack {}", member.display())]
@@ -1238,7 +1247,12 @@ pub enum UnpackError {
     clippy::wildcard_enum_match_arm,
     reason = "every other tar entry type (devices, fifos, GNU and PAX headers) is skipped"
 )]
-fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<(), UnpackError> {
+fn unpack(
+    artifact: Artifact,
+    download: &Path,
+    dest: &Path,
+    limits: Limits,
+) -> Result<(), UnpackError> {
     let create = |path: &Path| {
         fs::create_dir_all(path).map_err(|source| UnpackError::Create {
             path: path.to_owned(),
@@ -1270,6 +1284,7 @@ fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<(), Unpack
             })?;
             let mut archive =
                 tar::Archive::new(flate2::read::GzDecoder::new(io::BufReader::new(file)));
+            let mut expansion = Expansion::new(dest, limits);
             for entry in archive.entries().map_err(read)? {
                 let mut entry = entry.map_err(read)?;
                 let path = entry.path().map_err(read)?.into_owned();
@@ -1278,8 +1293,16 @@ fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<(), Unpack
                 };
                 let to = dest.join(&relative);
                 match entry.header().entry_type() {
-                    tar::EntryType::Directory => create(&to)?,
+                    tar::EntryType::Directory => {
+                        expansion
+                            .admit_folder(&relative)
+                            .map_err(UnpackError::TooLarge)?;
+                        create(&to)?;
+                    }
                     tar::EntryType::Regular | tar::EntryType::Continuous => {
+                        expansion
+                            .admit_file(&relative, entry.size())
+                            .map_err(UnpackError::TooLarge)?;
                         if let Some(parent) = to.parent() {
                             create(parent)?;
                         }
@@ -1734,3 +1757,7 @@ mod lifecycle_tests {
         assert_eq!(machine.state(), &State::Absent {});
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/install/unpack.rs"]
+mod unpack_tests;
