@@ -1948,8 +1948,10 @@ async fn a_newer_thread_page_slides_back_up_from_its_cursor() {
             .collect()
     };
     let after = |thread: &artisan_api::Thread, limit| artisan_api::ThreadsQuery {
-        after_activity: Some(thread.activity_seq),
-        after_id: Some(thread.id.clone()),
+        window: artisan_api::ThreadWindow::After(artisan_api::ThreadCursor {
+            activity_seq: thread.activity_seq,
+            id: thread.id.clone(),
+        }),
         limit: Some(limit),
         ..Default::default()
     };

@@ -137,25 +137,103 @@ pub struct WorkSpan {
     pub worked: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ThreadWindow {
+    #[default]
+    Latest,
+    Before(ThreadCursor),
+    After(ThreadCursor),
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ThreadsQueryWire", into = "ThreadsQueryWire")]
 pub struct ThreadsQuery {
-    #[serde(default)]
     pub archived: bool,
-    pub before_activity: Option<crate::Seq>,
-    pub before_id: Option<ThreadId>,
-    /// The page just newer than this cursor instead: a window that dropped
-    /// its newest threads slides back up. Exclusive with `before_*`.
-    #[serde(default)]
-    pub after_activity: Option<crate::Seq>,
-    #[serde(default)]
-    pub after_id: Option<ThreadId>,
+    pub window: ThreadWindow,
     pub limit: Option<u32>,
     pub query: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ThreadsQueryWire {
+    #[serde(default)]
+    archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before_activity: Option<Seq>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after_activity: Option<Seq>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ThreadsQueryError {
+    #[error("a thread cursor needs both its activity and its id")]
+    IncompleteCursor,
+    #[error("a thread page is either before or after its cursor, not both")]
+    BothDirections,
+}
+
+fn thread_cursor(
+    activity: Option<Seq>,
+    id: Option<ThreadId>,
+) -> Result<Option<ThreadCursor>, ThreadsQueryError> {
+    match (activity, id) {
+        (None, None) => Ok(None),
+        (Some(activity_seq), Some(id)) => Ok(Some(ThreadCursor { activity_seq, id })),
+        (Some(_), None) | (None, Some(_)) => Err(ThreadsQueryError::IncompleteCursor),
+    }
+}
+
+impl TryFrom<ThreadsQueryWire> for ThreadsQuery {
+    type Error = ThreadsQueryError;
+
+    fn try_from(wire: ThreadsQueryWire) -> Result<Self, Self::Error> {
+        let before = thread_cursor(wire.before_activity, wire.before_id)?;
+        let after = thread_cursor(wire.after_activity, wire.after_id)?;
+        let window = match (before, after) {
+            (None, None) => ThreadWindow::Latest,
+            (Some(cursor), None) => ThreadWindow::Before(cursor),
+            (None, Some(cursor)) => ThreadWindow::After(cursor),
+            (Some(_), Some(_)) => return Err(ThreadsQueryError::BothDirections),
+        };
+        Ok(Self {
+            archived: wire.archived,
+            window,
+            limit: wire.limit,
+            query: wire.query,
+        })
+    }
+}
+
+impl From<ThreadsQuery> for ThreadsQueryWire {
+    fn from(query: ThreadsQuery) -> Self {
+        let (before, after) = match query.window {
+            ThreadWindow::Latest => (None, None),
+            ThreadWindow::Before(cursor) => (Some(cursor), None),
+            ThreadWindow::After(cursor) => (None, Some(cursor)),
+        };
+        Self {
+            archived: query.archived,
+            before_activity: before.as_ref().map(|cursor| cursor.activity_seq),
+            before_id: before.map(|cursor| cursor.id),
+            after_activity: after.as_ref().map(|cursor| cursor.activity_seq),
+            after_id: after.map(|cursor| cursor.id),
+            limit: query.limit,
+            query: query.query,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadCursor {
-    pub activity_seq: crate::Seq,
+    pub activity_seq: Seq,
     pub id: ThreadId,
 }
 

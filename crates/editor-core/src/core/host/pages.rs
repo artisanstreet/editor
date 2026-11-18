@@ -1,5 +1,5 @@
 use super::{HostCompletion, HostData, HostEvent, HostMessage};
-use artisan_api::{Thread, ThreadCursor, ThreadId, ThreadsQuery};
+use artisan_api::{Thread, ThreadCursor, ThreadId, ThreadWindow, ThreadsQuery};
 use std::collections::{HashMap, HashSet, VecDeque};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -81,25 +81,22 @@ impl HostData {
         if page.loading {
             return;
         }
-        let (cursor, after) = match direction {
-            ThreadPageDirection::Latest => (None, None),
+        let window = match direction {
+            ThreadPageDirection::Latest => ThreadWindow::Latest,
             ThreadPageDirection::Older => {
                 let Some(cursor) = page.next.clone() else {
                     return;
                 };
-                (Some(cursor), None)
+                ThreadWindow::Before(cursor)
             }
             ThreadPageDirection::Newer => {
                 let Some(first) = page.ids.first().filter(|_| !page.at_latest) else {
                     return;
                 };
-                (
-                    None,
-                    Some(ThreadCursor {
-                        activity_seq: self.threads[first].activity_seq,
-                        id: first.clone(),
-                    }),
-                )
+                ThreadWindow::After(ThreadCursor {
+                    activity_seq: self.threads[first].activity_seq,
+                    id: first.clone(),
+                })
             }
         };
         page.loading = true;
@@ -116,10 +113,7 @@ impl HostData {
         page.generation = generation;
         let query = ThreadsQuery {
             archived,
-            before_activity: cursor.as_ref().map(|cursor| cursor.activity_seq),
-            before_id: cursor.map(|cursor| cursor.id),
-            after_activity: after.as_ref().map(|cursor| cursor.activity_seq),
-            after_id: after.map(|cursor| cursor.id),
+            window,
             limit: Some(PAGE),
             query: None,
         };

@@ -541,7 +541,7 @@ pub fn transcript_page(
     };
     let mut work = work_spans(conn, thread_id, from, to)?;
     let runs = page_runs(conn, &items, &work)?;
-    for run in runs.iter().filter(|run| run.status.is_live()) {
+    for run in runs.iter().filter(|run| run.status().is_live()) {
         for span in work
             .iter_mut()
             .filter(|span| span.run_id.as_ref() == Some(&run.id))
@@ -972,31 +972,18 @@ pub fn threads_page(
     query: &artisan_api::ThreadsQuery,
 ) -> Result<artisan_api::ThreadsPage> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
-    anyhow::ensure!(
-        query.before_activity.is_some() == query.before_id.is_some()
-            && query.after_activity.is_some() == query.after_id.is_some(),
-        "incomplete thread cursor"
-    );
-    anyhow::ensure!(
-        query.before_id.is_none() || query.after_id.is_none(),
-        "a thread page is either before or after its cursor"
-    );
-    // A newer page walks up from its cursor, then reads newest first like
-    // every other page.
-    let newer = query.after_id.is_some();
-    let (cursor, id) = if newer {
-        (
-            query.after_activity.unwrap_or(0).min(i64::MAX as u64),
-            query.after_id.as_ref().map_or("", ThreadId::as_str),
-        )
-    } else {
-        (
-            query
-                .before_activity
-                .unwrap_or(i64::MAX as u64)
-                .min(i64::MAX as u64),
-            query.before_id.as_ref().map_or("", ThreadId::as_str),
-        )
+    let (newer, cursor, id) = match &query.window {
+        artisan_api::ThreadWindow::Latest => (false, i64::MAX as u64, ""),
+        artisan_api::ThreadWindow::Before(cursor) => (
+            false,
+            cursor.activity_seq.min(i64::MAX as u64),
+            cursor.id.as_str(),
+        ),
+        artisan_api::ThreadWindow::After(cursor) => (
+            true,
+            cursor.activity_seq.min(i64::MAX as u64),
+            cursor.id.as_str(),
+        ),
     };
     let search = query.query.as_deref().unwrap_or("").trim();
     anyhow::ensure!(search.len() <= 256, "thread search exceeds 256 bytes");
