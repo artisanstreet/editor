@@ -4,9 +4,9 @@ use crate::{
     runner::{self, View},
     steps::{self, Key, Named, Step},
 };
-use anyhow::{Result, bail};
 use base64::Engine as _;
 use serde_json::json;
+use std::num::NonZeroU32;
 use std::{
     sync::{
         Mutex,
@@ -24,6 +24,8 @@ struct Fake {
     fail: bool,
     focused: bool,
     idle: bool,
+    captures: AtomicU64,
+    capture_limit: u64,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -35,6 +37,8 @@ impl Default for Fake {
             fail: false,
             focused: true,
             idle: true,
+            captures: AtomicU64::new(0),
+            capture_limit: u64::MAX,
         }
     }
 }
@@ -47,23 +51,30 @@ fn area() -> Rect {
     }
 }
 impl Desktop for Fake {
-    fn agent_display(&self) -> Result<Rect> {
+    fn agent_display(&self) -> Result<Rect, DisplayError> {
         Ok(area())
     }
-    fn user_display(&self) -> Result<Rect> {
+    fn user_display(&self) -> Result<Rect, DisplayError> {
         Ok(area())
     }
-    fn capture(&self, r: Rect) -> Result<Frame> {
-        Ok(Frame {
-            width: r.width,
-            height: r.height,
-            rgb: vec![0; r.width as usize * r.height as usize * 3],
-        })
+    fn capture(&self, r: Rect) -> Result<Frame, CaptureError> {
+        if self.captures.fetch_add(1, Ordering::SeqCst) >= self.capture_limit {
+            return Err(CaptureError::Failed {
+                area: r,
+                step: "BitBlt",
+            });
+        }
+        Ok(Frame::new(
+            r.width,
+            r.height,
+            vec![[0; 3]; r.width as usize * r.height as usize],
+        )
+        .unwrap())
     }
-    fn cursor(&self) -> Result<Point> {
+    fn cursor(&self) -> Result<Point, CursorError> {
         Ok(*self.cursor.lock().unwrap())
     }
-    fn send(&self, input: &Input) -> Result<()> {
+    fn send(&self, input: &Input) -> Result<(), InputError> {
         self.events.lock().unwrap().push(*input);
         if let Input::MoveTo(p) = input {
             *self.cursor.lock().unwrap() = *p;
@@ -76,7 +87,7 @@ impl Desktop for Fake {
             self.activity.fetch_add(1, Ordering::SeqCst);
         }
         if matches!(input, Input::Text(_)) && self.fail {
-            bail!("injected backend failure");
+            return Err(InputError::Rejected { input: *input });
         }
         Ok(())
     }
@@ -93,7 +104,7 @@ impl Desktop for Fake {
     fn foreground(&self) -> Option<WindowId> {
         Some(if self.focused { 1 } else { 2 })
     }
-    fn windows(&self) -> Result<Vec<WindowInfo>> {
+    fn windows(&self) -> Result<Vec<WindowInfo>, WindowError> {
         Ok(vec![WindowInfo {
             id: 1,
             title: "test".into(),
@@ -103,19 +114,19 @@ impl Desktop for Fake {
             minimized: false,
         }])
     }
-    fn change_window(&self, _: WindowId, _: WindowChange) -> Result<()> {
+    fn change_window(&self, _: WindowId, _: WindowChange) -> Result<(), WindowError> {
         Ok(())
     }
-    fn launch(&self, _: &str, _: &[String], _: Option<&str>) -> Result<u32> {
+    fn launch(&self, _: &str, _: &[String], _: Option<&str>) -> Result<u32, LaunchError> {
         Ok(1)
     }
-    fn processes(&self) -> Result<Vec<(u32, u32)>> {
+    fn processes(&self) -> Result<Vec<(u32, u32)>, ProcessesError> {
         Ok(vec![])
     }
-    fn clipboard(&self) -> Result<Option<String>> {
+    fn clipboard(&self) -> Result<Option<String>, ClipboardError> {
         Ok(None)
     }
-    fn set_clipboard(&self, _: &str) -> Result<()> {
+    fn set_clipboard(&self, _: &str) -> Result<(), ClipboardError> {
         Ok(())
     }
 }
@@ -177,7 +188,16 @@ fn backend_failure_releases_held_key() {
     };
     let steps = steps::parse(&json!([{"key_down":"shift"},{"type":"x"}])).unwrap();
     let error = run(&desktop, View::new(area()), &steps).err().unwrap();
-    assert!(error.to_string().contains("1 completed steps"));
+    assert!(
+        matches!(
+            error,
+            runner::RunError::Stopped {
+                completed: 1,
+                source: runner::StepError::Input(InputError::Rejected { .. }),
+            }
+        ),
+        "{error:?}"
+    );
     assert!(desktop.events.lock().unwrap().contains(&Input::Key {
         key: Key::Named(Named::Shift),
         down: false
@@ -215,34 +235,51 @@ fn scales_coordinates_including_negative_monitor_origins() {
         height: 2160,
     };
     let view = View::new(rect);
-    assert_eq!(
-        view.point(steps::At { x: 0., y: 0. }).unwrap(),
-        Point { x: -3840, y: -2160 }
-    );
+    let at = |x: u32, y: u32| steps::At::new(f64::from(x), f64::from(y)).unwrap();
+    assert_eq!(view.point(at(0, 0)).unwrap(), Point { x: -3840, y: -2160 });
     let point = view
-        .point(steps::At {
-            x: f64::from(view.width - 1),
-            y: f64::from(view.height - 1),
-        })
+        .point(at(view.width.get() - 1, view.height.get() - 1))
         .unwrap();
     assert!(rect.contains(point));
-    assert!(
-        view.point(steps::At {
-            x: f64::from(view.width),
-            y: 0.
-        })
-        .is_err()
-    );
+    assert!(view.point(at(view.width.get(), 0)).is_err());
+}
+#[test]
+fn points_off_the_screenshot_cannot_be_built() {
+    for (x, y) in [
+        (-1.0, 0.0),
+        (0.0, -0.5),
+        (f64::NAN, 0.0),
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 1.0),
+    ] {
+        assert!(steps::At::new(x, y).is_none(), "built ({x}, {y})");
+    }
+    let steps = steps::parse(&json!([{"drag":[[1,2],[3,4]]}])).unwrap();
+    let [
+        Step::Drag {
+            from, through, to, ..
+        },
+    ] = steps.as_slice()
+    else {
+        panic!("not one drag: {steps:?}");
+    };
+    assert_eq!((from.x(), from.y(), to.x(), to.y()), (1.0, 2.0, 3.0, 4.0));
+    assert!(through.is_empty());
 }
 #[test]
 fn image_crop_downsampling_and_png_are_consistent() {
-    let image = Frame {
-        width: 2,
-        height: 2,
-        rgb: vec![0, 0, 0, 100, 100, 100, 200, 200, 200, 100, 100, 100],
-    };
-    assert_eq!(image.shrink(1, 1).rgb, vec![100, 100, 100]);
-    assert_eq!(image.crop(1, 1, 100, 100).rgb, vec![100, 100, 100]);
+    let image = Frame::new(
+        2,
+        2,
+        vec![[0, 0, 0], [100, 100, 100], [200, 200, 200], [100, 100, 100]],
+    )
+    .unwrap();
+    let one = NonZeroU32::MIN;
+    assert_eq!(image.shrink(one, one).pixels(), [[100, 100, 100]]);
+    assert_eq!(
+        image.crop(1, 1, 100, 100).unwrap().pixels(),
+        [[100, 100, 100]]
+    );
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(image.png_base64().unwrap())
         .unwrap();
@@ -253,7 +290,41 @@ fn image_crop_downsampling_and_png_are_consistent() {
     assert!((frame::scale_for(800, 600) - 1.0).abs() < f64::EPSILON);
 }
 
-fn run(desktop: &dyn Desktop, view: View, steps: &[Step]) -> Result<runner::Outcome> {
+#[test]
+fn frames_keep_their_size_and_pixels_together() {
+    let image = Frame::new(2, 2, vec![[1, 2, 3]; 4]).unwrap();
+    assert_eq!(image.crop(2, 0, 1, 2), None);
+    assert_eq!(image.crop(0, 2, 2, 1), None);
+    assert_eq!(image.crop(0, 0, 0, 2), None);
+    assert!(Frame::new(2, 2, vec![[0; 3]; 3]).is_err());
+    assert!(Frame::new(0, 2, Vec::new()).is_err());
+}
+
+#[test]
+fn a_failed_capture_after_input_reports_the_screen_as_unknown() {
+    let desktop = Fake {
+        interrupt: true,
+        capture_limit: 1,
+        ..Default::default()
+    };
+    let steps = steps::parse(&json!([{"key":"ctrl+s"}])).unwrap();
+    let outcome = run(&desktop, View::new(area()), &steps).unwrap();
+    assert!(outcome.interrupted);
+    assert!(
+        matches!(
+            outcome.screen,
+            runner::Screen::Unknown(CaptureError::Failed { .. })
+        ),
+        "{:?}",
+        outcome.screen
+    );
+}
+
+fn run(
+    desktop: &dyn Desktop,
+    view: View,
+    steps: &[Step],
+) -> Result<runner::Outcome, runner::RunError> {
     runner::run(
         desktop,
         view,
@@ -345,7 +416,10 @@ async fn interruption_pauses_subsequent_batches() {
         .call(&caller, "input", json!({"steps":[{"type":"do not type"}]}))
         .await
         .unwrap_err();
-    assert!(refused.to_string().contains("paused"));
+    assert!(
+        matches!(&refused, super::ComputerError::Refused(refused) if refused.0.contains("paused")),
+        "{refused:?}"
+    );
 }
 
 #[test]
@@ -380,11 +454,11 @@ fn successful_batch_reports_settled_screen_and_restores_cursor() {
     let outcome = run(
         &desktop,
         View::new(area()),
-        &[Step::Move(steps::At { x: 100., y: 100. })],
+        &[Step::Move(steps::At::new(100., 100.).unwrap())],
     )
     .unwrap();
     assert_eq!(outcome.completed, 1);
     assert!(outcome.settled);
-    assert!(!outcome.screen_changed);
+    assert!(matches!(outcome.screen, runner::Screen::Unchanged));
     assert_eq!(*desktop.cursor.lock().unwrap(), Point { x: 110, y: 210 });
 }

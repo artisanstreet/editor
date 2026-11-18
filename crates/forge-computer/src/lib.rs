@@ -1,21 +1,14 @@
-//! App-independent computer use, served by Forge's authenticated MCP gateway.
 #![expect(
-    clippy::allow_attributes,
-    clippy::allow_attributes_without_reason,
-    clippy::derive_partial_eq_without_eq,
-    clippy::if_then_some_else_none,
     clippy::let_underscore_untyped,
     clippy::literal_string_with_formatting_args,
-    clippy::map_err_ignore,
     clippy::renamed_function_params,
-    clippy::too_long_first_doc_paragraph,
-    clippy::use_self,
-    clippy::wildcard_enum_match_arm,
     missing_debug_implementations,
     unreachable_pub,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #![allow(
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
     clippy::assertions_on_result_states,
     clippy::borrow_as_ptr,
     clippy::cast_possible_truncation,
@@ -40,20 +33,128 @@ mod tools;
 #[allow(unsafe_code)]
 mod windows;
 
-use anyhow::{Result, bail};
 use artisan_api::ThreadId;
-use desktop::{Desktop, Rect, WindowId};
-use forge_mcp::{Content, Tool, ToolSet};
+use desktop::{
+    CaptureError, ClipboardError, CursorError, Desktop, DisplayError, LaunchError, ProcessesError,
+    Rect, WindowError, WindowId,
+};
+use forge_mcp::{Content, Failure, Tool, ToolError, ToolSet};
 use forge_runs::{Hub, Refused};
-use runner::View;
+use frame::EncodeError;
+use runner::{RunError, View};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError, TryLockError,
         atomic::{AtomicBool, Ordering},
     },
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum ComputerError {
+    #[error(transparent)]
+    Refused(#[from] Refused),
+    #[error("read the computer use setting")]
+    Setting(#[source] anyhow::Error),
+    #[error("ask the user to take over from thread {thread}")]
+    Handoff {
+        thread: ThreadId,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("ask approval for computer {tool} in thread {thread}")]
+    Approval {
+        tool: String,
+        thread: ThreadId,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("run computer {tool}")]
+    Worker {
+        tool: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("unknown computer tool {tool}")]
+    UnknownTool { tool: String },
+    #[error("find the agent display")]
+    Display(#[source] DisplayError),
+    #[error("capture the agent display")]
+    Capture(#[source] CaptureError),
+    #[error("read the cursor")]
+    Cursor(#[source] CursorError),
+    #[error("encode the screenshot")]
+    Encode(#[source] EncodeError),
+    #[error("list the windows")]
+    Windows(#[source] WindowError),
+    #[error("change window {window}")]
+    Window {
+        window: WindowId,
+        #[source]
+        source: WindowError,
+    },
+    #[error("launch the program")]
+    Launch(#[source] LaunchError),
+    #[error("list the processes")]
+    Processes(#[source] ProcessesError),
+    #[error("read the clipboard")]
+    ReadClipboard(#[source] ClipboardError),
+    #[error("write the clipboard")]
+    WriteClipboard(#[source] ClipboardError),
+    #[error("run the input batch")]
+    Run(#[source] RunError),
+    #[error("display changed; take a new screenshot")]
+    DisplayChanged,
+    #[error("zoom rectangle is outside the screenshot")]
+    ZoomOutside,
+    #[error("computer input is paused; use handoff to resume")]
+    Paused,
+    #[error("user is active; window {window} was not changed")]
+    UserActive { window: WindowId },
+    #[error("window {window} is outside the agent display; use bring_here")]
+    WindowOutside { window: WindowId },
+    #[error("unknown window action {action}")]
+    WindowAction { action: String },
+    #[error("clipboard action must be read or write, not {action}")]
+    ClipboardAction { action: String },
+    #[error("encode the result")]
+    Json(#[source] serde_json::Error),
+}
+
+impl ToolError for ComputerError {
+    fn failure(&self) -> Failure<'_> {
+        match self {
+            Self::Refused(refused) => Failure::Refused(refused.to_string()),
+            Self::Setting(source)
+            | Self::Handoff { source, .. }
+            | Self::Approval { source, .. } => Failure::of_forge(source),
+            Self::Worker { .. }
+            | Self::UnknownTool { .. }
+            | Self::Display(_)
+            | Self::Capture(_)
+            | Self::Cursor(_)
+            | Self::Encode(_)
+            | Self::Windows(_)
+            | Self::Window { .. }
+            | Self::Launch(_)
+            | Self::Processes(_)
+            | Self::ReadClipboard(_)
+            | Self::WriteClipboard(_)
+            | Self::Run(_)
+            | Self::DisplayChanged
+            | Self::ZoomOutside
+            | Self::Paused
+            | Self::UserActive { .. }
+            | Self::WindowOutside { .. }
+            | Self::WindowAction { .. }
+            | Self::ClipboardAction { .. }
+            | Self::Json(_) => Failure::Broken,
+        }
+    }
+}
+
+type Result<T, E = ComputerError> = std::result::Result<T, E>;
 
 #[derive(Default)]
 struct Session {
@@ -69,14 +170,13 @@ pub struct ComputerMcp {
     paused: Arc<AtomicBool>,
 }
 impl ComputerMcp {
-    /// Available only when the host has an explicitly configured agent display.
     pub fn for_host(hub: &Hub) -> Option<Self> {
         #[cfg(windows)]
         {
             match windows::WindowsDesktop::new() {
                 Ok(desktop) => Some(Self::with_desktop(hub.clone(), Arc::new(desktop))),
                 Err(error) => {
-                    tracing::info!("computer use unavailable: {error:#}");
+                    tracing::info!("computer use unavailable: {}", diagnostics::chain(&error));
                     None
                 }
             }
@@ -100,7 +200,8 @@ impl ComputerMcp {
             .hub
             .store()
             .setting(forge_runs::COMPUTER_USE_KEY)
-            .await?
+            .await
+            .map_err(|source| ComputerError::Setting(source.into()))?
             .and_then(|v| v.as_bool())
             != Some(true)
         {
@@ -112,23 +213,39 @@ impl ComputerMcp {
         Ok(())
     }
     fn snapshot(&self, session: &mut Session, caller: &ThreadId) -> Result<Vec<Content>> {
-        let view = View::new(self.desktop.agent_display()?);
+        let view = View::new(
+            self.desktop
+                .agent_display()
+                .map_err(ComputerError::Display)?,
+        );
         let frame = self
             .desktop
-            .capture(view.rect)?
+            .capture(view.rect)
+            .map_err(ComputerError::Capture)?
             .shrink(view.width, view.height);
-        let cursor = self.desktop.cursor()?;
+        let cursor = self.desktop.cursor().map_err(ComputerError::Cursor)?;
         session.views.insert(caller.clone(), view);
-        Ok(vec![Content::Text(json!({"width":view.width,"height":view.height,
-            "cursor": if view.rect.contains(cursor) { Some([f64::from(cursor.x-view.rect.x)*f64::from(view.width)/f64::from(view.rect.width), f64::from(cursor.y-view.rect.y)*f64::from(view.height)/f64::from(view.rect.height)]) } else { None },
+        let (width, height) = (view.width.get(), view.height.get());
+        Ok(vec![Content::Text(json!({"width":width,"height":height,
+            "cursor": view.rect.contains(cursor).then(|| [f64::from(cursor.x-view.rect.x)*f64::from(width)/f64::from(view.rect.width), f64::from(cursor.y-view.rect.y)*f64::from(height)/f64::from(view.rect.height)]),
             "focused_window":self.desktop.foreground(),"paused":self.paused.load(Ordering::SeqCst)}).to_string()),
-            Content::Image { mime_type: "image/png", data: frame.png_base64()? }])
+            Content::Image { mime_type: "image/png", data: frame.png_base64().map_err(ComputerError::Encode)? }])
     }
     fn execute(&self, caller: &ThreadId, name: &str, args: &Value) -> Result<Vec<Content>> {
-        let mut session = self.session.try_lock().map_err(|_| {
-            Refused("Another computer tool is running. Try after it finishes.".into())
-        })?;
-        let area = self.desktop.agent_display()?;
+        let mut session = match self.session.try_lock() {
+            Ok(session) => session,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return Err(Refused(
+                    "Another computer tool is running. Try after it finishes.".into(),
+                )
+                .into());
+            }
+        };
+        let area = self
+            .desktop
+            .agent_display()
+            .map_err(ComputerError::Display)?;
         match name {
             "screenshot" => self.snapshot(&mut session, caller),
             "zoom" => self.zoom(&session, caller, args, area),
@@ -137,29 +254,39 @@ impl ComputerMcp {
             "window" => self.change_window(&mut session, caller, args, area),
             "launch" => self.launch(args, area),
             "clipboard" => match string(args, "action")? {
-                "read" => text(&json!({"text":self.desktop.clipboard()?})),
+                "read" => text(&json!({
+                    "text": self.desktop.clipboard().map_err(ComputerError::ReadClipboard)?
+                })),
                 "write" => {
-                    self.desktop.set_clipboard(string(args, "text")?)?;
+                    self.desktop
+                        .set_clipboard(string(args, "text")?)
+                        .map_err(ComputerError::WriteClipboard)?;
                     text(&json!({"ok":true}))
                 }
-                _ => bail!("clipboard action must be read or write"),
+                action => Err(ComputerError::ClipboardAction {
+                    action: action.to_owned(),
+                }),
             },
-            _ => bail!("unknown computer tool"),
+            tool => Err(ComputerError::UnknownTool {
+                tool: tool.to_owned(),
+            }),
         }
     }
 }
-fn string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+fn string<'a>(args: &'a Value, key: &str) -> Result<&'a str, Refused> {
     args[key]
         .as_str()
-        .ok_or_else(|| Refused(format!("{key} must be text")).into())
+        .ok_or_else(|| Refused(format!("{key} must be text")))
 }
-fn number(args: &Value, key: &str) -> Result<u32> {
+fn number(args: &Value, key: &str) -> Result<u32, Refused> {
     args[key]
         .as_u64()
-        .and_then(|n| n.try_into().ok())
-        .ok_or_else(|| Refused(format!("{key} must be a nonnegative integer")).into())
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| Refused(format!("{key} must be a nonnegative integer")))
 }
 impl ToolSet for ComputerMcp {
+    type Error = ComputerError;
+
     fn name(&self) -> &'static str {
         "computer"
     }
@@ -186,19 +313,26 @@ impl ToolSet for ComputerMcp {
                         string(&args, "reason")?
                     ),
                 )
-                .await?;
+                .await
+                .map_err(|source| ComputerError::Handoff {
+                    thread: caller.clone(),
+                    source,
+                })?;
             self.enabled().await?;
             let this = self.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let mut session = this
-                    .session
+            tokio::task::spawn_blocking(move || {
+                this.session
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("computer state lock poisoned"))?;
-                session.views.clear();
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .views
+                    .clear();
                 this.paused.store(false, Ordering::SeqCst);
-                Ok(())
             })
-            .await??;
+            .await
+            .map_err(|source| ComputerError::Worker {
+                tool: name.to_owned(),
+                source,
+            })?;
             return Ok(vec![Content::Text(
                 "User resumed computer use. Take a fresh screenshot.".into(),
             )]);
@@ -210,13 +344,23 @@ impl ToolSet for ComputerMcp {
         {
             self.hub
                 .ask_approval_on("computer", caller, name, format!("Computer {name}: {args}"))
-                .await?;
+                .await
+                .map_err(|source| ComputerError::Approval {
+                    tool: name.to_owned(),
+                    thread: caller.clone(),
+                    source,
+                })?;
             self.enabled().await?;
         }
         let this = self.clone();
         let caller = caller.clone();
-        let name = name.to_owned();
-        tokio::task::spawn_blocking(move || this.execute(&caller, &name, &args)).await?
+        let tool = name.to_owned();
+        tokio::task::spawn_blocking(move || this.execute(&caller, &tool, &args))
+            .await
+            .map_err(|source| ComputerError::Worker {
+                tool: name.to_owned(),
+                source,
+            })?
     }
 }
 
@@ -224,5 +368,7 @@ impl ToolSet for ComputerMcp {
 mod tests;
 
 fn text(value: &Value) -> Result<Vec<Content>> {
-    Ok(vec![Content::Text(serde_json::to_string(value)?)])
+    Ok(vec![Content::Text(
+        serde_json::to_string(value).map_err(ComputerError::Json)?,
+    )])
 }

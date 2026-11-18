@@ -1,13 +1,11 @@
-//! Win32 calls stay here. Forge remains an ordinary interactive process.
 use crate::{
     desktop::*,
     frame::Frame,
     steps::{Key, Named},
 };
-use anyhow::{Context, Result, bail, ensure};
 use std::{
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -27,7 +25,33 @@ use windows::{
 
 static ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static LAST_INPUT: AtomicU64 = AtomicU64::new(0);
-static HOOKS: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+static HOOKS: OnceLock<Result<(), Arc<HookError>>> = OnceLock::new();
+
+#[derive(Debug, thiserror::Error)]
+pub enum HookError {
+    #[error("start the user input thread")]
+    Thread(#[source] std::io::Error),
+    #[error("install the {hook} hook")]
+    Install {
+        hook: &'static str,
+        #[source]
+        source: windows::core::Error,
+    },
+    #[error("wait for the input hooks")]
+    NoAnswer(#[source] std::sync::mpsc::RecvTimeoutError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error(
+        "set ARTISAN_COMPUTER_DISPLAY to the virtual monitor device name, such as \\\\.\\DISPLAY3, before starting Forge"
+    )]
+    Unconfigured(#[source] std::env::VarError),
+    #[error("check the agent display")]
+    Display(#[source] DisplayError),
+    #[error("watch for the user's own input")]
+    Hooks(#[source] Arc<HookError>),
+}
 const MARKER: usize = 0x41525443;
 fn physical_input() {
     LAST_INPUT.store(unsafe { GetTickCount64() }, Ordering::SeqCst);
@@ -51,7 +75,7 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     unsafe { CallNextHookEx(None, code, w, l) }
 }
-fn hooks() -> Result<()> {
+fn hooks() -> Result<(), Arc<HookError>> {
     let result = HOOKS.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         if let Err(error) = std::thread::Builder::new()
@@ -60,16 +84,22 @@ fn hooks() -> Result<()> {
                 physical_input();
                 let mouse = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0) {
                     Ok(h) => h,
-                    Err(e) => {
-                        let _ = tx.send(Err(e.to_string()));
+                    Err(source) => {
+                        let _ = tx.send(Err(HookError::Install {
+                            hook: "mouse",
+                            source,
+                        }));
                         return;
                     }
                 };
                 let key = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), None, 0) {
                     Ok(h) => h,
-                    Err(e) => {
+                    Err(source) => {
                         let _ = UnhookWindowsHookEx(mouse);
-                        let _ = tx.send(Err(e.to_string()));
+                        let _ = tx.send(Err(HookError::Install {
+                            hook: "keyboard",
+                            source,
+                        }));
                         return;
                     }
                 };
@@ -83,12 +113,13 @@ fn hooks() -> Result<()> {
                 let _ = UnhookWindowsHookEx(mouse);
             })
         {
-            return Err(error.to_string());
+            return Err(Arc::new(HookError::Thread(error)));
         }
         rx.recv_timeout(Duration::from_secs(3))
-            .unwrap_or_else(|e| Err(e.to_string()))
+            .unwrap_or_else(|error| Err(HookError::NoAnswer(error)))
+            .map_err(Arc::new)
     });
-    result.clone().map_err(anyhow::Error::msg)
+    result.clone()
 }
 struct Dpi(DPI_AWARENESS_CONTEXT);
 impl Dpi {
@@ -144,7 +175,7 @@ unsafe extern "system" fn monitor_callback(
     }
     true.into()
 }
-fn monitors() -> Result<Vec<Monitor>> {
+fn monitors() -> Result<Vec<Monitor>, DisplayError> {
     let _dpi = Dpi::enter();
     let mut list = Vec::new();
     unsafe {
@@ -155,18 +186,20 @@ fn monitors() -> Result<Vec<Monitor>> {
             LPARAM((&raw mut list) as isize),
         )
     }
-    .ok()?;
+    .ok()
+    .map_err(DisplayError::Monitors)?;
     Ok(list)
 }
 pub struct WindowsDesktop {
     display: String,
 }
 impl WindowsDesktop {
-    pub fn new() -> Result<Self> {
-        let display=std::env::var("ARTISAN_COMPUTER_DISPLAY").context("set ARTISAN_COMPUTER_DISPLAY to the virtual monitor device name, such as \\\\.\\DISPLAY3, before starting Forge")?;
+    pub fn new() -> Result<Self, StartError> {
+        let display =
+            std::env::var("ARTISAN_COMPUTER_DISPLAY").map_err(StartError::Unconfigured)?;
         let desktop = Self { display };
-        desktop.agent_display()?;
-        hooks()?;
+        desktop.agent_display().map_err(StartError::Display)?;
+        hooks().map_err(StartError::Hooks)?;
         Ok(desktop)
     }
 }
@@ -244,8 +277,7 @@ impl Drop for Capture {
 }
 struct Clipboard(HWND);
 impl Clipboard {
-    fn open() -> Result<Self> {
-        // A real owner is necessary for SetClipboardData after EmptyClipboard.
+    fn open() -> Result<Self, ClipboardError> {
         let window = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -261,7 +293,11 @@ impl Clipboard {
                 None,
                 None,
             )
-        }?;
+        }
+        .map_err(|source| ClipboardError::System {
+            step: "create the clipboard owner window",
+            source,
+        })?;
         for _ in 0..10 {
             if unsafe { OpenClipboard(Some(window)) }.is_ok() {
                 return Ok(Self(window));
@@ -269,7 +305,7 @@ impl Clipboard {
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = unsafe { DestroyWindow(window) };
-        bail!("clipboard is busy")
+        Err(ClipboardError::Busy)
     }
 }
 impl Drop for Clipboard {
@@ -282,39 +318,47 @@ impl Drop for Clipboard {
 }
 
 impl Desktop for WindowsDesktop {
-    fn agent_display(&self) -> Result<Rect> {
+    fn agent_display(&self) -> Result<Rect, DisplayError> {
         let display = monitors()?
             .into_iter()
             .find(|m| m.name.eq_ignore_ascii_case(&self.display))
-            .context("configured agent display is disconnected")?;
-        ensure!(
-            !display.primary,
-            "agent display must not be the primary monitor"
-        );
-        ensure!(
-            display.rect.width > 0 && display.rect.height > 0,
-            "agent display has no pixels"
-        );
+            .ok_or_else(|| DisplayError::Disconnected {
+                display: self.display.clone(),
+            })?;
+        if display.primary {
+            return Err(DisplayError::Primary {
+                display: self.display.clone(),
+            });
+        }
+        if display.rect.width == 0 || display.rect.height == 0 {
+            return Err(DisplayError::Empty {
+                display: self.display.clone(),
+            });
+        }
         Ok(display.rect)
     }
-    fn user_display(&self) -> Result<Rect> {
+    fn user_display(&self) -> Result<Rect, DisplayError> {
         Ok(monitors()?
             .into_iter()
             .find(|m| m.primary)
-            .context("no primary monitor")?
+            .ok_or(DisplayError::NoPrimary)?
             .rect)
     }
-    fn capture(&self, area: Rect) -> Result<Frame> {
+    fn capture(&self, area: Rect) -> Result<Frame, CaptureError> {
         let _dpi = Dpi::enter();
-        ensure!(
-            area.width > 0
-                && area.height > 0
-                && u64::from(area.width) * u64::from(area.height) <= 64_000_000,
-            "invalid capture size"
-        );
+        if area.width == 0
+            || area.height == 0
+            || u64::from(area.width) * u64::from(area.height) > 64_000_000
+        {
+            return Err(CaptureError::Size { area });
+        }
+        let failed = |step| CaptureError::Failed { area, step };
+        let system = |step| move |source| CaptureError::System { area, step, source };
         unsafe {
             let screen = GetDC(None);
-            ensure!(!screen.is_invalid(), "GetDC failed");
+            if screen.is_invalid() {
+                return Err(failed("GetDC"));
+            }
             let mut capture = Capture {
                 screen,
                 memory: HDC::default(),
@@ -322,7 +366,9 @@ impl Desktop for WindowsDesktop {
                 previous: HGDIOBJ::default(),
             };
             capture.memory = CreateCompatibleDC(Some(screen));
-            ensure!(!capture.memory.is_invalid(), "CreateCompatibleDC failed");
+            if capture.memory.is_invalid() {
+                return Err(failed("CreateCompatibleDC"));
+            }
             let info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -337,9 +383,12 @@ impl Desktop for WindowsDesktop {
             };
             let mut pixels = std::ptr::null_mut();
             capture.bitmap =
-                CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut pixels, None, 0)?;
+                CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut pixels, None, 0)
+                    .map_err(system("CreateDIBSection"))?;
             capture.previous = SelectObject(capture.memory, capture.bitmap.into());
-            ensure!(!capture.previous.is_invalid(), "SelectObject failed");
+            if capture.previous.is_invalid() {
+                return Err(failed("SelectObject"));
+            }
             BitBlt(
                 capture.memory,
                 0,
@@ -350,30 +399,30 @@ impl Desktop for WindowsDesktop {
                 area.x,
                 area.y,
                 SRCCOPY | CAPTUREBLT,
-            )?;
-            GdiFlush().ok()?;
+            )
+            .map_err(system("BitBlt"))?;
+            GdiFlush().ok().map_err(system("GdiFlush"))?;
             let bgra = std::slice::from_raw_parts(
                 pixels.cast::<u8>(),
                 area.width as usize * area.height as usize * 4,
             );
-            let mut rgb = Vec::with_capacity(area.width as usize * area.height as usize * 3);
-            for [blue, green, red, _] in bgra.as_chunks::<4>().0 {
-                rgb.extend_from_slice(&[*red, *green, *blue]);
-            }
-            Ok(Frame {
-                width: area.width,
-                height: area.height,
-                rgb,
-            })
+            let pixels = bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|[blue, green, red, _]| [*red, *green, *blue])
+                .collect();
+            Frame::new(area.width, area.height, pixels)
+                .map_err(|source| CaptureError::Frame { area, source })
         }
     }
-    fn cursor(&self) -> Result<Point> {
+    fn cursor(&self) -> Result<Point, CursorError> {
         let _dpi = Dpi::enter();
         let mut p = POINT::default();
-        unsafe { GetCursorPos(&mut p) }?;
+        unsafe { GetCursorPos(&mut p) }.map_err(CursorError::System)?;
         Ok(Point { x: p.x, y: p.y })
     }
-    fn send(&self, input: &Input) -> Result<()> {
+    fn send(&self, input: &Input) -> Result<(), InputError> {
         let _dpi = Dpi::enter();
         let mouse = |flags: MOUSE_EVENT_FLAGS, data: u32, dx: i32, dy: i32| INPUT {
             r#type: INPUT_MOUSE,
@@ -406,7 +455,9 @@ impl Desktop for WindowsDesktop {
                 let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
                 let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
                 let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-                ensure!(width > 1 && height > 1, "invalid virtual desktop bounds");
+                if width <= 1 || height <= 1 {
+                    return Err(InputError::VirtualDesktop { width, height });
+                }
                 vec![mouse(
                     MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     0,
@@ -462,11 +513,11 @@ impl Desktop for WindowsDesktop {
                     .collect()
             }
         };
-        ensure!(
-            unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) } as usize
-                == events.len(),
-            "Windows rejected input; use handoff for elevated windows or UAC"
-        );
+        if unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) } as usize
+            != events.len()
+        {
+            return Err(InputError::Rejected { input: *input });
+        }
         Ok(())
     }
     fn user_idle(&self) -> Duration {
@@ -484,37 +535,48 @@ impl Desktop for WindowsDesktop {
         let window = unsafe { GetForegroundWindow() };
         (!window.is_invalid()).then(|| window_id(window))
     }
-    fn window_rect(&self, id: WindowId) -> Result<Rect> {
+    fn window_rect(&self, id: WindowId) -> Result<Rect, WindowError> {
         let _dpi = Dpi::enter();
         let mut bounds = RECT::default();
-        unsafe { GetWindowRect(hwnd(id), &mut bounds) }?;
+        unsafe { GetWindowRect(hwnd(id), &mut bounds) }.map_err(|source| WindowError::System {
+            step: "read the window bounds",
+            source,
+        })?;
         Ok(rect(bounds))
     }
-    fn windows(&self) -> Result<Vec<WindowInfo>> {
+    fn windows(&self) -> Result<Vec<WindowInfo>, WindowError> {
         let _dpi = Dpi::enter();
         let mut list = Vec::new();
-        unsafe { EnumWindows(Some(window_callback), LPARAM((&raw mut list) as isize)) }?;
+        unsafe { EnumWindows(Some(window_callback), LPARAM((&raw mut list) as isize)) }.map_err(
+            |source| WindowError::System {
+                step: "list the windows",
+                source,
+            },
+        )?;
         Ok(list)
     }
-    fn change_window(&self, window: WindowId, change: WindowChange) -> Result<()> {
+    fn change_window(&self, window: WindowId, change: WindowChange) -> Result<(), WindowError> {
         let _dpi = Dpi::enter();
-        let window = hwnd(window);
-        ensure!(
-            unsafe { IsWindow(Some(window)) }.as_bool(),
-            "window no longer exists"
-        );
+        let id = window;
+        let window = hwnd(id);
+        if !unsafe { IsWindow(Some(window)) }.as_bool() {
+            return Err(WindowError::Gone { window: id });
+        }
         unsafe {
             match change {
                 WindowChange::Focus => {
                     if IsIconic(window).as_bool() {
                         let _ = ShowWindow(window, SW_RESTORE);
                     }
-                    ensure!(
-                        SetForegroundWindow(window).as_bool(),
-                        "Windows refused focus; use handoff"
-                    );
+                    if !SetForegroundWindow(window).as_bool() {
+                        return Err(WindowError::FocusRefused { window: id });
+                    }
                 }
-                WindowChange::Close => PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0))?,
+                WindowChange::Close => PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0))
+                    .map_err(|source| WindowError::System {
+                    step: "ask the window to close",
+                    source,
+                })?,
                 WindowChange::Maximize => {
                     let _ = ShowWindow(window, SW_MAXIMIZE);
                 }
@@ -528,13 +590,22 @@ impl Desktop for WindowsDesktop {
                         r.width as i32,
                         r.height as i32,
                         SWP_NOACTIVATE | SWP_NOZORDER,
-                    )?;
+                    )
+                    .map_err(|source| WindowError::System {
+                        step: "place the window",
+                        source,
+                    })?;
                 }
             }
         }
         Ok(())
     }
-    fn launch(&self, command: &str, args: &[String], cwd: Option<&str>) -> Result<u32> {
+    fn launch(
+        &self,
+        command: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<u32, LaunchError> {
         let mut process = std::process::Command::new(command);
         process
             .args(args)
@@ -544,16 +615,20 @@ impl Desktop for WindowsDesktop {
         if let Some(cwd) = cwd {
             process.current_dir(cwd);
         }
-        let mut child = process.spawn().context("launch program")?;
+        let mut child = process.spawn().map_err(|source| LaunchError::Spawn {
+            command: command.to_owned(),
+            source,
+        })?;
         let pid = child.id();
         std::thread::spawn(move || {
             let _ = child.wait();
         });
         Ok(pid)
     }
-    fn processes(&self) -> Result<Vec<(u32, u32)>> {
+    fn processes(&self) -> Result<Vec<(u32, u32)>, ProcessesError> {
         unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let snapshot =
+                CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(ProcessesError::System)?;
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
@@ -568,16 +643,21 @@ impl Desktop for WindowsDesktop {
             Ok(list)
         }
     }
-    fn clipboard(&self) -> Result<Option<String>> {
+    fn clipboard(&self) -> Result<Option<String>, ClipboardError> {
         let _clipboard = Clipboard::open()?;
         unsafe {
             if IsClipboardFormatAvailable(13).is_err() {
                 return Ok(None);
             }
-            let handle = GetClipboardData(13)?;
+            let handle = GetClipboardData(13).map_err(|source| ClipboardError::System {
+                step: "read the clipboard text",
+                source,
+            })?;
             let global = HGLOBAL(handle.0);
             let ptr = GlobalLock(global).cast::<u16>();
-            ensure!(!ptr.is_null(), "clipboard memory could not be locked");
+            if ptr.is_null() {
+                return Err(ClipboardError::Lock);
+            }
             let length = GlobalSize(global) / 2;
             let slice = std::slice::from_raw_parts(ptr, length);
             let end = slice.iter().position(|u| *u == 0).unwrap_or(length);
@@ -586,19 +666,23 @@ impl Desktop for WindowsDesktop {
             Ok(Some(text))
         }
     }
-    fn set_clipboard(&self, text: &str) -> Result<()> {
-        ensure!(
-            text.len() <= 1024 * 1024 && !text.contains('\0'),
-            "clipboard text must be at most 1 MiB and contain no NUL"
-        );
+    fn set_clipboard(&self, text: &str) -> Result<(), ClipboardError> {
+        if text.len() > 1024 * 1024 || text.contains('\0') {
+            return Err(ClipboardError::Text { bytes: text.len() });
+        }
         let _clipboard = Clipboard::open()?;
         let units: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         unsafe {
-            let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2)?;
+            let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2).map_err(|source| {
+                ClipboardError::System {
+                    step: "allocate the clipboard text",
+                    source,
+                }
+            })?;
             let ptr = GlobalLock(memory).cast::<u16>();
             if ptr.is_null() {
                 let _ = GlobalFree(Some(memory));
-                bail!("clipboard allocation failed");
+                return Err(ClipboardError::Lock);
             }
             std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
             let _ = GlobalUnlock(memory);
@@ -606,19 +690,26 @@ impl Desktop for WindowsDesktop {
                 .and_then(|()| SetClipboardData(13, Some(HANDLE(memory.0))).map(|_| ()))
             {
                 let _ = GlobalFree(Some(memory));
-                return Err(error.into());
+                return Err(ClipboardError::System {
+                    step: "replace the clipboard text",
+                    source: error,
+                });
             }
             Ok(())
         }
     }
 }
-fn virtual_key(key: Key) -> Result<VIRTUAL_KEY> {
+fn virtual_key(key: Key) -> Result<VIRTUAL_KEY, InputError> {
     use Named::*;
     Ok(match key {
         Key::Char(c) => {
-            ensure!(c.is_ascii(), "use type for Unicode text");
+            if !c.is_ascii() {
+                return Err(InputError::NotAKey { key: c });
+            }
             let scan = unsafe { VkKeyScanW(c as u16) };
-            ensure!(scan != -1, "key is unavailable in this keyboard layout");
+            if scan == -1 {
+                return Err(InputError::Unavailable { key: c });
+            }
             VIRTUAL_KEY((scan as u16) & 0xff)
         }
         Key::Named(key) => match key {
