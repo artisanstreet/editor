@@ -66,13 +66,13 @@ use std::rc::Rc;
 
 use aqua_core::{
     CornerRadii, DisplayItem, GpuiBackground, InputEvent, Insets, Key as InputKey, NamedKey,
-    Oklch as PaintColor, PointerButton, Rect, Role,
+    NumericRangeSemantics, Oklch as PaintColor, PointerButton, Rect, Role,
 };
 use aqua_ui::{
     element::{Box as UiBox, Canvas, Element, Key},
     input::{CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput},
     style::{LayoutStyle, Length, Style},
-    tree::UiCommand,
+    tree::{AccessibilityRequest, UiCommand},
 };
 
 use super::kit::{Space, Spaced, TextRole};
@@ -167,6 +167,15 @@ impl Slider {
     pub fn build(self) -> Element {
         let theme = self.theme;
         let accent = theme.colors.amber.solid.to_reference_paint();
+        let range = {
+            let state = self.state.borrow();
+            NumericRangeSemantics {
+                min: state.range.min,
+                max: state.range.max,
+                value: state.value,
+                step: state.range.step,
+            }
+        };
         let state = self.state.clone();
         let layout = LayoutStyle {
             height: Length::Px(20.0),
@@ -220,6 +229,7 @@ impl Slider {
             .role(Role::Slider)
             .aria_label(self.label.clone())
             .aria_value(self.readout.clone())
+            .aria_range(range)
             .disabled(self.disabled)
             .focusable(!self.disabled);
         if self.disabled {
@@ -310,6 +320,26 @@ impl Slider {
                 InputResponse::default()
             });
             let state = self.state.clone();
+            let change = self.on_change.clone();
+            track = track.on_accessibility_request(move |request| {
+                let mut state = state.borrow_mut();
+                let value = match request {
+                    AccessibilityRequest::SetValue(value) => value,
+                    AccessibilityRequest::Increment => {
+                        state.range.command(state.value, SliderCommand::Next)
+                    }
+                    AccessibilityRequest::Decrement => {
+                        state.range.command(state.value, SliderCommand::Previous)
+                    }
+                    AccessibilityRequest::ShowContextMenu => return,
+                };
+                let changed = state.set(value).then_some(state.value);
+                drop(state);
+                if let (Some(value), Some(change)) = (changed, &change) {
+                    change(value);
+                }
+            });
+            let state = self.state.clone();
             let change = self.on_change;
             track = track.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
                 let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
@@ -365,3 +395,7 @@ impl Slider {
             .build()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/slider.rs"]
+mod tests;
