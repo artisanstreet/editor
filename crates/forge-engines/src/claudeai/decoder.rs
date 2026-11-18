@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use artisan_api::{ItemKind, Output, Phase, Status, ToolKind, Usage};
+use artisan_api::{ErrorKind, ItemKind, Output, Phase, Status, ToolKind, Usage};
 use serde_json::Value;
 
 use crate::claude::tools::tool_kind;
@@ -44,12 +44,32 @@ pub struct ClaudeAiDecoder {
     calls: Vec<Call>,
     /// The provider's tool calls, by id, waiting for the provider's result.
     provided: HashMap<String, ItemKind>,
-    /// The completion ended the turn: the model answered.
-    ended: bool,
+    stop: Option<Stop>,
     /// claude.ai failed the completion in the stream.
     failure: Option<Refusal>,
     /// A tool from the account's claude.ai connectors the provider began.
     connector: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stop {
+    Completed,
+    ToolUse,
+    Truncated,
+    Refused,
+    Unsupported(String),
+}
+
+impl Stop {
+    fn of(reason: &str) -> Self {
+        match reason {
+            "end_turn" | "stop_sequence" => Self::Completed,
+            "tool_use" => Self::ToolUse,
+            "max_tokens" => Self::Truncated,
+            "refusal" => Self::Refused,
+            other => Self::Unsupported(other.to_owned()),
+        }
+    }
 }
 
 /// A block the stream has opened.
@@ -95,10 +115,9 @@ impl ClaudeAiDecoder {
         !self.calls.is_empty()
     }
 
-    /// Whether the model answered and the turn is over.
     #[must_use]
-    pub const fn ended(&self) -> bool {
-        self.ended
+    pub const fn stop(&self) -> Option<&Stop> {
+        self.stop.as_ref()
     }
 
     /// The error claude.ai sent in the stream, if it sent one.
@@ -153,7 +172,7 @@ impl ClaudeAiDecoder {
         self.answers = str_at(&event["message"], "parent_uuid").map(str::to_owned);
         self.saved = false;
         self.texts.clear();
-        self.ended = false;
+        self.stop = None;
         if !model.is_empty() {
             out.push(EngineEvent::Model { id: model });
         }
@@ -375,12 +394,23 @@ impl ClaudeAiDecoder {
     /// The message ended. Its text is the reply when the model stopped to
     /// answer, and a note when it stopped for a tool.
     fn message_delta(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
-        let reason = str_at(&event["delta"], "stop_reason");
         self.usage(&event["usage"], out);
-        if reason.is_some_and(|reason| reason != "tool_use") {
-            self.ended = true;
+        if let Some(reason) = str_at(&event["delta"], "stop_reason") {
+            self.stop = Some(Stop::of(reason));
         }
         self.settle(out);
+        if self.stop == Some(Stop::Refused) {
+            out.push(EngineEvent::Item {
+                key: format!("{}:refusal", self.message.as_deref().unwrap_or_default()),
+                parent: None,
+                status: Status::Done,
+                kind: ItemKind::Error {
+                    kind: ErrorKind::Refusal,
+                    message: "Claude declined this request.".to_owned().into(),
+                    retryable: false,
+                },
+            });
+        }
     }
 
     /// claude.ai says where the account stands against its limits.
@@ -412,8 +442,9 @@ impl ClaudeAiDecoder {
             .filter(|(_, text)| !text.is_empty())
             .collect();
         let last = texts.len().saturating_sub(1);
+        let completed = self.stop == Some(Stop::Completed);
         for (index, (key, text)) in texts.into_iter().enumerate() {
-            let phase = if self.ended && index == last {
+            let phase = if completed && index == last {
                 Phase::Final
             } else {
                 Phase::Commentary
@@ -571,7 +602,7 @@ mod tests {
                 json!({ "type": "message_stop" }),
             ],
         );
-        assert!(decoder.ended());
+        assert_eq!(decoder.stop(), Some(&Stop::Completed));
         assert_eq!(
             out.last(),
             Some(&EngineEvent::Item {

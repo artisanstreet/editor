@@ -421,11 +421,7 @@ async fn provider_limits_show_the_correct_error_for_http_and_both_stream_event_s
             )
             .await;
             assert_eq!(outcome.status(), RunStatus::Failed);
-            assert_eq!(
-                outcome.error(),
-                Some(message),
-                "provider limit: {limit}"
-            );
+            assert_eq!(outcome.error(), Some(message), "provider limit: {limit}");
             assert_eq!(outcome.retry(), Some(retry), "provider limit: {limit}");
         }
     }
@@ -1941,3 +1937,6 @@ async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired()
 #[cfg(unix)]
 #[path = "../../tests/claudeai/status.rs"]
 mod status;
+
+#[path = "../../tests/claudeai/stops.rs"]
+mod stops;

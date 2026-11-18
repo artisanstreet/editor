@@ -27,7 +27,7 @@ mod tools;
 mod transport;
 
 pub use capabilities::{Capabilities, capabilities, usage};
-pub use decoder::ClaudeAiDecoder;
+pub use decoder::{ClaudeAiDecoder, Stop};
 pub use rules::Rules;
 pub use session::{CookieChange, Session, cookie_change};
 pub use tools::{Allowed, Answer, Call, Plan, Runtime};
@@ -92,7 +92,11 @@ impl Harness for ClaudeAiHarness {
         Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
     }
 
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+    fn set_title(
+        &self,
+        turn: Turn,
+        title: String,
+    ) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
         <crate::claude::ClaudeHarness as Harness>::set_title(
             &crate::claude::ClaudeHarness,
             turn,
@@ -449,10 +453,19 @@ async fn drive_turn(
                 delivering = ids;
                 continue;
             }
-            if decoder.ended() {
-                return Outcome::done();
-            }
-            return Outcome::retryable("claude.ai ended the answer early.", Retry::Overloaded);
+            return match decoder.stop() {
+                Some(Stop::Completed) => Outcome::done(),
+                Some(Stop::Refused) => Outcome::Refused,
+                Some(Stop::Truncated) => {
+                    Outcome::failed("claude.ai cut the answer off at the model's output limit.")
+                }
+                Some(Stop::Unsupported(reason)) => Outcome::failed(format!(
+                    "claude.ai ended the answer for a reason Forge does not know ({reason})."
+                )),
+                Some(Stop::ToolUse) | None => {
+                    Outcome::retryable("claude.ai ended the answer early.", Retry::Overloaded)
+                }
+            };
         }
 
         let mut results = Vec::new();

@@ -156,8 +156,16 @@ async fn read_summary(
                 | EngineEvent::InputAccepted { .. } => {}
             }
         }
-        if decoder.ended() {
-            return Ok(reply);
+        match decoder.stop() {
+            Some(Stop::Completed) => return Ok(reply),
+            Some(Stop::Truncated) => {
+                anyhow::bail!("claude.ai cut the summary off at the model's output limit")
+            }
+            Some(Stop::Refused) => anyhow::bail!("Claude declined to summarize"),
+            Some(Stop::Unsupported(reason)) => {
+                anyhow::bail!("claude.ai ended the summary for an unknown reason ({reason})")
+            }
+            Some(Stop::ToolUse) | None => {}
         }
     }
     anyhow::bail!("claude.ai compaction stream ended without a summary")
