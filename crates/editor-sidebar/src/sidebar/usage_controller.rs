@@ -1,5 +1,7 @@
 use artisan_api::{EngineCommand, EngineId, SignInState};
-use editor_core::{Core, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime};
+use editor_core::{
+    Core, HostId, HostInstance, Screen, client::CallError, delivery::Delivery, runtime::runtime,
+};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
@@ -11,7 +13,7 @@ struct Completion {
     host: HostId,
     instance: HostInstance,
     engine: EngineId,
-    result: anyhow::Result<()>,
+    result: Result<(), CallError>,
 }
 
 pub struct UsagePage {
@@ -77,7 +79,7 @@ impl UsagePage {
                         host,
                         instance,
                         engine,
-                        result: result.map_err(anyhow::Error::from),
+                        result,
                     })
                     .await;
             });
@@ -110,8 +112,9 @@ impl UsagePage {
                 self.errors.insert(
                     (completion.host, completion.instance),
                     format!(
-                        "Couldn't refresh {}: {error:#}",
-                        completion.engine.display_name()
+                        "Couldn't refresh {}: {}",
+                        completion.engine.display_name(),
+                        diagnostics::chain(&error)
                     ),
                 );
             }

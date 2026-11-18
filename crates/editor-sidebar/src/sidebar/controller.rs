@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 
 use artisan_api::{DirListing, Project, ProjectId, ThreadId, Timestamp, UpdateThread};
 
+use editor_core::client::CallError;
 use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
 use editor_core::{Core, HostId, HostInstance, Screen};
@@ -14,31 +15,58 @@ use super::row::rename_value;
 const MIN_TEXT_QUERY: usize = 3;
 const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
+#[derive(Debug, thiserror::Error)]
+pub enum ThreadActionError {
+    #[error("settle thread {thread}")]
+    Settle {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("mark thread {thread} unread")]
+    MarkUnread {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("archive thread {thread}")]
+    Archive {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("rename thread {thread}")]
+    Rename {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+}
+
 enum Completion {
     Action {
         host: HostId,
         instance: HostInstance,
-        what: String,
-        result: anyhow::Result<()>,
+        result: Result<(), ThreadActionError>,
     },
     Browse {
         host: HostId,
         instance: HostInstance,
         generation: u64,
-        result: anyhow::Result<DirListing>,
+        result: Result<DirListing, CallError>,
     },
     Create {
         host: HostId,
         instance: HostInstance,
         generation: u64,
-        result: anyhow::Result<Project>,
+        result: Result<Project, CallError>,
     },
     Search {
         host: HostId,
         instance: HostInstance,
         generation: u64,
         query: String,
-        result: anyhow::Result<Vec<artisan_api::TextHit>>,
+        result: Result<Vec<artisan_api::TextHit>, CallError>,
     },
 }
 
@@ -167,8 +195,16 @@ impl Sidebar {
             .send(Completion::Action {
                 host,
                 instance,
-                what: "rename thread".to_owned(),
-                result: Err(anyhow::anyhow!("old failure")),
+                result: Err(ThreadActionError::Rename {
+                    thread: ThreadId("thread".into()),
+                    source: CallError {
+                        method: "PATCH".parse().expect("PATCH is an HTTP method"),
+                        path: "/threads/thread".into(),
+                        failure: Box::new(editor_core::client::CallFailure::Inconsistent {
+                            check: "test failure",
+                        }),
+                    },
+                }),
             })
             .await;
     }
@@ -402,15 +438,15 @@ impl Sidebar {
                 Completion::Action {
                     host,
                     instance,
-                    what,
                     result: Err(error),
                 } if self.host.as_ref() == Some(&host)
                     && self.host_instance == Some(instance)
                     && core.host_if_instance(&host, instance).is_some() =>
                 {
                     accepted = true;
-                    tracing::error!("couldn't {what}: {error:#}");
-                    self.error = Some(format!("Couldn't {what}: {error:#}"));
+                    let error = diagnostics::chain(&error);
+                    tracing::error!(%host, "couldn't {error}");
+                    self.error = Some(format!("Couldn't {error}"));
                 }
                 Completion::Action { .. } => {}
                 Completion::Browse {
@@ -426,7 +462,7 @@ impl Sidebar {
                     self.browse_task = None;
                     if let Some(picker) = &mut self.picker {
                         accepted = true;
-                        picker.finish_browse(result.map_err(|error| format!("{error:#}")));
+                        picker.finish_browse(result.map_err(|error| diagnostics::chain(&error)));
                     }
                 }
                 Completion::Browse { .. } => {}
@@ -454,7 +490,8 @@ impl Sidebar {
                             tracing::warn!(
                                 %host,
                                 query_chars = query.chars().count(),
-                                "couldn't search message text: {error:#}"
+                                "couldn't search message text: {}",
+                                diagnostics::chain(&error)
                             );
                             self.text_hits = None;
                         }
@@ -488,7 +525,7 @@ impl Sidebar {
                                     });
                                 }
                             }
-                            Err(error) => picker.finish_create(Some(format!("{error:#}"))),
+                            Err(error) => picker.finish_create(Some(diagnostics::chain(&error))),
                         }
                     }
                 }
@@ -531,12 +568,10 @@ impl Sidebar {
         core.navigate(Screen::NewThread { host, project });
     }
 
-    fn call<F, Fut>(&self, core: &Core, what: String, operation: F)
+    fn call<F, Fut>(&self, core: &Core, operation: F)
     where
         F: FnOnce(editor_core::ForgeClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), editor_core::client::CallError>>
-            + Send
-            + 'static,
+        Fut: std::future::Future<Output = Result<(), ThreadActionError>> + Send + 'static,
     {
         let Some(host) = self
             .host
@@ -551,12 +586,11 @@ impl Sidebar {
         let client = host.client.clone();
         let sender = self.completions.sender();
         editor_core::runtime::runtime().spawn(async move {
-            let result = operation(client).await.map_err(anyhow::Error::from);
+            let result = operation(client).await;
             let _ = sender
                 .send(Completion::Action {
                     host: id,
                     instance,
-                    what,
                     result,
                 })
                 .await;
@@ -574,22 +608,27 @@ impl Sidebar {
         else {
             return;
         };
-        let what = format!("settle thread {thread}");
-        self.call(core, what, move |client| async move {
-            client.settle_thread(&thread, activity).await.map(drop)
+        self.call(core, move |client| async move {
+            client
+                .settle_thread(&thread, activity)
+                .await
+                .map(drop)
+                .map_err(|source| ThreadActionError::Settle { thread, source })
         });
     }
 
     pub fn mark_unread(&self, core: &Core, thread: ThreadId) {
-        let what = format!("mark thread {thread} unread");
-        self.call(core, what, move |client| async move {
-            client.mark_unread(&thread).await.map(drop)
+        self.call(core, move |client| async move {
+            client
+                .mark_unread(&thread)
+                .await
+                .map(drop)
+                .map_err(|source| ThreadActionError::MarkUnread { thread, source })
         });
     }
 
     pub fn archive(&self, core: &Core, thread: ThreadId) {
-        let what = format!("archive thread {thread}");
-        self.call(core, what, move |client| async move {
+        self.call(core, move |client| async move {
             client
                 .update_thread(
                     &thread,
@@ -600,6 +639,7 @@ impl Sidebar {
                 )
                 .await
                 .map(drop)
+                .map_err(|source| ThreadActionError::Archive { thread, source })
         });
     }
 
@@ -610,8 +650,7 @@ impl Sidebar {
         let Some(title) = rename_value(text) else {
             return;
         };
-        let what = format!("rename thread {thread}");
-        self.call(core, what, move |client| async move {
+        self.call(core, move |client| async move {
             client
                 .update_thread(
                     &thread,
@@ -622,6 +661,7 @@ impl Sidebar {
                 )
                 .await
                 .map(drop)
+                .map_err(|source| ThreadActionError::Rename { thread, source })
         });
     }
 
@@ -814,7 +854,7 @@ impl Sidebar {
                     host: host_id,
                     instance,
                     generation,
-                    result: result.map_err(anyhow::Error::from),
+                    result,
                 })
                 .await;
         }));
@@ -852,7 +892,7 @@ impl Sidebar {
                     instance,
                     generation,
                     query,
-                    result: result.map_err(anyhow::Error::from),
+                    result,
                 })
                 .await;
         }));
@@ -882,7 +922,7 @@ impl Sidebar {
                     host: host_id,
                     instance,
                     generation,
-                    result: result.map_err(anyhow::Error::from),
+                    result,
                 })
                 .await;
         });

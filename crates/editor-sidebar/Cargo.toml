@@ -20,7 +20,7 @@ aqua-ui = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-mentions.workspace = true
 editor-assets.workspace = true
-anyhow.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 diagnostics.workspace = true
 tracing.workspace = true

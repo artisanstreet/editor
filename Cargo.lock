@@ -1761,7 +1761,6 @@ dependencies = [
 name = "editor-sidebar"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-text",
@@ -1773,6 +1772,7 @@ dependencies = [
  "editor-core",
  "editor-ui",
  "neo_frizbee",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
