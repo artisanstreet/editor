@@ -154,3 +154,35 @@ fn inline_actions_preserve_reference_lines_and_color_menu_values() {
             .is_none()
     );
 }
+
+#[test]
+fn windows_drive_links_open_the_file_at_their_line() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let prepared = prepare_inline(
+        &[
+            Span::Link {
+                label: vec![Span::Text("main".into())],
+                destination: r"C:\src\main.rs:12".into(),
+            },
+            Span::Link {
+                label: vec![Span::Text("lib".into())],
+                destination: "d:/src/lib.rs".into(),
+            },
+        ],
+        theme,
+        SelectionSourceId(9),
+        vec![0],
+        "",
+    );
+    let Some(LinkAction::OpenReference(main)) = prepared.link_action(0, None) else {
+        panic!("a backslash drive path opens as a file")
+    };
+    assert_eq!(
+        (main.path.as_str(), main.line),
+        (r"C:\src\main.rs", Some(12))
+    );
+    let Some(LinkAction::OpenReference(lib)) = prepared.link_action(1, None) else {
+        panic!("a forward-slash drive path opens as a file")
+    };
+    assert_eq!((lib.path.as_str(), lib.line), ("d:/src/lib.rs", None));
+}

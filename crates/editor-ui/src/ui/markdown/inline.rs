@@ -325,17 +325,18 @@ pub(super) fn file_link_path(destination: &str) -> Option<std::path::PathBuf> {
         std::path::PathBuf::from(path)
     };
     let raw = destination.split('#').next().unwrap_or_default();
-    let has_scheme = raw.split_once(':').is_some_and(|(prefix, _)| {
-        !prefix.contains(['/', '\\'])
-            && !prefix.is_empty()
-            && prefix
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphabetic())
-            && prefix
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-    });
+    let has_scheme = !is_drive_path(raw)
+        && raw.split_once(':').is_some_and(|(prefix, _)| {
+            !prefix.contains(['/', '\\'])
+                && !prefix.is_empty()
+                && prefix
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_alphabetic())
+                && prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        });
     (!path.as_os_str().is_empty()
         && !destination.starts_with("//")
         && (!has_scheme
@@ -347,4 +348,11 @@ pub(super) fn file_link_path(destination: &str) -> Option<std::path::PathBuf> {
                         .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
             })))
     .then_some(path)
+}
+
+fn is_drive_path(raw: &str) -> bool {
+    matches!(
+        raw.as_bytes(),
+        [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic()
+    )
 }
