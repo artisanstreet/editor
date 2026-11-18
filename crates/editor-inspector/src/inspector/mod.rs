@@ -4,7 +4,6 @@ mod model;
 mod owner;
 mod palette;
 mod terminal;
-mod terminal_view;
 mod view;
 
 pub use model::{Entry, entries};
@@ -18,7 +17,7 @@ pub use dialog::{Job, Layout, ListChange, Row, TerminalDialog, list_changes};
 
 pub use palette::TerminalPalette;
 
-pub use terminal_view::{TerminalAction, terminal_view};
+pub use terminal::{TerminalAction, terminal_view};
 
 pub use view::{AgentCard, InspectorAction, agent_card, inspector_view, render_agent_card};
 

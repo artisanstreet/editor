@@ -1,4 +1,4 @@
-use super::{Layout, Row, TerminalDialog, TerminalPalette, shell_prompt};
+use crate::inspector::{Layout, Row, TerminalDialog, TerminalPalette, shell_prompt};
 use aqua_text::StyledSpan;
 use aqua_ui::{
     collection::{

@@ -1,5 +1,8 @@
+mod view;
+
 use artisan_api::{Item, ItemId, Output, TextContent, ThreadId};
 use std::ops::Range;
+pub use view::{TerminalAction, terminal_view};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Feed {
