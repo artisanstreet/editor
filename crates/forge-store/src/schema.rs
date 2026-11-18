@@ -71,311 +71,53 @@ enum Step {
 }
 
 const MIGRATIONS: &[&[Step]] = &[
-    &[Step::Sql(
-        r"
-CREATE TABLE projects (
-    id   TEXT PRIMARY KEY,
-    seq  INTEGER NOT NULL,
-    body TEXT NOT NULL
-);
-CREATE INDEX projects_seq ON projects (seq);
-
-CREATE TABLE threads (
-    id   TEXT PRIMARY KEY,
-    seq  INTEGER NOT NULL,
-    body TEXT NOT NULL
-);
-CREATE INDEX threads_seq ON threads (seq);
-
-CREATE TABLE items (
-    id        TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
-    position  INTEGER NOT NULL,
-    seq       INTEGER NOT NULL,
-    run_id    TEXT,
-    native_id TEXT,
-    status    TEXT NOT NULL,
-    body      TEXT NOT NULL
-);
-CREATE INDEX items_thread_position ON items (thread_id, position);
-CREATE INDEX items_seq ON items (seq);
-CREATE INDEX items_native ON items (thread_id, native_id) WHERE native_id IS NOT NULL;
-CREATE INDEX items_live ON items (status) WHERE status IN ('running', 'awaiting_user');
-
-CREATE TABLE runs (
-    id        TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
-    seq       INTEGER NOT NULL,
-    status    TEXT NOT NULL,
-    body      TEXT NOT NULL
-);
-CREATE INDEX runs_thread ON runs (thread_id);
-CREATE INDEX runs_seq ON runs (seq);
-CREATE INDEX runs_status ON runs (status);
-
-CREATE TABLE kv (
-    key   TEXT PRIMARY KEY,
-    seq   INTEGER NOT NULL,
-    value TEXT NOT NULL
-);
-CREATE INDEX kv_seq ON kv (seq);
-
-CREATE TABLE drafts (
-    scope TEXT PRIMARY KEY,
-    body  TEXT NOT NULL
-);
-
-CREATE TABLE authorized_keys (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    public_key TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL,
-    last_seen  INTEGER
-);
-
-CREATE TABLE pair_codes (
-    code_sha256 TEXT PRIMARY KEY,
-    expires_at  INTEGER NOT NULL
-);
-",
-    )],
-    &[Step::Sql(
-        r"
--- Values only Forge reads: never in /state or the event stream.
-CREATE TABLE secrets (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-INSERT INTO secrets (key, value) SELECT key, value FROM kv WHERE key = 'forge_identity';
-DELETE FROM kv WHERE key = 'forge_identity';
-",
-    )],
-    &[Step::Sql(
-        r"
--- Every saved version of the global prompt; the latest is also the
--- `global_prompt` setting.
-CREATE TABLE prompt_versions (
-    version  INTEGER PRIMARY KEY,
-    text     TEXT NOT NULL,
-    saved_at INTEGER NOT NULL
-);
-",
-    )],
-    &[Step::Sql(
-        r"
--- Access and approvals became one choice: Auto or Full. What never asked
--- (or bypassed Claude's permissions) stays Full; everything else is Auto.
-UPDATE threads SET body = json_remove(
-    json_set(body, '$.config.permissions',
-        CASE WHEN json_extract(body, '$.config.approvals') = 'never'
-               OR json_extract(body, '$.config.options.permission_mode') = 'bypassPermissions'
-             THEN 'full' ELSE 'auto' END),
-    '$.config.access', '$.config.approvals',
-    '$.config.options.permission_mode', '$.config.options.mode');
-UPDATE kv SET value = json_remove(
-    json_set(value, '$.permissions',
-        CASE WHEN json_extract(value, '$.approvals') = 'never'
-               OR json_extract(value, '$.options.permission_mode') = 'bypassPermissions'
-             THEN 'full' ELSE 'auto' END),
-    '$.access', '$.approvals', '$.options.permission_mode', '$.options.mode')
-WHERE key = 'default_engine_config' AND json_valid(value);
-",
-    )],
-    &[Step::Sql(
-        r"
-CREATE INDEX items_awaiting_position ON items(position) WHERE status = 'awaiting_user';
-CREATE INDEX items_pending_input ON items(thread_id, position)
-    WHERE status = 'running' AND json_extract(body, '$.kind.type') = 'user_message';
-",
-    )],
-    &[Step::Sql(
-        r"
-ALTER TABLE drafts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
-CREATE INDEX threads_activity ON threads(COALESCE(json_extract(body,'$.archived'),0),json_extract(body,'$.activity_seq') DESC,id DESC);
-CREATE INDEX items_thread_seq ON items(thread_id,seq);
-CREATE INDEX items_thread_kind_position ON items(thread_id,json_extract(body,'$.kind.type'),position);
-",
-    )],
-    &[Step::Sql(
-        r"
-CREATE VIEW thread_search_content AS
- SELECT t.rowid AS rowid, COALESCE(json_extract(t.body,'$.title'),'') || ' ' || COALESCE(json_extract(p.body,'$.name'),'') AS content
- FROM threads t LEFT JOIN projects p ON p.id=json_extract(t.body,'$.project_id');
-CREATE VIRTUAL TABLE threads_search USING fts5(content,content='thread_search_content',content_rowid='rowid',tokenize='trigram',columnsize=0);
-INSERT INTO threads_search(threads_search) VALUES('rebuild');
-CREATE TRIGGER thread_search_insert AFTER INSERT ON threads BEGIN
- INSERT INTO threads_search(rowid,content) SELECT rowid,content FROM thread_search_content WHERE rowid=NEW.rowid;
-END;
-CREATE TRIGGER thread_search_delete BEFORE DELETE ON threads BEGIN
- INSERT INTO threads_search(threads_search,rowid,content) SELECT 'delete',rowid,content FROM thread_search_content WHERE rowid=OLD.rowid;
-END;
-CREATE TRIGGER thread_search_before_update BEFORE UPDATE ON threads
- WHEN json_extract(OLD.body,'$.title') IS NOT json_extract(NEW.body,'$.title') OR json_extract(OLD.body,'$.project_id') IS NOT json_extract(NEW.body,'$.project_id') BEGIN
- INSERT INTO threads_search(threads_search,rowid,content) SELECT 'delete',rowid,content FROM thread_search_content WHERE rowid=OLD.rowid;
-END;
-CREATE TRIGGER thread_search_after_update AFTER UPDATE ON threads
- WHEN json_extract(OLD.body,'$.title') IS NOT json_extract(NEW.body,'$.title') OR json_extract(OLD.body,'$.project_id') IS NOT json_extract(NEW.body,'$.project_id') BEGIN
- INSERT INTO threads_search(rowid,content) SELECT rowid,content FROM thread_search_content WHERE rowid=NEW.rowid;
-END;
-CREATE TRIGGER project_search_before_update BEFORE UPDATE ON projects
- WHEN json_extract(OLD.body,'$.name') IS NOT json_extract(NEW.body,'$.name') BEGIN
- INSERT INTO threads_search(threads_search,rowid,content) SELECT 'delete',rowid,content FROM thread_search_content
- WHERE rowid IN (SELECT rowid FROM threads WHERE json_extract(body,'$.project_id')=OLD.id);
-END;
-CREATE TRIGGER project_search_after_update AFTER UPDATE ON projects
- WHEN json_extract(OLD.body,'$.name') IS NOT json_extract(NEW.body,'$.name') BEGIN
- INSERT INTO threads_search(rowid,content) SELECT rowid,content FROM thread_search_content
- WHERE rowid IN (SELECT rowid FROM threads WHERE json_extract(body,'$.project_id')=NEW.id);
-END;
-",
-    )],
-    &[Step::Sql(
-        r"CREATE INDEX items_thread_parent_position ON items(thread_id,json_extract(body,'$.parent_id'),position);
-CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
- WHERE json_extract(body,'$.parent_id') IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v01.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v02.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v03.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v04.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v05.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v06.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v07.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v08.sql"))],
     &[
-        Step::Sql(
-            r"ALTER TABLE items ADD COLUMN edit_added INTEGER;
-       ALTER TABLE items ADD COLUMN edit_removed INTEGER;
-       CREATE TABLE thread_edit_totals(thread_id TEXT PRIMARY KEY, added INTEGER NOT NULL, removed INTEGER NOT NULL, operations INTEGER NOT NULL);
-       CREATE TRIGGER item_edit_insert AFTER INSERT ON items WHEN NEW.edit_added IS NOT NULL BEGIN
-         INSERT INTO thread_edit_totals VALUES(NEW.thread_id,NEW.edit_added,NEW.edit_removed,1)
-         ON CONFLICT(thread_id) DO UPDATE SET added=added+excluded.added,removed=removed+excluded.removed,operations=operations+1;
-       END;
-       CREATE TRIGGER item_edit_update AFTER UPDATE OF edit_added,edit_removed ON items
-        WHEN OLD.edit_added IS NOT NEW.edit_added OR OLD.edit_removed IS NOT NEW.edit_removed BEGIN
-         INSERT INTO thread_edit_totals VALUES(NEW.thread_id,COALESCE(NEW.edit_added,0)-COALESCE(OLD.edit_added,0),
-            COALESCE(NEW.edit_removed,0)-COALESCE(OLD.edit_removed,0),(NEW.edit_added IS NOT NULL)-(OLD.edit_added IS NOT NULL))
-         ON CONFLICT(thread_id) DO UPDATE SET added=added+excluded.added,removed=removed+excluded.removed,operations=operations+excluded.operations;
-       END;
-       CREATE TRIGGER item_edit_delete AFTER DELETE ON items WHEN OLD.edit_added IS NOT NULL BEGIN
-         UPDATE thread_edit_totals SET added=added-OLD.edit_added,removed=removed-OLD.edit_removed,operations=operations-1 WHERE thread_id=OLD.thread_id;
-       END;",
-        ),
+        Step::Sql(include_str!("sql/migrations/v09.sql")),
         Step::Rust(backfill_edit_totals),
     ],
     &[Step::Rust(migrate_payloads)],
-    &[Step::Sql(
-        r"UPDATE runs SET body=json_set(body,'$.input_cutoff',seq);
-       CREATE INDEX items_pending_inputs ON items(thread_id,seq)
-        WHERE status='running' AND json_extract(body,'$.kind.type')='user_message';",
-    )],
-    &[Step::Sql(
-        r"UPDATE threads SET body=json_set(body,'$.activity_at',COALESCE(
-       (SELECT json_extract(i.body,'$.updated_at') FROM items i
-        WHERE i.thread_id=threads.id AND i.seq=json_extract(threads.body,'$.activity_seq')),
-       (SELECT json_extract(i.body,'$.created_at') FROM items i
-        WHERE i.thread_id=threads.id AND i.position=json_extract(threads.body,'$.activity_seq')
-          AND json_extract(i.body,'$.kind.type')='user_message'),
-       (SELECT COALESCE(json_extract(r.body,'$.ended_at'),json_extract(r.body,'$.started_at')) FROM runs r
-        WHERE r.thread_id=threads.id AND r.seq<=json_extract(threads.body,'$.activity_seq')
-        ORDER BY r.seq DESC LIMIT 1),
-       json_extract(body,'$.created_at'),0));",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v11.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v12.sql"))],
     &[
-        Step::Sql(
-            r"CREATE TABLE content(id TEXT PRIMARY KEY, bytes INTEGER NOT NULL, lines INTEGER NOT NULL,
-       diff_added INTEGER NOT NULL, diff_removed INTEGER NOT NULL, unreferenced_at INTEGER);
-       CREATE INDEX content_orphans ON content(unreferenced_at) WHERE unreferenced_at IS NOT NULL;
-       CREATE TABLE content_chunks(content_id TEXT NOT NULL,start INTEGER NOT NULL,data BLOB NOT NULL,PRIMARY KEY(content_id,start)) WITHOUT ROWID;
-       CREATE TABLE item_content(item_id TEXT NOT NULL,content_id TEXT NOT NULL,PRIMARY KEY(item_id,content_id)) WITHOUT ROWID;
-       CREATE INDEX item_content_source ON item_content(content_id);
-       CREATE TRIGGER item_content_insert AFTER INSERT ON item_content BEGIN
-         UPDATE content SET unreferenced_at=NULL WHERE id=NEW.content_id;
-       END;
-       CREATE TRIGGER item_content_owner_delete AFTER DELETE ON items BEGIN
-         DELETE FROM item_content WHERE item_id=OLD.id;
-       END;",
-        ),
+        Step::Sql(include_str!("sql/migrations/v13.sql")),
         Step::Rust(migrate_sources),
     ],
     &[Step::Sql(COLLECTIONS), Step::Rust(migrate_collections)],
     &[Step::Sql(SOURCE_INDEXES)],
-    &[Step::Sql(
-        r"ALTER TABLE items ADD COLUMN kind_type TEXT;
-       ALTER TABLE items ADD COLUMN parent_id TEXT;
-       UPDATE items SET kind_type=json_extract(body,'$.kind.type'),parent_id=json_extract(body,'$.parent_id');
-       DROP INDEX IF EXISTS items_pending_input;
-       DROP INDEX IF EXISTS items_pending_inputs;
-       DROP INDEX IF EXISTS items_thread_kind_position;
-       DROP INDEX IF EXISTS items_thread_parent_position;
-       DROP INDEX IF EXISTS items_agent_recipient_position;
-       CREATE INDEX items_pending_input ON items(thread_id,position) WHERE status='running' AND kind_type='user_message';
-       CREATE INDEX items_pending_inputs ON items(thread_id,seq) WHERE status='running' AND kind_type='user_message';
-       CREATE INDEX items_thread_kind_position ON items(thread_id,kind_type,position);
-       CREATE INDEX items_thread_parent_position ON items(thread_id,parent_id,position);
-       CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
-        WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v16.sql"))],
     &[
         Step::Rust(migrate_approvals),
-        Step::Sql(
-            r"UPDATE items SET body=json_remove(body,'$.kind.tool.recipient_label')
-         WHERE kind_type='tool' AND json_extract(body,'$.kind.tool.kind')='agent_message';
-       UPDATE items SET body=json_set(body,'$.kind.tool.target',(SELECT a.id FROM items a
-           WHERE a.thread_id=items.thread_id AND a.kind_type='agent'
-             AND json_extract(a.body,'$.kind.agent_id')=json_extract(items.body,'$.kind.tool.recipient')
-           ORDER BY a.position DESC LIMIT 1))
-         WHERE kind_type='tool' AND json_extract(body,'$.kind.tool.kind')='agent_message'
-           AND EXISTS(SELECT 1 FROM items a WHERE a.thread_id=items.thread_id AND a.kind_type='agent'
-             AND json_extract(a.body,'$.kind.agent_id')=json_extract(items.body,'$.kind.tool.recipient'));
-       DROP INDEX IF EXISTS items_agent_recipient_position;
-       CREATE INDEX items_agent_message_target ON items(thread_id,json_extract(body,'$.kind.tool.target'),position)
-        WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
-        ),
+        Step::Sql(include_str!("sql/migrations/v17.sql")),
     ],
-    &[Step::Sql(
-        r"DELETE FROM items WHERE kind_type='compaction'
-         AND json_extract(body,'$.kind.tokens_before') IS NULL
-         AND EXISTS(SELECT 1 FROM items c WHERE c.run_id=items.run_id AND c.kind_type='compaction'
-           AND (json_extract(c.body,'$.kind.tokens_before') IS NOT NULL OR c.position<items.position));",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v18.sql"))],
     &[
-        Step::Sql(
-            r"DROP TRIGGER IF EXISTS item_text_owner_delete;
-       DROP TABLE IF EXISTS item_search;
-       DROP TABLE IF EXISTS item_text;
-       CREATE TABLE item_text(rowid INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, item_id TEXT NOT NULL,
-         kind TEXT NOT NULL, created_at INTEGER NOT NULL, text TEXT NOT NULL, output TEXT NOT NULL, paths TEXT NOT NULL);
-       CREATE INDEX item_text_thread ON item_text(thread_id,rowid);
-       CREATE VIRTUAL TABLE item_search USING fts5(text,paths,content='item_text',content_rowid='rowid',tokenize='trigram');
-       CREATE TRIGGER item_text_owner_delete AFTER DELETE ON items BEGIN
-         INSERT INTO item_search(item_search,rowid,text,paths) SELECT 'delete',rowid,text,paths FROM item_text WHERE rowid=OLD.rowid;
-         DELETE FROM item_text WHERE rowid=OLD.rowid;
-       END;",
-        ),
+        Step::Sql(include_str!("sql/migrations/v19.sql")),
         Step::Rust(backfill_recall),
     ],
     &[Step::Rust(forget_artisan_calls)],
-    &[Step::Sql(
-        "CREATE TABLE IF NOT EXISTS continues(thread_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, reason TEXT NOT NULL);",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v21.sql"))],
     &[
-        Step::Sql("ALTER TABLE items ADD COLUMN work INTEGER NOT NULL DEFAULT 0;"),
+        Step::Sql(include_str!("sql/migrations/v22_a.sql")),
         Step::Rust(backfill_work),
-        Step::Sql(
-            "CREATE INDEX items_transcript_rows ON items(thread_id,position) WHERE parent_id IS NULL AND work=0;",
-        ),
+        Step::Sql(include_str!("sql/migrations/v22_b.sql")),
     ],
-    &[Step::Sql(
-        "ALTER TABLE continues ADD COLUMN due_at INTEGER;",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v23.sql"))],
     &[Step::Rust(migrate_model_permissions)],
-    &[Step::Sql(
-        "CREATE TABLE IF NOT EXISTS removed_threads(id TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-         CREATE INDEX IF NOT EXISTS removed_threads_seq ON removed_threads(seq);",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v25.sql"))],
     &[Step::Sql(include_str!("sql/coordination/schema.sql"))],
-    &[Step::Sql(
-        "CREATE INDEX items_work_spans ON items(thread_id,position,run_id,kind_type,parent_id,work) WHERE parent_id IS NULL AND work=1;",
-    )],
+    &[Step::Sql(include_str!("sql/migrations/v27.sql"))],
     &[
-        Step::Sql("ALTER TABLE items ADD COLUMN outline TEXT;"),
+        Step::Sql(include_str!("sql/migrations/v28_a.sql")),
         Step::Rust(backfill_outline),
-        Step::Sql(
-            "CREATE INDEX items_outline ON items(thread_id,position,id,outline) WHERE outline IS NOT NULL;",
-        ),
+        Step::Sql(include_str!("sql/migrations/v28_b.sql")),
     ],
     &[Step::Sql(include_str!("sql/pairing/track_revisions.sql"))],
 ];
@@ -388,7 +130,7 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let Some(text) = conn
         .query_row(
-            "SELECT value FROM kv WHERE key=?1",
+            include_str!("sql/migrations/kv_value.sql"),
             [artisan_api::MODEL_CONFIGS_KEY],
             |row| row.get::<_, String>(0),
         )
@@ -425,16 +167,16 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute(
-        "UPDATE kv SET value=?2 WHERE key=?1",
+        include_str!("sql/migrations/set_kv_value.sql"),
         rusqlite::params![artisan_api::MODEL_CONFIGS_KEY, configs.to_string()],
     )?;
     Ok(())
 }
 
 fn backfill_work(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare("SELECT id,body FROM items WHERE parent_id IS NULL")?;
+    let mut select = conn.prepare(include_str!("sql/migrations/work_candidates.sql"))?;
     let mut rows = select.query([])?;
-    let mut update = conn.prepare("UPDATE items SET work=1 WHERE id=?1")?;
+    let mut update = conn.prepare(include_str!("sql/migrations/mark_work.sql"))?;
     while let Some(row) = rows.next()? {
         let body: String = row.get(1)?;
         if serde_json::from_str::<artisan_api::Item>(&body).is_ok_and(|item| item.folds_into_work())
@@ -469,9 +211,7 @@ pub fn legacy_approval(item: &mut serde_json::Value) {
 fn migrate_approvals(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let approvals: Vec<(String, String, String)> = conn
-        .prepare(
-            "SELECT id,thread_id,body FROM items WHERE kind_type='approval' ORDER BY position",
-        )?
+        .prepare(include_str!("sql/migrations/approvals.sql"))?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (id, thread, body) in approvals {
@@ -483,8 +223,7 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
         let gated: Option<(String, Value)> = match &target {
             Some(target) => conn
                 .query_row(
-                    "SELECT id,body FROM items WHERE id=?1 AND thread_id=?2
-                     AND kind_type IN ('tool','plan') AND json_extract(body,'$.kind.approval') IS NULL",
+                    include_str!("sql/migrations/approval_target.sql"),
                     rusqlite::params![target, thread],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
@@ -497,16 +236,16 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
             gated["kind"]["approval"] = value["kind"]["approval"].take();
             let item: artisan_api::Item = crate::read::from_value(gated)?;
             conn.execute(
-                "UPDATE items SET body=?2 WHERE id=?1",
+                include_str!("sql/migrations/set_item_body.sql"),
                 rusqlite::params![target, crate::read::to_body(&item)?],
             )?;
             crate::content::own(conn, &item)?;
-            conn.execute("DELETE FROM items WHERE id=?1", [&id])?;
+            conn.execute(include_str!("sql/migrations/delete_item.sql"), [&id])?;
         } else {
             legacy_approval(&mut value);
             let item: artisan_api::Item = crate::read::from_value(value)?;
             conn.execute(
-                "UPDATE items SET body=?2,kind_type='tool' WHERE id=?1",
+                include_str!("sql/migrations/approval_as_tool.sql"),
                 rusqlite::params![id, crate::read::to_body(&item)?],
             )?;
         }
@@ -514,50 +253,9 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const COLLECTIONS: &str = r"
-CREATE TABLE content_collections(content_id TEXT PRIMARY KEY, count INTEGER NOT NULL, authored_bytes INTEGER NOT NULL, structural_bytes INTEGER NOT NULL);
-CREATE TABLE content_records(content_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
-  start INTEGER NOT NULL, end INTEGER NOT NULL, record_key TEXT, record_label TEXT, PRIMARY KEY(content_id,ordinal)) WITHOUT ROWID;
-CREATE UNIQUE INDEX content_records_key ON content_records(content_id,record_key) WHERE record_key IS NOT NULL;
-CREATE INDEX content_records_label ON content_records(content_id,record_label) WHERE record_label IS NOT NULL;
-CREATE TABLE content_dependencies(parent_id TEXT NOT NULL,child_id TEXT NOT NULL,
-  PRIMARY KEY(parent_id,child_id), CHECK(parent_id<>child_id)) WITHOUT ROWID;
-CREATE INDEX content_dependencies_child ON content_dependencies(child_id);
-CREATE TRIGGER content_dependency_insert AFTER INSERT ON content_dependencies BEGIN
-  UPDATE content SET unreferenced_at=NULL WHERE id=NEW.child_id;
-END;
-CREATE TRIGGER content_dependency_delete AFTER DELETE ON content_dependencies BEGIN
-  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.child_id
-    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.child_id)
-    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.child_id);
-END;
--- Databases that applied an earlier migration 13 have item-only versions.
-DROP TRIGGER IF EXISTS item_content_delete;
-CREATE TRIGGER item_content_delete AFTER DELETE ON item_content BEGIN
-  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.content_id
-    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.content_id)
-    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.content_id);
-END;
-DROP TRIGGER IF EXISTS content_delete;
-CREATE TRIGGER content_delete AFTER DELETE ON content BEGIN
-  DELETE FROM content_chunks WHERE content_id=OLD.id;
-  DELETE FROM content_records WHERE content_id=OLD.id;
-  DELETE FROM content_collections WHERE content_id=OLD.id;
-  DELETE FROM content_dependencies WHERE parent_id=OLD.id;
-END;
-";
+const COLLECTIONS: &str = include_str!("sql/migrations/v14.sql");
 
-const SOURCE_INDEXES: &str = r"
-CREATE TABLE source_indexes(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL,
- metadata_id TEXT NOT NULL, leaf_count INTEGER NOT NULL, PRIMARY KEY(source_id,format,version)) WITHOUT ROWID;
-CREATE TABLE source_index_leaves(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL, ordinal INTEGER NOT NULL,
- source_start INTEGER NOT NULL, source_end INTEGER NOT NULL, metadata_start INTEGER NOT NULL, metadata_end INTEGER NOT NULL,
- PRIMARY KEY(source_id,format,version,ordinal)) WITHOUT ROWID;
-CREATE TRIGGER source_index_delete AFTER DELETE ON content BEGIN
- DELETE FROM source_index_leaves WHERE source_id=OLD.id;
- DELETE FROM source_indexes WHERE source_id=OLD.id;
-END;
-";
+const SOURCE_INDEXES: &str = include_str!("sql/migrations/v15.sql");
 
 pub fn migrate(conn: &mut Connection) -> Result<(), SchemaError> {
     migrate_to(conn, MIGRATIONS.len())
@@ -606,11 +304,9 @@ fn apply(conn: &mut Connection, next: usize, steps: &[Step]) -> Result<()> {
 }
 
 fn backfill_edit_totals(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(
-        "SELECT id,body FROM items WHERE status='done' AND json_extract(body,'$.kind.tool.kind')='edit'",
-    )?;
+    let mut select = conn.prepare(include_str!("sql/migrations/edit_tools.sql"))?;
     let mut rows = select.query([])?;
-    let mut update = conn.prepare("UPDATE items SET edit_added=?2,edit_removed=?3 WHERE id=?1")?;
+    let mut update = conn.prepare(include_str!("sql/migrations/set_edit_totals.sql"))?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let body: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
@@ -625,9 +321,9 @@ fn backfill_edit_totals(conn: &Connection) -> Result<()> {
 }
 
 fn backfill_outline(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare("SELECT id,body FROM items WHERE kind_type='user_message'")?;
+    let mut select = conn.prepare(include_str!("sql/migrations/user_messages.sql"))?;
     let mut rows = select.query([])?;
-    let mut update = conn.prepare("UPDATE items SET outline=?2 WHERE id=?1")?;
+    let mut update = conn.prepare(include_str!("sql/migrations/set_outline.sql"))?;
     while let Some(row) = rows.next()? {
         let body: String = row.get(1)?;
         let Ok(item) = serde_json::from_str::<artisan_api::Item>(&body) else {
@@ -770,9 +466,9 @@ fn canonical_question(item: &str, body: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 fn migrate_payloads(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare("SELECT id,body FROM threads")?;
+    let mut select = conn.prepare(include_str!("sql/migrations/threads.sql"))?;
     let mut rows = select.query([])?;
-    let mut update = conn.prepare("UPDATE threads SET body=?2 WHERE id=?1")?;
+    let mut update = conn.prepare(include_str!("sql/migrations/set_thread_body.sql"))?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let text: String = row.get(1)?;
@@ -784,7 +480,9 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
     }
     for key in ["default_engine_config", "model_engine_configs"] {
         let value: Option<String> = conn
-            .query_row("SELECT value FROM kv WHERE key=?1", [key], |row| row.get(0))
+            .query_row(include_str!("sql/migrations/kv_value.sql"), [key], |row| {
+                row.get(0)
+            })
             .optional()?;
         if let Some(value) = value {
             let mut value: serde_json::Value = crate::read::from_body(&value)?;
@@ -798,15 +496,14 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
                 canonical_config(&mut value);
             }
             conn.execute(
-                "UPDATE kv SET value=?2 WHERE key=?1",
+                include_str!("sql/migrations/set_kv_value.sql"),
                 rusqlite::params![key, value.to_string()],
             )?;
         }
     }
-    let mut select = conn
-        .prepare("SELECT id,body FROM items WHERE json_extract(body,'$.kind.type')='question'")?;
+    let mut select = conn.prepare(include_str!("sql/migrations/questions.sql"))?;
     let mut rows = select.query([])?;
-    let mut update = conn.prepare("UPDATE items SET body=?2 WHERE id=?1")?;
+    let mut update = conn.prepare(include_str!("sql/migrations/set_item_body.sql"))?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let mut value: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
@@ -817,382 +514,13 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
-mod canonical_migration_tests {
-    use super::*;
-    use serde_json::{Value, json};
-    #[test]
-    fn persisted_settings_and_old_question_answers_upgrade_once_without_new_revisions() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.sqlite");
-        let mut conn = Connection::open(&path).unwrap();
-        migrate_to(&mut conn, 9).unwrap();
-        let codex = json!({"engine":"codex","model":null,"effort":null,"options":{"service_tier":"priority","unrelated":42}});
-        let cursor = json!({"engine":"cursor","model":null,"effort":null,"options":{"fast":true}});
-        let opencode = json!({"engine":"opencode","model":null,"effort":"high","variant":"custom","options":{}});
-        conn.execute(
-            "INSERT INTO threads VALUES ('t',17,?1)",
-            [json!({"config":codex}).to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kv VALUES ('default_engine_config',18,?1)",
-            [cursor.to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kv VALUES ('model_engine_configs',19,?1)",
-            [json!({"selected":opencode}).to_string()],
-        )
-        .unwrap();
-        let question = json!({"id":"q","thread_id":"t","position":1,"seq":20,"run_id":null,"parent_id":null,"status":"done","created_at":1,"updated_at":1,"kind":{"type":"question","blocking":false,"questions":[{"id":"q","header":null,"text":"Pick","multi_select":false,"options":[{"label":"Same","description":null},{"label":"Same","description":null}]}],"answers":[["Same"]]}});
-        conn.execute("INSERT INTO items (id,thread_id,position,seq,status,body) VALUES ('q','t',1,20,'done',?1)",[question.to_string()]).unwrap();
-        migrate(&mut conn).unwrap();
-        drop(conn);
-        let mut conn = Connection::open(&path).unwrap();
-        migrate(&mut conn).unwrap();
-        let body: String = conn
-            .query_row("SELECT body FROM threads WHERE id='t'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let body: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(body["config"]["speed"], "priority");
-        assert_eq!(body["config"]["options"], json!({"unrelated":42}));
-        let settings: Vec<(String, i64, String)> = conn
-            .prepare("SELECT key,seq,value FROM kv ORDER BY key")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(settings[0].1, 18);
-        assert_eq!(settings[1].1, 19);
-        let default: Value = serde_json::from_str(&settings[0].2).unwrap();
-        assert_eq!(default["speed"], "fast");
-        assert!(default["options"].get("fast").is_none());
-        let models: Value = serde_json::from_str(&settings[1].2).unwrap();
-        assert_eq!(models["selected"]["variant"], "custom");
-        assert!(models["selected"].get("effort").is_none());
-        let (seq, body): (i64, String) = conn
-            .query_row("SELECT seq,body FROM items WHERE id='q'", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .unwrap();
-        assert_eq!(seq, 20);
-        let body: Value = serde_json::from_str(&body).unwrap();
-        let kind: artisan_api::ItemKind = serde_json::from_value(body["kind"].clone()).unwrap();
-        let artisan_api::ItemKind::Question {
-            questions, answers, ..
-        } = kind
-        else {
-            panic!("question changed type")
-        };
-        let options = questions.inline().unwrap()[0].options.inline().unwrap();
-        assert_ne!(options[0].id, options[1].id);
-        assert_eq!(
-            answers,
-            Some(
-                vec![Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["option-0".into()].into()
-                })]
-                .into()
-            )
-        );
-        assert_eq!(
-            conn.query_row("SELECT seq FROM threads WHERE id='t'", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            17
-        );
-    }
-}
+#[path = "../tests/schema/canonical_migration.rs"]
+mod canonical_migration_tests;
 
 #[cfg(test)]
-mod activity_time_migration_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn activity_backfill_uses_source_events_and_preserves_revisions() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 11).unwrap();
-        for (id, activity) in [
-            ("edited-input", 20),
-            ("delivered-input", 30),
-            ("run", 40),
-            ("older-run", 60),
-            ("missing-event", 70),
-        ] {
-            conn.execute(
-                "INSERT INTO threads VALUES (?1,99,?2)",
-                rusqlite::params![
-                    id,
-                    json!({"activity_seq":activity,"created_at":10,"updated_at":9999}).to_string()
-                ],
-            )
-            .unwrap();
-        }
-        conn.execute("INSERT INTO items(id,thread_id,position,seq,status,body) VALUES('a','edited-input',15,20,'done',?1)",
-            [json!({"id":"a","thread_id":"edited-input","position":15,"seq":20,"run_id":null,"parent_id":null,"status":"done","created_at":100,"updated_at":200,"kind":{"type":"user_message","text":"edited input","images":[],"steer":false}}).to_string()]).unwrap();
-        conn.execute("INSERT INTO items(id,thread_id,position,seq,status,body) VALUES('b','delivered-input',30,31,'done',?1)",
-            [json!({"id":"b","thread_id":"delivered-input","position":30,"seq":31,"run_id":null,"parent_id":null,"status":"done","created_at":300,"updated_at":310,"kind":{"type":"user_message","text":"delivered input","images":[],"steer":false}}).to_string()]).unwrap();
-        conn.execute(
-            "INSERT INTO runs VALUES('r','run',40,'done',?1)",
-            [json!({"started_at":350,"ended_at":400}).to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO runs VALUES('older','older-run',50,'done',?1)",
-            [json!({"started_at":450,"ended_at":500}).to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO runs VALUES('newer','older-run',65,'done',?1)",
-            [json!({"started_at":600,"ended_at":650}).to_string()],
-        )
-        .unwrap();
-        migrate(&mut conn).unwrap();
-        for (id, expected) in [
-            ("edited-input", 200),
-            ("delivered-input", 300),
-            ("run", 400),
-            ("older-run", 500),
-            ("missing-event", 10),
-        ] {
-            let (seq, activity_at, updated_at): (u64, i64, i64) = conn.query_row(
-                "SELECT seq,json_extract(body,'$.activity_at'),json_extract(body,'$.updated_at') FROM threads WHERE id=?1",
-                [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-            assert_eq!((seq, activity_at, updated_at), (99, expected, 9999), "{id}");
-        }
-        migrate(&mut conn).unwrap();
-        assert_eq!(
-            conn.pragma_query_value::<usize, _>(None, "user_version", |row| row.get(0))
-                .unwrap(),
-            MIGRATIONS.len()
-        );
-    }
-}
+#[path = "../tests/schema/activity_time_migration.rs"]
+mod activity_time_migration_tests;
 
 #[cfg(test)]
-mod item_column_migration_tests {
-    use super::*;
-    use artisan_api::{Item, ItemId, ItemKind, ItemsQuery, Status, ThreadId};
-
-    const WHOLE: ItemsQuery = ItemsQuery {
-        before: None,
-        after: None,
-        limit: None,
-    };
-
-    fn item(id: &str, parent: Option<&str>, status: Status, kind: ItemKind) -> Item {
-        Item {
-            id: ItemId(id.into()),
-            thread_id: ThreadId("t".into()),
-            position: 0,
-            seq: 0,
-            run_id: None,
-            parent_id: parent.map(|parent| ItemId(parent.into())),
-            status,
-            created_at: 1,
-            updated_at: 1,
-            kind,
-        }
-    }
-
-    #[test]
-    fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 15).unwrap();
-        let rows = [
-            item(
-                "input",
-                None,
-                Status::Running,
-                ItemKind::UserMessage {
-                    text: "pending".into(),
-                    images: Vec::new(),
-                    steer: false,
-                    from_agent: None,
-                    sender: None,
-                },
-            ),
-            item(
-                "child",
-                Some("agent"),
-                Status::Done,
-                ItemKind::Notice {
-                    kind: artisan_api::NoticeKind::Info,
-                    text: "subagent work".into(),
-                },
-            ),
-        ];
-        for (seq, row) in rows.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO items(id,thread_id,position,seq,status,body) VALUES(?1,'t',?2,?2,?3,?4)",
-                rusqlite::params![
-                    row.id.as_str(),
-                    seq + 1,
-                    crate::read::tag(&row.status),
-                    serde_json::to_string(row).unwrap()
-                ],
-            )
-            .unwrap();
-        }
-        migrate(&mut conn).unwrap();
-        assert_eq!(
-            crate::read::pending_threads(&conn, 8, &[]).unwrap(),
-            [ThreadId("t".into())]
-        );
-        let agent = ItemId("agent".into());
-        let page = crate::read::scoped_items_page(
-            &conn,
-            &ThreadId("t".into()),
-            &WHOLE,
-            Some(Some(&agent)),
-        )
-        .unwrap();
-        assert_eq!(
-            page.items
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            ["child"]
-        );
-        let root = crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, Some(None))
-            .unwrap();
-        assert_eq!(
-            root.items
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            ["input"]
-        );
-    }
-
-    #[test]
-    fn repeated_compaction_items_collapse_to_one_per_compaction() {
-        use serde_json::json;
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 17).unwrap();
-        let compaction = |id: &str, run: &str, position: i64, before: Option<u64>| {
-            let body = json!({"id":id,"thread_id":"t","position":position,"seq":position,
-                "run_id":run,"parent_id":null,"status":"done","created_at":1,"updated_at":1,
-                "kind":{"type":"compaction","tokens_before":before,
-                    "tokens_after":before.map(|_| 15_000)}});
-            conn.execute(
-                "INSERT INTO items(id,thread_id,position,seq,run_id,status,body,kind_type)
-                 VALUES(?1,'t',?2,?2,?3,'done',?4,'compaction')",
-                rusqlite::params![id, position, run, body.to_string()],
-            )
-            .unwrap();
-        };
-        compaction("progress-1", "r1", 1, None);
-        compaction("progress-2", "r1", 2, None);
-        compaction("boundary", "r1", 3, Some(966_000));
-        compaction("interrupted-1", "r2", 4, None);
-        compaction("interrupted-2", "r2", 5, None);
-        compaction("other-run", "r3", 6, Some(500_000));
-        migrate(&mut conn).unwrap();
-        let page =
-            crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
-        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(ids, ["boundary", "interrupted-1", "other-run"]);
-    }
-
-    #[test]
-    fn stored_approvals_move_onto_their_items_and_agent_messages_name_their_agent() {
-        use serde_json::json;
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 16).unwrap();
-        let row = |id: &str, position: i64, status: &str, kind: serde_json::Value| {
-            json!({"id":id,"thread_id":"t","position":position,"seq":position,"run_id":null,
-                "parent_id":null,"status":status,"created_at":1,"updated_at":1,"kind":kind})
-        };
-        let approval = json!({"request":{"type":"command","command":"touch a","cwd":"/w"},
-            "reason":null,"options":["allow_once","deny_once"],"decision":"allow_once"});
-        let rows = [
-            row(
-                "tool",
-                1,
-                "done",
-                json!({"type":"tool","tool":{"kind":"shell","command":"touch a","cwd":"/w"},
-                "title":null,"output":null,"exit_code":0,"approval":null}),
-            ),
-            row(
-                "asked",
-                2,
-                "done",
-                json!({"type":"approval","target":"tool","approval":approval}),
-            ),
-            row(
-                "orphan",
-                3,
-                "declined",
-                json!({"type":"approval","target":null,"approval":approval}),
-            ),
-            row(
-                "agent",
-                4,
-                "running",
-                json!({"type":"agent","name":null,"description":"task",
-                "agent_id":"a935b57d5f0b8fb33","background":true,"result":null}),
-            ),
-            row(
-                "sent",
-                5,
-                "done",
-                json!({"type":"tool","tool":{"kind":"agent_message",
-                "recipient":"a935b57d5f0b8fb33","recipient_label":"an agent","summary":null,"text":"hi"},
-                "title":null,"output":null,"exit_code":null,"approval":null}),
-            ),
-        ];
-        for row in &rows {
-            conn.execute(
-                "INSERT INTO items(id,thread_id,position,seq,status,body,kind_type) VALUES(?1,'t',?2,?2,?3,?4,json_extract(?4,'$.kind.type'))",
-                rusqlite::params![
-                    row["id"].as_str().unwrap(),
-                    row["position"].as_i64().unwrap(),
-                    row["status"].as_str().unwrap(),
-                    row.to_string()
-                ],
-            )
-            .unwrap();
-        }
-        migrate(&mut conn).unwrap();
-        let page =
-            crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
-        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(ids, ["tool", "orphan", "agent", "sent"]);
-        let ItemKind::Tool {
-            approval: Some(moved),
-            ..
-        } = &page.items[0].kind
-        else {
-            panic!("the approval moved onto its command: {:?}", page.items[0]);
-        };
-        assert_eq!(moved.decision, Some(artisan_api::Decision::AllowOnce));
-        assert!(matches!(
-            &page.items[1].kind,
-            ItemKind::Tool {
-                approval: Some(_),
-                ..
-            }
-        ));
-        let agent = ItemId("agent".into());
-        let scoped = crate::read::scoped_items_page(
-            &conn,
-            &ThreadId("t".into()),
-            &WHOLE,
-            Some(Some(&agent)),
-        )
-        .unwrap();
-        assert_eq!(scoped.items.len(), 1);
-        assert!(matches!(
-            &scoped.items[0].kind,
-            ItemKind::Tool {
-                tool: artisan_api::ToolKind::AgentMessage { target: Some(target), .. },
-                ..
-            } if *target == agent
-        ));
-    }
-}
+#[path = "../tests/schema/item_column_migration.rs"]
+mod item_column_migration_tests;

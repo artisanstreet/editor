@@ -64,11 +64,33 @@ pub fn header(
             source_id: id.clone(),
         });
     }
-    conn.query_row("SELECT s.bytes,s.lines,m.id,m.bytes,m.lines,i.leaf_count FROM source_indexes i JOIN content s ON s.id=i.source_id JOIN content m ON m.id=i.metadata_id WHERE i.source_id=?1 AND i.version=?2 AND i.format=?3", params![id.as_str(),artisan_api::SOURCE_INDEX_VERSION,format.as_str()], |row| Ok(SourceIndexHeader {
-        format, source: ContentRef { id:id.clone(),bytes:row.get(0)?,lines:row.get(1)? },
-        metadata: ContentRef { id:ContentId(row.get(2)?),bytes:row.get(3)?,lines:row.get(4)? },
-        version: artisan_api::SOURCE_INDEX_VERSION, leaves:row.get(5)?,
-    })).optional().map_err(Into::into)
+    conn.query_row(
+        include_str!("sql/sources/index_header.sql"),
+        params![
+            id.as_str(),
+            artisan_api::SOURCE_INDEX_VERSION,
+            format.as_str()
+        ],
+        |row| {
+            Ok(SourceIndexHeader {
+                format,
+                source: ContentRef {
+                    id: id.clone(),
+                    bytes: row.get(0)?,
+                    lines: row.get(1)?,
+                },
+                metadata: ContentRef {
+                    id: ContentId(row.get(2)?),
+                    bytes: row.get(3)?,
+                    lines: row.get(4)?,
+                },
+                version: artisan_api::SOURCE_INDEX_VERSION,
+                leaves: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 pub struct PreparedIndex {
     source: ContentRef,
@@ -88,17 +110,13 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
         return Ok(Prepared::Indexed);
     }
     let Some(source) = conn
-        .query_row(
-            "SELECT bytes,lines FROM content WHERE id=?1",
-            [id.as_str()],
-            |row| {
-                Ok(ContentRef {
-                    id: id.clone(),
-                    bytes: row.get(0)?,
-                    lines: row.get(1)?,
-                })
-            },
-        )
+        .query_row(include_str!("sql/content/size.sql"), [id.as_str()], |row| {
+            Ok(ContentRef {
+                id: id.clone(),
+                bytes: row.get(0)?,
+                lines: row.get(1)?,
+            })
+        })
         .optional()?
     else {
         return Ok(Prepared::Missing);
@@ -242,16 +260,17 @@ pub fn publish(conn: &Connection, prepared: &PreparedIndex) -> Result<Option<Sou
         });
     }
     conn.execute(
-        "INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+        include_str!("sql/content/insert_dependency.sql"),
         params![prepared.source.id.as_str(), metadata_ref.id.as_str()],
     )?;
     conn.execute(
-        "INSERT INTO source_indexes(source_id,version,metadata_id,leaf_count,format) VALUES(?1,?2,?3,?4,?5)",
+        include_str!("sql/sources/insert_index.sql"),
         params![
             prepared.source.id.as_str(),
             artisan_api::SOURCE_INDEX_VERSION,
             metadata_ref.id.as_str(),
-            prepared.leaves.len() as u64, prepared.format.as_str()
+            prepared.leaves.len() as u64,
+            prepared.format.as_str()
         ],
     )?;
     header(conn, &prepared.source.id, prepared.format)
@@ -278,7 +297,7 @@ pub fn range(
             leaves: index.leaves,
         });
     }
-    let mut select=conn.prepare_cached("SELECT ordinal,source_start,source_end,metadata_start,metadata_end FROM source_index_leaves WHERE source_id=?1 AND version=?2 AND ordinal>=?3 AND format=?5 ORDER BY ordinal LIMIT ?4")?;
+    let mut select = conn.prepare_cached(include_str!("sql/sources/leaves.sql"))?;
     let leaves = select
         .query_map(
             params![

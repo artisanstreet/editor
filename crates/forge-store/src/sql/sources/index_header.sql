@@ -1,0 +1,1 @@
+SELECT s.bytes,s.lines,m.id,m.bytes,m.lines,i.leaf_count FROM source_indexes i JOIN content s ON s.id=i.source_id JOIN content m ON m.id=i.metadata_id WHERE i.source_id=?1 AND i.version=?2 AND i.format=?3

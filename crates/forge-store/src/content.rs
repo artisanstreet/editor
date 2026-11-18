@@ -249,7 +249,7 @@ pub fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
                 });
             }
             let known: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1 AND bytes=?2 AND lines=?3)",
+                include_str!("sql/content/exists_with_size.sql"),
                 params![source.id.as_str(), source.bytes, source.lines],
                 |row| row.get(0),
             )?;
@@ -276,19 +276,19 @@ pub fn own(conn: &Connection, item: &Item) -> Result<()> {
         next.insert(source.id.0.clone());
         Ok::<_, ContentError>(())
     })?;
-    let mut query = conn.prepare_cached("SELECT content_id FROM item_content WHERE item_id=?1")?;
+    let mut query = conn.prepare_cached(include_str!("sql/content/owned.sql"))?;
     let old = query
         .query_map([item.id.as_str()], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
     for id in old.iter().filter(|id| !next.contains(*id)) {
         conn.execute(
-            "DELETE FROM item_content WHERE item_id=?1 AND content_id=?2",
+            include_str!("sql/content/disown.sql"),
             params![item.id.as_str(), id],
         )?;
     }
     for id in next.into_iter().filter(|id| !old.contains(id)) {
         conn.execute(
-            "INSERT INTO item_content(item_id,content_id) VALUES(?1,?2)",
+            include_str!("sql/content/own.sql"),
             params![item.id.as_str(), id],
         )?;
     }
@@ -311,7 +311,7 @@ pub fn range(
     }
     let Some(total) = conn
         .query_row(
-            "SELECT bytes FROM content WHERE id=?1",
+            include_str!("sql/content/bytes.sql"),
             [id.as_str()],
             |row| row.get::<_, u64>(0),
         )
@@ -335,8 +335,12 @@ pub fn range(
             text: String::new(),
         }));
     }
-    let start_chunk: u64 = conn.query_row("SELECT start FROM content_chunks WHERE content_id=?1 AND start<=?2 ORDER BY start DESC LIMIT 1", params![id.as_str(),query.offset], |row| row.get(0))?;
-    let mut read = conn.prepare_cached("SELECT start,data FROM content_chunks WHERE content_id=?1 AND start>=?2 AND start<?3 ORDER BY start")?;
+    let start_chunk: u64 = conn.query_row(
+        include_str!("sql/content/chunk_start.sql"),
+        params![id.as_str(), query.offset],
+        |row| row.get(0),
+    )?;
+    let mut read = conn.prepare_cached(include_str!("sql/content/chunks.sql"))?;
     let mut rows = read.query(params![
         id.as_str(),
         start_chunk,
@@ -497,7 +501,7 @@ pub fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTota
             let count = match diff {
                 TextContent::Inline(text) => diff_totals(text),
                 TextContent::Stored(source) => conn.query_row(
-                    "SELECT diff_added,diff_removed FROM content WHERE id=?1",
+                    include_str!("sql/content/diff_totals.sql"),
                     [source.id.as_str()],
                     |row| {
                         Ok(EditTotals {
@@ -526,7 +530,7 @@ pub fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTota
 
 pub fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
     const BATCH_BYTES: u64 = 16 * 1024 * 1024;
-    let mut query = conn.prepare_cached("SELECT id,bytes FROM content WHERE unreferenced_at IS NOT NULL AND unreferenced_at<=?1 ORDER BY unreferenced_at LIMIT 256")?;
+    let mut query = conn.prepare_cached(include_str!("sql/content/unreferenced.sql"))?;
     let mut rows = query.query([now.saturating_sub(GRACE_MILLIS)])?;
     let mut selected = Vec::new();
     let mut bytes = 0u64;
@@ -541,8 +545,7 @@ pub fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
             break;
         }
     }
-    let mut delete =
-        conn.prepare_cached("DELETE FROM content WHERE id=?1 AND unreferenced_at IS NOT NULL")?;
+    let mut delete = conn.prepare_cached(include_str!("sql/content/delete_unreferenced.sql"))?;
     let mut removed = 0;
     for id in selected {
         removed += delete.execute([id])?;
@@ -551,7 +554,7 @@ pub fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
 }
 
 pub fn migrate(conn: &Connection, collections: bool) -> Result<()> {
-    let mut select = conn.prepare("SELECT id,body FROM items ORDER BY rowid")?;
+    let mut select = conn.prepare(include_str!("sql/migrations/items_by_rowid.sql"))?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
@@ -595,7 +598,7 @@ pub fn migrate(conn: &Connection, collections: bool) -> Result<()> {
         let normalized = crate::read::to_body(&item)?;
         if normalized != original {
             conn.execute(
-                "UPDATE items SET body=?2 WHERE id=?1",
+                include_str!("sql/migrations/set_item_body.sql"),
                 params![id, normalized],
             )?;
         }
@@ -612,16 +615,20 @@ pub fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
     }
     let source = ContentRef::from_text(value);
     let exists: bool = conn
-        .prepare_cached("SELECT EXISTS(SELECT 1 FROM content WHERE id=?1)")?
+        .prepare_cached(include_str!("sql/content/exists.sql"))?
         .query_row([source.id.as_str()], |row| row.get(0))?;
     if !exists {
         let totals = diff_totals(value);
-        conn.prepare_cached(
-            "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6)",
-        )?
-        .execute(params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()])?;
-        let mut insert = conn
-            .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
+        conn.prepare_cached(include_str!("sql/content/insert.sql"))?
+            .execute(params![
+                source.id.as_str(),
+                source.bytes,
+                source.lines,
+                totals.added,
+                totals.removed,
+                artisan_api::now()
+            ])?;
+        let mut insert = conn.prepare_cached(include_str!("sql/content/insert_chunk.sql"))?;
         let mut start = 0;
         while start < value.len() {
             let mut end = (start + CHUNK_BYTES).min(value.len());
@@ -640,190 +647,5 @@ pub fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn database() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn).unwrap();
-        conn
-    }
-    fn stored(conn: &Connection, text: &str) -> ContentRef {
-        let mut value = TextContent::Inline(text.to_owned());
-        normalize_text(conn, &mut value).unwrap();
-        let TextContent::Stored(source) = value else {
-            panic!("large payload was not externalized")
-        };
-        source
-    }
-    #[test]
-    fn ranges_reconstruct_multimegabyte_unicode_without_item_reads() {
-        let conn = database();
-        let text = "αβ🙂\nsource\0".repeat(800_000);
-        let source = stored(&conn, &text);
-        let again = stored(&conn, &text);
-        assert_eq!(source, again);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            1
-        );
-        let mut rebuilt = String::new();
-        let mut offset = 0;
-        while offset < source.bytes {
-            let part = range(
-                &conn,
-                &source.id,
-                &ContentQuery {
-                    offset,
-                    limit: Some(65536),
-                },
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(part.start, offset);
-            assert!(part.text.len() <= 65536);
-            assert_eq!(part.end - part.start, part.text.len() as u64);
-            offset = part.end;
-            rebuilt.push_str(&part.text);
-        }
-        assert_eq!(rebuilt, text);
-        for offset in [1, 3, 5, 32767, 32768, 65535] {
-            let part = range(
-                &conn,
-                &source.id,
-                &ContentQuery {
-                    offset,
-                    limit: Some(19),
-                },
-            )
-            .unwrap()
-            .unwrap();
-            assert!(part.start <= offset && offset - part.start <= 3);
-            assert_eq!(
-                part.text,
-                text[usize::try_from(part.start).unwrap()..usize::try_from(part.end).unwrap()]
-            );
-        }
-        assert!(
-            range(
-                &conn,
-                &source.id,
-                &ContentQuery {
-                    offset: source.bytes + 1,
-                    limit: None
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            range(
-                &conn,
-                &source.id,
-                &ContentQuery {
-                    offset: 0,
-                    limit: Some(65537)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn transaction_rollback_does_not_leave_chunks_and_gc_keeps_owned_sources() {
-        let mut conn = database();
-        {
-            let tx = conn.transaction().unwrap();
-            stored(&tx, &"ab".repeat(20_000));
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_chunks", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        let source = stored(&conn, &"payload".repeat(4_000));
-        conn.execute(
-            "INSERT INTO item_content VALUES('owner',?1)",
-            [source.id.as_str()],
-        )
-        .unwrap();
-        assert_eq!(collect(&conn, i64::MAX).unwrap(), 0);
-        conn.execute("DELETE FROM item_content WHERE item_id='owner'", [])
-            .unwrap();
-        assert_eq!(collect(&conn, artisan_api::now()).unwrap(), 0);
-        assert_eq!(
-            collect(&conn, artisan_api::now() + GRACE_MILLIS + 1000).unwrap(),
-            1
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_chunks", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    #[test]
-    fn stored_edit_counts_are_not_zeroed_when_status_changes() {
-        let conn = database();
-        let diff = format!(
-            "--- old\n+++ new\n@@ -1,1 +1,1 @@\n{}",
-            "-old\n+new\n".repeat(3000)
-        );
-        let expected = diff_totals(&diff);
-        let source = stored(&conn, &diff);
-        let tool = ToolKind::Edit {
-            changes: vec![artisan_api::FileChange {
-                path: "a".into(),
-                op: artisan_api::FileOp::Modify,
-                diff: Some(TextContent::Stored(source)),
-            }]
-            .into(),
-        };
-        assert_eq!(inline_edit_totals(&tool), None);
-        assert_eq!(edit_totals(&conn, &tool).unwrap(), Some(expected));
-    }
-    #[test]
-    fn unknown_and_inconsistent_references_are_rejected_and_chunk_gaps_are_errors() {
-        let conn = database();
-        let source = stored(&conn, &"abcd".repeat(25000));
-        let mut known = TextContent::Stored(source.clone());
-        normalize_text(&conn, &mut known).unwrap();
-        let mut wrong_length = source.clone();
-        wrong_length.bytes += 1;
-        assert!(normalize_text(&conn, &mut TextContent::Stored(wrong_length)).is_err());
-        let mut unknown = source.clone();
-        unknown.id = ContentId("f".repeat(64));
-        assert!(normalize_text(&conn, &mut TextContent::Stored(unknown)).is_err());
-        conn.execute(
-            "DELETE FROM content_chunks WHERE content_id=?1 AND start=32768",
-            [source.id.as_str()],
-        )
-        .unwrap();
-        assert!(
-            range(
-                &conn,
-                &source.id,
-                &ContentQuery {
-                    offset: 0,
-                    limit: None
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn collection_batches_are_bounded_and_make_progress_on_a_large_source() {
-        let conn = database();
-        for (id, bytes) in [
-            ("a", 20 * 1024 * 1024),
-            ("b", 10 * 1024 * 1024),
-            ("c", 10 * 1024 * 1024),
-        ] {
-            conn.execute("INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,1,0,0,0)", params![id, bytes]).unwrap();
-        }
-        assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(collect(&conn, i64::MAX).unwrap(), 0);
-    }
-}
+#[path = "../tests/content/unit.rs"]
+mod tests;

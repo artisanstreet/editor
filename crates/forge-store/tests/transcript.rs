@@ -1,6 +1,3 @@
-//! Transcript pages: a thread pages in the rows a reader sees, the work
-//! between them summarised, so a turn of any length opens in one page.
-
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, Item, ItemId, ItemKind, ItemsQuery, Phase,
     ProjectId, Run, RunId, RunStatus, Status, ThreadId, ToolKind, Usage,
@@ -122,8 +119,6 @@ fn text(text: &str, phase: Phase) -> ItemKind {
     }
 }
 
-/// A finished turn of hundreds of calls, a steer and a question in the
-/// middle, then a live turn still working.
 async fn long_turns(store: &Store, thread: &ThreadId) -> (RunId, RunId, Vec<Item>) {
     let (done, live) = (RunId::from("done"), RunId::from("live"));
     run(store, thread, &done, RunStatus::Done).await;
@@ -223,8 +218,6 @@ async fn a_long_turn_opens_as_its_rows_and_its_work_in_spans() {
         .map(|item| item.position)
         .collect();
     assert_eq!(rows, expected, "the messages, the question and the reply");
-    // The finished turn's work is summarised, split by the question that
-    // stands on its own; the steer folds into it.
     let finished: Vec<_> = tail
         .work
         .iter()
@@ -232,8 +225,6 @@ async fn a_long_turn_opens_as_its_rows_and_its_work_in_spans() {
         .map(|span| (span.count, span.worked))
         .collect();
     assert_eq!(finished, [(300, true), (149, true)]);
-    // The live turn's newest work ships: it is open, and its phase reads
-    // from it. The rest of it is a span ending just before.
     let live_items: Vec<_> = tail
         .items
         .iter()
@@ -252,8 +243,6 @@ async fn a_long_turn_opens_as_its_rows_and_its_work_in_spans() {
         "opening reads a small page, not the turn"
     );
 
-    // Opening the finished section reads its work newest first, a page at
-    // a time, ending where its span ends.
     let span = tail.work.iter().find(|span| span.count == 149).unwrap();
     let page = store
         .work_page(
@@ -272,8 +261,6 @@ async fn a_long_turn_opens_as_its_rows_and_its_work_in_spans() {
     assert!(page.items.iter().all(Item::folds_into_work));
 }
 
-/// Paging back a row at a time, every root item arrives exactly once: as a
-/// row or counted in one span.
 #[tokio::test]
 async fn row_pages_cover_the_thread_once() {
     let dir = tempfile::tempdir().unwrap();

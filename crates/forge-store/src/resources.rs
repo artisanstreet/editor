@@ -121,7 +121,7 @@ impl Store {
             let threads = self
                 .read(|conn| {
                     Ok::<_, StorageError>(
-                        conn.prepare_cached("SELECT id FROM threads")?
+                        conn.prepare_cached(include_str!("sql/state/thread_ids.sql"))?
                             .query_map([], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<HashSet<_>>>()?,
                     )

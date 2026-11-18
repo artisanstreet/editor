@@ -467,10 +467,7 @@ impl Tx<'_> {
         }
         project.seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO projects (id, seq, body) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/state/save_project.sql"))?
             .execute(params![
                 project.id.as_str(),
                 project.seq,
@@ -509,10 +506,7 @@ impl Tx<'_> {
             thread.activity_at = thread.updated_at;
         }
         self.sql
-            .prepare_cached(
-                "INSERT INTO threads (id, seq, body) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/state/save_thread.sql"))?
             .execute(params![thread.id.as_str(), thread.seq, to_body(&thread)?])?;
         self.emit(
             thread.seq,
@@ -526,9 +520,7 @@ impl Tx<'_> {
     pub(crate) fn set_native_id(&self, id: &ItemId, native_id: Option<&str>) -> Result<()> {
         if let Some(native_id) = native_id {
             self.sql
-                .prepare_cached(
-                    "UPDATE items SET native_id=?2 WHERE id=?1 AND native_id IS NOT ?2",
-                )?
+                .prepare_cached(include_str!("sql/items/set_native_id.sql"))?
                 .execute(params![id.as_str(), native_id])?;
         }
         Ok(())
@@ -549,7 +541,7 @@ impl Tx<'_> {
             }
         } else {
             let exists: bool = self.sql.query_row(
-                "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)",
+                include_str!("sql/state/thread_exists.sql"),
                 [item.thread_id.as_str()],
                 |row| row.get(0),
             )?;
@@ -581,16 +573,7 @@ impl Tx<'_> {
         };
         let outline = read::outline_entry(self, &item)?;
         self.sql
-            .prepare_cached(
-                "INSERT INTO items (id, thread_id, position, seq, run_id, status, body,
-                     edit_added, edit_removed, kind_type, parent_id, work, outline)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, json_extract(?7, '$.kind.type'), ?10, ?11, ?12)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, run_id = excluded.run_id,
-                     status = excluded.status, body = excluded.body,
-                     edit_added = excluded.edit_added, edit_removed = excluded.edit_removed,
-                     kind_type = excluded.kind_type, parent_id = excluded.parent_id,
-                     work = excluded.work, outline = excluded.outline",
-            )?
+            .prepare_cached(include_str!("sql/items/save.sql"))?
             .execute(params![
                 item.id.as_str(),
                 item.thread_id.as_str(),
@@ -657,7 +640,7 @@ impl Tx<'_> {
         self.save_thread(thread)?;
         if let Some(draft) = draft {
             self.sql.execute(
-                "UPDATE drafts SET body='null', revision=revision+1 WHERE scope=?1 AND revision=?2",
+                include_str!("sql/settings/clear_draft.sql"),
                 params![draft.scope, draft.revision],
             )?;
         }
@@ -693,11 +676,7 @@ impl Tx<'_> {
         }
         run.seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO runs (id, thread_id, seq, status, body) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, status = excluded.status,
-                     body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/runs/save.sql"))?
             .execute(params![
                 run.id.as_str(),
                 run.thread_id.as_str(),
@@ -770,10 +749,7 @@ impl Tx<'_> {
         }
         let seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO kv (key, seq, value) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (key) DO UPDATE SET seq = excluded.seq, value = excluded.value",
-            )?
+            .prepare_cached(include_str!("sql/settings/save.sql"))?
             .execute(params![key, seq, body])?;
         if value == serde_json::Value::Bool(false) {
             for continuation in [Continuation::Overloaded, Continuation::UsageLimit] {
@@ -863,8 +839,7 @@ impl Tx<'_> {
             return Ok(false);
         }
         let pending: bool = self.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=?1 AND status='running'
-                AND kind_type='user_message')",
+            include_str!("sql/items/has_running_input.sql"),
             [run.thread_id.as_str()],
             |row| row.get(0),
         )?;
@@ -888,10 +863,7 @@ impl Tx<'_> {
         continuation: Continuation,
     ) -> Result<()> {
         self.sql
-            .prepare_cached(
-                "INSERT INTO continues (thread_id, seq, reason) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (thread_id) DO NOTHING",
-            )?
+            .prepare_cached(include_str!("sql/continues/request.sql"))?
             .execute(params![thread.as_str(), self.seq, tag(&continuation)])?;
         Ok(())
     }
@@ -901,11 +873,7 @@ impl Tx<'_> {
             return Ok(false);
         }
         self.sql
-            .prepare_cached(
-                "INSERT INTO continues (thread_id, seq, reason, due_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (thread_id) DO UPDATE SET seq = excluded.seq,
-                   reason = excluded.reason, due_at = excluded.due_at",
-            )?
+            .prepare_cached(include_str!("sql/continues/park.sql"))?
             .execute(params![
                 run.thread_id.as_str(),
                 self.seq,
@@ -919,7 +887,7 @@ impl Tx<'_> {
     pub(crate) fn unpark(&mut self, thread: &artisan_api::ThreadId) -> Result<bool> {
         let dropped = self
             .sql
-            .prepare_cached("DELETE FROM continues WHERE thread_id=?1 AND due_at IS NOT NULL")?
+            .prepare_cached(include_str!("sql/continues/unpark.sql"))?
             .execute([thread.as_str()])?;
         self.set_parked(thread, None)?;
         Ok(dropped > 0)
@@ -928,9 +896,7 @@ impl Tx<'_> {
     pub(crate) fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
         let threads: Vec<String> = self
             .sql
-            .prepare_cached(
-                "SELECT thread_id FROM continues WHERE reason=?1 AND due_at IS NOT NULL",
-            )?
+            .prepare_cached(include_str!("sql/continues/parked_for.sql"))?
             .query_map([tag(&continuation)], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for thread in threads {
@@ -961,7 +927,7 @@ impl Tx<'_> {
     ) -> Result<usize> {
         let recent: Vec<Run> = read::many(
             self,
-            "SELECT body FROM runs WHERE thread_id=?1 ORDER BY rowid DESC LIMIT ?2",
+            include_str!("sql/runs/chain.sql"),
             params![thread.as_str(), limit],
         )?;
         Ok(recent
@@ -976,7 +942,7 @@ impl Tx<'_> {
     ) -> Result<Option<Continuation>> {
         let reason: Option<String> = self
             .sql
-            .prepare_cached("DELETE FROM continues WHERE thread_id=?1 RETURNING reason")?
+            .prepare_cached(include_str!("sql/continues/take.sql"))?
             .query_row([thread.as_str()], |row| row.get(0))
             .optional()?;
         self.set_parked(thread, None)?;

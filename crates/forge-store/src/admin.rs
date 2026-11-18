@@ -1,7 +1,7 @@
 use crate::error::StorageError;
 use crate::{BUSY_TIMEOUT, Device, PairCodeHash, schema};
 use artisan_api::{DeviceId, Timestamp};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 const DATABASE: &str = "forge.sqlite3";
@@ -112,29 +112,14 @@ impl Admin {
     }
 
     pub fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
-        self.conn
-            .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|source| ReadSecretError {
-                key: key.to_owned(),
-                cause: Box::new(source.into()),
-            })
+        crate::secrets::secret(&self.conn, key).map_err(|source| ReadSecretError {
+            key: key.to_owned(),
+            cause: Box::new(source.into()),
+        })
     }
 
     pub fn secret_or_insert(&mut self, key: &str, value: &str) -> Result<String, SaveSecretError> {
-        let saved = || -> Result<String, rusqlite::Error> {
-            self.conn.execute(
-                "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-                rusqlite::params![key, value],
-            )?;
-            self.conn
-                .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
-                    row.get(0)
-                })
-        };
-        saved().map_err(|source| SaveSecretError {
+        crate::secrets::secret_or_insert(&self.conn, key, value).map_err(|source| SaveSecretError {
             key: key.to_owned(),
             cause: Box::new(source.into()),
         })
@@ -204,10 +189,7 @@ impl Admin {
             }
         };
         self.conn
-            .execute(
-                "DELETE FROM authorized_keys WHERE id = ?1",
-                [device.id.as_str()],
-            )
+            .execute(include_str!("sql/pairing/revoke.sql"), [device.id.as_str()])
             .map_err(|source| storage(source.into()))?;
         crate::pairing::announce_device_change(&self.database).map_err(|source| {
             RevokeError::Announce {

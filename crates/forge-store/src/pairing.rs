@@ -97,9 +97,11 @@ impl Devices {
     }
 
     fn refresh(&mut self) -> Result<Vec<DeviceId>> {
-        let data_version: i64 = self
-            .conn
-            .query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        let data_version: i64 =
+            self.conn
+                .query_row(include_str!("sql/pairing/data_version.sql"), [], |row| {
+                    row.get(0)
+                })?;
         if self
             .seen
             .is_some_and(|seen| seen.data_version == data_version)
@@ -310,7 +312,7 @@ impl Store {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
             if tx.execute(
-                "DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2",
+                include_str!("sql/pairing/redeem_code.sql"),
                 params![code.hex(), now()],
             )? == 0
             {
@@ -355,7 +357,7 @@ impl Store {
         let key = id.clone();
         let revoked = self
             .write_acknowledged(move |tx| {
-                Ok(tx.execute("DELETE FROM authorized_keys WHERE id = ?1", [key.as_str()])? > 0)
+                Ok(tx.execute(include_str!("sql/pairing/revoke.sql"), [key.as_str()])? > 0)
             })
             .await
             .map_err(|cause| RevokeDeviceError {
@@ -384,8 +386,7 @@ impl Store {
         let id = id.clone();
         self.write(move |tx| {
             tx.execute(
-                "UPDATE authorized_keys SET last_seen = ?2 WHERE id = ?1
-                 AND (last_seen IS NULL OR last_seen < ?2 - 60000)",
+                include_str!("sql/pairing/touch.sql"),
                 params![id.as_str(), now()],
             )?;
             Ok(())
@@ -442,7 +443,7 @@ pub(crate) fn add_pair_code(
 
 pub(crate) fn pair_code_pending(conn: &Connection, code: &PairCodeHash) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pair_codes WHERE code_sha256 = ?1)",
+        include_str!("sql/pairing/code_pending.sql"),
         [code.hex()],
         |row| row.get(0),
     )?)

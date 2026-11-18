@@ -7,7 +7,9 @@ async fn a_stalled_writer_queues_at_most_its_byte_budget() {
     let directory = tempfile::tempdir().unwrap();
     let store = forge_store::Store::open(directory.path()).unwrap();
     let blocker = rusqlite::Connection::open(directory.path().join("forge.sqlite3")).unwrap();
-    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    blocker
+        .execute_batch(include_str!("writer/begin_immediate.sql"))
+        .unwrap();
     let writes: Vec<_> = (0..128)
         .map(|n| {
             let store = store.clone();
@@ -36,7 +38,9 @@ async fn a_stalled_writer_queues_at_most_its_byte_budget() {
         "{} bytes queued behind a stalled writer",
         store.queued_write_bytes()
     );
-    blocker.execute_batch("ROLLBACK").unwrap();
+    blocker
+        .execute_batch(include_str!("writer/rollback.sql"))
+        .unwrap();
     let mut saved = 0;
     for write in writes {
         let result = tokio::time::timeout(Duration::from_secs(30), write)

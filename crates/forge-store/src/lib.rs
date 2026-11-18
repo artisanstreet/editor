@@ -35,6 +35,7 @@ mod recall;
 mod resources;
 mod retention;
 mod schema;
+mod secrets;
 mod settings;
 mod source_index;
 mod sources;
@@ -978,7 +979,7 @@ fn checkpoint_when_due(
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
-        let progress = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+        let progress = conn.query_row(include_str!("sql/wal/checkpoint.sql"), [], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,

@@ -81,7 +81,8 @@ fn sync(path: &Path) -> std::io::Result<()> {
 }
 
 fn copy_into(conn: &Connection, target: &str) -> rusqlite::Result<()> {
-    conn.execute("VACUUM INTO ?1", [target]).map(drop)
+    conn.execute(include_str!("../sql/backup/vacuum_into.sql"), [target])
+        .map(drop)
 }
 
 pub fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupError> {

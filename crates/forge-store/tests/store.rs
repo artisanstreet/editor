@@ -30,7 +30,6 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        // Best effort: a leftover temp dir is harmless.
         std::fs::remove_dir_all(&self.0).ok();
     }
 }
@@ -196,7 +195,6 @@ async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
     assert!(seqs[0] > seen);
     assert_eq!(*seqs.last().unwrap(), store.head());
 
-    // Only the latest version of each entity, and nothing from before `seen`.
     let kinds: Vec<&str> = changes
         .iter()
         .map(|envelope| match &envelope.event {
@@ -215,7 +213,6 @@ async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
         .collect();
     assert_eq!(kinds, ["run", "thread", "item", "setting"]);
 
-    // Too far behind: the caller resets instead.
     assert_eq!(store.changes_since(0, 3).await.unwrap(), None);
     let state = store.state().await.unwrap();
     assert_eq!(state.head, store.head());
@@ -250,7 +247,6 @@ async fn updating_an_item_keeps_its_place_and_a_finished_item_never_reopens() {
     );
     assert!(done.seq > second.seq);
 
-    // A late event from the engine must not resurrect the finished message.
     let late = store
         .upsert_item(reply(&thread, "a1", None, "final!", Status::Running))
         .await
@@ -457,7 +453,6 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
         Status::Done
     );
 
-    // An Editor that was connected before the restart learns about it.
     let changes = store.changes_since(seen, 100).await.unwrap().unwrap();
     assert!(changes.iter().any(|envelope| matches!(&envelope.event,
         Event::Run { run } if run.status() == RunStatus::Interrupted)));
@@ -490,7 +485,6 @@ async fn subscribers_see_concurrent_writes_in_seq_order() {
         writer.await.unwrap();
     }
 
-    // Raw Item writes publish exactly one durable change.
     let mut seqs = Vec::new();
     while let Ok(envelope) = events.try_recv() {
         seqs.push(envelope.seq.unwrap());
@@ -613,8 +607,6 @@ async fn abandoned_pairing_codes_do_not_pile_up() {
     assert_eq!(stored, 2);
 }
 
-/// `ae forge devices revoke` writes from another process while Forge runs;
-/// the device's next request is refused and its open streams are told.
 #[tokio::test]
 async fn a_device_revoked_by_another_process_is_refused_next() {
     let dir = TempDir::new();
@@ -643,8 +635,6 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     assert_eq!(revocations.try_recv().unwrap(), device);
 }
 
-/// Threads saved with the old access and approvals keep running the way
-/// they did: never asking stays Full, everything else becomes Auto.
 #[tokio::test]
 async fn old_permission_choices_become_auto_or_full() {
     let dir = TempDir::new();
@@ -714,8 +704,6 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
     assert_eq!(store.head(), head);
     assert!(store.thread(&request.id).await.unwrap().is_none());
 
-    // Existing IDs return their canonical stored thread. A route must not
-    // override that operation with an earlier check of the replayed request.
     request.id = thread.clone();
     let existing = store.thread(&thread).await.unwrap().unwrap();
     assert_eq!(store.create_thread(request).await.unwrap(), existing);
@@ -851,7 +839,9 @@ async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
     };
     let before = on_disk();
     let reader = rusqlite::Connection::open(&database).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
+    reader
+        .execute_batch(include_str!("store/begin.sql"))
+        .unwrap();
     let _: i64 = reader
         .query_row(include_str!("store/count_items.sql"), [], |row| row.get(0))
         .unwrap();
@@ -871,7 +861,9 @@ async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
         "the reader held the newer commits back"
     );
 
-    reader.execute_batch("COMMIT").unwrap();
+    reader
+        .execute_batch(include_str!("store/commit.sql"))
+        .unwrap();
 
     test_support::wait::wait_until(
         "the held-back commits to reach the database file",
@@ -988,7 +980,8 @@ async fn pairing_failure_does_not_consume_the_invitation() {
             .await
             .is_err()
     );
-    conn.execute_batch("DROP TRIGGER reject_device;").unwrap();
+    conn.execute_batch(include_str!("store/drop_reject_device.sql"))
+        .unwrap();
     let id = store
         .pair_device(
             PairCodeHash::of("invite"),
@@ -1401,7 +1394,6 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
             .any(|item| item.id.as_str() == "background-shell")
     );
     let summary = store.inspector(&thread).await.unwrap();
-    // The panel splits what the turn waits on from what runs on without it.
     let terminals: Vec<_> = summary
         .terminals
         .iter()
@@ -1598,8 +1590,6 @@ async fn thread_controls_survive_window_eviction_and_goal_completion() {
     assert!(store.inspector(&thread).await.unwrap().goal.is_none());
 }
 
-/// The user clears the goal (a new notice), then the engine sets it again
-/// on its run's goal notice, which sits earlier: the goal is set.
 #[tokio::test]
 async fn a_goal_set_again_after_a_clear_shows_the_goal() {
     let dir = TempDir::new();
@@ -1721,8 +1711,6 @@ async fn agents_get_unique_stable_names_across_harnesses_and_tool_promotions() {
                 assert_eq!(named.position, initial.position);
                 assert_eq!(named.created_at, initial.created_at);
             }
-            // Replayed adapter updates must keep the reserved name, even
-            // when they contain a blank label.
             assert_eq!(
                 store
                     .upsert_item(agent.clone())
@@ -1903,7 +1891,6 @@ async fn inline_metadata_pages_enforce_byte_budget_without_cursor_gaps() {
 async fn a_settled_agent_leaves_the_inspector_at_once() {
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;
-    // The agents belong to the turn still in progress.
     let turn = store
         .upsert_run(run(&thread, RunStatus::Running))
         .await
@@ -1941,7 +1928,6 @@ async fn a_settled_agent_leaves_the_inspector_at_once() {
         listed(store.inspector(&thread).await.unwrap()),
         ["stopping", "finishing", "working"]
     );
-    // Done and cancelled agents go now, not when the next turn starts.
     store
         .upsert_item(agent("finishing", Status::Done))
         .await
@@ -2007,19 +1993,15 @@ async fn a_newer_thread_page_slides_back_up_from_its_cursor() {
         limit: Some(limit),
         ..Default::default()
     };
-    // The two just above the fourth newest, newest first; more above them.
     let page = store.threads_page(after(&all[3], 2)).await.unwrap();
     assert_eq!(ids(&page), [all[1].id.clone(), all[2].id.clone()]);
     assert!(page.newer);
     assert!(page.next.is_none());
-    // Up to the newest: nothing above it.
     let page = store.threads_page(after(&all[1], 2)).await.unwrap();
     assert_eq!(ids(&page), [all[0].id.clone()]);
     assert!(!page.newer);
 }
 
-/// A run left live with an engine session, as a Forge that died mid-turn
-/// leaves it.
 #[expect(
     clippy::unwrap_used,
     reason = "test helper; a failure fails the calling test"
@@ -2036,13 +2018,11 @@ async fn a_turn_a_restart_cut_short_carries_on_by_itself() {
     let (thread, without_session, waiting) = {
         let (store, thread) = test_store(&dir.0).await;
         live_run_with_session(&store, &thread).await;
-        // The engine never named a session: nothing to resume.
         let without_session = add_thread(&store).await;
         store
             .upsert_run(run(&without_session, RunStatus::Running))
             .await
             .unwrap();
-        // An undelivered message starts the next run anyway.
         let waiting = add_thread(&store).await;
         live_run_with_session(&store, &waiting).await;
         let mut input = message(&waiting, "pending", "not delivered");

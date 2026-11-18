@@ -2,7 +2,7 @@ use crate::error::{StorageError, operation_error};
 use crate::writer::WriteFailure;
 use crate::{Store, read};
 use artisan_api::EngineId;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingFailure {
@@ -153,8 +153,6 @@ impl Store {
         })
     }
 
-    /// Changes the model against the latest config instead of a client's
-    /// stale full snapshot; the model comes back as it was last chosen.
     pub async fn set_default_model(
         &self,
         engine: EngineId,
@@ -194,8 +192,6 @@ impl Store {
         })
     }
 
-    /// Remembers `config` as the one its model comes back with, fitted to
-    /// what `model` offers.
     pub async fn set_model_config(
         &self,
         mut config: artisan_api::EngineConfig,
@@ -223,8 +219,6 @@ impl Store {
         })
     }
 
-    /// Remembers whether the user opened or closed one of `engine`'s model
-    /// groups.
     pub async fn set_model_group(
         &self,
         engine: EngineId,
@@ -282,9 +276,6 @@ impl Store {
         })
     }
 
-    /// Saves a new version of the global prompt and makes it the
-    /// `global_prompt` setting, if `base` is still the latest version.
-    /// Returns the new version, or `Err(latest)` when `base` is stale.
     pub async fn save_prompt_version(
         &self,
         base: u64,
@@ -297,7 +288,7 @@ impl Store {
             }
             let version = latest + 1;
             tx.execute(
-                "INSERT INTO prompt_versions (version, text, saved_at) VALUES (?1, ?2, ?3)",
+                include_str!("sql/settings/save_prompt_version.sql"),
                 params![
                     i64::try_from(version).unwrap_or(i64::MAX),
                     text,
@@ -334,7 +325,6 @@ impl Store {
             })
     }
 
-    /// Compare-and-swap prevents delayed writes and clears from overwriting newer input.
     pub async fn set_draft(
         &self,
         scope: String,
@@ -364,8 +354,7 @@ impl Store {
                 body: request.body,
             };
             tx.execute(
-                "INSERT INTO drafts (scope, body, revision) VALUES (?1, ?2, ?3)
-                ON CONFLICT (scope) DO UPDATE SET body=excluded.body, revision=excluded.revision",
+                include_str!("sql/settings/set_draft.sql"),
                 params![scope, read::to_body(&current.body)?, current.revision],
             )?;
             Ok(artisan_api::DraftWriteResult {
@@ -397,11 +386,7 @@ impl Store {
                 .iter()
                 .any(|listed| listed.name == server && listed.url.as_deref() == Some(url.as_str()));
             if listed {
-                tx.execute(
-                    "INSERT INTO secrets (key, value) VALUES (?1, ?2)
-                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                    params![secret.key(&server), value],
-                )?;
+                crate::secrets::set_secret(tx, &secret.key(&server), Some(&value))?;
             }
             Ok(listed)
         })
@@ -415,35 +400,19 @@ impl Store {
     pub async fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
         let read_key = key.to_owned();
         let key = key.to_owned();
-        self.read(move |conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT value FROM secrets WHERE key = ?1",
-                    [&read_key],
-                    |row| row.get(0),
-                )
-                .optional()?)
-        })
-        .await
-        .map_err(|cause| ReadSecretError {
-            key,
-            cause: Box::new(cause),
-        })
+        self.read(move |conn| Ok(crate::secrets::secret(conn, &read_key)?))
+            .await
+            .map_err(|cause| ReadSecretError {
+                key,
+                cause: Box::new(cause),
+            })
     }
 
     pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<(), SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
         self.write_acknowledged(move |tx| {
-            match value {
-                Some(value) => tx.execute(
-                    "INSERT INTO secrets (key, value) VALUES (?1, ?2)
-                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                    params![key, value],
-                )?,
-                None => tx.execute("DELETE FROM secrets WHERE key = ?1", [&key])?,
-            };
-            Ok(())
+            Ok(crate::secrets::set_secret(tx, &key, value.as_deref())?)
         })
         .await
         .map_err(|cause| SetSecretError {
@@ -459,178 +428,18 @@ impl Store {
     ) -> Result<String, SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
-        self.write_acknowledged(move |tx| {
-            tx.execute(
-                "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-                params![key, value],
-            )?;
-            Ok(
-                tx.query_row("SELECT value FROM secrets WHERE key = ?1", [&key], |row| {
-                    row.get(0)
-                })?,
-            )
-        })
-        .await
-        .map_err(|cause| SetSecretError {
-            key: saved,
-            cause: Box::new(cause),
-        })
+        self.write_acknowledged(move |tx| Ok(crate::secrets::secret_or_insert(tx, &key, &value)?))
+            .await
+            .map_err(|cause| SetSecretError {
+                key: saved,
+                cause: Box::new(cause),
+            })
     }
 }
 
 #[cfg(test)]
-mod context_window_tests {
-    use super::*;
-    use artisan_api::{
-        ContextWindow, CreateProject, CreateThread, EngineConfig, Model, ProjectId, ThreadId,
-    };
-
-    #[tokio::test]
-    async fn saved_context_choice_survives_roundtrip_and_clears_on_incompatible_model() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let mut config = EngineConfig::new(EngineId::Codex);
-        config
-            .options
-            .insert("context_window".to_owned(), serde_json::json!(1_000_000));
-        store
-            .set_setting(
-                "default_engine_config".into(),
-                serde_json::to_value(config).unwrap(),
-            )
-            .await
-            .unwrap();
-        let extended = Model {
-            id: "extended".to_owned(),
-            context_windows: vec![
-                ContextWindow {
-                    tokens: 272_000,
-                    override_tokens: None,
-                },
-                ContextWindow {
-                    tokens: 1_000_000,
-                    override_tokens: Some(1_000_000),
-                },
-            ],
-            ..Model::default()
-        };
-        let saved = store
-            .set_default_model(EngineId::Codex, extended)
-            .await
-            .unwrap();
-        assert_eq!(saved.context_window_override(), Some(1_000_000));
-        let reread: EngineConfig = serde_json::from_value(
-            store
-                .setting("default_engine_config")
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(reread, saved);
-        let standard = Model {
-            id: "standard".to_owned(),
-            context_windows: vec![ContextWindow {
-                tokens: 400_000,
-                override_tokens: None,
-            }],
-            ..Model::default()
-        };
-        let saved = store
-            .set_default_model(EngineId::Codex, standard)
-            .await
-            .unwrap();
-        assert!(!saved.options.contains_key("context_window"));
-    }
-
-    #[tokio::test]
-    async fn each_harness_remembers_its_model_and_preferences_after_reopening() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let mut opencode = EngineConfig::new(EngineId::OpenCode);
-        let muse = Model {
-            id: "gateway/muse-spark-1.3".into(),
-            ..Model::default()
-        };
-        opencode.model = Some(muse.id.clone());
-        opencode.permissions = artisan_api::Permissions::Full;
-        opencode
-            .options
-            .insert("custom".into(), serde_json::json!(true));
-        let opencode = store.set_model_config(opencode, &muse).await.unwrap();
-        let claude = store
-            .set_default_model(
-                EngineId::Claude,
-                Model {
-                    id: "opus".into(),
-                    ..Model::default()
-                },
-            )
-            .await
-            .unwrap();
-        // A new model in OpenCode inherits its own harness preferences,
-        // even though Claude is now the global default.
-        let other = store
-            .set_default_model(
-                EngineId::OpenCode,
-                Model {
-                    id: "gateway/other".into(),
-                    ..Model::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(other.permissions, opencode.permissions);
-        assert_eq!(other.options, opencode.options);
-        store
-            .set_model_config(opencode.clone(), &muse)
-            .await
-            .unwrap();
-        drop(store);
-        let store = Store::open(directory.path()).unwrap();
-        let saved = store
-            .setting(artisan_api::HARNESS_CONFIGS_KEY)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(saved["opencode"], serde_json::to_value(opencode).unwrap());
-        assert_eq!(saved["claude"], serde_json::to_value(claude).unwrap());
-    }
-
-    #[tokio::test]
-    async fn invalid_context_config_is_rejected_before_thread_is_saved() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let project = store
-            .create_project(CreateProject {
-                id: ProjectId::new(),
-                path: "/context-validation".into(),
-                name: None,
-            })
-            .await
-            .unwrap();
-        for (engine, value) in [
-            (EngineId::Codex, serde_json::json!(0)),
-            (EngineId::Claude, serde_json::json!(100_000_001_u64)),
-            (EngineId::Codex, serde_json::json!("1000000")),
-            (EngineId::OpenCode, serde_json::json!(1_000_000)),
-        ] {
-            let mut config = EngineConfig::new(engine);
-            config.options.insert("context_window".to_owned(), value);
-            let result = store
-                .create_thread(CreateThread {
-                    id: ThreadId::new(),
-                    project_id: project.id.clone(),
-                    title: None,
-                    config,
-                    parent_thread_id: None,
-                    spawned_by: None,
-                })
-                .await;
-            assert!(result.is_err());
-        }
-    }
-}
+#[path = "../tests/settings/context_window.rs"]
+mod context_window_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpSecret {

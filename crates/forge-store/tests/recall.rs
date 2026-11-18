@@ -27,7 +27,6 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        // Best effort: a leftover temp dir is harmless.
         std::fs::remove_dir_all(&self.0).ok();
     }
 }
@@ -172,7 +171,6 @@ async fn an_agent_finds_what_another_thread_said_and_where() {
         .unwrap();
     assert!(none.hits.is_empty());
 
-    // Output is searched only when asked for.
     let quiet = store
         .recall_search(RecallScope::default(), "41 passed".into(), false, 10, None)
         .await

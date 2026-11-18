@@ -106,7 +106,6 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
         .unwrap(),
         1
     );
-    // Source reads depend only on the indexed chunk table, not Item decoding.
     conn.execute(include_str!("content/corrupt_item.sql"), [last.id.as_str()])
         .unwrap();
     let mut reconstructed = String::new();
@@ -133,7 +132,6 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn version_twelve_migration_preserves_revisions_native_identity_and_complete_output() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -189,34 +187,8 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
         rusqlite::params![item.id.as_str(), serde_json::to_string(&legacy).unwrap()],
     )
     .unwrap();
-    conn.execute_batch(
-        "DROP TRIGGER item_content_owner_delete;
-         DROP INDEX items_work_spans;
-         DROP INDEX items_outline;
-         ALTER TABLE items DROP COLUMN outline;
-         DROP INDEX items_transcript_rows;
-         ALTER TABLE items DROP COLUMN work;
-         DROP INDEX items_pending_input;
-         DROP INDEX items_pending_inputs;
-         DROP INDEX items_thread_kind_position;
-         DROP INDEX items_thread_parent_position;
-         DROP INDEX items_agent_message_target;
-         ALTER TABLE items DROP COLUMN kind_type;
-         ALTER TABLE items DROP COLUMN parent_id;
-         DROP TABLE source_index_leaves;
-         DROP TABLE source_indexes;
-         DROP TABLE content_records;
-         DROP TABLE content_collections;
-         DROP TABLE content_dependencies;
-         DROP TABLE item_content;
-         DROP TABLE content_chunks;
-         DROP TABLE content;
-         DROP TABLE continues;
-         DROP TABLE coordination_events;
-         DROP TABLE coordination_records;
-         PRAGMA user_version=12;",
-    )
-    .unwrap();
+    conn.execute_batch(include_str!("content/downgrade_to_v12.sql"))
+        .unwrap();
     drop(conn);
     let migrated = Store::open(dir.path()).unwrap();
     let actual = migrated.item(&item.id).await.unwrap().unwrap();

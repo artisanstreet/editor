@@ -240,11 +240,7 @@ fn artisan_call(item: &Item) -> bool {
 }
 
 pub fn forget_artisan_calls(conn: &Connection) -> Result<()> {
-    let mut rows = conn.prepare(
-        "SELECT body FROM items WHERE kind_type='tool'
-            AND json_extract(body,'$.kind.tool.kind')='mcp'
-            AND json_extract(body,'$.kind.tool.server')='artisan'",
-    )?;
+    let mut rows = conn.prepare(include_str!("sql/recall/artisan_calls.sql"))?;
     let bodies = rows.query_map([], |row| row.get::<_, String>(0))?;
     for body in bodies {
         if let Ok(item) = serde_json::from_str::<Item>(&body?) {
@@ -256,11 +252,11 @@ pub fn forget_artisan_calls(conn: &Connection) -> Result<()> {
 
 pub fn index(conn: &Connection, item: &Item) -> Result<()> {
     let rowid: i64 = conn
-        .prepare_cached("SELECT rowid FROM items WHERE id=?1")?
+        .prepare_cached(include_str!("sql/recall/rowid.sql"))?
         .query_row([item.id.as_str()], |row| row.get(0))?;
     let next = searchable(conn, item)?;
     let previous = conn
-        .prepare_cached("SELECT text,output,paths FROM item_text WHERE rowid=?1")?
+        .prepare_cached(include_str!("sql/recall/indexed.sql"))?
         .query_row([rowid], |row| {
             Ok(Searchable {
                 text: row.get(0)?,
@@ -273,31 +269,26 @@ pub fn index(conn: &Connection, item: &Item) -> Result<()> {
         return Ok(());
     }
     if let Some(previous) = &previous {
-        conn.prepare_cached(
-            "INSERT INTO item_search(item_search,rowid,text,paths) VALUES('delete',?1,?2,?3)",
-        )?
-        .execute(params![rowid, previous.text, previous.paths])?;
+        conn.prepare_cached(include_str!("sql/recall/unindex.sql"))?
+            .execute(params![rowid, previous.text, previous.paths])?;
     }
     if next.is_empty() {
-        conn.prepare_cached("DELETE FROM item_text WHERE rowid=?1")?
+        conn.prepare_cached(include_str!("sql/recall/delete_text.sql"))?
             .execute([rowid])?;
         return Ok(());
     }
-    conn.prepare_cached(
-        "INSERT OR REPLACE INTO item_text(rowid,thread_id,item_id,kind,created_at,text,output,paths)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-    )?
-    .execute(params![
-        rowid,
-        item.thread_id.as_str(),
-        item.id.as_str(),
-        RecallKind::of(&item.kind).name(),
-        item.created_at,
-        next.text,
-        next.output,
-        next.paths,
-    ])?;
-    conn.prepare_cached("INSERT INTO item_search(rowid,text,paths) VALUES(?1,?2,?3)")?
+    conn.prepare_cached(include_str!("sql/recall/save_text.sql"))?
+        .execute(params![
+            rowid,
+            item.thread_id.as_str(),
+            item.id.as_str(),
+            RecallKind::of(&item.kind).name(),
+            item.created_at,
+            next.text,
+            next.output,
+            next.paths,
+        ])?;
+    conn.prepare_cached(include_str!("sql/recall/index.sql"))?
         .execute(params![rowid, next.text, next.paths])?;
     Ok(())
 }
@@ -375,7 +366,7 @@ impl rusqlite::types::FromSql for RecallKind {
 }
 
 pub fn backfill(conn: &Connection) -> Result<()> {
-    let mut rows = conn.prepare("SELECT body FROM items ORDER BY rowid")?;
+    let mut rows = conn.prepare(include_str!("sql/recall/items.sql"))?;
     let bodies = rows.query_map([], |row| row.get::<_, String>(0))?;
     let mut skipped = 0_u64;
     for body in bodies {
@@ -414,41 +405,57 @@ impl RecallScope {
         let mut clauses = Vec::new();
         let mut values: Vec<Value> = Vec::new();
         let mut add = |clause: &str, value: Value| {
-            clauses.push(clause.replace('?', &format!("?{}", first + values.len())));
+            clauses.push(
+                clause
+                    .trim_end()
+                    .replace('?', &format!("?{}", first + values.len())),
+            );
             values.push(value);
         };
         if let Some(thread) = &self.thread {
-            add("t.thread_id=?", Value::Text(thread.as_str().to_owned()));
+            add(
+                include_str!("sql/recall/scope/thread.sql"),
+                Value::Text(thread.as_str().to_owned()),
+            );
         }
         if let Some(project) = &self.project {
             add(
-                "json_extract(h.body,'$.project_id')=?",
+                include_str!("sql/recall/scope/project.sql"),
                 Value::Text(project.as_str().to_owned()),
             );
         }
         if let Some(engine) = self.engine {
             add(
-                "COALESCE((SELECT json_extract(r.body,'$.engine') FROM items i JOIN runs r ON r.id=i.run_id
-                    WHERE i.rowid=t.rowid),json_extract(h.body,'$.config.engine'))=?",
+                include_str!("sql/recall/scope/engine.sql"),
                 Value::Text(engine.as_str().to_owned()),
             );
         }
         if let Some(since) = self.since {
-            add("t.created_at>=?", Value::Integer(since));
+            add(
+                include_str!("sql/recall/scope/since.sql"),
+                Value::Integer(since),
+            );
         }
         if let Some(until) = self.until {
-            add("t.created_at<?", Value::Integer(until));
+            add(
+                include_str!("sql/recall/scope/until.sql"),
+                Value::Integer(until),
+            );
         }
         if !self.kinds.is_empty() {
             let list =
                 serde_json::to_string(&self.kinds).expect("invariant: kind names always encode");
             add(
-                "t.kind IN (SELECT value FROM json_each(?))",
+                include_str!("sql/recall/scope/kinds.sql"),
                 Value::Text(list),
             );
         }
         if self.skip_archived {
-            clauses.push("COALESCE(json_extract(h.body,'$.archived'),0)=0".to_owned());
+            clauses.push(
+                include_str!("sql/recall/scope/unarchived.sql")
+                    .trim_end()
+                    .to_owned(),
+            );
         }
         let sql = if clauses.is_empty() {
             String::new()
@@ -739,12 +746,10 @@ fn grep_rows(
     let resume = query.cursor.unwrap_or(GrepCursor::Before { row: i64::MAX });
     values.insert(0, rusqlite::types::Value::Integer(resume.last_row()));
     let output = if query.output { "t.output" } else { "''" };
-    let sql = format!(
-        "SELECT t.rowid,t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.text,{output},t.created_at
-         FROM item_text t JOIN threads h ON h.id=t.thread_id
-         WHERE t.rowid<=?1{filter} ORDER BY t.rowid DESC LIMIT {}",
-        GREP_SCAN_ROWS + 1
-    );
+    let sql = include_str!("sql/recall/grep.sql")
+        .replace("__OUTPUT__", output)
+        .replace("__SCOPE__", &filter)
+        .replace("__LIMIT__", &(GREP_SCAN_ROWS + 1).to_string());
     let mut statement = conn.prepare(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(values))?;
     let mut matches = Vec::new();
@@ -820,7 +825,7 @@ fn grep_rows(
 }
 
 struct TextMatch {
-    condition: String,
+    condition: &'static str,
     needle: String,
 }
 
@@ -828,12 +833,11 @@ impl TextMatch {
     fn of(query: &str) -> Self {
         match fts_query(query) {
             Some(fts) => Self {
-                condition: "t.rowid IN (SELECT rowid FROM item_search WHERE item_search MATCH ?1)"
-                    .to_owned(),
+                condition: include_str!("sql/recall/match/indexed.sql").trim_end(),
                 needle: fts,
             },
             None => Self {
-                condition: "instr(lower(t.text),lower(?1))>0".to_owned(),
+                condition: include_str!("sql/recall/match/text.sql").trim_end(),
                 needle: query.trim().to_owned(),
             },
         }
@@ -856,25 +860,10 @@ fn text_hits(
     ];
     let sql = if let Some(fts) = fts_query(query) {
         values[0] = rusqlite::types::Value::Text(fts);
-        format!(
-            "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
-                    snippet(item_search,0,'**','**','…',24)
-                 FROM item_search s JOIN item_text t ON t.rowid=s.rowid JOIN threads h ON h.id=t.thread_id
-                 WHERE item_search MATCH ?1{filter}
-                 ORDER BY instr(lower(t.text),lower(?4))>0 DESC,
-                    bm25(item_search,1.0,0.5) * CASE WHEN t.kind IN ('user','assistant','agent','plan','question')
-                        THEN 3.0 ELSE 1.0 END
-                 LIMIT ?2 OFFSET ?3"
-        )
+        include_str!("sql/recall/text_indexed.sql").replace("__SCOPE__", &filter)
     } else {
         values[0] = rusqlite::types::Value::Text(query.trim().to_owned());
-        format!(
-            "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
-                    substr(t.text,1,200)
-                 FROM item_text t JOIN threads h ON h.id=t.thread_id
-                 WHERE instr(lower(t.text),lower(?1))>0 AND ?4 IS NOT NULL{filter}
-                 ORDER BY t.rowid DESC LIMIT ?2 OFFSET ?3"
-        )
+        include_str!("sql/recall/text_scan.sql").replace("__SCOPE__", &filter)
     };
     values.extend(scope_values);
     read_hits(conn, &sql, &values)
@@ -896,14 +885,9 @@ fn output_hits(
         rusqlite::types::Value::Text(query.trim().to_owned()),
     ];
     values.extend(scope_values);
-    let sql = format!(
-        "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
-            substr(t.output,max(1,instr(lower(t.output),lower(?4))-80),240)
-         FROM item_text t JOIN threads h ON h.id=t.thread_id
-         WHERE instr(lower(t.output),lower(?4))>0 AND NOT ({}){filter}
-         ORDER BY t.rowid DESC LIMIT ?2 OFFSET ?3",
-        text.condition
-    );
+    let sql = include_str!("sql/recall/output.sql")
+        .replace("__TEXT__", text.condition)
+        .replace("__SCOPE__", &filter);
     read_hits(conn, &sql, &values)
 }
 
@@ -980,22 +964,22 @@ fn touching_rows(
     let path = path.trim();
     let (condition, needle) = match fts_query(path) {
         Some(_) => (
-            "t.rowid IN (SELECT rowid FROM item_search WHERE item_search MATCH ?1)",
+            include_str!("sql/recall/match/indexed.sql").trim_end(),
             format!("paths : \"{}\"", path.replace('"', "\"\"")),
         ),
-        None => ("instr(t.paths,?1)>0", path.to_owned()),
+        None => (
+            include_str!("sql/recall/match/paths.sql").trim_end(),
+            path.to_owned(),
+        ),
     };
     let mut values = vec![
         rusqlite::types::Value::Text(needle),
         rusqlite::types::Value::Integer(i64::from(limit) * 4),
     ];
     values.extend(scope_values);
-    let sql = format!(
-        "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.paths,t.created_at
-         FROM item_text t JOIN threads h ON h.id=t.thread_id
-         WHERE t.paths<>'' AND {condition}{filter}
-         ORDER BY t.rowid DESC LIMIT ?2"
-    );
+    let sql = include_str!("sql/recall/touching.sql")
+        .replace("__PATHS__", condition)
+        .replace("__SCOPE__", &filter);
     let mut statement = conn.prepare(&sql)?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(values), |row| {

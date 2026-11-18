@@ -81,6 +81,35 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
     Ok((key, label))
 }
 
+const CONTENT_EXISTS: &str = include_str!("sql/content/exists.sql");
+const INSERT_CONTENT: &str = include_str!("sql/collection/insert_content.sql");
+const INSERT_COLLECTION: &str = include_str!("sql/collection/insert.sql");
+const INSERT_RECORD: &str = include_str!("sql/collection/insert_record.sql");
+const INSERT_CHUNK: &str = include_str!("sql/content/insert_chunk.sql");
+const RECORD_COUNT: &str = include_str!("sql/collection/count.sql");
+const INSERT_DEPENDENCY: &str = include_str!("sql/content/insert_dependency.sql");
+
+fn check_dependencies(
+    conn: &Connection,
+    source: &ContentId,
+    dependencies: &BTreeSet<ContentId>,
+) -> Result<()> {
+    for child in dependencies {
+        if child == source {
+            return Err(ContentError::SelfDependency {
+                content: child.clone(),
+            });
+        }
+        let exists: bool = conn.query_row(CONTENT_EXISTS, [child.as_str()], |row| row.get(0))?;
+        if !exists {
+            return Err(ContentError::MissingDependency {
+                content: child.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub fn store<T: Serialize>(
     conn: &Connection,
     records: &[T],
@@ -98,33 +127,28 @@ pub fn store<T: Serialize>(
     if bytes > MAX_COLLECTION_BYTES {
         return Err(ContentError::CollectionTooLarge { bytes });
     }
-    for child in dependencies {
-        if child == &source.id {
-            return Err(ContentError::SelfDependency {
-                content: child.clone(),
-            });
-        }
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1)",
-            [child.as_str()],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            return Err(ContentError::MissingDependency {
-                content: child.clone(),
-            });
-        }
-    }
-    let inserted = conn.execute("INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,0,0,?4) ON CONFLICT(id) DO NOTHING",
-        params![source.id.as_str(), source.bytes, source.lines, artisan_api::now()])? != 0;
-    let indexed = conn.execute("INSERT INTO content_collections(content_id,count,authored_bytes,structural_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(content_id) DO NOTHING",
-        params![source.id.as_str(), records.len() as u64,authored_bytes,source.bytes.saturating_add(nested_structural_bytes)])? != 0;
+    check_dependencies(conn, &source.id, dependencies)?;
+    let inserted = conn.execute(
+        INSERT_CONTENT,
+        params![
+            source.id.as_str(),
+            source.bytes,
+            source.lines,
+            artisan_api::now()
+        ],
+    )? != 0;
+    let indexed = conn.execute(
+        INSERT_COLLECTION,
+        params![
+            source.id.as_str(),
+            records.len() as u64,
+            authored_bytes,
+            source.bytes.saturating_add(nested_structural_bytes)
+        ],
+    )? != 0;
     if inserted || indexed {
-        let mut insert_record = conn.prepare_cached(
-            "INSERT INTO content_records(content_id,ordinal,start,end,record_key,record_label) VALUES(?1,?2,?3,?4,?5,?6)",
-        )?;
-        let mut insert_chunk = conn
-            .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
+        let mut insert_record = conn.prepare_cached(INSERT_RECORD)?;
+        let mut insert_chunk = conn.prepare_cached(INSERT_CHUNK)?;
         let mut buffer = String::with_capacity(if inserted {
             crate::content::CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
         } else {
@@ -170,16 +194,15 @@ pub fn store<T: Serialize>(
             insert_chunk.execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])?;
         }
     }
-    let known: u64 = conn.query_row(
-        "SELECT count FROM content_collections WHERE content_id=?1",
-        [source.id.as_str()],
-        |row| row.get(0),
-    )?;
+    let known: u64 = conn.query_row(RECORD_COUNT, [source.id.as_str()], |row| row.get(0))?;
     if known != records.len() as u64 {
         return Err(damaged(&source.id, Damage::DescriptorMismatch));
     }
     for child in dependencies {
-        conn.execute("INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING", params![source.id.as_str(),child.as_str()])?;
+        conn.execute(
+            INSERT_DEPENDENCY,
+            params![source.id.as_str(), child.as_str()],
+        )?;
     }
     Ok(CollectionRef {
         source,
@@ -201,7 +224,22 @@ pub fn range<T: DeserializeOwned>(
     if !(1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit) {
         return Err(ContentError::CollectionLimit { limit });
     }
-    let Some((bytes, lines, total)) = conn.query_row("SELECT c.bytes,c.lines,r.count FROM content c JOIN content_collections r ON r.content_id=c.id WHERE c.id=?1", [id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?))).optional()? else { return Ok(None) };
+    let Some((bytes, lines, total)) = conn
+        .query_row(
+            include_str!("sql/collection/header.sql"),
+            [id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
     if query.offset > total {
         return Err(ContentError::RecordOffsetPastEnd {
             content: id.clone(),
@@ -209,7 +247,7 @@ pub fn range<T: DeserializeOwned>(
             total,
         });
     }
-    let mut select = conn.prepare_cached("SELECT ordinal,start,end FROM content_records WHERE content_id=?1 AND ordinal>=?2 ORDER BY ordinal LIMIT ?3")?;
+    let mut select = conn.prepare_cached(include_str!("sql/collection/records.sql"))?;
     let mut rows = select.query(params![id.as_str(), query.offset, limit])?;
     let mut records = Vec::new();
     let mut loaded_bytes = 0usize;
@@ -296,7 +334,8 @@ pub fn validate_answer(
             }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
-                let mut exists=conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM content_records WHERE content_id=?1 AND record_key=?2)")?;
+                let mut exists =
+                    conn.prepare_cached(include_str!("sql/collection/key_exists.sql"))?;
                 for id in ids {
                     let known: bool = exists
                         .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))?;
@@ -334,12 +373,8 @@ pub fn answer_text(
     };
     let mut labels = String::new();
     let mut duplicate_counts = std::collections::HashMap::<String, u64>::new();
-    let mut option = conn.prepare_cached(
-        "SELECT ordinal,record_label FROM content_records WHERE content_id=?1 AND record_key=?2",
-    )?;
-    let mut count = conn.prepare_cached(
-        "SELECT COUNT(*) FROM content_records WHERE content_id=?1 AND record_label=?2",
-    )?;
+    let mut option = conn.prepare_cached(include_str!("sql/collection/record_by_key.sql"))?;
+    let mut count = conn.prepare_cached(include_str!("sql/collection/label_count.sql"))?;
     for id in ids {
         let (index, label): (u64, String) = option
             .query_row(params![reference.source.id.as_str(), id], |row| {
@@ -470,8 +505,22 @@ pub fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> 
             content: reference.source.id.clone(),
         });
     }
-    let value = conn.query_row("SELECT r.count,c.bytes,c.lines,r.authored_bytes,r.structural_bytes FROM content_collections r JOIN content c ON c.id=r.content_id WHERE r.content_id=?1",
-        [reference.source.id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?,row.get::<_,u64>(3)?,row.get::<_,u64>(4)?))).optional()?.ok_or_else(|| missing(&reference.source.id))?;
+    let value = conn
+        .query_row(
+            include_str!("sql/collection/metrics.sql"),
+            [reference.source.id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| missing(&reference.source.id))?;
     if !(reference.count == value.0
         && reference.source.bytes == value.1
         && reference.source.lines == value.2)
@@ -619,7 +668,7 @@ pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Re
 pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
     let Some(count) = conn
         .query_row(
-            "SELECT count FROM content_collections WHERE content_id=?1",
+            include_str!("sql/collection/count.sql"),
             [source.id.as_str()],
             |row| row.get::<_, u64>(0),
         )
@@ -802,451 +851,5 @@ pub fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Resu
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::{PlanStep, StepStatus, TextContent};
-    fn database() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn).unwrap();
-        conn
-    }
-    fn steps(count: usize) -> Vec<PlanStep> {
-        (0..count)
-            .map(|index| PlanStep {
-                text: format!("Step {index}: αβ🙂").into(),
-                status: StepStatus::Pending,
-            })
-            .collect()
-    }
-    #[test]
-    fn five_thousand_records_use_indexed_bounded_ranges_and_keep_order() {
-        let conn = database();
-        let original = steps(5000);
-        let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        assert_eq!(reference.count, 5000);
-        assert!(serde_json::to_string(&reference).unwrap().len() < 256);
-        let duplicate = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        assert_eq!(reference, duplicate);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            5000
-        );
-        let mut actual = Vec::new();
-        let mut offset = 0;
-        while offset < reference.count {
-            let page = range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset,
-                    limit: None,
-                },
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(page.start, offset);
-            assert_eq!(page.end - offset, page.records.len() as u64);
-            assert!(page.records.len() <= 64);
-            offset = page.end;
-            actual.extend(page.records);
-        }
-        assert_eq!(actual, original);
-        let last = range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 4999,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(last.records, original[4999..]);
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 5001,
-                    limit: None
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 0,
-                    limit: Some(65)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn byte_budget_bounds_a_page_even_when_count_limit_is_not_reached() {
-        let conn = database();
-        let original: Vec<_> = (0..4000)
-            .map(|index| PlanStep {
-                text: format!("{index}{}", "α".repeat(6000)).into(),
-                status: StepStatus::Pending,
-            })
-            .collect();
-        let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        let page = range::<PlanStep>(&conn, &reference.source.id, CollectionQuery::default())
-            .unwrap()
-            .unwrap();
-        assert!(page.records.len() < 64);
-        assert_eq!(page.records, original[..page.records.len()]);
-        let encoded: usize = page
-            .records
-            .iter()
-            .map(|record| serde_json::to_string(record).unwrap().len())
-            .sum();
-        assert!(encoded <= artisan_api::COLLECTION_RANGE_BYTES);
-    }
-    #[test]
-    fn nested_sources_survive_item_updates_then_collect_after_parent_grace() {
-        let conn = database();
-        let mut text = TextContent::Inline("a large step\n".repeat(3000));
-        crate::content::normalize_text(&conn, &mut text).unwrap();
-        let TextContent::Stored(child_source) = &text else {
-            panic!("large text must be stored")
-        };
-        let child_bytes = child_source.bytes;
-        let child = child_source.id.clone();
-        let dependencies = BTreeSet::from([child]);
-        let parent = store(
-            &conn,
-            &[PlanStep {
-                text,
-                status: StepStatus::Pending,
-            }],
-            &dependencies,
-            child_bytes,
-            0,
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO item_content(item_id,content_id) VALUES('owner',?1)",
-            [parent.source.id.as_str()],
-        )
-        .unwrap();
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 0);
-        conn.execute("DELETE FROM item_content WHERE item_id='owner'", [])
-            .unwrap();
-        assert_eq!(
-            crate::content::collect(&conn, artisan_api::now()).unwrap(),
-            0
-        );
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(
-            crate::content::collect(&conn, artisan_api::now()).unwrap(),
-            0
-        );
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    #[test]
-    fn rollback_and_missing_index_cannot_publish_partial_collections() {
-        let mut conn = database();
-        {
-            let tx = conn.transaction().unwrap();
-            store(&tx, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        conn.execute(
-            "DELETE FROM content_records WHERE content_id=?1 AND ordinal=4000",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 3999,
-                    limit: Some(4)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
-        let conn = database();
-        let options = (0..5000)
-            .map(|index| artisan_api::QuestionOption {
-                id: format!("opaque-{index}"),
-                label: "Same".into(),
-                description: None,
-            })
-            .collect::<Vec<_>>();
-        let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
-        let question = artisan_api::Question {
-            id: "question".into(),
-            header: None,
-            text: "Pick".into(),
-            multi_select: false,
-            options: artisan_api::Collection::Stored(reference),
-        };
-        let answer = artisan_api::QuestionAnswer::Choices {
-            ids: vec!["opaque-4999".into()].into(),
-        };
-        validate_answer(&conn, &question, &Some(answer.clone())).unwrap();
-        assert_eq!(
-            answer_text(&conn, &question, &answer).unwrap(),
-            "Same (option 5000 of 5000)"
-        );
-        assert!(
-            validate_answer(
-                &conn,
-                &question,
-                &Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["Same".into()].into()
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_answer(
-                &conn,
-                &question,
-                &Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["opaque-1".into(), "opaque-1".into()].into()
-                })
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
-        let conn = database();
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            answer_text: None,
-            questions: vec![artisan_api::Question {
-                id: "q".into(),
-                header: None,
-                text: "Choose".into(),
-                multi_select: true,
-                options: vec![].into(),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Choices {
-                    ids: (0..5000)
-                        .map(|index| format!("id-{index}"))
-                        .collect::<Vec<_>>()
-                        .into(),
-                })]
-                .into(),
-            ),
-        };
-        normalize_item(&conn, &mut kind).unwrap();
-        let artisan_api::ItemKind::Question {
-            answers: Some(artisan_api::Collection::Inline(answers)),
-            ..
-        } = &kind
-        else {
-            panic!("small answer collection should stay inline")
-        };
-        let Some(artisan_api::QuestionAnswer::Choices {
-            ids: artisan_api::Collection::Stored(ids),
-        }) = &answers[0]
-        else {
-            panic!("many choices must use an indexed source")
-        };
-        assert_eq!(ids.count, 5000);
-        let ordinal = conn
-            .query_row(
-                "SELECT ordinal FROM content_records WHERE content_id=?1 AND record_key=?2",
-                params![ids.source.id.as_str(), "id-4999"],
-                |row| row.get::<_, u64>(0),
-            )
-            .unwrap();
-        assert_eq!(ordinal, 4999);
-        let page = range::<String>(
-            &conn,
-            &ids.source.id,
-            artisan_api::CollectionQuery {
-                offset: ordinal,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(page.records, ["id-4999"]);
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            answer_text: None,
-            questions: vec![].into(),
-            answers: Some(vec![None; 5000].into()),
-        };
-        normalize_item(&conn, &mut kind).unwrap();
-        let artisan_api::ItemKind::Question {
-            answers: Some(artisan_api::Collection::Stored(answers)),
-            ..
-        } = kind
-        else {
-            panic!("large saved answer arrays must use a source")
-        };
-        assert_eq!(answers.count, 5000);
-        let page = range::<Option<artisan_api::QuestionAnswer>>(
-            &conn,
-            &answers.source.id,
-            CollectionQuery {
-                offset: 4999,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(page.records, vec![None]);
-    }
-    #[test]
-    fn missing_final_index_record_cannot_return_a_short_successful_page() {
-        let conn = database();
-        let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        conn.execute(
-            "DELETE FROM content_records WHERE content_id=?1 AND ordinal=4999",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 4990,
-                    limit: Some(64)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn canonical_answer_display_is_derived_once_and_free_text_stays_literal() {
-        let conn = database();
-        let options = (0..5000)
-            .map(|index| artisan_api::QuestionOption {
-                id: format!("opaque-{index}"),
-                label: "Same".into(),
-                description: None,
-            })
-            .collect::<Vec<_>>();
-        let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            questions: vec![artisan_api::Question {
-                id: "q".into(),
-                header: None,
-                text: "Pick".into(),
-                multi_select: false,
-                options: artisan_api::Collection::Stored(reference.clone()),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["opaque-4999".into()].into(),
-                })]
-                .into(),
-            ),
-            answer_text: None,
-        };
-        derive_answer_text(&conn, &mut kind, None).unwrap();
-        let expected = artisan_api::TextContent::from("Same (option 5000 of 5000)");
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
-        );
-        let old = kind.clone();
-        let artisan_api::ItemKind::Question { answer_text, .. } = &mut kind else {
-            unreachable!()
-        };
-        *answer_text = None;
-        conn.execute(
-            "UPDATE content_records SET record_label='Changed' WHERE content_id=?1",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        derive_answer_text(&conn, &mut kind, Some(&old)).unwrap();
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
-        );
-        let literal = " \n**still literal** \n";
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            questions: vec![artisan_api::Question {
-                id: "free".into(),
-                header: None,
-                text: "Explain".into(),
-                multi_select: false,
-                options: vec![].into(),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Text {
-                    text: literal.into(),
-                })]
-                .into(),
-            ),
-            answer_text: None,
-        };
-        derive_answer_text(&conn, &mut kind, None).unwrap();
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text.inline()==Some(literal))
-        );
-    }
-    #[test]
-    fn duplicate_opaque_record_keys_roll_back_with_the_item_transaction() {
-        let mut conn = database();
-        {
-            let tx = conn.transaction().unwrap();
-            let duplicate = artisan_api::QuestionOption {
-                id: "same".into(),
-                label: "Choice".into(),
-                description: None,
-            };
-            assert!(store(&tx, &[duplicate.clone(), duplicate], &BTreeSet::new(), 0, 0).is_err());
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-    }
-}
+#[path = "../tests/collection/unit.rs"]
+mod tests;

@@ -417,11 +417,11 @@ impl Store {
 
     pub async fn next_parked(&self) -> Result<Option<artisan_api::Timestamp>, NextParkedError> {
         self.read(|conn| {
-            Ok(conn.query_row(
-                "SELECT min(due_at) FROM continues WHERE due_at IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )?)
+            Ok(
+                conn.query_row(include_str!("sql/continues/next_due.sql"), [], |row| {
+                    row.get(0)
+                })?,
+            )
         })
         .await
         .map_err(|cause| NextParkedError {
@@ -434,7 +434,7 @@ impl Store {
         let thread = thread.clone();
         self.read(move |conn| {
             Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM continues WHERE thread_id=?1)",
+                include_str!("sql/continues/pending.sql"),
                 [thread.as_str()],
                 |row| row.get(0),
             )?)
@@ -455,7 +455,7 @@ impl Store {
         self.read(move |conn| {
             read::items(
                 conn,
-                "SELECT body FROM items WHERE run_id=?1 AND status='cancelled' ORDER BY position",
+                include_str!("sql/items/cancelled.sql"),
                 [run.as_str()],
             )
         })
@@ -507,8 +507,7 @@ impl Store {
             tx.take_continue(&thread)?;
             let inputs: Vec<Item> = read::items(
                 tx,
-                "SELECT body FROM items WHERE thread_id=?1 AND position<=?2 AND status='running'
-                    AND kind_type='user_message'",
+                include_str!("sql/items/pending_inputs_through.sql"),
                 params![thread.as_str(), through],
             )?;
             let mut activity = None;
@@ -698,7 +697,7 @@ impl Store {
         let id = id.clone();
         self.read(move |conn| {
             Ok(conn
-                .prepare_cached("SELECT native_id FROM items WHERE id=?1")?
+                .prepare_cached(include_str!("sql/items/native_id.sql"))?
                 .query_row([id.as_str()], |row| row.get::<_, Option<String>>(0))
                 .optional()
                 .map(Option::flatten)?)
