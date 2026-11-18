@@ -258,3 +258,83 @@ async fn cancelled_watches_never_start_a_notification_turn() {
     assert!(fixture.items().await.is_empty());
     fixture.hub.stop(Duration::from_secs(2)).await;
 }
+
+async fn acknowledged_request(
+    fixture: &Fixture,
+    recipient: &ThreadId,
+    text: &str,
+) -> (String, u64) {
+    let record = fixture
+        .hub
+        .store()
+        .coordination_put(
+            fixture.thread_id.clone(),
+            None,
+            Content::Message {
+                recipient: recipient.clone(),
+                intent: Intent::Boundary,
+                text: text.into(),
+                state: MessageState::Prepared,
+                reply: None,
+                delivery_item: None,
+                receipt_revision: 0,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let delivered = fixture
+        .hub
+        .deliver_coordination_message(&fixture.thread_id, record.id.clone())
+        .await
+        .unwrap();
+    (record.id, delivered.revision)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_that_cannot_be_delivered_does_not_hold_up_the_others() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let recipient = other_thread(&fixture).await;
+    let (stuck, stuck_revision) =
+        acknowledged_request(&fixture, &recipient, "Leave the parser to me").await;
+    let (fine, fine_revision) =
+        acknowledged_request(&fixture, &recipient, "Leave the lexer to me").await;
+    let mut taken = message("an unrelated message");
+    taken.id = ItemId::from(format!(
+        "coordination-receipt:{stuck}:{}",
+        stuck_revision + 1
+    ));
+    fixture.hub.send_message(&recipient, taken).await.unwrap();
+
+    for (id, revision) in [(&stuck, stuck_revision), (&fine, fine_revision)] {
+        let acknowledged = fixture
+            .hub
+            .acknowledge_coordination(
+                &recipient,
+                id.clone(),
+                revision,
+                MessageState::Acknowledged,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(acknowledged.revision, revision + 1);
+    }
+
+    let expected = format!("request {fine} as Acknowledged");
+    fixture
+        .wait_for(|items| {
+            items.iter().any(|item| {
+                matches!(&item.kind, ItemKind::UserMessage { text, .. }
+                    if text.inline().is_some_and(|text| text.contains(&expected)))
+            })
+        })
+        .await;
+    let undeliverable = format!("request {stuck} as");
+    assert!(!fixture.items().await.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::UserMessage { text, .. }
+            if text.inline().is_some_and(|text| text.contains(&undeliverable))
+    )));
+    fixture.hub.stop(Duration::from_secs(2)).await;
+}

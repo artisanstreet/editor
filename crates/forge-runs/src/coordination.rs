@@ -157,6 +157,7 @@ impl Hub {
     pub(crate) fn start_coordination(&self) {
         let hub = self.clone();
         self.inner.tasks.spawn(async move {
+            let mut deferred = Deferred::default();
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -167,7 +168,7 @@ impl Hub {
                         if let Err(error) = hub.deliver_work_watches().await {
                             tracing::warn!("coordination watches: {}", diagnostics::chain(&error));
                         }
-                        if let Err(error) = hub.deliver_coordination_receipts().await {
+                        if let Err(error) = hub.deliver_coordination_receipts(&mut deferred).await {
                             tracing::warn!("coordination receipts: {}", diagnostics::chain(&error));
                         }
                     }
@@ -265,46 +266,115 @@ impl Hub {
         Ok(())
     }
 
-    async fn deliver_coordination_receipts(&self) -> Result<(), CoordinationDeliveryError> {
-        for record in self.store().coordination_receipts().await? {
-            let Content::Message {
-                recipient,
-                state,
-                reply,
-                ..
-            } = &record.content
-            else {
-                continue;
-            };
-            let text = format!(
-                "Coordination receipt: thread {recipient} marked request {} as {state:?}.\n\n{}",
-                record.id,
-                reply.as_deref().unwrap_or("No additional reply.")
-            );
-            self.send_as_agent_with_id(
-                &record.owner,
-                &record.owner,
-                text,
-                ItemId::from(format!(
-                    "coordination-receipt:{}:{}",
-                    record.id, record.revision
-                )),
-            )
-            .await
-            .map_err(|source| CoordinationDeliveryError::Receipt {
-                id: record.id.clone(),
-                owner: record.owner.clone(),
-                source: Box::new(source),
-            })?;
-            self.store()
-                .coordination_update(
-                    record.owner,
-                    record.id,
-                    record.revision,
-                    Update::ReceiptDelivered,
-                )
-                .await?;
+    async fn deliver_coordination_receipts(
+        &self,
+        deferred: &mut Deferred,
+    ) -> Result<(), CoordinationDeliveryError> {
+        let now = tokio::time::Instant::now();
+        for record in self
+            .store()
+            .coordination_receipts(deferred.waiting(now))
+            .await?
+        {
+            let (id, revision) = (record.id.clone(), record.revision);
+            match self.deliver_receipt(record).await {
+                Ok(()) => deferred.delivered(&id),
+                Err(error) => {
+                    let retry = deferred.failed(&id, revision, now);
+                    tracing::warn!(receipt = %id, revision, retry_in_s = retry.as_secs(), "deliver coordination receipt: {}", diagnostics::chain(&error));
+                }
+            }
         }
         Ok(())
+    }
+
+    async fn deliver_receipt(&self, record: Record) -> Result<(), CoordinationDeliveryError> {
+        let Content::Message {
+            recipient,
+            state,
+            reply,
+            ..
+        } = &record.content
+        else {
+            unreachable!("invariant: coordination receipt {} is a message", record.id);
+        };
+        let text = format!(
+            "Coordination receipt: thread {recipient} marked request {} as {state:?}.\n\n{}",
+            record.id,
+            reply.as_deref().unwrap_or("No additional reply.")
+        );
+        self.send_as_agent_with_id(
+            &record.owner,
+            &record.owner,
+            text,
+            ItemId::from(format!(
+                "coordination-receipt:{}:{}",
+                record.id, record.revision
+            )),
+        )
+        .await
+        .map_err(|source| CoordinationDeliveryError::Receipt {
+            id: record.id.clone(),
+            owner: record.owner.clone(),
+            source: Box::new(source),
+        })?;
+        self.store()
+            .coordination_update(
+                record.owner,
+                record.id,
+                record.revision,
+                Update::ReceiptDelivered,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+const FIRST_RECEIPT_RETRY: Duration = Duration::from_secs(2);
+const LAST_RECEIPT_RETRY: Duration = Duration::from_mins(5);
+
+struct Retry {
+    revision: u64,
+    failures: u32,
+    at: tokio::time::Instant,
+}
+
+#[derive(Default)]
+struct Deferred {
+    receipts: std::collections::HashMap<String, Retry>,
+}
+
+impl Deferred {
+    fn waiting(&self, now: tokio::time::Instant) -> Vec<String> {
+        self.receipts
+            .iter()
+            .filter(|(_, retry)| retry.at > now)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn delivered(&mut self, id: &str) {
+        self.receipts.remove(id);
+    }
+
+    fn failed(&mut self, id: &str, revision: u64, now: tokio::time::Instant) -> Duration {
+        let failures = self
+            .receipts
+            .get(id)
+            .filter(|retry| retry.revision == revision)
+            .map_or(0, |retry| retry.failures)
+            .saturating_add(1);
+        let wait = FIRST_RECEIPT_RETRY
+            .saturating_mul(2_u32.saturating_pow(failures.saturating_sub(1).min(16)))
+            .min(LAST_RECEIPT_RETRY);
+        self.receipts.insert(
+            id.to_owned(),
+            Retry {
+                revision,
+                failures,
+                at: now + wait,
+            },
+        );
+        wait
     }
 }

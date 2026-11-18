@@ -920,11 +920,14 @@ impl Store {
         })
     }
 
-    pub async fn coordination_receipts(&self) -> Result<Vec<Record>, CoordinationReceiptsError> {
+    pub async fn coordination_receipts(
+        &self,
+        deferred: Vec<String>,
+    ) -> Result<Vec<Record>, CoordinationReceiptsError> {
         self.read(move |conn| {
             let mut statement = conn.prepare(include_str!("sql/coordination/receipts.sql"))?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([read::to_body(&deferred)?], |row| row.get::<_, String>(0))?
                 .map(|row| read::from_body(&row?))
                 .collect()
         })
