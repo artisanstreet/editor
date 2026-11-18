@@ -225,7 +225,8 @@ fn wordmark(theme: &ArtisanTheme, sidebar: &Sidebar) -> Element {
                 .zip(LINE_HEIGHTS)
                 .map(|(row, line_height)| wordmark_row(theme, row, line_height * WORDMARK_SIZE)),
         )
-        .build();
+        .build()
+        .aria_hidden();
     let label = if sidebar.open {
         "Hide sidebar"
     } else {

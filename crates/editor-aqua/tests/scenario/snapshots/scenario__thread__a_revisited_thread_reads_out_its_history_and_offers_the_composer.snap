@@ -4,13 +4,6 @@ expression: "editor.shows(\"It turns text into tokens.\")"
 ---
 Group [focused]
   Button "Hide sidebar"
-    Label "A"
-    Label "R"
-    Label "T"
-    Label "I"
-    Label "S"
-    Label "A"
-    Label "N"
   TextInput "Search threads"
   Button "New thread"
   List

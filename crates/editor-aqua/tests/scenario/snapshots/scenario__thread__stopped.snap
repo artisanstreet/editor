@@ -3,13 +3,6 @@ source: crates/editor-aqua/tests/scenario/thread.rs
 expression: "editor.settle(\"the turn to stop\", |view|\n{\n    view.find(Role::Button, \"Continue where it stopped\").is_some() &&\n    view.shows(\"Stopped after\")\n})"
 ---
 Button "Hide sidebar"
-  Label "A"
-  Label "R"
-  Label "T"
-  Label "I"
-  Label "S"
-  Label "A"
-  Label "N"
 TextInput "Search threads"
 Button "New thread"
 List

@@ -3,13 +3,6 @@ source: crates/editor-aqua/tests/scenario/states.rs
 expression: "editor.settle(\"the failure to show\", |view|\n{ view.shows(\"Couldn't\") && view.find(Role::Button, \"Try again\").is_some() })"
 ---
 Button "Hide sidebar"
-  Label "A"
-  Label "R"
-  Label "T"
-  Label "I"
-  Label "S"
-  Label "A"
-  Label "N"
 TextInput "Search threads"
 Button "New thread"
 List

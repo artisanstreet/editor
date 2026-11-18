@@ -4,13 +4,6 @@ expression: "editor.settle(\"the new thread page\", |view|\n{\n    view.shows(\"
 ---
 Group [focused]
   Button "Hide sidebar"
-    Label "A"
-    Label "R"
-    Label "T"
-    Label "I"
-    Label "S"
-    Label "A"
-    Label "N"
   TextInput "Search threads"
   Button "New thread"
   Label "No threads yet."
