@@ -1071,14 +1071,11 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
         .map(|file| {
             let slash = if file.folder { "/" } else { "" };
             let path = file.path.as_path();
-            let name = path
-                .file_name()
-                .map_or_else(
-                    || path.display().to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                )
-                .replace(['[', ']'], "");
-            format!("[{name}{slash}](<{}>)", path.display())
+            let name = path.file_name().map_or_else(
+                || file.path.0.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            markdown_link(&format!("{name}{slash}"), &file.path.0)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1087,6 +1084,38 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
     } else {
         format!("{text}\n\n{links}")
     }
+}
+
+fn markdown_link(label: &str, destination: &str) -> String {
+    let mut link = String::from("[");
+    for character in label.chars() {
+        match character {
+            '\n' | '\r' => link.push(' '),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '~' | '|' | '&' | '!' => {
+                link.push('\\');
+                link.push(character);
+            }
+            other => link.push(other),
+        }
+    }
+    link.push_str("](<");
+    let mut characters = destination.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\n' => link.push_str("%0A"),
+            '\r' => link.push_str("%0D"),
+            '<' | '>' => {
+                link.push('\\');
+                link.push(character);
+            }
+            '\\' if characters.peek().is_some_and(char::is_ascii_punctuation) => {
+                link.push_str("\\\\");
+            }
+            other => link.push(other),
+        }
+    }
+    link.push_str(">)");
+    link
 }
 
 fn last_project(host: &HostData) -> Option<ProjectId> {
@@ -1157,3 +1186,7 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     config.effort = None;
     Some(config)
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/controller.rs"]
+mod tests;
