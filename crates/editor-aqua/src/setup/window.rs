@@ -1,5 +1,5 @@
 use super::install;
-use super::model::{Choice, Effect, Event, Setup, State};
+use super::model::{Choice, Effect, Event, Setup};
 use super::view::{self, Props};
 use crate::shell::host::{ShellResources, set_window_scale};
 use crate::ui::theme::ArtisanTheme;
@@ -29,6 +29,7 @@ struct SetupApplication {
     choices: Rc<RefCell<VecDeque<Choice>>>,
     work: Mailbox<Event>,
     folder_request: Option<RequestId>,
+    installation: install::Cancel,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +63,7 @@ pub fn run(setup: Setup) -> Result<(), SetupWindowError> {
             choices: Rc::default(),
             work: Mailbox::new(MAILBOX),
             folder_request: None,
+            installation: install::Cancel::default(),
         })
         .map_err(|message| SetupWindowError::Run { message })
 }
@@ -69,24 +71,24 @@ pub fn run(setup: Setup) -> Result<(), SetupWindowError> {
 fn find_distros(sender: Sender<Event>) {
     std::thread::spawn(move || {
         let found = crate::core::runtime::runtime().block_on(crate::core::hosts::wsl_state());
-        let distros = match found {
-            Ok(distros) => distros.into_iter().map(|distro| distro.name).collect(),
+        let event = match found {
+            Ok(distros) => Event::DistrosFound(distros.into_iter().map(|distro| distro.name).collect()),
             Err(error) => {
                 tracing::warn!(
                     error = %::diagnostics::chain(&error),
-                    "setup could not list WSL distributions; offering this PC only"
+                    "setup could not list WSL distributions"
                 );
-                Vec::new()
+                Event::DistrosUnavailable(::diagnostics::chain(&error))
             }
         };
-        let _closed = sender.send(Event::DistrosFound(distros));
+        let _closed = sender.send(event);
     });
 }
 
-fn install(arguments: Vec<String>, sender: Sender<Event>) {
+fn install(arguments: Vec<String>, cancel: install::Cancel, sender: Sender<Event>) {
     std::thread::spawn(move || {
         let progress = sender.clone();
-        let result = install::run(&arguments, |line| {
+        let result = install::run(&arguments, &cancel, |line| {
             let _closed = progress.send(Event::Progressed(line.to_owned()));
         });
         if let Err(error) = &result {
@@ -109,7 +111,12 @@ impl SetupApplication {
                     },
                 ));
             }
-            Effect::Install(arguments) => install(arguments, self.work.sender()),
+            Effect::FindDistros => find_distros(self.work.sender()),
+            Effect::Install(arguments) => {
+                self.installation = install::Cancel::default();
+                install(arguments, self.installation.clone(), self.work.sender());
+            }
+            Effect::Cancel => self.installation.cancel(),
             Effect::Quit => ctx.quit(),
         }
     }
@@ -148,7 +155,7 @@ impl SetupApplication {
             Err(error) => tracing::error!(%error, "could not show setup"),
         }
         ctx.request_frame(id, FrameReason::DAMAGE);
-        if self.setup.installing() {
+        if self.setup.busy() {
             ctx.request_animation_deadline(id, ctx.now() + SPIN_INTERVAL);
         }
     }
@@ -195,17 +202,18 @@ impl Application for SetupApplication {
             set_window_scale(ui, window.scale_factor as f32);
         }
         ctx.bind_mailbox(id, &self.work);
-        match self.setup.state() {
-            State::Choosing(_) => find_distros(self.work.sender()),
-            State::Installing { .. } | State::Failed { .. } | State::Done { .. } => {}
-        }
         if let Some(effect) = self.setup.started() {
             self.perform(effect, ctx, id);
         }
         self.drain(ctx, id);
     }
     fn can_close(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) -> bool {
-        !self.setup.installing() && self.ui.can_close(ctx, id)
+        let closable = self.setup.closable();
+        if let Some(effect) = self.setup.apply(Event::CloseRequested) {
+            self.perform(effect, ctx, id);
+            self.rebuild(ctx, id);
+        }
+        closable && self.ui.can_close(ctx, id)
     }
     fn on_wake(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         self.ui.on_wake(ctx, id);
@@ -216,7 +224,7 @@ impl Application for SetupApplication {
     }
     fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, now: Instant) {
         self.ui.on_animation_frame(ctx, id, now);
-        if self.setup.installing() {
+        if self.setup.busy() {
             self.spin = (self.spin + 1) % view::SPIN_STEPS;
             self.rebuild(ctx, id);
         }

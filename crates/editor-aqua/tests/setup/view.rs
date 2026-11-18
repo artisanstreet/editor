@@ -164,3 +164,60 @@ fn dozens_of_distros_scroll_inside_the_window_and_keep_install_reachable() {
     click(&mut app, "artisan-setup-install");
     assert_eq!(*heard.borrow(), [Choice::Selected(1), Choice::Started]);
 }
+
+fn texts(app: &UiApp) -> Vec<String> {
+    app.tree()
+        .traverse()
+        .into_iter()
+        .filter_map(|node| match &app.tree().get(node)?.kind {
+            aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_failed_install_offers_a_way_back_to_the_choices() {
+    let mut setup = with_three_distros();
+    setup.apply(Event::Chose(Choice::Started));
+    setup.apply(Event::Finished(Err(InstallError::Refused {
+        code: Some(1),
+        reason: "the folder is read-only".to_owned(),
+    })));
+    let (mut app, heard) = shown(&setup);
+    click(&mut app, "artisan-setup-back");
+    assert_eq!(*heard.borrow(), [Choice::Back]);
+    setup.apply(Event::Chose(Choice::Back));
+    let (app, _) = shown(&setup);
+    assert!(texts(&app).iter().any(|text| text == "Where should agents work?"));
+}
+
+#[test]
+fn wsl_discovery_shows_that_it_is_looking_and_why_it_failed() {
+    let setup = Setup::fresh("1.2.0", PathBuf::from(r"C:\Artisan Street"), true);
+    let (app, _) = shown(&setup);
+    assert!(
+        texts(&app)
+            .iter()
+            .any(|text| text == "Looking for WSL distributions…")
+    );
+    let mut setup = setup;
+    setup.apply(Event::DistrosUnavailable("wsl.exe timed out".to_owned()));
+    let (mut app, heard) = shown(&setup);
+    assert!(
+        texts(&app)
+            .iter()
+            .any(|text| text == "Couldn't list WSL distributions: wsl.exe timed out")
+    );
+    click(&mut app, "artisan-setup-find-distros");
+    assert_eq!(*heard.borrow(), [Choice::FindDistros]);
+}
+
+#[test]
+fn closing_mid_install_says_the_installer_is_stopping() {
+    let mut setup = with_three_distros();
+    setup.apply(Event::Chose(Choice::Started));
+    setup.apply(Event::CloseRequested);
+    let (app, _) = shown(&setup);
+    assert!(texts(&app).iter().any(|text| text == "Stopping the installer…"));
+}

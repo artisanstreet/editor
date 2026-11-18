@@ -1,4 +1,4 @@
-use super::model::{Choice, Choices, InstallPlan, Location, Machine, Setup, State};
+use super::model::{Choice, Choices, Discovery, Job, Location, Machine, Setup, State};
 use crate::frame::sign_in::card::{body, framed, header, wordmark};
 use crate::ui::chrome::card::{hex, key_face};
 use crate::ui::kit::surface::{self, Tone, tint};
@@ -29,8 +29,9 @@ pub struct Props<'a> {
 pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
     let content = match props.setup.state() {
         State::Choosing(choices) => choosing(theme, props, choices),
-        State::Installing { plan, line } => vec![working(theme, props, plan, line)],
-        State::Failed { error, .. } => failed(theme, props, &::diagnostics::chain(error)),
+        State::Installing { job, line } => vec![working(theme, props, job, line)],
+        State::Cancelling { .. } => vec![stopping(theme, props)],
+        State::Failed { job, error } => failed(theme, props, job, &::diagnostics::chain(error)),
         State::Done { .. } => {
             vec![wrapped(
                 TextRole::Label.text(theme, "Opening Artisan Editor…"),
@@ -68,16 +69,13 @@ fn heading(theme: &ArtisanTheme, setup: &Setup) -> Element {
     let version = setup.version();
     let (title, detail) = match setup.state() {
         State::Choosing(_) => ("Set up Artisan Editor", format!("Version {version}")),
-        State::Installing { plan, .. } | State::Failed { plan, .. } | State::Done { plan } => {
-            match plan {
-                InstallPlan::Fresh { .. } => {
-                    ("Set up Artisan Editor", format!("Version {version}"))
-                }
-                InstallPlan::Update { from } => {
-                    ("Update Artisan Editor", format!("{from} to {version}"))
-                }
-            }
-        }
+        State::Installing { job, .. }
+        | State::Cancelling { job }
+        | State::Failed { job, .. }
+        | State::Done { job } => match job {
+            Job::Fresh(_) => ("Set up Artisan Editor", format!("Version {version}")),
+            Job::Update { from } => ("Update Artisan Editor", format!("{from} to {version}")),
+        },
     };
     UiBox::new()
         .layout("column")
@@ -174,11 +172,58 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>, choices: &Choices) -> Vec<E
             .build(),
         )
         .build();
+    let machines = UiBox::new()
+        .layout("column")
+        .spaced(Space::S8)
+        .child(machines)
+        .children(discovery(theme, props, choices.discovery()))
+        .build();
     vec![
         section(theme, "Install location", location),
         section(theme, "Where should agents work?", machines),
         install,
     ]
+}
+
+fn discovery(theme: &ArtisanTheme, props: &Props<'_>, discovery: &Discovery) -> Option<Element> {
+    match discovery {
+        Discovery::Found => None,
+        Discovery::Searching => Some(muted(
+            theme,
+            TextRole::Caption,
+            "Looking for WSL distributions…",
+        )),
+        Discovery::Failed(reason) => {
+            let retry = Rc::clone(&props.emit);
+            Some(
+                UiBox::new()
+                    .layout("row")
+                    .spaced(Space::S12)
+                    .style(Style::new().align(AlignItems::CENTER))
+                    .child(
+                        UiBox::new()
+                            .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+                            .child(colored(
+                                TextRole::Caption
+                                    .text(theme, format!("Couldn't list WSL distributions: {reason}")),
+                                tint(theme, Tone::Danger),
+                            ))
+                            .build(),
+                    )
+                    .child(
+                        Button::text(
+                            "artisan-setup-find-distros",
+                            *theme,
+                            ButtonTone::Neutral,
+                            "Look again",
+                        )
+                        .on_activate(move |_| retry(Choice::FindDistros))
+                        .build(),
+                    )
+                    .build(),
+            )
+        }
+    }
 }
 
 fn section(theme: &ArtisanTheme, label: &str, content: Element) -> Element {
@@ -281,16 +326,25 @@ fn picture(svg: String, size: IconSize) -> Element {
         .exclude_from_hit_testing()
 }
 
-fn working(theme: &ArtisanTheme, props: &Props<'_>, plan: &InstallPlan, line: &str) -> Element {
-    let title = match plan {
-        InstallPlan::Fresh { .. } => "Installing…",
-        InstallPlan::Update { .. } => "Updating…",
+fn working(theme: &ArtisanTheme, props: &Props<'_>, job: &Job, line: &str) -> Element {
+    let title = match job {
+        Job::Fresh(_) => "Installing…",
+        Job::Update { .. } => "Updating…",
     };
-    let detail = if line.is_empty() {
-        "Getting ready"
-    } else {
-        line
-    };
+    let detail = if line.is_empty() { "Getting ready" } else { line };
+    progress(theme, props, title, detail)
+}
+
+fn stopping(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
+    progress(
+        theme,
+        props,
+        "Stopping the installer…",
+        "Setup closes once it has stopped",
+    )
+}
+
+fn progress(theme: &ArtisanTheme, props: &Props<'_>, title: &str, detail: &str) -> Element {
     UiBox::new()
         .layout("row")
         .spaced(Space::S12)
@@ -308,8 +362,9 @@ fn working(theme: &ArtisanTheme, props: &Props<'_>, plan: &InstallPlan, line: &s
         .build()
 }
 
-fn failed(theme: &ArtisanTheme, props: &Props<'_>, message: &str) -> Vec<Element> {
+fn failed(theme: &ArtisanTheme, props: &Props<'_>, job: &Job, message: &str) -> Vec<Element> {
     let retry = Rc::clone(&props.emit);
+    let back = Rc::clone(&props.emit);
     vec![
         wrapped(TextRole::LabelStrong.text(theme, "Setup couldn't finish")),
         colored(
@@ -318,7 +373,13 @@ fn failed(theme: &ArtisanTheme, props: &Props<'_>, message: &str) -> Vec<Element
         ),
         UiBox::new()
             .layout("row")
+            .spaced(Space::S8)
             .style(Style::new().justify(JustifyContent::END))
+            .children(matches!(job, Job::Fresh(_)).then(|| {
+                Button::text("artisan-setup-back", *theme, ButtonTone::Neutral, "Back")
+                    .on_activate(move |_| back(Choice::Back))
+                    .build()
+            }))
             .child(
                 Button::text(
                     "artisan-setup-retry",

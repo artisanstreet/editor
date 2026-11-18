@@ -1,6 +1,6 @@
 use editor_aqua::setup::InstallError;
 use editor_aqua::setup::model::{
-    Choice, Choices, Effect, Entry, Event, Existing, InstallPlan, Machine, Setup, State, entry,
+    Choice, Choices, Discovery, Effect, Entry, Event, Existing, Job, Machine, Setup, State, entry,
     existing,
 };
 use std::path::PathBuf;
@@ -214,7 +214,7 @@ fn an_update_keeps_forge_where_it_already_is() {
     let mut setup = Setup::update("1.2.0", "1.1.0".to_owned());
     assert!(matches!(
         setup.state(),
-        State::Installing { plan: InstallPlan::Update { from }, .. } if from == "1.1.0"
+        State::Installing { job: Job::Update { from }, .. } if from == "1.1.0"
     ));
     let keep = words(&["install", "--apply", "--editor", "here", "--forge", "keep"]);
     assert_eq!(setup.started(), Some(Effect::Install(keep.clone())));
@@ -223,4 +223,75 @@ fn an_update_keeps_forge_where_it_already_is() {
         setup.apply(Event::Chose(Choice::Started)),
         Some(Effect::Install(keep))
     );
+}
+
+#[test]
+fn a_failed_install_can_go_back_and_change_what_was_chosen() {
+    let mut setup = fresh();
+    setup.apply(Event::DistrosFound(words(&["Debian"])));
+    setup.apply(Event::Chose(Choice::Selected(1)));
+    setup.apply(Event::Chose(Choice::Started));
+    setup.apply(Event::Finished(Err(refused("Debian has no systemd"))));
+    assert_eq!(
+        setup.apply(Event::Chose(Choice::Back)),
+        Some(Effect::FindDistros),
+        "going back looks for distributions again"
+    );
+    assert_eq!(choices(&setup).selected(), &Machine::Wsl("Debian".to_owned()));
+    assert_eq!(choices(&setup).discovery(), &Discovery::Searching);
+    setup.apply(Event::DistrosFound(words(&["Debian"])));
+    setup.apply(Event::Chose(Choice::Selected(0)));
+    assert_eq!(
+        setup.apply(Event::Chose(Choice::Started)),
+        Some(Effect::Install(words(&[
+            "install", "--apply", "--editor", "here", "--forge", "here"
+        ])))
+    );
+}
+
+#[test]
+fn an_update_that_failed_has_nothing_to_go_back_to() {
+    let mut setup = Setup::update("1.2.0", "1.1.0".to_owned());
+    setup.apply(Event::Finished(Err(refused("Forge didn't stop"))));
+    assert_eq!(setup.apply(Event::Chose(Choice::Back)), None);
+    assert!(matches!(setup.state(), State::Failed { .. }));
+}
+
+#[test]
+fn closing_during_an_install_stops_the_installer_before_setup_closes() {
+    let mut setup = fresh();
+    setup.apply(Event::Chose(Choice::Started));
+    assert!(!setup.closable());
+    assert_eq!(setup.apply(Event::CloseRequested), Some(Effect::Cancel));
+    assert!(matches!(setup.state(), State::Cancelling { .. }));
+    assert!(setup.busy());
+    assert!(
+        setup.closable(),
+        "a second close doesn't wait for an installer that won't stop"
+    );
+    assert_eq!(setup.apply(Event::CloseRequested), None);
+    assert_eq!(
+        setup.apply(Event::Finished(Err(InstallError::Cancelled))),
+        Some(Effect::Quit)
+    );
+}
+
+#[test]
+fn wsl_discovery_reports_its_progress_and_failure_and_can_look_again() {
+    let mut setup = fresh();
+    assert_eq!(setup.started(), Some(Effect::FindDistros));
+    assert_eq!(choices(&setup).discovery(), &Discovery::Searching);
+    setup.apply(Event::DistrosUnavailable("wsl.exe timed out".to_owned()));
+    assert_eq!(
+        choices(&setup).discovery(),
+        &Discovery::Failed("wsl.exe timed out".to_owned())
+    );
+    assert_eq!(
+        setup.apply(Event::Chose(Choice::FindDistros)),
+        Some(Effect::FindDistros)
+    );
+    assert_eq!(choices(&setup).discovery(), &Discovery::Searching);
+    setup.apply(Event::DistrosFound(words(&["Ubuntu"])));
+    assert_eq!(choices(&setup).discovery(), &Discovery::Found);
+    assert_eq!(choices(&setup).machines().len(), 2);
 }

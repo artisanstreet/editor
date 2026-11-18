@@ -109,10 +109,18 @@ impl Location {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Discovery {
+    Searching,
+    Found,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choices {
     location: Location,
     machines: Vec<Machine>,
     selected: Machine,
+    discovery: Discovery,
 }
 
 impl Choices {
@@ -129,6 +137,11 @@ impl Choices {
     #[must_use]
     pub const fn selected(&self) -> &Machine {
         &self.selected
+    }
+
+    #[must_use]
+    pub const fn discovery(&self) -> &Discovery {
+        &self.discovery
     }
 
     fn select(&mut self, index: usize) {
@@ -148,6 +161,7 @@ impl Choices {
     }
 
     fn found(&mut self, distros: Vec<String>) {
+        self.discovery = Discovery::Found;
         self.machines = std::iter::once(Machine::ThisPc)
             .chain(
                 distros
@@ -204,20 +218,29 @@ impl InstallPlan {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Job {
+    Fresh(Choices),
+    Update { from: String },
+}
+
+impl Job {
+    #[must_use]
+    pub fn plan(&self) -> InstallPlan {
+        match self {
+            Self::Fresh(choices) => choices.plan(),
+            Self::Update { from } => InstallPlan::Update { from: from.clone() },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum State {
     Choosing(Choices),
-    Installing {
-        plan: InstallPlan,
-        line: String,
-    },
-    Failed {
-        plan: InstallPlan,
-        error: InstallError,
-    },
-    Done {
-        plan: InstallPlan,
-    },
+    Installing { job: Job, line: String },
+    Cancelling { job: Job },
+    Failed { job: Job, error: InstallError },
+    Done { job: Job },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,21 +248,27 @@ pub enum Choice {
     Selected(usize),
     ChangeLocation,
     Located(PathBuf),
+    FindDistros,
     Started,
+    Back,
 }
 
 #[derive(Debug)]
 pub enum Event {
     Chose(Choice),
     DistrosFound(Vec<String>),
+    DistrosUnavailable(String),
     Progressed(String),
     Finished(Result<(), InstallError>),
+    CloseRequested,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     PickFolder,
+    FindDistros,
     Install(Vec<String>),
+    Cancel,
     Quit,
 }
 
@@ -265,6 +294,7 @@ impl Setup {
                 location,
                 machines: vec![Machine::ThisPc],
                 selected: Machine::ThisPc,
+                discovery: Discovery::Searching,
             }),
         }
     }
@@ -274,7 +304,7 @@ impl Setup {
         Self {
             version: version.to_owned(),
             state: State::Installing {
-                plan: InstallPlan::Update { from },
+                job: Job::Update { from },
                 line: String::new(),
             },
         }
@@ -291,15 +321,21 @@ impl Setup {
     }
 
     #[must_use]
-    pub const fn installing(&self) -> bool {
-        matches!(self.state, State::Installing { .. })
+    pub const fn busy(&self) -> bool {
+        matches!(self.state, State::Installing { .. } | State::Cancelling { .. })
+    }
+
+    #[must_use]
+    pub const fn closable(&self) -> bool {
+        !matches!(self.state, State::Installing { .. })
     }
 
     #[must_use]
     pub fn started(&self) -> Option<Effect> {
         match &self.state {
-            State::Installing { plan, .. } => Some(Effect::Install(plan.arguments())),
-            State::Choosing(_) | State::Failed { .. } | State::Done { .. } => None,
+            State::Choosing(_) => Some(Effect::FindDistros),
+            State::Installing { job, .. } => Some(Effect::Install(job.plan().arguments())),
+            State::Cancelling { .. } | State::Failed { .. } | State::Done { .. } => None,
         }
     }
 
@@ -316,50 +352,72 @@ impl Setup {
                 choices.relocate(folder);
                 None
             }
+            (State::Choosing(choices), Event::Chose(Choice::FindDistros)) => {
+                choices.discovery = Discovery::Searching;
+                Some(Effect::FindDistros)
+            }
             (State::Choosing(choices), Event::DistrosFound(distros)) => {
                 choices.found(distros);
                 None
             }
-            (State::Choosing(choices), Event::Chose(Choice::Started)) => {
-                let plan = choices.plan();
-                Some(self.install(plan))
+            (State::Choosing(choices), Event::DistrosUnavailable(reason)) => {
+                choices.discovery = Discovery::Failed(reason);
+                None
             }
-            (State::Failed { plan, .. }, Event::Chose(Choice::Started)) => {
-                let plan = plan.clone();
-                Some(self.install(plan))
+            (State::Choosing(choices), Event::Chose(Choice::Started)) => {
+                let job = Job::Fresh(choices.clone());
+                Some(self.install(job))
+            }
+            (State::Failed { job, .. }, Event::Chose(Choice::Started)) => {
+                let job = job.clone();
+                Some(self.install(job))
+            }
+            (State::Failed { job: Job::Fresh(choices), .. }, Event::Chose(Choice::Back)) => {
+                let mut choices = choices.clone();
+                choices.discovery = Discovery::Searching;
+                self.state = State::Choosing(choices);
+                Some(Effect::FindDistros)
             }
             (State::Installing { line, .. }, Event::Progressed(next)) => {
                 *line = next;
                 None
             }
-            (State::Installing { plan, .. }, Event::Finished(Ok(()))) => {
-                self.state = State::Done { plan: plan.clone() };
+            (State::Installing { job, .. }, Event::Finished(Ok(()))) => {
+                self.state = State::Done { job: job.clone() };
                 Some(Effect::Quit)
             }
-            (State::Installing { plan, .. }, Event::Finished(Err(error))) => {
+            (State::Installing { job, .. }, Event::Finished(Err(error))) => {
                 self.state = State::Failed {
-                    plan: plan.clone(),
+                    job: job.clone(),
                     error,
                 };
                 None
             }
+            (State::Installing { job, .. }, Event::CloseRequested) => {
+                self.state = State::Cancelling { job: job.clone() };
+                Some(Effect::Cancel)
+            }
+            (State::Cancelling { .. }, Event::Finished(_)) => Some(Effect::Quit),
             (
                 State::Choosing(_)
                 | State::Installing { .. }
+                | State::Cancelling { .. }
                 | State::Failed { .. }
                 | State::Done { .. },
                 Event::Chose(_)
                 | Event::DistrosFound(_)
+                | Event::DistrosUnavailable(_)
                 | Event::Progressed(_)
-                | Event::Finished(_),
+                | Event::Finished(_)
+                | Event::CloseRequested,
             ) => None,
         }
     }
 
-    fn install(&mut self, plan: InstallPlan) -> Effect {
-        let effect = Effect::Install(plan.arguments());
+    fn install(&mut self, job: Job) -> Effect {
+        let effect = Effect::Install(job.plan().arguments());
         self.state = State::Installing {
-            plan,
+            job,
             line: String::new(),
         };
         effect
