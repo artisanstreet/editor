@@ -10,6 +10,7 @@ pub trait NotificationHost {
     fn run(&self, thread: &ThreadId) -> Option<&Run>;
     fn is_working(&self, thread: &ThreadId) -> bool;
     fn is_waiting(&self, thread: &ThreadId) -> bool;
+    fn is_deleted(&self, thread: &ThreadId) -> bool;
     fn setting(&self, key: &str) -> Option<&serde_json::Value>;
 }
 
@@ -22,7 +23,7 @@ struct Mark {
 #[derive(Default)]
 pub struct Notifications {
     marks: HashMap<HostId, Option<HashMap<ThreadId, Mark>>>,
-    posted: HashSet<(HostId, ThreadId)>,
+    posted: HashMap<HostId, HashSet<ThreadId>>,
 }
 
 impl Notifications {
@@ -48,10 +49,10 @@ impl Notifications {
     pub fn retain_hosts(&mut self, live: &[HostId]) -> Vec<String> {
         self.marks.retain(|id, _| live.contains(id));
         let mut gone = Vec::new();
-        self.posted.retain(|(host, thread)| {
+        self.posted.retain(|host, threads| {
             let keep = live.contains(host);
             if !keep {
-                gone.push(tag(host, thread));
+                gone.extend(threads.iter().map(|thread| tag(host, thread)));
             }
             keep
         });
@@ -60,19 +61,28 @@ impl Notifications {
 
     pub fn withdraw(&mut self, host: &impl NotificationHost) -> Vec<String> {
         let mut settled = Vec::new();
-        self.posted.retain(|(id, thread)| {
-            let wanted = id != host.id()
-                || host.is_waiting(thread)
-                || host
-                    .threads()
-                    .get(thread)
-                    .is_none_or(|info| !info.archived && info.is_unread());
-            if !wanted {
-                settled.push(tag(id, thread));
-            }
-            wanted
-        });
+        if let Some(threads) = self.posted.get_mut(host.id()) {
+            threads.retain(|thread| {
+                let wanted = wanted(host, thread);
+                if !wanted {
+                    settled.push(tag(host.id(), thread));
+                }
+                wanted
+            });
+        }
         settled
+    }
+
+    fn withdraw_thread(&mut self, host: &impl NotificationHost, thread: &ThreadId) -> Vec<String> {
+        let posted = self
+            .posted
+            .get_mut(host.id())
+            .is_some_and(|threads| !wanted(host, thread) && threads.remove(thread));
+        if posted {
+            vec![tag(host.id(), thread)]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn observe(
@@ -127,7 +137,10 @@ impl Notifications {
         } else {
             return None;
         };
-        self.posted.insert((host.id().clone(), thread.clone()));
+        self.posted
+            .entry(host.id().clone())
+            .or_default()
+            .insert(thread.clone());
         Some(Notification {
             tag: tag(host.id(), thread),
             title: info.title.clone().unwrap_or_else(|| "A thread".into()),
@@ -135,6 +148,15 @@ impl Notifications {
             actions: Vec::new(),
         })
     }
+}
+
+fn wanted(host: &impl NotificationHost, thread: &ThreadId) -> bool {
+    host.is_waiting(thread)
+        || !host.is_deleted(thread)
+            && host
+                .threads()
+                .get(thread)
+                .is_none_or(|info| !info.archived && info.is_unread())
 }
 
 fn mark(host: &impl NotificationHost, thread: &ThreadId) -> Mark {
@@ -166,7 +188,7 @@ impl Notifications {
         watching: Option<&ThreadId>,
         enabled: bool,
     ) -> NotificationChanges {
-        let withdraw = self.withdraw(host);
+        let withdraw = self.withdraw_thread(host, thread);
         let notification = self.observe(host, thread, watching);
         NotificationChanges {
             withdraw,
@@ -198,6 +220,12 @@ impl NotificationHost for crate::core::HostData {
     }
     fn is_waiting(&self, thread: &ThreadId) -> bool {
         self.is_waiting(thread)
+    }
+    fn is_deleted(&self, thread: &ThreadId) -> bool {
+        matches!(
+            self.thread_unavailable(thread),
+            Some(crate::core::ThreadUnavailable::Deleted)
+        )
     }
     fn setting(&self, key: &str) -> Option<&serde_json::Value> {
         self.setting(key)
