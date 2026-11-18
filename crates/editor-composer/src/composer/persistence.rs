@@ -1,5 +1,6 @@
+use super::attachment::PendingUpload;
 use super::draft_session::{DraftSession, Operation, SAVE_DELAY, Submission};
-use artisan_api::{ItemId, ThreadId};
+use artisan_api::{BlobHash, ItemId, ThreadId};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use serde_json::Value;
 use std::{
@@ -17,6 +18,7 @@ pub enum SessionEvent {
     Changed,
     Reloaded,
     Accepted { thread: ThreadId, item: ItemId },
+    ImageAdopted(BlobHash),
 }
 
 struct Shared {
@@ -251,6 +253,32 @@ impl DraftHandle {
                 }
             },
         )
+    }
+
+    pub fn adopt_image(&self, upload: PendingUpload) {
+        self.mutate(|shared| shared.state.adopting());
+        let session = self.clone();
+        let span = tracing::info_span!("adopt_image", host = %session.0.host);
+        runtime().spawn(
+            async move {
+                let cancelled = session.0.cancelled.clone();
+                let result = tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => Err("the draft was closed".to_owned()),
+                    result = upload.upload() => result,
+                };
+                if let Err(error) = &result {
+                    tracing::warn!(%error, "uploading an image handed over by a closed composer failed");
+                }
+                session.mutate(|shared| {
+                    if let Some(hash) = shared.state.adopted(result) {
+                        shared.emit(SessionEvent::ImageAdopted(hash));
+                    }
+                });
+                session.flush();
+            }
+            .instrument(span),
+        );
     }
 
     fn remove(&self) {

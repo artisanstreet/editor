@@ -566,6 +566,58 @@ fn process_exit_reports_a_rejected_draft_write() {
 }
 
 #[test]
+fn an_image_still_uploading_when_leaving_the_draft_is_kept() {
+    use editor_aqua::composer::attachment::{Attachments, Source};
+    use editor_aqua::composer::persistence::SessionEvent;
+
+    let (_directory, core, config, _client) = fixture();
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::default();
+        let mut lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut attachments = Attachments::new(client);
+        assert!(attachments.add(Source::Bytes(png), "pasted.png".into()));
+        let uploads = attachments.take_unfinished();
+        assert_eq!(uploads.len(), 1);
+        drop(attachments);
+        for upload in uploads {
+            lease.adopt_image(upload);
+        }
+        assert!(lease.read(|state| state.pending()));
+        let (mut socket, route, webp) = request_bytes(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        assert_eq!(&webp[8..12], b"WEBP");
+        let hash = "a".repeat(64);
+        respond(&mut socket, json!({"hash": hash, "bytes": webp.len()})).await;
+        drop(socket);
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(
+            body["body"]["images"],
+            json!([hash]),
+            "the image pasted before leaving is part of the saved draft"
+        );
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        assert!(lease.drain_events().iter().any(
+            |event| matches!(event, SessionEvent::ImageAdopted(adopted) if adopted.0 == hash)
+        ));
+    });
+}
+
+#[test]
 fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
 

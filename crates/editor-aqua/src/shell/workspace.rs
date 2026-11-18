@@ -1424,7 +1424,8 @@ impl Workspace {
                         self.composer_editor_dirty = true;
                     }
                     crate::composer::persistence::SessionEvent::Reloaded
-                    | crate::composer::persistence::SessionEvent::Changed => {
+                    | crate::composer::persistence::SessionEvent::Changed
+                    | crate::composer::persistence::SessionEvent::ImageAdopted(_) => {
                         self.composer_editor_dirty = true;
                     }
                 }

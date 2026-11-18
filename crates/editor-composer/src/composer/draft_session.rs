@@ -1,5 +1,7 @@
+use super::controller::DraftBody;
 use artisan_api::{
-    CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, SendMessage, ThreadId, WriteDraft,
+    BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, SendMessage, ThreadId,
+    WriteDraft,
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -49,6 +51,7 @@ pub struct DraftSession {
     pub conflict: bool,
     snapshot: DraftSnapshot,
     ambiguous: Option<Value>,
+    adopting: usize,
     edited: u64,
     saved: u64,
     dirty: bool,
@@ -68,6 +71,7 @@ impl DraftSession {
             conflict: false,
             snapshot: DraftSnapshot::default(),
             ambiguous: None,
+            adopting: 0,
             edited: 0,
             saved: 0,
             dirty: false,
@@ -79,11 +83,51 @@ impl DraftSession {
     }
 
     pub fn evictable(&self) -> bool {
-        !self.busy && !self.dirty && self.outgoing.is_none()
+        !self.busy && !self.dirty && self.outgoing.is_none() && self.adopting == 0
     }
 
     pub fn pending(&self) -> bool {
-        !self.removed && (self.dirty || self.outgoing.is_some())
+        !self.removed && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
+    }
+
+    pub fn adopting(&mut self) {
+        self.adopting += 1;
+    }
+
+    pub fn adopted(&mut self, result: Result<BlobHash, String>) -> Option<BlobHash> {
+        self.adopting = self
+            .adopting
+            .checked_sub(1)
+            .expect("invariant: an adopted upload was counted when it started");
+        if self.removed {
+            return None;
+        }
+        let hash = match result {
+            Ok(hash) => hash,
+            Err(error) => {
+                self.fail(format!(
+                    "Couldn't upload an image pasted before leaving this draft: {error}"
+                ));
+                return None;
+            }
+        };
+        let mut body = match &self.body {
+            Value::Null => DraftBody::default(),
+            body => match serde_json::from_value::<DraftBody>(body.clone()) {
+                Ok(body) => body,
+                Err(error) => {
+                    self.fail(format!(
+                        "Couldn't add an image pasted before leaving this draft: {error}"
+                    ));
+                    return None;
+                }
+            },
+        };
+        if !body.images.contains(&hash) {
+            body.images.push(hash.clone());
+        }
+        self.queue(serde_json::to_value(body).expect("invariant: DraftBody serializes"));
+        Some(hash)
     }
 
     pub fn removed(&self) -> bool {

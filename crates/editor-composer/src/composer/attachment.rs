@@ -49,7 +49,7 @@ use std::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -60,11 +60,11 @@ pub enum Source {
 }
 
 impl Source {
-    fn read(self) -> anyhow::Result<Vec<u8>> {
+    fn read(&self) -> anyhow::Result<Vec<u8>> {
         use anyhow::Context as _;
         use std::io::Read as _;
         let bytes = match self {
-            Self::Bytes(bytes) => bytes,
+            Self::Bytes(bytes) => bytes.clone(),
             Self::Clipboard(image) => {
                 use image::ImageEncoder as _;
                 let mut bytes = Vec::new();
@@ -77,7 +77,7 @@ impl Source {
                 bytes
             }
             Self::Path(path) => {
-                let file = std::fs::File::open(&path)
+                let file = std::fs::File::open(path)
                     .with_context(|| format!("read {}", path.display()))?;
                 anyhow::ensure!(
                     file.metadata()?.len() <= super::encode::MAX_INPUT_BYTES as u64,
@@ -107,8 +107,33 @@ pub struct Attachment {
     pub revealed: Option<Instant>,
     pub shown: bool,
     source: Option<(u64, usize)>,
+    origin: Option<Arc<Source>>,
     encoded: Option<Vec<u8>>,
     task: Option<tokio::task::AbortHandle>,
+}
+
+pub struct PendingUpload {
+    origin: Arc<Source>,
+    client: ForgeClient,
+}
+
+impl PendingUpload {
+    pub async fn upload(self) -> Result<BlobHash, String> {
+        let origin = self.origin;
+        let webp = tokio::task::spawn_blocking(move || {
+            origin
+                .read()
+                .and_then(|bytes| super::encode::to_webp(&bytes))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))?;
+        self.client
+            .put_blob(webp)
+            .await
+            .map(|blob| blob.hash)
+            .map_err(|error| format!("{error:#}"))
+    }
 }
 
 impl Drop for Attachment {
@@ -164,6 +189,7 @@ impl Attachments {
             self.notice = Some("Images must be at most 32 MiB.".into());
             return false;
         }
+        let source = Arc::new(source);
         let key = self.next;
         self.next += 1;
         self.items.push(Attachment {
@@ -176,6 +202,7 @@ impl Attachments {
             revealed: None,
             shown: false,
             source: None,
+            origin: Some(Arc::clone(&source)),
             encoded: None,
             task: None,
         });
@@ -214,6 +241,7 @@ impl Attachments {
             revealed: None,
             shown: true,
             source: None,
+            origin: None,
             encoded: None,
             task: None,
         });
@@ -245,6 +273,22 @@ impl Attachments {
     }
     pub fn clear(&mut self) {
         self.items.clear();
+    }
+    pub fn contains(&self, hash: &BlobHash) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.state.hash() == Some(hash))
+    }
+    pub fn take_unfinished(&mut self) -> Vec<PendingUpload> {
+        self.items
+            .iter_mut()
+            .filter(|item| matches!(item.state, State::Encoding | State::Uploading))
+            .filter_map(|item| item.origin.take())
+            .map(|origin| PendingUpload {
+                origin,
+                client: self.client.clone(),
+            })
+            .collect()
     }
     pub fn drain(&mut self, assets: &ImageAssets) -> bool {
         let mut changed = false;
@@ -298,10 +342,10 @@ impl Attachments {
                         item.shown = true;
                         let sender = self.delivery.sender();
                         let task = runtime().spawn(async move {
-                            static CONVERSION: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+                            static CONVERSION: OnceLock<Arc<tokio::sync::Semaphore>> =
                                 OnceLock::new();
                             let permit = CONVERSION
-                                .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
+                                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
                                 .clone()
                                 .acquire_owned()
                                 .await;
@@ -342,6 +386,7 @@ impl Attachments {
                     if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                         match result {
                             Ok(hash) => {
+                                item.origin = None;
                                 item.state.accept(&Input::Uploaded(hash));
                                 item.revealed = Some(Instant::now());
                             }

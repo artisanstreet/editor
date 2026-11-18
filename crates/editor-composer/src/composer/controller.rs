@@ -117,6 +117,12 @@ pub struct Composer {
     restore_revision: Option<u64>,
 }
 
+impl Drop for Composer {
+    fn drop(&mut self) {
+        self.hand_off_attachments();
+    }
+}
+
 impl Composer {
     pub fn new(core: &Core, sessions: &mut DraftSessions, target: ComposerTarget) -> Self {
         let session = core.host(target.host()).and_then(|host| {
@@ -177,6 +183,7 @@ impl Composer {
         {
             return;
         }
+        self.hand_off_attachments();
         if let Some(session) = &self.session {
             session.flush();
         }
@@ -221,6 +228,15 @@ impl Composer {
         if self.session.is_none() && self.host_instance.is_some() {
             self.notice = Some("There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".into());
             self.editor.borrow_mut().set_disabled(true);
+        }
+    }
+
+    fn hand_off_attachments(&mut self) {
+        let (Some(session), Some(attachments)) = (&self.session, &mut self.attachments) else {
+            return;
+        };
+        for upload in attachments.take_unfinished() {
+            session.adopt_image(upload);
         }
     }
 
@@ -698,6 +714,14 @@ impl Composer {
                     }
                     self.outbox = Outbox::Idle;
                     self.bring_back_follow_up();
+                }
+                SessionEvent::ImageAdopted(hash) => {
+                    if let Some(attachments) = &mut self.attachments
+                        && !attachments.contains(hash)
+                    {
+                        attachments.restore(hash.clone());
+                        self.save();
+                    }
                 }
                 SessionEvent::Reloaded => {
                     self.outbox = Outbox::Idle;
