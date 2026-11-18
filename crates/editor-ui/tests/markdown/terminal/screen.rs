@@ -31,3 +31,15 @@ fn a_flag_and_a_skin_tone_each_take_one_wide_column() {
     ]);
     assert_eq!(screen.plain_text(), "🇳🇴👍🏽!b");
 }
+
+#[test]
+fn erasing_from_the_second_half_of_a_wide_character_erases_all_of_it() {
+    let screen = screen_after(&["a界".as_bytes(), b"\x1b[3G\x1b[K"]);
+    assert_eq!(screen.plain_text().trim_end(), "a");
+}
+
+#[test]
+fn erasing_up_to_the_first_half_of_a_wide_character_keeps_later_columns_in_place() {
+    let screen = screen_after(&["a界b".as_bytes(), b"\x1b[2G\x1b[1K"]);
+    assert_eq!(screen.plain_text(), "   b");
+}

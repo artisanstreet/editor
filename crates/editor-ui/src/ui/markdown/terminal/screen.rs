@@ -181,9 +181,15 @@ impl Grid {
         let before = self.current_line().cells.len();
         let cells = self.current_line().cells_mut();
         match mode {
-            0 => cells.truncate(col),
+            0 => {
+                if col > 0 && cells.get(col).is_some_and(|cell| cell.ch == '\0') {
+                    cells[col - 1] = BLANK;
+                }
+                cells.truncate(col);
+            }
             1 => {
-                let end = (col + 1).min(cells.len());
+                let wide = cells.get(col + 1).is_some_and(|cell| cell.ch == '\0');
+                let end = (col + 1 + usize::from(wide)).min(cells.len());
                 cells[..end].fill(BLANK);
             }
             2 => cells.clear(),
