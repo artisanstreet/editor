@@ -27,7 +27,10 @@ fn shell(index: usize) -> ItemKind {
             watch: false,
         },
         title: None,
-        output: None,
+        output: Some(artisan_api::Output::from_text(&format!(
+            "test result: ok. {index} passed\n{}",
+            "running tests in the renderer crate\n".repeat(160)
+        ))),
         exit_code: Some(0),
         approval: None,
     }

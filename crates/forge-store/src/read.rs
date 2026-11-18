@@ -411,19 +411,47 @@ fn page_bounds(query: &ItemsQuery) -> (i64, i64) {
     (after, before)
 }
 
+const PAGE_BYTES: usize = 8 * 1024 * 1024;
+
+struct Budget {
+    items: usize,
+    bytes: usize,
+    admitted: usize,
+}
+
+impl Budget {
+    const fn new(items: usize) -> Self {
+        Self {
+            items,
+            bytes: PAGE_BYTES,
+            admitted: 0,
+        }
+    }
+
+    fn admit(&mut self, body: &str) -> bool {
+        let fits = self.items > 0 && body.len() <= self.bytes;
+        if !(fits || self.admitted == 0) {
+            return false;
+        }
+        self.items = self.items.saturating_sub(1);
+        self.bytes = self.bytes.saturating_sub(body.len());
+        self.admitted += 1;
+        true
+    }
+}
+
 fn read_page(rows: &mut rusqlite::Rows<'_>, limit: usize) -> Result<(Vec<Item>, bool)> {
-    const PAGE_BYTES: usize = 8 * 1024 * 1024;
+    read_budgeted(rows, &mut Budget::new(limit))
+}
+
+fn read_budgeted(rows: &mut rusqlite::Rows<'_>, budget: &mut Budget) -> Result<(Vec<Item>, bool)> {
     let mut items: Vec<Item> = Vec::new();
-    let mut bytes = 0usize;
     while let Some(row) = rows.next()? {
-        let body: String = row.get(0)?;
-        if items.len() == limit
-            || (!items.is_empty() && bytes.saturating_add(body.len()) > PAGE_BYTES)
-        {
+        let body = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+        if !budget.admit(body) {
             return Ok((items, true));
         }
-        bytes = bytes.saturating_add(body.len());
-        items.push(from_body(&body)?);
+        items.push(from_body(body)?);
     }
     Ok((items, false))
 }
@@ -446,43 +474,42 @@ fn work_spans(
     thread_id: &ThreadId,
     after: i64,
     before: i64,
+    rows: &[Seq],
 ) -> Result<Vec<WorkSpan>> {
     let mut statement = conn.prepare_cached(
-        "SELECT position,run_id,work,kind_type FROM items
-         WHERE thread_id=?1 AND parent_id IS NULL AND position>?2 AND position<?3
+        "SELECT position,run_id,kind_type FROM items INDEXED BY items_work_spans
+         WHERE thread_id=?1 AND parent_id IS NULL AND work=1 AND position>?2 AND position<?3
          ORDER BY position",
     )?;
-    let mut rows = statement.query(params![thread_id.as_str(), after, before])?;
+    let mut work = statement.query(params![thread_id.as_str(), after, before])?;
     let mut spans: Vec<WorkSpan> = Vec::new();
-    let mut open = false;
-    while let Some(row) = rows.next()? {
+    let mut rows = rows.iter().peekable();
+    while let Some(row) = work.next()? {
         let position: Seq = row.get(0)?;
-        let run_id: Option<String> = row.get(1)?;
-        let run_id = run_id.map(RunId::from);
-        if !row.get::<_, bool>(2)? {
-            open = false;
-            continue;
-        }
+        let run_id = row.get::<_, Option<String>>(1)?.map(RunId::from);
         let worked = matches!(
-            row.get::<_, Option<String>>(3)?.as_deref(),
+            row.get_ref(2)?
+                .as_str_or_null()
+                .map_err(rusqlite::Error::from)?,
             Some("tool" | "agent" | "plan")
         );
+        let mut broken = false;
+        while rows.next_if(|row| **row < position).is_some() {
+            broken = true;
+        }
         match spans.last_mut() {
-            Some(span) if open && span.run_id == run_id => {
+            Some(span) if !broken && span.run_id == run_id => {
                 span.last = position;
                 span.count += 1;
                 span.worked |= worked;
             }
-            _ => {
-                spans.push(WorkSpan {
-                    run_id,
-                    first: position,
-                    last: position,
-                    count: 1,
-                    worked,
-                });
-                open = true;
-            }
+            _ => spans.push(WorkSpan {
+                run_id,
+                first: position,
+                last: position,
+                count: 1,
+                worked,
+            }),
         }
     }
     Ok(spans)
@@ -504,7 +531,8 @@ pub fn transcript_page(
          AND position>?2 AND position<?3 ORDER BY position {order}"
     ))?;
     let mut rows = statement.query(params![thread_id.as_str(), after, before])?;
-    let (mut items, more) = read_page(&mut rows, limit)?;
+    let mut budget = Budget::new(limit);
+    let (mut items, more) = read_budgeted(&mut rows, &mut budget)?;
     drop(rows);
     drop(statement);
     if !forward {
@@ -519,8 +547,10 @@ pub fn transcript_page(
     } else {
         (far(items.first()).unwrap_or(after), before)
     };
-    let mut work = work_spans(conn, thread_id, from, to)?;
+    let positions: Vec<Seq> = items.iter().map(|item| item.position).collect();
+    let mut work = work_spans(conn, thread_id, from, to, &positions)?;
     let runs = page_runs(conn, &items, &work)?;
+    budget.items = DEFAULT_PAGE;
     for run in runs.iter().filter(|run| run.status().is_live()) {
         for span in work
             .iter_mut()
@@ -531,7 +561,7 @@ pub fn transcript_page(
                  AND position>=?2 AND position<=?3 ORDER BY position DESC",
             )?;
             let mut rows = statement.query(params![thread_id.as_str(), span.first, span.last])?;
-            let (newest, rest) = read_page(&mut rows, DEFAULT_PAGE)?;
+            let (newest, rest) = read_budgeted(&mut rows, &mut budget)?;
             drop(rows);
             drop(statement);
             let shipped = u32::try_from(newest.len()).unwrap_or(u32::MAX);
@@ -543,6 +573,8 @@ pub fn transcript_page(
                     |row| row.get(0),
                 )?;
                 span.count = span.count.saturating_sub(shipped);
+            } else if rest {
+                continue;
             } else {
                 span.count = 0;
             }

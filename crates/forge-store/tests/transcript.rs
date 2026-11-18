@@ -472,3 +472,52 @@ async fn a_thread_reopened_through_another_forge_generation_shows_its_writes() {
         "the serving Forge shows the reply another generation wrote"
     );
 }
+
+#[tokio::test]
+#[expect(clippy::unwrap_used, reason = "a failure fails the test")]
+async fn live_work_split_by_prompts_shares_one_page_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let thread = thread(&store).await;
+    let live = RunId::from("live");
+    run(&store, &thread, &live, RunStatus::Running).await;
+    for span in 0..4 {
+        put(
+            &store,
+            &thread,
+            &live,
+            Status::Done,
+            user(&format!("prompt {span}"), false),
+        )
+        .await;
+        for call in 0..150 {
+            put(
+                &store,
+                &thread,
+                &live,
+                Status::Done,
+                shell(&format!("step {span}.{call}")),
+            )
+            .await;
+        }
+    }
+    let page = store
+        .transcript_rows(
+            &thread,
+            ItemsQuery {
+                before: None,
+                after: None,
+                limit: Some(50),
+            },
+        )
+        .await
+        .unwrap();
+    let shipped = page
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Tool { .. }))
+        .count();
+    let folded: u32 = page.work.iter().map(|span| span.count).sum();
+    assert!(shipped <= 100, "shipped {shipped} work items in one page");
+    assert_eq!(shipped + folded as usize, 600, "{:?}", page.work);
+}

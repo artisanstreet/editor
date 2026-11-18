@@ -363,6 +363,9 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
          CREATE INDEX IF NOT EXISTS removed_threads_seq ON removed_threads(seq);",
     )],
     &[Step::Sql(include_str!("sql/coordination/schema.sql"))],
+    &[Step::Sql(
+        "CREATE INDEX items_work_spans ON items(thread_id,position,run_id,kind_type,parent_id,work) WHERE parent_id IS NULL AND work=1;",
+    )],
     &[
         Step::Sql("ALTER TABLE items ADD COLUMN outline TEXT;"),
         Step::Rust(backfill_outline),

@@ -191,6 +191,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
     .unwrap();
     conn.execute_batch(
         "DROP TRIGGER item_content_owner_delete;
+         DROP INDEX items_work_spans;
          DROP INDEX items_outline;
          ALTER TABLE items DROP COLUMN outline;
          DROP INDEX items_transcript_rows;
