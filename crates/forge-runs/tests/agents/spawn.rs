@@ -9,15 +9,15 @@ async fn a_spawn_whose_prompt_is_refused_leaves_no_working_agent_behind() {
         .hub
         .spawn_agent(
             &fixture.thread_id,
-            agents::SpawnAgent {
+            SpawnAgent {
                 task: "Read everything".to_owned(),
                 prompt: oversized,
-                ..agents::SpawnAgent::default()
+                ..SpawnAgent::default()
             },
         )
         .await;
 
-    assert!(spawned.is_err());
+    spawned.unwrap_err();
     assert!(
         fixture
             .hub

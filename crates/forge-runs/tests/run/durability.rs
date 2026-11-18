@@ -95,7 +95,7 @@ async fn a_continue_whose_run_could_not_be_saved_is_still_waiting() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Notify::new());
     let script: Script = Arc::new({
         let release = Arc::clone(&release);
         move |turn, io| {

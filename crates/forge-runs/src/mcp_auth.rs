@@ -1,11 +1,14 @@
+use crate::error::ErrorClass;
 use crate::mcp_reach::Endpoint;
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
 use forge_engines::mcp_oauth::{
     self, Client, Discovery, Pkce, Probe, ProbeError, RegistrationError, Revocation, TokenError,
     Tokens,
 };
-use forge_store::McpSecret;
-use forge_store::Store;
+use forge_store::{
+    McpSecret, ReadSecretError, ReadSettingError, SetMcpSecretError, SetSecretError,
+    SetSettingError, Store,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
@@ -13,8 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const FLOW_LASTS: Duration = Duration::from_mins(10);
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Default)]
 struct Flows {
@@ -53,32 +54,144 @@ struct Saved {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum ReadMcpServersError {
+    #[error("read the MCP server list")]
+    Read(#[source] ReadSettingError),
+    #[error("decode the MCP server list")]
+    Decode(#[source] serde_json::Error),
+}
+
+pub(crate) async fn read_mcp_servers(store: &Store) -> Result<Vec<McpServer>, ReadMcpServersError> {
+    store
+        .setting("mcp_servers")
+        .await
+        .map_err(ReadMcpServersError::Read)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ReadMcpServersError::Decode)
+        .map(Option::unwrap_or_default)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum McpAuthError {
+    #[error("read Forge's {MCP_AUTH_KEY} setting")]
+    Read(#[source] ReadSettingError),
+    #[error("decode Forge's {MCP_AUTH_KEY} setting")]
+    Decode(#[source] serde_json::Error),
+}
+
+impl McpAuthError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Read(_) | Self::Decode(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetAuthError {
+    #[error("read the MCP sign-in states")]
+    Read(#[source] McpAuthError),
+    #[error("encode the MCP sign-in states")]
+    Encode(#[source] serde_json::Error),
+    #[error("save the MCP sign-in states")]
+    Save(#[source] SetSettingError),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum McpStoreError {
-    #[error("reading the MCP server list")]
-    Servers(#[source] BoxError),
-    #[error("{step} for the MCP sign-in states")]
-    Statuses {
-        step: &'static str,
+    #[error("read the MCP servers")]
+    Servers(#[source] ReadMcpServersError),
+    #[error("read the MCP sign-in states")]
+    ReadStatuses(#[source] McpAuthError),
+    #[error("encode the MCP sign-in states")]
+    EncodeStatuses(#[source] serde_json::Error),
+    #[error("record the MCP sign-in states")]
+    RecordStatuses(#[source] SetSettingError),
+    #[error("record the sign-in state of MCP server {server}")]
+    RecordAuth {
+        server: String,
         #[source]
-        source: BoxError,
+        source: SetAuthError,
     },
     #[error("{step} for MCP server {server}")]
-    Credentials {
+    ReadSecret {
         server: String,
         step: &'static str,
         #[source]
-        source: BoxError,
+        source: ReadSecretError,
+    },
+    #[error("{step} for MCP server {server}")]
+    SaveSecret {
+        server: String,
+        step: &'static str,
+        #[source]
+        source: SetMcpSecretError,
+    },
+    #[error("{step} for MCP server {server}")]
+    ForgetSecret {
+        server: String,
+        step: &'static str,
+        #[source]
+        source: SetSecretError,
+    },
+    #[error("{step} for MCP server {server}")]
+    Encoding {
+        server: String,
+        step: &'static str,
+        #[source]
+        source: serde_json::Error,
     },
 }
 
-fn store_error<'a, E: Into<BoxError>>(
+impl McpStoreError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Servers(_)
+            | Self::ReadStatuses(_)
+            | Self::EncodeStatuses(_)
+            | Self::RecordStatuses(_)
+            | Self::RecordAuth { .. }
+            | Self::ReadSecret { .. }
+            | Self::SaveSecret { .. }
+            | Self::ForgetSecret { .. }
+            | Self::Encoding { .. } => ErrorClass::Internal,
+        }
+    }
+}
+
+fn read_secret_error<'a>(
     server: &'a str,
     step: &'static str,
-) -> impl FnOnce(E) -> McpStoreError + 'a {
-    move |source| McpStoreError::Credentials {
+) -> impl FnOnce(ReadSecretError) -> McpStoreError + 'a {
+    move |source| McpStoreError::ReadSecret {
         server: server.to_owned(),
         step,
-        source: source.into(),
+        source,
+    }
+}
+
+fn save_secret_error<'a>(
+    server: &'a str,
+    step: &'static str,
+) -> impl FnOnce(SetMcpSecretError) -> McpStoreError + 'a {
+    move |source| McpStoreError::SaveSecret {
+        server: server.to_owned(),
+        step,
+        source,
+    }
+}
+
+fn forget_secret_error<'a>(
+    server: &'a str,
+    step: &'static str,
+) -> impl FnOnce(SetSecretError) -> McpStoreError + 'a {
+    move |source| McpStoreError::ForgetSecret {
+        server: server.to_owned(),
+        step,
+        source,
     }
 }
 
@@ -86,10 +199,10 @@ fn encoding_error<'a>(
     server: &'a str,
     step: &'static str,
 ) -> impl FnOnce(serde_json::Error) -> McpStoreError + 'a {
-    move |source| McpStoreError::Credentials {
+    move |source| McpStoreError::Encoding {
         server: server.to_owned(),
         step,
-        source: Box::new(source),
+        source,
     }
 }
 
@@ -187,14 +300,9 @@ impl Mcp {
     }
 
     async fn servers(&self) -> Result<Vec<McpServer>, McpStoreError> {
-        self.store()
-            .setting("mcp_servers")
+        read_mcp_servers(self.store())
             .await
-            .map_err(|source| McpStoreError::Servers(source.into()))?
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|source| McpStoreError::Servers(Box::new(source)))
-            .map(Option::unwrap_or_default)
+            .map_err(McpStoreError::Servers)
     }
 
     async fn server_named(&self, name: &str) -> Result<(McpServer, String), McpSignInStartError> {
@@ -321,7 +429,7 @@ impl Mcp {
             .store()
             .secret(&McpSecret::Client.key(name))
             .await
-            .map_err(store_error(name, "reading Artisan's registration"))?;
+            .map_err(read_secret_error(name, "reading Artisan's registration"))?;
         let reusable = match cached.map(|text| serde_json::from_str::<Client>(&text)) {
             Some(Ok(client)) => {
                 Some(client).filter(|client| client.serves(discovery, redirect_uri))
@@ -351,7 +459,7 @@ impl Mcp {
                     .map_err(encoding_error(name, "encoding Artisan's registration"))?,
             )
             .await
-            .map_err(store_error(name, "saving Artisan's registration"))?;
+            .map_err(save_secret_error(name, "saving Artisan's registration"))?;
         if !kept {
             return Err(McpSignInStartError::Removed {
                 server: name.to_owned(),
@@ -430,7 +538,7 @@ impl Mcp {
         self.store()
             .set_secret(&McpSecret::Tokens.key(name), None)
             .await
-            .map_err(store_error(name, "forgetting the tokens"))?;
+            .map_err(forget_secret_error(name, "forgetting the tokens"))?;
         self.record_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await
     }
@@ -445,7 +553,7 @@ impl Mcp {
                     .map_err(encoding_error(name, "encoding the tokens"))?,
             )
             .await
-            .map_err(store_error(name, "saving the tokens"))
+            .map_err(save_secret_error(name, "saving the tokens"))
     }
 
     pub async fn check_auth(&self) {
@@ -473,13 +581,7 @@ impl Mcp {
         }
         let _writes = self.writes.lock().await;
         let servers = self.servers().await?;
-        let recorded = self
-            .auth()
-            .await
-            .map_err(|source| McpStoreError::Statuses {
-                step: "reading",
-                source: source.into(),
-            })?;
+        let recorded = self.auth().await.map_err(McpStoreError::ReadStatuses)?;
         let mut statuses = recorded.clone();
         statuses.retain(|name, _| servers.iter().any(|server| &server.name == name));
         for server in &servers {
@@ -517,16 +619,10 @@ impl Mcp {
         self.store()
             .set_setting(
                 MCP_AUTH_KEY.to_owned(),
-                serde_json::to_value(&statuses).map_err(|source| McpStoreError::Statuses {
-                    step: "encoding",
-                    source: Box::new(source),
-                })?,
+                serde_json::to_value(&statuses).map_err(McpStoreError::EncodeStatuses)?,
             )
             .await
-            .map_err(|source| McpStoreError::Statuses {
-                step: "recording",
-                source: source.into(),
-            })
+            .map_err(McpStoreError::RecordStatuses)
     }
 
     async fn signed_in(&self, name: &str, url: &str) -> bool {
@@ -539,14 +635,15 @@ impl Mcp {
         }
     }
 
-    pub async fn auth(&self) -> anyhow::Result<BTreeMap<String, McpAuthStatus>> {
-        Ok(self
-            .store()
+    pub async fn auth(&self) -> Result<BTreeMap<String, McpAuthStatus>, McpAuthError> {
+        self.store()
             .setting(MCP_AUTH_KEY)
-            .await?
+            .await
+            .map_err(McpAuthError::Read)?
             .map(serde_json::from_value)
-            .transpose()?
-            .unwrap_or_default())
+            .transpose()
+            .map_err(McpAuthError::Decode)
+            .map(Option::unwrap_or_default)
     }
 
     async fn record_auth(
@@ -556,20 +653,30 @@ impl Mcp {
     ) -> Result<(), McpStoreError> {
         self.set_auth(name, status)
             .await
-            .map_err(store_error(name, "recording the sign-in state"))
+            .map_err(|source| McpStoreError::RecordAuth {
+                server: name.to_owned(),
+                source,
+            })
     }
 
-    async fn set_auth(&self, name: &str, status: Option<McpAuthStatus>) -> anyhow::Result<()> {
+    async fn set_auth(
+        &self,
+        name: &str,
+        status: Option<McpAuthStatus>,
+    ) -> Result<(), SetAuthError> {
         let _guard = self.writes.lock().await;
-        let mut statuses = self.auth().await?;
+        let mut statuses = self.auth().await.map_err(SetAuthError::Read)?;
         match status {
             Some(status) => statuses.insert(name.to_owned(), status),
             None => statuses.remove(name),
         };
         self.store()
-            .set_setting(MCP_AUTH_KEY.to_owned(), serde_json::to_value(&statuses)?)
+            .set_setting(
+                MCP_AUTH_KEY.to_owned(),
+                serde_json::to_value(&statuses).map_err(SetAuthError::Encode)?,
+            )
             .await
-            .map_err(Into::into)
+            .map_err(SetAuthError::Save)
     }
 
     async fn saved(&self, name: &str, url: &str) -> Result<Option<Saved>, McpStoreError> {
@@ -577,7 +684,7 @@ impl Mcp {
             .store()
             .secret(&McpSecret::Tokens.key(name))
             .await
-            .map_err(store_error(name, "reading the tokens"))?
+            .map_err(read_secret_error(name, "reading the tokens"))?
         else {
             return Ok(None);
         };
@@ -655,7 +762,10 @@ impl Mcp {
                     self.store()
                         .set_secret(&McpSecret::Client.key(name), None)
                         .await
-                        .map_err(store_error(name, "forgetting Artisan's registration"))?;
+                        .map_err(forget_secret_error(
+                            name,
+                            "forgetting Artisan's registration",
+                        ))?;
                 }
                 self.forget_tokens(name).await?;
                 None

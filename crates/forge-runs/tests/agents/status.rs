@@ -71,7 +71,7 @@ async fn an_agent_whose_run_failed_before_taking_its_prompt_reports_failed() {
         .await
         .unwrap();
 
-    assert_eq!(status.state, agents::AgentState::Failed);
+    assert_eq!(status.state, AgentState::Failed);
     assert_eq!(
         status.error.as_deref(),
         Some("the working directory is gone")

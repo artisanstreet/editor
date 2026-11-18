@@ -1,25 +1,112 @@
-//! Portable handoffs: OpenCode's structured summary plus a bounded, role-labelled
-//! recent transcript. Summarize a disposable fork first to retain the provider's
-//! cached prefix. Never replace a failed summary with a claim of complete history.
-
 use crate::Hub;
-use anyhow::{Context, Result};
 use artisan_api::{
-    EngineConfig, EngineId, Item, ItemId, ItemKind, ItemsQuery, Run, Status, Thread,
+    EngineConfig, EngineId, Item, ItemId, ItemKind, ItemsQuery, Run, Status, Thread, ThreadId,
 };
 use forge_content::ItemTexts as _;
-use forge_engines::{COMPACTION_NUDGE, UserInput, compaction_prompt, is_compaction_summary};
-use forge_store::NewItem;
+use forge_engines::{
+    COMPACTION_NUDGE, SideQueryError, UserInput, compaction_prompt, is_compaction_summary,
+};
+use forge_store::{
+    LatestRunError, NewItem, ReadThreadError, ResolveCollectionsError, ResolveTextError,
+    TranscriptPageError, UpsertItemError,
+};
 use std::collections::HashSet;
+use std::convert::Infallible;
 use tokio_util::sync::CancellationToken;
 
 const PAGE: u32 = 500;
-// OpenCode keeps ~15k tokens of recent context, truncating tool results at 1250 chars.
 const TAIL_BYTES: usize = 60_000;
 const HISTORY_BYTES: usize = 2_000_000;
 const ENTRY_BYTES: usize = 32_000;
 const SUMMARY_BYTES: usize = 128_000;
-pub const COMPACTION_KEY: &str = "forge:handoff";
+pub(crate) const COMPACTION_KEY: &str = "forge:handoff";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ContextError {
+    #[error("read the transcript of thread {thread}")]
+    Transcript {
+        thread: ThreadId,
+        #[source]
+        source: TranscriptPageError,
+    },
+    #[error("resolve the collections of item {item}")]
+    Collections {
+        item: ItemId,
+        #[source]
+        source: ResolveCollectionsError,
+    },
+    #[error("resolve a text of item {item}")]
+    Text {
+        item: ItemId,
+        #[source]
+        source: ResolveTextError,
+    },
+    #[error("serialize item {item} for the handoff")]
+    Encode {
+        item: ItemId,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read parent thread {parent} of thread {thread}")]
+    ReadParent {
+        thread: ThreadId,
+        parent: ThreadId,
+        #[source]
+        source: ReadThreadError,
+    },
+    #[error("parent thread {parent} of thread {thread} is gone")]
+    NoParent { thread: ThreadId, parent: ThreadId },
+    #[error("read the latest run of parent thread {parent}")]
+    ParentRun {
+        parent: ThreadId,
+        #[source]
+        source: LatestRunError,
+    },
+    #[error("store the handoff's compaction item {item} as {status:?}")]
+    StoreCompaction {
+        item: ItemId,
+        status: Status,
+        #[source]
+        source: UpsertItemError,
+    },
+    #[error("prepare {engine} to summarize thread {thread}")]
+    Prepare {
+        thread: ThreadId,
+        engine: EngineId,
+        #[source]
+        source: crate::run::PrepareError,
+    },
+    #[error("the handoff of thread {thread} was cancelled")]
+    Cancelled { thread: ThreadId },
+    #[error("summarize the handoff of thread {thread} on {engine}")]
+    Summarize {
+        thread: ThreadId,
+        engine: EngineId,
+        #[source]
+        source: SideQueryError,
+    },
+    #[error(
+        "{engine}'s summary of thread {thread} did not match the required template or size limit"
+    )]
+    Template { thread: ThreadId, engine: EngineId },
+    #[error("{} could not summarize the conversation of thread {thread}", engine.display_name())]
+    Exhausted {
+        thread: ThreadId,
+        engine: EngineId,
+        #[source]
+        last: AttemptFailure,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AttemptFailure {
+    #[error("native compaction returned no portable summary")]
+    NoPortableSummary,
+    #[error("compaction summary did not match the required template or size limit")]
+    Template,
+    #[error("the summary request failed")]
+    Query(#[source] SideQueryError),
+}
 
 #[derive(Debug)]
 struct Entry {
@@ -37,13 +124,13 @@ struct Source {
     session: Option<Run>,
 }
 
-pub async fn context(
+pub(crate) async fn context(
     hub: &Hub,
     thread: &Thread,
     previous: Option<Run>,
     pending: &HashSet<ItemId>,
     compaction: &mut crate::run::Compaction<'_>,
-) -> Result<Option<String>> {
+) -> Result<Option<String>, ContextError> {
     let mut source = Source {
         thread: thread.clone(),
         session: previous,
@@ -57,9 +144,22 @@ pub async fn context(
             thread: hub
                 .store()
                 .thread(parent)
-                .await?
-                .context("no parent thread")?,
-            session: hub.store().latest_run(parent).await?,
+                .await
+                .map_err(|source| ContextError::ReadParent {
+                    thread: thread.id.clone(),
+                    parent: parent.clone(),
+                    source,
+                })?
+                .ok_or_else(|| ContextError::NoParent {
+                    thread: thread.id.clone(),
+                    parent: parent.clone(),
+                })?,
+            session: hub.store().latest_run(parent).await.map_err(|source| {
+                ContextError::ParentRun {
+                    parent: parent.clone(),
+                    source,
+                }
+            })?,
         };
         transcript = read(hub, &source.thread, &HashSet::new()).await?;
     }
@@ -79,9 +179,11 @@ pub async fn context(
     Ok(Some(render(&summary, &recent(&transcript.entries))))
 }
 
-/// Only accepted input and settled output; subagent results live on their
-/// root Agent item. Commentary and tool calls stay in their actual roles.
-async fn read(hub: &Hub, thread: &Thread, pending: &HashSet<ItemId>) -> Result<Transcript> {
+async fn read(
+    hub: &Hub,
+    thread: &Thread,
+    pending: &HashSet<ItemId>,
+) -> Result<Transcript, ContextError> {
     let store = hub.store();
     let mut entries = Vec::new();
     let mut bytes = 0;
@@ -98,7 +200,11 @@ async fn read(hub: &Hub, thread: &Thread, pending: &HashSet<ItemId>) -> Result<T
                     limit: Some(PAGE),
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| ContextError::Transcript {
+                thread: thread.id.clone(),
+                source,
+            })?;
         for item in page.items.iter().rev() {
             if pending.contains(&item.id)
                 || !item.status.is_terminal()
@@ -125,26 +231,50 @@ async fn read(hub: &Hub, thread: &Thread, pending: &HashSet<ItemId>) -> Result<T
     Ok(Transcript { entries, omitted })
 }
 
-async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>> {
+async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>, ContextError> {
     let store = hub.store();
     let status = item.status;
-    let mut kind = store.resolve_item_collections(item).await?.kind;
-    // Resolve blobs before serializing tool arguments, file changes, plans and
-    // agent results; opaque content references aren't useful to the next model.
+    let id = item.id.clone();
+    let mut kind = store
+        .resolve_item_collections(item)
+        .await
+        .map_err(|source| ContextError::Collections {
+            item: id.clone(),
+            source,
+        })?
+        .kind;
     let mut texts = Vec::new();
-    kind.try_visit_texts(|text| -> Result<()> {
+    let Ok(()) = kind.try_visit_texts(|text| {
         texts.push(text.clone());
-        Ok(())
-    })?;
+        Ok::<(), Infallible>(())
+    });
     let mut resolved = Vec::with_capacity(texts.len());
     for text in texts {
-        resolved.push(bounded(&store.resolve_text(&text).await?, ENTRY_BYTES));
+        let text = store
+            .resolve_text(&text)
+            .await
+            .map_err(|source| ContextError::Text {
+                item: id.clone(),
+                source,
+            })?;
+        resolved.push(bounded(&text, ENTRY_BYTES));
     }
     let mut resolved = resolved.into_iter();
-    kind.try_visit_texts_mut(|text| -> Result<()> {
-        *text = resolved.next().context("missing handoff text")?.into();
-        Ok(())
-    })?;
+    let Ok(()) = kind.try_visit_texts_mut(|text| {
+        *text = resolved
+            .next()
+            .unwrap_or_else(|| {
+                unreachable!("invariant: item {id} visits the texts it was resolved from")
+            })
+            .into();
+        Ok::<(), Infallible>(())
+    });
+    let encode = |kind: &ItemKind| {
+        serde_json::to_string(kind).map_err(|source| ContextError::Encode {
+            item: id.clone(),
+            source,
+        })
+    };
     let (user, label, text) = match &mut kind {
         ItemKind::UserMessage { text, .. } => {
             (true, "User", text.inline().unwrap_or_default().to_owned())
@@ -164,23 +294,11 @@ async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>> {
                     shortened.into()
                 };
             }
-            (
-                false,
-                "Assistant tool call and result",
-                serde_json::to_string(&kind)?,
-            )
+            (false, "Assistant tool call and result", encode(&kind)?)
         }
-        ItemKind::Agent { .. } => (
-            false,
-            "Assistant subagent and result",
-            serde_json::to_string(&kind)?,
-        ),
-        ItemKind::Question { .. } => (
-            false,
-            "Question and user answer",
-            serde_json::to_string(&kind)?,
-        ),
-        ItemKind::Plan { .. } => (false, "Assistant plan", serde_json::to_string(&kind)?),
+        ItemKind::Agent { .. } => (false, "Assistant subagent and result", encode(&kind)?),
+        ItemKind::Question { .. } => (false, "Question and user answer", encode(&kind)?),
+        ItemKind::Plan { .. } => (false, "Assistant plan", encode(&kind)?),
         ItemKind::Compaction {
             summary: Some(summary),
             ..
@@ -194,7 +312,7 @@ async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>> {
             "Error",
             message.inline().unwrap_or_default().to_owned(),
         ),
-        ItemKind::Image { .. } => (false, "Image", serde_json::to_string(&kind)?),
+        ItemKind::Image { .. } => (false, "Image", encode(&kind)?),
         ItemKind::Notice { .. } | ItemKind::Compaction { summary: None, .. } => return Ok(None),
     };
     if text.trim().is_empty() {
@@ -290,7 +408,7 @@ async fn summarize(
     transcript: &Transcript,
     native_branch_allowed: bool,
     cancel: CancellationToken,
-) -> Result<String> {
+) -> Result<String, ContextError> {
     let engine = source
         .session
         .as_ref()
@@ -324,16 +442,21 @@ async fn summarize(
             .as_ref()
             .and_then(|run| run.session_id.clone())
             .filter(|id| !id.is_empty())
-            // A fork may race work still running in its parent conversation.
-            // Never send/stop a native completion on another thread's session.
-            .filter(|id| native_branch_allowed || !id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)),
+            .filter(|id| {
+                native_branch_allowed || !id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)
+            }),
         UserInput {
             text: compaction_prompt(),
             ..UserInput::default()
         },
         lease.as_ref().map(|lease| lease.path().to_path_buf()),
     )
-    .await?;
+    .await
+    .map_err(|source| ContextError::Prepare {
+        thread: thread.id.clone(),
+        engine,
+        source,
+    })?;
     if engine == EngineId::Claude {
         let transport = source
             .session
@@ -361,10 +484,7 @@ async fn summarize(
         }
     }
     let harness = (hub.inner.harness_for)(engine);
-    let mut error = String::new();
-    // First use the source's full native history. If it no longer exists or
-    // doesn't fit the selected model, use a bounded canonical transcript in
-    // a disposable fresh session. Shrinking requests never touch the source.
+    let mut last: Option<AttemptFailure> = None;
     let window = hub
         .engines()
         .status(engine)
@@ -377,7 +497,11 @@ async fn summarize(
         .unwrap_or(HISTORY_BYTES)
         .clamp(16_000, HISTORY_BYTES);
     for share in [None, Some(100), Some(70), Some(50), Some(35)] {
-        anyhow::ensure!(!cancel.is_cancelled(), "compaction cancelled");
+        if cancel.is_cancelled() {
+            return Err(ContextError::Cancelled {
+                thread: thread.id.clone(),
+            });
+        }
         if let Some(share) = share {
             turn.session_id = None;
             turn.input.text = format!(
@@ -398,35 +522,45 @@ async fn summarize(
                         return Ok(reply.text.trim().to_owned());
                     }
                     if reply.text.trim().is_empty() && turn.session_id.is_some() {
-                        "native compaction returned no portable summary".clone_into(&mut error);
+                        last = Some(AttemptFailure::NoPortableSummary);
                         break;
                     }
-                    "compaction summary did not match the required template or size limit"
-                        .clone_into(&mut error);
+                    last = Some(AttemptFailure::Template);
                     if retry == 0 {
                         turn.input.text.push_str("\n\n");
                         turn.input.text.push_str(COMPACTION_NUDGE);
                     }
                 }
                 Err(failure) => {
-                    error = format!("{failure:#}");
-                    // After the first canonical fallback, only an overflow can
-                    // justify paying for another progressively smaller request.
-                    if share.is_some() && !context_overflow(&error) {
-                        return Err(failure).context("summarize the handoff");
+                    if share.is_some() && !context_overflow(&diagnostics::chain(&failure)) {
+                        return Err(ContextError::Summarize {
+                            thread: thread.id.clone(),
+                            engine,
+                            source: failure,
+                        });
                     }
+                    last = Some(AttemptFailure::Query(failure));
                     break;
                 }
             }
         }
-        if error == "compaction summary did not match the required template or size limit" {
-            anyhow::bail!("{error}");
+        if matches!(last, Some(AttemptFailure::Template)) {
+            return Err(ContextError::Template {
+                thread: thread.id.clone(),
+                engine,
+            });
         }
     }
-    anyhow::bail!(
-        "{} could not summarize the conversation: {error}",
-        engine.display_name()
-    )
+    Err(ContextError::Exhausted {
+        thread: thread.id.clone(),
+        engine,
+        last: last.unwrap_or_else(|| {
+            unreachable!(
+                "invariant: the canonical attempts for thread {} always run",
+                thread.id
+            )
+        }),
+    })
 }
 
 fn context_overflow(error: &str) -> bool {
@@ -462,19 +596,19 @@ fn bounded(text: &str, budget: usize) -> String {
 }
 
 impl crate::run::Compaction<'_> {
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<(), ContextError> {
         self.store(Status::Running, None).await?;
         self.persisted();
         Ok(())
     }
 
-    async fn finish(&mut self, summary: &str) -> Result<()> {
+    async fn finish(&mut self, summary: &str) -> Result<(), ContextError> {
         self.store(Status::Done, Some(summary)).await?;
         self.settled();
         Ok(())
     }
 
-    async fn store(&self, status: Status, summary: Option<&str>) -> Result<()> {
+    async fn store(&self, status: Status, summary: Option<&str>) -> Result<(), ContextError> {
         self.hub
             .store()
             .upsert_item(NewItem {
@@ -492,7 +626,11 @@ impl crate::run::Compaction<'_> {
                 },
             })
             .await
-            .context("store the handoff's compaction item")?;
+            .map_err(|source| ContextError::StoreCompaction {
+                item: self.id.clone(),
+                status,
+                source,
+            })?;
         Ok(())
     }
 }

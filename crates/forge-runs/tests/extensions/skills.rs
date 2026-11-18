@@ -27,10 +27,14 @@ async fn a_damaged_disabled_skills_setting_keeps_skills_out_instead_of_enabling_
         .await
         .expect_err("a damaged setting is reported, not read as no skills turned off");
     assert!(
-        refused.chain().any(|cause| cause
-            .downcast_ref::<extensions::DisabledSkillsError>()
-            .is_some()),
-        "the failure names the setting: {refused:#}"
+        matches!(
+            refused,
+            ReconcileSkillsError::Customisation(
+                extensions::SkillCustomisationError::DisabledSkills(_)
+            )
+        ),
+        "the failure names the setting: {}",
+        diagnostics::chain(&refused)
     );
     assert_eq!(
         claude_skills(hub),

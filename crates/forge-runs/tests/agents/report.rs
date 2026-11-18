@@ -45,7 +45,7 @@ async fn background_agent(fixture: &Fixture, parent: &artisan_api::Thread) -> (I
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_result_that_could_not_be_delivered_is_delivered_after_recovery() {
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Notify::new());
     let fixture = fixture(Arc::new({
         let release = Arc::clone(&release);
         move |turn, io| {

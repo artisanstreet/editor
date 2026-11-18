@@ -26,7 +26,7 @@ const UNKNOWN_RESET: Duration = FIRST_RETRY.saturating_mul(60);
 const RESET_SLACK: Duration = FIRST_RETRY.saturating_mul(2);
 
 /// When the failed `run` should be picked up again, if it should.
-pub async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
+pub(crate) async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
     let now = artisan_api::now();
     match outcome.retry()? {
         Retry::Overloaded => {
@@ -39,7 +39,7 @@ pub async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
                 .continuation_chain(run.thread_id.clone(), Continuation::Overloaded, 16)
                 .await
                 .inspect_err(|error| {
-                    tracing::warn!(thread = %run.thread_id, "count overload retries: {error:#}");
+                    tracing::warn!(thread = %run.thread_id, "count overload retries: {}", diagnostics::chain(&error));
                 })
                 .unwrap_or(0);
             Some(Park {
@@ -99,9 +99,9 @@ fn millis(duration: Duration) -> Timestamp {
 }
 
 /// Waits until the earliest parked turn is due; forever when none is.
-pub async fn until_next(hub: &Hub) -> impl Future<Output = ()> + use<> {
+pub(crate) async fn until_next(hub: &Hub) -> impl Future<Output = ()> + use<> {
     let next = hub.store().next_parked().await.unwrap_or_else(|error| {
-        tracing::error!("read the next parked turn: {error:#}");
+        tracing::error!("read the next parked turn: {}", diagnostics::chain(&error));
         None
     });
     async move {

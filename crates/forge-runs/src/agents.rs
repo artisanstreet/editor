@@ -8,16 +8,14 @@
 //! waiting for the user while it asks something, and settled with the
 //! child's last reply as its result once it stops.
 
-use crate::Hub;
-use crate::Refused;
-use anyhow::{Context, Result};
+use crate::error::{self, ErrorClass, Refused};
+use crate::{CancelError, Hub, InputError, SendError};
 use artisan_api::{
     CreateThread, EngineConfig, EngineId, InstallState, Item, ItemId, ItemKind, Permissions,
     RunStatus, SendMessage, SignInState, Status, Thread, ThreadId,
 };
 use forge_store::NewItem;
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
 use std::time::Duration;
 
 /// How deep agents may start agents: a thread's agent is depth 1.
@@ -106,14 +104,13 @@ fn resolve(
     parent: &EngineConfig,
     request: &SpawnAgent,
     status: &artisan_api::EngineStatus,
-) -> Result<(EngineConfig, Vec<String>)> {
+) -> Result<(EngineConfig, Vec<String>), Refused> {
     let engine = status.engine;
     let name = engine.display_name();
     if matches!(status.install, InstallState::Absent) {
         return Err(Refused(format!(
             "{name} isn't installed. Install it in Settings → Engines, or spawn the agent on another harness."
-        ))
-        .into());
+        )));
     }
     if matches!(
         status.sign_in,
@@ -121,8 +118,7 @@ fn resolve(
     ) {
         return Err(Refused(format!(
             "{name} isn't signed in. Ask the user to sign in to {name} in Settings → Engines, or spawn the agent on another harness."
-        ))
-        .into());
+        )));
     }
     let mut warnings = Vec::new();
     let same = engine == parent.engine;
@@ -267,27 +263,284 @@ fn sender(thread: &Thread) -> artisan_api::Sender {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnAgentError {
+    #[error("start an agent for thread {parent}")]
+    Refused {
+        parent: ThreadId,
+        #[source]
+        refused: Refused,
+    },
+    #[error("thread {parent} does not exist")]
+    ParentNotFound { parent: ThreadId },
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error(transparent)]
+    LatestRun(#[from] forge_store::LatestRunError),
+    #[error(transparent)]
+    Store(#[from] forge_store::SpawnAgentError),
+}
+
+impl SpawnAgentError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Refused { .. } => ErrorClass::Conflict,
+            Self::ParentNotFound { .. } => ErrorClass::NotFound,
+            Self::Store(store) => error::spawn(&store.cause),
+            Self::ReadThread(_) | Self::LatestRun(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartThreadError {
+    #[error("start a thread for thread {caller}")]
+    Refused {
+        caller: ThreadId,
+        #[source]
+        refused: Refused,
+    },
+    #[error("thread {caller} does not exist")]
+    CallerNotFound { caller: ThreadId },
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error(transparent)]
+    ReadProject(#[from] forge_store::ReadProjectError),
+    #[error(transparent)]
+    Create(#[from] forge_store::CreateThreadError),
+    #[error("send the first message of thread {thread}")]
+    Send {
+        thread: ThreadId,
+        #[source]
+        source: Box<SendError>,
+    },
+}
+
+impl StartThreadError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Refused { .. } => ErrorClass::Conflict,
+            Self::CallerNotFound { .. } => ErrorClass::NotFound,
+            Self::Create(create) => error::create_thread(create),
+            Self::Send { source, .. } => source.class(),
+            Self::ReadThread(_) | Self::ReadProject(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SendAsAgentError {
+    #[error("thread {caller} does not exist")]
+    CallerNotFound { caller: ThreadId },
+    #[error("thread {caller} cannot message thread {thread}")]
+    NoThread {
+        caller: ThreadId,
+        thread: ThreadId,
+        #[source]
+        refused: Refused,
+    },
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error("ask the user before thread {caller} messages thread {thread}")]
+    Approval {
+        caller: ThreadId,
+        thread: ThreadId,
+        #[source]
+        source: Box<crate::approvals::ApprovalError>,
+    },
+    #[error(transparent)]
+    Send(Box<SendError>),
+}
+
+impl SendAsAgentError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::NoThread { .. } => ErrorClass::Conflict,
+            Self::CallerNotFound { .. } => ErrorClass::NotFound,
+            Self::Approval { source, .. } => source.class(),
+            Self::Send(send) => send.class(),
+            Self::ReadThread(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentLookupError {
+    #[error("find agent {agent} of thread {caller}")]
+    Refused {
+        caller: ThreadId,
+        agent: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error(transparent)]
+    ReadItem(#[from] forge_store::ReadItemError),
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+}
+
+impl AgentLookupError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Refused { .. } => ErrorClass::Conflict,
+            Self::ReadItem(_) | Self::ReadThread(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentViewError {
+    #[error(transparent)]
+    AwaitsUser(#[from] forge_store::AwaitsUserError),
+    #[error(transparent)]
+    RunnableInput(#[from] forge_store::RunnableInputError),
+    #[error(transparent)]
+    LatestRun(#[from] forge_store::LatestRunError),
+    #[error(transparent)]
+    ContinuePending(#[from] forge_store::ContinuePendingError),
+    #[error(transparent)]
+    LastReply(#[from] forge_store::LastReplyError),
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error(transparent)]
+    Reopen(#[from] forge_store::ReopenAgentError),
+    #[error(transparent)]
+    Save(#[from] forge_store::UpsertItemError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentQueryError {
+    #[error("name at least one agent of thread {caller} to wait for")]
+    NothingNamed { caller: ThreadId },
+    #[error(transparent)]
+    Lookup(#[from] AgentLookupError),
+    #[error(transparent)]
+    View(#[from] AgentViewError),
+    #[error(transparent)]
+    Agents(#[from] forge_store::AgentThreadsError),
+    #[error(transparent)]
+    ReadItem(#[from] forge_store::ReadItemError),
+}
+
+impl AgentQueryError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::NothingNamed { .. } => ErrorClass::BadRequest,
+            Self::Lookup(lookup) => lookup.class(),
+            Self::View(_) | Self::Agents(_) | Self::ReadItem(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageAgentError {
+    #[error("the message to agent {agent} of thread {caller} is empty")]
+    Empty { caller: ThreadId, agent: String },
+    #[error(transparent)]
+    Lookup(#[from] AgentLookupError),
+    #[error(transparent)]
+    Send(Box<SendAsAgentError>),
+    #[error(transparent)]
+    View(#[from] AgentViewError),
+}
+
+impl MessageAgentError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Empty { .. } => ErrorClass::BadRequest,
+            Self::Lookup(lookup) => lookup.class(),
+            Self::Send(send) => send.class(),
+            Self::View(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CancelAgentError {
+    #[error(transparent)]
+    Lookup(#[from] AgentLookupError),
+    #[error(transparent)]
+    Cancel(Box<CancelError>),
+    #[error(transparent)]
+    View(#[from] AgentViewError),
+}
+
+impl CancelAgentError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Lookup(lookup) => lookup.class(),
+            Self::Cancel(cancel) => cancel.class(),
+            Self::View(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SettleAgentError {
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error(transparent)]
+    ReadItem(#[from] forge_store::ReadItemError),
+    #[error(transparent)]
+    LatestRun(#[from] forge_store::LatestRunError),
+    #[error(transparent)]
+    View(#[from] AgentViewError),
+    #[error(transparent)]
+    Reopen(#[from] forge_store::ReopenAgentError),
+    #[error(transparent)]
+    Save(#[from] forge_store::UpsertItemError),
+    #[error(transparent)]
+    Report(#[from] forge_store::SettleAgentError),
+    #[error("hand agent {agent}'s report to the live run of thread {parent}")]
+    Deliver {
+        agent: ItemId,
+        parent: ThreadId,
+        #[source]
+        source: Box<InputError>,
+    },
+}
+
 impl Hub {
     /// Starts an agent for `parent` and returns it at once.
-    pub async fn spawn_agent(&self, parent: &ThreadId, request: SpawnAgent) -> Result<AgentInfo> {
+    pub async fn spawn_agent(
+        &self,
+        parent: &ThreadId,
+        request: SpawnAgent,
+    ) -> Result<AgentInfo, SpawnAgentError> {
+        let refused = |refused| SpawnAgentError::Refused {
+            parent: parent.clone(),
+            refused,
+        };
         let store = self.store();
         let task = request.task.trim().to_owned();
         if task.is_empty() || request.prompt.trim().is_empty() {
-            return Err(Refused("An agent needs a task and a prompt.".to_owned()).into());
+            return Err(refused(Refused(
+                "An agent needs a task and a prompt.".to_owned(),
+            )));
         }
-        let thread = store
-            .thread(parent)
-            .await?
-            .with_context(|| format!("no thread {parent}"))?;
+        let thread =
+            store
+                .thread(parent)
+                .await?
+                .ok_or_else(|| SpawnAgentError::ParentNotFound {
+                    parent: parent.clone(),
+                })?;
         let depth = self.agent_depth(&thread).await?;
         if depth >= MAX_AGENT_DEPTH {
-            return Err(Refused(format!(
+            return Err(refused(Refused(format!(
                 "Agents can start agents only {MAX_AGENT_DEPTH} deep; do this work here instead."
-            ))
-            .into());
+            ))));
         }
         let engine = request.harness.unwrap_or(thread.config.engine);
-        let (config, warnings) = resolve(&thread.config, &request, &self.engines().status(engine))?;
+        let (config, warnings) =
+            resolve(&thread.config, &request, &self.engines().status(engine)).map_err(refused)?;
         let child = ThreadId::new();
         let agent = ItemId::new();
         let run_id = store
@@ -367,18 +620,25 @@ impl Hub {
         caller: &ThreadId,
         project: Option<artisan_api::ProjectId>,
         request: SpawnAgent,
-    ) -> Result<(Thread, Vec<String>)> {
+    ) -> Result<(Thread, Vec<String>), StartThreadError> {
+        let refused = |refused| StartThreadError::Refused {
+            caller: caller.clone(),
+            refused,
+        };
         let store = self.store();
         let from = store
             .thread(caller)
             .await?
-            .with_context(|| format!("no thread {caller}"))?;
+            .ok_or_else(|| StartThreadError::CallerNotFound {
+                caller: caller.clone(),
+            })?;
         let project = project.unwrap_or_else(|| from.project_id.clone());
         if store.project(&project).await?.is_none() {
-            return Err(Refused(format!("There is no project {project}.")).into());
+            return Err(refused(Refused(format!("There is no project {project}."))));
         }
         let engine = request.harness.unwrap_or(from.config.engine);
-        let (config, warnings) = resolve(&from.config, &request, &self.engines().status(engine))?;
+        let (config, warnings) =
+            resolve(&from.config, &request, &self.engines().status(engine)).map_err(refused)?;
         let title = Some(request.task.trim().to_owned()).filter(|title| !title.is_empty());
         let thread = store
             .create_thread(CreateThread {
@@ -410,7 +670,11 @@ impl Hub {
                     sender: Some(sender(&from)),
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| StartThreadError::Send {
+                thread: thread.id.clone(),
+                source: Box::new(source),
+            })?;
         }
         Ok((thread, warnings))
     }
@@ -423,7 +687,7 @@ impl Hub {
         caller: &ThreadId,
         thread: &ThreadId,
         text: String,
-    ) -> Result<Item> {
+    ) -> Result<Item, SendAsAgentError> {
         self.send_as_agent_with_id(caller, thread, text, ItemId::new())
             .await
     }
@@ -434,16 +698,22 @@ impl Hub {
         thread: &ThreadId,
         text: String,
         id: ItemId,
-    ) -> Result<Item> {
+    ) -> Result<Item, SendAsAgentError> {
         let store = self.store();
         let from = store
             .thread(caller)
             .await?
-            .with_context(|| format!("no thread {caller}"))?;
+            .ok_or_else(|| SendAsAgentError::CallerNotFound {
+                caller: caller.clone(),
+            })?;
         let target = store
             .thread(thread)
             .await?
-            .ok_or_else(|| Refused(format!("There is no thread {thread}.")))?;
+            .ok_or_else(|| SendAsAgentError::NoThread {
+                caller: caller.clone(),
+                thread: thread.clone(),
+                refused: Refused(format!("There is no thread {thread}.")),
+            })?;
         if exceeds(&target.config, &from.config) {
             self.ask_approval(
                 caller,
@@ -453,7 +723,12 @@ impl Hub {
                     target.title.as_deref().unwrap_or("a thread")
                 ),
             )
-            .await?;
+            .await
+            .map_err(|source| SendAsAgentError::Approval {
+                caller: caller.clone(),
+                thread: thread.clone(),
+                source: Box::new(source),
+            })?;
         }
         self.accept_message(
             thread,
@@ -472,10 +747,10 @@ impl Hub {
             },
         )
         .await
+        .map_err(|error| SendAsAgentError::Send(Box::new(error)))
     }
 
-    /// How many agents up the chain `thread` is.
-    async fn agent_depth(&self, thread: &Thread) -> Result<usize> {
+    async fn agent_depth(&self, thread: &Thread) -> Result<usize, forge_store::ReadThreadError> {
         let mut depth = 0;
         let mut current = thread.clone();
         while current.spawned_by.is_some() {
@@ -500,7 +775,16 @@ impl Hub {
 
     /// The agent `id` names, as `caller` sees it: an agent item of the
     /// caller's, or the thread one runs in.
-    async fn agent_item(&self, caller: &ThreadId, id: &str) -> Result<(Item, ThreadId)> {
+    async fn agent_item(
+        &self,
+        caller: &ThreadId,
+        id: &str,
+    ) -> Result<(Item, ThreadId), AgentLookupError> {
+        let refused = |message: String| AgentLookupError::Refused {
+            caller: caller.clone(),
+            agent: id.to_owned(),
+            refused: Refused(message),
+        };
         let store = self.store();
         let item = match store.item(&ItemId::from(id)).await? {
             Some(item) => Some(item),
@@ -512,27 +796,29 @@ impl Hub {
                 None => None,
             },
         };
-        let not_yours = || Refused(format!("{caller} has no agent {id}."));
+        let not_yours = || refused(format!("{caller} has no agent {id}."));
         let item = item.ok_or_else(not_yours)?;
         if &item.thread_id != caller {
-            return Err(not_yours().into());
+            return Err(not_yours());
         }
         let ItemKind::Agent {
             thread: Some(child),
             ..
         } = &item.kind
         else {
-            return Err(Refused(format!(
+            return Err(refused(format!(
                 "{id} is one of the engine's own subagents; use the engine's tools for it."
-            ))
-            .into());
+            )));
         };
         let child = child.clone();
         Ok((item, child))
     }
 
     /// Where an agent's thread is now.
-    async fn child_state(&self, child: &ThreadId) -> Result<(AgentState, Option<String>)> {
+    async fn child_state(
+        &self,
+        child: &ThreadId,
+    ) -> Result<(AgentState, Option<String>), AgentViewError> {
         let store = self.store();
         if store.awaits_user(child).await? {
             return Ok((AgentState::WaitingForUser, None));
@@ -562,7 +848,11 @@ impl Hub {
         })
     }
 
-    async fn refresh_agent(&self, item: Item, child: &ThreadId) -> Result<AgentInfo> {
+    async fn refresh_agent(
+        &self,
+        item: Item,
+        child: &ThreadId,
+    ) -> Result<AgentInfo, AgentViewError> {
         let (info, update) = self.agent_view(&item, child).await?;
         if let Some(update) = update {
             if item.status.is_terminal()
@@ -581,7 +871,7 @@ impl Hub {
         &self,
         item: &Item,
         child: &ThreadId,
-    ) -> Result<(AgentInfo, Option<NewItem>)> {
+    ) -> Result<(AgentInfo, Option<NewItem>), AgentViewError> {
         let store = self.store();
         let (state, error) = self.child_state(child).await?;
         let result = if state.is_settled() {
@@ -605,7 +895,10 @@ impl Hub {
             thread: child_thread,
         } = item.kind.clone()
         else {
-            anyhow::bail!("item {} is not an agent", item.id);
+            unreachable!(
+                "invariant: item {} of thread {} that runs agent thread {child} is an agent",
+                item.id, item.thread_id
+            );
         };
         let next = state.status();
         let result_text = result.clone().map(Into::into).or(stored);
@@ -658,13 +951,17 @@ impl Hub {
     }
 
     /// One agent of the caller's, as it is now.
-    pub async fn agent_status(&self, caller: &ThreadId, id: &str) -> Result<AgentInfo> {
+    pub async fn agent_status(
+        &self,
+        caller: &ThreadId,
+        id: &str,
+    ) -> Result<AgentInfo, AgentQueryError> {
         let (item, child) = self.agent_item(caller, id).await?;
-        self.refresh_agent(item, &child).await
+        Ok(self.refresh_agent(item, &child).await?)
     }
 
     /// The caller's agents, newest last.
-    pub async fn agents(&self, caller: &ThreadId) -> Result<Vec<AgentInfo>> {
+    pub async fn agents(&self, caller: &ThreadId) -> Result<Vec<AgentInfo>, AgentQueryError> {
         let mut agents = Vec::new();
         for thread in self.store().agent_threads(caller).await? {
             if let Some(agent) = &thread.spawned_by
@@ -685,13 +982,15 @@ impl Hub {
         ids: &[String],
         any: bool,
         timeout: Duration,
-    ) -> Result<Vec<AgentInfo>> {
+    ) -> Result<Vec<AgentInfo>, AgentQueryError> {
         let mut found = Vec::new();
         for id in ids {
             found.push(self.agent_item(caller, id).await?);
         }
         if found.is_empty() {
-            return Err(Refused("Name at least one agent to wait for.".to_owned()).into());
+            return Err(AgentQueryError::NothingNamed {
+                caller: caller.clone(),
+            });
         }
         let _waiting = Waiting::new(self, found.iter().map(|(item, _)| item.id.clone()));
         let deadline = tokio::time::Instant::now() + timeout.min(LONGEST_WAIT);
@@ -732,24 +1031,37 @@ impl Hub {
         caller: &ThreadId,
         id: &str,
         text: String,
-    ) -> Result<AgentInfo> {
+    ) -> Result<AgentInfo, MessageAgentError> {
         let (item, child) = self.agent_item(caller, id).await?;
         if text.trim().is_empty() {
-            return Err(Refused("The message is empty.".to_owned()).into());
+            return Err(MessageAgentError::Empty {
+                caller: caller.clone(),
+                agent: id.to_owned(),
+            });
         }
-        // The user may have raised the agent's permissions since it started.
-        self.send_as_agent(caller, &child, text).await?;
-        self.refresh_agent(item, &child).await
+        self.send_as_agent(caller, &child, text)
+            .await
+            .map_err(|error| MessageAgentError::Send(Box::new(error)))?;
+        Ok(self.refresh_agent(item, &child).await?)
     }
 
     /// Stops an agent and every agent under it.
-    pub async fn cancel_agent(&self, caller: &ThreadId, id: &str) -> Result<AgentInfo> {
+    pub async fn cancel_agent(
+        &self,
+        caller: &ThreadId,
+        id: &str,
+    ) -> Result<AgentInfo, CancelAgentError> {
         let (item, child) = self.agent_item(caller, id).await?;
-        self.cancel(&child).await?;
-        self.refresh_agent(item, &child).await
+        self.cancel(&child)
+            .await
+            .map_err(|error| CancelAgentError::Cancel(Box::new(error)))?;
+        Ok(self.refresh_agent(item, &child).await?)
     }
 
-    pub(crate) async fn agent_tree(&self, thread: &ThreadId) -> Result<Vec<ThreadId>> {
+    pub(crate) async fn agent_tree(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Vec<ThreadId>, forge_store::AgentThreadsError> {
         let mut tree = Vec::new();
         let mut stack = vec![thread.clone()];
         let mut seen = std::collections::HashSet::new();
@@ -773,18 +1085,18 @@ impl Hub {
     /// deliver a background agent's result.
     pub(crate) async fn agent_run_ended(&self, thread: &ThreadId) {
         if let Err(error) = self.settle_agent(thread).await {
-            tracing::error!(%thread, "updating the agent this thread runs: {error:#}");
+            tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
         }
     }
 
     /// Something in `thread` started or stopped waiting on the user.
     pub(crate) async fn agent_attention(&self, thread: &ThreadId) {
         if let Err(error) = self.settle_agent(thread).await {
-            tracing::error!(%thread, "updating the agent this thread runs: {error:#}");
+            tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
         }
     }
 
-    async fn settle_agent(&self, thread: &ThreadId) -> Result<()> {
+    async fn settle_agent(&self, thread: &ThreadId) -> Result<(), SettleAgentError> {
         let _admission = self.inner.admission.lock().await;
         let store = self.store();
         let Some(child) = store.thread(thread).await? else {
@@ -835,7 +1147,7 @@ impl Hub {
                     thread: parent.clone(),
                     message: SendMessage {
                         id: ItemId::new(),
-                        text: report_text(&info)?,
+                        text: report_text(&info),
                         images: Vec::new(),
                         config: None,
                         draft: None,
@@ -851,10 +1163,16 @@ impl Hub {
             )
             .await?;
         self.agents_moved();
-        self.dispatch_accepted(&parent, &report, engine).await
+        self.dispatch_accepted(&parent, &report, engine)
+            .await
+            .map_err(|source| SettleAgentError::Deliver {
+                agent: agent.clone(),
+                parent: parent.clone(),
+                source: Box::new(source),
+            })
     }
 
-    async fn stopping(&self, parent: &ThreadId) -> Result<bool> {
+    async fn stopping(&self, parent: &ThreadId) -> Result<bool, forge_store::LatestRunError> {
         let cancelling = self.lock().get(parent).map(|run| run.cancel.is_cancelled());
         Ok(match cancelling {
             Some(cancelling) => cancelling,
@@ -873,7 +1191,7 @@ impl Hub {
         let items = match self.store().working_agents().await {
             Ok(items) => items,
             Err(error) => {
-                tracing::error!("reading working agents: {error:#}");
+                tracing::error!("reading working agents: {}", diagnostics::chain(&error));
                 return;
             }
         };
@@ -887,7 +1205,7 @@ impl Hub {
                     .is_none_or(|generation| generation.owner(child).is_none())
                 && let Err(error) = self.settle_agent(child).await
             {
-                tracing::error!(thread = %child, "updating an agent: {error:#}");
+                tracing::error!(thread = %child, "updating an agent: {}", diagnostics::chain(&error));
             }
         }
     }
@@ -904,7 +1222,7 @@ impl Hub {
     }
 }
 
-fn report_text(info: &AgentInfo) -> Result<String> {
+fn report_text(info: &AgentInfo) -> String {
     let outcome = match info.state {
         AgentState::Done => "finished",
         AgentState::Failed => "failed",
@@ -917,13 +1235,14 @@ fn report_text(info: &AgentInfo) -> Result<String> {
         info.agent
     );
     if let Some(error) = &info.error {
-        write!(text, "\nError: {error}")?;
+        text.push_str("\nError: ");
+        text.push_str(error);
     }
     if let Some(result) = &info.result {
         text.push_str("\nIts last reply:\n\n");
         text.push_str(result);
     }
-    Ok(text)
+    text
 }
 
 fn store_text(text: &artisan_api::TextContent) -> String {

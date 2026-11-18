@@ -3,9 +3,9 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_final_events() {
     for engine in [EngineId::Codex, EngineId::Claude, EngineId::OpenCode] {
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let ready = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(Notify::new());
+        let ready = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
         let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let script_entered = Arc::clone(&entered);
         let script_ready = Arc::clone(&ready);
@@ -64,7 +64,7 @@ async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_preserves_an_adapter_stop_failure() {
-    let ready = Arc::new(tokio::sync::Notify::new());
+    let ready = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
     let fixture = fixture(Arc::new(move |_, io| {
         let ready = Arc::clone(&script_ready);
@@ -94,7 +94,7 @@ async fn cancellation_preserves_an_adapter_stop_failure() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
-    let ready = Arc::new(tokio::sync::Notify::new());
+    let ready = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
     let fixture = fixture(Arc::new(move |_, _io| {
         let ready = Arc::clone(&script_ready);
@@ -137,7 +137,7 @@ async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
     reason = "one cancellation told from request to cleanup"
 )]
 async fn cancellation_rejects_answers_and_goal_updates_while_cleanup_is_pending() {
-    let release = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Notify::new());
     let script_release = Arc::clone(&release);
     let adapter: Arc<dyn Harness> = Arc::new(Scripted(Arc::new(move |_, io| {
         let release = Arc::clone(&script_release);
@@ -253,7 +253,7 @@ async fn cancellation_rejects_answers_and_goal_updates_while_cleanup_is_pending(
 #[tokio::test(flavor = "multi_thread")]
 async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
     let asked = Asked::default();
-    let started = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(Notify::new());
     let script: Script = {
         let asked = Arc::clone(&asked);
         let started = Arc::clone(&started);

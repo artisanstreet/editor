@@ -6,12 +6,12 @@
 
 use crate::Hub;
 use crate::Refused;
-use anyhow::Result;
+use crate::error::{self, ErrorClass};
 use artisan_api::{
     Approval, ApprovalRequest, Decision, ItemId, ItemKind, Permissions, RunStatus, Status,
     ThreadId, ToolKind,
 };
-use forge_store::NewItem;
+use forge_store::{LatestRunError, NewItem, ReadThreadError, UpsertItemError};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -19,40 +19,96 @@ use tokio::sync::oneshot;
 const ANSWER_WITHIN: Duration = Duration::from_mins(9);
 
 /// A card Forge showed itself, waiting for its answer.
-pub struct OwnApproval {
+pub(crate) struct OwnApproval {
     thread: ThreadId,
     /// A permission Full access gives; otherwise only the user answers.
     permission: bool,
     answer: oneshot::Sender<Decision>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ApprovalError {
+    #[error("read the thread's access to ask approval for {tool}")]
+    ReadThread {
+        tool: String,
+        #[source]
+        source: ReadThreadError,
+    },
+    #[error("read the running turn to ask approval for {tool}")]
+    LatestRun {
+        tool: String,
+        #[source]
+        source: LatestRunError,
+    },
+    #[error("show the approval card for {tool}")]
+    ShowCard {
+        tool: String,
+        #[source]
+        source: UpsertItemError,
+    },
+    #[error("settle the approval card for {tool}")]
+    SettleCard {
+        tool: String,
+        #[source]
+        source: UpsertItemError,
+    },
+    #[error("approval card {item} for {tool} in thread {thread} went unanswered")]
+    Unanswered {
+        thread: ThreadId,
+        item: ItemId,
+        tool: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error("the user declined approval card {item} for {tool} in thread {thread}")]
+    Declined {
+        thread: ThreadId,
+        item: ItemId,
+        tool: String,
+        #[source]
+        refused: Refused,
+    },
+}
+
+impl ApprovalError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::ReadThread { .. } | Self::LatestRun { .. } => ErrorClass::Internal,
+            Self::ShowCard { source, .. } | Self::SettleCard { source, .. } => {
+                error::write(&source.cause)
+            }
+            Self::Unanswered { .. } | Self::Declined { .. } => ErrorClass::Conflict,
+        }
+    }
+}
+
 impl Hub {
-    /// Asks the user's permission for `tool` in `thread`: allowed at once
-    /// under Full access, otherwise an approval card waits for the user.
-    /// `Ok(())` once allowed; refused when denied or unanswered.
     pub async fn ask_approval(
         &self,
         thread: &ThreadId,
         tool: &str,
         description: String,
-    ) -> Result<()> {
+    ) -> Result<(), ApprovalError> {
         self.ask_approval_on(forge_engines::ARTISAN_MCP, thread, tool, description)
             .await
     }
 
-    /// [`Hub::ask_approval`] for a tool of another of Forge's own servers
-    /// (`server`, as engines know it).
     pub async fn ask_approval_on(
         &self,
         server: &str,
         thread: &ThreadId,
         tool: &str,
         description: String,
-    ) -> Result<()> {
+    ) -> Result<(), ApprovalError> {
         let full = self
             .store()
             .thread(thread)
-            .await?
+            .await
+            .map_err(|source| ApprovalError::ReadThread {
+                tool: tool.to_owned(),
+                source,
+            })?
             .is_some_and(|thread| thread.config.permissions == Permissions::Full);
         if full {
             return Ok(());
@@ -61,15 +117,13 @@ impl Hub {
             .await
     }
 
-    /// Shows a card only the user answers, whatever the thread's access:
-    /// for steps the user takes themselves, like a handoff.
     pub async fn ask_user_on(
         &self,
         server: &str,
         thread: &ThreadId,
         tool: &str,
         description: String,
-    ) -> Result<()> {
+    ) -> Result<(), ApprovalError> {
         self.show_card(server, thread, tool, description, false)
             .await
     }
@@ -81,11 +135,15 @@ impl Hub {
         tool: &str,
         description: String,
         permission: bool,
-    ) -> Result<()> {
+    ) -> Result<(), ApprovalError> {
         let store = self.store();
         let run_id = store
             .latest_run(thread)
-            .await?
+            .await
+            .map_err(|source| ApprovalError::LatestRun {
+                tool: tool.to_owned(),
+                source,
+            })?
             .filter(|run| run.status() == RunStatus::Running)
             .map(|run| run.id);
         let id = ItemId::new();
@@ -124,9 +182,12 @@ impl Hub {
                 }),
             },
         };
-        if let Err(error) = store.upsert_item(card(Status::AwaitingUser, None)).await {
+        if let Err(source) = store.upsert_item(card(Status::AwaitingUser, None)).await {
             self.approvals_lock().remove(&id);
-            return Err(error.into());
+            return Err(ApprovalError::ShowCard {
+                tool: tool.to_owned(),
+                source,
+            });
         }
         let decision = tokio::select! {
             decision = answered => decision.unwrap_or(Decision::Cancelled),
@@ -141,16 +202,31 @@ impl Hub {
         } else {
             Status::Declined
         };
-        store.upsert_item(card(status, Some(decision))).await?;
+        store
+            .upsert_item(card(status, Some(decision)))
+            .await
+            .map_err(|source| ApprovalError::SettleCard {
+                tool: tool.to_owned(),
+                source,
+            })?;
         if decision.allows() {
             Ok(())
         } else if decision == Decision::Cancelled {
-            Err(
-                Refused("The user didn't answer the approval card; nothing changed.".to_owned())
-                    .into(),
-            )
+            Err(ApprovalError::Unanswered {
+                thread: thread.clone(),
+                item: id,
+                tool: tool.to_owned(),
+                refused: Refused(
+                    "The user didn't answer the approval card; nothing changed.".to_owned(),
+                ),
+            })
         } else {
-            Err(Refused("The user declined; nothing changed.".to_owned()).into())
+            Err(ApprovalError::Declined {
+                thread: thread.clone(),
+                item: id,
+                tool: tool.to_owned(),
+                refused: Refused("The user declined; nothing changed.".to_owned()),
+            })
         }
     }
 
@@ -160,8 +236,9 @@ impl Hub {
         let Some(card) = self.approvals_lock().remove(item) else {
             return false;
         };
-        // The asker stopped waiting; the card is answered either way.
-        card.answer.send(decision).ok();
+        if card.answer.send(decision).is_err() {
+            tracing::debug!(%item, "the asker stopped waiting; the card is answered anyway");
+        }
         true
     }
 
@@ -175,8 +252,10 @@ impl Hub {
             .map(|(id, _)| id.clone())
             .collect();
         for id in waiting {
-            if let Some(card) = approvals.remove(&id) {
-                card.answer.send(Decision::AllowOnce).ok();
+            if let Some(card) = approvals.remove(&id)
+                && card.answer.send(Decision::AllowOnce).is_err()
+            {
+                tracing::debug!(item = %id, "the asker stopped waiting; the card is allowed anyway");
             }
         }
     }

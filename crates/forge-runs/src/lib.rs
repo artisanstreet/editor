@@ -9,8 +9,6 @@
 //! message sent while a run winds down is never lost.
 #![expect(
     missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #![allow(
@@ -20,7 +18,6 @@
     clippy::iter_over_hash_type,
     clippy::partial_pub_fields,
     clippy::string_slice,
-    clippy::unused_result_ok,
     trivial_casts,
     reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
 )]
@@ -29,13 +26,14 @@ mod agents;
 mod approvals;
 mod coordination;
 mod disk;
+pub mod error;
 mod extensions;
 mod gateway;
 mod handoff;
 mod mcp_auth;
 mod mcp_reach;
+mod operation;
 mod park;
-mod refusal;
 pub mod resources;
 mod retention;
 mod run;
@@ -43,14 +41,35 @@ pub mod runtime;
 mod scratch;
 mod side;
 
-pub use agents::{AgentInfo, AgentState, MAX_AGENT_DEPTH, SpawnAgent};
-pub use extensions::{DISABLED_SKILLS_KEY, Extensions, GLOBAL_PROMPT_KEY};
+pub use agents::{
+    AgentInfo, AgentLookupError, AgentQueryError, AgentState, AgentViewError, CancelAgentError,
+    MAX_AGENT_DEPTH, MessageAgentError, SendAsAgentError, SpawnAgent, SpawnAgentError,
+    StartThreadError,
+};
+pub use approvals::ApprovalError;
+pub use coordination::DeliverMessageError;
+pub use error::{ErrorClass, Refused};
+pub use extensions::{
+    AdoptSkillError, CustomisationError, DISABLED_SKILLS_KEY, DiscardSkillError,
+    EnabledSkillsError, Extensions, GLOBAL_PROMPT_KEY, GlobalPromptError, HomesLockError,
+    InstallSkillError, MarketplaceInstallError, MarketplaceSearchError, ReconcileSkillsError,
+    ResolveGlobalPromptError, SaveGlobalPromptError, SetSkillEnabledError, SkillCatalogError,
+};
 pub use gateway::COMPUTER_USE_KEY;
-pub use mcp_auth::{Mcp, McpSignInFinishError, McpSignInStartError, McpStoreError};
-pub use refusal::{Refused, refusal};
+pub use gateway::CallEditorError;
+pub use mcp_auth::{
+    Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
+    ReadMcpServersError,
+};
+pub use mcp_reach::ProbeServersError;
+pub use operation::{
+    AnswerError, CancelError, ClearGoalError, ContinueError, InputError, SendError, UpdateError,
+};
+pub use retention::RemoveInactiveThreadsError;
+pub use run::PrepareError;
+pub use scratch::{EnsureScratchProjectError, ThreadFolderError};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
-use anyhow::{Context, Result, bail};
 use artisan_api::{
     Answer, EngineId, Event, Item, ItemId, ItemKind, LiveTarget, RunId, SendMessage, Status,
     ThreadId,
@@ -247,14 +266,19 @@ impl Hub {
         self.inner.dispatch.notify_one();
     }
 
-    /// Stores the message, then starts a run or steers the live one.
-    pub async fn send_message(&self, thread_id: &ThreadId, message: SendMessage) -> Result<Item> {
-        let store = &self.inner.store;
+    pub async fn send_message(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+    ) -> Result<Item, SendError> {
         if message.text.trim_start().starts_with('/') {
-            let thread = store
-                .thread(thread_id)
-                .await?
-                .ok_or_else(|| forge_store::SendRejected::ThreadNotFound(thread_id.clone()))?;
+            let thread =
+                self.store()
+                    .thread(thread_id)
+                    .await?
+                    .ok_or_else(|| SendError::ThreadNotFound {
+                        thread: thread_id.clone(),
+                    })?;
             let requested = message
                 .config
                 .as_ref()
@@ -264,25 +288,21 @@ impl Hub {
                 .get(thread_id)
                 .and_then(|run| run.engine)
                 .unwrap_or(requested);
-            // A command the engine can't read fails the send, not the run.
-            forge_engines::normalize_command(engine, &message.text)
-                .map_err(|error| Refused(error.to_string()))?;
+            forge_engines::normalize_command(engine, &message.text).map_err(|source| {
+                SendError::Command {
+                    thread: thread_id.clone(),
+                    engine,
+                    source,
+                }
+            })?;
         }
-        // The first line names an untitled thread; the config a message
-        // runs with becomes the default for new threads.
         let acceptance = forge_store::Acceptance {
-            title: Some(
-                message
-                    .text
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .chars()
-                    .take(80)
-                    .collect::<String>(),
-            )
-            .filter(|title| !title.is_empty()),
+            title: message
+                .text
+                .lines()
+                .next()
+                .map(|line| line.trim().chars().take(80).collect::<String>())
+                .filter(|title| !title.is_empty()),
             remember_config: true,
             from_agent: None,
             sender: None,
@@ -290,26 +310,32 @@ impl Hub {
         self.accept_message(thread_id, message, acceptance).await
     }
 
-    /// Stores an already checked message, then starts a run or steers the
-    /// live one.
     async fn accept_message(
         &self,
         thread_id: &ThreadId,
         message: SendMessage,
         acceptance: forge_store::Acceptance,
-    ) -> Result<Item> {
-        if let Some(member) = self.route(thread_id)? {
-            return Ok(serde_json::from_value(
-                runtime::request(
-                    &member,
-                    &runtime::Command::Accept {
-                        thread: thread_id.clone(),
-                        message,
-                        acceptance,
-                    },
-                )
-                .await?,
-            )?);
+    ) -> Result<Item, SendError> {
+        let route = self.route(thread_id).map_err(|source| SendError::Route {
+            thread: thread_id.clone(),
+            source,
+        })?;
+        if let Some(member) = route {
+            let item = message.id.clone();
+            return runtime::request_as(
+                &member,
+                &runtime::Command::Accept {
+                    thread: thread_id.clone(),
+                    message,
+                    acceptance,
+                },
+            )
+            .await
+            .map_err(|source| SendError::Peer {
+                thread: thread_id.clone(),
+                item,
+                source: Box::new(source),
+            });
         }
         self.accept_here(thread_id, message, acceptance).await
     }
@@ -319,7 +345,7 @@ impl Hub {
         thread_id: &ThreadId,
         message: SendMessage,
         acceptance: forge_store::Acceptance,
-    ) -> Result<Item> {
+    ) -> Result<Item, SendError> {
         let steer = self.is_live(thread_id);
         let (item, created, saved_engine) = self
             .inner
@@ -330,7 +356,12 @@ impl Hub {
             return Ok(item);
         }
         self.dispatch_accepted(thread_id, &item, saved_engine)
-            .await?;
+            .await
+            .map_err(|source| SendError::Steer {
+                thread: thread_id.clone(),
+                item: item.id.clone(),
+                source: Box::new(source),
+            })?;
         Ok(item)
     }
 
@@ -339,7 +370,7 @@ impl Hub {
         thread_id: &ThreadId,
         item: &Item,
         saved_engine: EngineId,
-    ) -> Result<()> {
+    ) -> Result<(), InputError> {
         let live = self
             .lock()
             .get(thread_id)
@@ -356,16 +387,15 @@ impl Hub {
         Ok(())
     }
 
-    /// Answers the approval or question on an item of a live run. What the
-    /// item's state turns down is [`Refused`]; anything else is Forge's fault.
-    pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
-        let item = self
-            .inner
-            .store
-            .item(item_id)
-            .await?
-            .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
-        if let Some(member) = self.route(&item.thread_id)? {
+    pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<(), AnswerError> {
+        let item = self.answerable(item_id).await?;
+        let route = self
+            .route(&item.thread_id)
+            .map_err(|source| AnswerError::Route {
+                item: item_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
             runtime::request(
                 &member,
                 &runtime::Command::Answer {
@@ -373,28 +403,34 @@ impl Hub {
                     answer,
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| AnswerError::Peer {
+                item: item_id.clone(),
+                source: Box::new(source),
+            })?;
             return Ok(());
         }
         self.answer_item(item, answer).await
     }
 
-    async fn answer_here(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
-        let item = self
-            .inner
-            .store
-            .item(item_id)
-            .await?
-            .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
+    async fn answer_here(&self, item_id: &ItemId, answer: Answer) -> Result<(), AnswerError> {
+        let item = self.answerable(item_id).await?;
         self.answer_item(item, answer).await
     }
 
-    async fn answer_item(&self, item: Item, answer: Answer) -> Result<()> {
-        let refused = |message: String| anyhow::Error::new(Refused(message));
+    async fn answerable(&self, item_id: &ItemId) -> Result<Item, AnswerError> {
+        self.store()
+            .item(item_id)
+            .await?
+            .ok_or_else(|| AnswerError::ItemNotFound {
+                item: item_id.clone(),
+            })
+    }
+
+    async fn answer_item(&self, item: Item, answer: Answer) -> Result<(), AnswerError> {
         let item_id = &item.id;
         if let Answer::Question { answers } = &answer {
-            self.inner
-                .store
+            self.store()
                 .validate_question_answers(item_id, answers)
                 .await?;
         }
@@ -412,10 +448,16 @@ impl Hub {
                 | ItemKind::Notice { .. }
                 | ItemKind::Error { .. } => None,
             }
-            .ok_or_else(|| refused(format!("Item {item_id} is not an approval request.")))?;
+            .ok_or_else(|| {
+                AnswerError::refused(
+                    item_id,
+                    format!("Item {item_id} is not an approval request."),
+                )
+            })?;
             if !approval.options.contains(decision) {
-                return Err(refused(
-                    "This request does not offer that decision.".to_owned(),
+                return Err(AnswerError::refused(
+                    item_id,
+                    "This request does not offer that decision.",
                 ));
             }
             if self.answer_own_approval(item_id, *decision) {
@@ -443,31 +485,33 @@ impl Hub {
             return Ok(());
         }
         if item.status != Status::AwaitingUser {
-            return Err(refused(format!(
-                "Item {item_id} is not waiting for an answer."
-            )));
+            return Err(AnswerError::refused(
+                item_id,
+                format!("Item {item_id} is not waiting for an answer."),
+            ));
         }
-        let key = self
-            .inner
-            .store
-            .native_id(item_id)
-            .await?
-            .with_context(|| format!("item {item_id} has no engine id"))?;
-        let ended = || refused(format!("The run of item {item_id} has ended."));
+        let key =
+            self.store()
+                .native_id(item_id)
+                .await?
+                .ok_or_else(|| AnswerError::NoEngineId {
+                    item: item_id.clone(),
+                })?;
+        let ended =
+            || AnswerError::refused(item_id, format!("The run of item {item_id} has ended."));
         let inbox = inbox.ok_or_else(ended)?;
-        inbox
-            .send(Input::Answer { key, answer })
-            .await
-            .map_err(|_unsent| ended())?;
+        if inbox.send(Input::Answer { key, answer }).await.is_err() {
+            return Err(ended());
+        }
         self.agent_attention(&item.thread_id).await;
         Ok(())
     }
 
-    /// Carries on the thread's turn that stopped before it finished (the
-    /// user stopped it, or Forge restarted), with no new message. Messages
-    /// the stop caught before the engine read them are sent instead.
-    pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<()> {
-        let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
+    pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let refused = |message: &str| ContinueError::Refused {
+            thread: thread_id.clone(),
+            refused: Refused(message.to_owned()),
+        };
         let _admission = self.inner.admission.lock().await;
         if self.is_live(thread_id) {
             return Err(refused("The thread is already working."));
@@ -492,25 +536,28 @@ impl Hub {
         Ok(())
     }
 
-    /// Saves a thread's title, archive state, settings or read mark. A
-    /// change of access reaches its live run at once: Full approves what
-    /// waits and the engine stops asking.
     pub async fn update_thread(
         &self,
         thread_id: &ThreadId,
         update: artisan_api::UpdateThread,
-    ) -> Result<Option<artisan_api::Thread>> {
-        if let Some(member) = self.route(thread_id)? {
-            return Ok(serde_json::from_value(
-                runtime::request(
-                    &member,
-                    &runtime::Command::Update {
-                        thread: thread_id.clone(),
-                        update,
-                    },
-                )
-                .await?,
-            )?);
+    ) -> Result<Option<artisan_api::Thread>, UpdateError> {
+        let route = self.route(thread_id).map_err(|source| UpdateError::Route {
+            thread: thread_id.clone(),
+            source,
+        })?;
+        if let Some(member) = route {
+            return runtime::request_as(
+                &member,
+                &runtime::Command::Update {
+                    thread: thread_id.clone(),
+                    update,
+                },
+            )
+            .await
+            .map_err(|source| UpdateError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            });
         }
         self.update_here(thread_id, update).await
     }
@@ -519,13 +566,12 @@ impl Hub {
         &self,
         thread_id: &ThreadId,
         update: artisan_api::UpdateThread,
-    ) -> Result<Option<artisan_api::Thread>> {
+    ) -> Result<Option<artisan_api::Thread>, UpdateError> {
         let before = self
             .store()
             .thread(thread_id)
             .await?
             .map(|thread| thread.config.permissions);
-        // A title the user gave wins over one a side query would generate.
         if update.title.is_some() {
             self.untitled_lock().remove(thread_id);
         }
@@ -549,32 +595,44 @@ impl Hub {
         Ok(thread)
     }
 
-    pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<()> {
-        if let Some(member) = self.route(thread_id)? {
+    pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<(), ClearGoalError> {
+        let route = self
+            .route(thread_id)
+            .map_err(|source| ClearGoalError::Route {
+                thread: thread_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
             runtime::request(
                 &member,
                 &runtime::Command::ClearGoal {
                     thread: thread_id.clone(),
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| ClearGoalError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            })?;
             return Ok(());
         }
         self.clear_goal_here(thread_id).await
     }
 
-    async fn clear_goal_here(&self, thread_id: &ThreadId) -> Result<()> {
-        let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
+    async fn clear_goal_here(&self, thread_id: &ThreadId) -> Result<(), ClearGoalError> {
         let store = self.store();
-        let thread = store
-            .thread(thread_id)
-            .await?
-            .ok_or_else(|| forge_store::SendRejected::ThreadNotFound(thread_id.clone()))?;
+        let thread =
+            store
+                .thread(thread_id)
+                .await?
+                .ok_or_else(|| ClearGoalError::ThreadNotFound {
+                    thread: thread_id.clone(),
+                })?;
         let goal = store
             .inspector(thread_id)
             .await?
             .goal
-            .ok_or_else(|| refused("The thread has no goal."))?;
+            .ok_or_else(|| ClearGoalError::refused(thread_id, "The thread has no goal."))?;
         let live = self.lock().get(thread_id).map(|run| {
             (
                 run.inbox.clone(),
@@ -593,37 +651,25 @@ impl Hub {
                     config: None,
                     draft: None,
                 };
-                self.send_message(thread_id, message).await?;
+                self.send_message(thread_id, message)
+                    .await
+                    .map_err(|source| ClearGoalError::Send {
+                        thread: thread_id.clone(),
+                        source: Box::new(source),
+                    })?;
                 return Ok(());
             }
             EngineId::Codex | EngineId::OpenCode => {}
         }
         if let Some((inbox, _)) = live {
-            inbox
-                .send(Input::ClearGoal)
-                .await
-                .map_err(|_unsent| refused("The run is ending; try again in a moment."))?;
+            if inbox.send(Input::ClearGoal).await.is_err() {
+                return Err(ClearGoalError::refused(
+                    thread_id,
+                    "The run is ending; try again in a moment.",
+                ));
+            }
         } else {
-            let session = store
-                .latest_run(thread_id)
-                .await?
-                .filter(|run| run.engine == engine)
-                .and_then(|run| run.session_id)
-                .ok_or_else(|| refused("This engine never started this thread's session."))?;
-            let lease = self.engines().lease(engine);
-            let turn = run::prepare(
-                self,
-                &thread,
-                Some(session),
-                forge_engines::UserInput::default(),
-                lease.as_ref().map(|lease| lease.path().to_path_buf()),
-            )
-            .await?;
-            (self.inner.harness_for)(engine)
-                .clear_goal(turn)
-                .await
-                .with_context(|| format!("clearing the goal of thread {thread_id}"))?;
-            drop(lease);
+            self.clear_goal_offline(&thread, engine).await?;
         }
         store
             .upsert_item(forge_store::NewItem {
@@ -644,12 +690,60 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn cancel(&self, thread_id: &ThreadId) -> Result<()> {
+    async fn clear_goal_offline(
+        &self,
+        thread: &artisan_api::Thread,
+        engine: EngineId,
+    ) -> Result<(), ClearGoalError> {
+        let thread_id = &thread.id;
+        let session = self
+            .store()
+            .latest_run(thread_id)
+            .await?
+            .filter(|run| run.engine == engine)
+            .and_then(|run| run.session_id)
+            .ok_or_else(|| {
+                ClearGoalError::refused(
+                    thread_id,
+                    "This engine never started this thread's session.",
+                )
+            })?;
+        let lease = self.engines().lease(engine);
+        let turn = run::prepare(
+            self,
+            thread,
+            Some(session),
+            forge_engines::UserInput::default(),
+            lease.as_ref().map(|lease| lease.path().to_path_buf()),
+        )
+        .await
+        .map_err(|source| ClearGoalError::Prepare {
+            thread: thread_id.clone(),
+            engine,
+            source: Box::new(source),
+        })?;
+        (self.inner.harness_for)(engine)
+            .clear_goal(turn)
+            .await
+            .map_err(|source| ClearGoalError::Engine {
+                thread: thread_id.clone(),
+                engine,
+                source,
+            })?;
+        drop(lease);
+        Ok(())
+    }
+
+    pub async fn cancel(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
         let elsewhere = {
             let _admission = self.inner.admission.lock().await;
             let mut elsewhere = Vec::new();
             for thread in self.agent_tree(thread_id).await? {
-                match self.route(&thread)? {
+                let route = self.route(&thread).map_err(|source| CancelError::Route {
+                    thread: thread.clone(),
+                    source,
+                })?;
+                match route {
                     Some(member) => elsewhere.push((thread, member)),
                     None => self.cancel_owned(&thread).await?,
                 }
@@ -657,17 +751,27 @@ impl Hub {
             elsewhere
         };
         for (thread, member) in elsewhere {
-            runtime::request(&member, &runtime::Command::Cancel { thread }).await?;
+            runtime::request(
+                &member,
+                &runtime::Command::Cancel {
+                    thread: thread.clone(),
+                },
+            )
+            .await
+            .map_err(|source| CancelError::Peer {
+                thread,
+                source: Box::new(source),
+            })?;
         }
         Ok(())
     }
 
-    pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<()> {
+    pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
         let _admission = self.inner.admission.lock().await;
         self.cancel_owned(thread_id).await
     }
 
-    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<()> {
+    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
         let cutoff = self.store().head();
         if let Some(run) = self.lock().get(thread_id) {
             run.cancel_through.store(cutoff, Ordering::Release);
@@ -676,7 +780,6 @@ impl Hub {
         self.store()
             .cancel_pending_inputs(thread_id.clone(), cutoff)
             .await?;
-        // A parked turn is stopped too: it isn't picked up again.
         self.store().unpark(thread_id.clone()).await?;
         self.resume_pending();
         Ok(())
@@ -733,7 +836,10 @@ impl Hub {
         ids.into_iter().collect()
     }
 
-    fn route(&self, thread: &ThreadId) -> Result<Option<runtime::Member>> {
+    fn route(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Option<runtime::Member>, runtime::RegistryFileError> {
         let Some(generation) = &self.inner.generation else {
             return Ok(None);
         };
@@ -895,7 +1001,7 @@ impl Hub {
                     self.resume_pending();
                 }
                 Err(error) => {
-                    tracing::warn!(%thread, %run, "saving the run's end failed again: {error:#}");
+                    tracing::warn!(%thread, %run, "saving the run's end failed again: {}", diagnostics::chain(&error));
                 }
             }
         }
@@ -945,7 +1051,7 @@ impl Hub {
                         let next = match hub.store().pending_threads(1, excluded).await {
                             Ok(threads) => threads.into_iter().next(),
                             Err(error) => {
-                                tracing::error!("read pending run candidates: {error:#}");
+                                tracing::error!("read pending run candidates: {}", diagnostics::chain(&error));
                                 break;
                             }
                         };
@@ -988,7 +1094,7 @@ impl Hub {
             ))
             .await;
             if let Err(error) = &outcome {
-                tracing::error!(thread = %thread_id, run = %run_id, "run failed: {error:#}");
+                tracing::error!(thread = %thread_id, run = %run_id, "run failed: {}", diagnostics::chain(&error));
             }
             hub.lock().remove(&thread_id);
             drop(permit);
@@ -1020,7 +1126,11 @@ impl Hub {
         &self.inner.mcp
     }
 
-    async fn user_input(&self, item: &Item, engine: EngineId) -> Result<forge_engines::UserInput> {
+    async fn user_input(
+        &self,
+        item: &Item,
+        engine: EngineId,
+    ) -> Result<forge_engines::UserInput, InputError> {
         let ItemKind::UserMessage {
             text,
             images,
@@ -1028,7 +1138,10 @@ impl Hub {
             ..
         } = &item.kind
         else {
-            bail!("input {} is not a user message", item.id);
+            unreachable!(
+                "invariant: input {} of thread {} is a user message",
+                item.id, item.thread_id
+            );
         };
         let text = self.store().resolve_text(text).await?;
         let parent = match sender {
@@ -1040,24 +1153,25 @@ impl Hub {
             None => None,
         };
         let text = match sender {
-            // An agent's own parent briefs it: its words go as they are.
             Some(sender) if parent.as_ref() == Some(&sender.thread) => text,
-            // Another thread's agent wrote it: the engine is told so, and a
-            // leading slash is text, never one of the user's commands.
             Some(sender) => format!("{}\n\n{text}", sender_line(sender)),
-            // Normalize each native prompt before pending inputs/context are joined.
-            None => forge_engines::normalize_command(engine, &text)?.unwrap_or(text),
+            None => forge_engines::normalize_command(engine, &text)
+                .map_err(|source| InputError::Command {
+                    thread: item.thread_id.clone(),
+                    item: item.id.clone(),
+                    engine,
+                    source,
+                })?
+                .unwrap_or(text),
         };
         let text = if text.contains('$') {
             let skills = match self.extensions().enabled_skills().await {
                 Ok(skills) => skills,
                 Err(error) => {
-                    // The message still goes; only the closing line naming
-                    // the mentioned skills is left off.
                     tracing::warn!(
                         thread = %item.thread_id,
                         item = %item.id,
-                        "listing the skills for the message's mentions: {error:#}"
+                        "listing the skills for the message's mentions: {}", diagnostics::chain(&error)
                     );
                     Vec::new()
                 }
@@ -1070,12 +1184,10 @@ impl Hub {
             match self.store().thread_titles().await {
                 Ok(threads) => forge_engines::with_thread_mentions(&text, &threads),
                 Err(error) => {
-                    // The message still goes; only the closing line naming
-                    // the mentioned threads is left off.
                     tracing::warn!(
                         thread = %item.thread_id,
                         item = %item.id,
-                        "listing the threads for the message's mentions: {error:#}"
+                        "listing the threads for the message's mentions: {}", diagnostics::chain(&error)
                     );
                     text
                 }

@@ -10,7 +10,6 @@ description = "Live runs: start, steer, answer and cancel engine runs, and turn 
 doctest = false
 
 [dependencies]
-anyhow.workspace = true
 artisan-api.workspace = true
 diagnostics.workspace = true
 forge-content.workspace = true

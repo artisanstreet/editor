@@ -1,4 +1,5 @@
-use crate::mcp_auth::Mcp;
+use crate::error::ErrorClass;
+use crate::mcp_auth::{Mcp, ReadMcpServersError};
 use artisan_api::McpServer;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
@@ -7,9 +8,26 @@ use tokio_util::sync::CancellationToken;
 const EVERY: Duration = Duration::from_secs(10);
 const PATIENCE: Duration = Duration::from_secs(3);
 
-pub type Endpoint = (String, u16);
+pub(crate) type Endpoint = (String, u16);
 
-pub fn endpoint(server: &McpServer) -> Option<Endpoint> {
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeServersError {
+    #[error("read the MCP servers to probe")]
+    Servers(#[source] ReadMcpServersError),
+    #[error("probe whether an MCP server answers")]
+    Probe(#[source] tokio::task::JoinError),
+}
+
+impl ProbeServersError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Servers(_) | Self::Probe(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+pub(crate) fn endpoint(server: &McpServer) -> Option<Endpoint> {
     let url = url::Url::parse(server.url.as_deref()?).ok()?;
     Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
 }
@@ -30,13 +48,10 @@ impl Mcp {
         })
     }
 
-    pub async fn probe_servers(&self) -> anyhow::Result<()> {
-        let servers: Vec<McpServer> = self
-            .store()
-            .setting("mcp_servers")
-            .await?
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
+    pub async fn probe_servers(&self) -> Result<(), ProbeServersError> {
+        let servers = crate::mcp_auth::read_mcp_servers(self.store())
+            .await
+            .map_err(ProbeServersError::Servers)?;
         let named: BTreeMap<Endpoint, String> = servers
             .iter()
             .filter_map(|server| Some((endpoint(server)?, server.name.clone())))
@@ -51,7 +66,7 @@ impl Mcp {
             .collect();
         let mut unreachable = HashSet::new();
         while let Some(verdict) = probes.join_next().await {
-            if let (endpoint, false) = verdict? {
+            if let (endpoint, false) = verdict.map_err(ProbeServersError::Probe)? {
                 unreachable.insert(endpoint);
             }
         }
@@ -80,7 +95,10 @@ impl Mcp {
     pub async fn watch_servers(&self, stop: CancellationToken) {
         loop {
             if let Err(error) = self.probe_servers().await {
-                tracing::warn!("check which MCP servers answer: {error:#}");
+                tracing::warn!(
+                    "check which MCP servers answer: {}",
+                    diagnostics::chain(&error)
+                );
             }
             tokio::select! {
                 () = stop.cancelled() => return,

@@ -1,5 +1,6 @@
 use crate::Hub;
-use anyhow::Context as _;
+use crate::error::ErrorClass;
+use crate::scratch::ThreadFolderError;
 use artisan_api::{EngineId, ItemId, Thread, ThreadId};
 use forge_engines::claudeai::Rules;
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
@@ -23,10 +24,50 @@ static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 pub enum ResourceError {
     #[error("resource not found")]
     Missing,
-    #[error("{0}")]
-    Refused(String),
-    #[error(transparent)]
-    Failed(#[from] anyhow::Error),
+    #[error("{path} is not a file URL Forge can read")]
+    InvalidUrl {
+        path: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("the file is in the WSL distribution {distribution}, which Forge does not run in")]
+    OtherDistribution { distribution: String },
+    #[error("Forge has no home directory")]
+    NoHome,
+    #[error("resource must be a regular file no larger than 128 MiB")]
+    NotRegular { path: PathBuf },
+    #[error("outside the thread's folder or covered by a permission rule")]
+    Outside { path: PathBuf },
+    #[error("read resource {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("find the folder resources are read from")]
+    Folder(#[source] ThreadFolderError),
+    #[error("run the resource read task of thread {thread}")]
+    Task {
+        thread: ThreadId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
+impl ResourceError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Missing => ErrorClass::NotFound,
+            Self::InvalidUrl { .. }
+            | Self::OtherDistribution { .. }
+            | Self::NoHome
+            | Self::NotRegular { .. }
+            | Self::Outside { .. } => ErrorClass::BadRequest,
+            Self::Read { .. } | Self::Task { .. } => ErrorClass::Internal,
+            Self::Folder(source) => source.class(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -218,7 +259,10 @@ fn without_scheme(path: &str) -> Result<String, ResourceError> {
     if !has_scheme(path, "file://") {
         return Ok(path.to_owned());
     }
-    let url = url::Url::parse(path).map_err(|error| ResourceError::Refused(error.to_string()))?;
+    let url = url::Url::parse(path).map_err(|source| ResourceError::InvalidUrl {
+        path: path.to_owned(),
+        source,
+    })?;
     let local = percent_decoded(url.path());
     let share = url
         .host_str()
@@ -261,9 +305,9 @@ fn inside_wsl(
         Some((named, rest)) if own.is_some_and(|own| own.eq_ignore_ascii_case(named)) => {
             Ok(Some(Path::new("/").join(forward(rest))))
         }
-        Some((named, _)) => Err(ResourceError::Refused(format!(
-            "the file is in the WSL distribution {named}, which Forge does not run in"
-        ))),
+        Some((named, _)) => Err(ResourceError::OtherDistribution {
+            distribution: named.to_owned(),
+        }),
     }
 }
 
@@ -279,7 +323,7 @@ pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBu
             .home
             .as_ref()
             .map(|home| home.join(&path))
-            .ok_or_else(|| ResourceError::Refused("Forge has no home directory".to_owned()));
+            .ok_or(ResourceError::NoHome);
     }
     Ok(if path.is_absolute() {
         path
@@ -322,9 +366,10 @@ fn io_failure(path: &Path, error: std::io::Error) -> ResourceError {
     if error.kind() == std::io::ErrorKind::NotFound {
         ResourceError::Missing
     } else {
-        ResourceError::Failed(
-            anyhow::Error::from(error).context(format!("read resource {}", path.display())),
-        )
+        ResourceError::Read {
+            path: path.to_path_buf(),
+            source: error,
+        }
     }
 }
 
@@ -346,8 +391,8 @@ fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
-    let too_large = || {
-        ResourceError::Refused("resource must be a regular file no larger than 128 MiB".to_owned())
+    let too_large = || ResourceError::NotRegular {
+        path: path.to_path_buf(),
     };
     let file = open_resource(path).map_err(|error| io_failure(path, error))?;
     let metadata = file.metadata().map_err(|error| io_failure(path, error))?;
@@ -384,16 +429,14 @@ pub(crate) fn without_verbatim_prefix(path: &Path) -> PathBuf {
 
 fn keep(target: &Path, bytes: &[u8]) {
     if let Err(error) = forge_store::keep_resource_snapshot(target, bytes) {
-        tracing::warn!(path = %target.display(), "keep resource snapshot: {error:#}");
+        tracing::warn!(path = %target.display(), "keep resource snapshot: {}", diagnostics::chain(&error));
     }
 }
 
 fn snapshot(live: &Path, access: &Access, target: &Path) -> Result<(), ResourceError> {
     let resolved = resolved(live)?;
     if !access.permits(&resolved) {
-        return Err(ResourceError::Refused(
-            "outside the thread's folder or covered by a permission rule".to_owned(),
-        ));
+        return Err(ResourceError::Outside { path: resolved });
     }
     let bytes = read_regular(&resolved)?;
     keep(target, &bytes);
@@ -419,7 +462,10 @@ impl Hub {
                 written.from_home,
             )
         });
-        let folder = self.thread_folder(thread).await?;
+        let folder = self
+            .thread_folder(thread)
+            .await
+            .map_err(ResourceError::Folder)?;
         let live = host_path(written, &folder, &HOST);
         let hub = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -436,7 +482,10 @@ impl Hub {
             Ok(bytes)
         })
         .await
-        .context("resource read task")?
+        .map_err(|source| ResourceError::Task {
+            thread: thread.id.clone(),
+            source,
+        })?
     }
 
     pub(crate) async fn snapshot_resources(
@@ -455,14 +504,14 @@ impl Hub {
                 return;
             }
             Err(error) => {
-                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {error:#}");
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {}", diagnostics::chain(&error));
                 return;
             }
         };
         let folder = match self.thread_folder(&thread).await {
             Ok(folder) => folder,
             Err(error) => {
-                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {error:#}");
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {}", diagnostics::chain(&error));
                 return;
             }
         };
@@ -480,7 +529,7 @@ impl Hub {
             let access = hub.resource_access(&folder);
             for (live, target) in targets {
                 if let Err(error) = live.and_then(|live| snapshot(&live, &access, &target)) {
-                    tracing::debug!(%thread, %item, "resource not kept: {error:#}");
+                    tracing::debug!(%thread, %item, "resource not kept: {}", diagnostics::chain(&error));
                 }
             }
         })

@@ -5,7 +5,7 @@
 
 use crate::Hub;
 use crate::Refused;
-use anyhow::Result;
+use crate::error::ErrorClass;
 use artisan_api::{EditorCall, EditorReply, Event, Secret, ThreadId};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,8 +18,44 @@ pub const COMPUTER_USE_KEY: &str = "computer_use";
 /// How long an Editor gets to act on a call; pairing a host takes longest.
 const EDITOR_ANSWERS_WITHIN: Duration = Duration::from_secs(90);
 
+const NO_EDITOR: &str =
+    "No Editor answered. This needs the Artisan Editor open and connected to this Forge.";
+
+#[derive(Debug, thiserror::Error)]
+pub enum CallEditorError {
+    #[error("the Editor refused call {call}")]
+    Editor {
+        call: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error("no Editor answered call {call} within {} s", EDITOR_ANSWERS_WITHIN.as_secs())]
+    TimedOut {
+        call: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error("call {call} was dropped before an Editor answered")]
+    Dropped {
+        call: String,
+        #[source]
+        refused: Refused,
+    },
+}
+
+impl CallEditorError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Editor { .. } | Self::TimedOut { .. } | Self::Dropped { .. } => {
+                ErrorClass::Conflict
+            }
+        }
+    }
+}
+
 #[derive(Default)]
-pub struct Gateway {
+pub(crate) struct Gateway {
     /// `http://127.0.0.1:<port>/mcp/`, once the gateway listens.
     base: Option<String>,
     /// The gateway serves computer use (this machine has a display for it).
@@ -92,7 +128,11 @@ impl Hub {
         match self.store().setting(COMPUTER_USE_KEY).await {
             Ok(value) => value.and_then(|value| value.as_bool()).unwrap_or(false),
             Err(error) => {
-                tracing::warn!(key = COMPUTER_USE_KEY, "reading a setting: {error:#}");
+                tracing::warn!(
+                    key = COMPUTER_USE_KEY,
+                    "reading a setting: {}",
+                    diagnostics::chain(&error)
+                );
                 false
             }
         }
@@ -120,9 +160,10 @@ impl Hub {
         Some((base, token))
     }
 
-    /// Asks the connected Editors to act for an agent and returns the first
-    /// answer. Fails when no Editor answers in time.
-    pub async fn call_editor(&self, call: EditorCall) -> Result<serde_json::Value> {
+    pub async fn call_editor(
+        &self,
+        call: EditorCall,
+    ) -> Result<serde_json::Value, CallEditorError> {
         let id = artisan_api::ItemId::new().to_string();
         let (answer, answered) = oneshot::channel();
         self.gateway_lock().calls.insert(id.clone(), answer);
@@ -132,14 +173,21 @@ impl Hub {
         });
         let reply = tokio::time::timeout(EDITOR_ANSWERS_WITHIN, answered).await;
         self.gateway_lock().calls.remove(&id);
+        let no_editor = || Refused(NO_EDITOR.to_owned());
         match reply {
             Ok(Ok(EditorReply::Ok(value))) => Ok(value),
-            Ok(Ok(EditorReply::Error(error))) => Err(Refused(error).into()),
-            _ => Err(Refused(
-                "No Editor answered. This needs the Artisan Editor open and connected to this Forge."
-                    .to_owned(),
-            )
-            .into()),
+            Ok(Ok(EditorReply::Error(error))) => Err(CallEditorError::Editor {
+                call: id,
+                refused: Refused(error),
+            }),
+            Ok(Err(oneshot::error::RecvError { .. })) => Err(CallEditorError::Dropped {
+                call: id,
+                refused: no_editor(),
+            }),
+            Err(tokio::time::error::Elapsed { .. }) => Err(CallEditorError::TimedOut {
+                call: id,
+                refused: no_editor(),
+            }),
         }
     }
 

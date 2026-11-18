@@ -1,24 +1,83 @@
-use crate::Hub;
-use anyhow::{Context, Result, ensure};
+use crate::error::{self, ErrorClass};
+use crate::{Hub, SendAsAgentError};
 use artisan_api::{ItemId, ThreadId};
 use forge_store::coordination::{Content, MessageState, Record, Update, WatchState};
 use std::time::Duration;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeliverMessageError {
+    #[error("coordination message {id} does not exist")]
+    NotFound { id: String },
+    #[error("only the sender can deliver coordination message {id}; thread {caller} is not it")]
+    NotSender { id: String, caller: ThreadId },
+    #[error("coordination record {id} is not a message")]
+    NotAMessage { id: String },
+    #[error(transparent)]
+    Get(#[from] forge_store::coordination::CoordinationGetError),
+    #[error("deliver coordination message {id}")]
+    Send {
+        id: String,
+        #[source]
+        source: Box<SendAsAgentError>,
+    },
+    #[error(transparent)]
+    Update(#[from] forge_store::coordination::CoordinationUpdateError),
+    #[error("coordination message {id} was delivered; reload its record for the latest receipt")]
+    Raced { id: String },
+}
+
+impl DeliverMessageError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::NotFound { .. } => ErrorClass::NotFound,
+            Self::NotSender { .. } | Self::NotAMessage { .. } | Self::Raced { .. } => {
+                ErrorClass::Conflict
+            }
+            Self::Get(get) => error::coordination(&get.cause),
+            Self::Update(update) => error::coordination(&update.cause),
+            Self::Send { source, .. } => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CoordinationDeliveryError {
+    #[error(transparent)]
+    Watches(#[from] forge_store::coordination::CoordinationWatchesError),
+    #[error(transparent)]
+    Receipts(#[from] forge_store::coordination::CoordinationReceiptsError),
+    #[error(transparent)]
+    Get(#[from] forge_store::coordination::CoordinationGetError),
+    #[error(transparent)]
+    Update(#[from] forge_store::coordination::CoordinationUpdateError),
+    #[error("send the receipt of coordination message {id} to thread {owner}")]
+    Receipt {
+        id: String,
+        owner: ThreadId,
+        #[source]
+        source: Box<SendAsAgentError>,
+    },
+}
 
 impl Hub {
     pub async fn deliver_coordination_message(
         &self,
         caller: &ThreadId,
         id: String,
-    ) -> Result<Record> {
+    ) -> Result<Record, DeliverMessageError> {
+        let gone = || DeliverMessageError::NotFound { id: id.clone() };
         let record = self
             .store()
             .coordination_get(id.clone())
             .await?
-            .context("message not found")?;
-        ensure!(
-            &record.owner == caller,
-            "only the sender can deliver this message"
-        );
+            .ok_or_else(gone)?;
+        if &record.owner != caller {
+            return Err(DeliverMessageError::NotSender {
+                id,
+                caller: caller.clone(),
+            });
+        }
         let Content::Message {
             recipient,
             text,
@@ -27,7 +86,7 @@ impl Hub {
             ..
         } = &record.content
         else {
-            anyhow::bail!("record is not a coordination message");
+            return Err(DeliverMessageError::NotAMessage { id });
         };
         if *state != MessageState::Prepared {
             return Ok(record);
@@ -38,13 +97,17 @@ impl Hub {
         );
         let item = self
             .send_as_agent_with_id(caller, recipient, body, ItemId::from(id.clone()))
-            .await?;
+            .await
+            .map_err(|source| DeliverMessageError::Send {
+                id: id.clone(),
+                source: Box::new(source),
+            })?;
         for _ in 0..8 {
             let current = self
                 .store()
                 .coordination_get(id.clone())
                 .await?
-                .context("message disappeared")?;
+                .ok_or_else(gone)?;
             match self
                 .store()
                 .coordination_update(
@@ -63,16 +126,14 @@ impl Hub {
                         .store()
                         .coordination_get(id.clone())
                         .await?
-                        .context("message disappeared")?;
+                        .ok_or_else(gone)?;
                     if latest.revision == current.revision {
                         return Err(error.into());
                     }
                 }
             }
         }
-        anyhow::bail!(
-            "message was delivered; reload its coordination record for the latest receipt"
-        )
+        Err(DeliverMessageError::Raced { id })
     }
 
     pub async fn acknowledge_coordination(
@@ -82,17 +143,15 @@ impl Hub {
         revision: u64,
         state: MessageState,
         reply: Option<String>,
-    ) -> Result<Record> {
-        let record = self
-            .store()
+    ) -> Result<Record, forge_store::coordination::CoordinationUpdateError> {
+        self.store()
             .coordination_update(
                 caller.clone(),
                 id,
                 revision,
                 Update::Acknowledge { state, reply },
             )
-            .await?;
-        Ok(record)
+            .await
     }
 
     pub(crate) fn start_coordination(&self) {
@@ -106,10 +165,10 @@ impl Hub {
                     _tick = interval.tick() => {
                         if hub.generation().is_some_and(|generation| !generation.accepting()) { continue; }
                         if let Err(error) = hub.deliver_work_watches().await {
-                            tracing::warn!("coordination watches: {error:#}");
+                            tracing::warn!("coordination watches: {}", diagnostics::chain(&error));
                         }
                         if let Err(error) = hub.deliver_coordination_receipts().await {
-                            tracing::warn!("coordination receipts: {error:#}");
+                            tracing::warn!("coordination receipts: {}", diagnostics::chain(&error));
                         }
                     }
                 }
@@ -117,7 +176,7 @@ impl Hub {
         });
     }
 
-    async fn deliver_work_watches(&self) -> Result<()> {
+    async fn deliver_work_watches(&self) -> Result<(), CoordinationDeliveryError> {
         for mut watch in self.store().coordination_watches().await? {
             let Content::Watch {
                 target,
@@ -199,14 +258,14 @@ impl Hub {
                         .await?;
                 }
                 Err(error) => {
-                    tracing::warn!(watch = %watch.id, "deliver coordination watch: {error:#}");
+                    tracing::warn!(watch = %watch.id, "deliver coordination watch: {}", diagnostics::chain(&error));
                 }
             }
         }
         Ok(())
     }
 
-    async fn deliver_coordination_receipts(&self) -> Result<()> {
+    async fn deliver_coordination_receipts(&self) -> Result<(), CoordinationDeliveryError> {
         for record in self.store().coordination_receipts().await? {
             let Content::Message {
                 recipient,
@@ -231,7 +290,12 @@ impl Hub {
                     record.id, record.revision
                 )),
             )
-            .await?;
+            .await
+            .map_err(|source| CoordinationDeliveryError::Receipt {
+                id: record.id.clone(),
+                owner: record.owner.clone(),
+                source: Box::new(source),
+            })?;
             self.store()
                 .coordination_update(
                     record.owner,

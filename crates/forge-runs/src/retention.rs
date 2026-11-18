@@ -1,13 +1,41 @@
 use crate::Hub;
-use anyhow::{Context, Result};
-use artisan_api::{THREAD_RETENTION_DAYS_KEY, Thread};
+use crate::error::ErrorClass;
+use artisan_api::{THREAD_RETENTION_DAYS_KEY, Thread, Timestamp};
+use forge_store::{CollectBlobsError, ReadSettingError, RemoveInactiveError};
 use std::collections::HashSet;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const BATCH: usize = 8;
 
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveInactiveThreadsError {
+    #[error("read Forge's {THREAD_RETENTION_DAYS_KEY} setting")]
+    Days(#[source] ReadSettingError),
+    #[error("remove the threads inactive since {cutoff}")]
+    Remove {
+        cutoff: Timestamp,
+        #[source]
+        source: RemoveInactiveError,
+    },
+    #[error("collect the images of {removed} removed threads")]
+    CollectBlobs {
+        removed: usize,
+        #[source]
+        source: CollectBlobsError,
+    },
+}
+
+impl RemoveInactiveThreadsError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Days(_) | Self::Remove { .. } | Self::CollectBlobs { .. } => ErrorClass::Internal,
+        }
+    }
+}
+
 impl Hub {
-    pub async fn remove_inactive_threads(&self) -> Result<usize> {
+    pub async fn remove_inactive_threads(&self) -> Result<usize, RemoveInactiveThreadsError> {
         let Some(days) = self.retention_days().await? else {
             return Ok(0);
         };
@@ -18,7 +46,8 @@ impl Hub {
             let removed = self
                 .store()
                 .remove_inactive_threads(cutoff, live, BATCH)
-                .await?;
+                .await
+                .map_err(|source| RemoveInactiveThreadsError::Remove { cutoff, source })?;
             if removed.is_empty() {
                 break;
             }
@@ -29,19 +58,22 @@ impl Hub {
         }
         if total > 0 {
             tracing::info!(removed = total, days, "removed inactive threads");
-            self.store()
-                .gc_blobs()
-                .await
-                .context("collect images of removed threads")?;
+            self.store().gc_blobs().await.map_err(|source| {
+                RemoveInactiveThreadsError::CollectBlobs {
+                    removed: total,
+                    source,
+                }
+            })?;
         }
         Ok(total)
     }
 
-    async fn retention_days(&self) -> Result<Option<u32>> {
+    async fn retention_days(&self) -> Result<Option<u32>, RemoveInactiveThreadsError> {
         let value = self
             .store()
             .setting(THREAD_RETENTION_DAYS_KEY)
-            .await?
+            .await
+            .map_err(RemoveInactiveThreadsError::Days)?
             .or_else(|| {
                 artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
                     .map(artisan_api::SettingDecl::default_value)
@@ -73,7 +105,7 @@ impl Hub {
         match removed {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(thread = %id, "remove scratch folder of removed thread: {error:#}");
+                tracing::warn!(thread = %id, "remove scratch folder of removed thread: {}", diagnostics::chain(&error));
             }
             Err(error) => {
                 tracing::warn!(thread = %id, "remove scratch folder task of removed thread: {error}");

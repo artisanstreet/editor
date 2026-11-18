@@ -1,35 +1,489 @@
-//! Skills and the global prompt across the engines (master's
-//! `extension_sync`): what the Editor's Marketplace and Settings show and
-//! change. The filesystem work is `forge_engines::customise`; this keeps
-//! the user's choices in the store and serialises work on engine homes.
-
 use crate::Hub;
 use crate::Refused;
-use anyhow::{Context, Result};
+use crate::error::{self, ErrorClass};
+use crate::mcp_auth::ReadMcpServersError;
 use artisan_api::{
     CatalogSkill, EngineId, GlobalPrompt, PromptCandidate, PromptEngineState, PromptEngineStatus,
     ResolvePrompt, SavePrompt, SkillOrigin,
 };
 use forge_engines::Engines;
 use forge_engines::{Customisation, PromptApplied};
-use forge_store::Store;
+use forge_store::{
+    BumpRevisionError, PromptVersionError, ReadSettingError, SavePromptError, SetSettingError,
+    Store,
+};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// Forge's setting holding the ids of the skills the user turned off.
 pub const DISABLED_SKILLS_KEY: &str = "disabled_skills";
-/// Forge's setting holding the global prompt (its latest version).
 pub const GLOBAL_PROMPT_KEY: &str = "global_prompt";
-/// The longest global prompt Forge keeps.
 const PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-#[error("read the skills turned off in Forge's {DISABLED_SKILLS_KEY} setting")]
-pub struct DisabledSkillsError(#[source] pub serde_json::Error);
+pub enum HomesLockError {
+    #[error("open the engine homes lock {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("lock the engine homes with {}", path.display())]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
-fn refused(message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(Refused(message.into()))
+#[derive(Debug, thiserror::Error)]
+pub enum HomesError {
+    #[error("wait for the engine homes")]
+    Lock(#[source] HomesLockError),
+    #[error("run the work on the engine homes")]
+    Task(#[source] tokio::task::JoinError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SkillCustomisationError {
+    #[error("read Forge's {DISABLED_SKILLS_KEY} setting")]
+    Read(#[source] ReadSettingError),
+    #[error("read the skills turned off in Forge's {DISABLED_SKILLS_KEY} setting")]
+    DisabledSkills(#[source] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CustomisationError {
+    #[error("read the global prompt engines launch with")]
+    Prompt(#[source] GlobalPromptError),
+    #[error("read the MCP servers engines launch with")]
+    McpServers(#[source] ReadMcpServersError),
+    #[error("read the skills engines launch with")]
+    Skills(#[source] SkillCustomisationError),
+}
+
+impl CustomisationError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Prompt(prompt) => prompt.class(),
+            Self::McpServers(_) | Self::Skills(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SkillCatalogError {
+    #[error("read which skills are turned off")]
+    Customisation(#[source] SkillCustomisationError),
+    #[error("read the skill catalog from the engine homes")]
+    Homes(#[source] HomesError),
+    #[error("read the skill catalog")]
+    Read(#[source] forge_engines::ReadSkillsError),
+}
+
+impl SkillCatalogError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation(_) | Self::Homes(_) | Self::Read(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EnabledSkillsError {
+    #[error("read which skills are turned off")]
+    Customisation(#[source] SkillCustomisationError),
+    #[error("read the enabled skills from the engine homes")]
+    Homes(#[source] HomesError),
+    #[error("read the enabled skills")]
+    Read(#[source] forge_engines::ReadSkillsError),
+}
+
+impl EnabledSkillsError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation(_) | Self::Homes(_) | Self::Read(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReconcileSkillsError {
+    #[error("read which skills are turned off")]
+    Customisation(#[source] SkillCustomisationError),
+    #[error("put the skills into the engine homes")]
+    Homes(#[source] HomesError),
+    #[error("put the skills into the engines")]
+    Reconcile(#[source] forge_engines::ReconcileSkillsError),
+}
+
+impl ReconcileSkillsError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation(_) | Self::Homes(_) | Self::Reconcile(_) => ErrorClass::Internal,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetSkillEnabledError {
+    #[error("read the skill catalog to turn skill {skill} on or off")]
+    Catalog {
+        skill: String,
+        #[source]
+        source: SkillCatalogError,
+    },
+    #[error("turn skill {skill} on or off")]
+    Unmanaged {
+        skill: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error("save whether skill {skill} is on")]
+    Save {
+        skill: String,
+        #[source]
+        source: forge_store::SetSkillEnabledError,
+    },
+    #[error("put the skills into the engines after turning skill {skill} on or off")]
+    Reconcile {
+        skill: String,
+        #[source]
+        source: ReconcileSkillsError,
+    },
+}
+
+impl SetSkillEnabledError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Catalog { source, .. } => source.class(),
+            Self::Unmanaged { .. } => ErrorClass::Conflict,
+            Self::Save { source, .. } => error::write(&source.cause),
+            Self::Reconcile { source, .. } => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptSkillError {
+    #[error("read which skills are turned off to adopt skill {skill}")]
+    Customisation {
+        skill: String,
+        #[source]
+        source: SkillCustomisationError,
+    },
+    #[error("adopt skill {skill} in the engine homes")]
+    Homes {
+        skill: String,
+        #[source]
+        source: HomesError,
+    },
+    #[error("Couldn't adopt skill {skill}")]
+    Adopt {
+        skill: String,
+        #[source]
+        source: Box<forge_engines::AdoptSkillError>,
+    },
+    #[error("put the skills into the engines after adopting skill {skill}")]
+    Reconcile {
+        skill: String,
+        #[source]
+        source: ReconcileSkillsError,
+    },
+    #[error("announce adopted skill {skill}")]
+    Bump {
+        skill: String,
+        #[source]
+        source: BumpRevisionError,
+    },
+    #[error("read the skill catalog after adopting skill {skill}")]
+    Catalog {
+        skill: String,
+        #[source]
+        source: SkillCatalogError,
+    },
+}
+
+impl AdoptSkillError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation { .. } | Self::Homes { .. } => ErrorClass::Internal,
+            Self::Adopt { .. } => ErrorClass::Conflict,
+            Self::Reconcile { source, .. } => source.class(),
+            Self::Bump { source, .. } => error::setting(&source.cause),
+            Self::Catalog { source, .. } => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DiscardSkillError {
+    #[error("read which skills are turned off to discard skill {skill}")]
+    Customisation {
+        skill: String,
+        #[source]
+        source: SkillCustomisationError,
+    },
+    #[error("discard skill {skill} in the engine homes")]
+    Homes {
+        skill: String,
+        #[source]
+        source: HomesError,
+    },
+    #[error("Couldn't discard skill {skill}")]
+    Discard {
+        skill: String,
+        #[source]
+        source: forge_engines::DiscardSkillError,
+    },
+    #[error("announce discarded skill {skill}")]
+    Bump {
+        skill: String,
+        #[source]
+        source: BumpRevisionError,
+    },
+    #[error("read the skill catalog after discarding skill {skill}")]
+    Catalog {
+        skill: String,
+        #[source]
+        source: SkillCatalogError,
+    },
+}
+
+impl DiscardSkillError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation { .. } | Self::Homes { .. } => ErrorClass::Internal,
+            Self::Discard { .. } => ErrorClass::Conflict,
+            Self::Bump { source, .. } => error::setting(&source.cause),
+            Self::Catalog { source, .. } => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InstallSkillError {
+    #[error("read which skills are turned off to install the skill in {}", from.display())]
+    Customisation {
+        from: PathBuf,
+        #[source]
+        source: SkillCustomisationError,
+    },
+    #[error("install the skill in {} into the engine homes", from.display())]
+    Homes {
+        from: PathBuf,
+        #[source]
+        source: HomesError,
+    },
+    #[error("Couldn't install the skill in {}", from.display())]
+    Install {
+        from: PathBuf,
+        #[source]
+        source: forge_engines::InstallSkillError,
+    },
+    #[error("turn installed skill {skill} on")]
+    Enable {
+        skill: String,
+        #[source]
+        source: forge_store::SetSkillEnabledError,
+    },
+    #[error("put the skills into the engines after installing skill {skill}")]
+    Reconcile {
+        skill: String,
+        #[source]
+        source: ReconcileSkillsError,
+    },
+    #[error("announce installed skill {skill}")]
+    Bump {
+        skill: String,
+        #[source]
+        source: BumpRevisionError,
+    },
+}
+
+impl InstallSkillError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Customisation { .. } | Self::Homes { .. } => ErrorClass::Internal,
+            Self::Install { .. } => ErrorClass::Conflict,
+            Self::Enable { source, .. } => error::write(&source.cause),
+            Self::Reconcile { source, .. } => source.class(),
+            Self::Bump { source, .. } => error::setting(&source.cause),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MarketplaceSearchError {
+    #[error("Couldn't search skills.sh for {query:?}")]
+    Search {
+        query: String,
+        #[source]
+        source: forge_engines::SearchSkillsError,
+    },
+}
+
+impl MarketplaceSearchError {
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Search { .. } => ErrorClass::Conflict,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MarketplaceInstallError {
+    #[error("Couldn't fetch listing {listing}")]
+    Fetch {
+        listing: String,
+        #[source]
+        source: Box<forge_engines::FetchSkillError>,
+    },
+    #[error("install listing {listing}")]
+    Install {
+        listing: String,
+        #[source]
+        source: Box<InstallSkillError>,
+    },
+    #[error("read the skill catalog after installing listing {listing}")]
+    Catalog {
+        listing: String,
+        #[source]
+        source: SkillCatalogError,
+    },
+}
+
+impl MarketplaceInstallError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Fetch { .. } => ErrorClass::Conflict,
+            Self::Install { source, .. } => source.class(),
+            Self::Catalog { source, .. } => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GlobalPromptError {
+    #[error("read Forge's {GLOBAL_PROMPT_KEY} setting")]
+    Read(#[source] ReadSettingError),
+    #[error("read the engines' global prompt files")]
+    Candidates(#[source] HomesError),
+    #[error("take over the engines' global prompt")]
+    TakeOver(#[source] SetSettingError),
+    #[error("read the global prompt's version")]
+    Version(#[source] PromptVersionError),
+    #[error("compare the global prompt with the engines' files")]
+    Engines(#[source] HomesError),
+}
+
+impl GlobalPromptError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::TakeOver(source) => error::setting(&source.cause),
+            Self::Read(_) | Self::Candidates(_) | Self::Version(_) | Self::Engines(_) => {
+                ErrorClass::Internal
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SaveGlobalPromptError {
+    #[error("save a global prompt of {bytes} bytes")]
+    TooLong {
+        bytes: usize,
+        #[source]
+        refused: Refused,
+    },
+    #[error("save the global prompt over version {base}")]
+    Save {
+        base: u64,
+        #[source]
+        source: SavePromptError,
+    },
+    #[error("save the global prompt over version {base} while version {current} is the latest")]
+    Stale {
+        base: u64,
+        current: u64,
+        #[source]
+        refused: Refused,
+    },
+    #[error("write the saved global prompt into the engines")]
+    Reconcile(#[source] GlobalPromptError),
+}
+
+impl SaveGlobalPromptError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::TooLong { .. } | Self::Stale { .. } => ErrorClass::Conflict,
+            Self::Save { source, .. } => error::write(&source.cause),
+            Self::Reconcile(source) => source.class(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveGlobalPromptError {
+    #[error("read the global prompt to resolve")]
+    Current(#[source] GlobalPromptError),
+    #[error("resolve {engine}'s global prompt")]
+    NotDrifted {
+        engine: EngineId,
+        #[source]
+        refused: Refused,
+    },
+    #[error("choose prompt {candidate} as the global prompt")]
+    NoCandidate {
+        candidate: String,
+        #[source]
+        refused: Refused,
+    },
+    #[error("save the resolved global prompt over version {version}")]
+    Save {
+        version: u64,
+        #[source]
+        source: SavePromptError,
+    },
+    #[error(
+        "save the resolved global prompt over version {version} while version {current} is the latest"
+    )]
+    Changed {
+        version: u64,
+        current: u64,
+        #[source]
+        refused: Refused,
+    },
+    #[error("write the resolved global prompt into the engines")]
+    Reconcile(#[source] GlobalPromptError),
+    #[error("announce the resolved global prompt")]
+    Bump(#[source] BumpRevisionError),
+}
+
+impl ResolveGlobalPromptError {
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Current(source) | Self::Reconcile(source) => source.class(),
+            Self::NotDrifted { .. } | Self::NoCandidate { .. } | Self::Changed { .. } => {
+                ErrorClass::Conflict
+            }
+            Self::Save { source, .. } => error::write(&source.cause),
+            Self::Bump(source) => error::setting(&source.cause),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -41,22 +495,23 @@ pub struct Extensions {
 }
 
 impl Hub {
-    /// What an engine gets at launch: the prompt (once the user has one),
-    /// MCP servers, and the enabled skills.
-    pub(crate) async fn customisation(&self) -> Result<Customisation> {
+    pub(crate) async fn customisation(&self) -> Result<Customisation, CustomisationError> {
+        let prompt = self
+            .extensions()
+            .launch_prompt()
+            .await
+            .map_err(CustomisationError::Prompt)?;
+        let servers = crate::mcp_auth::read_mcp_servers(self.store())
+            .await
+            .map_err(CustomisationError::McpServers)?;
         Ok(Customisation {
-            prompt: self.extensions().launch_prompt().await?,
-            mcp_servers: self
-                .mcp()
-                .with_tokens(
-                    self.store()
-                        .setting("mcp_servers")
-                        .await?
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default(),
-                )
-                .await,
-            ..self.extensions().skill_customisation().await?
+            prompt,
+            mcp_servers: self.mcp().with_tokens(servers).await,
+            ..self
+                .extensions()
+                .skill_customisation()
+                .await
+                .map_err(CustomisationError::Skills)?
         })
     }
 }
@@ -87,19 +542,24 @@ impl Extensions {
         self.data_dir.join("extensions").join("skills")
     }
 
-    pub(crate) fn homes_lock(&self) -> Result<(MutexGuard<'_, ()>, std::fs::File)> {
+    pub(crate) fn homes_lock(&self) -> Result<(MutexGuard<'_, ()>, std::fs::File), HomesLockError> {
         let local = self.homes.lock().unwrap_or_else(PoisonError::into_inner);
+        let path = self.data_dir.join("homes.lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.data_dir.join("homes.lock"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
+            .open(&path)
+            .map_err(|source| HomesLockError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        fs2::FileExt::lock_exclusive(&file)
+            .map_err(|source| HomesLockError::Lock { path, source })?;
         Ok((local, file))
     }
 
-    /// Every engine with its home when installed.
     fn engine_homes(&self) -> Vec<(EngineId, Option<PathBuf>)> {
         let engines = self.engines();
         EngineId::ALL
@@ -108,16 +568,23 @@ impl Extensions {
             .collect()
     }
 
-    async fn disabled_skills(&self) -> Result<BTreeSet<String>> {
-        match self.store().setting(DISABLED_SKILLS_KEY).await? {
+    async fn disabled_skills(&self) -> Result<BTreeSet<String>, SkillCustomisationError> {
+        match self
+            .store()
+            .setting(DISABLED_SKILLS_KEY)
+            .await
+            .map_err(SkillCustomisationError::Read)?
+        {
             None => Ok(BTreeSet::new()),
-            Some(value) => Ok(serde_json::from_value(value).map_err(DisabledSkillsError)?),
+            Some(value) => {
+                serde_json::from_value(value).map_err(SkillCustomisationError::DisabledSkills)
+            }
         }
     }
 
-    /// The skills part of what an engine gets: Artisan's own and the user's,
-    /// less the ones turned off.
-    pub(crate) async fn skill_customisation(&self) -> Result<Customisation> {
+    pub(crate) async fn skill_customisation(
+        &self,
+    ) -> Result<Customisation, SkillCustomisationError> {
         Ok(Customisation {
             skills_dir: self.skills_dir(),
             first_party: true,
@@ -126,147 +593,266 @@ impl Extensions {
         })
     }
 
-    /// Runs filesystem work on engine homes, one job at a time.
     async fn on_homes<R: Send + 'static>(
         &self,
         job: impl FnOnce() -> R + Send + 'static,
-    ) -> Result<R> {
+    ) -> Result<R, HomesError> {
         let extensions = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _homes = extensions.homes_lock()?;
+            let _homes = extensions.homes_lock().map_err(HomesError::Lock)?;
             Ok(job())
         })
         .await
-        .context("engine home task")?
+        .map_err(HomesError::Task)?
     }
 
-    /// Read-only skill catalog; ownership changes reconcile explicitly.
-    pub async fn skill_catalog(&self) -> Result<Vec<CatalogSkill>> {
-        let customisation = self.skill_customisation().await?;
+    pub async fn skill_catalog(&self) -> Result<Vec<CatalogSkill>, SkillCatalogError> {
+        let customisation = self
+            .skill_customisation()
+            .await
+            .map_err(SkillCatalogError::Customisation)?;
         let homes = self.engine_homes();
-        Ok(self
-            .on_homes(move || forge_engines::skill_catalog(&homes, &customisation))
-            .await??)
+        self.on_homes(move || forge_engines::skill_catalog(&homes, &customisation))
+            .await
+            .map_err(SkillCatalogError::Homes)?
+            .map_err(SkillCatalogError::Read)
     }
 
-    /// The skills a `$name` mention can name: the ones Forge puts into the
-    /// engines.
-    pub async fn enabled_skills(&self) -> Result<Vec<artisan_api::Skill>> {
-        let customisation = self.skill_customisation().await?;
-        Ok(self
-            .on_homes(move || forge_engines::enabled_skills(&customisation))
-            .await??)
+    pub async fn enabled_skills(&self) -> Result<Vec<artisan_api::Skill>, EnabledSkillsError> {
+        let customisation = self
+            .skill_customisation()
+            .await
+            .map_err(EnabledSkillsError::Customisation)?;
+        self.on_homes(move || forge_engines::enabled_skills(&customisation))
+            .await
+            .map_err(EnabledSkillsError::Homes)?
+            .map_err(EnabledSkillsError::Read)
     }
 
-    /// Turns a skill Forge manages on or off in every engine.
-    pub async fn set_skill_enabled(&self, id: &str, enabled: bool) -> Result<Vec<CatalogSkill>> {
+    pub async fn set_skill_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<Vec<CatalogSkill>, SetSkillEnabledError> {
+        let catalog = |source| SetSkillEnabledError::Catalog {
+            skill: id.to_owned(),
+            source,
+        };
         let known = self
             .skill_catalog()
-            .await?
+            .await
+            .map_err(catalog)?
             .into_iter()
             .any(|skill| skill.id == id && skill.origin != SkillOrigin::Discovered);
         if !known {
-            return Err(refused("Artisan doesn't manage that skill."));
+            return Err(SetSkillEnabledError::Unmanaged {
+                skill: id.to_owned(),
+                refused: Refused("Artisan doesn't manage that skill.".to_owned()),
+            });
         }
         self.store()
             .set_skill_enabled(id.to_owned(), enabled)
-            .await?;
-        self.reconcile_skills().await?;
-        self.skill_catalog().await
-    }
-
-    /// Installs a quarantined skill: copies it into Forge's skills folder,
-    /// so Forge keeps it in every engine.
-    pub async fn adopt_skill(&self, id: &str) -> Result<Vec<CatalogSkill>> {
-        let customisation = self.skill_customisation().await?;
-        let homes = self.engine_homes();
-        let id = id.to_owned();
-        let adopted = self
-            .on_homes(move || forge_engines::adopt_skill(&homes, &customisation, &id))
-            .await?;
-        if let Err(error) = adopted {
-            // The customise layer phrases its refusals for the user.
-            return Err(refused(diagnostics::chain(&error)));
-        }
-        self.reconcile_skills().await?;
-        self.store().bump_revision("skills_revision".into()).await?;
-        self.skill_catalog().await
-    }
-
-    /// skills.sh's skills for `query`.
-    pub async fn marketplace_search(&self, query: &str) -> Result<Vec<artisan_api::Listing>> {
-        forge_engines::search_skills(self.engines().http(), forge_engines::SKILLS_SH_URL, query)
             .await
-            .map_err(|error| {
-                refused(format!(
-                    "Couldn't search skills.sh: {}",
-                    diagnostics::chain(&error)
-                ))
+            .map_err(|source| SetSkillEnabledError::Save {
+                skill: id.to_owned(),
+                source,
+            })?;
+        self.reconcile_skills()
+            .await
+            .map_err(|source| SetSkillEnabledError::Reconcile {
+                skill: id.to_owned(),
+                source,
+            })?;
+        self.skill_catalog().await.map_err(catalog)
+    }
+
+    pub async fn adopt_skill(&self, id: &str) -> Result<Vec<CatalogSkill>, AdoptSkillError> {
+        let skill = || id.to_owned();
+        let customisation =
+            self.skill_customisation()
+                .await
+                .map_err(|source| AdoptSkillError::Customisation {
+                    skill: skill(),
+                    source,
+                })?;
+        let homes = self.engine_homes();
+        let adopted = id.to_owned();
+        self.on_homes(move || forge_engines::adopt_skill(&homes, &customisation, &adopted))
+            .await
+            .map_err(|source| AdoptSkillError::Homes {
+                skill: skill(),
+                source,
+            })?
+            .map_err(|source| AdoptSkillError::Adopt {
+                skill: skill(),
+                source: Box::new(source),
+            })?;
+        self.reconcile_skills()
+            .await
+            .map_err(|source| AdoptSkillError::Reconcile {
+                skill: skill(),
+                source,
+            })?;
+        self.store()
+            .bump_revision("skills_revision".into())
+            .await
+            .map_err(|source| AdoptSkillError::Bump {
+                skill: skill(),
+                source,
+            })?;
+        self.skill_catalog()
+            .await
+            .map_err(|source| AdoptSkillError::Catalog {
+                skill: skill(),
+                source,
             })
     }
 
-    /// Fetches a listed skill from its repository and installs it like
-    /// `skill_install`: into Forge's skills folder, on, in every engine.
-    pub async fn marketplace_install(&self, id: &str) -> Result<Vec<CatalogSkill>> {
+    pub async fn marketplace_search(
+        &self,
+        query: &str,
+    ) -> Result<Vec<artisan_api::Listing>, MarketplaceSearchError> {
+        forge_engines::search_skills(self.engines().http(), forge_engines::SKILLS_SH_URL, query)
+            .await
+            .map_err(|source| MarketplaceSearchError::Search {
+                query: query.to_owned(),
+                source,
+            })
+    }
+
+    pub async fn marketplace_install(
+        &self,
+        id: &str,
+    ) -> Result<Vec<CatalogSkill>, MarketplaceInstallError> {
         let scratch = self
             .data_dir()
             .join("scratch")
             .join(format!("marketplace-{}", artisan_api::now()));
-        let fetched = forge_engines::fetch_skill(self.engines().http(), id, &scratch).await;
-        let installed = match fetched {
-            Ok(folder) => self.install_skill(folder, false).await.map(drop),
-            Err(error) => Err(refused(diagnostics::chain(&error))),
+        let installed = match forge_engines::fetch_skill(self.engines().http(), id, &scratch).await
+        {
+            Ok(folder) => self
+                .install_skill(folder, false)
+                .await
+                .map(drop)
+                .map_err(|source| MarketplaceInstallError::Install {
+                    listing: id.to_owned(),
+                    source: Box::new(source),
+                }),
+            Err(source) => Err(MarketplaceInstallError::Fetch {
+                listing: id.to_owned(),
+                source: Box::new(source),
+            }),
         };
-        // Best effort: a leftover scratch folder is harmless.
-        tokio::fs::remove_dir_all(&scratch).await.ok();
-        installed?;
-        self.skill_catalog().await
-    }
-
-    /// Deletes a quarantined skill.
-    pub async fn discard_skill(&self, id: &str) -> Result<Vec<CatalogSkill>> {
-        let customisation = self.skill_customisation().await?;
-        let homes = self.engine_homes();
-        let id = id.to_owned();
-        let discarded = self
-            .on_homes(move || forge_engines::discard_skill(&homes, &customisation, &id))
-            .await?;
-        if let Err(error) = discarded {
-            return Err(refused(diagnostics::chain(&error)));
+        match tokio::fs::remove_dir_all(&scratch).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(listing = %id, path = %scratch.display(), "remove the marketplace scratch folder: {error}");
+            }
         }
-        self.store().bump_revision("skills_revision".into()).await?;
-        self.skill_catalog().await
+        installed?;
+        self.skill_catalog()
+            .await
+            .map_err(|source| MarketplaceInstallError::Catalog {
+                listing: id.to_owned(),
+                source,
+            })
     }
 
-    /// Copies a skill folder into Forge's skills folder and turns it on, so
-    /// Forge keeps it in every engine.
-    pub async fn install_skill(&self, from: PathBuf, replace: bool) -> Result<String> {
-        let customisation = self.skill_customisation().await?;
+    pub async fn discard_skill(&self, id: &str) -> Result<Vec<CatalogSkill>, DiscardSkillError> {
+        let skill = || id.to_owned();
+        let customisation = self.skill_customisation().await.map_err(|source| {
+            DiscardSkillError::Customisation {
+                skill: skill(),
+                source,
+            }
+        })?;
         let homes = self.engine_homes();
-        let installed = self
-            .on_homes(move || forge_engines::install_skill(&homes, &customisation, &from, replace))
-            .await?;
-        // The customise layer phrases its refusals for the caller.
-        let name = installed.map_err(|error| refused(diagnostics::chain(&error)))?;
+        let discarded = id.to_owned();
+        self.on_homes(move || forge_engines::discard_skill(&homes, &customisation, &discarded))
+            .await
+            .map_err(|source| DiscardSkillError::Homes {
+                skill: skill(),
+                source,
+            })?
+            .map_err(|source| DiscardSkillError::Discard {
+                skill: skill(),
+                source,
+            })?;
+        self.store()
+            .bump_revision("skills_revision".into())
+            .await
+            .map_err(|source| DiscardSkillError::Bump {
+                skill: skill(),
+                source,
+            })?;
+        self.skill_catalog()
+            .await
+            .map_err(|source| DiscardSkillError::Catalog {
+                skill: skill(),
+                source,
+            })
+    }
+
+    pub async fn install_skill(
+        &self,
+        from: PathBuf,
+        replace: bool,
+    ) -> Result<String, InstallSkillError> {
+        let customisation = self.skill_customisation().await.map_err(|source| {
+            InstallSkillError::Customisation {
+                from: from.clone(),
+                source,
+            }
+        })?;
+        let homes = self.engine_homes();
+        let folder = from.clone();
+        let name = self
+            .on_homes(move || {
+                forge_engines::install_skill(&homes, &customisation, &folder, replace)
+            })
+            .await
+            .map_err(|source| InstallSkillError::Homes {
+                from: from.clone(),
+                source,
+            })?
+            .map_err(|source| InstallSkillError::Install { from, source })?;
         self.store()
             .set_skill_enabled(format!("local.{name}"), true)
-            .await?;
-        self.reconcile_skills().await?;
-        self.store().bump_revision("skills_revision".into()).await?;
+            .await
+            .map_err(|source| InstallSkillError::Enable {
+                skill: name.clone(),
+                source,
+            })?;
+        self.reconcile_skills()
+            .await
+            .map_err(|source| InstallSkillError::Reconcile {
+                skill: name.clone(),
+                source,
+            })?;
+        self.store()
+            .bump_revision("skills_revision".into())
+            .await
+            .map_err(|source| InstallSkillError::Bump {
+                skill: name.clone(),
+                source,
+            })?;
         Ok(name)
     }
 
-    pub async fn reconcile_skills(&self) -> Result<()> {
-        let customisation = self.skill_customisation().await?;
+    pub async fn reconcile_skills(&self) -> Result<(), ReconcileSkillsError> {
+        let customisation = self
+            .skill_customisation()
+            .await
+            .map_err(ReconcileSkillsError::Customisation)?;
         let homes = self.engine_homes();
-        Ok(self
-            .on_homes(move || forge_engines::reconcile_skills(&homes, &customisation))
-            .await??)
+        self.on_homes(move || forge_engines::reconcile_skills(&homes, &customisation))
+            .await
+            .map_err(ReconcileSkillsError::Homes)?
+            .map_err(ReconcileSkillsError::Reconcile)
     }
 
-    /// The prompt engines get at launch; `None` while the user must still
-    /// choose between the engines' differing prompts.
-    pub(crate) async fn launch_prompt(&self) -> Result<Option<String>> {
+    pub(crate) async fn launch_prompt(&self) -> Result<Option<String>, GlobalPromptError> {
         if let Some(text) = self.stored_prompt().await? {
             return Ok(Some(text));
         }
@@ -274,38 +860,35 @@ impl Extensions {
         Ok(prompt.candidates.is_empty().then_some(prompt.text))
     }
 
-    async fn stored_prompt(&self) -> Result<Option<String>> {
+    async fn stored_prompt(&self) -> Result<Option<String>, GlobalPromptError> {
         Ok(self
             .store()
             .setting(GLOBAL_PROMPT_KEY)
-            .await?
+            .await
+            .map_err(GlobalPromptError::Read)?
             .and_then(|value| value.as_str().map(str::to_owned)))
     }
 
-    /// Read-only view of the global prompt and each engine file.
-    pub async fn global_prompt(&self) -> Result<GlobalPrompt> {
+    pub async fn global_prompt(&self) -> Result<GlobalPrompt, GlobalPromptError> {
         self.prompt_projection(false, None).await
     }
 
-    pub async fn reconcile_global_prompt(&self) -> Result<GlobalPrompt> {
-        self.reconcile_prompt(None).await
-    }
-
-    async fn reconcile_prompt(&self, force: Option<EngineId>) -> Result<GlobalPrompt> {
-        self.prompt_projection(true, force).await
+    pub async fn reconcile_global_prompt(&self) -> Result<GlobalPrompt, GlobalPromptError> {
+        self.prompt_projection(true, None).await
     }
 
     async fn prompt_projection(
         &self,
         reconcile: bool,
         force: Option<EngineId>,
-    ) -> Result<GlobalPrompt> {
+    ) -> Result<GlobalPrompt, GlobalPromptError> {
         let homes = self.engine_homes();
         if self.stored_prompt().await?.is_none() {
-            // Before Forge first writes, it takes what the engines have: one
-            // shared text silently, differing ones as a choice for the user.
             let found = homes.clone();
-            let mut candidates = self.on_homes(move || candidates(&found)).await?;
+            let mut candidates = self
+                .on_homes(move || candidates(&found))
+                .await
+                .map_err(GlobalPromptError::Candidates)?;
             if !reconcile || candidates.len() > 1 {
                 return Ok(GlobalPrompt {
                     version: 0,
@@ -318,14 +901,17 @@ impl Extensions {
                 .pop()
                 .map(|candidate| candidate.text)
                 .unwrap_or_default();
-            // Taking it over isn't a save: no version. Another request may
-            // have set it up meanwhile; that one stands.
             self.store()
                 .set_setting_if_absent(GLOBAL_PROMPT_KEY.to_owned(), serde_json::json!(text))
-                .await?;
+                .await
+                .map_err(GlobalPromptError::TakeOver)?;
         }
         let text = self.stored_prompt().await?.unwrap_or_default();
-        let version = self.store().prompt_version().await?;
+        let version = self
+            .store()
+            .prompt_version()
+            .await
+            .map_err(GlobalPromptError::Version)?;
         let canonical = text.clone();
         let engines = self
             .on_homes(move || {
@@ -336,7 +922,8 @@ impl Extensions {
                     })
                     .collect()
             })
-            .await?;
+            .await
+            .map_err(GlobalPromptError::Engines)?;
         Ok(GlobalPrompt {
             version,
             text,
@@ -345,85 +932,122 @@ impl Extensions {
         })
     }
 
-    /// Saves a new version and writes it to every engine not edited outside
-    /// Artisan.
-    pub async fn save_global_prompt(&self, save: SavePrompt) -> Result<GlobalPrompt> {
+    pub async fn save_global_prompt(
+        &self,
+        save: SavePrompt,
+    ) -> Result<GlobalPrompt, SaveGlobalPromptError> {
         if save.text.len() > PROMPT_MAX_BYTES {
-            return Err(refused("The global prompt is longer than 64 KB."));
+            return Err(SaveGlobalPromptError::TooLong {
+                bytes: save.text.len(),
+                refused: Refused("The global prompt is longer than 64 KB.".to_owned()),
+            });
         }
-        if self
-            .store()
-            .save_prompt_version(save.base_version, save.text)
-            .await?
-            .is_err()
-        {
-            return Err(refused(
-                "The global prompt changed since you started editing. Review the current version and save again.",
-            ));
-        }
-        self.reconcile_prompt(None).await
+        let base = save.base_version;
+        self.store()
+            .save_prompt_version(base, save.text)
+            .await
+            .map_err(|source| SaveGlobalPromptError::Save { base, source })?
+            .map_err(|current| SaveGlobalPromptError::Stale {
+                base,
+                current,
+                refused: Refused(
+                    "The global prompt changed since you started editing. Review the current version and save again.".to_owned(),
+                ),
+            })?;
+        self.prompt_projection(true, None)
+            .await
+            .map_err(SaveGlobalPromptError::Reconcile)
     }
 
-    /// Settles the setup choice or an engine edited outside Artisan.
-    pub async fn resolve_global_prompt(&self, resolution: ResolvePrompt) -> Result<GlobalPrompt> {
+    pub async fn resolve_global_prompt(
+        &self,
+        resolution: ResolvePrompt,
+    ) -> Result<GlobalPrompt, ResolveGlobalPromptError> {
         let prompt = self.resolve_prompt_inner(resolution).await?;
-        self.store().bump_revision("prompt_revision".into()).await?;
+        self.store()
+            .bump_revision("prompt_revision".into())
+            .await
+            .map_err(ResolveGlobalPromptError::Bump)?;
         Ok(prompt)
     }
 
-    async fn resolve_prompt_inner(&self, resolution: ResolvePrompt) -> Result<GlobalPrompt> {
-        let current = self.global_prompt().await?;
+    async fn resolve_prompt_inner(
+        &self,
+        resolution: ResolvePrompt,
+    ) -> Result<GlobalPrompt, ResolveGlobalPromptError> {
+        let current = self
+            .global_prompt()
+            .await
+            .map_err(ResolveGlobalPromptError::Current)?;
         let drifted = |engine: EngineId| {
             current
                 .engines
                 .iter()
                 .find(|state| state.engine == engine && state.status == PromptEngineStatus::Drifted)
                 .and_then(|state| state.external_text.clone())
-                .ok_or_else(|| {
-                    refused(format!(
+                .ok_or_else(|| ResolveGlobalPromptError::NotDrifted {
+                    engine,
+                    refused: Refused(format!(
                         "{}'s global prompt is no longer edited outside Artisan.",
                         engine.display_name()
-                    ))
+                    )),
                 })
         };
-        match resolution {
+        let version = current.version;
+        let changed = |message: &str| {
+            let message = message.to_owned();
+            move |latest| ResolveGlobalPromptError::Changed {
+                version,
+                current: latest,
+                refused: Refused(message),
+            }
+        };
+        let force = match resolution {
             ResolvePrompt::Choose { candidate_id } => {
                 let candidate = current
                     .candidates
                     .iter()
                     .find(|candidate| candidate.id == candidate_id)
-                    .ok_or_else(|| {
-                        if current.candidates.is_empty() {
-                            refused("The global prompt is already set up.")
-                        } else {
-                            refused("That prompt is no longer in your engines.")
-                        }
+                    .ok_or_else(|| ResolveGlobalPromptError::NoCandidate {
+                        candidate: candidate_id.clone(),
+                        refused: Refused(
+                            if current.candidates.is_empty() {
+                                "The global prompt is already set up."
+                            } else {
+                                "That prompt is no longer in your engines."
+                            }
+                            .to_owned(),
+                        ),
                     })?;
                 self.store()
-                    .save_prompt_version(current.version, candidate.text.clone())
-                    .await?
-                    .map_err(|_current| refused("The global prompt was set up meanwhile."))?;
-                self.reconcile_prompt(None).await
+                    .save_prompt_version(version, candidate.text.clone())
+                    .await
+                    .map_err(|source| ResolveGlobalPromptError::Save { version, source })?
+                    .map_err(changed("The global prompt was set up meanwhile."))?;
+                None
             }
             ResolvePrompt::UseEngine { engine } => {
                 let text = drifted(engine)?;
                 self.store()
-                    .save_prompt_version(current.version, text)
-                    .await?
-                    .map_err(|_current| {
-                        refused("The global prompt changed meanwhile. Review it and try again.")
-                    })?;
-                self.reconcile_prompt(None).await
+                    .save_prompt_version(version, text)
+                    .await
+                    .map_err(|source| ResolveGlobalPromptError::Save { version, source })?
+                    .map_err(changed(
+                        "The global prompt changed meanwhile. Review it and try again.",
+                    ))?;
+                None
             }
             ResolvePrompt::RestoreEngine { engine } => {
                 drifted(engine)?;
-                self.reconcile_prompt(Some(engine)).await
+                Some(engine)
             }
-        }
+        };
+        self.prompt_projection(true, force)
+            .await
+            .map_err(ResolveGlobalPromptError::Reconcile)
     }
 }
 
-/// The distinct non-empty prompts the installed engines hold.
 fn candidates(homes: &[(EngineId, Option<PathBuf>)]) -> Vec<PromptCandidate> {
     let mut found: Vec<PromptCandidate> = Vec::new();
     for (engine, home) in homes {

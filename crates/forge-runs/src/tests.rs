@@ -61,7 +61,7 @@ impl Harness for Scripted {
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
-        let script = std::sync::Arc::clone(&self.0);
+        let script = Arc::clone(&self.0);
         Box::pin(async move {
             io.emit(EngineEvent::InputAccepted {
                 id: turn.input.id.clone(),
@@ -148,7 +148,7 @@ async fn fixture_in(
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
     install_fake(&data, engine);
-    let store = forge_store::Store::open(&data.join("forge")).unwrap();
+    let store = Store::open(&data.join("forge")).unwrap();
     let engines = Engines::new(&data);
     let generation = managed.then(|| {
         let registry = runtime::Registry::open(&data).unwrap();
@@ -160,7 +160,7 @@ async fn fixture_in(
                 address: "127.0.0.1:2".parse().unwrap(),
                 pid: std::process::id(),
                 protocol: runtime::PROTOCOL,
-                schema: forge_store::Store::schema_version(),
+                schema: Store::schema_version(),
             })
             .unwrap();
         generation.set_phase(runtime::Phase::Active);
@@ -320,7 +320,7 @@ impl Fixture {
 }
 
 /// User messages the thread shows as sent but not yet taken by an engine.
-async fn undelivered(store: &forge_store::Store, thread: &ThreadId) -> Vec<Item> {
+async fn undelivered(store: &Store, thread: &ThreadId) -> Vec<Item> {
     let query = ItemsQuery {
         before: None,
         after: None,
@@ -397,7 +397,7 @@ fn sign_in_to_claude_ai(fixture: &Fixture) {
         None,
     );
     session
-        .save(&fixture.hub.engines().home(artisan_api::EngineId::Claude))
+        .save(&fixture.hub.engines().home(EngineId::Claude))
         .unwrap();
 }
 
@@ -413,7 +413,7 @@ async fn turn_on_enhanced_claude(fixture: &Fixture) {
         .unwrap();
 }
 
-fn transport_of(config: &artisan_api::EngineConfig) -> Option<&str> {
+fn transport_of(config: &EngineConfig) -> Option<&str> {
     config
         .options
         .get("transport")
@@ -424,7 +424,7 @@ fn transport_of(config: &artisan_api::EngineConfig) -> Option<&str> {
 /// thread: a Forge setting names it, and every Claude thread follows it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_claude_transport_setting_reaches_every_claude_turn() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
         let asked = Arc::clone(&asked);
@@ -455,7 +455,7 @@ async fn the_claude_transport_setting_reaches_every_claude_turn() {
 /// and says why, rather than failing or switching silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
         let asked = Arc::clone(&asked);
@@ -484,7 +484,7 @@ async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
 /// the thread's history.
 #[tokio::test(flavor = "multi_thread")]
 async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, io| {
         let asked = Arc::clone(&asked);
@@ -536,7 +536,7 @@ async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
 /// clears the session and the message runs again on a fresh one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
     // This engine says itself what it delivered, as the real ones do.
     let harness: Arc<dyn Harness> = Arc::new(Unscripted(Arc::new(move |turn, io| {
@@ -594,7 +594,7 @@ async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
 /// Without the setting, a Claude turn runs the official way.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_turn_without_the_transport_setting_runs_claude_code() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
         let asked = Arc::clone(&asked);
@@ -909,7 +909,7 @@ async fn an_approval_answer_reaches_the_run() {
                 return Outcome::failed("no answer");
             };
             assert_eq!(key, "t1");
-            let artisan_api::Answer::Approval { decision } = answer else {
+            let Answer::Approval { decision } = answer else {
                 return Outcome::failed("wrong answer");
             };
             io.emit(EngineEvent::Item {
@@ -941,7 +941,7 @@ async fn an_approval_answer_reaches_the_run() {
         .hub
         .answer(
             &waiting.id,
-            artisan_api::Answer::Approval {
+            Answer::Approval {
                 decision: Decision::DenyOnce,
             },
         )
@@ -999,7 +999,7 @@ async fn switching_to_full_access_mid_run_approves_what_waits() {
                     match io.inbox.recv().await {
                         Some(Input::Answer {
                             key: answered,
-                            answer: artisan_api::Answer::Approval { decision },
+                            answer: Answer::Approval { decision },
                         }) if answered == key => {
                             heard.push(format!("{key} {decision:?}"));
                             io.emit(EngineEvent::Item {
@@ -1041,8 +1041,8 @@ async fn switching_to_full_access_mid_run_approves_what_waits() {
         .unwrap()
         .unwrap()
         .config;
-    assert_eq!(config.permissions, artisan_api::Permissions::Auto);
-    config.permissions = artisan_api::Permissions::Full;
+    assert_eq!(config.permissions, Permissions::Auto);
+    config.permissions = Permissions::Full;
     fixture
         .hub
         .update_thread(
@@ -1062,12 +1062,7 @@ async fn switching_to_full_access_mid_run_approves_what_waits() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        run.status(),
-        artisan_api::RunStatus::Done,
-        "{:?}",
-        run.error()
-    );
+    assert_eq!(run.status(), RunStatus::Done, "{:?}", run.error());
     assert_eq!(run.config.as_ref().unwrap().permissions, Permissions::Full);
     let statuses: Vec<_> = fixture
         .items()
@@ -1314,9 +1309,11 @@ async fn adopting_a_skill_found_in_an_engine_copies_it_into_forge() {
 
     let again = hub.extensions().adopt_skill(&found.id).await.unwrap_err();
     assert!(
-        again.downcast_ref::<Refused>().is_some(),
-        "adopting twice is refused: {again:#}"
+        matches!(again, AdoptSkillError::Adopt { .. }),
+        "adopting twice is refused: {}",
+        diagnostics::chain(&again)
     );
+    assert_eq!(again.class(), ErrorClass::Conflict);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1383,9 +1380,11 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
         .await
         .unwrap_err();
     assert!(
-        refusal.downcast_ref::<Refused>().is_some(),
-        "a save from an old version is refused: {refusal:#}"
+        matches!(refusal, SaveGlobalPromptError::Stale { base: 0, .. }),
+        "a save from an old version is refused: {}",
+        diagnostics::chain(&refusal)
     );
+    assert_eq!(refusal.class(), ErrorClass::Conflict);
 
     let used = hub
         .extensions()
@@ -1608,11 +1607,9 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
     let fixture = fixture(Arc::new(|turn, mut io| {
         Box::pin(async move {
             assert_eq!(turn.input.text, "one delivery");
-            assert!(
-                tokio::time::timeout(Duration::from_millis(20), io.inbox.recv())
-                    .await
-                    .is_err()
-            );
+            tokio::time::timeout(Duration::from_millis(20), io.inbox.recv())
+                .await
+                .unwrap_err();
             Outcome::done()
         })
     }))
@@ -1640,7 +1637,7 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         ))
         .await
         .unwrap();
-    let status = Box::pin(super::run::drive(
+    let status = Box::pin(run::drive(
         &fixture.hub,
         &fixture.thread_id,
         RunId::new(),
@@ -1666,9 +1663,9 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_nonblocking_question_can_be_answered_after_its_engine_exits() {
     let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = std::sync::Arc::clone(&turns);
+    let observed = Arc::clone(&turns);
     let fixture = fixture(Arc::new(move |turn, io| {
-        let first = observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        let first = observed.fetch_add(1, Ordering::SeqCst) == 0;
         Box::pin(async move {
             if first {
                 io.emit(EngineEvent::Item {
@@ -1729,7 +1726,7 @@ async fn a_nonblocking_question_can_be_answered_after_its_engine_exits() {
         .await
         .unwrap();
     fixture.settled().await;
-    assert_eq!(turns.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(turns.load(Ordering::SeqCst), 2);
     let question = fixture
         .hub
         .store()
@@ -1866,10 +1863,10 @@ async fn at_most_eight_harnesses_execute_at_once() {
     let started = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(Semaphore::new(0));
     let observed = (
-        std::sync::Arc::clone(&active),
-        std::sync::Arc::clone(&maximum),
-        std::sync::Arc::clone(&started),
-        std::sync::Arc::clone(&release),
+        Arc::clone(&active),
+        Arc::clone(&maximum),
+        Arc::clone(&started),
+        Arc::clone(&release),
     );
     let fixture = fixture(Arc::new(move |_, _| {
         let (active, maximum, started, release) = observed.clone();
@@ -2043,7 +2040,7 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"Native reply","usa
     assert!(items.iter().any(|item| item.id == question.id && item.status == Status::Done && matches!(&item.kind, ItemKind::Question { answers: Some(answers), .. } if answers.inline() == Some(vec![Some(artisan_api::QuestionAnswer::Choices { ids: vec!["option-0".into()].into() })].as_slice()))));
     let mut full_prose_saves = 0;
     while let Ok(envelope) = events.try_recv() {
-        if matches!(envelope.event, artisan_api::Event::Item { item } if matches!(&item.kind, ItemKind::AssistantMessage { text, .. } if text.inline() == Some("Native reply")))
+        if matches!(envelope.event, Event::Item { item } if matches!(&item.kind, ItemKind::AssistantMessage { text, .. } if text.inline() == Some("Native reply")))
         {
             full_prose_saves += 1;
         }
@@ -2663,7 +2660,7 @@ async fn an_approval_is_answered_on_the_item_it_gates() {
             .await;
             let Some(Input::Answer {
                 key,
-                answer: artisan_api::Answer::Approval { decision },
+                answer: Answer::Approval { decision },
             }) = io.inbox.recv().await
             else {
                 return Outcome::failed("missing the approval answer");
@@ -2697,13 +2694,13 @@ async fn an_approval_is_answered_on_the_item_it_gates() {
         .await;
     let tool = fixture.by_native("execution").await;
     for refused in [
-        artisan_api::Answer::Approval {
+        Answer::Approval {
             decision: Decision::DenyAlways,
         },
-        artisan_api::Answer::Approval {
+        Answer::Approval {
             decision: Decision::Cancelled,
         },
-        artisan_api::Answer::Question {
+        Answer::Question {
             answers: Vec::new(),
         },
     ] {
@@ -2713,17 +2710,14 @@ async fn an_approval_is_answered_on_the_item_it_gates() {
         .hub
         .answer(
             &tool.id,
-            artisan_api::Answer::Approval {
+            Answer::Approval {
                 decision: Decision::AllowOnce,
             },
         )
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert!(
-        runs.iter()
-            .all(|run| run.status() == artisan_api::RunStatus::Done)
-    );
+    assert!(runs.iter().all(|run| run.status() == RunStatus::Done));
     let tool = fixture.by_native("execution").await;
     assert_eq!(tool.status, Status::Done);
     assert!(matches!(
@@ -2738,12 +2732,12 @@ async fn duplicate_label_offline_choices_resume_as_different_inputs_with_exact_i
     let mut received = Vec::new();
     for selected in ["option-0", "option-1"] {
         let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = std::sync::Arc::clone(&turns);
-        let resumed = Arc::new(std::sync::Mutex::new(String::new()));
-        let captured = std::sync::Arc::clone(&resumed);
+        let count = Arc::clone(&turns);
+        let resumed = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&resumed);
         let fixture = fixture(Arc::new(move |turn, io| {
-            let first = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
-            let captured = std::sync::Arc::clone(&captured);
+            let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+            let captured = Arc::clone(&captured);
             Box::pin(async move {
                 if first {
                     io.emit(EngineEvent::Item {
@@ -2821,7 +2815,7 @@ async fn duplicate_label_offline_choices_resume_as_different_inputs_with_exact_i
         assert!(
             matches!(saved.kind,ItemKind::Question {answers:Some(answers),..} if answers.inline()==Some(vec![Some(artisan_api::QuestionAnswer::Choices {ids:vec![selected.into()].into()})].as_slice()))
         );
-        assert_eq!(turns.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(turns.load(Ordering::SeqCst), 2);
         let input = resumed.lock().unwrap().clone();
         assert!(
             fixture
@@ -2956,7 +2950,7 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
             .unwrap()
             .unwrap()
             .status(),
-        artisan_api::RunStatus::Done
+        RunStatus::Done
     );
 }
 
@@ -3089,7 +3083,7 @@ for line in sys.stdin:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
-    let started = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(Notify::new());
     let script_started = Arc::clone(&started);
     let fixture = fixture(Arc::new(move |_turn, mut io| {
         let started = Arc::clone(&script_started);
@@ -3172,13 +3166,13 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn large_saved_question_validates_selected_identity_without_expanding_options() {
     let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = Arc::new(std::sync::Mutex::new(String::new()));
+    let observed = Arc::new(Mutex::new(String::new()));
     let fixture = fixture(Arc::new({
-        let turns = std::sync::Arc::clone(&turns);
-        let observed = std::sync::Arc::clone(&observed);
+        let turns = Arc::clone(&turns);
+        let observed = Arc::clone(&observed);
         move |turn, io| {
-            let first = turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
-            let observed = std::sync::Arc::clone(&observed);
+            let first = turns.fetch_add(1, Ordering::SeqCst) == 0;
+            let observed = Arc::clone(&observed);
             Box::pin(async move {
                 if first {
                     let options = (0..5000)
@@ -3268,7 +3262,7 @@ async fn large_saved_question_validates_selected_identity_without_expanding_opti
         .await
         .unwrap();
     fixture.settled().await;
-    assert_eq!(turns.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(turns.load(Ordering::SeqCst), 2);
     assert!(
         observed
             .lock()
@@ -3339,13 +3333,11 @@ async fn invalid_slash_commands_never_persist_or_start_the_engine() {
     }))
     .await;
     for text in ["/ultrathink", "/ultracode", "/ultracode   "] {
-        assert!(
-            fixture
-                .hub
-                .send_message(&fixture.thread_id, message(text))
-                .await
-                .is_err()
-        );
+        fixture
+            .hub
+            .send_message(&fixture.thread_id, message(text))
+            .await
+            .unwrap_err();
     }
     assert!(fixture.items().await.is_empty());
     assert!(fixture.settled().await.is_empty());
@@ -3361,7 +3353,7 @@ struct Asking {
 
 impl Harness for Asking {
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
-        let script = std::sync::Arc::clone(&self.run);
+        let script = Arc::clone(&self.run);
         Box::pin(async move {
             io.emit(EngineEvent::InputAccepted {
                 id: turn.input.id.clone(),
@@ -4129,7 +4121,7 @@ async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
         .await
         .unwrap();
     while asked.lock().unwrap().is_empty() {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
@@ -4182,7 +4174,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
 
     // The next Forge on the same data.
     let harness: Arc<dyn Harness> = Arc::new(Scripted(stoppable(&asked)));
-    let store = forge_store::Store::open(&data.join("forge")).unwrap();
+    let store = Store::open(&data.join("forge")).unwrap();
     let hub = Hub::with_harness(
         store,
         Engines::new(&data),
@@ -4581,7 +4573,7 @@ async fn an_agents_message_to_a_full_access_thread_waits_for_the_user_and_names_
         .hub
         .answer(
             &card.id,
-            artisan_api::Answer::Approval {
+            Answer::Approval {
                 decision: Decision::AllowOnce,
             },
         )
@@ -4631,13 +4623,13 @@ async fn a_declined_message_never_reaches_the_full_access_thread() {
         .hub
         .answer(
             &card.id,
-            artisan_api::Answer::Approval {
+            Answer::Approval {
                 decision: Decision::DenyOnce,
             },
         )
         .await
         .unwrap();
-    assert!(send.await.unwrap().is_err());
+    send.await.unwrap().unwrap_err();
     assert!(items_of(&fixture.hub, &target).await.is_empty());
     fixture.hub.shutdown();
 }
@@ -5143,7 +5135,7 @@ async fn a_missing_session_summarizes_tool_history_with_correct_roles() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
     struct BlockingSummary {
-        entered: Arc<tokio::sync::Notify>,
+        entered: Arc<Notify>,
         cleaned: Arc<std::sync::atomic::AtomicBool>,
     }
     impl Harness for BlockingSummary {
@@ -5171,7 +5163,7 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
                 entered.notify_one();
                 cancel.cancelled().await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+                cleaned.store(true, Ordering::SeqCst);
                 Err(forge_engines::SideQueryError::Cancelled {
                     engine: turn.engine,
                     thread: turn.thread_id,
@@ -5179,7 +5171,7 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
             })
         }
     }
-    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(Notify::new());
     let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let harness: Arc<dyn Harness> = Arc::new(BlockingSummary {
         entered: Arc::clone(&entered),
@@ -5203,7 +5195,7 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
-    assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(cleaned.load(Ordering::SeqCst));
     assert!(runs.iter().any(|run| run.status() == RunStatus::Cancelled));
 }
 

@@ -64,7 +64,7 @@ fn a_link_into_another_wsl_distribution_is_refused_not_read_from_this_one() {
         assert!(
             matches!(
                 host_path(&written(path), Path::new("/work/project"), &wsl()),
-                Err(ResourceError::Refused(_))
+                Err(ResourceError::OtherDistribution { .. })
             ),
             "{path}"
         );
@@ -79,7 +79,7 @@ fn a_link_into_another_wsl_distribution_is_refused_not_read_from_this_one() {
             Path::new("/work/project"),
             &unnamed
         ),
-        Err(ResourceError::Refused(_))
+        Err(ResourceError::OtherDistribution { .. })
     ));
     assert_eq!(
         resolved("//WSL.localhost/ubuntu/tmp/shot.png", &wsl()),
@@ -146,7 +146,7 @@ fn native_paths_resolve_against_the_thread_folder_and_home() {
     };
     assert!(matches!(
         host_path(&home, Path::new("/work"), &homeless),
-        Err(ResourceError::Refused(_))
+        Err(ResourceError::NoHome)
     ));
 }
 

@@ -136,7 +136,7 @@ async fn a_file_first_seen_when_viewed_is_kept_from_then_on() {
     ));
 }
 
-fn kept_at(fixture: &Fixture, item: &ItemId, path: &str) -> std::path::PathBuf {
+fn kept_at(fixture: &Fixture, item: &ItemId, path: &str) -> PathBuf {
     fixture
         .hub
         .store()
@@ -189,7 +189,7 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
 
 #[tokio::test]
 async fn a_reply_keeps_the_file_as_it_was_when_the_reply_was_published() {
-    let overwritten = Arc::new(tokio::sync::Notify::new());
+    let overwritten = Arc::new(Notify::new());
     let resume = Arc::clone(&overwritten);
     let fixture = fixture(Arc::new(move |_, io| {
         let resume = Arc::clone(&resume);
@@ -210,7 +210,7 @@ async fn a_reply_keeps_the_file_as_it_was_when_the_reply_was_published() {
         .unwrap();
     let item = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let artisan_api::Event::Item { item } = events.recv().await.unwrap().event
+            if let Event::Item { item } = events.recv().await.unwrap().event
                 && matches!(item.kind, ItemKind::AssistantMessage { .. })
             {
                 return item.id;
