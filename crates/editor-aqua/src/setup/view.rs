@@ -1,4 +1,4 @@
-use super::model::{Event, Kind, Machine, Phase, Setup};
+use super::model::{Choice, Choices, InstallPlan, Location, Machine, Setup, State};
 use crate::frame::sign_in::card::{body, framed, header, wordmark};
 use crate::ui::chrome::card::{hex, key_face};
 use crate::ui::kit::surface::{self, Tone, tint};
@@ -22,16 +22,18 @@ const ROOMY_ROWS: usize = 4;
 pub struct Props<'a> {
     pub setup: &'a Setup,
     pub spin: u32,
-    pub emit: Rc<dyn Fn(Event)>,
+    pub emit: Rc<dyn Fn(Choice)>,
 }
 
 #[must_use]
 pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
-    let content = match &props.setup.phase {
-        Phase::Choosing => choosing(theme, props),
-        Phase::Installing { line } => vec![working(theme, props, line)],
-        Phase::Failed { message } => failed(theme, props, message),
-        Phase::Done => vec![wrapped(TextRole::Label.text(theme, "Opening Artisan Editor…"))],
+    let content = match props.setup.state() {
+        State::Choosing(choices) => choosing(theme, props, choices),
+        State::Installing { plan, line } => vec![working(theme, props, plan, line)],
+        State::Failed { error, .. } => failed(theme, props, &::diagnostics::chain(error)),
+        State::Done { .. } => {
+            vec![wrapped(TextRole::Label.text(theme, "Opening Artisan Editor…"))]
+        }
     };
     let card = UiBox::new()
         .layout("column")
@@ -58,9 +60,19 @@ pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
 }
 
 fn heading(theme: &ArtisanTheme, setup: &Setup) -> Element {
-    let (title, detail) = match &setup.kind {
-        Kind::Fresh => ("Set up Artisan Editor", format!("Version {}", setup.version)),
-        Kind::Update { from } => ("Update Artisan Editor", format!("{from} to {}", setup.version)),
+    let version = setup.version();
+    let (title, detail) = match setup.state() {
+        State::Choosing(_) => ("Set up Artisan Editor", format!("Version {version}")),
+        State::Installing { plan, .. } | State::Failed { plan, .. } | State::Done { plan } => {
+            match plan {
+                InstallPlan::Fresh { .. } => {
+                    ("Set up Artisan Editor", format!("Version {version}"))
+                }
+                InstallPlan::Update { from } => {
+                    ("Update Artisan Editor", format!("{from} to {version}"))
+                }
+            }
+        }
     };
     UiBox::new()
         .layout("column")
@@ -76,14 +88,14 @@ fn heading(theme: &ArtisanTheme, setup: &Setup) -> Element {
         .build()
 }
 
-fn choosing(theme: &ArtisanTheme, props: &Props<'_>) -> Vec<Element> {
+fn choosing(theme: &ArtisanTheme, props: &Props<'_>, choices: &Choices) -> Vec<Element> {
     let change = Rc::clone(&props.emit);
     let begin = Rc::clone(&props.emit);
     let folder = UiBox::new()
         .layout("column")
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(wrapped(
-            TextRole::Label.text(theme, props.setup.location.display().to_string()),
+            TextRole::Label.text(theme, choices.location().path().display().to_string()),
         ))
         .build();
     let location = UiBox::new()
@@ -91,22 +103,22 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>) -> Vec<Element> {
         .spaced(Space::S12)
         .style(Style::new().align(AlignItems::CENTER))
         .child(folder)
-        .children(props.setup.relocatable.then(|| {
+        .children(matches!(choices.location(), Location::Movable { .. }).then(|| {
             Button::text("artisan-setup-change", *theme, ButtonTone::Neutral, "Change…")
-                .on_activate(move |_| change(Event::ChangeLocation))
+                .on_activate(move |_| change(Choice::ChangeLocation))
                 .build()
         }))
         .build();
-    let roomy = props.setup.machines.len() <= ROOMY_ROWS;
+    let roomy = choices.machines().len() <= ROOMY_ROWS;
     let machines = UiBox::new()
         .layout("column")
         .spaced(if roomy { Space::S8 } else { Space::S4 })
-        .children(props.setup.machines.iter().enumerate().map(|(index, machine)| {
+        .children(choices.machines().iter().enumerate().map(|(index, machine)| {
             machine_row(
                 theme,
                 machine,
                 index,
-                index == props.setup.selected,
+                machine == choices.selected(),
                 roomy,
                 &props.emit,
             )
@@ -117,7 +129,7 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>) -> Vec<Element> {
         .style(Style::new().justify(JustifyContent::END))
         .child(
             Button::text("artisan-setup-install", *theme, ButtonTone::Primary, "Install")
-                .on_activate(move |_| begin(Event::Started))
+                .on_activate(move |_| begin(Choice::Started))
                 .build(),
         )
         .build();
@@ -143,7 +155,7 @@ fn machine_row(
     index: usize,
     selected: bool,
     roomy: bool,
-    emit: &Rc<dyn Fn(Event)>,
+    emit: &Rc<dyn Fn(Choice)>,
 ) -> Element {
     let pick = Rc::clone(emit);
     let row = match roomy {
@@ -167,7 +179,7 @@ fn machine_row(
     .face(face)
     .leading(radio(theme, selected))
     .selected(selected)
-    .on_activate(move || pick(Event::Selected(index)));
+    .on_activate(move || pick(Choice::Selected(index)));
     match roomy {
         true => item.detail(machine.detail()),
         false => item,
@@ -224,10 +236,10 @@ fn picture(svg: String, size: IconSize) -> Element {
         .exclude_from_hit_testing()
 }
 
-fn working(theme: &ArtisanTheme, props: &Props<'_>, line: &str) -> Element {
-    let title = match props.setup.kind {
-        Kind::Fresh => "Installing…",
-        Kind::Update { .. } => "Updating…",
+fn working(theme: &ArtisanTheme, props: &Props<'_>, plan: &InstallPlan, line: &str) -> Element {
+    let title = match plan {
+        InstallPlan::Fresh { .. } => "Installing…",
+        InstallPlan::Update { .. } => "Updating…",
     };
     let detail = if line.is_empty() { "Getting ready" } else { line };
     UiBox::new()
@@ -257,7 +269,7 @@ fn failed(theme: &ArtisanTheme, props: &Props<'_>, message: &str) -> Vec<Element
             .style(Style::new().justify(JustifyContent::END))
             .child(
                 Button::text("artisan-setup-retry", *theme, ButtonTone::Neutral, "Try again")
-                    .on_activate(move |_| retry(Event::Started))
+                    .on_activate(move |_| retry(Choice::Started))
                     .build(),
             )
             .build(),

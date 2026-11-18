@@ -1,14 +1,34 @@
-use super::payload::{self, Staged};
-use anyhow::{Context as _, Result, bail};
+use super::payload::{self, StageError, Staged, WriteNoticesError};
 use std::io::{BufRead as _, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-fn command(staged: &Staged, arguments: &[String]) -> Result<Command> {
+#[derive(Debug, thiserror::Error)]
+pub enum InstallError {
+    #[error("find this program")]
+    CurrentExe(#[source] std::io::Error),
+    #[error("stage the installer")]
+    Stage(#[source] StageError),
+    #[error("start the installer {}", path.display())]
+    Start {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("wait for the installer")]
+    Wait(#[source] std::io::Error),
+    #[error("{reason}")]
+    Refused { code: Option<i32>, reason: String },
+    #[error("write the third-party notices")]
+    Notices(#[source] WriteNoticesError),
+}
+
+fn command(staged: &Staged, arguments: &[String]) -> Result<Command, InstallError> {
     let mut command = Command::new(&staged.ae);
     command
         .args(arguments)
         .arg("--bundled-editor")
-        .arg(std::env::current_exe().context("find this program")?)
+        .arg(std::env::current_exe().map_err(InstallError::CurrentExe)?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -24,8 +44,7 @@ fn command(staged: &Staged, arguments: &[String]) -> Result<Command> {
     Ok(command)
 }
 
-#[must_use]
-pub fn failure(lines: &[String]) -> String {
+fn failure(lines: &[String]) -> String {
     lines
         .iter()
         .rev()
@@ -35,11 +54,14 @@ pub fn failure(lines: &[String]) -> String {
         .to_owned()
 }
 
-pub fn run(arguments: &[String], mut progress: impl FnMut(&str)) -> Result<()> {
-    let staged = payload::stage()?;
+pub fn run(arguments: &[String], mut progress: impl FnMut(&str)) -> Result<(), InstallError> {
+    let staged = payload::stage().map_err(InstallError::Stage)?;
     let mut child = command(&staged, arguments)?
         .spawn()
-        .with_context(|| format!("start {}", staged.ae.display()))?;
+        .map_err(|source| InstallError::Start {
+            path: staged.ae.clone(),
+            source,
+        })?;
     let mut lines = Vec::new();
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -50,14 +72,17 @@ pub fn run(arguments: &[String], mut progress: impl FnMut(&str)) -> Result<()> {
             }
         }
     }
-    let status = child.wait().context("wait for the installer")?;
+    let status = child.wait().map_err(InstallError::Wait)?;
     if !status.success() {
-        bail!(failure(&lines));
+        return Err(InstallError::Refused {
+            code: status.code(),
+            reason: failure(&lines),
+        });
     }
-    payload::write_notices()
+    payload::write_notices().map_err(InstallError::Notices)
 }
 
-pub fn headless(arguments: &[String]) -> Result<()> {
+pub fn headless(arguments: &[String]) -> Result<(), InstallError> {
     let mut all = vec!["install".to_owned(), "--apply".to_owned()];
     all.extend_from_slice(arguments);
     run(&all, |line| eprintln!("{line}"))

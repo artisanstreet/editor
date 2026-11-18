@@ -320,7 +320,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
                     if let Err(error) = crate::setup::open_notices() {
                         tracing::warn!(
-                            error = format!("{error:#}"),
+                            error = %::diagnostics::chain(&error),
                             "could not open the third-party notices"
                         );
                     }

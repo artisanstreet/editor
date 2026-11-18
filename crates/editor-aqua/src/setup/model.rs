@@ -1,3 +1,4 @@
+use super::InstallError;
 use std::path::{Path, PathBuf};
 
 pub const FOLDER: &str = "Artisan Street";
@@ -86,72 +87,100 @@ impl Machine {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Fresh,
-    Update { from: String },
+pub enum Location {
+    Fixed(PathBuf),
+    Movable { default: PathBuf, chosen: PathBuf },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Phase {
-    Choosing,
-    Installing { line: String },
-    Failed { message: String },
-    Done,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event {
-    Selected(usize),
-    ChangeLocation,
-    Located(PathBuf),
-    DistrosFound(Vec<String>),
-    Started,
-    Progressed(String),
-    Finished(Result<(), String>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Effect {
-    PickFolder,
-    Install(Vec<String>),
-    Quit,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Setup {
-    pub kind: Kind,
-    pub version: String,
-    pub default_location: PathBuf,
-    pub location: PathBuf,
-    pub relocatable: bool,
-    pub machines: Vec<Machine>,
-    pub selected: usize,
-    pub phase: Phase,
-}
-
-impl Setup {
+impl Location {
     #[must_use]
-    pub fn fresh(version: &str, default_location: PathBuf, relocatable: bool) -> Self {
-        Self {
-            kind: Kind::Fresh,
-            version: version.to_owned(),
-            location: default_location.clone(),
-            default_location,
-            relocatable,
-            machines: vec![Machine::ThisPc],
-            selected: 0,
-            phase: Phase::Choosing,
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Fixed(path) | Self::Movable { chosen: path, .. } => path,
         }
     }
 
+    fn custom(&self) -> Option<PathBuf> {
+        match self {
+            Self::Movable { default, chosen } if chosen != default => Some(chosen.clone()),
+            Self::Fixed(_) | Self::Movable { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choices {
+    location: Location,
+    machines: Vec<Machine>,
+    selected: Machine,
+}
+
+impl Choices {
     #[must_use]
-    pub fn update(version: &str, from: String, location: PathBuf) -> Self {
-        Self {
-            kind: Kind::Update { from },
-            ..Self::fresh(version, location, false)
+    pub const fn location(&self) -> &Location {
+        &self.location
+    }
+
+    #[must_use]
+    pub fn machines(&self) -> &[Machine] {
+        &self.machines
+    }
+
+    #[must_use]
+    pub const fn selected(&self) -> &Machine {
+        &self.selected
+    }
+
+    fn select(&mut self, index: usize) {
+        if let Some(machine) = self.machines.get(index) {
+            self.selected = machine.clone();
         }
     }
 
+    fn relocate(&mut self, folder: PathBuf) {
+        if let Location::Movable { chosen, .. } = &mut self.location {
+            *chosen = if folder.ends_with(FOLDER) {
+                folder
+            } else {
+                folder.join(FOLDER)
+            };
+        }
+    }
+
+    fn found(&mut self, distros: Vec<String>) {
+        self.machines = std::iter::once(Machine::ThisPc)
+            .chain(
+                distros
+                    .into_iter()
+                    .filter(|distro| !distro.starts_with("docker-desktop"))
+                    .map(Machine::Wsl),
+            )
+            .collect();
+        if !self.machines.contains(&self.selected) {
+            self.selected = Machine::ThisPc;
+        }
+    }
+
+    fn plan(&self) -> InstallPlan {
+        InstallPlan::Fresh {
+            machine: self.selected.clone(),
+            location: self.location.custom(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallPlan {
+    Fresh {
+        machine: Machine,
+        location: Option<PathBuf>,
+    },
+    Update {
+        from: String,
+    },
+}
+
+impl InstallPlan {
     #[must_use]
     pub fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
@@ -161,72 +190,178 @@ impl Setup {
             "here".to_owned(),
             "--forge".to_owned(),
         ];
-        match &self.kind {
-            Kind::Update { .. } => arguments.push("keep".to_owned()),
-            Kind::Fresh => {
-                arguments.push(self.machines[self.selected].place());
-                if self.location != self.default_location {
+        match self {
+            Self::Update { .. } => arguments.push("keep".to_owned()),
+            Self::Fresh { machine, location } => {
+                arguments.push(machine.place());
+                if let Some(location) = location {
                     arguments.push("--location".to_owned());
-                    arguments.push(self.location.display().to_string());
+                    arguments.push(location.display().to_string());
                 }
             }
         }
         arguments
     }
+}
+
+#[derive(Debug)]
+pub enum State {
+    Choosing(Choices),
+    Installing {
+        plan: InstallPlan,
+        line: String,
+    },
+    Failed {
+        plan: InstallPlan,
+        error: InstallError,
+    },
+    Done {
+        plan: InstallPlan,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Selected(usize),
+    ChangeLocation,
+    Located(PathBuf),
+    Started,
+}
+
+#[derive(Debug)]
+pub enum Event {
+    Chose(Choice),
+    DistrosFound(Vec<String>),
+    Progressed(String),
+    Finished(Result<(), InstallError>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effect {
+    PickFolder,
+    Install(Vec<String>),
+    Quit,
+}
+
+#[derive(Debug)]
+pub struct Setup {
+    version: String,
+    state: State,
+}
+
+impl Setup {
+    #[must_use]
+    pub fn fresh(version: &str, default_location: PathBuf, relocatable: bool) -> Self {
+        let location = match relocatable {
+            true => Location::Movable {
+                chosen: default_location.clone(),
+                default: default_location,
+            },
+            false => Location::Fixed(default_location),
+        };
+        Self {
+            version: version.to_owned(),
+            state: State::Choosing(Choices {
+                location,
+                machines: vec![Machine::ThisPc],
+                selected: Machine::ThisPc,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn update(version: &str, from: String) -> Self {
+        Self {
+            version: version.to_owned(),
+            state: State::Installing {
+                plan: InstallPlan::Update { from },
+                line: String::new(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> &State {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn installing(&self) -> bool {
+        matches!(self.state, State::Installing { .. })
+    }
+
+    #[must_use]
+    pub fn started(&self) -> Option<Effect> {
+        match &self.state {
+            State::Installing { plan, .. } => Some(Effect::Install(plan.arguments())),
+            State::Choosing(_) | State::Failed { .. } | State::Done { .. } => None,
+        }
+    }
 
     pub fn apply(&mut self, event: Event) -> Option<Effect> {
-        match (&self.phase, event) {
-            (Phase::Choosing, Event::Selected(index)) if index < self.machines.len() => {
-                self.selected = index;
+        match (&mut self.state, event) {
+            (State::Choosing(choices), Event::Chose(Choice::Selected(index))) => {
+                choices.select(index);
                 None
             }
-            (Phase::Choosing, Event::ChangeLocation) if self.relocatable => {
-                Some(Effect::PickFolder)
+            (State::Choosing(choices), Event::Chose(Choice::ChangeLocation)) => {
+                matches!(choices.location, Location::Movable { .. }).then_some(Effect::PickFolder)
             }
-            (Phase::Choosing, Event::Located(folder)) if self.relocatable => {
-                self.location = if folder.ends_with(FOLDER) {
-                    folder
-                } else {
-                    folder.join(FOLDER)
-                };
+            (State::Choosing(choices), Event::Chose(Choice::Located(folder))) => {
+                choices.relocate(folder);
                 None
             }
-            (Phase::Choosing, Event::DistrosFound(distros)) => {
-                let chosen = self.machines[self.selected].clone();
-                self.machines = std::iter::once(Machine::ThisPc)
-                    .chain(
-                        distros
-                            .into_iter()
-                            .filter(|distro| !distro.starts_with("docker-desktop"))
-                            .map(Machine::Wsl),
-                    )
-                    .collect();
-                self.selected = self
-                    .machines
-                    .iter()
-                    .position(|machine| *machine == chosen)
-                    .unwrap_or(0);
+            (State::Choosing(choices), Event::DistrosFound(distros)) => {
+                choices.found(distros);
                 None
             }
-            (Phase::Choosing | Phase::Failed { .. }, Event::Started) => {
-                self.phase = Phase::Installing {
-                    line: String::new(),
-                };
-                Some(Effect::Install(self.arguments()))
+            (State::Choosing(choices), Event::Chose(Choice::Started)) => {
+                let plan = choices.plan();
+                Some(self.install(plan))
             }
-            (Phase::Installing { .. }, Event::Progressed(line)) => {
-                self.phase = Phase::Installing { line };
+            (State::Failed { plan, .. }, Event::Chose(Choice::Started)) => {
+                let plan = plan.clone();
+                Some(self.install(plan))
+            }
+            (State::Installing { line, .. }, Event::Progressed(next)) => {
+                *line = next;
                 None
             }
-            (Phase::Installing { .. }, Event::Finished(Ok(()))) => {
-                self.phase = Phase::Done;
+            (State::Installing { plan, .. }, Event::Finished(Ok(()))) => {
+                self.state = State::Done { plan: plan.clone() };
                 Some(Effect::Quit)
             }
-            (Phase::Installing { .. }, Event::Finished(Err(message))) => {
-                self.phase = Phase::Failed { message };
+            (State::Installing { plan, .. }, Event::Finished(Err(error))) => {
+                self.state = State::Failed {
+                    plan: plan.clone(),
+                    error,
+                };
                 None
             }
-            _ => None,
+            (
+                State::Choosing(_)
+                | State::Installing { .. }
+                | State::Failed { .. }
+                | State::Done { .. },
+                Event::Chose(_)
+                | Event::DistrosFound(_)
+                | Event::Progressed(_)
+                | Event::Finished(_),
+            ) => None,
         }
+    }
+
+    fn install(&mut self, plan: InstallPlan) -> Effect {
+        let effect = Effect::Install(plan.arguments());
+        self.state = State::Installing {
+            plan,
+            line: String::new(),
+        };
+        effect
     }
 }

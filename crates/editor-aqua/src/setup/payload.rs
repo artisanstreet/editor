@@ -1,10 +1,36 @@
-use anyhow::{Context as _, Result};
-use artisan_payload::Payload;
+use artisan_paths::RootError;
+use artisan_payload::{Payload, WritePayloadError};
 use std::path::PathBuf;
 
 pub static AE: Payload<'static> = artisan_payload::payload!("ae.gz");
 static AE_LINUX: Payload<'static> = artisan_payload::payload!("ae-linux.gz");
 static NOTICES: Payload<'static> = artisan_payload::payload!("notices.gz");
+
+#[derive(Debug, thiserror::Error)]
+pub enum StageError {
+    #[error("create a folder for the installer")]
+    Folder(#[source] std::io::Error),
+    #[error("write the installer")]
+    Installer(#[source] WritePayloadError),
+    #[error("write the Linux installer")]
+    LinuxInstaller(#[source] WritePayloadError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WriteNoticesError {
+    #[error("find the Editor's folder")]
+    Folder(#[source] RootError),
+    #[error("write the notices into the Editor's folder")]
+    Write(#[source] WritePayloadError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenNoticesError {
+    #[error("write the notices to a temporary file")]
+    Write(#[source] WritePayloadError),
+    #[error("open the notices")]
+    Open(#[source] crate::shell::OpenPathError),
+}
 
 pub struct Staged {
     _folder: tempfile::TempDir,
@@ -12,21 +38,20 @@ pub struct Staged {
     pub linux_ae: Option<PathBuf>,
 }
 
-pub fn stage() -> Result<Staged> {
+pub fn stage() -> Result<Staged, StageError> {
     let folder = tempfile::Builder::new()
         .prefix("artisan-setup-")
         .tempdir()
-        .context("create a folder for the installer")?;
+        .map_err(StageError::Folder)?;
     let ae = folder.path().join(artisan_paths::App::Ae.binary_name());
-    AE.write_program(&ae)
-        .with_context(|| format!("write {}", ae.display()))?;
+    AE.write_program(&ae).map_err(StageError::Installer)?;
     let linux_ae = AE_LINUX
         .present()
-        .then(|| -> Result<PathBuf> {
+        .then(|| {
             let path = folder.path().join("ae-linux");
             AE_LINUX
                 .write_program(&path)
-                .with_context(|| format!("write {}", path.display()))?;
+                .map_err(StageError::LinuxInstaller)?;
             Ok(path)
         })
         .transpose()?;
@@ -37,23 +62,22 @@ pub fn stage() -> Result<Staged> {
     })
 }
 
-pub fn write_notices() -> Result<()> {
-    let folder = artisan_paths::App::Editor.dir()?;
+pub fn write_notices() -> Result<(), WriteNoticesError> {
+    let folder = artisan_paths::App::Editor
+        .dir()
+        .map_err(WriteNoticesError::Folder)?;
     if !folder.is_dir() {
         return Ok(());
     }
-    let path = folder.join("NOTICES.txt");
     NOTICES
-        .write(&path)
-        .with_context(|| format!("write {}", path.display()))
+        .write(&folder.join("NOTICES.txt"))
+        .map_err(WriteNoticesError::Write)
 }
 
-pub fn open_notices() -> Result<()> {
+pub fn open_notices() -> Result<(), OpenNoticesError> {
     let path = std::env::temp_dir().join("Artisan Editor NOTICES.txt");
-    NOTICES
-        .write(&path)
-        .with_context(|| format!("write {}", path.display()))?;
-    Ok(crate::shell::open_path(&path)?)
+    NOTICES.write(&path).map_err(OpenNoticesError::Write)?;
+    crate::shell::open_path(&path).map_err(OpenNoticesError::Open)
 }
 
 #[cfg(test)]

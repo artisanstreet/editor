@@ -2,7 +2,8 @@ use aqua::UiApp;
 use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
 use aqua_ui::element::Key;
 use aqua_ui::tree::hash_key;
-use editor_aqua::setup::model::{Event, Setup};
+use editor_aqua::setup::InstallError;
+use editor_aqua::setup::model::{Choice, Event, Setup};
 use editor_aqua::setup::view::{self, Props};
 use editor_aqua::shell::host::ShellResources;
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -10,7 +11,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-fn shown(setup: &Setup) -> (UiApp, Rc<RefCell<Vec<Event>>>) {
+fn shown(setup: &Setup) -> (UiApp, Rc<RefCell<Vec<Choice>>>) {
     let mut app = ShellResources::new(1.0).expect("setup window resources").ui;
     let heard = Rc::new(RefCell::new(Vec::new()));
     let hearing = Rc::clone(&heard);
@@ -50,10 +51,14 @@ fn click(app: &mut UiApp, key: &str) {
 }
 
 fn with_distros(distros: &[&str]) -> Setup {
+    with_distros_in(distros, true)
+}
+
+fn with_distros_in(distros: &[&str], relocatable: bool) -> Setup {
     let mut setup = Setup::fresh(
         "0.0.0-nightly.20261111220000+abcdef123456",
         PathBuf::from(r"C:\Users\someone with a long name\AppData\Local\Artisan Street"),
-        true,
+        relocatable,
     );
     setup.apply(Event::DistrosFound(
         distros.iter().map(|distro| (*distro).to_owned()).collect(),
@@ -82,17 +87,18 @@ fn every_choice_fits_the_window_and_reports_what_was_clicked() {
     click(&mut app, "artisan-setup-install");
     assert_eq!(
         *heard.borrow(),
-        [Event::Selected(2), Event::ChangeLocation, Event::Started]
+        [Choice::Selected(2), Choice::ChangeLocation, Choice::Started]
     );
 }
 
 #[test]
 fn a_failure_shows_its_reason_and_offers_another_try() {
     let mut setup = with_three_distros();
-    setup.apply(Event::Started);
-    setup.apply(Event::Finished(Err(
-        "Forge didn't start: the port is in use".to_owned(),
-    )));
+    setup.apply(Event::Chose(Choice::Started));
+    setup.apply(Event::Finished(Err(InstallError::Refused {
+        code: Some(1),
+        reason: "Forge didn't start: the port is in use".to_owned(),
+    })));
     let (mut app, heard) = shown(&setup);
     let said: Vec<String> = app
         .tree()
@@ -109,7 +115,7 @@ fn a_failure_shows_its_reason_and_offers_another_try() {
         "the reason is on screen: {said:?}"
     );
     click(&mut app, "artisan-setup-retry");
-    assert_eq!(*heard.borrow(), [Event::Started]);
+    assert_eq!(*heard.borrow(), [Choice::Started]);
 }
 
 #[test]
@@ -126,13 +132,12 @@ fn many_distros_still_leave_install_within_reach() {
     assert!(card_fits(&app), "eight machines fit the window");
     click(&mut app, "artisan-setup-machine-7");
     click(&mut app, "artisan-setup-install");
-    assert_eq!(*heard.borrow(), [Event::Selected(7), Event::Started]);
+    assert_eq!(*heard.borrow(), [Choice::Selected(7), Choice::Started]);
 }
 
 #[test]
 fn an_install_that_already_has_a_folder_does_not_offer_another() {
-    let mut setup = with_three_distros();
-    setup.relocatable = false;
+    let mut setup = with_distros_in(&["Ubuntu-24.04", "Debian", "NixOS"], false);
     let (app, _) = shown(&setup);
     assert!(
         app.tree()
@@ -140,5 +145,5 @@ fn an_install_that_already_has_a_folder_does_not_offer_another() {
             .is_none(),
         "the folder can't be changed once something is installed there"
     );
-    assert_eq!(setup.apply(Event::ChangeLocation), None);
+    assert_eq!(setup.apply(Event::Chose(Choice::ChangeLocation)), None);
 }

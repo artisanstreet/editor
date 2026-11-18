@@ -1,5 +1,5 @@
 use super::install;
-use super::model::{Effect, Event, Kind, Phase, Setup};
+use super::model::{Choice, Effect, Event, Setup, State};
 use super::view::{self, Props};
 use crate::shell::host::{ShellResources, set_window_scale};
 use crate::ui::theme::ArtisanTheme;
@@ -26,21 +26,31 @@ struct SetupApplication {
     setup: Setup,
     spin: u32,
     mounted: bool,
-    choices: Rc<RefCell<VecDeque<Event>>>,
+    choices: Rc<RefCell<VecDeque<Choice>>>,
     work: Mailbox<Event>,
     folder_request: Option<RequestId>,
 }
 
-pub fn run(setup: Setup) -> anyhow::Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum SetupWindowError {
+    #[error("start the window system: {message}")]
+    Start { message: String },
+    #[error("configure the setup window's layout")]
+    Layout,
+    #[error("run the setup window: {message}")]
+    Run { message: String },
+}
+
+pub fn run(setup: Setup) -> Result<(), SetupWindowError> {
     let mut config = aqua::AquaConfig::default();
     config.window.title = "Artisan Editor Setup".to_owned();
     config.window.inner_size.width = view::WINDOW.0;
     config.window.inner_size.height = view::WINDOW.1;
     config.window.resizable = false;
     config.window.maximizable = false;
-    let runtime = aqua::Aqua::new(config).map_err(anyhow::Error::msg)?;
+    let runtime = aqua::Aqua::new(config).map_err(|message| SetupWindowError::Start { message })?;
     let resources = ShellResources::for_runtime(&runtime, 1.0)
-        .ok_or_else(|| anyhow::anyhow!("could not configure the setup window"))?
+        .ok_or(SetupWindowError::Layout)?
         .with_color_profile(aqua_core::ColorProfile::GpuiWindowsEncoded);
     runtime
         .run(SetupApplication {
@@ -53,15 +63,22 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
             work: Mailbox::new(MAILBOX),
             folder_request: None,
         })
-        .map_err(anyhow::Error::msg)
+        .map_err(|message| SetupWindowError::Run { message })
 }
 
 fn find_distros(sender: Sender<Event>) {
     std::thread::spawn(move || {
         let found = crate::core::runtime::runtime().block_on(crate::core::hosts::wsl_state());
-        let distros = found
-            .map(|distros| distros.into_iter().map(|distro| distro.name).collect())
-            .unwrap_or_default();
+        let distros = match found {
+            Ok(distros) => distros.into_iter().map(|distro| distro.name).collect(),
+            Err(error) => {
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "setup could not list WSL distributions; offering this PC only"
+                );
+                Vec::new()
+            }
+        };
         let _closed = sender.send(Event::DistrosFound(distros));
     });
 }
@@ -72,9 +89,10 @@ fn install(arguments: Vec<String>, sender: Sender<Event>) {
         let result = install::run(&arguments, |line| {
             let _closed = progress.send(Event::Progressed(line.to_owned()));
         });
-        let _closed = sender.send(Event::Finished(
-            result.map_err(|error| format!("{error:#}")),
-        ));
+        if let Err(error) = &result {
+            tracing::error!(error = %::diagnostics::chain(error), "setup could not install");
+        }
+        let _closed = sender.send(Event::Finished(result));
     });
 }
 
@@ -98,7 +116,7 @@ impl SetupApplication {
 
     fn drain(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         let mut events = self.work.drain();
-        events.extend(self.choices.borrow_mut().drain(..));
+        events.extend(self.choices.borrow_mut().drain(..).map(Event::Chose));
         let changed = !events.is_empty();
         for event in events {
             if let Some(effect) = self.setup.apply(event) {
@@ -130,7 +148,7 @@ impl SetupApplication {
             Err(error) => tracing::error!(%error, "could not show setup"),
         }
         ctx.request_frame(id, FrameReason::DAMAGE);
-        if matches!(self.setup.phase, Phase::Installing { .. }) {
+        if self.setup.installing() {
             ctx.request_animation_deadline(id, ctx.now() + SPIN_INTERVAL);
         }
     }
@@ -177,14 +195,17 @@ impl Application for SetupApplication {
             set_window_scale(ui, window.scale_factor as f32);
         }
         ctx.bind_mailbox(id, &self.work);
-        match self.setup.kind {
-            Kind::Fresh => find_distros(self.work.sender()),
-            Kind::Update { .. } => self.choices.borrow_mut().push_back(Event::Started),
+        match self.setup.state() {
+            State::Choosing(_) => find_distros(self.work.sender()),
+            State::Installing { .. } | State::Failed { .. } | State::Done { .. } => {}
+        }
+        if let Some(effect) = self.setup.started() {
+            self.perform(effect, ctx, id);
         }
         self.drain(ctx, id);
     }
     fn can_close(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) -> bool {
-        !matches!(self.setup.phase, Phase::Installing { .. }) && self.ui.can_close(ctx, id)
+        !self.setup.installing() && self.ui.can_close(ctx, id)
     }
     fn on_wake(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         self.ui.on_wake(ctx, id);
@@ -195,7 +216,7 @@ impl Application for SetupApplication {
     }
     fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, now: Instant) {
         self.ui.on_animation_frame(ctx, id, now);
-        if matches!(self.setup.phase, Phase::Installing { .. }) {
+        if self.setup.installing() {
             self.spin = (self.spin + 1) % view::SPIN_STEPS;
             self.rebuild(ctx, id);
         }
@@ -212,8 +233,10 @@ impl Application for SetupApplication {
             return;
         }
         self.folder_request = None;
-        if let Ok(Some(folder)) = crate::ui::dialogs::chosen_path(outcome) {
-            self.choices.borrow_mut().push_back(Event::Located(folder));
+        match crate::ui::dialogs::chosen_path(outcome) {
+            Ok(Some(folder)) => self.choices.borrow_mut().push_back(Choice::Located(folder)),
+            Ok(None) => {}
+            Err(message) => tracing::warn!(%message, "setup could not show the folder picker"),
         }
         self.drain(ctx, id);
     }
