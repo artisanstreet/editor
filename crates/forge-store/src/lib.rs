@@ -31,7 +31,7 @@ mod collection;
 mod content;
 pub mod coordination;
 pub mod discovery;
-mod hot;
+pub mod hot;
 mod items;
 mod pairing;
 mod read;

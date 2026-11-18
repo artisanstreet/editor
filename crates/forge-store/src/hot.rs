@@ -38,8 +38,11 @@ pub enum Lookup {
     Miss(Version),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Version(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version {
+    epoch: u64,
+    revision: u64,
+}
 
 struct Held {
     tail: Tail,
@@ -59,6 +62,7 @@ struct Window {
     threads: HashMap<ThreadId, Thread>,
     bytes: usize,
     clock: u64,
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -109,23 +113,31 @@ impl HotPages {
 impl Window {
     fn lookup(&mut self, thread: &ThreadId, tail: &Tail) -> Lookup {
         self.clock += 1;
+        let epoch = self.epoch;
         let Some(known) = self.threads.get_mut(thread) else {
-            return Lookup::Miss(Version(0));
+            return Lookup::Miss(Version { epoch, revision: 0 });
         };
         match known.held.iter_mut().find(|held| held.tail == *tail) {
             Some(held) => {
                 held.used = self.clock;
                 Lookup::Hit(Arc::clone(&held.page))
             }
-            None => Lookup::Miss(Version(known.version)),
+            None => Lookup::Miss(Version {
+                epoch,
+                revision: known.version,
+            }),
         }
     }
 
     fn hold(&mut self, thread: &ThreadId, read_at: Version, mut held: Held) {
         self.clock += 1;
+        let epoch = self.epoch;
         let known = self.threads.entry(thread.clone()).or_default();
-        if Version(known.version) != read_at || known.held.iter().any(|kept| kept.tail == held.tail)
-        {
+        let current = Version {
+            epoch,
+            revision: known.version,
+        };
+        if current != read_at || known.held.iter().any(|kept| kept.tail == held.tail) {
             return;
         }
         held.used = self.clock;
@@ -152,10 +164,8 @@ impl Window {
     }
 
     fn invalidate_everything(&mut self) {
-        for known in self.threads.values_mut() {
-            known.version += 1;
-            known.held.clear();
-        }
+        self.epoch += 1;
+        self.threads.clear();
         self.bytes = 0;
     }
 
