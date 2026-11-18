@@ -367,6 +367,15 @@ fn undo_restores_the_active_end_of_a_backward_selection() {
     assert_eq!(editor.selection(), 0..3);
 }
 
+#[test]
+fn oversized_text_is_cut_on_a_grapheme_boundary() {
+    let text = format!("ab{}", "e\u{301}".repeat(30_000));
+    let editor = Editor::new(&text, Mode::Document);
+    assert!(editor.limit_notice());
+    assert!(editor.text().len() <= 64 * 1024);
+    assert!(editor.text().ends_with("e\u{301}"));
+}
+
 fn key(named: aqua_core::NamedKey, modifiers: aqua_core::Modifiers) -> aqua_core::InputEvent {
     aqua_core::InputEvent::KeyDown(aqua_core::KeyEvent {
         key: aqua_core::Key::Named(named),

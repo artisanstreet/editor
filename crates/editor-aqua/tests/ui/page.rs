@@ -14,3 +14,11 @@ fn preview_bounds_utf8_and_lines() {
     assert_eq!(preview_lines(" \n\t"), ["(empty)"]);
     assert_eq!(preview_lines("a\nb"), ["a", "b"]);
 }
+
+#[test]
+fn preview_keeps_a_combining_mark_with_its_base() {
+    let text = format!("ab{}", "e\u{301}".repeat(5_000));
+    let shown = preview_lines(&text);
+    assert!(shown[0].ends_with("e\u{301}"));
+    assert_eq!(shown.last().unwrap(), "…");
+}

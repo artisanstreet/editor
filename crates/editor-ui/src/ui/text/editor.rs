@@ -102,7 +102,7 @@ pub struct Editor {
 impl Editor {
     pub fn new(text: &str, mode: Mode) -> Self {
         let limit_notice = text.len() > MAX_BYTES;
-        let mut text = truncate(text, MAX_BYTES).to_owned();
+        let mut text = grapheme_prefix(text, MAX_BYTES).to_owned();
         if mode == Mode::SingleLine {
             text = text.replace(['\r', '\n', '\t'], " ");
         }
@@ -240,7 +240,7 @@ impl Editor {
             text
         };
         self.limit_notice = text.len() > MAX_BYTES;
-        self.text = truncate(text, MAX_BYTES).to_owned();
+        self.text = grapheme_prefix(text, MAX_BYTES).to_owned();
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
         let end = self.text.len();
@@ -920,8 +920,17 @@ impl Editor {
     }
 }
 
-fn truncate(text: &str, max: usize) -> &str {
-    &text[..text.floor_char_boundary(max.min(text.len()))]
+pub fn grapheme_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let model = aqua_text::TextModel::new(text);
+    let end = if model.is_grapheme_boundary(max) {
+        max
+    } else {
+        model.prev_grapheme(max)
+    };
+    &text[..end]
 }
 
 pub fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {

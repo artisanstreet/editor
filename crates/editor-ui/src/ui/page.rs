@@ -59,11 +59,7 @@ impl Notice {
     }
 }
 pub fn preview_lines(text: &str) -> Vec<String> {
-    let mut end = text.len().min(4096);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let prefix = &text[..end];
+    let prefix = crate::ui::text::editor::grapheme_prefix(text, 4096);
     let mut lines = prefix.lines();
     let mut shown: Vec<_> = lines.by_ref().take(8).map(str::to_owned).collect();
     let truncated = prefix.len() < text.len() || lines.next().is_some();
