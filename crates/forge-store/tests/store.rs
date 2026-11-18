@@ -1805,6 +1805,62 @@ async fn turning_continue_after_restart_off_leaves_interrupted_turns_alone() {
 }
 
 #[tokio::test]
+async fn turning_retries_off_publishes_the_setting_before_the_threads_it_unparks() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let mut failed = live_run_with_session(&store, &thread).await;
+    failed.status = RunStatus::Failed;
+    let (_, parked) = store
+        .settle_run(
+            failed,
+            Vec::new(),
+            Some(forge_store::Park {
+                continuation: artisan_api::Continuation::Overloaded,
+                due_at: now() + 60_000,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(parked);
+    let mut events = store.subscribe();
+
+    store
+        .set_setting(
+            forge_store::RETRY_WHEN_OVERLOADED_KEY.into(),
+            serde_json::Value::Bool(false),
+        )
+        .await
+        .unwrap();
+
+    let mut delivered = Vec::new();
+    while let Ok(envelope) = events.try_recv() {
+        delivered.push(envelope);
+    }
+    let mut cursor = 0;
+    let accepted: Vec<&Event> = delivered
+        .iter()
+        .filter(|envelope| {
+            let seq = envelope.seq.unwrap();
+            let fresh = seq > cursor;
+            cursor = cursor.max(seq);
+            fresh
+        })
+        .map(|envelope| &envelope.event)
+        .collect();
+    assert!(
+        accepted.iter().any(|event| matches!(
+            event,
+            Event::Setting { key, .. } if key == forge_store::RETRY_WHEN_OVERLOADED_KEY
+        )),
+        "a client following the cursor still sees retries turn off"
+    );
+    assert!(accepted.iter().any(|event| matches!(
+        event,
+        Event::Thread { thread: unparked } if unparked.id == thread && unparked.parked_until.is_none()
+    )));
+}
+
+#[tokio::test]
 async fn an_agent_forge_started_keeps_working_through_a_restart() {
     let dir = TempDir::new();
     let (parent, child) = {

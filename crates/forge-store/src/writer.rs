@@ -65,8 +65,12 @@ impl Writer {
         };
         let result = job(&mut tx)?;
         let Tx {
-            sql, seq, events, ..
+            sql,
+            seq,
+            mut events,
+            ..
         } = tx;
+        events.sort_by_key(|envelope| envelope.seq);
         sql.commit().context("commit write transaction")?;
         self.commits.fetch_add(1, Ordering::AcqRel);
         self.hot.committed(&events);
