@@ -264,3 +264,31 @@ async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backend_that_dies_is_replaced_before_anyone_connects() {
+    let (directory, running, gateway) = start().await;
+    signal("-KILL", &[gateway.backend.pid]);
+    let restarted = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(current) = upgrade::gateway(&running.data)
+                .unwrap()
+                .filter(|current| current.backend.id != gateway.backend.id)
+            {
+                break current.backend;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "no generation replaced the killed backend: {}",
+            std::fs::read_to_string(directory.path().join("forge.log")).unwrap()
+        )
+    });
+    assert_ne!(restarted.pid, gateway.backend.pid);
+    let serving = upgrade::health(&running.data).await.unwrap();
+    assert_eq!(serving.backend.id, restarted.id);
+    upgrade::stop(&running.data).await.unwrap();
+}

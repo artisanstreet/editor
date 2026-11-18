@@ -1,3 +1,4 @@
+use super::process::Exited;
 use super::process::{
     CandidateError, HealthyError, InheritError, NotifyError, ReadyError, SpawnError,
 };
@@ -17,7 +18,7 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::Notify,
+    sync::{Notify, oneshot},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,7 @@ struct Service {
     listener: Arc<StdListener>,
     lock: Arc<File>,
     replaced: Arc<Notify>,
+    wake: Arc<Notify>,
     stop: CancellationToken,
 }
 
@@ -78,6 +80,7 @@ async fn upgrade(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let result = replace(&service, upgrade).await;
+    service.wake.notify_one();
     Json(match result {
         Ok(gateway) => Outcome::Ready(Box::new(gateway)),
         Err(error) => {
@@ -396,8 +399,6 @@ pub enum ServeError {
         #[source]
         source: RegistryFileError,
     },
-    #[error("find this Forge executable")]
-    Binary(#[source] std::io::Error),
     #[error(transparent)]
     Binding(#[from] BindingError),
     #[error(transparent)]
@@ -507,7 +508,11 @@ async fn forward(registry: Registry, mut client: TcpStream) -> Result<(), Connec
     Ok(())
 }
 
-fn report(gateway: &str, finished: Result<Result<(), ConnectionError>, tokio::task::JoinError>) {
+fn report(
+    gateway: &str,
+    wake: &Notify,
+    finished: Result<Result<(), ConnectionError>, tokio::task::JoinError>,
+) {
     match finished {
         Ok(Ok(())) => {}
         Ok(Err(error @ ConnectionError::Forward { .. })) => {
@@ -527,6 +532,7 @@ fn report(gateway: &str, finished: Result<Result<(), ConnectionError>, tokio::ta
                 error = diagnostics::chain(&error),
                 "gateway connection failed"
             );
+            wake.notify_one();
         }
         Err(error) => {
             tracing::warn!(gateway, error = %error, "gateway connection task stopped");
@@ -540,6 +546,7 @@ fn report(gateway: &str, finished: Result<Result<(), ConnectionError>, tokio::ta
 )]
 pub async fn serve(
     config: crate::ServeConfig,
+    binary: PathBuf,
     handoff: Option<PathBuf>,
     log: diagnostics::Destination,
     stop: impl Future<Output = ()>,
@@ -552,9 +559,6 @@ pub async fn serve(
         data: config.data_dir.clone(),
         source,
     })?;
-    let binary = std::env::current_exe()
-        .and_then(|binary| binary.canonicalize())
-        .map_err(ServeError::Binary)?;
     let Binding {
         listener,
         lock,
@@ -598,6 +602,7 @@ pub async fn serve(
     };
     let stop_token = CancellationToken::new();
     let replaced = Arc::new(Notify::new());
+    let wake = Arc::new(Notify::new());
     let service = Service {
         gateway: gateway.clone(),
         registry: registry.clone(),
@@ -606,6 +611,7 @@ pub async fn serve(
         listener: Arc::new(listener),
         lock: Arc::new(lock),
         replaced: Arc::clone(&replaced),
+        wake: Arc::clone(&wake),
         stop: stop_token.clone(),
     };
     let control_task = start_control(control, service.clone());
@@ -641,8 +647,11 @@ pub async fn serve(
             gateway: id.clone(),
             source,
         })?;
-    let maintenance_task = spawn_maintenance(service.clone(), stop_token.clone());
-    backend.release();
+    let maintenance_task = spawn_maintenance(
+        service.clone(),
+        stop_token.clone(),
+        Backend::Serving(backend.release()),
+    );
     let mut connections = JoinSet::new();
     let replaced = loop {
         tokio::select! {
@@ -653,18 +662,18 @@ pub async fn serve(
                 let (client, _) = accepted.map_err(|source| ServeError::Accept { gateway: id.clone(), source })?;
                 connections.spawn(forward(registry.clone(), client));
             }
-            Some(finished)=connections.join_next(),if !connections.is_empty()=>report(&id, finished),
+            Some(finished)=connections.join_next(),if !connections.is_empty()=>report(&id, &wake, finished),
         }
     };
     drop(tcp);
     stop_token.cancel();
-    maintenance_task
+    let backend = maintenance_task
         .await
         .map_err(|source| ServeError::Maintenance {
             gateway: id.clone(),
             source,
         })?;
-    drain(&service, replaced, &mut connections).await?;
+    drain(&service, replaced, &mut connections, backend).await?;
     control_task
         .await
         .map_err(|source| ServeError::ControlTask {
@@ -678,22 +687,115 @@ pub async fn serve(
     Ok(())
 }
 
+const RETRY_AFTER: Duration = Duration::from_secs(10);
+
+enum Backend {
+    Serving(Exited),
+    Gone,
+}
+
+impl Backend {
+    async fn exited(&mut self) {
+        match self {
+            Self::Serving(exited) => {
+                exited.wait().await;
+                *self = Self::Gone;
+            }
+            Self::Gone => std::future::pending().await,
+        }
+    }
+}
+
+enum Pass {
+    Settled,
+    Retiring,
+    Upgrading,
+}
+
+enum Wait {
+    Event,
+    Retry,
+    Release(oneshot::Receiver<std::io::Result<()>>),
+}
+
+impl Wait {
+    async fn elapsed(self, gateway: &str) {
+        match self {
+            Self::Event => std::future::pending().await,
+            Self::Retry => tokio::time::sleep(RETRY_AFTER).await,
+            Self::Release(released) => match released.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(gateway, error = %error, "wait for the upgrade lock");
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
+                Err(error) => {
+                    tracing::warn!(gateway, error = %error, "the upgrade lock waiter stopped");
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
+            },
+        }
+    }
+}
+
+fn upgrade_released(
+    registry: &Registry,
+) -> std::io::Result<oneshot::Receiver<std::io::Result<()>>> {
+    let path = registry.root().join("upgrade.lock");
+    let (released, waiting) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("forge-upgrade-lock".into())
+        .spawn(move || {
+            let locked = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .and_then(|lock| lock.lock_exclusive());
+            if released.send(locked).is_err() {
+                tracing::debug!(path = %path.display(), "the upgrade lock was released after maintenance moved on");
+            }
+        })?;
+    Ok(waiting)
+}
+
 fn spawn_maintenance(
     maintenance: Service,
     maintenance_stop: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+    mut backend: Backend,
+) -> tokio::task::JoinHandle<Backend> {
     tokio::spawn(async move {
+        let gateway = maintenance.gateway.id.as_str();
         loop {
-            tokio::select! {()=maintenance_stop.cancelled()=>break,()=tokio::time::sleep(Duration::from_millis(250))=>{}}
-            if let Err(error) = maintain(&maintenance).await {
-                tracing::warn!(
-                    gateway = %maintenance.gateway.id,
-                    backend = %maintenance.gateway.backend.id,
-                    error = diagnostics::chain(&error),
-                    "generation maintenance"
-                );
+            let wait = match maintain(&maintenance, &mut backend).await {
+                Ok(Pass::Settled) => Wait::Event,
+                Ok(Pass::Retiring) => Wait::Retry,
+                Ok(Pass::Upgrading) => match upgrade_released(&maintenance.registry) {
+                    Ok(released) => Wait::Release(released),
+                    Err(error) => {
+                        tracing::warn!(gateway, error = %error, "start waiting for the upgrade lock");
+                        Wait::Retry
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        gateway,
+                        backend = %maintenance.gateway.backend.id,
+                        error = diagnostics::chain(&error),
+                        "generation maintenance"
+                    );
+                    Wait::Retry
+                }
+            };
+            tokio::select! {
+                () = maintenance_stop.cancelled() => break,
+                () = maintenance.wake.notified() => {}
+                () = backend.exited() => {}
+                () = wait.elapsed(gateway) => {}
             }
         }
+        backend
     })
 }
 
@@ -740,6 +842,7 @@ async fn drain(
     service: &Service,
     replaced: bool,
     connections: &mut JoinSet<Result<(), ConnectionError>>,
+    mut backend: Backend,
 ) -> Result<(), DrainError> {
     let gateway = || service.gateway.id.clone();
     let peers = |source| DrainError::Peers {
@@ -765,18 +868,16 @@ async fn drain(
             request_logged(&service.gateway.backend, &Command::Stop).await;
         }
     }
-    while !connections.is_empty() {
+    if matches!(backend, Backend::Gone) {
+        connections.abort_all();
+    }
+    loop {
         tokio::select! {
-            finished = connections.join_next() => {
-                if let Some(finished) = finished {
-                    report(&service.gateway.id, finished);
-                }
+            finished = connections.join_next() => match finished {
+                Some(finished) => report(&service.gateway.id, &service.wake, finished),
+                None => break,
             },
-            () = tokio::time::sleep(Duration::from_millis(250)) => {
-                if !service.registry.peers().map_err(peers)?.iter().any(|member| member.id == service.gateway.backend.id) {
-                    connections.abort_all();
-                }
-            }
+            () = backend.exited() => connections.abort_all(),
         }
     }
     Ok(())
@@ -826,62 +927,72 @@ pub enum MaintainError {
     },
 }
 
-async fn maintain(service: &Service) -> Result<(), MaintainError> {
-    if read::<Gateway>(&service.registry.root().join("gateway.json"))
-        .map_err(MaintainError::Record)?
-        .is_none_or(|current| current.id != service.gateway.id)
-    {
-        return Ok(());
-    }
+async fn maintain(service: &Service, backend: &mut Backend) -> Result<Pass, MaintainError> {
     let Some(_upgrade) = service
         .registry
         .upgrade_lock()
         .map_err(MaintainError::Lock)?
     else {
-        return Ok(());
+        return Ok(Pass::Upgrading);
     };
+    if read::<Gateway>(&service.registry.root().join("gateway.json"))
+        .map_err(MaintainError::Record)?
+        .is_none_or(|current| current.id != service.gateway.id)
+    {
+        return Ok(Pass::Settled);
+    }
     let members = service.registry.peers().map_err(MaintainError::Peers)?;
     let active = service
         .registry
         .active()
         .map_err(MaintainError::Active)?
         .ok_or(MaintainError::ActiveMissing)?;
-    if !members.iter().any(|member| member.id == active.id) {
-        let ready = service
-            .registry
-            .root()
-            .join("binaries")
-            .join(&service.gateway.id)
-            .join(format!("restart-{}.json", artisan_api::ItemId::new()));
-        let mut child =
-            process::spawn_backend(&service.gateway.binary, &service.data, &service.log, &ready)?;
-        let member: runtime::Member = process::ready(&mut child, &ready).await?;
-        process::healthy(&member).await?;
-        runtime::request(&member, &Command::Activate)
-            .await
-            .map_err(|source| MaintainError::Activate {
-                generation: member.id.clone(),
-                source,
-            })?;
-        let promote = |source| MaintainError::Promote {
-            generation: member.id.clone(),
-            source,
-        };
-        service.registry.promote(&member).map_err(promote)?;
-        let mut gateway = service.gateway.clone();
-        gateway.backend = member.clone();
-        write(&service.registry.root().join("gateway.json"), &gateway).map_err(promote)?;
-        child.release();
-        return Ok(());
-    }
-    for member in &members {
-        if member.id == active.id {
-            continue;
-        }
+    let active = if members.iter().any(|member| member.id == active.id) {
+        active.id
+    } else {
+        restart(service, backend).await?
+    };
+    let mut retiring = false;
+    for member in members.iter().filter(|member| member.id != active) {
         request_logged(member, &Command::Drain).await;
         request_logged(member, &Command::Retire).await;
+        retiring = true;
     }
-    prune(service, &members)
+    prune(service, &members)?;
+    Ok(if retiring {
+        Pass::Retiring
+    } else {
+        Pass::Settled
+    })
+}
+
+async fn restart(service: &Service, backend: &mut Backend) -> Result<String, MaintainError> {
+    let ready = service
+        .registry
+        .root()
+        .join("binaries")
+        .join(&service.gateway.id)
+        .join(format!("restart-{}.json", artisan_api::ItemId::new()));
+    let mut child =
+        process::spawn_backend(&service.gateway.binary, &service.data, &service.log, &ready)?;
+    let member: runtime::Member = process::ready(&mut child, &ready).await?;
+    process::healthy(&member).await?;
+    runtime::request(&member, &Command::Activate)
+        .await
+        .map_err(|source| MaintainError::Activate {
+            generation: member.id.clone(),
+            source,
+        })?;
+    let promote = |source| MaintainError::Promote {
+        generation: member.id.clone(),
+        source,
+    };
+    service.registry.promote(&member).map_err(promote)?;
+    let mut gateway = service.gateway.clone();
+    gateway.backend = member.clone();
+    write(&service.registry.root().join("gateway.json"), &gateway).map_err(promote)?;
+    *backend = Backend::Serving(child.release());
+    Ok(member.id)
 }
 
 fn prune(service: &Service, members: &[runtime::Member]) -> Result<(), MaintainError> {

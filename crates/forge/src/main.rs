@@ -143,6 +143,8 @@ enum PlatformError {
         #[source]
         source: forge_runs::runtime::RegistryFileError,
     },
+    #[error("find this Forge executable")]
+    Executable(#[source] std::io::Error),
     #[error(transparent)]
     Gateway(#[from] forge_http::upgrade::ServeError),
 }
@@ -246,7 +248,10 @@ fn run(cli: &Cli, data_dir: PathBuf) -> Result<(), RunError> {
                     .log
                     .clone()
                     .map_or(Destination::Stderr, Destination::File);
-                forge_http::upgrade::serve(config, cli.handoff.clone(), log, stop)
+                let binary = std::env::current_exe()
+                    .and_then(|binary| binary.canonicalize())
+                    .map_err(PlatformError::Executable)?;
+                forge_http::upgrade::serve(config, binary, cli.handoff.clone(), log, stop)
                     .await
                     .map_err(|error| PlatformError::from(error).into())
             }

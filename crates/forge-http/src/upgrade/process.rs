@@ -8,16 +8,28 @@ use std::{
     process::{Child, Stdio},
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 pub struct ChildProcess {
     child: Option<Child>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Exited(CancellationToken);
+
+impl Exited {
+    pub async fn wait(&self) {
+        self.0.cancelled().await;
+    }
+}
+
 impl ChildProcess {
-    pub fn release(mut self) {
-        if let Some(child) = self.child.take() {
-            reap(child);
-        }
+    pub fn release(mut self) -> Exited {
+        reap(
+            self.child
+                .take()
+                .expect("invariant: a child process is only released by consuming it"),
+        )
     }
 }
 
@@ -31,22 +43,27 @@ impl Drop for ChildProcess {
                     "stop an abandoned Forge child"
                 );
             }
-            reap(child);
+            drop(reap(child));
         }
     }
 }
 
-fn reap(mut child: Child) {
+fn reap(mut child: Child) -> Exited {
+    let exited = CancellationToken::new();
+    let reaped = exited.clone();
+    let pid = child.id();
     if let Err(error) = std::thread::Builder::new()
         .name("forge-child".into())
         .spawn(move || {
             if let Err(error) = child.wait() {
                 tracing::warn!(pid = child.id(), error = %error, "reap Forge child");
             }
+            reaped.cancel();
         })
     {
-        tracing::warn!("reap Forge child: {error}");
+        tracing::warn!(pid, "reap Forge child: {error}");
     }
+    Exited(exited)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -384,7 +401,7 @@ pub async fn candidate(
     }
     .await;
     match &result {
-        Ok(_) => child.release(),
+        Ok(_) => drop(child.release()),
         Err(_) => abandon(&mut child, &directory.join("backend.json")).await,
     }
     result

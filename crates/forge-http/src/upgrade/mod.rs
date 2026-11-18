@@ -209,11 +209,12 @@ async fn stop_member(gateway: &Gateway) -> Result<(), StopMemberError> {
 
 pub async fn serve(
     config: crate::ServeConfig,
+    binary: PathBuf,
     handoff: Option<PathBuf>,
     log: diagnostics::Destination,
     stop: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
-    controller::serve(config, handoff, log, stop).await
+    controller::serve(config, binary, handoff, log, stop).await
 }
 
 pub use forge_runs::runtime::{read, write};
