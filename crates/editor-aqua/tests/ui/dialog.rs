@@ -120,3 +120,71 @@ fn unstyled_content_follows_the_font_set_across_a_runtime_switch() {
     );
     host.dispose(&mut app);
 }
+
+#[test]
+fn an_open_dialog_hides_the_background_from_assistive_tech_and_keeps_tab_inside() {
+    use aqua_core::{Key as Pressed, KeyEvent, Modifiers, NamedKey, Role};
+    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| {
+        UiBox::new()
+            .width(600.0)
+            .height(400.0)
+            .child(
+                UiBox::new()
+                    .width(80.0)
+                    .height(30.0)
+                    .build()
+                    .focusable(true)
+                    .with_key("background")
+                    .role(Role::Button)
+                    .aria_label("Background"),
+            )
+            .build()
+    })
+    .unwrap();
+    app.set_viewport(600.0, 400.0, 1.0);
+    app.build_frame().unwrap();
+    let owner = app.tree().root().unwrap();
+    let background = app
+        .tree()
+        .sole_node_with_key(hash_key(Key::from("background")))
+        .unwrap();
+    assert!(app.tree_mut().set_focused(Some(background)));
+    let inside = UiBox::new()
+        .width(80.0)
+        .height(30.0)
+        .build()
+        .focusable(true)
+        .with_key("inside")
+        .role(Role::Button)
+        .aria_label("Inside");
+    let host = DialogHost::open(
+        &mut app,
+        owner,
+        Dialog::new("modal", ArtisanTheme::resolved(), "Confirm", inside),
+    )
+    .unwrap();
+    app.build_frame().unwrap();
+    let labels: Vec<String> = app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .map(|node| node.label)
+        .collect();
+    assert!(labels.iter().any(|label| label == "Inside"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label == "Background"),
+        "{labels:?}"
+    );
+    let tab = KeyEvent {
+        key: Pressed::Named(NamedKey::Tab),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    for _ in 0..4 {
+        app.handle_input(&InputEvent::KeyDown(tab));
+        app.handle_input(&InputEvent::KeyUp(tab));
+        assert_ne!(app.tree().focused(), Some(background));
+    }
+    host.dispose(&mut app);
+}
