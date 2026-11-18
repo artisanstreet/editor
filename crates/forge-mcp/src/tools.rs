@@ -1522,11 +1522,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             Ok(servers
                 .iter()
                 .map(|server| {
-                    let target = server.url.clone().unwrap_or_else(|| {
-                        format!("{} {}", server.command, server.args.join(" "))
-                            .trim()
-                            .to_owned()
-                    });
+                    let target = listed_destination(server);
                     let env = if server.env.is_empty() {
                         String::new()
                     } else {
@@ -1866,6 +1862,106 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
         }
         _ => Err(Refused(format!("Unknown tool {name}")).into()),
     }
+}
+
+const REDACTED: &str = "<redacted>";
+
+const SECRET_WORDS: [&str; 12] = [
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "auth",
+    "credential",
+    "cookie",
+    "session",
+    "bearer",
+    "header",
+    "private",
+];
+
+const SECRET_PREFIXES: [&str; 8] = [
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "akia",
+    "bearer ",
+];
+
+fn listed_destination(server: &McpServer) -> String {
+    server.url.as_deref().map_or_else(
+        || {
+            std::iter::once(server.command.clone())
+                .chain(redacted_args(&server.args))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+        sanitized_url,
+    )
+}
+
+fn sanitized_url(written: &str) -> String {
+    url::Url::parse(written).map_or_else(
+        |_| REDACTED.to_owned(),
+        |url| {
+            let host = url.host_str().unwrap_or_default();
+            let port = url
+                .port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            format!("{}://{host}{port}{}", url.scheme(), url.path())
+        },
+    )
+}
+
+fn names_secret(key: &str) -> bool {
+    let key = key.trim_start_matches('-').to_ascii_lowercase();
+    !key.is_empty() && SECRET_WORDS.iter().any(|word| key.contains(word))
+}
+
+fn looks_secret(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn redacted_arg(arg: &str) -> String {
+    if arg.contains("://") {
+        return sanitized_url(arg);
+    }
+    if looks_secret(arg) {
+        return REDACTED.to_owned();
+    }
+    for separator in ['=', ':'] {
+        if let Some((key, _)) = arg.split_once(separator)
+            && names_secret(key)
+        {
+            return format!("{key}{separator}{REDACTED}");
+        }
+    }
+    arg.to_owned()
+}
+
+fn redacted_args(args: &[String]) -> Vec<String> {
+    let mut shown = Vec::with_capacity(args.len());
+    let mut value_is_secret = false;
+    for arg in args {
+        if value_is_secret {
+            shown.push(REDACTED.to_owned());
+            value_is_secret = false;
+            continue;
+        }
+        let flag = arg.starts_with('-') && !arg.contains('=');
+        value_is_secret = flag && names_secret(arg);
+        shown.push(redacted_arg(arg));
+    }
+    shown
 }
 
 async fn mcp_servers(hub: &Hub) -> Result<Vec<McpServer>> {
