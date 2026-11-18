@@ -41,6 +41,10 @@ impl HostData {
     pub fn thread_page(&self, archived: bool) -> &ThreadPage {
         &self.thread_pages.pages[usize::from(archived)]
     }
+    #[cfg(feature = "test-support")]
+    pub fn test_thread_page_generation(&self, archived: bool) -> u64 {
+        self.thread_pages.pages[usize::from(archived)].generation
+    }
     pub fn fill_threads(&mut self) {
         let page = self.thread_page(false);
         if page.loaded && !page.loading && page.error.is_none() && page.next.is_some() {

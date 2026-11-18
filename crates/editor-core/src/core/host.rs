@@ -263,6 +263,28 @@ impl TestHostTransitions {
             "host closed before the event transition was delivered"
         );
     }
+    pub async fn thread_page(
+        &self,
+        archived: bool,
+        direction: ThreadPageDirection,
+        started_seq: artisan_api::Seq,
+        generation: u64,
+        page: artisan_api::ThreadsPage,
+    ) {
+        assert!(
+            self.sender
+                .send(HostMessage::Completion(HostCompletion::ThreadPage {
+                    archived,
+                    direction,
+                    started_seq,
+                    generation,
+                    result: Ok(page),
+                }))
+                .await
+                .is_ok(),
+            "host closed before the thread page was delivered"
+        );
+    }
     pub async fn prompt(&self, generation: u64, prompt: artisan_api::GlobalPrompt) {
         assert!(
             self.sender

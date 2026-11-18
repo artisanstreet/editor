@@ -36,6 +36,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 editor-core = { path = ".", features = ["test-support"] }
+test-support.workspace = true
 
 [lints]
 workspace = true
