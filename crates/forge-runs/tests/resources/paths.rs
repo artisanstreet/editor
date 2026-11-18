@@ -1,4 +1,7 @@
-use crate::resources::{Host, ResourceError, Written, automount_root, host_path, written_sources};
+use crate::resources::{
+    Host, ResourceError, Written, automount_root, host_path, without_verbatim_prefix,
+    written_sources,
+};
 use std::path::{Path, PathBuf};
 
 fn written(path: &str) -> Written {
@@ -193,4 +196,24 @@ fn a_reply_names_every_local_file_it_shows_once_as_the_editor_asks_for_it() {
     let mut found = written_sources(reply);
     found.sort();
     assert_eq!(found, expected);
+}
+
+#[test]
+fn windows_canonical_paths_compare_in_the_form_permission_rules_are_written_in() {
+    assert_eq!(
+        without_verbatim_prefix(Path::new(r"\\?\C:\Users\ada\project\.env")),
+        PathBuf::from(r"C:\Users\ada\project\.env")
+    );
+    assert_eq!(
+        without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\project\key.pem")),
+        PathBuf::from(r"\\server\share\project\key.pem")
+    );
+    assert_eq!(
+        without_verbatim_prefix(Path::new(r"\\?\GLOBALROOT\Device\Null")),
+        PathBuf::from(r"\\?\GLOBALROOT\Device\Null")
+    );
+    assert_eq!(
+        without_verbatim_prefix(Path::new("/home/ada/project/.env")),
+        PathBuf::from("/home/ada/project/.env")
+    );
 }

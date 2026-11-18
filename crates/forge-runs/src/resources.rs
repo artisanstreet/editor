@@ -297,7 +297,7 @@ impl Access {
     #[must_use]
     pub fn load(engine_home: &Path, folder: &Path) -> Self {
         let root = match std::fs::canonicalize(folder) {
-            Ok(root) => Some(root),
+            Ok(root) => Some(without_verbatim_prefix(&root)),
             Err(error) => {
                 tracing::warn!(folder = %folder.display(), "resolve the thread folder for resources: {error}");
                 None
@@ -366,7 +366,20 @@ fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
 }
 
 fn resolved(live: &Path) -> Result<PathBuf, ResourceError> {
-    std::fs::canonicalize(live).map_err(|error| io_failure(live, error))
+    std::fs::canonicalize(live)
+        .map(|path| without_verbatim_prefix(&path))
+        .map_err(|error| io_failure(live, error))
+}
+
+pub(crate) fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    match path.to_str() {
+        Some(text) => match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+            (Some(share), _) => PathBuf::from(format!(r"\\{share}")),
+            (None, Some(rest)) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+            _ => path.to_path_buf(),
+        },
+        None => path.to_path_buf(),
+    }
 }
 
 fn keep(target: &Path, bytes: &[u8]) {
