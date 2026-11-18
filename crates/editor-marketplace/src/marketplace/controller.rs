@@ -2,10 +2,12 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use artisan_api::{CatalogSkill, Listing, McpServer};
-use tokio_util::task::AbortOnDropHandle;
 
 use editor_core::delivery::OwnedDelivery;
-use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, runtime};
+use editor_core::{
+    CompletionKey, CompletionSlot, Core, CoreEvent, HostEvent, HostId, HostInstance, Screen,
+    runtime,
+};
 use editor_ui::text::mount::{EditorController, EditorEvent};
 use editor_ui::text::{Editor, ListKey as EditorListKey, Mode};
 use std::rc::Rc;
@@ -17,8 +19,7 @@ use editor_core::client::CallError;
 
 enum Completion {
     Search(
-        HostId,
-        HostInstance,
+        CompletionKey,
         SearchRequest,
         Result<Vec<Listing>, CallError>,
     ),
@@ -54,7 +55,7 @@ pub struct MarketplaceController {
     pub page: Marketplace,
     pub search: EditorController,
     completion: OwnedDelivery<Completion>,
-    search_task: Option<AbortOnDropHandle<()>>,
+    remote_search: CompletionSlot,
     host_instance: Option<HostInstance>,
     loading_started: Option<Instant>,
     pub reduced_motion: bool,
@@ -82,7 +83,7 @@ impl MarketplaceController {
             page: Marketplace::default(),
             search,
             completion: OwnedDelivery::new(NonZeroUsize::new(64).unwrap()),
-            search_task: None,
+            remote_search: CompletionSlot::default(),
             host_instance: None,
             loading_started: None,
             reduced_motion: false,
@@ -130,9 +131,10 @@ impl MarketplaceController {
             .map(|host| (host.id.clone(), host.instance()));
         let id = active.as_ref().map(|(id, _)| id.clone());
         let instance = active.map(|(_, instance)| instance);
-        if self.page.host == id && self.host_instance != instance {
+        let host_changed = self.page.host != id || self.host_instance != instance;
+        if host_changed {
             self.page.sync_host(None, &[], &[]);
-            self.search_task = None;
+            self.remote_search.cancel();
             self.page.cancel_search();
         }
         self.host_instance = instance;
@@ -161,6 +163,9 @@ impl MarketplaceController {
         } else {
             self.loading_started = None;
             self.page.sync_host(None, &[], &[]);
+        }
+        if host_changed && self.page.restart_search(Instant::now()) {
+            self.schedule_search(core);
         }
     }
 
@@ -203,34 +208,62 @@ impl MarketplaceController {
         if query == self.page.query {
             return;
         }
-        self.search_task = None;
+        self.remote_search.cancel();
         self.page.set_query(query, Instant::now());
         self.search
             .state()
             .borrow_mut()
             .set_list_open(!self.page.query.trim().is_empty());
+        self.schedule_search(core);
+    }
+
+    fn schedule_search(&mut self, core: &Core) {
         let Some(deadline) = self.page.search_deadline() else {
             return;
         };
-        let Some(host) = core.active_host() else {
+        let Some(host) = core
+            .active_host()
+            .filter(|host| self.page.host.as_ref() == Some(&host.id))
+        else {
             return;
         };
         let client = host.client.clone();
-        let id = host.id.clone();
-        let instance = host.instance();
         let Some(request) = self.page.take_search(deadline) else {
             return;
         };
         let sender = self.completion.sender();
-        self.search_task = Some(AbortOnDropHandle::new(runtime::runtime().spawn(
-            async move {
+        self.remote_search
+            .spawn(&host.id, host.instance(), move |key| async move {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                 let result = Marketplace::search(&client, &request).await;
-                let _ = sender
-                    .send(Completion::Search(id, instance, request, result))
-                    .await;
-            },
-        )));
+                let _ = sender.send(Completion::Search(key, request, result)).await;
+            });
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn search_key(&self) -> Option<CompletionKey> {
+        self.remote_search.current().cloned()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn finish_search_for_tests(
+        &self,
+        key: CompletionKey,
+        result: Result<Vec<Listing>, CallError>,
+    ) -> impl Future<Output = ()> + use<> {
+        let request = SearchRequest {
+            query: self.page.query.trim().to_owned(),
+            serial: self.page.search_serial,
+        };
+        let sender = self.completion.sender();
+        async move {
+            sender
+                .send(Completion::Search(key, request, result))
+                .await
+                .expect(
+                    "invariant: the marketplace owns its completion mailbox while a test drives it",
+                );
+        }
     }
 
     pub fn clear_search(&mut self, core: &Core) {
@@ -299,8 +332,8 @@ impl MarketplaceController {
         let completions = self.completion.drain();
         for completion in completions {
             match completion {
-                Completion::Search(id, instance, request, result) => {
-                    if core.host_if_instance(&id, instance).is_some() {
+                Completion::Search(key, request, result) => {
+                    if self.remote_search.finish(core, &key) {
                         self.page.finish_search(&request, result);
                     } else {
                         self.sync(core);

@@ -133,13 +133,19 @@ impl Marketplace {
         }
         self.query = query;
         self.selected = 0;
+        self.restart_search(now);
+    }
+
+    pub fn restart_search(&mut self, now: Instant) -> bool {
         self.search_serial = self.search_serial.wrapping_add(1);
         self.search_due = None;
         if self.host.is_some() && self.query.trim().chars().count() >= 2 {
             self.listings = Remote::Searching;
             self.search_due = Some(now + REMOTE_SEARCH_DELAY);
+            true
         } else {
             self.listings = Remote::Idle;
+            false
         }
     }
 

@@ -189,7 +189,7 @@ fn same_id_host_replacement_resets_marketplace_requests() {
     controller
         .page
         .finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
-    assert_eq!(controller.page.listings, Remote::Idle);
+    assert_eq!(controller.page.listings, Remote::Searching);
     assert!(!controller.page.finish_operation(&operation, Err(refused())));
     assert!(controller.page.pending.is_none());
     assert!(controller.page.notice.is_none());
@@ -428,4 +428,62 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         view::dispatch(&mut controller, &mut core, action);
     }
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::Extensions));
+}
+
+#[test]
+fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen};
+    use editor_aqua::marketplace::controller::MarketplaceController;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let identity = Identity::generate("marketplace-switch-test").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+    let first = HostId("first".into());
+    let second = HostId("second".into());
+    for id in [&first, &second] {
+        core.add_test_host(
+            &HostConfig {
+                id: id.clone(),
+                name: id.0.clone(),
+                address: "127.0.0.1:1".into(),
+                fingerprint: fingerprint.clone(),
+                kind: HostKind::Local,
+            },
+            client.clone(),
+        );
+    }
+    let show_on = |core: &mut Core, host: &HostId| {
+        core.navigate(Screen::NewThread {
+            host: host.clone(),
+            project: None,
+        });
+        core.navigate(Screen::Marketplace);
+    };
+    show_on(&mut core, &first);
+    let mut controller = MarketplaceController::default();
+    controller.sync(&mut core);
+    controller.search.state().borrow_mut().set_text("pdf");
+    controller.edited(&core);
+    let on_first = controller.search_key().unwrap();
+
+    show_on(&mut core, &second);
+    controller.sync(&mut core);
+    assert_eq!(controller.page.host.as_ref(), Some(&second));
+    assert_eq!(controller.search_key().unwrap().host(), &second);
+
+    futures::executor::block_on(
+        controller.finish_search_for_tests(on_first, Ok(vec![listing("first", "pdf", 1)])),
+    );
+    controller.drain(&mut core);
+    assert_eq!(
+        controller.page.listings,
+        Remote::Searching,
+        "the first host's results must not appear on the second host"
+    );
 }

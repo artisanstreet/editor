@@ -4,6 +4,7 @@ pub mod ae;
 mod agent_calls;
 pub mod client;
 pub mod clock;
+pub mod completion;
 pub mod config_file;
 pub mod connection;
 pub mod delivery;
@@ -29,6 +30,7 @@ pub use account::{Account, AccountEvent, AccountMachine, AccountPhase, LocalForg
 pub use ae::AeScript;
 pub use client::ForgeClient;
 pub use clock::{Clock, TimeSource};
+pub use completion::{CompletionKey, CompletionSlot};
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, HostData, HostEvent, HostInstance,
