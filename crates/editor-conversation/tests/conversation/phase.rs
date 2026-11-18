@@ -1,7 +1,7 @@
 use super::{Phase, turn_phase};
 use artisan_api::{
-    EngineId, Item, ItemId, ItemKind, LiveTarget, Run, RunId, RunStatus, Status, ThreadId,
-    ToolKind, Usage,
+    EngineId, Item, ItemId, ItemKind, LiveTarget, Run, RunId, RunState, Status, ThreadId, ToolKind,
+    Usage,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,13 +14,11 @@ fn run() -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status: RunStatus::Running,
+        state: RunState::Running,
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 1,
         started_at: 0,
-        ended_at: None,
         continuation: None,
     }
 }

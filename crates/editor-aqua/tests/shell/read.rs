@@ -1,6 +1,6 @@
 use artisan_api::{
-    EngineConfig, EngineId, Item, ItemsPage, ProjectId, Run, RunId, RunStatus, Thread, ThreadId,
-    Usage,
+    EngineConfig, EngineId, Item, ItemsPage, ProjectId, Run, RunId, RunOutcome, RunState, Thread,
+    ThreadId, Usage,
 };
 use editor_aqua::conversation::fold::{Row, Slot};
 use editor_aqua::shell::application::SectionViews;
@@ -49,13 +49,15 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
                     engine: EngineId::Claude,
                     model: None,
                     input_cutoff: 0,
-                    status: RunStatus::Done,
+                    state: RunState::Finished {
+                        outcome: RunOutcome::Done,
+                        error: None,
+                        ended_at: 0,
+                    },
                     usage: Usage::default(),
                     session_id: None,
-                    error: None,
                     seq: RUN_SEQ,
                     started_at: 0,
-                    ended_at: Some(0),
                     continuation: None,
                 },
             );

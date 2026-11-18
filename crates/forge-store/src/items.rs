@@ -332,7 +332,7 @@ impl Store {
             if let Some(note) = note {
                 tx.upsert_item(note)?;
             }
-            let status = if run.status == RunStatus::Done {
+            let status = if run.status() == RunStatus::Done {
                 Status::Done
             } else {
                 Status::Cancelled
@@ -345,7 +345,7 @@ impl Store {
                         old.thread_id == run.thread_id,
                         "output belongs to another thread"
                     );
-                    if run.status != RunStatus::Cancelled
+                    if run.status() != RunStatus::Cancelled
                         && old.status == Status::AwaitingUser
                         && matches!(
                             old.kind,
@@ -368,12 +368,12 @@ impl Store {
                     tx.save_item(item, Some(old))?;
                 }
             }
-            let parked = match park.filter(|_| run.status == RunStatus::Failed) {
+            let parked = match park.filter(|_| run.status() == RunStatus::Failed) {
                 Some(park) => tx.park(&run, park)?,
                 None => false,
             };
             let run = tx.save_run(run)?;
-            if run.status == RunStatus::Interrupted {
+            if run.status() == RunStatus::Interrupted {
                 tx.continue_after_restart(&run)?;
             }
             tx.mark_activity(&run.thread_id, run.seq)?;

@@ -205,20 +205,20 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
     let events = read_events(
         stream,
         "the failed run",
-        |envelope| matches!(&envelope.event, Event::Run { run } if run.status == RunStatus::Failed),
+        |envelope| matches!(&envelope.event, Event::Run { run } if run.status() == RunStatus::Failed),
     )
     .await;
     assert!(matches!(events[0].event, Event::Hello { .. }));
     let failed = events.iter().find_map(|envelope| {
         if let Event::Run { run } = &envelope.event
-            && run.status == RunStatus::Failed
+            && run.status() == RunStatus::Failed
         {
-            run.error.clone()
+            run.error()
         } else {
             None
         }
     });
-    assert_eq!(failed.as_deref(), Some("Claude Code is not installed"));
+    assert_eq!(failed, Some("Claude Code is not installed"));
     let seqs: Vec<_> = events.iter().filter_map(|envelope| envelope.seq).collect();
     assert!(
         seqs.windows(2).all(|pair| pair[0] < pair[1]),

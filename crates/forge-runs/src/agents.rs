@@ -292,7 +292,7 @@ impl Hub {
         let run_id = store
             .latest_run(parent)
             .await?
-            .filter(|run| run.status == RunStatus::Running)
+            .filter(|run| run.status() == RunStatus::Running)
             .map(|run| run.id);
         store
             .spawn_agent(
@@ -542,7 +542,7 @@ impl Hub {
         let run = store.latest_run(child).await?;
         Ok(match run {
             None => (AgentState::Working, None),
-            Some(run) => match run.status {
+            Some(run) => match run.status() {
                 RunStatus::Running => (AgentState::Working, None),
                 RunStatus::Done => (AgentState::Done, None),
                 // A restart cut it short, or it is parked until the
@@ -555,7 +555,7 @@ impl Hub {
                 }
                 RunStatus::Cancelled => (AgentState::Cancelled, None),
                 RunStatus::Failed | RunStatus::Refused | RunStatus::Interrupted => {
-                    (AgentState::Failed, run.error)
+                    (AgentState::Failed, run.error().map(str::to_owned))
                 }
             },
         })
@@ -857,7 +857,7 @@ impl Hub {
                 .store()
                 .latest_run(parent)
                 .await?
-                .is_some_and(|run| run.status == RunStatus::Cancelled),
+                .is_some_and(|run| run.status() == RunStatus::Cancelled),
         })
     }
 

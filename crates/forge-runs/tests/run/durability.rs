@@ -53,7 +53,7 @@ async fn stopped_turn(fixture: &Fixture) {
         })
         .await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
+    assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -90,7 +90,7 @@ async fn a_continue_whose_run_could_not_be_saved_is_still_waiting() {
         continued.continuation,
         Some(artisan_api::Continuation::Requested)
     );
-    assert_eq!(continued.status, RunStatus::Done);
+    assert_eq!(continued.status(), RunStatus::Done);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -136,7 +136,7 @@ async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stuck.status, RunStatus::Running);
+    assert_eq!(stuck.status(), RunStatus::Running);
     assert!(
         fixture
             .items()
@@ -157,7 +157,7 @@ async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
                 .latest_run(&fixture.thread_id)
                 .await
                 .unwrap()
-                .is_some_and(|run| run.status == RunStatus::Failed)
+                .is_some_and(|run| run.status() == RunStatus::Failed)
         },
     )
     .await;

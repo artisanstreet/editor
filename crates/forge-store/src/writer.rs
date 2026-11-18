@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Context, Result};
 use artisan_api::{
     Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, ItemKind, Project,
-    Run, RunId, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
+    Run, RunId, RunOutcome, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
 };
 use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
@@ -277,7 +277,8 @@ impl Tx<'_> {
     }
 
     pub(crate) fn upsert_run(&mut self, run: Run) -> Result<Run> {
-        let changed_status = read::run(self, &run.id)?.is_none_or(|old| old.status != run.status);
+        let changed_status =
+            read::run(self, &run.id)?.is_none_or(|old| old.status() != run.status());
         let run = self.save_run(run)?;
         if changed_status {
             self.mark_activity(&run.thread_id, run.seq)?;
@@ -583,7 +584,7 @@ impl Tx<'_> {
                 run.id.as_str(),
                 run.thread_id.as_str(),
                 run.seq,
-                tag(&run.status)?,
+                tag(&run.status())?,
                 to_body(&run)?,
             ])
             .with_context(|| format!("save run {} of thread {}", run.id, run.thread_id))?;
@@ -662,8 +663,8 @@ impl Tx<'_> {
         let interrupted = runs.len();
         let mut continued = 0;
         for mut run in runs {
-            run.status = RunStatus::Interrupted;
-            run.ended_at.get_or_insert(ended_at);
+            let error = run.error().map(str::to_owned);
+            run.finish(RunOutcome::Interrupted, error, ended_at);
             let run = self.save_run(run)?;
             if self.continue_after_restart(&run)? {
                 continued += 1;
@@ -745,7 +746,7 @@ impl Tx<'_> {
         if pending {
             return Ok(false);
         }
-        if run.status != RunStatus::Interrupted {
+        if run.status() != RunStatus::Interrupted {
             return Ok(true);
         }
         let chain = self.continuation_chain(

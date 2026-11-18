@@ -117,13 +117,18 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: now(),
+            },
+        ),
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 0,
         started_at: now(),
-        ended_at: None,
         continuation: None,
     }
 }
@@ -419,8 +424,8 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
 
     let store = Store::open(&dir.0).unwrap();
     let run = store.run(&live.id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Interrupted);
-    assert!(run.ended_at.is_some());
+    assert_eq!(run.status(), RunStatus::Interrupted);
+    assert!(run.ended_at().is_some());
     assert_eq!(store.run(&finished.id).await.unwrap().unwrap(), finished);
 
     let tool = store
@@ -455,7 +460,7 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
     // An Editor that was connected before the restart learns about it.
     let changes = store.changes_since(seen, 100).await.unwrap().unwrap();
     assert!(changes.iter().any(|envelope| matches!(&envelope.event,
-        Event::Run { run } if run.status == RunStatus::Interrupted)));
+        Event::Run { run } if run.status() == RunStatus::Interrupted)));
     assert_eq!(
         store.latest_run(&thread).await.unwrap().unwrap().id,
         live.id
@@ -776,7 +781,7 @@ async fn a_run_stays_in_the_thread_it_started_in() {
         .unwrap();
     let mut moved = started.clone();
     moved.thread_id = other.clone();
-    moved.status = RunStatus::Done;
+    moved.finish(artisan_api::RunOutcome::Done, None, now());
 
     let error = store.upsert_run(moved).await.unwrap_err();
 
@@ -2048,7 +2053,7 @@ async fn turning_continue_after_restart_off_leaves_interrupted_turns_alone() {
     };
     let store = Store::open(&dir.0).unwrap();
     assert_eq!(
-        store.latest_run(&thread).await.unwrap().unwrap().status,
+        store.latest_run(&thread).await.unwrap().unwrap().status(),
         RunStatus::Interrupted
     );
     assert!(!store.continue_pending(&thread).await.unwrap());
@@ -2059,7 +2064,7 @@ async fn turning_retries_off_publishes_the_setting_before_the_threads_it_unparks
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;
     let mut failed = live_run_with_session(&store, &thread).await;
-    failed.status = RunStatus::Failed;
+    failed.finish(artisan_api::RunOutcome::Failed, None, now());
     let (_, parked) = store
         .settle_run(forge_store::Settlement {
             run: failed,

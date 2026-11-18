@@ -509,12 +509,12 @@ impl HostData {
     pub fn is_working(&self, thread: &ThreadId) -> bool {
         self.runs
             .get(thread)
-            .is_some_and(|run| run.status.is_live())
+            .is_some_and(|run| run.status().is_live())
     }
     pub fn can_continue(&self, thread: &ThreadId) -> bool {
         self.runs
             .get(thread)
-            .is_some_and(|run| run.status.is_stopped())
+            .is_some_and(|run| run.status().is_stopped())
     }
     pub fn is_waiting(&self, thread: &ThreadId) -> bool {
         self.waiting
@@ -1268,7 +1268,7 @@ impl HostData {
                 events.push(HostEvent::Changed);
             }
             Event::Run { run } => {
-                if !run.status.is_live() {
+                if !run.status().is_live() {
                     self.live.remove(&run.thread_id);
                 }
                 let thread_id = run.thread_id.clone();

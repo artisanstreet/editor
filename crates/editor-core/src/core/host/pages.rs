@@ -382,7 +382,7 @@ impl HostData {
         keep.extend(
             self.runs
                 .iter()
-                .filter(|(_, run)| run.status.is_live())
+                .filter(|(_, run)| run.status().is_live())
                 .map(|(id, _)| id.clone()),
         );
         keep.extend(
@@ -394,7 +394,7 @@ impl HostData {
 
         self.threads.retain(|id, _| keep.contains(id));
         self.runs
-            .retain(|id, run| self.threads.contains_key(id) || run.status.is_live());
+            .retain(|id, run| self.threads.contains_key(id) || run.status().is_live());
         self.waiting
             .retain(|id, items| self.threads.contains_key(id) || !items.is_empty());
         self.thread_pages

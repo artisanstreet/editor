@@ -51,13 +51,13 @@ async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_
                 .await
                 .unwrap()
                 .unwrap()
-                .status,
+                .status(),
             RunStatus::Cancelled
         );
         release.notify_one();
         let runs = fixture.settled().await;
         assert!(cleaned.load(Ordering::SeqCst));
-        assert_eq!(runs.last().unwrap().status, RunStatus::Cancelled);
+        assert_eq!(runs.last().unwrap().status(), RunStatus::Cancelled);
         assert_eq!(fixture.items().await.iter().filter(|item| matches!(&item.kind, ItemKind::AssistantMessage { text, .. } if text.inline() == Some("stopped"))).count(), 300);
     }
 }
@@ -85,9 +85,9 @@ async fn cancellation_preserves_an_adapter_stop_failure() {
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs.last().unwrap().status, RunStatus::Failed);
+    assert_eq!(runs.last().unwrap().status(), RunStatus::Failed);
     assert_eq!(
-        runs.last().unwrap().error.as_deref(),
+        runs.last().unwrap().error(),
         Some("provider refused to stop")
     );
 }
@@ -127,8 +127,8 @@ async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
-    assert!(run.error.unwrap().contains("did not confirm it stopped"));
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert!(run.error().unwrap().contains("did not confirm it stopped"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,7 +244,7 @@ async fn cancellation_rejects_answers_and_goal_updates_while_cleanup_is_pending(
     );
     release.notify_one();
     assert_eq!(
-        fixture.settled().await.last().unwrap().status,
+        fixture.settled().await.last().unwrap().status(),
         RunStatus::Cancelled,
         "cleanup must still complete cancellation after rejecting inputs"
     );
@@ -299,7 +299,7 @@ async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
+    assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
     let continued = fixture.settled().await.remove(0);

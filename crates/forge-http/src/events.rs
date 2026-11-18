@@ -182,7 +182,7 @@ pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> an
                 Event::Item { item } if item.status.is_terminal() => {
                     completed_items.insert(item.id.clone());
                 }
-                Event::Run { run } if !run.status.is_live() => {
+                Event::Run { run } if !run.status().is_live() => {
                     completed_runs.insert(run.id.clone());
                 }
                 Event::Hello { .. }

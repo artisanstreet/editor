@@ -190,13 +190,18 @@ fn run(id: &str, status: RunStatus, started_at: artisan_api::Timestamp, carried:
         engine: artisan_api::EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: started_at,
+            },
+        ),
         usage: artisan_api::Usage::default(),
         session_id: None,
-        error: None,
         seq: 1,
         started_at,
-        ended_at: None,
         continuation: carried.then_some(artisan_api::Continuation::Restart),
     }
 }

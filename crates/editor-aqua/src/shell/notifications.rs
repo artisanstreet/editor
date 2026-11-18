@@ -108,7 +108,7 @@ impl Notifications {
         let body = if now.waiting && !previous.waiting {
             format!("{engine} asked you a question.")
         } else if previous.working && !now.working {
-            match host.run(thread).map(|run| run.status) {
+            match host.run(thread).map(|run| run.status()) {
                 Some(RunStatus::Done) => "Finished.".to_owned(),
                 Some(RunStatus::Failed) if info.parked_until.is_some() => return None,
                 Some(RunStatus::Failed) => format!("{engine} ran into an error."),

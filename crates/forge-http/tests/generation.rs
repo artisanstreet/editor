@@ -110,7 +110,7 @@ async fn wait(store: &Store, thread: &ThreadId, status: RunStatus) {
                 .latest_run(thread)
                 .await
                 .unwrap()
-                .is_some_and(|run| run.status == status)
+                .is_some_and(|run| run.status() == status)
             {
                 break;
             }

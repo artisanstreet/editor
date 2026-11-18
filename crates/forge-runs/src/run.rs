@@ -4,8 +4,8 @@ use crate::Hub;
 use anyhow::{Context, Result};
 use artisan_api::{
     Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
-    NamedModel, Permissions, Run, RunId, RunStatus, Status, ThreadId, ToolKind, UpdateThread,
-    Usage,
+    NamedModel, Permissions, Run, RunId, RunOutcome, RunState, RunStatus, Status, ThreadId,
+    ToolKind, UpdateThread, Usage,
 };
 use forge_engines::{EngineEvent, Input, LiveKind, Outcome, RunIo, Turn, UserInput};
 use forge_store::NewItem;
@@ -78,14 +78,12 @@ pub async fn drive(
         thread_id: thread_id.clone(),
         engine,
         model: thread.config.model.clone(),
-        status: RunStatus::Running,
+        state: RunState::Running,
         usage,
         session_id,
-        error: None,
         seq: 0,
         input_cutoff: observed.cutoff,
         started_at: artisan_api::now(),
-        ended_at: None,
         continuation,
     };
     run = store.begin_run(run).await?;
@@ -1256,11 +1254,8 @@ fn open_items(items: &Work) -> Vec<ItemId> {
 /// Settles a stopped run as soon as the stop lands, so clients don't wait
 /// on the engine confirming it. The engine's teardown carries on after.
 async fn announce_stop(hub: &Hub, run: &Run, items: &Work) -> Result<Run> {
-    let stopped = Run {
-        status: RunStatus::Cancelled,
-        ended_at: Some(artisan_api::now()),
-        ..run.clone()
-    };
+    let mut stopped = run.clone();
+    stopped.finish(RunOutcome::Cancelled, None, artisan_api::now());
     let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
         run: stopped,
         open: open_items(items),
@@ -1298,9 +1293,13 @@ async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Res
     } else {
         None
     };
-    run.status = outcome.status;
-    run.error = outcome.error;
-    run.ended_at = run.ended_at.or_else(|| Some(artisan_api::now()));
+    let ended = RunOutcome::of(outcome.status).unwrap_or_else(|| {
+        unreachable!(
+            "invariant: run {} of thread {} ended with a running outcome",
+            run.id, run.thread_id
+        )
+    });
+    run.finish(ended, outcome.error, artisan_api::now());
     let settlement = forge_store::Settlement {
         run: run.clone(),
         open,

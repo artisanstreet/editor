@@ -85,7 +85,7 @@ impl Hub {
         let run_id = store
             .latest_run(thread)
             .await?
-            .filter(|run| run.status == RunStatus::Running)
+            .filter(|run| run.status() == RunStatus::Running)
             .map(|run| run.id);
         let id = ItemId::new();
         let (answer, answered) = oneshot::channel();

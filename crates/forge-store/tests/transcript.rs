@@ -72,13 +72,18 @@ async fn run(store: &Store, thread: &ThreadId, id: &RunId, status: RunStatus) {
             engine: EngineId::Codex,
             model: None,
             input_cutoff: 0,
-            status,
+            state: artisan_api::RunOutcome::of(status).map_or(
+                artisan_api::RunState::Running,
+                |outcome| artisan_api::RunState::Finished {
+                    outcome,
+                    error: None,
+                    ended_at: 0,
+                },
+            ),
             usage: Usage::default(),
             session_id: None,
-            error: None,
             seq: 0,
             started_at: 0,
-            ended_at: None,
             continuation: None,
         })
         .await
@@ -331,7 +336,7 @@ async fn a_reopened_thread_shows_what_changed_since_it_was_last_opened() {
         first
             .runs
             .iter()
-            .all(|run| run.status == RunStatus::Running),
+            .all(|run| run.status() == RunStatus::Running),
         "the first open shows the turn working"
     );
 
@@ -359,7 +364,7 @@ async fn a_reopened_thread_shows_what_changed_since_it_was_last_opened() {
         reopened
             .runs
             .iter()
-            .all(|run| run.status == RunStatus::Done),
+            .all(|run| run.status() == RunStatus::Done),
         "the reopened thread shows the turn finished"
     );
     assert_eq!(

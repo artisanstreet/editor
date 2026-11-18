@@ -92,7 +92,7 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
                     .latest_run(&child)
                     .await
                     .unwrap()
-                    .is_some_and(|run| run.status == RunStatus::Done)
+                    .is_some_and(|run| run.status() == RunStatus::Done)
         },
     )
     .await;

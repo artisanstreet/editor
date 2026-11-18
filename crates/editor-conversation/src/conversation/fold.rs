@@ -537,7 +537,7 @@ pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
         match previous {
             Some(previous)
                 if !matches!(
-                    previous.status,
+                    previous.status(),
                     RunStatus::Done | RunStatus::Failed | RunStatus::Refused
                 ) =>
             {
@@ -651,7 +651,9 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
                 from_agent: Some(_),
                 ..
             } => None,
-            ItemKind::UserMessage { .. } => Some(Row::text(item.id.clone(), Slot::Text(TextSection::User))),
+            ItemKind::UserMessage { .. } => {
+                Some(Row::text(item.id.clone(), Slot::Text(TextSection::User)))
+            }
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
@@ -734,7 +736,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         }
     } else if view.window().gap.is_some() {
         rows.push(Row::Gap);
-    } else if let Some(run) = latest.filter(|run| run.status.is_live()) {
+    } else if let Some(run) = latest.filter(|run| run.status().is_live()) {
         rows.push(Row::Status(run.id.clone()));
     }
     if scope.is_none() {
@@ -801,7 +803,7 @@ fn head_every_run(
     for (at, run) in inserts {
         rows.insert(at, work_header(run));
     }
-    if let Some(run) = latest.filter(|run| run.status.is_live()) {
+    if let Some(run) = latest.filter(|run| run.status().is_live()) {
         let id = turn(&Some(run.id.clone())).unwrap_or_else(|| run.id.clone());
         if !headed.contains(&id) && !inserted.contains(&id) {
             let status = rows
@@ -1140,7 +1142,7 @@ fn summaries(
                     (
                         phase::turn_phase(run, &items, &view.live),
                         Some(run.started_at),
-                        run.ended_at,
+                        run.ended_at(),
                     )
                 });
             let live = !matches!(phase, Phase::Unknown | Phase::Settled(_));

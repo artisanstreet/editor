@@ -19,8 +19,8 @@ pub fn turn_phase<S: BuildHasher>(
     items: &[&Item],
     live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
 ) -> Phase {
-    if !run.status.is_live() {
-        return Phase::Settled(run.status);
+    if !run.status().is_live() {
+        return Phase::Settled(run.status());
     }
     if items.iter().any(|item| item.status == Status::AwaitingUser) {
         return Phase::WaitingOnYou;

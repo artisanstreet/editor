@@ -51,13 +51,15 @@ async fn an_agent_whose_run_failed_before_taking_its_prompt_reports_failed() {
             engine: EngineId::Claude,
             model: None,
             input_cutoff: prompt.seq,
-            status: RunStatus::Failed,
+            state: artisan_api::RunState::Finished {
+                outcome: artisan_api::RunOutcome::Failed,
+                error: Some("the working directory is gone".into()),
+                ended_at: artisan_api::now(),
+            },
             usage: artisan_api::Usage::default(),
             session_id: None,
-            error: Some("the working directory is gone".into()),
             seq: 0,
             started_at: artisan_api::now(),
-            ended_at: Some(artisan_api::now()),
             continuation: None,
         })
         .await

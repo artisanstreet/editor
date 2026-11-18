@@ -9,7 +9,7 @@
 use anyhow::{Context as _, Result};
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId, Run,
-    RunId, RunStatus, Status, ThreadId, Usage,
+    RunId, RunOutcome, RunState, Status, ThreadId, Usage,
     tls::{Identity, fingerprint_of},
 };
 use forge_store::NewItem;
@@ -85,13 +85,15 @@ async fn main() -> Result<()> {
                 engine: EngineId::Claude,
                 model: None,
                 input_cutoff: 0,
-                status: RunStatus::Done,
+                state: RunState::Finished {
+                    outcome: RunOutcome::Done,
+                    error: None,
+                    ended_at: 1_700_000_030_000 + turn * 60_000,
+                },
                 usage: Usage::default(),
                 session_id: None,
-                error: None,
                 seq: 0,
                 started_at: 1_700_000_000_000 + turn * 60_000,
-                ended_at: Some(1_700_000_030_000 + turn * 60_000),
                 continuation: None,
             })
             .await?;

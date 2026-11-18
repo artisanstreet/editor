@@ -326,7 +326,7 @@ mod activity_time_tests {
     use super::*;
     use crate::Acceptance;
     use crate::writer::Stamp;
-    use artisan_api::{EngineConfig, EngineId, ItemId, RunStatus, SendMessage, Usage};
+    use artisan_api::{EngineConfig, EngineId, ItemId, RunState, SendMessage, Usage};
 
     #[tokio::test]
     #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
@@ -369,13 +369,11 @@ mod activity_time_tests {
                     engine: EngineId::Codex,
                     model: None,
                     input_cutoff: thread.activity_seq,
-                    status: RunStatus::Running,
+                    state: RunState::Running,
                     usage: Usage::default(),
                     session_id: None,
-                    error: None,
                     seq: 0,
                     started_at: 20,
-                    ended_at: None,
                     continuation: None,
                 },
                 Stamp {
@@ -401,8 +399,7 @@ mod activity_time_tests {
             .unwrap();
         let unchanged = store.thread(&thread.id).await.unwrap().unwrap();
         assert_eq!(unchanged.activity_at, 20, "usage alone is not activity");
-        usage.status = RunStatus::Done;
-        usage.ended_at = Some(30);
+        usage.finish(artisan_api::RunOutcome::Done, None, 30);
         let done = store
             .upsert_run_at(
                 usage,

@@ -84,7 +84,7 @@ async fn a_low_disk_tells_the_agent_once_to_free_space() {
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Done, "{:?}", runs[0].error);
+    assert_eq!(runs[0].status(), RunStatus::Done, "{:?}", runs[0].error());
     let items = fixture.items().await;
     let told = texts(&items)
         .into_iter()
@@ -130,7 +130,7 @@ async fn a_full_disk_stops_the_run_and_says_why() {
     assert!(fixture.hub.is_live(&fixture.thread_id));
     free.store(2 * GIB, Ordering::Relaxed);
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     let shown = errors(&fixture.items().await);
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert!(
@@ -165,7 +165,7 @@ async fn a_run_sent_on_a_full_disk_can_clean_it_up() {
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Done, "{:?}", runs[0].error);
+    assert_eq!(runs[0].status(), RunStatus::Done, "{:?}", runs[0].error());
     assert!(errors(&fixture.items().await).is_empty());
 }
 
@@ -191,7 +191,7 @@ async fn a_run_sent_on_a_full_disk_stops_if_it_keeps_filling_it() {
     assert!(fixture.hub.is_live(&fixture.thread_id));
     free.store(GIB / 2, Ordering::Relaxed);
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     let shown = errors(&fixture.items().await);
     assert!(
         shown[0].starts_with("Stopped: only 0.5 GiB free on "),

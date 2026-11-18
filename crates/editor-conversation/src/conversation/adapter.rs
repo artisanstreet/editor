@@ -356,7 +356,7 @@ pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId
     let run = core.host(host)?.runs.get(thread)?;
     let ends_run = last.run_id.as_ref() == Some(&run.id)
         || rowed().all(|item| item.run_id.as_ref() != Some(&run.id));
-    (!run.status.is_live() && ends_run && run.seq >= newest).then(|| (last.id.clone(), run.seq))
+    (!run.status().is_live() && ends_run && run.seq >= newest).then(|| (last.id.clone(), run.seq))
 }
 
 pub fn agent_names(conversation: &Conversation) -> HashMap<ItemId, String> {

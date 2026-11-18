@@ -325,7 +325,7 @@ async fn a_message_runs_and_the_reply_is_stored() {
         .unwrap();
     let runs = fixture.settled().await;
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunStatus::Done);
+    assert_eq!(runs[0].status(), RunStatus::Done);
     assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
     assert_eq!(
         texts(&fixture.items().await),
@@ -1015,7 +1015,12 @@ async fn switching_to_full_access_mid_run_approves_what_waits() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, artisan_api::RunStatus::Done, "{:?}", run.error);
+    assert_eq!(
+        run.status(),
+        artisan_api::RunStatus::Done,
+        "{:?}",
+        run.error()
+    );
     assert_eq!(run.config.as_ref().unwrap().permissions, Permissions::Full);
     let statuses: Vec<_> = fixture
         .items()
@@ -1062,7 +1067,7 @@ async fn cancel_ends_the_run_and_settles_open_items() {
     fixture.wait_for(|items| items.len() == 2).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Cancelled);
+    assert_eq!(runs[0].status(), RunStatus::Cancelled);
     let items = fixture.items().await;
     assert_eq!(items[1].status, Status::Cancelled);
 }
@@ -1513,7 +1518,7 @@ async fn failed_preparation_preserves_input_without_a_retry_loop() {
         .unwrap();
     let runs = fixture.settled().await;
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     let input = fixture.hub.store().item(&input.id).await.unwrap().unwrap();
     assert_eq!(input.status, Status::Running);
     assert!(input.run_id.is_none());
@@ -1724,7 +1729,7 @@ async fn controller_shutdown_preserves_undelivered_input() {
         .unwrap()
         .unwrap();
     // Unfinished, not cancelled by the user: it carries on after the restart.
-    assert_eq!(run.status, RunStatus::Interrupted);
+    assert_eq!(run.status(), RunStatus::Interrupted);
     assert_eq!(
         undelivered(fixture.hub.store(), &fixture.thread_id)
             .await
@@ -1899,8 +1904,8 @@ async fn a_coordinator_event_error_settles_the_run_and_open_outputs() {
         .unwrap();
     let runs = fixture.settled().await;
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunStatus::Failed);
-    assert!(runs[0].ended_at.is_some());
+    assert_eq!(runs[0].status(), RunStatus::Failed);
+    assert!(runs[0].ended_at().is_some());
     assert!(
         fixture
             .items()
@@ -1967,7 +1972,7 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"Native reply","usa
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Done);
+    assert_eq!(runs[0].status(), RunStatus::Done);
     let items = fixture.items().await;
     assert!(items.iter().any(|item| item.id == question.id && item.status == Status::Done && matches!(&item.kind, ItemKind::Question { answers: Some(answers), .. } if answers.inline() == Some(vec![Some(artisan_api::QuestionAnswer::Choices { ids: vec!["option-0".into()].into() })].as_slice()))));
     let mut full_prose_saves = 0;
@@ -2131,13 +2136,13 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(latest.status, RunStatus::Failed);
+    assert_eq!(latest.status(), RunStatus::Failed);
     assert_eq!(latest.input_cutoff, later.seq);
     assert!(latest.input_cutoff > earlier.seq);
     let mut attempts = std::collections::HashSet::new();
     while let Ok(event) = events.try_recv() {
         if let Event::Run { run } = event.event
-            && run.status == RunStatus::Running
+            && run.status() == RunStatus::Running
         {
             attempts.insert(run.id);
         }
@@ -2228,7 +2233,7 @@ async fn a_failed_bounded_batch_does_not_retry_its_already_observed_tail() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status(), RunStatus::Failed);
     assert_eq!(run.input_cutoff, latest);
     assert_eq!(
         undelivered(fixture.hub.store(), &fixture.thread_id)
@@ -2405,9 +2410,9 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status(), RunStatus::Failed);
     assert!(
-        run.error
+        run.error()
             .as_ref()
             .is_some_and(|error| error.contains("missing"))
     );
@@ -2651,7 +2656,7 @@ async fn an_approval_is_answered_on_the_item_it_gates() {
     let runs = fixture.settled().await;
     assert!(
         runs.iter()
-            .all(|run| run.status == artisan_api::RunStatus::Done)
+            .all(|run| run.status() == artisan_api::RunStatus::Done)
     );
     let tool = fixture.by_native("execution").await;
     assert_eq!(tool.status, Status::Done);
@@ -2884,7 +2889,7 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         artisan_api::RunStatus::Done
     );
 }
@@ -3753,10 +3758,9 @@ async fn a_switch_without_a_summary_fails_without_delivering_the_new_message() {
         "new session never started"
     );
     assert!(runs.iter().any(|run| {
-        run.status == RunStatus::Failed
+        run.status() == RunStatus::Failed
             && run
-                .error
-                .as_deref()
+                .error()
                 .is_some_and(|error| error.contains("required template"))
     }));
     assert!(
@@ -3979,7 +3983,7 @@ async fn a_stopped_turn_continues_without_a_message() {
         })
         .await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
+    assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -3994,7 +3998,7 @@ async fn a_stopped_turn_continues_without_a_message() {
         continued.continuation,
         Some(artisan_api::Continuation::Requested)
     );
-    assert_eq!(continued.status, RunStatus::Done);
+    assert_eq!(continued.status(), RunStatus::Done);
 
     let asked = asked.lock().unwrap().clone();
     let (prompt, session) = &asked[1];
@@ -4062,7 +4066,7 @@ async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
+    assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
     let stopped = fixture.items().await;
     assert!(
         stopped
@@ -4074,7 +4078,7 @@ async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
     let continued = fixture.settled().await.remove(0);
-    assert_eq!(continued.status, RunStatus::Done);
+    assert_eq!(continued.status(), RunStatus::Done);
     assert_eq!(continued.continuation, None);
     let asked = asked.lock().unwrap().clone();
     assert!(
@@ -4123,7 +4127,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
     let continued = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let latest = hub.store().latest_run(&thread_id).await.unwrap().unwrap();
-            if latest.status == RunStatus::Done {
+            if latest.status() == RunStatus::Done {
                 return latest;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4209,13 +4213,15 @@ async fn interrupted_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
             engine: EngineId::Claude,
             model: None,
             input_cutoff: 0,
-            status: RunStatus::Interrupted,
+            state: artisan_api::RunState::Finished {
+                outcome: artisan_api::RunOutcome::Interrupted,
+                error: None,
+                ended_at: artisan_api::now(),
+            },
             usage: artisan_api::Usage::default(),
             session_id: Some("child-session".into()),
-            error: None,
             seq: 0,
             started_at: artisan_api::now(),
-            ended_at: Some(artisan_api::now()),
             continuation: None,
         })
         .await
@@ -4273,7 +4279,7 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
                     .latest_run(thread)
                     .await
                     .unwrap()
-                    .is_some_and(|run| run.status == RunStatus::Running);
+                    .is_some_and(|run| run.status() == RunStatus::Running);
             }
             if running {
                 break;
@@ -4308,7 +4314,7 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Cancelled
     );
     assert!(
@@ -4336,7 +4342,7 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Done
     );
     fixture.hub.shutdown();
@@ -4376,7 +4382,7 @@ async fn a_successful_agent_result_arriving_after_stop_does_not_restart_its_pare
         .await
         .unwrap()
         .unwrap();
-    run.status = RunStatus::Done;
+    run.finish(artisan_api::RunOutcome::Done, None, artisan_api::now());
     fixture.hub.store().upsert_run(run).await.unwrap();
     fixture.hub.reconcile_agents().await;
     assert_eq!(user_messages(&fixture.items().await), 1);
@@ -4691,7 +4697,7 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let latest = self.hub.store().latest_run(&self.thread_id).await.unwrap();
-                if let Some(latest) = latest.filter(|run| run.status == status) {
+                if let Some(latest) = latest.filter(|run| run.status() == status) {
                     return latest;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -4755,7 +4761,7 @@ async fn a_turn_failed_at_capacity_is_retried_until_it_goes_through() {
         .runs()
         .await
         .iter()
-        .map(|run| (run.status, run.continuation))
+        .map(|run| (run.status(), run.continuation))
         .collect();
     assert_eq!(
         continuations,
@@ -4867,7 +4873,7 @@ async fn with_retrying_off_a_turn_failed_at_capacity_stays_failed() {
         .unwrap();
     let runs = fixture.settled().await;
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     assert_eq!(fixture.thread().await.parked_until, None);
     assert!(
         !fixture
@@ -4952,7 +4958,7 @@ async fn compaction_always_inherits_the_source_model_and_settings() {
                 .unwrap();
             let runs = fixture.settled().await;
             assert!(
-                runs.iter().all(|run| run.status == RunStatus::Done),
+                runs.iter().all(|run| run.status() == RunStatus::Done),
                 "{runs:?}"
             );
             assert_eq!(
@@ -5059,7 +5065,7 @@ async fn a_missing_session_summarizes_tool_history_with_correct_roles() {
         .unwrap();
     let runs = fixture.settled().await;
     assert!(
-        runs.iter().all(|run| run.status == RunStatus::Done),
+        runs.iter().all(|run| run.status() == RunStatus::Done),
         "{runs:?}"
     );
     assert_eq!(prompts.lock().unwrap().len(), 2);
@@ -5128,7 +5134,7 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
     assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(runs.iter().any(|run| run.status == RunStatus::Cancelled));
+    assert!(runs.iter().any(|run| run.status() == RunStatus::Cancelled));
 }
 
 /// A long first turn and an independently delayed title response.

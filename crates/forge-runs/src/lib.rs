@@ -453,7 +453,7 @@ impl Hub {
             .store()
             .latest_run(thread_id)
             .await?
-            .is_some_and(|run| run.status.is_stopped());
+            .is_some_and(|run| run.status().is_stopped());
         if !stopped {
             return Err(refused("The thread has no stopped turn to continue."));
         }

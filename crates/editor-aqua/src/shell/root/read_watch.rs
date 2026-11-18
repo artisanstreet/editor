@@ -20,7 +20,7 @@ impl ReadWatch {
             run: host
                 .zip(id)
                 .and_then(|(host, id)| host.runs.get(id))
-                .map(|run| (run.seq, run.status.is_live())),
+                .map(|run| (run.seq, run.status().is_live())),
             read: host
                 .zip(id)
                 .and_then(|(host, id)| host.threads.get(id))

@@ -70,13 +70,18 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: now(),
+            },
+        ),
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 0,
         started_at: now(),
-        ended_at: None,
         continuation: None,
     }
 }
