@@ -1,11 +1,3 @@
-//! Machine identity and account enrollment: client side only.
-//!
-//! The Forge keypair is local and persisted by Forge (`secrets`, same as
-//! the existing Forge identity). Core owns the enrollment lifecycle
-//! (codes, TTL, rate limits, claims); Rust only builds the exact proof
-//! bodies Core specifies, signs them, and reads the strict DTOs back.
-//! No parallel enrollment business logic lives here.
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -69,9 +61,6 @@ impl MachineKeypair {
     }
 }
 
-/// The status Core returns to the authenticated holder of the enrollment
-/// key (`GET …/status`): named account for explicit local approval, no
-/// pasted-id friction. Strict read: unknown fields are rejected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairStatus {
@@ -88,8 +77,6 @@ pub struct PairStatus {
     pub expires_at: Option<String>,
 }
 
-/// Normalize a user-typed code the same way everywhere: keep ASCII
-/// alphanumerics, uppercase (client sends the raw code; Core hashes).
 #[must_use]
 pub fn normalise_code(code: &str) -> String {
     code.chars()
@@ -98,22 +85,16 @@ pub fn normalise_code(code: &str) -> String {
         .collect()
 }
 
-/// Enrollment-request proof body (Core §5):
-/// `enrollment-request\n<x>\n<label>\n<timestamp>` where `x` is the
-/// base64url Ed25519 public key (JWK `x`), `timestamp` is unix seconds.
 #[must_use]
 pub fn enrollment_request_body(public_b64u: &str, label: &str, timestamp_sec: i64) -> String {
     format!("enrollment-request\n{public_b64u}\n{label}\n{timestamp_sec}")
 }
 
-/// Enrollment-confirm proof body (Core §5):
-/// `enrollment-confirm\n<enrollmentId>\n<accountId>\n<x>`.
 #[must_use]
 pub fn enrollment_confirm_body(enrollment_id: &str, account_id: &str, public_b64u: &str) -> String {
     format!("enrollment-confirm\n{enrollment_id}\n{account_id}\n{public_b64u}")
 }
 
-/// Sign an enrollment proof body with the enrollment private key.
 #[must_use]
 pub fn sign_enrollment_proof(secret: &[u8; 32], body: &str) -> [u8; 64] {
     use ed25519_dalek::Signer as _;
@@ -121,7 +102,6 @@ pub fn sign_enrollment_proof(secret: &[u8; 32], body: &str) -> [u8; 64] {
     key.sign(body.as_bytes()).to_bytes()
 }
 
-/// Verify an enrollment proof body against the enrollment public key.
 #[must_use]
 pub fn verify_enrollment_proof(public: &[u8; 32], body: &str, signature: &[u8]) -> bool {
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(public) else {

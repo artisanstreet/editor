@@ -81,7 +81,6 @@ impl NetworkError {
     }
 }
 
-/// Core error envelope (strict read).
 #[derive(Clone, Debug, Deserialize)]
 struct CoreErrorBody {
     error: CoreErrorDetail,
@@ -94,7 +93,6 @@ struct CoreErrorDetail {
     request_id: String,
 }
 
-/// Ed25519 JWK (`kty: OKP, crv: Ed25519`), as Core emits it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jwk {
     pub kty: String,
@@ -102,7 +100,6 @@ pub struct Jwk {
     pub x: String,
 }
 
-/// One enrolled Forge, as `/v1/me` and `/v1/machines` report it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineEntry {
     pub id: String,
@@ -115,7 +112,6 @@ pub struct MachineEntry {
     pub last_seen_at: Option<String>,
 }
 
-/// The verified profile behind `GET /v1/me`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountProfile {
     pub account_id: String,
@@ -137,19 +133,12 @@ struct AccountDetails {
     username: Option<String>,
 }
 
-/// `POST /v1/machines/enrollments/claim`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimRequest {
     pub code: String,
 }
 
-/// `POST /v1/grants/issue` from an authenticated session (Editor path:
-/// explicit target machine + ephemeral `cnf`).
-///
-/// Wire shape: `cnf` is the PLAIN JWK `{kty, crv, x}`. Only the ISSUED
-/// JWT nests it (`cnf.jwk` claim); sending `{cnf: {jwk: {...}}}` fails
-/// Core validation with 400.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantIssueRequest {
@@ -177,7 +166,6 @@ pub struct GrantToken {
     pub expires_at: String,
 }
 
-/// Session-authed Core HTTP. One client per base URL; cheap to clone.
 #[derive(Clone, Debug)]
 pub struct CoreSessionClient {
     http: reqwest::Client,
@@ -271,8 +259,6 @@ impl CoreSessionClient {
         Self::read(Self::send(request, action).await?, action).await
     }
 
-    /// Start a magic-link request. The secret returns here once; the emailed
-    /// token alone can never mint a session.
     pub async fn magic_request(
         &self,
         email: &str,
@@ -434,9 +420,6 @@ impl CoreSessionClient {
         Ok(())
     }
 
-    /// Session-authed Editor grant for a Relay target. `cnf_x_b64u` is the
-    /// ephemeral key's public half (base64url); the secret never leaves the
-    /// device except inside the PoP proof the Relay transport makes.
     pub async fn issue_editor_grant(
         &self,
         session: &SessionToken,
@@ -463,7 +446,6 @@ impl CoreSessionClient {
     }
 }
 
-/// `POST /v1/machines/enrollments/claim` answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedEnrollment {
     pub enrollment_id: String,

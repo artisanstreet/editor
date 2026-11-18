@@ -1,18 +1,5 @@
-//! Core magic-link + session DTOs: strict client shapes mirroring
-//! `core/src/contracts/v1.ts` (requests deny unknown fields; responses
-//! read forward-compatibly).
-//!
-//! The lifecycle lives in Core (server authority). Rust never replicates
-//! it: this module holds the request/response shapes the Editor/CLI sends
-//! and reads. Behavior rules (link GET never consumes; the emailed token
-//! alone can never mint a session — the `requestSecret` returned once to
-//! the originating session is required; cross-browser flows need explicit
-//! original-session approval; email alone never bypasses TOTP) are
-//! enforced by Core; the client only surfaces them.
-
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/auth/magic/request`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagicRequest {
@@ -25,8 +12,6 @@ pub struct MagicRequest {
     pub device_name: Option<String>,
 }
 
-/// `POST /v1/auth/magic/request` → link sent; the token is emailed, the
-/// secret returns here once (the email token alone can never mint).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagicRequestResponse {
@@ -35,7 +20,6 @@ pub struct MagicRequestResponse {
     pub expires_at: String,
 }
 
-/// `POST /v1/auth/magic/status` — poll the login request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagicStatusRequest {
@@ -45,9 +29,6 @@ pub struct MagicStatusRequest {
     pub request_secret: String,
 }
 
-/// `200` status read (forward-compatible: unknown fields ignored).
-/// NOTE (Vilde owns this file): Core also returns required `email` and
-/// `expires_at` here — added to match the Core OpenAPI exactly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicStatusResponse {
     pub request_id: String,
@@ -57,7 +38,6 @@ pub struct MagicStatusResponse {
     pub expires_at: String,
 }
 
-/// `POST /v1/auth/magic/finalize` — complete sign-in (originating session).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagicFinalizeRequest {
@@ -90,35 +70,5 @@ pub struct MagicFinalizeResponse {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_and_finalize_reads_tolerate_future_fields() {
-        let raw = serde_json::json!({
-            "request_id": "logreq_1",
-            "status": "pending",
-            "totp_required": false,
-            "email": "a@example.invalid",
-            "expires_at": "2030-01-01T00:00:00Z",
-            "future": [1],
-        });
-        let status: MagicStatusResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(status.status, "pending");
-        let raw = serde_json::json!({
-            "session_id": "sess_1",
-            "account_id": "acct_1",
-            "expires_at": "t",
-            "totp_verified": false,
-            "future": 1,
-        });
-        let finalize: MagicFinalizeResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(finalize.session_id, "sess_1");
-    }
-
-    #[test]
-    fn secret_is_required_to_finalize() {
-        let raw = serde_json::json!({"requestId": "logreq_1"});
-        assert!(serde_json::from_value::<MagicFinalizeRequest>(raw).is_err());
-    }
-}
+#[path = "../tests/signin/unit.rs"]
+mod tests;
