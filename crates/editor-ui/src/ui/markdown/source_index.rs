@@ -10,8 +10,8 @@ pub enum MarkdownIndexError {
     Parse(#[from] super::MarkdownError),
     #[error("The indexed Markdown leaf has an unexpected semantic shape")]
     InvalidShape,
-    #[error("The fetched Markdown leaf does not cover its complete indexed source range")]
-    IncompleteRange,
+    #[error("The Markdown index has no leaf {leaf}")]
+    MissingLeaf { leaf: usize },
 }
 #[derive(Debug)]
 pub enum IndexedLeafContent {
@@ -52,7 +52,7 @@ impl MarkdownIndex {
         let record = self
             .0
             .record(leaf)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
+            .ok_or(MarkdownIndexError::MissingLeaf { leaf })?;
         normalize_record(&record, start, source, engine, memo)
     }
 }
@@ -63,19 +63,7 @@ pub(crate) fn normalize_record(
     engine: &MarkdownEngine,
     memo: &mut dyn super::FenceTokenMemo,
 ) -> Result<IndexedLeafContent, MarkdownIndexError> {
-    let range = record.leaf.source_range();
-    let exact = source
-        .get(
-            range
-                .start
-                .checked_sub(start)
-                .ok_or(MarkdownIndexError::IncompleteRange)?
-                ..range
-                    .end
-                    .checked_sub(start)
-                    .ok_or(MarkdownIndexError::IncompleteRange)?,
-        )
-        .ok_or(MarkdownIndexError::IncompleteRange)?;
+    let exact = record.exact_source(start, source)?;
     let mut document =
         DocumentBuilder::default().build_events(exact, record.replay(start, source)?)?;
     engine.highlight_blocks(&mut document.blocks, memo)?;

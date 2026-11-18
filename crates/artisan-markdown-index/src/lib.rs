@@ -57,7 +57,7 @@ pub enum ReplayLeafError {
         fetched_bytes: usize,
     },
     #[error("the Markdown token {token:?} in leaf {leaf:?} is text stored as structure")]
-    InvalidShape {
+    TextStoredAsStructure {
         leaf: Range<usize>,
         token: Range<usize>,
     },
@@ -403,19 +403,26 @@ impl LeafRecord {
             Kind::Paragraph | Kind::Heading | Kind::Code | Kind::Html => None,
         }
     }
+    pub fn exact_source<'a>(
+        &self,
+        start: usize,
+        source: &'a str,
+    ) -> Result<&'a str, ReplayLeafError> {
+        local_range(&self.leaf.range, &(start..start))
+            .and_then(|local| source.get(local))
+            .ok_or_else(|| ReplayLeafError::IncompleteRange {
+                leaf: self.leaf.range.clone(),
+                fetched_start: start,
+                fetched_bytes: source.len(),
+            })
+    }
     pub fn replay(
         &self,
         start: usize,
         source: &str,
     ) -> Result<Vec<(Event<'static>, Range<usize>)>, ReplayLeafError> {
         let leaf = &self.leaf;
-        let exact = local_range(&leaf.range, &(start..start))
-            .and_then(|local| source.get(local))
-            .ok_or_else(|| ReplayLeafError::IncompleteRange {
-                leaf: leaf.range.clone(),
-                fetched_start: start,
-                fetched_bytes: source.len(),
-            })?;
+        let exact = self.exact_source(start, source)?;
         let mut events = Vec::with_capacity(leaf.events.len() + 2);
         if let Kind::TableRow { .. } = leaf.kind {
             let alignments = self
@@ -436,7 +443,7 @@ impl LeafRecord {
                 Token::Structural(
                     Event::Text(_) | Event::Code(_) | Event::Html(_) | Event::InlineHtml(_),
                 ) => {
-                    return Err(ReplayLeafError::InvalidShape {
+                    return Err(ReplayLeafError::TextStoredAsStructure {
                         leaf: leaf.range.clone(),
                         token: event.range.clone(),
                     });
