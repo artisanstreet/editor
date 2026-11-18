@@ -1940,3 +1940,6 @@ mod status;
 
 #[path = "../../tests/claudeai/stops.rs"]
 mod stops;
+
+#[path = "../../tests/claudeai/blocks.rs"]
+mod blocks;

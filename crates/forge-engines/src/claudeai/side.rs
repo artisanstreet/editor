@@ -119,6 +119,9 @@ async fn read_summary(
         if let Some(error) = decoder.take_failure() {
             return Err(anyhow::Error::new(error));
         }
+        if let Some(error) = decoder.take_protocol_error() {
+            return Err(anyhow::Error::new(error));
+        }
         for event in out {
             match event {
                 EngineEvent::Item {

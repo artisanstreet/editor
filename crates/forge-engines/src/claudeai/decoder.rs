@@ -36,8 +36,8 @@ pub struct ClaudeAiDecoder {
     answers: Option<String>,
     saved: bool,
     usage: Usage,
-    /// The blocks the stream has opened, by their index.
     blocks: HashMap<u64, Block>,
+    broken: Option<ProtocolError>,
     /// The text blocks of the message being streamed, with their text.
     texts: Vec<(String, String)>,
     /// The caller's tool calls the model made, waiting for a result.
@@ -72,19 +72,51 @@ impl Stop {
     }
 }
 
-/// A block the stream has opened.
-#[derive(Clone, Debug, Default)]
-struct Block {
-    /// The block's type.
-    kind: String,
-    /// The tool's id, for a tool call.
-    id: String,
-    /// The tool's name, for a tool call.
-    name: String,
-    /// Whether the provider runs the tool.
-    provider: bool,
-    /// The JSON a tool call has streamed.
-    input: String,
+#[derive(Debug)]
+enum Block {
+    Text {
+        key: String,
+    },
+    Tool {
+        id: String,
+        execution: Execution,
+        start: Value,
+        input: String,
+    },
+    Other,
+}
+
+#[derive(Debug)]
+enum Execution {
+    Caller(String),
+    Provider(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("claude.ai sent a {event} without a block index")]
+    NoIndex { event: &'static str },
+    #[error("claude.ai opened block {index} while it was still open")]
+    IndexInUse { index: u64 },
+    #[error("claude.ai sent a {event} for block {index}, which is not an open {expected} block")]
+    NotOpen {
+        event: &'static str,
+        index: u64,
+        expected: &'static str,
+    },
+    #[error("claude.ai closed block {index}, which is not open")]
+    StopNotOpen { index: u64 },
+    #[error("claude.ai opened tool block {index} without an id")]
+    ToolWithoutId { index: u64 },
+    #[error("claude.ai opened tool block {index} ({id}) without a name")]
+    ToolWithoutName { index: u64, id: String },
+    #[error("claude.ai streamed input for tool {name} ({id}) that is not JSON")]
+    InvalidToolInput {
+        id: String,
+        name: String,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl ClaudeAiDecoder {
@@ -93,6 +125,9 @@ impl ClaudeAiDecoder {
     /// Events the decoder does not know are ignored, so a newer claude.ai
     /// does not fail the run.
     pub fn feed(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
+        if self.broken.is_some() {
+            return;
+        }
         match str_at(event, "type").unwrap_or_default() {
             "message_start" => self.started(event, out),
             "content_block_start" => self.block_started(event, out),
@@ -118,6 +153,15 @@ impl ClaudeAiDecoder {
     #[must_use]
     pub const fn stop(&self) -> Option<&Stop> {
         self.stop.as_ref()
+    }
+
+    #[must_use]
+    pub const fn broken(&self) -> bool {
+        self.broken.is_some()
+    }
+
+    pub const fn take_protocol_error(&mut self) -> Option<ProtocolError> {
+        self.broken.take()
     }
 
     /// The error claude.ai sent in the stream, if it sent one.
@@ -172,6 +216,7 @@ impl ClaudeAiDecoder {
         self.answers = str_at(&event["message"], "parent_uuid").map(str::to_owned);
         self.saved = false;
         self.texts.clear();
+        self.blocks.clear();
         self.stop = None;
         if !model.is_empty() {
             out.push(EngineEvent::Model { id: model });
@@ -179,50 +224,91 @@ impl ClaudeAiDecoder {
         self.usage(&event["message"]["usage"], out);
     }
 
-    /// A content block opened.
+    fn index(&mut self, event: &Value, name: &'static str) -> Option<u64> {
+        let index = event["index"].as_u64();
+        if index.is_none() {
+            self.broken = Some(ProtocolError::NoIndex { event: name });
+        }
+        index
+    }
+
     fn block_started(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
-        let index = event["index"].as_u64().unwrap_or_default();
+        let Some(index) = self.index(event, "content_block_start") else {
+            return;
+        };
+        if self.blocks.contains_key(&index) {
+            self.broken = Some(ProtocolError::IndexInUse { index });
+            return;
+        }
         let block = &event["content_block"];
-        let kind = str_at(block, "type").unwrap_or_default().to_owned();
-        match kind.as_str() {
-            // The item opens with its first text, so a block that stays
-            // empty is never shown.
-            "text" => self.texts.push((self.key(index), String::new())),
+        let state = match str_at(block, "type").unwrap_or_default() {
+            "text" => {
+                let key = self.key(index);
+                self.texts.push((key.clone(), String::new()));
+                Block::Text { key }
+            }
+            "tool_use" => match self.tool(index, block) {
+                Ok(tool) => tool,
+                Err(error) => {
+                    self.broken = Some(error);
+                    return;
+                }
+            },
             "tool_result" => {
-                // The provider ran this one itself.
                 if let Some(id) = str_at(block, "tool_use_id") {
                     self.provider_result(id, block, out);
                 }
-                return;
+                Block::Other
             }
-            "tool_use" if is_connector(block) => {
-                self.connector = Some(str_at(block, "name").unwrap_or("a connector").to_owned());
-            }
-            _ => {}
-        }
-        self.blocks.insert(
-            index,
-            Block {
-                id: str_at(block, "id").unwrap_or_default().to_owned(),
-                name: str_at(block, "name").unwrap_or_default().to_owned(),
-                provider: !block["tool_origin"].is_null(),
-                kind,
-                input: String::new(),
-            },
-        );
+            _ => Block::Other,
+        };
+        self.blocks.insert(index, state);
     }
 
-    /// A content block grew.
+    fn tool(&mut self, index: u64, block: &Value) -> Result<Block, ProtocolError> {
+        let id = str_at(block, "id")
+            .filter(|id| !id.is_empty())
+            .ok_or(ProtocolError::ToolWithoutId { index })?
+            .to_owned();
+        let Some(name) = str_at(block, "name").filter(|name| !name.is_empty()) else {
+            return Err(ProtocolError::ToolWithoutName { index, id });
+        };
+        if is_connector(block) {
+            self.connector = Some(name.to_owned());
+        }
+        let execution = if block["tool_origin"].is_null() {
+            Execution::Caller(name.to_owned())
+        } else {
+            Execution::Provider(name.to_owned())
+        };
+        Ok(Block::Tool {
+            id,
+            execution,
+            start: block["input"].clone(),
+            input: String::new(),
+        })
+    }
+
     fn block_delta(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
-        let index = event["index"].as_u64().unwrap_or_default();
         let delta = &event["delta"];
         match str_at(delta, "type").unwrap_or_default() {
             "text_delta" => {
+                let Some(index) = self.index(event, "text_delta") else {
+                    return;
+                };
+                let Some(Block::Text { key }) = self.blocks.get(&index) else {
+                    self.broken = Some(ProtocolError::NotOpen {
+                        event: "text_delta",
+                        index,
+                        expected: "text",
+                    });
+                    return;
+                };
+                let key = key.clone();
                 let text = str_at(delta, "text").unwrap_or_default();
                 if text.is_empty() {
                     return;
                 }
-                let key = self.key(index);
                 if let Some((_, streamed)) = self.texts.iter_mut().find(|(k, _)| *k == key) {
                     if streamed.is_empty() {
                         out.push(EngineEvent::Item {
@@ -248,9 +334,6 @@ impl ClaudeAiDecoder {
                 if summary.trim().is_empty() {
                     return;
                 }
-                // The recap is already a line: it is published whole, not
-                // trimmed into one the way the model's own prose is, less a
-                // closing full stop (an ellipsis stays).
                 out.push(EngineEvent::Live {
                     target: LiveKind::Narration,
                     text: recap_line(summary),
@@ -258,11 +341,18 @@ impl ClaudeAiDecoder {
                 });
             }
             "input_json_delta" => {
-                if let Some(block) = self.blocks.get_mut(&index) {
-                    block
-                        .input
-                        .push_str(str_at(delta, "partial_json").unwrap_or_default());
-                }
+                let Some(index) = self.index(event, "input_json_delta") else {
+                    return;
+                };
+                let Some(Block::Tool { input, .. }) = self.blocks.get_mut(&index) else {
+                    self.broken = Some(ProtocolError::NotOpen {
+                        event: "input_json_delta",
+                        index,
+                        expected: "tool",
+                    });
+                    return;
+                };
+                input.push_str(str_at(delta, "partial_json").unwrap_or_default());
             }
             _ => {}
         }
@@ -272,46 +362,63 @@ impl ClaudeAiDecoder {
     /// streams the tool's arguments, so the call is reported when it is
     /// whole.
     fn block_stopped(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
-        let index = event["index"].as_u64().unwrap_or_default();
-        let Some(block) = self.blocks.remove(&index) else {
+        let Some(index) = self.index(event, "content_block_stop") else {
             return;
         };
-        if block.kind != "tool_use" {
+        let Some(block) = self.blocks.remove(&index) else {
+            self.broken = Some(ProtocolError::StopNotOpen { index });
+            return;
+        };
+        let Block::Tool {
+            id,
+            execution,
+            start,
+            input,
+        } = block
+        else {
+            return;
+        };
+        let input = if input.trim().is_empty() {
+            if start.is_object() {
+                start
+            } else {
+                Value::Object(serde_json::Map::new())
+            }
+        } else {
+            match serde_json::from_str(&input) {
+                Ok(input) => input,
+                Err(source) => {
+                    let (Execution::Caller(name) | Execution::Provider(name)) = execution;
+                    self.broken = Some(ProtocolError::InvalidToolInput { id, name, source });
+                    return;
+                }
+            }
+        };
+        let name = match execution {
+            Execution::Provider(name) => {
+                let kind = ItemKind::Tool {
+                    tool: provider_tool(&name, &input),
+                    title: None,
+                    output: None,
+                    exit_code: None,
+                    approval: None,
+                };
+                self.provided.insert(id.clone(), kind.clone());
+                out.push(EngineEvent::Item {
+                    key: id,
+                    parent: None,
+                    status: Status::Running,
+                    kind,
+                });
+                return;
+            }
+            Execution::Caller(name) => name,
+        };
+        if name == "TodoWrite" {
+            self.calls.push(Call { id, name, input });
             return;
         }
-        let input: Value = serde_json::from_str(&block.input)
-            .unwrap_or_else(|_| event["content_block"]["input"].clone());
-        if block.provider {
-            // The provider runs it on its own machines; the Editor shows it
-            // with what it returned.
-            let kind = ItemKind::Tool {
-                tool: provider_tool(&block.name, &input),
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: None,
-            };
-            self.provided.insert(block.id.clone(), kind.clone());
-            out.push(EngineEvent::Item {
-                key: block.id,
-                parent: None,
-                status: Status::Running,
-                kind,
-            });
-            return;
-        }
-        if block.name == "TodoWrite" {
-            // The todo list is one item per run, which the run writes when
-            // it takes the call (`tools::item_key`); an item under the
-            // call's id would stay running beside it.
-            self.calls.push(Call {
-                id: block.id,
-                name: block.name,
-                input,
-            });
-            return;
-        }
-        let kind = match tool_kind(&block.name, &input) {
+        let kind = match tool_kind(&name, &input) {
             Ok(tool) => ItemKind::Tool {
                 tool,
                 title: input["description"].as_str().map(str::to_owned),
@@ -319,11 +426,9 @@ impl ClaudeAiDecoder {
                 exit_code: None,
                 approval: None,
             },
-            // A call Forge does not offer, or one missing what it needs: it
-            // is answered with why, and shown as it was asked.
             Err(_) => ItemKind::Tool {
                 tool: ToolKind::Other {
-                    name: block.name.clone(),
+                    name: name.clone(),
                     input: Some(input.to_string().into()),
                 },
                 title: None,
@@ -333,12 +438,12 @@ impl ClaudeAiDecoder {
             },
         };
         self.calls.push(Call {
-            id: block.id.clone(),
-            name: block.name,
+            id: id.clone(),
+            name,
             input,
         });
         out.push(EngineEvent::Item {
-            key: block.id,
+            key: id,
             parent: None,
             status: Status::Running,
             kind,

@@ -27,7 +27,7 @@ mod tools;
 mod transport;
 
 pub use capabilities::{Capabilities, capabilities, usage};
-pub use decoder::{ClaudeAiDecoder, Stop};
+pub use decoder::{ClaudeAiDecoder, ProtocolError, Stop};
 pub use rules::Rules;
 pub use session::{CookieChange, Session, cookie_change};
 pub use tools::{Allowed, Answer, Call, Plan, Runtime};
@@ -412,6 +412,12 @@ async fn drive_turn(
         if let Some(failure) = decoder.take_failure() {
             return refused(&anyhow::Error::new(failure));
         }
+        if let Some(error) = decoder.take_protocol_error() {
+            return Outcome::failed(format!(
+                "claude.ai sent a stream Forge could not read: {}",
+                diagnostics::chain(&error)
+            ));
+        }
         if let Some(connector) = decoder
             .take_connector()
             .filter(|_| inbox.permissions != artisan_api::Permissions::Full)
@@ -556,6 +562,9 @@ async fn read(
                 decoder.feed(&value, &mut out);
                 for event in out {
                     emit(io, event).await;
+                }
+                if decoder.broken() {
+                    return Read::Interrupted;
                 }
                 if decoder.connector_started() && inbox.permissions != artisan_api::Permissions::Full {
                     // Stop it before the provider runs it.
