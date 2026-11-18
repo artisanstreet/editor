@@ -14,14 +14,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub const WINDOW: (f64, f64) = (480.0, 640.0);
-pub const SPIN_STEPS: u32 = 24;
 const WIDTH: f32 = 400.0;
 const ROOMY_ROWS: usize = 4;
 const VISIBLE_ROWS: u16 = 8;
 
 pub struct Props<'a> {
     pub setup: &'a Setup,
-    pub spin: u32,
+    pub reduced_motion: bool,
     pub emit: Rc<dyn Fn(Choice)>,
 }
 
@@ -296,15 +295,15 @@ fn radio(theme: &ArtisanTheme, selected: bool) -> Element {
     )
 }
 
-fn spinner(theme: &ArtisanTheme, spin: u32) -> Element {
-    picture(
+fn spinner(theme: &ArtisanTheme, reduced_motion: bool) -> Element {
+    let arc = picture(
         format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round"><circle cx="15" cy="15" r="8.5" stroke-opacity="0.18"/><path transform="rotate({angle} 15 15)" d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round"><circle cx="15" cy="15" r="8.5" stroke-opacity="0.18"/><path d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5"/></svg>"#,
             ink = hex(theme.colors.text),
-            angle = spin % SPIN_STEPS * 360 / SPIN_STEPS,
         ),
         IconSize::Lg,
-    )
+    );
+    crate::ui::motion::WorkingPulse::default().wrap(arc, reduced_motion)
 }
 
 fn picture(svg: String, size: IconSize) -> Element {
@@ -355,7 +354,7 @@ fn progress(theme: &ArtisanTheme, props: &Props<'_>, title: &str, detail: &str) 
         .layout("row")
         .spaced(Space::S12)
         .style(Style::new().align(AlignItems::START))
-        .child(spinner(theme, props.spin))
+        .child(spinner(theme, props.reduced_motion))
         .child(
             UiBox::new()
                 .layout("column")

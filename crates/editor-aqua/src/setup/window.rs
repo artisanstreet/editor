@@ -15,16 +15,13 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
-use std::time::Duration;
 
-const SPIN_INTERVAL: Duration = Duration::from_millis(33);
 const MAILBOX: NonZeroUsize = NonZeroUsize::new(256).expect("a nonzero capacity");
 
 struct SetupApplication {
     ui: ManagedUiApp,
     theme: ArtisanTheme,
     setup: Setup,
-    spin: u32,
     mounted: bool,
     choices: Rc<RefCell<VecDeque<Choice>>>,
     work: Mailbox<Event>,
@@ -58,7 +55,6 @@ pub fn run(setup: Setup) -> Result<(), SetupWindowError> {
             ui: resources.into_managed(),
             theme: ArtisanTheme::resolved(),
             setup,
-            spin: 0,
             mounted: false,
             choices: Rc::default(),
             work: Mailbox::new(MAILBOX),
@@ -143,7 +139,8 @@ impl SetupApplication {
             &self.theme,
             &Props {
                 setup: &self.setup,
-                spin: self.spin,
+                reduced_motion: self.ui.ui().host().motion().reduced_motion()
+                    == aqua_ui::motion::ReducedMotion::Reduce,
                 emit: Rc::new(move |event| choices.borrow_mut().push_back(event)),
             },
         );
@@ -157,9 +154,6 @@ impl SetupApplication {
             Err(error) => tracing::error!(%error, "could not show setup"),
         }
         ctx.request_frame(id, FrameReason::DAMAGE);
-        if self.setup.busy() {
-            ctx.request_animation_deadline(id, ctx.now() + SPIN_INTERVAL);
-        }
     }
 }
 
@@ -226,10 +220,6 @@ impl Application for SetupApplication {
     }
     fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, now: Instant) {
         self.ui.on_animation_frame(ctx, id, now);
-        if self.setup.busy() {
-            self.spin = (self.spin + 1) % view::SPIN_STEPS;
-            self.rebuild(ctx, id);
-        }
     }
     fn on_dialog(
         &mut self,

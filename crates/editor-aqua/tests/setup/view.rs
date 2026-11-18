@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 fn shown(setup: &Setup) -> (UiApp, Rc<RefCell<Vec<Choice>>>) {
+    shown_with_motion(setup, false)
+}
+
+fn shown_with_motion(setup: &Setup, reduced_motion: bool) -> (UiApp, Rc<RefCell<Vec<Choice>>>) {
     let mut app = ShellResources::new(1.0).expect("setup window resources").ui;
     let heard = Rc::new(RefCell::new(Vec::new()));
     let hearing = Rc::clone(&heard);
@@ -19,7 +23,7 @@ fn shown(setup: &Setup) -> (UiApp, Rc<RefCell<Vec<Choice>>>) {
         &ArtisanTheme::resolved(),
         &Props {
             setup,
-            spin: 0,
+            reduced_motion,
             emit: Rc::new(move |event| hearing.borrow_mut().push(event)),
         },
     );
@@ -228,4 +232,22 @@ fn closing_mid_install_says_the_installer_is_stopping() {
             .iter()
             .any(|text| text == "Stopping the installer…")
     );
+}
+
+fn pulses(app: &mut UiApp) -> bool {
+    app.tree_mut()
+        .emit_scene()
+        .iter()
+        .any(|(_, item)| matches!(item, aqua_core::DisplayItem::PushGpuiQuadPulse(_)))
+}
+
+#[test]
+fn installing_breathes_on_the_gpu_and_holds_still_under_reduced_motion() {
+    let mut setup = with_three_distros();
+    setup.apply(Event::Chose(Choice::Started));
+    assert!(setup.busy());
+    let (mut moving, _) = shown_with_motion(&setup, false);
+    assert!(pulses(&mut moving));
+    let (mut still, _) = shown_with_motion(&setup, true);
+    assert!(!pulses(&mut still));
 }
