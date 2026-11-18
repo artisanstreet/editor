@@ -21,7 +21,7 @@ pub(crate) mod sankey;
 #[cfg(feature = "test-support")]
 pub use sankey::SankeyFixture;
 pub mod scale;
-pub(crate) mod scene;
+pub mod scene;
 pub(crate) mod spans;
 
 #[derive(Debug)]
