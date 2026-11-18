@@ -220,3 +220,56 @@ async fn recent_threads_stay_and_a_removal_survives_a_restart() {
     );
     assert!(store.thread(&thread).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn an_old_thread_with_a_saved_draft_survives_collection() {
+    let (_dir, store, project) = open().await;
+    let drafted = add_thread(&store, &project, None).await;
+    let cleared = add_thread(&store, &project, None).await;
+    let scope = |thread: &ThreadId| format!("thread:{thread}");
+    store
+        .set_draft(
+            scope(&drafted),
+            artisan_api::WriteDraft {
+                expected_revision: 0,
+                body: serde_json::json!({"text": "half a thought"}),
+            },
+        )
+        .await
+        .unwrap();
+    let written = store
+        .set_draft(
+            scope(&cleared),
+            artisan_api::WriteDraft {
+                expected_revision: 0,
+                body: serde_json::json!({"text": "sent later"}),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_draft(
+            scope(&cleared),
+            artisan_api::WriteDraft {
+                expected_revision: written.current.revision,
+                body: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let removed: Vec<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, vec![cleared]);
+    assert!(store.thread(&drafted).await.unwrap().is_some());
+    assert_eq!(
+        store.draft(&scope(&drafted)).await.unwrap().body,
+        serde_json::json!({"text": "half a thought"})
+    );
+}
