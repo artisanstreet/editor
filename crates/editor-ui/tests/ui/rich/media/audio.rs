@@ -125,13 +125,22 @@ fn node(app: &aqua::UiApp, role: aqua_core::Role, label: &str) -> aqua_core::Sem
 }
 
 fn fire(app: &aqua::UiApp, node: aqua_core::NodeId, kind: aqua_ui::tree::ActionKind) {
+    fire_request(app, node, kind, None);
+}
+
+fn fire_request(
+    app: &aqua::UiApp,
+    node: aqua_core::NodeId,
+    kind: aqua_ui::tree::ActionKind,
+    request: Option<AccessibilityRequest>,
+) {
     app.tree().fire_action(aqua_ui::tree::ActionEvent {
         source: None,
         node,
         kind,
         text: None,
         focused: None,
-        request: None,
+        request,
     });
 }
 
@@ -168,4 +177,66 @@ fn the_play_button_is_named_and_toggles_from_keyboard_and_assistive_tech() {
     assert_eq!(toggles.get(), 2);
     fire(&app, play.node, aqua_ui::tree::ActionKind::Activate);
     assert_eq!(toggles.get(), 3);
+}
+
+#[test]
+fn the_progress_line_is_a_slider_that_keyboard_and_assistive_tech_seek() {
+    let seeks = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seeks);
+    let mut app = mounted(progress_line(
+        "row",
+        &ArtisanTheme::resolved(),
+        &Shown::Paused {
+            position: Duration::from_secs(20),
+            duration: Duration::from_secs(60),
+        },
+        "intro.ogg",
+        Rc::new(move |to| sink.borrow_mut().push(to)),
+        AudioState::default(),
+        Rc::new(Cell::new(None)),
+        Rc::new(|| {}),
+    ));
+    let slider = node(&app, aqua_core::Role::Slider, "Seek intro.ogg");
+    assert!(slider.focusable);
+    assert_eq!(
+        slider.numeric_range,
+        Some(aqua_core::NumericRangeSemantics {
+            min: 0.0,
+            max: 60.0,
+            value: 20.0,
+            step: 5.0,
+        })
+    );
+    assert!(app.focus_key("row-line"));
+    for key in [
+        Key::Named(NamedKey::Right),
+        Key::Named(NamedKey::Left),
+        Key::Named(NamedKey::Home),
+        Key::Named(NamedKey::End),
+    ] {
+        press(&mut app, key);
+    }
+    let kind = aqua_ui::tree::ActionKind::AccessibilityRequest;
+    for request in [
+        AccessibilityRequest::SetValue(42.0),
+        AccessibilityRequest::SetValue(600.0),
+        AccessibilityRequest::Increment,
+        AccessibilityRequest::Decrement,
+    ] {
+        fire_request(&app, slider.node, kind, Some(request));
+    }
+    let seconds = |value: u64| Duration::from_secs(value);
+    assert_eq!(
+        seeks.borrow().as_slice(),
+        &[
+            seconds(25),
+            seconds(15),
+            seconds(0),
+            seconds(60),
+            seconds(42),
+            seconds(60),
+            seconds(25),
+            seconds(15),
+        ]
+    );
 }

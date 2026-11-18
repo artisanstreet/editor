@@ -4,18 +4,21 @@ use crate::ui::kit::control::focus_ring;
 use crate::ui::kit::{Button, ButtonSize, ButtonTone, Corner, IconSize, TextRole};
 
 const PLAY: f32 = 28.0;
+const SEEK_STEP: Duration = Duration::from_secs(5);
 use crate::ui::media::{
     audio::{AudioAssets, AudioLoadError},
     source::{MediaFetcher, MediaLoadError, MediaSource, Parsed},
 };
 use crate::ui::rich::narrative::callout::GlyphFactory;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
-use aqua_core::{GpuiBackground, InputEvent, PointerButton, Rect, Role};
+use aqua_core::{
+    GpuiBackground, InputEvent, Key, NamedKey, NumericRangeSemantics, PointerButton, Rect, Role,
+};
 use aqua_text::{FontFamily, overflow::OverflowMode};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{CaptureRequest, EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
-use aqua_ui::tree::ActivationSource;
+use aqua_ui::tree::{AccessibilityRequest, ActivationSource};
 use editor_assets::AssetId;
 use editor_audio::{PlaybackState, Player, Snapshot};
 use editor_core::runtime::runtime;
@@ -150,6 +153,13 @@ impl Shown {
             _ => None,
         }
     }
+    fn position(&self) -> Duration {
+        match self {
+            Self::Playing { position, .. } | Self::Paused { position, .. } => *position,
+            Self::Ended { duration } => *duration,
+            Self::Idle | Self::Loading | Self::Failed(_) => Duration::ZERO,
+        }
+    }
     fn progress(&self) -> f32 {
         match self {
             Self::Playing { position, duration } | Self::Paused { position, duration }
@@ -211,10 +221,50 @@ fn track_path(source: &MediaSource, fetcher: Option<&MediaFetcher>, id: &str) ->
         _ => None,
     }
 }
-fn seek(player: &Player, line: &Rc<Cell<Option<Rect>>>, duration: Option<Duration>, x: f32) {
+type Seek = Rc<dyn Fn(Duration)>;
+fn seek_at(seek: &Seek, line: &Rc<Cell<Option<Rect>>>, duration: Option<Duration>, x: f32) {
     if let (Some(bounds), Some(duration)) = (line.get(), duration) {
         let share = ((x - bounds.x) / bounds.w.max(1.0)).clamp(0.0, 1.0);
-        player.seek(duration.mul_f32(share));
+        seek(duration.mul_f32(share));
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SeekCommand {
+    Back,
+    Forward,
+    Start,
+    End,
+    To(f64),
+}
+impl SeekCommand {
+    fn of_key(key: Key) -> Option<Self> {
+        match key {
+            Key::Named(NamedKey::Left | NamedKey::Down) => Some(Self::Back),
+            Key::Named(NamedKey::Right | NamedKey::Up) => Some(Self::Forward),
+            Key::Named(NamedKey::Home) => Some(Self::Start),
+            Key::Named(NamedKey::End) => Some(Self::End),
+            _ => None,
+        }
+    }
+    fn of_request(request: AccessibilityRequest) -> Option<Self> {
+        match request {
+            AccessibilityRequest::SetValue(seconds) => Some(Self::To(seconds)),
+            AccessibilityRequest::Increment => Some(Self::Forward),
+            AccessibilityRequest::Decrement => Some(Self::Back),
+            AccessibilityRequest::ShowContextMenu => None,
+        }
+    }
+    fn target(self, position: Duration, duration: Duration) -> Duration {
+        match self {
+            Self::Back => position.saturating_sub(SEEK_STEP),
+            Self::Forward => (position + SEEK_STEP).min(duration),
+            Self::Start => Duration::ZERO,
+            Self::End => duration,
+            Self::To(seconds) => {
+                Duration::try_from_secs_f64(seconds.clamp(0.0, duration.as_secs_f64()))
+                    .unwrap_or(Duration::ZERO)
+            }
+        }
     }
 }
 fn play_button(
@@ -432,7 +482,11 @@ impl AudioBlock {
                     &row_id,
                     &theme,
                     &shown,
-                    player.clone(),
+                    &name,
+                    {
+                        let player = player.clone();
+                        Rc::new(move |to| player.seek(to))
+                    },
                     state.clone(),
                     line,
                     invalidate.clone(),
@@ -471,7 +525,8 @@ fn progress_line(
     id: &str,
     theme: &ArtisanTheme,
     shown: &Shown,
-    player: Player,
+    name: &str,
+    seek: Seek,
     state: AudioState,
     line: Rc<Cell<Option<Rect>>>,
     invalidate: Rc<dyn Fn()>,
@@ -519,15 +574,52 @@ fn progress_line(
         .child(track)
         .build()
         .with_key(format!("{id}-line"));
-    if duration.is_some() {
+    if let Some(length) = duration {
+        let position = shown.position();
+        let key_seek = seek.clone();
+        let key_invalidate = invalidate.clone();
+        let request_seek = seek.clone();
+        let request_invalidate = invalidate.clone();
+        element = element
+            .role(Role::Slider)
+            .aria_label(format!("Seek {name}"))
+            .aria_range(NumericRangeSemantics {
+                min: 0.0,
+                max: length.as_secs_f64(),
+                value: position.as_secs_f64(),
+                step: SEEK_STEP.as_secs_f64(),
+            })
+            .aria_value(format!("{} of {}", clock(position), clock(length)))
+            .focusable(true)
+            .focus_visible_style(focus_ring(theme))
+            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
+                    return InputResponse::default();
+                };
+                let Some(command) = SeekCommand::of_key(key.key) else {
+                    return InputResponse::default();
+                };
+                key_seek(command.target(position, length));
+                key_invalidate();
+                InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                }
+            })
+            .on_accessibility_request(move |request| {
+                if let Some(command) = SeekCommand::of_request(request) {
+                    request_seek(command.target(position, length));
+                    request_invalidate();
+                }
+            });
         let pressing = state.clone();
         let press_id = id.to_owned();
-        let press_player = player.clone();
+        let press_seek = seek.clone();
         let press_line = line.clone();
         let press_invalidate = invalidate.clone();
         let moving = state.clone();
         let move_id = id.to_owned();
-        let move_player = player.clone();
+        let move_seek = seek;
         let move_line = line.clone();
         let move_invalidate = invalidate.clone();
         let releasing = state.clone();
@@ -540,7 +632,7 @@ fn progress_line(
                 else {
                     return InputResponse::default();
                 };
-                seek(&press_player, &press_line, duration, pointer.position.x);
+                seek_at(&press_seek, &press_line, duration, pointer.position.x);
                 if let Some(row) = pressing.0.borrow_mut().rows.get_mut(&press_id) {
                     row.dragging = true;
                 }
@@ -563,7 +655,7 @@ fn progress_line(
                         .get(&move_id)
                         .is_some_and(|row| row.dragging)
                 {
-                    seek(&move_player, &move_line, duration, pointer.position.x);
+                    seek_at(&move_seek, &move_line, duration, pointer.position.x);
                     move_invalidate();
                 }
                 InputResponse::default()
