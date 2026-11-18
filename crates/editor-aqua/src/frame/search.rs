@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 pub const OVERLAY: &str = "artisan-frame-search-overlay";
 pub const QUERY: &str = "sidebar-thread-search";
+const SCOPE: &str = "artisan-frame-search-scope";
 pub const RAIL_KEY: KeySize = KeySize::Md;
 const BAR: KeySize = KeySize::Lg;
 const BLUR: f32 = 4.0;
@@ -222,24 +223,27 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
         )
         .build();
     let escape = Rc::clone(&emit);
-    root.child(scrim(theme, progress, emit))
+    let scope = UiBox::new()
+        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+        .child(scrim(theme, progress, emit))
         .child(list)
         .child(field)
         .build()
-        .with_key(OVERLAY)
-        .on_input(
-            InputKind::KeyDown,
-            EventPhase::Bubble,
-            move |event| match &event.input {
-                RoutedInput::Native(InputEvent::KeyDown(key))
-                    if key.key == Pressed::Named(NamedKey::Escape) =>
-                {
-                    escape(Event::Search(false));
-                    InputResponse::handled()
-                }
-                _ => InputResponse::default(),
-            },
-        )
+        .with_key(SCOPE)
+        .modal_scope();
+    root.child(scope).build().with_key(OVERLAY).on_input(
+        InputKind::KeyDown,
+        EventPhase::Bubble,
+        move |event| match &event.input {
+            RoutedInput::Native(InputEvent::KeyDown(key))
+                if key.key == Pressed::Named(NamedKey::Escape) =>
+            {
+                escape(Event::Search(false));
+                InputResponse::handled()
+            }
+            _ => InputResponse::default(),
+        },
+    )
 }
 
 fn scrim(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Element {

@@ -14,6 +14,8 @@ mod glide;
 mod menu;
 #[path = "frame/scramble.rs"]
 mod scramble;
+#[path = "frame/search.rs"]
+mod search;
 #[path = "frame/sign_in/card.rs"]
 mod sign_in_card;
 #[path = "frame/sign_in/dither.rs"]
