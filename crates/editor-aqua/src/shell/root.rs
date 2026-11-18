@@ -2277,6 +2277,9 @@ impl RootViews {
                 Effect::OpenSettings => shell.core.navigate(crate::core::Screen::Settings(
                     crate::core::SettingsPage::General,
                 )),
+                Effect::OpenAccount => shell.core.navigate(crate::core::Screen::Settings(
+                    crate::core::SettingsPage::Account,
+                )),
                 Effect::SignOut => shell.core.account_mut().sign_out(),
             }
         }

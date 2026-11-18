@@ -26,8 +26,7 @@ fn leaving_actions_close_the_menu_and_report_their_effect() {
     for (spot, effect) in [
         (Spot::Settings, Some(Effect::OpenSettings)),
         (Spot::SignOut, Some(Effect::SignOut)),
-        (Spot::Help, None),
-        (Spot::Upgrade, None),
+        (Spot::Identity, Some(Effect::OpenAccount)),
     ] {
         let mut menu = Menu::default();
         menu.apply(Event::Toggle, now, false);

@@ -1,11 +1,11 @@
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face, soft};
+use crate::ui::chrome::card::POLAR_HAZE;
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Menu, Spot};
 use crate::ui::engine::engine_icon;
 use crate::ui::kit::hover::live;
 use crate::ui::kit::{Hover, Radius, Space, Surface};
-use crate::ui::theme::{ArtisanTheme, Cast, Oklch};
+use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::images::ImageHandle;
 use aqua::{Aqua, Style, pct, px};
 use aqua_core::{CursorIcon, DisplayItem, ImageRef, Insets, Role, image::ImageFit};
@@ -28,18 +28,15 @@ const ITEM_PAD_X: f32 = 12.0;
 const ITEM_PAD_Y: f32 = 8.0;
 const LINE: f32 = 20.0;
 const TEXT: f32 = 14.0;
-const ITEM_HEIGHT: f32 = LINE + 2.0 * ITEM_PAD_Y;
 const BADGE: f32 = 40.0;
 const BADGE_RADIUS: f32 = 10.4;
 const GLYPH: f32 = 16.0;
 const FALLBACK_GLYPH: f32 = 18.0;
 const CHEVRON: f32 = 12.0;
-const UPGRADE_HEIGHT: f32 = ITEM_HEIGHT + 2.0;
 const LIMIT_TEXT: f32 = 12.0;
 const LIMIT_LINE: f32 = 16.0;
 const LIMIT_ROW: f32 = 24.0;
 const LIMIT_LABEL: f32 = 52.0;
-const HOVER_LIFT: f32 = 0.06;
 
 const CHEVRON_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3 7.5 6l-3 3"/></svg>"#;
 
@@ -184,12 +181,6 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
         .child(crate::ui::chrome::card::double_rule(theme, MENU_PADDING))
         .child(entry(Spot::Theme, "Theme", theme_icon))
         .child(entry(Spot::Settings, "Settings", AssetId::TABLER_SETTINGS))
-        .child(entry(
-            Spot::Help,
-            "Help & Feedback",
-            AssetId::TABLER_MESSAGE_CIRCLE_QUESTION,
-        ))
-        .child(upgrade(theme, &sheet))
         .child(crate::ui::chrome::card::double_rule(theme, MENU_PADDING))
         .children(limits(theme, &palette, &sheet.account.limits))
         .child(entry(Spot::SignOut, "Sign out", AssetId::TABLER_LOGOUT))
@@ -291,46 +282,6 @@ fn item(
             .cursor(CursorIcon::Pointer)
             .on_hover_change(move |inside| hover(Event::Hover(spot, inside))),
     )
-}
-
-fn upgrade(theme: &ArtisanTheme, sheet: &Sheet<'_>) -> Element {
-    let hover = Rc::clone(&sheet.emit);
-    let pick = Rc::clone(&sheet.emit);
-    let lift = if sheet.menu.highlight(Spot::Upgrade).lit() {
-        HOVER_LIFT
-    } else {
-        0.0
-    };
-    Aqua::Button()
-        .styles([
-            Aqua::Style()
-                .width(pct(100.0))
-                .height(px(UPGRADE_HEIGHT))
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER)
-                .gap(8.0)
-                .radius(px(ITEM_RADIUS))
-                .margin_insets(Insets {
-                    top: 8.0,
-                    bottom: 4.0,
-                    ..Insets::default()
-                }),
-            Style::new().shadows(soft(theme, Cast::PRESS)),
-        ])
-        .child(polar(lift))
-        .child(source_asset_glyph(
-            AssetId::TABLER_CIRCLE_ARROW_UP,
-            GLYPH,
-            POLAR_INK.with_alpha(0.8).to_reference_paint(),
-        ))
-        .child(label(theme, "Upgrade to Go", POLAR_INK, FontWeight::MEDIUM))
-        .on_activate(move || pick(Event::Pick(Spot::Upgrade)))
-        .build()
-        .with_key("artisan-account-upgrade")
-        .role(Role::MenuItem)
-        .aria_label("Upgrade to Go")
-        .cursor(CursorIcon::Pointer)
-        .on_hover_change(move |inside| hover(Event::Hover(Spot::Upgrade, inside)))
 }
 
 fn limits(theme: &ArtisanTheme, palette: &Palette, engines: &[EngineLimits]) -> Vec<Element> {
@@ -448,14 +399,6 @@ fn limit_row(
                 )
             }
         })
-}
-
-fn polar(lift: f32) -> Element {
-    Aqua::Canvas()
-        .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
-        .on_paint(move |bounds| vec![polar_face(bounds, lift, ITEM_RADIUS)])
-        .build()
-        .exclude_from_hit_testing()
 }
 
 #[must_use]

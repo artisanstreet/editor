@@ -7,19 +7,15 @@ pub enum Spot {
     Identity,
     Theme,
     Settings,
-    Help,
-    Upgrade,
     SignOut,
 }
 
 impl Spot {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 5] = [
         Self::Trigger,
         Self::Identity,
         Self::Theme,
         Self::Settings,
-        Self::Help,
-        Self::Upgrade,
         Self::SignOut,
     ];
 
@@ -40,6 +36,7 @@ pub enum Event {
 pub enum Effect {
     FlipTheme,
     OpenSettings,
+    OpenAccount,
     SignOut,
 }
 
@@ -109,15 +106,14 @@ impl Menu {
                 self.set_open(!self.open, now, reduced);
                 None
             }
-            Spot::Identity => None,
+            Spot::Identity => {
+                self.set_open(false, now, reduced);
+                Some(Effect::OpenAccount)
+            }
             Spot::Theme => Some(Effect::FlipTheme),
             Spot::Settings => {
                 self.set_open(false, now, reduced);
                 Some(Effect::OpenSettings)
-            }
-            Spot::Help | Spot::Upgrade => {
-                self.set_open(false, now, reduced);
-                None
             }
             Spot::SignOut => {
                 self.set_open(false, now, reduced);
