@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod opencode;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead as _, Write as _};
@@ -18,6 +19,11 @@ fn main() -> ExitCode {
         "claude-background-agent" => claude::background_agent(),
         "claude-long-turn" => claude::long_turn(),
         "claude-side-fork" => claude::side_fork(),
+        "opencode-title" => opencode::serve(opencode::Mode::Title),
+        "opencode-clear-goal" => opencode::serve(opencode::Mode::ClearGoal),
+        "opencode-compaction" => opencode::serve(opencode::Mode::compaction()),
+        "opencode-cancellation" => opencode::serve(opencode::Mode::cancellation()),
+        "opencode-oversized-output" => opencode::serve(opencode::Mode::OversizedOutput),
         "hold" => hold(),
         unknown => {
             writeln!(

@@ -211,79 +211,21 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::{Launch, UserInput};
+    use crate::UserInput;
     use artisan_api::{EngineConfig, EngineId, ThreadId};
-    use std::os::unix::fs::PermissionsExt as _;
 
-    /// Exercise the real adapter against a fake v2 server, checking that the
-    /// source is never prompted, compacted, changed or deleted.
     #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one adapter scenario with an inline fake HTTP server"
-    )]
     async fn native_compaction_forks_overrides_only_the_fork_and_cleans_it_up() {
         let dir = tempfile::tempdir().unwrap();
-        let binary = dir.path().join("opencode");
-        std::fs::write(&binary, r#"#!/usr/bin/env python3
-import http.server,json,queue,pathlib,threading,os
-root=pathlib.Path.cwd()
-events=queue.Queue()
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self,*args): pass
-    def do_GET(self):
-        assert self.path=='/api/event',self.path
-        self.send_response(200)
-        self.send_header('Content-Type','text/event-stream')
-        self.end_headers()
-        self.wfile.write(b'data: {"type":"server.connected"}\n\n')
-        self.wfile.flush()
-        while True:
-            event=events.get()
-            self.wfile.write(('data: '+json.dumps(event)+'\n\n').encode())
-            self.wfile.flush()
-    def do_POST(self):
-        length=int(self.headers.get('Content-Length',0))
-        body=json.loads(self.rfile.read(length)) if length else None
-        with (root/'requests').open('a') as f: f.write(json.dumps([self.path,body])+'\n')
-        if self.path=='/api/session/source/fork':
-            response={'data':{'id':'fork'}}
-        elif self.path=='/api/session/fork/model':
-            assert body=={'model':{'providerID':'opencode','id':'big-pickle'}},body
-            response=None
-        elif self.path=='/api/session/fork/compact':
-            if os.environ.get('ARTISAN_TEST_COMPACTION_HANG'):
-                (root/'hanging').write_text('waiting')
-            else:
-                events.put({'type':'session.compaction.ended','data':{'sessionID':'source','text':'wrong session'}})
-                events.put({'type':'session.compaction.ended','data':{'sessionID':'fork','text':'## Objective\n- Keep building','tokens':{'input':3,'output':20,'reasoning':0,'cache':{'read':2000,'write':0}}}})
-            response={'data':{'id':'compact-request'}}
-        elif self.path=='/api/session/fork/interrupt': response=None
-        else: raise AssertionError(self.path)
-        payload=json.dumps(response).encode() if response else b''
-        self.send_response(200)
-        self.send_header('Content-Length',str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-    def do_DELETE(self):
-        assert self.path=='/api/session/fork',self.path
-        (root/'deleted-fork').write_text(self.path)
-        self.send_response(204)
-        self.end_headers()
-server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
-print('opencode server listening on http://127.0.0.1:'+str(server.server_port),flush=True)
-server.serve_forever()
-"#).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut config = EngineConfig::new(EngineId::OpenCode);
         config.model = Some("opencode/big-pickle".to_owned());
         let turn = Turn {
             thread_id: ThreadId::new(),
             engine: EngineId::OpenCode,
-            binary,
+            binary: crate::fake_engine::binary(),
             home: dir.path().join("home"),
             cwd: dir.path().to_owned(),
             config,
@@ -292,7 +234,7 @@ server.serve_forever()
                 text: crate::compaction_prompt(),
                 ..Default::default()
             },
-            launch: Launch::default(),
+            launch: crate::fake_engine::launch("opencode-compaction", &[]),
             trace_dir: None,
         };
         let reply = tokio::time::timeout(

@@ -428,44 +428,21 @@ fn background_shell_keeps_server_alive_through_notification_and_followup() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn generated_title_is_written_to_opencode_without_prompting() {
-    use crate::{Harness as _, Launch, Turn, UserInput};
+    use crate::{Harness as _, Turn, UserInput};
     use artisan_api::{EngineConfig, EngineId, ThreadId};
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("opencode");
-    std::fs::write(
-        &binary,
-        r"#!/usr/bin/env python3
-import http.server,json,pathlib
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self,*args): pass
-    def do_PATCH(self):
-        assert self.path=='/api/session/working-session',self.path
-        body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        assert body=={'title':'Fix sidebar titles'},body
-        pathlib.Path('named').write_text(json.dumps(body))
-        self.send_response(204)
-        self.end_headers()
-server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
-print('opencode server listening on http://127.0.0.1:'+str(server.server_port),flush=True)
-server.serve_forever()
-",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let turn = Turn {
         thread_id: ThreadId::new(),
         engine: EngineId::OpenCode,
-        binary,
+        binary: crate::fake_engine::binary(),
         home: dir.path().join("home"),
         cwd: dir.path().to_owned(),
         config: EngineConfig::new(EngineId::OpenCode),
         session_id: Some("working-session".to_owned()),
         input: UserInput::default(),
-        launch: Launch::default(),
+        launch: crate::fake_engine::launch("opencode-title", &[]),
         trace_dir: None,
     };
     super::OpenCodeHarness

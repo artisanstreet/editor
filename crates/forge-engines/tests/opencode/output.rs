@@ -1,54 +1,15 @@
 use super::*;
-use crate::{Launch, UserInput};
+use crate::{UserInput, fake_engine};
 use artisan_api::{EngineConfig, EngineId, RunStatus, ThreadId};
-use std::os::unix::fs::PermissionsExt as _;
 use tokio_util::sync::CancellationToken;
-
-const SERVER: &str = r#"#!/usr/bin/env python3
-import http.server,json,sys,threading
-stopped=threading.Event()
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self,*args): pass
-    def reply(self,value):
-        data=json.dumps(value).encode()
-        self.send_response(200)
-        self.send_header('Content-Length',str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-    def do_GET(self):
-        if self.path=='/api/event':
-            self.send_response(200)
-            self.send_header('Content-Type','text/event-stream')
-            self.end_headers()
-            self.wfile.write(b'data: {"type":"server.connected"}\n\n')
-            self.wfile.flush()
-            stopped.wait(30)
-        else: self.reply([])
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get('Content-Length',0)))
-        if self.path=='/api/session': self.reply({'data':{'id':'root'}})
-        elif self.path=='/api/rpc/opencode.goal/get': self.reply({'output':None})
-        elif self.path=='/api/session/root/prompt':
-            self.reply({'data':{'id':'prompt'}})
-            sys.stdout.write('x'*(32*1024*1024+1)+'\n')
-            sys.stdout.flush()
-        elif self.path=='/api/session/root/interrupt': self.reply(None)
-        else: raise AssertionError(self.path)
-server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
-print('opencode server listening on http://127.0.0.1:'+str(server.server_port),flush=True)
-server.serve_forever()
-"#;
 
 #[tokio::test]
 async fn an_unreadable_stdout_line_fails_the_run_with_its_cause_not_as_an_exit() {
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("opencode");
-    std::fs::write(&binary, SERVER).unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let turn = Turn {
         thread_id: ThreadId::new(),
         engine: EngineId::OpenCode,
-        binary,
+        binary: fake_engine::binary(),
         home: dir.path().join("home"),
         cwd: dir.path().to_owned(),
         config: EngineConfig::new(EngineId::OpenCode),
@@ -57,7 +18,7 @@ async fn an_unreadable_stdout_line_fails_the_run_with_its_cause_not_as_an_exit()
             text: "work".to_owned(),
             ..Default::default()
         },
-        launch: Launch::default(),
+        launch: fake_engine::launch("opencode-oversized-output", &[]),
         trace_dir: None,
     };
     let (_inputs, inbox) = mpsc::channel(8);

@@ -1,7 +1,7 @@
 #[cfg(test)]
 #[path = "../tests/opencode/agents.rs"]
 mod agent_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "../tests/opencode/cancellation.rs"]
 mod cancellation_tests;
 mod decoder;
@@ -19,7 +19,7 @@ mod ending_tests;
 #[cfg(test)]
 #[path = "../tests/opencode/forms.rs"]
 mod form_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "../tests/opencode/output.rs"]
 mod output_tests;
 mod side;
