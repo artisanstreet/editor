@@ -85,6 +85,18 @@ pub struct Lists {
     pub next_tick: Option<Timestamp>,
 }
 
+impl Lists {
+    #[must_use]
+    pub fn working(&self) -> std::collections::HashSet<&ThreadId> {
+        self.inbox
+            .iter()
+            .chain(self.history.iter().flat_map(|group| group.rows.iter()))
+            .filter(|row| row.state == RowState::Working)
+            .map(|row| &row.id)
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HitRow {
     pub thread: ThreadId,

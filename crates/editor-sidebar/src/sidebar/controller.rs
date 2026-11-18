@@ -430,18 +430,10 @@ impl Sidebar {
                 lists
             })
             .unwrap_or_default();
-        self.working_pulses.borrow_mut().retain(|id, _| {
-            self.lists
-                .inbox
-                .iter()
-                .chain(
-                    self.lists
-                        .history
-                        .iter()
-                        .flat_map(|group| group.rows.iter()),
-                )
-                .any(|row| &row.id == id && row.state == super::list::RowState::Working)
-        });
+        let working = self.lists.working();
+        self.working_pulses
+            .borrow_mut()
+            .retain(|id, _| working.contains(id));
     }
 
     pub fn drain(&mut self, core: &mut Core, now: Timestamp) -> bool {
