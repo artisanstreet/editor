@@ -303,11 +303,8 @@ pub fn build(
                     || page == SettingsPage::Section(SettingsSection::Archive)) =>
         {
             let host = core.active_host().unwrap();
-            let mut content = ui::column().child(ui::header(
-                &theme,
-                page.label(),
-                page::description(page),
-            ));
+            let mut content =
+                ui::column().child(ui::header(&theme, page.label(), page::description(page)));
             if page == SettingsPage::Threads {
                 content = content
                     .child(thread_section(
@@ -557,14 +554,9 @@ fn notifications(
         .get("notifications")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let control = Switch::new(
-        "settings-switch-notify",
-        *theme,
-        enabled,
-        "switch notify",
-    )
-    .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
-    .build();
+    let control = Switch::new("settings-switch-notify", *theme, enabled, "switch notify")
+        .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
+        .build();
     let row = ui::row(
         theme,
         "Notify Me",
@@ -1333,10 +1325,10 @@ impl ViewSnapshot {
             archive_loading: host.map(|host| {
                 let page = host.thread_page(true);
                 (
-                    page.loading,
-                    page.at_latest,
-                    page.next.is_some(),
-                    page.error.clone(),
+                    page.is_loading(),
+                    page.at_latest(),
+                    page.has_older(),
+                    page.error().map(str::to_owned),
                 )
             }),
             archive_restoring: controller.archive.restoring.clone(),
@@ -1355,12 +1347,9 @@ impl ViewSnapshot {
             mcp_sign_ins: host
                 .into_iter()
                 .flat_map(|host| {
-                    let servers: Vec<artisan_api::McpServer> = host
-                        .setting(super::extensions::MCP_SERVERS_KEY)
-                        .and_then(|value| serde_json::from_value(value.clone()).ok())
-                        .unwrap_or_default();
-                    servers.into_iter().filter_map(move |server| {
-                        let name = server.name;
+                    let servers = host.mcp_servers().unwrap_or_default();
+                    servers.iter().filter_map(move |server| {
+                        let name = server.name.clone();
                         core.mcp_sign_in(&host.id, &name).map(|sign_in| {
                             (
                                 name.clone(),

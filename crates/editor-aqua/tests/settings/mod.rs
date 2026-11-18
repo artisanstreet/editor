@@ -516,7 +516,7 @@ fn retention_target(
 fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::settings::preferences::SettingWrites;
-    use serde_json::{Map, json};
+    use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
     let mut core = Core::for_tests(EditorFiles {
         dir: dir.path().to_path_buf(),
@@ -524,7 +524,7 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     .unwrap();
     let target = retention_target(&mut core);
     let key = target.key;
-    let mut settings = Map::new();
+    let mut settings = editor_aqua::core::HostSettings::new(target.host.clone());
     settings.insert(key.into(), json!(90));
     let mut writes = SettingWrites::default();
 

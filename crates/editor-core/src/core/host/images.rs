@@ -144,7 +144,7 @@ impl HostData {
         &mut self,
         hash: BlobHash,
         generation: u64,
-        result: anyhow::Result<Vec<u8>>,
+        result: Result<Vec<u8>, crate::core::client::CallError>,
     ) -> bool {
         if !self
             .images
@@ -201,7 +201,7 @@ impl HostData {
                 true
             }
             (Err(error), _) => {
-                self.finish_image(hash, Err(format!("{error:#}")));
+                self.finish_image(hash, Err(::diagnostics::chain(&error)));
                 true
             }
         }

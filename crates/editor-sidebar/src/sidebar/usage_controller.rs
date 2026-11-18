@@ -1,5 +1,5 @@
-use editor_core::{Core, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime};
 use artisan_api::{EngineCommand, EngineId, SignInState};
+use editor_core::{Core, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
@@ -77,7 +77,7 @@ impl UsagePage {
                         host,
                         instance,
                         engine,
-                        result,
+                        result: result.map_err(anyhow::Error::from),
                     })
                     .await;
             });

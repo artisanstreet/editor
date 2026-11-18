@@ -199,7 +199,11 @@ fn save_signed_in_account(files: &EditorFiles) -> Result<()> {
         "session_token": "capture-session",
         "profile": profile,
     });
-    std::fs::write(files.dir.join("account.json"), serde_json::to_vec_pretty(&account)?)
-        .context("write the capture account")?;
+    std::fs::write(
+        files.dir.join("account.json"),
+        serde_json::to_vec_pretty(&account)?,
+    )
+    .context("write the capture account")?;
     crate::core::save_onboarding_for_tests(files, CORE_URL, ACCOUNT_ID, MACHINE_ID)
+        .context("write the capture onboarding")
 }

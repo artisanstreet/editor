@@ -496,7 +496,16 @@ fn magic_link_poll_interval_starts_when_pending_state_reaches_ui() {
         }
     });
     let directory = tempfile::tempdir().unwrap();
-    let services = Services::scripted(&url, Arc::new(|_| anyhow::bail!("no ae")), None);
+    let services = Services::scripted(
+        &url,
+        Arc::new(|args| {
+            Err(editor_aqua::core::ae::AeError::Failed {
+                command: args.join(" "),
+                detail: "no ae".to_owned(),
+            })
+        }),
+        None,
+    );
     let mut core = Core::with_services(
         EditorFiles {
             dir: directory.path().to_owned(),

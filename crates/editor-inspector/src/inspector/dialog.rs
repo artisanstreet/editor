@@ -1,10 +1,10 @@
 use super::{StreamState, accepts_item, command_lines, shell_output};
+use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, TextContent, ThreadId, ToolKind};
 use editor_core::{
-        Core, CoreEvent, HostEvent, HostId, HostInstance, delivery::Delivery, runtime::runtime,
-    };
+    Core, CoreEvent, HostEvent, HostId, HostInstance, delivery::Delivery, runtime::runtime,
+};
 use editor_sources::ContentText;
 use editor_ui::markdown::terminal::TerminalScreen;
-use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, TextContent, ThreadId, ToolKind};
 use std::{num::NonZeroUsize, ops::Range, sync::Arc};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -138,7 +138,9 @@ impl TerminalDialog {
         self.error = None;
         self.load = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = client.item(&item).await;
-            let _ = sender.send(Completion(generation, result)).await;
+            let _ = sender
+                .send(Completion(generation, result.map_err(anyhow::Error::from)))
+                .await;
         })));
     }
 

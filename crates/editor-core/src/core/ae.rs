@@ -1,4 +1,3 @@
-use anyhow::{Context as _, Result, bail};
 use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone)]
@@ -9,10 +8,30 @@ pub enum Ae {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub type AeScript = std::sync::Arc<dyn Fn(&[&str]) -> Result<String> + Send + Sync>;
+pub type AeScript = std::sync::Arc<dyn Fn(&[&str]) -> Result<String, AeError> + Send + Sync>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AeError {
+    #[error("locate the installed `ae`")]
+    Locate(#[source] artisan_paths::RootError),
+    #[error("run {path} (install Artisan with `ae install`)")]
+    Run {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the `ae {command}` task stopped")]
+    Task {
+        command: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("`ae {command}` failed: {detail}")]
+    Failed { command: String, detail: String },
+}
 
 impl Ae {
-    pub async fn run(&self, args: &[&str]) -> Result<String> {
+    pub async fn run(&self, args: &[&str]) -> Result<String, AeError> {
         match self {
             Self::Installed => installed(args.iter().map(|arg| (*arg).to_owned()).collect()).await,
             #[cfg(any(test, feature = "test-support"))]
@@ -21,10 +40,9 @@ impl Ae {
     }
 }
 
-async fn installed(args: Vec<String>) -> Result<String> {
-    let path = artisan_paths::App::Ae
-        .binary()
-        .context("locate the installed `ae`")?;
+async fn installed(args: Vec<String>) -> Result<String, AeError> {
+    let path = artisan_paths::App::Ae.binary().map_err(AeError::Locate)?;
+    let command_line = args.join(" ");
     let mut command = tokio::process::Command::new(&path);
     command.args(&args).kill_on_drop(true);
     #[cfg(windows)]
@@ -36,8 +54,11 @@ async fn installed(args: Vec<String>) -> Result<String> {
         crate::core::runtime::runtime().spawn(async move { command.output().await }),
     )
     .await
-    .context("`ae` task")?
-    .with_context(|| format!("run {} (install Artisan with `ae install`)", path.display()))?;
+    .map_err(|source| AeError::Task {
+        command: command_line.clone(),
+        source,
+    })?
+    .map_err(|source| AeError::Run { path, source })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr
@@ -45,7 +66,10 @@ async fn installed(args: Vec<String>) -> Result<String> {
             .rev()
             .find(|line| !line.trim().is_empty())
             .unwrap_or("no message");
-        bail!("`ae {}` failed: {}", args.join(" "), detail.trim());
+        return Err(AeError::Failed {
+            command: command_line,
+            detail: detail.trim().to_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

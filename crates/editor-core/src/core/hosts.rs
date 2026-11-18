@@ -1,8 +1,7 @@
-use crate::core::ae::Ae;
-use crate::core::client::ForgeClient;
+use crate::core::ae::{Ae, AeError};
+use crate::core::client::{CallError, ForgeClient, NewClientError};
 use crate::core::config_file::{self, ReadConfigError, UpdateConfigError, WriteConfigError};
 use crate::core::runtime::runtime;
-use anyhow::{Context, Result, bail};
 use artisan_api::PairRequest;
 use artisan_api::tls::Identity;
 use serde::{Deserialize, Serialize};
@@ -41,6 +40,19 @@ pub enum HostKind {
         account: String,
         machine: String,
     },
+}
+
+#[must_use]
+pub fn is_loopback(address: &str) -> bool {
+    match url::Url::parse(&format!("https://{address}")) {
+        Ok(url) => match url.host() {
+            Some(url::Host::Domain(domain)) => domain == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -139,6 +151,87 @@ impl EditorFiles {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PairThisMachineError {
+    #[error("ask `ae pair` for an invite to {host}")]
+    Invite {
+        host: HostId,
+        #[source]
+        source: AeError,
+    },
+    #[error("read the invite `ae pair` printed for {host}")]
+    ReadInvite {
+        host: HostId,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the certificate in the invite for {host}")]
+    Certificate {
+        host: HostId,
+        #[source]
+        source: artisan_api::tls::DecodeCertificateError,
+    },
+    #[error("pair with this machine's Forge as {host}")]
+    Pair {
+        host: HostId,
+        #[source]
+        source: PairError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PairError {
+    #[error("connect to Forge at {address}")]
+    Client {
+        address: String,
+        #[source]
+        source: Box<NewClientError>,
+    },
+    #[error("pair with Forge at {address}")]
+    Pair {
+        address: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("Forge at {address} has fingerprint {fingerprint:?}, which is too short to name it")]
+    Fingerprint {
+        address: String,
+        fingerprint: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WslCommandError {
+    #[error("the wsl.exe task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error("wsl.exe did not finish within {seconds} seconds")]
+    TimedOut { seconds: u64 },
+    #[error("run wsl.exe")]
+    Run(#[source] std::io::Error),
+    #[error("wsl.exe failed: {stderr}")]
+    Failed { stderr: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("read WSL's state")]
+pub struct WslStateError(#[source] pub WslCommandError);
+
+#[derive(Debug, thiserror::Error)]
+#[error("start Forge with `ae forge start` in {distro}")]
+pub struct StartWslForgeError {
+    pub distro: String,
+    #[source]
+    pub source: WslCommandError,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("keep {distro} awake")]
+pub struct KeepWslAwakeError {
+    pub distro: String,
+    #[source]
+    pub source: std::io::Error,
+}
+
 #[derive(Debug, Deserialize)]
 struct Invite {
     code: String,
@@ -152,10 +245,26 @@ pub(crate) async fn pair_this_machine(
     device_name: &str,
     id: HostId,
     name: String,
-) -> Result<HostConfig> {
-    let invite: Invite = serde_json::from_str(&ae.run(&["pair", "--json"]).await?)
-        .context("read what `ae pair` printed")?;
-    let fingerprint = artisan_api::tls::fingerprint_of(&invite.forge_certificate)?;
+) -> Result<HostConfig, PairThisMachineError> {
+    let printed =
+        ae.run(&["pair", "--json"])
+            .await
+            .map_err(|source| PairThisMachineError::Invite {
+                host: id.clone(),
+                source,
+            })?;
+    let invite: Invite =
+        serde_json::from_str(&printed).map_err(|source| PairThisMachineError::ReadInvite {
+            host: id.clone(),
+            source,
+        })?;
+    let fingerprint =
+        artisan_api::tls::fingerprint_of(&invite.forge_certificate).map_err(|source| {
+            PairThisMachineError::Certificate {
+                host: id.clone(),
+                source,
+            }
+        })?;
     let config = pair(
         &invite.address,
         &invite.code,
@@ -165,7 +274,11 @@ pub(crate) async fn pair_this_machine(
         name,
         HostKind::Local,
     )
-    .await?;
+    .await
+    .map_err(|source| PairThisMachineError::Pair {
+        host: id.clone(),
+        source,
+    })?;
     Ok(HostConfig { id, ..config })
 }
 
@@ -182,22 +295,30 @@ fn wsl_exe() -> tokio::process::Command {
     command
 }
 
-async fn wsl_listing(args: &'static [&'static str]) -> Result<String> {
-    let mut command = wsl_exe();
-    command.args(args);
+async fn run_wsl(
+    mut command: tokio::process::Command,
+    seconds: u64,
+) -> Result<std::process::Output, WslCommandError> {
     let output = runtime()
         .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
+            tokio::time::timeout(std::time::Duration::from_secs(seconds), command.output()).await
         })
         .await
-        .context("WSL query task failed")?
-        .context("WSL query timed out")?
-        .context("Could not run wsl.exe")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "wsl.exe failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+        .map_err(WslCommandError::Task)?
+        .map_err(|_elapsed| WslCommandError::TimedOut { seconds })?
+        .map_err(WslCommandError::Run)?;
+    if !output.status.success() {
+        return Err(WslCommandError::Failed {
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(output)
+}
+
+async fn wsl_listing(args: &'static [&'static str]) -> Result<String, WslCommandError> {
+    let mut command = wsl_exe();
+    command.args(args);
+    let output = run_wsl(command, 10).await?;
     let units: Vec<u16> = output
         .stdout
         .as_chunks::<2>()
@@ -236,40 +357,29 @@ pub fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
         .collect()
 }
 
-pub async fn wsl_state() -> Result<Vec<WslDistro>> {
+pub async fn wsl_state() -> Result<Vec<WslDistro>, WslStateError> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }
     Ok(parse_wsl_verbose(
         &wsl_listing(&["--list", "--verbose"])
             .await
-            .context("Could not read WSL's state")?,
+            .map_err(WslStateError)?,
     ))
 }
 
-pub(crate) async fn start_wsl_forge(distro: String) -> Result<()> {
+pub(crate) async fn start_wsl_forge(distro: String) -> Result<(), StartWslForgeError> {
     let mut command = wsl_exe();
     command.args([
         "-d", &distro, "--exec", "sh", "-c", AE_IN_WSL, "ae", "forge", "start",
     ]);
-    let output = runtime()
-        .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await
-        })
+    run_wsl(command, 60)
         .await
-        .context("WSL start task failed")?
-        .context("starting WSL timed out")?
-        .context("Could not run wsl.exe")?;
-    if !output.status.success() {
-        bail!(
-            "`ae forge start` failed in {distro}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+        .map(drop)
+        .map_err(|source| StartWslForgeError { distro, source })
 }
 
-pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
+pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child, KeepWslAwakeError> {
     let _runtime = runtime().enter();
     wsl_exe()
         .args(["-d", distro, "--exec", "sleep", "infinity"])
@@ -277,7 +387,10 @@ pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("keep WSL awake")
+        .map_err(|source| KeepWslAwakeError {
+            distro: distro.to_owned(),
+            source,
+        })
 }
 
 pub async fn pair(
@@ -288,21 +401,28 @@ pub async fn pair(
     device_name: &str,
     name: String,
     kind: HostKind,
-) -> Result<HostConfig> {
-    let client = ForgeClient::new(address, fingerprint, identity)?;
+) -> Result<HostConfig, PairError> {
+    let short = fingerprint.get(..8).ok_or_else(|| PairError::Fingerprint {
+        address: address.to_owned(),
+        fingerprint: fingerprint.to_owned(),
+    })?;
+    let client =
+        ForgeClient::new(address, fingerprint, identity).map_err(|source| PairError::Client {
+            address: address.to_owned(),
+            source: Box::new(source),
+        })?;
     client
         .pair(&PairRequest {
             code: code.to_owned(),
             device_name: device_name.to_owned(),
         })
         .await
-        .with_context(|| format!("pair with Forge at {address}"))?;
+        .map_err(|source| PairError::Pair {
+            address: address.to_owned(),
+            source,
+        })?;
     Ok(HostConfig {
-        id: HostId(format!(
-            "{}-{}",
-            address.replace([':', '.'], "-"),
-            &fingerprint[..8]
-        )),
+        id: HostId(format!("{}-{short}", address.replace([':', '.'], "-"))),
         name,
         address: address.to_owned(),
         fingerprint: fingerprint.to_owned(),

@@ -36,7 +36,6 @@ fn column(width: f32, child: Element) -> Element {
         .build()
 }
 
-
 fn entries() -> Vec<SelectEntry<Option<u32>>> {
     let choices = artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
         .and_then(|decl| match decl.kind {
@@ -173,7 +172,7 @@ pub fn archived(
             theme,
             vec![ui::note(
                 theme,
-                if page.loading {
+                if page.is_loading() {
                     "Loading archived threads…"
                 } else {
                     "No archived threads."
@@ -185,7 +184,12 @@ pub fn archived(
             .spaced(Space::S16)
             .padded(KitRow::FormRow.pad().y)
             .style(Style::new().align(AlignItems::CENTER))
-            .child(ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Thread")))
+            .child(ui::grow(ui::line(
+                theme,
+                TextRole::Caption,
+                Ink::Muted,
+                "Thread",
+            )))
             .child(column(
                 AGE_WIDTH,
                 ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Archived")),
@@ -220,7 +224,12 @@ pub fn archived(
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(ui::grow(
                         ui::stack(Space::S2)
-                            .child(ui::line(&theme, TextRole::Label, Ink::Plain, row.title.clone()))
+                            .child(ui::line(
+                                &theme,
+                                TextRole::Label,
+                                Ink::Plain,
+                                row.title.clone(),
+                            ))
                             .child(ui::line(
                                 &theme,
                                 TextRole::Caption,
@@ -252,32 +261,32 @@ pub fn archived(
         ui::card(&theme, vec![header, list])
     };
     let mut body = ui::stack(Space::S8).child(card);
-    if let Some(error) = &page.error {
+    if let Some(error) = page.error() {
         body = body.child(ui::error_text(theme, error));
     }
-    if !page.at_latest || page.error.is_some() {
+    if !page.at_latest() || page.error().is_some() {
         let send = emit.clone();
         body = body.child(ui::button(
             theme,
             "archived-latest",
             "Latest archived threads",
             ButtonTone::Quiet,
-            page.loading,
+            page.is_loading(),
             move || send(ViewAction::ArchiveLatest),
         ));
     }
-    if page.next.is_some() {
+    if page.has_older() {
         let send = emit.clone();
         body = body.child(ui::button(
             theme,
             "archived-older",
-            if page.loading {
+            if page.is_loading() {
                 "Loading…"
             } else {
                 "Older archived threads"
             },
             ButtonTone::Quiet,
-            page.loading,
+            page.is_loading(),
             move || send(ViewAction::ArchiveOlder),
         ));
     }

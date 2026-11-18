@@ -1,5 +1,5 @@
-use editor_core::{HostId, HostInstance};
-use serde_json::{Map, Value};
+use editor_core::{HostId, HostInstance, HostSettings};
+use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ pub struct SettingWrites {
 impl SettingWrites {
     pub fn begin(
         &mut self,
-        settings: &mut Map<String, Value>,
+        settings: &mut HostSettings,
         target: SettingKey,
         value: Value,
     ) -> Option<SettingRequest> {
@@ -51,7 +51,7 @@ impl SettingWrites {
 
     pub fn complete(
         &mut self,
-        settings: Option<&mut Map<String, Value>>,
+        settings: Option<&mut HostSettings>,
         request: &SettingRequest,
         result: &Result<(), String>,
     ) -> Option<SettingRequest> {

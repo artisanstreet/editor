@@ -141,7 +141,9 @@ impl StoredSource {
         &self,
         offset: u64,
         limit: u32,
-    ) -> Option<futures::future::BoxFuture<'static, anyhow::Result<ContentRange>>> {
+    ) -> Option<
+        futures::future::BoxFuture<'static, Result<ContentRange, editor_core::client::RangeError>>,
+    > {
         if self.format() != SourceIndexFormat::Literal || limit == 0 || limit > RANGE_BYTES {
             return None;
         }

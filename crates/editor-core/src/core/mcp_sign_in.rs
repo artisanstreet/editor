@@ -1,3 +1,4 @@
+use crate::core::client::CallError;
 use crate::core::{
     ForgeClient,
     delivery::{AdmissionOrder, Delivery},
@@ -5,7 +6,6 @@ use crate::core::{
     hosts::HostId,
     runtime::runtime,
 };
-use anyhow::{Context as _, Result, anyhow};
 use artisan_account::browser;
 use artisan_api::{McpSignInFinish, McpSignInStart};
 use std::{collections::HashMap, num::NonZeroUsize, time::Duration};
@@ -16,14 +16,37 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 const PREFERRED_PORT: u16 = 33418;
 const WAITS: Duration = Duration::from_mins(10);
 
-async fn bind() -> Result<(TcpListener, String)> {
+#[derive(Debug, thiserror::Error)]
+pub enum StartMcpSignInError {
+    #[error("{host} is no longer connected, so {server} cannot sign in")]
+    Disconnected { host: HostId, server: String },
+    #[error("The sign-in for {server} is still starting; try again in a moment.")]
+    StillStarting { host: HostId, server: String },
+    #[error("{server} is finishing its sign-in already.")]
+    Finishing { host: HostId, server: String },
+    #[error("listen for the browser's redirect for {server}")]
+    Listen {
+        server: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("start the sign-in for {server} on {host}")]
+    Start {
+        host: HostId,
+        server: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("The sign-in for {server} was cancelled.")]
+    Cancelled { host: HostId, server: String },
+}
+
+async fn bind() -> Result<(TcpListener, String), std::io::Error> {
     let listener = match TcpListener::bind(("127.0.0.1", PREFERRED_PORT)).await {
         Ok(listener) => listener,
         Err(taken) => {
             tracing::debug!("port {PREFERRED_PORT} is taken ({taken}); using another");
-            TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .context("listen for the browser's redirect")?
+            TcpListener::bind(("127.0.0.1", 0)).await?
         }
     };
     let port = listener.local_addr()?.port();
@@ -287,7 +310,7 @@ impl McpSignIns {
         server: String,
         client: ForgeClient,
         open: bool,
-    ) -> tokio::sync::oneshot::Receiver<Result<String>> {
+    ) -> tokio::sync::oneshot::Receiver<Result<String, StartMcpSignInError>> {
         let key = (host, server);
         let (answer, answered) = tokio::sync::oneshot::channel();
         if self
@@ -308,15 +331,17 @@ impl McpSignIns {
                     return answered;
                 }
                 (McpSignInPhase::Starting | McpSignInPhase::Waiting, _) => {
-                    let _ = answer.send(Err(anyhow!(
-                        "The sign-in for {} is still starting; try again in a moment.",
-                        key.1
-                    )));
+                    let _ = answer.send(Err(StartMcpSignInError::StillStarting {
+                        host: key.0.clone(),
+                        server: key.1.clone(),
+                    }));
                     return answered;
                 }
                 (McpSignInPhase::Finishing, _) => {
-                    let _ =
-                        answer.send(Err(anyhow!("{} is finishing its sign-in already.", key.1)));
+                    let _ = answer.send(Err(StartMcpSignInError::Finishing {
+                        host: key.0.clone(),
+                        server: key.1.clone(),
+                    }));
                     return answered;
                 }
                 (McpSignInPhase::Failed(_), _) => {}
@@ -342,28 +367,36 @@ impl McpSignIns {
         let task_key = key.clone();
         let task = runtime().spawn(async move {
             let begun = async {
-                let (listener, redirect_uri) = bind().await?;
+                let (listener, redirect_uri) =
+                    bind().await.map_err(|source| StartMcpSignInError::Listen {
+                        server: task_key.1.clone(),
+                        source,
+                    })?;
                 let started = client
                     .mcp_sign_in_start(&McpSignInStart {
                         server: task_key.1.clone(),
                         redirect_uri,
                     })
-                    .await?;
-                anyhow::Ok((listener, started))
+                    .await
+                    .map_err(|source| StartMcpSignInError::Start {
+                        host: task_key.0.clone(),
+                        server: task_key.1.clone(),
+                        source,
+                    })?;
+                Ok::<_, StartMcpSignInError>((listener, started))
             }
             .await;
             let (listener, started) = match begun {
                 Ok(value) => value,
                 Err(error) => {
-                    let message = format!("{error:#}");
                     let _ = sender
                         .send(Message::Phase {
                             key: task_key.clone(),
                             id,
-                            phase: McpSignInPhase::Failed(message.clone()),
+                            phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
                         })
                         .await;
-                    let _ = answer.send(Err(anyhow!(message)));
+                    let _ = answer.send(Err(error));
                     let _ = sender.send(Message::Cleanup { key: task_key, id }).await;
                     return;
                 }
@@ -383,7 +416,10 @@ impl McpSignIns {
                 || !accepted.await.unwrap_or(false)
             {
                 client.mcp_sign_in_cancel(&started.state).await.ok();
-                let _ = answer.send(Err(anyhow!("The sign-in was cancelled.")));
+                let _ = answer.send(Err(StartMcpSignInError::Cancelled {
+                    host: task_key.0.clone(),
+                    server: task_key.1.clone(),
+                }));
                 let _ = sender.send(Message::Finished { key: task_key, id }).await;
                 return;
             }
@@ -424,7 +460,7 @@ impl McpSignIns {
                 .await;
             let page = match &finished {
                 Ok(_) => Page::signed_in(&task_key.1),
-                Err(error) => Page::failed(&task_key.1, &format!("{error:#}")),
+                Err(error) => Page::failed(&task_key.1, &::diagnostics::chain(&error)),
             };
             runtime().spawn(respond(stream, page));
             let message = match finished {
@@ -435,7 +471,7 @@ impl McpSignIns {
                 Err(error) => Message::Phase {
                     key: task_key.clone(),
                     id,
-                    phase: McpSignInPhase::Failed(format!("{error:#}")),
+                    phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
                 },
             };
             let _ = sender.send(message).await;
@@ -453,7 +489,7 @@ impl McpSignIns {
         if let Some(state) = entry.state {
             runtime().spawn(async move {
                 if let Err(error) = client.mcp_sign_in_cancel(&state).await {
-                    tracing::debug!("cancelling an MCP sign-in: {error:#}");
+                    tracing::debug!(error = %::diagnostics::chain(&error), "cancelling an MCP sign-in");
                 }
             });
         }

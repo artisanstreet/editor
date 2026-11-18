@@ -31,8 +31,9 @@ pub use client::ForgeClient;
 pub use clock::{Clock, TimeSource};
 pub use connection::ConnectionStatus;
 pub use host::{
-    Attention, BlobImage, HostData, HostEvent, HostInstance, LiveSnapshot, ProjectionLoad,
-    ThreadPage, ThreadPageDirection, ThreadSummary, WslStatus,
+    Attention, BlobImage, HostData, HostEvent, HostInstance, HostSettings, LiveSnapshot,
+    LoadThreadError, MCP_SERVERS_KEY, McpServersError, ProjectionLoad, ThreadPage,
+    ThreadPageDirection, ThreadSummary, ThreadUnavailable, WslStatus,
 };
 pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,
@@ -42,10 +43,10 @@ pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 pub use range_window::RangeCompletion;
 pub use range_window::{CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow};
 pub use resident::{CollectionBytes, ResidentBytes};
-pub use screen::{DraggedThread, Screen, SettingsPage, SettingsSection};
+pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSection};
 #[cfg(feature = "test-support")]
 pub use services::RelayScript;
 pub use services::{RelayDialRequest, Services};
-pub use settings::{SetSettingError, Settings};
+pub use settings::{SetSettingError, Settings, StoredSettingError};
 pub use store::{Core, CoreEvent, OpenCoreError};
 pub mod diagnostics;

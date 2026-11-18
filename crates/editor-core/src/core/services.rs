@@ -1,8 +1,7 @@
-use anyhow::{Context as _, Result, bail};
 use artisan_account::network::{CoreSessionClient, SessionToken};
 
 use crate::core::ae::Ae;
-use crate::core::client::ForgeClient;
+use crate::core::client::{ForgeClient, RelayClientError};
 use crate::core::clock::Clock;
 use crate::core::runtime::run_http;
 use artisan_account::network::MachineEntry as AccountMachine;
@@ -26,8 +25,9 @@ pub enum RelayRoute {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub type RelayScript =
-    std::sync::Arc<dyn Fn(&RelayDialRequest) -> Result<ForgeClient> + Send + Sync>;
+pub type RelayScript = std::sync::Arc<
+    dyn Fn(&RelayDialRequest) -> Result<ForgeClient, RelayClientError> + Send + Sync,
+>;
 
 impl Services {
     #[must_use]
@@ -80,17 +80,48 @@ impl Drop for RelayDialRequest {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OpenRelayError {
+    #[error("the Relay is turned off (AST_RELAY_URL is empty), so {machine} cannot be reached")]
+    Off { machine: String },
+    #[error("make a connection key for {machine}")]
+    Key {
+        machine: String,
+        #[source]
+        source: artisan_account::MachineKeyError,
+    },
+    #[error("ask the account service for a Relay grant to {machine}")]
+    Grant {
+        machine: String,
+        #[source]
+        source: artisan_account::network::NetworkError,
+    },
+    #[error("dial {machine} through the Relay")]
+    Dial {
+        machine: String,
+        #[source]
+        source: Box<RelayClientError>,
+    },
+}
+
 pub async fn open_relay(
     route: RelayRoute,
     core: CoreSessionClient,
     session: SessionToken,
     account_id: String,
     machine: AccountMachine,
-) -> Result<ForgeClient> {
+) -> Result<ForgeClient, OpenRelayError> {
+    let machine_id = machine.id.clone();
     if matches!(route, RelayRoute::Off) {
-        bail!("the Relay is turned off (AST_RELAY_URL is empty)");
+        return Err(OpenRelayError::Off {
+            machine: machine_id,
+        });
     }
-    let keypair = artisan_account::MachineKeypair::generate().context("make a connection key")?;
+    let keypair =
+        artisan_account::MachineKeypair::generate().map_err(|source| OpenRelayError::Key {
+            machine: machine_id.clone(),
+            source,
+        })?;
     let public = keypair.public_b64u();
     let grant = run_http({
         let (core, session, machine_id) = (core.clone(), session.clone(), machine.id.clone());
@@ -100,7 +131,10 @@ pub async fn open_relay(
         }
     })
     .await
-    .context("ask the account service for a Relay grant")?;
+    .map_err(|source| OpenRelayError::Grant {
+        machine: machine_id.clone(),
+        source,
+    })?;
     let request = RelayDialRequest {
         account_id,
         machine_id: machine.id,
@@ -108,7 +142,7 @@ pub async fn open_relay(
         grant_jwt: grant.token,
         cnf_secret: *keypair.secret(),
     };
-    match route {
+    let dialed = match route {
         RelayRoute::Url(relay_base_url) => {
             let context = artisan_account::relay_client::RelayDialContext {
                 relay_base_url,
@@ -117,8 +151,12 @@ pub async fn open_relay(
             };
             ForgeClient::via_relay(request, &context).await
         }
-        RelayRoute::Off => bail!("the Relay is turned off"),
+        RelayRoute::Off => unreachable!("invariant: a Relay that is off was refused above"),
         #[cfg(any(test, feature = "test-support"))]
         RelayRoute::Scripted(open) => open(&request),
-    }
+    };
+    dialed.map_err(|source| OpenRelayError::Dial {
+        machine: machine_id,
+        source: Box::new(source),
+    })
 }

@@ -41,7 +41,7 @@ impl ArchiveForm {
         self.ids = host
             .map(|host| {
                 host.thread_page(true)
-                    .ids
+                    .ids()
                     .iter()
                     .filter(|id| host.threads.get(*id).is_some_and(|thread| thread.archived))
                     .cloned()

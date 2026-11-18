@@ -11,9 +11,9 @@ use std::{
 };
 
 mod open_thread;
+mod rail_refresh;
 mod read_watch;
 pub mod reveal;
-mod rail_refresh;
 mod wheel_sync;
 
 enum ConversationAction {
@@ -31,6 +31,7 @@ enum ConversationAction {
         crate::conversation::view::source_actions::CopySource,
     ),
     RetryControls(crate::conversation::presentation::PresentationScope),
+    RetryThread(crate::conversation::presentation::PresentationScope),
     Blob(
         crate::conversation::presentation::PresentationScope,
         artisan_api::ItemId,
@@ -644,11 +645,7 @@ impl RootViews {
                             .map(std::sync::Arc::<[u8]>::from)
                             .map_err(|error| {
                                 use crate::ui::media::source::MediaFailure;
-                                match error
-                                    .chain()
-                                    .find_map(|cause| cause.downcast_ref::<artisan_api::ApiError>())
-                                    .map(|error| error.code)
-                                {
+                                match error.api_code() {
                                     Some(artisan_api::ErrorCode::NotFound) => MediaFailure::Missing,
                                     Some(_) => MediaFailure::Unreadable,
                                     None => MediaFailure::Unreachable,
@@ -898,6 +895,32 @@ impl RootViews {
         });
         let mut controls = Vec::new();
         controls.extend(jump);
+        if workspace.conversation.agent.is_none()
+            && let Some(unavailable) = core
+                .host_if_instance(&scope.host, scope.instance)
+                .and_then(|host| host.thread_unavailable(&scope.thread))
+        {
+            let mut notice = crate::ui::page::notice(&theme, unavailable.to_string());
+            if matches!(unavailable, crate::core::ThreadUnavailable::Failed(_)) {
+                let actions = Rc::clone(&self.conversation_actions);
+                let scope = scope.clone();
+                notice = notice.action(
+                    crate::ui::kit::Button::text(
+                        "retry-thread",
+                        theme,
+                        crate::ui::kit::ButtonTone::Neutral,
+                        "Retry",
+                    )
+                    .on_activate(move |_| {
+                        actions
+                            .borrow_mut()
+                            .push_back(ConversationAction::RetryThread(scope.clone()))
+                    })
+                    .build(),
+                );
+            }
+            controls.push(notice.build());
+        }
         if workspace.conversation.agent.is_none() {
             if let Some(error) = core
                 .host_if_instance(&scope.host, scope.instance)
@@ -1341,7 +1364,8 @@ impl RootViews {
                 | ConversationAction::Copy(scope, _)
                 | ConversationAction::Media(scope, _, _, _)
                 | ConversationAction::Blob(scope, _, _, _)
-                | ConversationAction::RetryControls(scope) => scope,
+                | ConversationAction::RetryControls(scope)
+                | ConversationAction::RetryThread(scope) => scope,
             };
             if !shell
                 .entry
@@ -1426,6 +1450,13 @@ impl RootViews {
                     if let Some(host) = shell.core.host_mut_if_instance(&scope.host, scope.instance)
                     {
                         host.load_thread_summary(&scope.thread, true);
+                        changed = true;
+                    }
+                }
+                ConversationAction::RetryThread(scope) => {
+                    if let Some(host) = shell.core.host_mut_if_instance(&scope.host, scope.instance)
+                    {
+                        host.ensure_thread(&scope.thread);
                         changed = true;
                     }
                 }
@@ -1828,9 +1859,12 @@ impl RootViews {
         let reveal = workspace
             .conversation
             .reveal(workspace.conversation.clock().now());
-        let Some(node) = ui.tree().sole_node_with_key(aqua_ui::tree::hash_key(
-            aqua_ui::element::Key::from(crate::conversation::view::TRANSCRIPT_FRAME),
-        )) else {
+        let Some(node) =
+            ui.tree()
+                .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                    crate::conversation::view::TRANSCRIPT_FRAME,
+                )))
+        else {
             return false;
         };
         let Some(mut paint) = ui.tree().get(node).map(|record| record.paint().clone()) else {
@@ -2437,9 +2471,9 @@ impl RootViews {
             avatar: self.avatar.image(),
             limits: crate::ui::chrome::limits::resolve(
                 shell.core.active_host().into_iter().flat_map(|host| {
-                    host.engines
-                        .values()
-                        .filter_map(|status| status.usage.as_ref().map(|usage| (status.engine, usage)))
+                    host.engines.values().filter_map(|status| {
+                        status.usage.as_ref().map(|usage| (status.engine, usage))
+                    })
                 }),
             ),
         })
@@ -2733,15 +2767,21 @@ impl SectionViews for RootViews {
         let changed = causes.iter().any(|(_, fired)| *fired);
         for (cause, fired) in causes {
             let cause = match cause {
-                "anim_sidebar" if sidebar_resizing && !self.sidebar.resizing() => "anim_sidebar_settled",
-                "anim_sidebar" if sidebar_resizing || self.sidebar.resizing() => "anim_sidebar_resize",
+                "anim_sidebar" if sidebar_resizing && !self.sidebar.resizing() => {
+                    "anim_sidebar_settled"
+                }
+                "anim_sidebar" if sidebar_resizing || self.sidebar.resizing() => {
+                    "anim_sidebar_resize"
+                }
                 cause => cause,
             };
             crate::core::diagnostics::rebuild_stats::note(cause, fired);
         }
         self.apply_account_effects(shell, ctx, window, reduced);
         if self.sidebar.menu().open()
-            && causes.iter().any(|(cause, fired)| *cause == "anim_sidebar" && *fired)
+            && causes
+                .iter()
+                .any(|(cause, fired)| *cause == "anim_sidebar" && *fired)
         {
             self.sync_account_menu(shell, ui, ctx, window);
         }
@@ -2959,8 +2999,7 @@ impl SectionViews for RootViews {
                         theme,
                         card_width,
                         reduced,
-                        shell.preferences.streaming
-                            == crate::ui::preferences::StreamingMode::Swift,
+                        shell.preferences.streaming == crate::ui::preferences::StreamingMode::Swift,
                         app_media,
                         now,
                         false,
@@ -3157,11 +3196,12 @@ impl SectionViews for RootViews {
                                 .map(|_| workspace.conversation.agent_trail())
                                 .unwrap_or_default(),
                             title: crate::frame::projects::title_of(thread.title.as_deref()),
-                            location: (!project.id.is_scratch()).then(|| host
-                                .repository(&project.id)
-                                .and_then(|repository| repository.web_url.as_deref())
-                                .map(crate::sidebar::list::qualified_label)
-                                .unwrap_or_else(|| project.name.clone())),
+                            location: (!project.id.is_scratch()).then(|| {
+                                host.repository(&project.id)
+                                    .and_then(|repository| repository.web_url.as_deref())
+                                    .map(crate::sidebar::list::qualified_label)
+                                    .unwrap_or_else(|| project.name.clone())
+                            }),
                             url: host
                                 .repository(&project.id)
                                 .and_then(|repository| repository.web_url.clone()),
@@ -3423,35 +3463,33 @@ impl SectionViews for RootViews {
         let now = std::time::Instant::now();
         aqua_core::checkpoint::reach();
         self.sync_edges(shell, ui, ctx, window);
-        let mut action_changed =
-            crate::core::diagnostics::rebuild_stats::note("wheel", self.sync_wheel(shell, ui, ctx, window))
-                | crate::core::diagnostics::rebuild_stats::note(
-                    "dispatch",
-                    self.dispatch_conversation(shell, ui, ctx, window),
-                )
-                | crate::core::diagnostics::rebuild_stats::note(
-                    "sidebar",
-                    self.sync_sidebar(shell, ui, ctx, window),
-                )
-                | crate::core::diagnostics::rebuild_stats::note(
-                    "connection_anim",
-                    self.connection.animating(now, reduced),
-                )
-                | crate::core::diagnostics::rebuild_stats::note(
-                    "loading_anim",
-                    self.thread_loading.animating(now, reduced),
-                )
-                | crate::core::diagnostics::rebuild_stats::note(
-                    "landing_anim",
-                    self.thread_landing.animating(now, reduced),
-                );
+        let mut action_changed = crate::core::diagnostics::rebuild_stats::note(
+            "wheel",
+            self.sync_wheel(shell, ui, ctx, window),
+        ) | crate::core::diagnostics::rebuild_stats::note(
+            "dispatch",
+            self.dispatch_conversation(shell, ui, ctx, window),
+        ) | crate::core::diagnostics::rebuild_stats::note(
+            "sidebar",
+            self.sync_sidebar(shell, ui, ctx, window),
+        ) | crate::core::diagnostics::rebuild_stats::note(
+            "connection_anim",
+            self.connection.animating(now, reduced),
+        ) | crate::core::diagnostics::rebuild_stats::note(
+            "loading_anim",
+            self.thread_loading.animating(now, reduced),
+        ) | crate::core::diagnostics::rebuild_stats::note(
+            "landing_anim",
+            self.thread_landing.animating(now, reduced),
+        );
         if let Some(height) = self.composer_measurement.take() {
             if self
                 .composer_height
                 .is_none_or(|previous| (previous - height).abs() >= 0.5)
             {
                 self.composer_height = Some(height);
-                action_changed = crate::core::diagnostics::rebuild_stats::note("composer_height", true);
+                action_changed =
+                    crate::core::diagnostics::rebuild_stats::note("composer_height", true);
             }
         }
         let Some(rows) = &self.rows else {
@@ -3463,7 +3501,8 @@ impl SectionViews for RootViews {
         let Some(reveals) = early_reveals else {
             return action_changed;
         };
-        let mut changed = crate::core::diagnostics::rebuild_stats::note("reveals", reveals.frontier_changed);
+        let mut changed =
+            crate::core::diagnostics::rebuild_stats::note("reveals", reveals.frontier_changed);
         let reveal_active = reveals.changed || reveals.animating;
         let retry = self.pending_stall.observe(
             reveals.pending && !reveals.changed && !reveals.animating,
@@ -3716,28 +3755,29 @@ impl SectionViews for RootViews {
             let _tm = crate::shell::application::Tm::new("input.views.wheel");
             self.sync_wheel(shell, ui, ctx, window)
         };
-        let palette_changed = crate::core::diagnostics::rebuild_stats::note("in_wheel", wheel_changed)
-            | {
-                let _tm = crate::shell::application::Tm::new("input.views.palette");
-                crate::core::diagnostics::rebuild_stats::note(
-                    "in_palette",
-                    self.dispatch_palette(shell, ui) | self.dispatch_resource(shell, ui, ctx),
-                )
-            }
-            | {
-                let _tm = crate::shell::application::Tm::new("input.views.conversation");
-                crate::core::diagnostics::rebuild_stats::note(
-                    "in_conversation",
-                    self.dispatch_conversation(shell, ui, ctx, window),
-                )
-            }
-            | {
-                let _tm = crate::shell::application::Tm::new("input.views.sidebar");
-                crate::core::diagnostics::rebuild_stats::note(
-                    "in_sidebar",
-                    self.sync_sidebar(shell, ui, ctx, window),
-                )
-            };
+        let palette_changed =
+            crate::core::diagnostics::rebuild_stats::note("in_wheel", wheel_changed)
+                | {
+                    let _tm = crate::shell::application::Tm::new("input.views.palette");
+                    crate::core::diagnostics::rebuild_stats::note(
+                        "in_palette",
+                        self.dispatch_palette(shell, ui) | self.dispatch_resource(shell, ui, ctx),
+                    )
+                }
+                | {
+                    let _tm = crate::shell::application::Tm::new("input.views.conversation");
+                    crate::core::diagnostics::rebuild_stats::note(
+                        "in_conversation",
+                        self.dispatch_conversation(shell, ui, ctx, window),
+                    )
+                }
+                | {
+                    let _tm = crate::shell::application::Tm::new("input.views.sidebar");
+                    crate::core::diagnostics::rebuild_stats::note(
+                        "in_sidebar",
+                        self.sync_sidebar(shell, ui, ctx, window),
+                    )
+                };
         let failure_changed = if self.failure_dismissed.replace(false) {
             shell
                 .entry
@@ -3776,7 +3816,9 @@ impl SectionViews for RootViews {
         }
         if modifiers.is_empty()
             && event.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
-            && self.navigation.close(std::time::Instant::now(), Self::reduced(ui))
+            && self
+                .navigation
+                .close(std::time::Instant::now(), Self::reduced(ui))
         {
             self.navigation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);

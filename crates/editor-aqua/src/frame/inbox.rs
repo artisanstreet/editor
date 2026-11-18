@@ -121,14 +121,14 @@ pub fn view(
                 .build(),
         );
     }
-    if let Some(error) = sidebar.error.as_ref().or_else(|| {
+    if let Some(error) = sidebar.error.as_deref().or_else(|| {
         sidebar
             .host_data(core)
-            .and_then(|host| host.thread_page(false).error.as_ref())
+            .and_then(|host| host.thread_page(false).error())
     }) {
         column = column.child(
             TextRole::Caption
-                .text(&theme, error.clone())
+                .text(&theme, error.to_owned())
                 .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .build(),
         );

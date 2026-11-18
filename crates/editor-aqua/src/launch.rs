@@ -92,10 +92,12 @@ fn run(qualifying: bool) -> anyhow::Result<()> {
         .any(|arg| arg == "--source-encoded");
     anyhow::ensure!(
         !qualifying
-            || (!std::env::args()
-                .skip(1)
-                .any(|argument| crate::core::Screen::from_link(&argument).is_some())
-                && std::env::var_os("ARTISAN_EDITOR_SCRIPT").is_none()
+            || (!std::env::args().skip(1).any(|argument| {
+                !matches!(
+                    crate::core::Screen::from_link(&argument),
+                    Err(crate::core::DeepLinkError::NotALink)
+                )
+            }) && std::env::var_os("ARTISAN_EDITOR_SCRIPT").is_none()
                 && std::env::var_os("ARTISAN_EDITOR_CAPTURE").is_none()),
         "qualification does not accept an external route or legacy capture script"
     );
@@ -151,7 +153,14 @@ fn run(qualifying: bool) -> anyhow::Result<()> {
     aqua::native::startup_mark("runtime_ready");
     let link = std::env::args()
         .skip(1)
-        .find_map(|argument| crate::core::Screen::from_link(&argument));
+        .find_map(|argument| match crate::core::Screen::from_link(&argument) {
+            Ok(screen) => Some(screen),
+            Err(crate::core::DeepLinkError::NotALink) => None,
+            Err(error) => {
+                tracing::warn!(error = %::diagnostics::chain(&error), "ignored a link the Editor was opened with");
+                None
+            }
+        });
     let resources = ShellResources::for_runtime(&runtime, 1.0)
         .ok_or_else(|| anyhow::anyhow!("could not configure Editor layout"))?;
     let resources = resources.with_color_profile(aqua_core::ColorProfile::GpuiWindowsEncoded);

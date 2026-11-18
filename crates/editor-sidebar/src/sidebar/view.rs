@@ -117,7 +117,7 @@ fn visible_load_state(sidebar: &Sidebar, core: &Core) -> Option<(Option<String>,
         .filter(|host| host.is_live())
         .map(|host| {
             (
-                host.thread_page(false).error.clone(),
+                host.thread_page(false).error().map(str::to_owned),
                 host.project_icons_failed(),
             )
         })
@@ -768,7 +768,9 @@ fn thread_entries(
                     .width(Length::Pct(100.0))
                     .height(Length::Pct(100.0)),
             )
-            .estimated_row_height(Length::Px(super::geometry::ThreadLayout::Standalone.height()))
+            .estimated_row_height(Length::Px(
+                super::geometry::ThreadLayout::Standalone.height(),
+            ))
             .initial_height(move |index| heights.get(index).copied().unwrap_or(0.0))
             .virtualize()
             .overscan_pixels(READ_AHEAD)
@@ -876,10 +878,15 @@ pub fn thread_entries_view(
             ))
         })
         .collect();
-    let project_marks: HashMap<_, _> = entries.iter().filter_map(|entry| {
-        let Entry::Project { id, .. } = entry else { return None; };
-        Some((id.clone(), editor_ui::project_mark::Mark::of(host, id)))
-    }).collect();
+    let project_marks: HashMap<_, _> = entries
+        .iter()
+        .filter_map(|entry| {
+            let Entry::Project { id, .. } = entry else {
+                return None;
+            };
+            Some((id.clone(), editor_ui::project_mark::Mark::of(host, id)))
+        })
+        .collect();
     let row_entries = entries.clone();
     let row_emit = emit.clone();
     let row_host = host_id;
@@ -1059,9 +1066,9 @@ pub fn build(
         );
         if let Some(host) = sidebar.host_data(core) {
             if host.is_live()
-                && let Some(error) = &host.thread_page(false).error
+                && let Some(error) = host.thread_page(false).error()
             {
-                column = column.child(error_text(&theme, error.clone()));
+                column = column.child(error_text(&theme, error.to_owned()));
             }
             if host.project_icons_failed() {
                 let retry = emit.clone();
@@ -1084,14 +1091,9 @@ pub fn build(
                     .layout("column")
                     .child(error_text(&theme, error.clone()))
                     .child(
-                        Button::text(
-                            "sidebar-error-dismiss",
-                            theme,
-                            ButtonTone::Quiet,
-                            "Dismiss",
-                        )
-                        .on_activate(move |_| dismiss(ViewAction::DismissError))
-                        .build(),
+                        Button::text("sidebar-error-dismiss", theme, ButtonTone::Quiet, "Dismiss")
+                            .on_activate(move |_| dismiss(ViewAction::DismissError))
+                            .build(),
                     )
                     .build(),
             );

@@ -136,7 +136,7 @@ impl HostData {
         &mut self,
         project: ProjectId,
         generation: u64,
-        result: anyhow::Result<Option<BlobHash>>,
+        result: Result<Option<BlobHash>, crate::core::client::CallError>,
     ) -> bool {
         if !self
             .project_icons
@@ -152,7 +152,7 @@ impl HostData {
         let hash = match result {
             Ok(hash) => hash,
             Err(error) => {
-                tracing::debug!(%project, "project icon read failed: {error:#}");
+                tracing::debug!(%project, "project icon read failed: {}", ::diagnostics::chain(&error));
                 last.as_ref().and_then(|entry| entry.hash.clone())
             }
         };

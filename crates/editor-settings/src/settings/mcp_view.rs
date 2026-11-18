@@ -8,7 +8,6 @@ use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer};
 
 use super::{
     controller::SettingsController,
-    extensions::MCP_SERVERS_KEY,
     ui::{self, Ink},
     view::ViewAction,
 };
@@ -31,7 +30,9 @@ fn button(
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
+    ui::button(theme, id, label, tone, disabled, move || {
+        emit(action.clone())
+    })
 }
 
 fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
@@ -209,12 +210,10 @@ pub fn section(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let servers: Result<Vec<McpServer>, String> =
-        host.setting(MCP_SERVERS_KEY)
-            .map_or(Ok(Vec::new()), |value| {
-                serde_json::from_value(value.clone())
-                    .map_err(|error| format!("Couldn't read MCP servers: {error}"))
-            });
+    let servers: Result<Vec<McpServer>, String> = host
+        .mcp_servers()
+        .map(<[McpServer]>::to_vec)
+        .map_err(|error| format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error)));
     let auth: BTreeMap<String, McpAuthStatus> = host
         .setting(MCP_AUTH_KEY)
         .and_then(|value| serde_json::from_value(value.clone()).ok())

@@ -124,7 +124,7 @@ impl Drop for Entry {
 struct Completion {
     key: String,
     generation: u64,
-    result: anyhow::Result<ContentRange>,
+    result: Result<ContentRange, editor_core::client::RangeError>,
 }
 
 #[derive(Default)]

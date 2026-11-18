@@ -2,8 +2,8 @@ pub mod controller;
 pub mod presentation;
 pub mod view;
 
-use editor_core::{ForgeClient, HostId, Screen, SettingsPage};
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
+use editor_core::{ForgeClient, HostId, Screen, SettingsPage};
 use presentation::{Item, Kind};
 use std::time::{Duration, Instant};
 
@@ -152,7 +152,10 @@ impl Marketplace {
         client: &ForgeClient,
         request: &SearchRequest,
     ) -> anyhow::Result<Vec<Listing>> {
-        client.marketplace_search(&request.query).await
+        client
+            .marketplace_search(&request.query)
+            .await
+            .map_err(anyhow::Error::from)
     }
 
     pub fn finish_search(&mut self, request: &SearchRequest, result: anyhow::Result<Vec<Listing>>) {
@@ -237,8 +240,14 @@ impl Marketplace {
         request: &OperationRequest,
     ) -> anyhow::Result<Vec<CatalogSkill>> {
         match &request.operation {
-            Operation::Listing(id) => client.marketplace_install(id).await,
-            Operation::Skill { id, action } => client.skill_action(id, *action).await,
+            Operation::Listing(id) => client
+                .marketplace_install(id)
+                .await
+                .map_err(anyhow::Error::from),
+            Operation::Skill { id, action } => client
+                .skill_action(id, *action)
+                .await
+                .map_err(anyhow::Error::from),
         }
     }
 

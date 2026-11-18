@@ -54,7 +54,10 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
         CORE_URL,
         Arc::new(move |_| {
             let _ = blocked.lock().unwrap().recv();
-            anyhow::bail!("released")
+            Err(editor_aqua::core::ae::AeError::Failed {
+                command: "account status".to_owned(),
+                detail: "released".to_owned(),
+            })
         }),
         None,
     );
@@ -151,7 +154,10 @@ fn a_pairing_that_cannot_be_saved_is_not_left_connected_and_can_be_retried() {
         Arc::new(move |args| match args {
             ["account", ..] => Ok(status.clone()),
             ["pair", "--json"] => Ok(invite.clone()),
-            _ => anyhow::bail!("unexpected ae call {args:?}"),
+            _ => Err(editor_aqua::core::ae::AeError::Failed {
+                command: args.join(" "),
+                detail: "unexpected ae call".to_owned(),
+            }),
         }),
         None,
     );

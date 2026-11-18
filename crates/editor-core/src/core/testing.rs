@@ -8,7 +8,7 @@ pub fn save_onboarding_for_tests(
     base_url: &str,
     account_id: &str,
     machine_id: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), crate::core::config_file::WriteConfigError> {
     access::save_onboarding(
         &files.dir,
         &OnboardingRecord {

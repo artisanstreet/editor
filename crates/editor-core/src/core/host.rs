@@ -4,9 +4,11 @@ mod pages;
 pub use images::{BlobImage, BlobImages};
 mod preferences;
 mod project_icons;
+mod settings;
+pub use settings::{HostSettings, MCP_SERVERS_KEY, McpServersError};
 pub mod stopping;
 mod wsl;
-pub use pages::{ThreadPage, ThreadPageDirection};
+pub use pages::{LoadThreadError, ThreadPage, ThreadPageDirection, ThreadUnavailable};
 pub use wsl::WslStatus;
 
 use crate::core::{
@@ -62,8 +64,12 @@ impl ScopedSourceProvider {
         format: artisan_api::SourceIndexFormat,
         offset: Option<u64>,
         limit: u32,
-    ) -> Option<futures::future::BoxFuture<'static, anyhow::Result<artisan_api::SourceIndexRange>>>
-    {
+    ) -> Option<
+        futures::future::BoxFuture<
+            'static,
+            Result<artisan_api::SourceIndexRange, crate::core::client::RangeError>,
+        >,
+    > {
         let _authority = self.authority.upgrade()?;
         let client = self.client.clone();
         Some(Box::pin(async move {
@@ -77,8 +83,12 @@ impl ScopedSourceProvider {
         source: artisan_api::ContentRef,
         offset: u64,
         limit: u32,
-    ) -> Option<futures::future::BoxFuture<'static, anyhow::Result<artisan_api::ContentRange>>>
-    {
+    ) -> Option<
+        futures::future::BoxFuture<
+            'static,
+            Result<artisan_api::ContentRange, crate::core::client::RangeError>,
+        >,
+    > {
         let _authority = self.authority.upgrade()?;
         let client = self.client.clone();
         Some(Box::pin(async move {
@@ -183,48 +193,65 @@ pub(super) enum HostCompletion {
     ProjectIcon(
         ProjectId,
         u64,
-        anyhow::Result<Option<artisan_api::BlobHash>>,
+        Result<Option<artisan_api::BlobHash>, crate::core::client::CallError>,
     ),
-    Image(artisan_api::BlobHash, u64, anyhow::Result<Vec<u8>>),
+    Image(
+        artisan_api::BlobHash,
+        u64,
+        Result<Vec<u8>, crate::core::client::CallError>,
+    ),
     Preference(
         u64,
         preferences::Choice,
         preferences::Preference,
-        anyhow::Result<()>,
+        Result<(), crate::core::client::CallError>,
     ),
     WslProbe(
         u64,
         wsl::WslTarget,
-        anyhow::Result<Vec<crate::core::hosts::WslDistro>>,
+        Result<Vec<crate::core::hosts::WslDistro>, crate::core::hosts::WslStateError>,
     ),
-    WslStarted(String, anyhow::Result<()>),
+    WslStarted(String, Result<(), crate::core::hosts::StartWslForgeError>),
     ReadAck(ThreadId, artisan_api::Seq, u64, Thread),
     ThreadPage {
         archived: bool,
         direction: ThreadPageDirection,
         started_seq: artisan_api::Seq,
         generation: u64,
-        result: anyhow::Result<artisan_api::ThreadsPage>,
+        result: Result<artisan_api::ThreadsPage, crate::core::client::CallError>,
     },
-    ThreadLookup(ThreadId, u64, anyhow::Result<Thread>),
+    ThreadLookup(
+        ThreadId,
+        u64,
+        Result<Thread, crate::core::client::CallError>,
+    ),
     Summary(
         ThreadId,
         u64,
         artisan_api::Seq,
-        anyhow::Result<artisan_api::InspectorSummary>,
+        Result<artisan_api::InspectorSummary, crate::core::client::CallError>,
     ),
-    Prompt(u64, anyhow::Result<artisan_api::GlobalPrompt>),
-    Catalog(u64, anyhow::Result<Vec<artisan_api::CatalogSkill>>),
+    Prompt(
+        u64,
+        Result<artisan_api::GlobalPrompt, crate::core::client::CallError>,
+    ),
+    Catalog(
+        u64,
+        Result<Vec<artisan_api::CatalogSkill>, crate::core::client::CallError>,
+    ),
     Repository(
         ProjectId,
         u64,
-        anyhow::Result<Option<artisan_api::ProjectRepository>>,
+        Result<Option<artisan_api::ProjectRepository>, crate::core::client::CallError>,
     ),
     ClaudeAiCaptured(
         claude_ai_browser::Ticket,
         Result<artisan_api::ClaudeAiSession, claude_ai_browser::RenewError>,
     ),
-    ClaudeAiHanded(claude_ai_browser::Ticket, anyhow::Result<()>),
+    ClaudeAiHanded(
+        claude_ai_browser::Ticket,
+        Result<(), crate::core::client::CallError>,
+    ),
 }
 
 #[cfg(feature = "test-support")]
@@ -358,7 +385,7 @@ pub struct HostData {
     pub threads: HashMap<ThreadId, Thread>,
     pub runs: HashMap<ThreadId, Run>,
     stopping: HashMap<ThreadId, stopping::Stopping>,
-    pub settings: serde_json::Map<String, serde_json::Value>,
+    pub settings: HostSettings,
     pub engines: BTreeMap<EngineId, EngineStatus>,
     pub account: Option<Account>,
     pub global_prompt: Option<Arc<artisan_api::GlobalPrompt>>,
@@ -437,6 +464,7 @@ impl HostData {
             id: id.clone(),
             instance,
         };
+        let settings = HostSettings::new(id.clone());
         Self {
             instance,
             source_authority: RefCell::new(Rc::new(())),
@@ -450,7 +478,7 @@ impl HostData {
             threads: HashMap::new(),
             runs: HashMap::new(),
             stopping: HashMap::new(),
-            settings: serde_json::Map::new(),
+            settings,
             engines: BTreeMap::new(),
             account: None,
             global_prompt: None,
@@ -548,6 +576,9 @@ impl HostData {
     }
     pub fn setting(&self, key: &str) -> Option<&serde_json::Value> {
         self.settings.get(key)
+    }
+    pub fn mcp_servers(&self) -> Result<&[artisan_api::McpServer], &McpServersError> {
+        self.settings.mcp_servers()
     }
     pub fn retry_now(&self) {
         self.retry.notify_one();
@@ -731,7 +762,7 @@ impl HostData {
                         return;
                     }
                     Err(error) => {
-                        tracing::debug!(%id, "read acknowledgement will retry: {error:#}");
+                        tracing::debug!(%id, "read acknowledgement will retry: {}", ::diagnostics::chain(&error));
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
@@ -1029,7 +1060,7 @@ impl HostData {
                     for run in state.runs {
                         self.remember_run(run);
                     }
-                    self.settings = state.settings;
+                    self.settings = HostSettings::from_values(self.id.clone(), state.settings);
                     self.invalidate_prompt();
                     self.invalidate_catalog();
                     self.learn_wsl_distro(
@@ -1168,7 +1199,7 @@ impl HostData {
                                 state.dirty = false;
                             }
                         }
-                        Err(error) => state.error = Some(format!("Couldn't load thread details: {error:#}")),
+                        Err(error) => state.error = Some(format!("Couldn't load thread details: {}", ::diagnostics::chain(&error))),
                     }
                     events.push(HostEvent::ThreadSummaryChanged { thread_id: thread });
                 }
@@ -1194,8 +1225,10 @@ impl HostData {
                             }
                         }
                         Err(error) => {
-                            self.prompt_load.error =
-                                Some(format!("Couldn't read the global prompt: {error:#}"))
+                            self.prompt_load.error = Some(format!(
+                                "Couldn't read the global prompt: {}",
+                                ::diagnostics::chain(&error)
+                            ))
                         }
                     }
                     events.push(HostEvent::Changed);
@@ -1208,8 +1241,10 @@ impl HostData {
                     match result {
                         Ok(catalog) => self.skill_catalog = Some(Arc::new(catalog)),
                         Err(error) => {
-                            self.catalog_load.error =
-                                Some(format!("Couldn't list skills: {error:#}"))
+                            self.catalog_load.error = Some(format!(
+                                "Couldn't list skills: {}",
+                                ::diagnostics::chain(&error)
+                            ))
                         }
                     }
                     events.push(HostEvent::Changed);
@@ -1227,7 +1262,7 @@ impl HostData {
                     let value = match result {
                         Ok(value) => value,
                         Err(error) => {
-                            tracing::debug!(%project, "repository read failed: {error:#}");
+                            tracing::debug!(%project, "repository read failed: {}", ::diagnostics::chain(&error));
                             self.repositories
                                 .get(&project)
                                 .and_then(|entry| entry.value.clone())

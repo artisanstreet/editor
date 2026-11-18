@@ -54,7 +54,16 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
         }
     });
     let directory = tempfile::tempdir().unwrap();
-    let services = Services::scripted(&url, Arc::new(|_| anyhow::bail!("no ae")), None);
+    let services = Services::scripted(
+        &url,
+        Arc::new(|args| {
+            Err(editor_aqua::core::ae::AeError::Failed {
+                command: args.join(" "),
+                detail: "no ae".to_owned(),
+            })
+        }),
+        None,
+    );
     let mut core = Core::with_services(
         EditorFiles {
             dir: directory.path().to_owned(),

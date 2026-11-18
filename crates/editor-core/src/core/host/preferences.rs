@@ -115,15 +115,17 @@ impl HostData {
         generation: u64,
         choice: Choice,
         preference: Preference,
-        result: anyhow::Result<()>,
+        result: Result<(), crate::core::client::CallError>,
     ) -> bool {
         if self.preferences.generation != generation {
             return false;
         }
         if let Err(error) = result {
-            tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {error:#}");
-            self.preferences.writer =
-                Writer::Failed(format!("Couldn't save the model choice: {error:#}"));
+            tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {}", ::diagnostics::chain(&error));
+            self.preferences.writer = Writer::Failed(format!(
+                "Couldn't save the model choice: {}",
+                ::diagnostics::chain(&error)
+            ));
             return true;
         }
         self.preferences.writer = Writer::Idle;

@@ -1,4 +1,4 @@
-use crate::core::{ForgeClient, delivery::Delivery};
+use crate::core::{ForgeClient, client::RangeError, delivery::Delivery};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef};
 use futures::future::BoxFuture;
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
@@ -17,7 +17,7 @@ pub trait RangePage: Sized + 'static {
         client: &ForgeClient,
         source: &Self::Source,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>>;
+    ) -> BoxFuture<'static, Result<Self, RangeError>>;
 }
 
 impl RangePage for ContentRange {
@@ -41,7 +41,7 @@ impl RangePage for ContentRange {
         client: &ForgeClient,
         source: &ContentRef,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>> {
+    ) -> BoxFuture<'static, Result<Self, RangeError>> {
         let (client, source) = (client.clone(), source.clone());
         Box::pin(async move {
             client
@@ -72,7 +72,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
         client: &ForgeClient,
         source: &CollectionRef,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>> {
+    ) -> BoxFuture<'static, Result<Self, RangeError>> {
         let (client, source) = (client.clone(), source.clone());
         Box::pin(async move {
             client
@@ -96,7 +96,7 @@ pub struct RangeWindow<R: RangePage + Send> {
     requested: u64,
     generation: u64,
     read: Option<AbortOnDropHandle<()>>,
-    delivery: Delivery<(u64, anyhow::Result<R>)>,
+    delivery: Delivery<(u64, Result<R, RangeError>)>,
 }
 
 pub type ContentWindow = RangeWindow<ContentRange>;
@@ -105,12 +105,12 @@ pub type CollectionWindow<T> = RangeWindow<CollectionRange<T>>;
 #[cfg(feature = "test-support")]
 pub struct RangeCompletion<R: RangePage + Send> {
     generation: u64,
-    sender: crate::core::delivery::DeliverySender<(u64, anyhow::Result<R>)>,
+    sender: crate::core::delivery::DeliverySender<(u64, Result<R, RangeError>)>,
 }
 
 #[cfg(feature = "test-support")]
 impl<R: RangePage + Send> RangeCompletion<R> {
-    pub async fn complete(&self, result: anyhow::Result<R>) -> bool {
+    pub async fn complete(&self, result: Result<R, RangeError>) -> bool {
         self.sender.send((self.generation, result)).await.is_ok()
     }
 }
@@ -239,7 +239,9 @@ impl<R: RangePage + Send> RangeWindow<R> {
                     }
                     RangeState::Ready(page)
                 }
-                Err(error) => RangeState::Failed(format!("{}: {error:#}", R::FAILURE)),
+                Err(error) => {
+                    RangeState::Failed(format!("{}: {}", R::FAILURE, ::diagnostics::chain(&error)))
+                }
             };
             changed = true;
         }

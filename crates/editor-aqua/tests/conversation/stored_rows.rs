@@ -136,7 +136,9 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     deliver(
         &browser,
         &failed,
-        Err(anyhow::anyhow!("test failure")),
+        Err(editor_aqua::core::client::RangeError::InvalidSource {
+            source_id: artisan_api::ContentId("test failure".to_owned()),
+        }),
         &core,
     );
     assert!(matches!(
@@ -292,7 +294,10 @@ fn deliver(
     completion: &editor_aqua::core::RangeCompletion<
         artisan_api::CollectionRange<artisan_api::Question>,
     >,
-    result: anyhow::Result<artisan_api::CollectionRange<artisan_api::Question>>,
+    result: Result<
+        artisan_api::CollectionRange<artisan_api::Question>,
+        editor_aqua::core::client::RangeError,
+    >,
     core: &Core,
 ) {
     editor_aqua::core::runtime::runtime().block_on(async {

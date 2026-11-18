@@ -24,7 +24,6 @@
     clippy::semicolon_if_nothing_returned,
     clippy::similar_names,
     clippy::single_match_else,
-    clippy::string_slice,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::unnested_or_patterns,

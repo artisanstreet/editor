@@ -136,10 +136,7 @@ impl MarketplaceController {
         if let Some(host) = id.as_ref().and_then(|id| core.host_mut(id)) {
             host.load_skill_catalog(false);
             host.load_prompt(false);
-            let servers: Vec<McpServer> = host
-                .setting("mcp_servers")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                .unwrap_or_default();
+            let servers: Vec<McpServer> = host.mcp_servers().unwrap_or_default().to_vec();
             let loading = host.catalog_load().loading
                 && host
                     .skill_catalog

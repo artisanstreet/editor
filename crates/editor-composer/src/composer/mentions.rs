@@ -130,15 +130,12 @@ impl Mentions {
                 add(Kind::Skill, skill.name.clone(), skill.description.clone());
             }
         }
-        if let Some(Ok(servers)) = host
-            .setting("mcp_servers")
-            .map(|value| serde_json::from_value::<Vec<artisan_api::McpServer>>(value.clone()))
-        {
+        if let Ok(servers) = host.mcp_servers() {
             for server in servers {
                 add(
                     Kind::Connector,
-                    server.name,
-                    server.url.unwrap_or(server.command),
+                    server.name.clone(),
+                    server.url.clone().unwrap_or_else(|| server.command.clone()),
                 );
             }
         }

@@ -2,7 +2,8 @@ use crate::core::{
     ForgeClient,
     access::{self, EntryGate},
     account::{Account, AccountEvent, LocalForge},
-    config_file::ReadConfigError,
+    client::NewClientError,
+    config_file::{ReadConfigError, UpdateConfigError},
     delivery::{AdmissionOrder, Delivery},
     host::{HostData, HostEvent, HostInstance},
     hosts::{self, EditorFiles, HostConfig, HostId, HostKind, HostsFile, IdentityError},
@@ -12,7 +13,6 @@ use crate::core::{
     services::{self, Services},
     settings::{SetSettingError, Settings},
 };
-use anyhow::{Context as _, Result};
 use artisan_api::tls::Identity;
 use std::{
     collections::{HashMap, VecDeque},
@@ -39,7 +39,44 @@ enum Dial {
 struct Opened {
     id: HostId,
     generation: u64,
-    result: Result<(HostConfig, ForgeClient)>,
+    result: Result<(HostConfig, ForgeClient), DialError>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DialError {
+    #[error("this device has no identity to pair with {host}")]
+    NoIdentity { host: HostId },
+    #[error("pair with this machine's Forge")]
+    Pair(#[source] hosts::PairThisMachineError),
+    #[error("connect to this machine's Forge {host}")]
+    Client {
+        host: HostId,
+        #[source]
+        source: NewClientError,
+    },
+    #[error("sign in first to connect to {label} through the Relay")]
+    SignedOut { host: HostId, label: String },
+    #[error("connect to {label} through the Relay")]
+    Relay {
+        host: HostId,
+        label: String,
+        #[source]
+        source: services::OpenRelayError,
+    },
+    #[error("save the pairing with this machine's Forge {host}")]
+    Save {
+        host: HostId,
+        #[source]
+        source: UpdateConfigError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("forget the pairing with {host}")]
+pub struct RemoveHostError {
+    pub host: HostId,
+    #[source]
+    pub source: UpdateConfigError,
 }
 
 pub(crate) enum Effect {
@@ -99,6 +136,7 @@ pub struct Core {
     hosts_file: HostsFile,
     relay_configs: HashMap<HostId, HostConfig>,
     screen: Screen,
+    workspace_host: Option<HostId>,
     back: Vec<Screen>,
     pending_screen: Option<Screen>,
     gate: EntryGate,
@@ -202,6 +240,7 @@ impl Core {
             hosts_file,
             relay_configs: HashMap::new(),
             screen: Screen::Home,
+            workspace_host: None,
             back: Vec::new(),
             pending_screen: None,
             gate,
@@ -220,18 +259,23 @@ impl Core {
         core
     }
     #[cfg(feature = "test-support")]
-    pub fn for_tests(files: EditorFiles) -> Result<Self> {
+    pub fn for_tests(files: EditorFiles) -> Result<Self, OpenCoreError> {
         Self::for_tests_with_clock(files, crate::core::clock::Clock::system())
     }
     #[cfg(feature = "test-support")]
     pub fn for_tests_with_clock(
         files: EditorFiles,
         clock: crate::core::clock::Clock,
-    ) -> Result<Self> {
+    ) -> Result<Self, OpenCoreError> {
         use artisan_account::network::{AccountProfile, Jwk, MachineEntry};
         let services = Services::scripted(
             "http://127.0.0.1:1",
-            std::sync::Arc::new(|_| anyhow::bail!("no `ae` in component tests")),
+            std::sync::Arc::new(|args| {
+                Err(crate::core::ae::AeError::Failed {
+                    command: args.join(" "),
+                    detail: "no `ae` in component tests".to_owned(),
+                })
+            }),
             None,
         )
         .with_clock(clock);
@@ -260,9 +304,19 @@ impl Core {
         };
         core.account.sign_in_for_tests(profile, machine.id);
         core.gate = core.account.entry_gate();
-        let identity = core.identity.clone().context("test identity")?;
+        let identity = core
+            .identity
+            .clone()
+            .expect("invariant: Core::with_services opened an identity");
         for config in core.hosts_file.hosts.clone() {
-            let client = ForgeClient::new(&config.address, &config.fingerprint, &identity)?;
+            let client = ForgeClient::new(&config.address, &config.fingerprint, &identity)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "test host {} has no client: {}",
+                        config.id,
+                        ::diagnostics::chain(&error)
+                    )
+                });
             let mut host = HostData::new(
                 config.id.clone(),
                 config.name.clone(),
@@ -398,11 +452,28 @@ impl Core {
             || self.hosts_file.hosts.iter().any(|host| &host.id == id)
     }
     pub fn active_host(&self) -> Option<&HostData> {
-        self.screen
-            .host()
+        self.workspace_host
+            .as_ref()
             .and_then(|id| self.host(id))
             .or_else(|| self.hosts_file.last.as_ref().and_then(|id| self.host(id)))
             .or_else(|| self.hosts().next().map(|(_, host)| host))
+    }
+    fn show(&mut self, screen: Screen) -> Screen {
+        if let Some(host) = screen.host() {
+            self.workspace_host = Some(host.clone());
+            if self.hosts_file.last.as_ref() != Some(host) {
+                let last = host.clone();
+                match self.files.update_hosts(|file| file.last = Some(last)) {
+                    Ok(file) => self.hosts_file = file,
+                    Err(error) => tracing::warn!(
+                        host = %host,
+                        error = %::diagnostics::chain(&error),
+                        "couldn't remember the last host"
+                    ),
+                }
+            }
+        }
+        std::mem::replace(&mut self.screen, screen)
     }
     fn landing(&self, screen: Screen) -> Screen {
         if !matches!(self.gate, EntryGate::Ready { .. }) {
@@ -438,20 +509,7 @@ impl Core {
         if screen == self.screen {
             return;
         }
-        if let Some(host) = screen.host()
-            && self.hosts_file.last.as_ref() != Some(host)
-        {
-            let last = host.clone();
-            match self.files.update_hosts(|file| file.last = Some(last)) {
-                Ok(file) => self.hosts_file = file,
-                Err(error) => tracing::warn!(
-                    host = %host,
-                    error = %::diagnostics::chain(&error),
-                    "couldn't remember the last host"
-                ),
-            }
-        }
-        let previous = std::mem::replace(&mut self.screen, screen);
+        let previous = self.show(screen);
         self.back.push(previous);
         if self.back.len() > 50 {
             self.back.remove(0);
@@ -485,12 +543,14 @@ impl Core {
             return;
         }
         self.back.clear();
-        self.screen = self.landing(Screen::Home);
+        let landing = self.landing(Screen::Home);
+        self.show(landing);
         self.events.push(CoreEvent::ScreenChanged);
     }
     pub fn go_back(&mut self) {
         if let Some(screen) = self.back.pop() {
-            self.screen = self.landing(screen);
+            let landing = self.landing(screen);
+            self.show(landing);
             if let Screen::Thread { host, thread } = &self.screen
                 && let Some(host) = self.hosts.get_mut(host)
             {
@@ -510,15 +570,19 @@ impl Core {
                 source: source.clone(),
             });
         }
-        if self.settings.get(key) == Some(&value) {
+        if self.settings.get(key) == Some(&value) && self.settings.rejected(key).is_none() {
             return Ok(());
         }
+        crate::core::settings::check(key, &value).map_err(|source| SetSettingError::Invalid {
+            key: key.to_owned(),
+            source,
+        })?;
         let saved = self.files.update_settings(|settings| {
             settings.insert(key.to_owned(), value);
         });
         match saved {
             Ok(settings) => {
-                self.settings = Settings::Loaded(settings);
+                self.settings = Settings::validated(settings);
                 self.events.push(CoreEvent::SettingsChanged);
                 Ok(())
             }
@@ -547,13 +611,19 @@ impl Core {
         }
         self.events.push(CoreEvent::SettingsChanged);
     }
-    pub fn remove_host(&mut self, id: &HostId) -> Result<()> {
-        let file = self.files.update_hosts(|file| {
-            file.hosts.retain(|known| &known.id != id);
-            if file.last.as_ref() == Some(id) {
-                file.last = None;
-            }
-        })?;
+    pub fn remove_host(&mut self, id: &HostId) -> Result<(), RemoveHostError> {
+        let file = self
+            .files
+            .update_hosts(|file| {
+                file.hosts.retain(|known| &known.id != id);
+                if file.last.as_ref() == Some(id) {
+                    file.last = None;
+                }
+            })
+            .map_err(|source| RemoveHostError {
+                host: id.clone(),
+                source,
+            })?;
         self.hosts_file = file;
         self.relay_configs.remove(id);
         self.mcp_sign_ins.end_host(id);
@@ -561,9 +631,7 @@ impl Core {
             host.client.close_relay();
         }
         self.dials.remove(id);
-        if self.screen.host() == Some(id) {
-            self.navigate(Screen::Home);
-        }
+        self.forget_navigation_to(std::slice::from_ref(id));
         self.events.push(CoreEvent::HostsChanged);
         Ok(())
     }
@@ -576,7 +644,8 @@ impl Core {
         host: &HostId,
         server: &str,
         open: bool,
-    ) -> tokio::sync::oneshot::Receiver<Result<String>> {
+    ) -> tokio::sync::oneshot::Receiver<Result<String, crate::core::mcp_sign_in::StartMcpSignInError>>
+    {
         if let Some((instance, client)) = self
             .host_any(host)
             .map(|host| (host.instance(), host.client.clone()))
@@ -590,7 +659,12 @@ impl Core {
             );
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let _ = sender.send(Err(anyhow::anyhow!("This Forge is no longer connected.")));
+        let _ = sender.send(Err(
+            crate::core::mcp_sign_in::StartMcpSignInError::Disconnected {
+                host: host.clone(),
+                server: server.to_owned(),
+            },
+        ));
         receiver
     }
     pub fn cancel_mcp_sign_in(&mut self, host: &HostId, server: &str) {
@@ -645,25 +719,29 @@ impl Core {
         let task = runtime().spawn(async move {
             let result = if direct {
                 async {
-                    let identity = identity.context("this device has no identity to pair with")?;
+                    let identity = identity.ok_or_else(|| DialError::NoIdentity {
+                        host: task_id.clone(),
+                    })?;
                     let config = match saved {
                         Some(config) => config,
-                        None => {
-                            hosts::pair_this_machine(
-                                &ae,
-                                &identity,
-                                &device_name,
-                                task_id.clone(),
-                                machine.label,
-                            )
-                            .await?
-                        }
+                        None => hosts::pair_this_machine(
+                            &ae,
+                            &identity,
+                            &device_name,
+                            task_id.clone(),
+                            machine.label,
+                        )
+                        .await
+                        .map_err(DialError::Pair)?,
                     };
-                    let client = ForgeClient::new(&config.address, &config.fingerprint, &identity)?;
-                    anyhow::Ok((config, client))
+                    let client = ForgeClient::new(&config.address, &config.fingerprint, &identity)
+                        .map_err(|source| DialError::Client {
+                            host: task_id.clone(),
+                            source,
+                        })?;
+                    Ok((config, client))
                 }
                 .await
-                .context("connect to this machine's Forge")
             } else {
                 let label = machine.label.clone();
                 let config = HostConfig {
@@ -676,14 +754,22 @@ impl Core {
                         machine: machine.id.clone(),
                     },
                 };
-                async {
-                    let session = session.context("sign in first")?;
-                    services::open_relay(route, http, session, account_id, machine)
-                        .await
-                        .map(|client| (config, client))
+                match session {
+                    None => Err(DialError::SignedOut {
+                        host: task_id.clone(),
+                        label,
+                    }),
+                    Some(session) => {
+                        services::open_relay(route, http, session, account_id, machine)
+                            .await
+                            .map(|client| (config, client))
+                            .map_err(|source| DialError::Relay {
+                                host: task_id.clone(),
+                                label,
+                                source,
+                            })
+                    }
                 }
-                .await
-                .with_context(|| format!("connect to {label} through the Relay"))
             };
             let _ = sender
                 .send(Opened {
@@ -693,8 +779,12 @@ impl Core {
                 })
                 .await;
         });
-        self.dials
-            .insert(id, Dial::Opening { _task: AbortOnDropHandle::new(task) });
+        self.dials.insert(
+            id,
+            Dial::Opening {
+                _task: AbortOnDropHandle::new(task),
+            },
+        );
     }
     fn finish_dial(&mut self, opened: Opened) {
         if self.dial_generations.get(&opened.id) != Some(&opened.generation)
@@ -719,17 +809,18 @@ impl Core {
             });
             match saved {
                 Ok(file) => self.hosts_file = file,
-                Err(error) => {
+                Err(source) => {
+                    let error = DialError::Save {
+                        host: opened.id.clone(),
+                        source,
+                    };
                     tracing::error!(
                         host = %opened.id,
                         error = %::diagnostics::chain(&error),
                         "couldn't save the pairing with this machine's Forge"
                     );
                     self.dials.insert(opened.id, Dial::Failed);
-                    self.account.report(
-                        &anyhow::Error::new(error)
-                            .context("save the pairing with this machine's Forge"),
-                    );
+                    self.account.report(&error);
                     return;
                 }
             }
@@ -764,17 +855,25 @@ impl Core {
             self.relay_configs.remove(id);
             self.dials.remove(id);
         }
-        if self.screen.host().is_some_and(|host| ids.contains(host)) {
-            self.screen = Screen::Home;
+        self.forget_navigation_to(ids);
+        self.events.push(CoreEvent::HostsChanged);
+    }
+    fn forget_navigation_to(&mut self, ids: &[HostId]) {
+        let elsewhere = |screen: &Screen| screen.host().is_none_or(|host| !ids.contains(host));
+        self.back.retain(elsewhere);
+        self.pending_screen = self.pending_screen.take().filter(elsewhere);
+        if self
+            .workspace_host
+            .as_ref()
+            .is_some_and(|host| ids.contains(host))
+        {
+            self.workspace_host = None;
+        }
+        if !elsewhere(&self.screen) {
+            let landing = self.landing(Screen::Home);
+            self.show(landing);
             self.events.push(CoreEvent::ScreenChanged);
         }
-        self.back
-            .retain(|screen| screen.host().is_none_or(|host| !ids.contains(host)));
-        self.pending_screen = self
-            .pending_screen
-            .take()
-            .filter(|screen| screen.host().is_none_or(|host| !ids.contains(host)));
-        self.events.push(CoreEvent::HostsChanged);
     }
     fn reconcile(&mut self) {
         let gate = self.account.entry_gate();

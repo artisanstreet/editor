@@ -1675,7 +1675,6 @@ dependencies = [
 name = "editor-core"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "artisan-account",
  "artisan-api",
@@ -1685,6 +1684,7 @@ dependencies = [
  "diagnostics",
  "editor-core",
  "futures",
+ "getrandom 0.4.3",
  "reqwest",
  "ropey",
  "serde",
@@ -1729,6 +1729,7 @@ dependencies = [
  "aqua-text",
  "aqua-ui",
  "artisan-api",
+ "diagnostics",
  "editor-assets",
  "editor-core",
  "editor-ui",

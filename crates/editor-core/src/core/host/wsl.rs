@@ -22,7 +22,7 @@ impl HostData {
     pub fn set_pairing(&mut self, kind: &HostKind, address: &str) {
         self.wsl_target = match kind {
             HostKind::Wsl { distro } => WslTarget::Distro(distro.clone()),
-            HostKind::Local | HostKind::Remote if cfg!(windows) && is_loopback(address) => {
+            HostKind::Local | HostKind::Remote if cfg!(windows) && hosts::is_loopback(address) => {
                 WslTarget::Default
             }
             HostKind::Local | HostKind::Remote | HostKind::Account { .. } => WslTarget::None,
@@ -64,7 +64,12 @@ impl HostData {
             return;
         }
         self.wsl_awake = hosts::keep_wsl_awake(distro)
-            .inspect_err(|error| tracing::warn!("couldn't keep {distro} awake: {error:#}"))
+            .inspect_err(|error| {
+                tracing::warn!(
+                    "couldn't keep {distro} awake: {}",
+                    ::diagnostics::chain(error)
+                )
+            })
             .ok();
     }
     fn probe_wsl(&mut self) {
@@ -87,7 +92,7 @@ impl HostData {
         &mut self,
         generation: u64,
         target: WslTarget,
-        result: anyhow::Result<Vec<hosts::WslDistro>>,
+        result: Result<Vec<hosts::WslDistro>, hosts::WslStateError>,
     ) -> bool {
         if generation != self.wsl_generation {
             return false;
@@ -99,7 +104,10 @@ impl HostData {
         let distros = match result {
             Ok(distros) => distros,
             Err(error) => {
-                tracing::debug!("couldn't read WSL's state: {error:#}");
+                tracing::debug!(
+                    "couldn't read WSL's state: {}",
+                    ::diagnostics::chain(&error)
+                );
                 return false;
             }
         };
@@ -151,14 +159,25 @@ impl HostData {
         });
         self.wsl_start = Some(AbortOnDropHandle::new(task));
     }
-    pub(super) fn finish_wsl_start(&mut self, distro: String, result: anyhow::Result<()>) {
+    pub(super) fn finish_wsl_start(
+        &mut self,
+        distro: String,
+        result: Result<(), hosts::StartWslForgeError>,
+    ) {
         self.wsl_start = None;
         if let Some(wsl) = &mut self.wsl {
             wsl.starting = false;
-            wsl.error = result.as_ref().err().map(|error| format!("{error:#}"));
+            wsl.error = result
+                .as_ref()
+                .err()
+                .map(|error| ::diagnostics::chain(&error));
         }
         if let Err(error) = &result {
-            tracing::warn!(distro, "couldn't start Forge in WSL: {error:#}");
+            tracing::warn!(
+                distro,
+                "couldn't start Forge in WSL: {}",
+                ::diagnostics::chain(&error)
+            );
         }
         if self.wsl_target == WslTarget::Default {
             self.wsl_target = WslTarget::Distro(distro);
@@ -166,14 +185,4 @@ impl HostData {
         self.retry_now();
         self.probe_wsl();
     }
-}
-fn is_loopback(address: &str) -> bool {
-    let host = address
-        .rsplit_once(':')
-        .map_or(address, |(host, _)| host)
-        .trim_matches(['[', ']']);
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
 }

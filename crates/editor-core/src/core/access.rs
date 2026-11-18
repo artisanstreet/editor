@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use artisan_account::network::AccountProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::core::account::{AccountMachine, AccountPhase};
-use crate::core::config_file;
+use crate::core::config_file::{self, ReadConfigError, WriteConfigError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryGate {
@@ -63,15 +62,13 @@ pub fn load_onboarding(
     data_dir: &Path,
     base_url: &str,
     account_id: &str,
-) -> Result<Option<OnboardingRecord>> {
-    Ok(config_file::read(&onboarding_path(
-        data_dir, base_url, account_id,
-    ))?)
+) -> Result<Option<OnboardingRecord>, ReadConfigError> {
+    config_file::read(&onboarding_path(data_dir, base_url, account_id))
 }
 
-pub fn save_onboarding(data_dir: &Path, record: &OnboardingRecord) -> Result<()> {
-    Ok(config_file::write(
+pub fn save_onboarding(data_dir: &Path, record: &OnboardingRecord) -> Result<(), WriteConfigError> {
+    config_file::write(
         &onboarding_path(data_dir, &record.base_url, &record.account_id),
         record,
-    )?)
+    )
 }

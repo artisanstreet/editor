@@ -129,8 +129,8 @@ impl Sidebar {
         reduced_motion: bool,
     ) -> super::view::ThreadVisualFactory {
         let pulses = self.working_pulses.clone();
-        let truncate: super::row::TruncatedText =
-            std::rc::Rc::new(move |text, role: editor_ui::kit::TextRole, color, selector| {
+        let truncate: super::row::TruncatedText = std::rc::Rc::new(
+            move |text, role: editor_ui::kit::TextRole, color, selector| {
                 role.text(&theme, text)
                     .gpui_source_color(color)
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
@@ -141,7 +141,8 @@ impl Sidebar {
                     )
                     .build()
                     .debug_selector(selector)
-            });
+            },
+        );
         std::rc::Rc::new(move |row, image, host| {
             let id = row.id.clone();
             let pulses = pulses.clone();
@@ -445,10 +446,7 @@ impl Sidebar {
                         Ok(hits) => {
                             self.text_hits = Some(TextHits {
                                 query,
-                                rows: hits
-                                    .iter()
-                                    .filter_map(super::list::HitRow::of)
-                                    .collect(),
+                                rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
                             });
                             self.sync(core, now);
                         }
@@ -536,7 +534,9 @@ impl Sidebar {
     fn call<F, Fut>(&self, core: &Core, what: String, operation: F)
     where
         F: FnOnce(editor_core::ForgeClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), editor_core::client::CallError>>
+            + Send
+            + 'static,
     {
         let Some(host) = self
             .host
@@ -551,7 +551,7 @@ impl Sidebar {
         let client = host.client.clone();
         let sender = self.completions.sender();
         editor_core::runtime::runtime().spawn(async move {
-            let result = operation(client).await;
+            let result = operation(client).await.map_err(anyhow::Error::from);
             let _ = sender
                 .send(Completion::Action {
                     host: id,
@@ -677,12 +677,12 @@ impl Sidebar {
             viewport_height: viewport.viewport_height,
             above: viewport.distance_from_start,
             below: viewport.distance_from_end,
-            loading: page.loading,
-            loaded: page.loaded,
-            failed: page.error.is_some(),
+            loading: page.is_loading(),
+            loaded: page.is_loaded(),
+            failed: page.error().is_some(),
             scrolled,
-            at_latest: page.at_latest,
-            has_older: page.next.is_some(),
+            at_latest: page.at_latest(),
+            has_older: page.has_older(),
             history_open: self.history_open,
             history_empty: self.lists.history.is_empty(),
         };
@@ -698,7 +698,7 @@ impl Sidebar {
                 .as_ref()
                 .zip(self.host_instance)
                 .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
-            && !host.thread_page(false).at_latest
+            && !host.thread_page(false).at_latest()
         {
             host.load_threads(false, ThreadPageDirection::Latest);
         }
@@ -814,7 +814,7 @@ impl Sidebar {
                     host: host_id,
                     instance,
                     generation,
-                    result,
+                    result: result.map_err(anyhow::Error::from),
                 })
                 .await;
         }));
@@ -852,7 +852,7 @@ impl Sidebar {
                     instance,
                     generation,
                     query,
-                    result,
+                    result: result.map_err(anyhow::Error::from),
                 })
                 .await;
         }));
@@ -882,7 +882,7 @@ impl Sidebar {
                     host: host_id,
                     instance,
                     generation,
-                    result,
+                    result: result.map_err(anyhow::Error::from),
                 })
                 .await;
         });

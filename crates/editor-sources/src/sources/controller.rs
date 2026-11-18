@@ -1,9 +1,9 @@
 use super::{page_record, raw_rows};
+use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, TextContent};
 use editor_core::{
     CollectionWindow, ContentWindow, Core, ForgeClient, HostData, HostId, HostInstance, RangeState,
     delivery::Delivery, runtime::runtime,
 };
-use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, TextContent};
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -233,7 +233,13 @@ impl ContentText {
         self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let permit = COPIES.acquire().await.expect("copy semaphore stays open");
             let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-            let _ = sender.send(Completion::Copy(source, result, permit)).await;
+            let _ = sender
+                .send(Completion::Copy(
+                    source,
+                    result.map_err(anyhow::Error::from),
+                    permit,
+                ))
+                .await;
         })));
     }
 
@@ -278,7 +284,12 @@ impl ContentText {
         let sender = self.delivery.sender();
         self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = client.export_content(&source, path).await;
-            let _ = sender.send(Completion::Export(source, result)).await;
+            let _ = sender
+                .send(Completion::Export(
+                    source,
+                    result.map_err(anyhow::Error::from),
+                ))
+                .await;
         })));
     }
 

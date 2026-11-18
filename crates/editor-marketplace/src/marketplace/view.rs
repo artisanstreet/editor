@@ -100,6 +100,9 @@ pub fn build(
                 [
                     host.catalog_load().error.clone(),
                     host.prompt_load().error.clone(),
+                    host.mcp_servers().err().map(|error| {
+                        format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error))
+                    }),
                 ]
             })
             .chain([page.notice.clone()])
@@ -313,13 +316,18 @@ fn hero(
     .into_iter()
     .map(|(tab, text)| {
         let emit = emit.clone();
-        Link::new(format!("marketplace-kind-{tab:?}"), *theme, LinkTone::Crumb, text)
-            .current(kind == tab)
-            .on_activate(move || emit(ViewAction::SetKind(tab)))
-            .build()
-            .role(aqua_core::Role::Tab)
-            .aria_selected(kind == tab)
-            .debug_selector(format!("marketplace-kind-{tab:?}"))
+        Link::new(
+            format!("marketplace-kind-{tab:?}"),
+            *theme,
+            LinkTone::Crumb,
+            text,
+        )
+        .current(kind == tab)
+        .on_activate(move || emit(ViewAction::SetKind(tab)))
+        .build()
+        .role(aqua_core::Role::Tab)
+        .aria_selected(kind == tab)
+        .debug_selector(format!("marketplace-kind-{tab:?}"))
     });
     let tabs = UiBox::new()
         .spaced(Space::S16)
@@ -372,7 +380,12 @@ fn hero(
         .padded(Space::S32)
         .spaced(Space::S20)
         .style(Style::new().align(AlignItems::CENTER))
-        .child(TextRole::Heading.text(theme, "Marketplace").wrap(false).build())
+        .child(
+            TextRole::Heading
+                .text(theme, "Marketplace")
+                .wrap(false)
+                .build(),
+        )
         .child(
             UiBox::new()
                 .layout("column")
@@ -400,13 +413,18 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
         body.push(
             page::notice(theme, attention.clone())
                 .action(
-                    Button::text("marketplace-prompt-choose", *theme, ButtonTone::Quiet, "Open")
-                        .on_activate(move |_| {
-                            emit(ViewAction::Navigate(Screen::Settings(
-                                SettingsPage::GlobalPrompt,
-                            )))
-                        })
-                        .build(),
+                    Button::text(
+                        "marketplace-prompt-choose",
+                        *theme,
+                        ButtonTone::Quiet,
+                        "Open",
+                    )
+                    .on_activate(move |_| {
+                        emit(ViewAction::Navigate(Screen::Settings(
+                            SettingsPage::GlobalPrompt,
+                        )))
+                    })
+                    .build(),
                 )
                 .build(),
         );
@@ -450,7 +468,12 @@ fn found(theme: &ArtisanTheme, summary: &str, open: bool, emit: Rc<dyn Fn(ViewAc
         .child(
             UiBox::new()
                 .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-                .child(TextRole::Label.text(theme, summary.to_owned()).wrap(false).build())
+                .child(
+                    TextRole::Label
+                        .text(theme, summary.to_owned())
+                        .wrap(false)
+                        .build(),
+                )
                 .build(),
         )
         .child(

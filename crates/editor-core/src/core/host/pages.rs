@@ -1,6 +1,8 @@
 use super::{HostCompletion, HostData, HostEvent, HostMessage};
+use crate::core::{client::CallError, hosts::HostId};
 use artisan_api::{Thread, ThreadCursor, ThreadId, ThreadWindow, ThreadsQuery};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
 const PAGE: u32 = 200;
@@ -14,16 +16,91 @@ pub enum ThreadPageDirection {
 }
 
 #[derive(Default)]
+enum PageLoad {
+    #[default]
+    Unloaded,
+    Loading {
+        generation: u64,
+        first: bool,
+        changed: HashSet<ThreadId>,
+        _task: AbortOnDropHandle<()>,
+    },
+    Ready,
+    Failed(String),
+}
+
+#[derive(Default)]
 pub struct ThreadPage {
-    pub ids: Vec<ThreadId>,
-    pub next: Option<ThreadCursor>,
-    pub loading: bool,
-    pub loaded: bool,
-    pub error: Option<String>,
-    pub at_latest: bool,
-    task: Option<AbortOnDropHandle<()>>,
-    generation: u64,
-    changed: HashSet<ThreadId>,
+    ids: Vec<ThreadId>,
+    next: Option<ThreadCursor>,
+    at_latest: bool,
+    load: PageLoad,
+}
+
+impl ThreadPage {
+    #[must_use]
+    pub fn ids(&self) -> &[ThreadId] {
+        &self.ids
+    }
+    #[must_use]
+    pub const fn has_older(&self) -> bool {
+        self.next.is_some()
+    }
+    #[must_use]
+    pub const fn at_latest(&self) -> bool {
+        self.at_latest
+    }
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        matches!(self.load, PageLoad::Loading { .. })
+    }
+    #[must_use]
+    pub const fn is_loaded(&self) -> bool {
+        match self.load {
+            PageLoad::Unloaded => false,
+            PageLoad::Loading { first, .. } => !first,
+            PageLoad::Ready | PageLoad::Failed(_) => true,
+        }
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        match &self.load {
+            PageLoad::Failed(error) => Some(error),
+            PageLoad::Unloaded | PageLoad::Loading { .. } | PageLoad::Ready => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ThreadUnavailable {
+    Failed(Arc<LoadThreadError>),
+    Deleted,
+}
+
+impl std::fmt::Display for ThreadUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => {
+                write!(
+                    formatter,
+                    "Couldn't load this thread: {}",
+                    ::diagnostics::chain(&**error)
+                )
+            }
+            Self::Deleted => {
+                formatter.write_str("This thread was deleted after a long time without activity.")
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("load thread {thread} from {host}")]
+pub struct LoadThreadError {
+    pub host: HostId,
+    pub thread: ThreadId,
+    #[source]
+    pub source: CallError,
 }
 
 #[derive(Default)]
@@ -32,7 +109,7 @@ pub(super) struct ThreadPages {
     direct: HashMap<ThreadId, (u64, AbortOnDropHandle<()>)>,
     queued: VecDeque<ThreadId>,
     recent: VecDeque<ThreadId>,
-    errors: HashMap<ThreadId, String>,
+    unavailable: HashMap<ThreadId, ThreadUnavailable>,
     removed: HashSet<ThreadId>,
     generation: u64,
 }
@@ -43,11 +120,21 @@ impl HostData {
     }
     #[cfg(feature = "test-support")]
     pub fn test_thread_page_generation(&self, archived: bool) -> u64 {
-        self.thread_pages.pages[usize::from(archived)].generation
+        match &self.thread_pages.pages[usize::from(archived)].load {
+            PageLoad::Loading { generation, .. } => *generation,
+            PageLoad::Unloaded | PageLoad::Ready | PageLoad::Failed(_) => {
+                unreachable!(
+                    "invariant: the test asked for the generation of a page that is not loading"
+                )
+            }
+        }
+    }
+    pub fn thread_unavailable(&self, id: &ThreadId) -> Option<&ThreadUnavailable> {
+        self.thread_pages.unavailable.get(id)
     }
     pub fn fill_threads(&mut self) {
         let page = self.thread_page(false);
-        if page.loaded && !page.loading && page.error.is_none() && page.next.is_some() {
+        if matches!(page.load, PageLoad::Ready) && page.next.is_some() {
             self.load_threads(false, ThreadPageDirection::Older);
         }
     }
@@ -73,18 +160,18 @@ impl HostData {
         let page = ThreadPage {
             ids,
             next,
-            loaded: true,
             at_latest: true,
-            ..ThreadPage::default()
+            load: PageLoad::Ready,
         };
         self.thread_pages.pages[0] = page;
         self.fill_threads();
     }
     pub fn load_threads(&mut self, archived: bool, direction: ThreadPageDirection) {
         let page = &mut self.thread_pages.pages[usize::from(archived)];
-        if page.loading {
+        if page.is_loading() {
             return;
         }
+        let first_load = !page.is_loaded();
         let window = match direction {
             ThreadPageDirection::Latest => ThreadWindow::Latest,
             ThreadPageDirection::Older => {
@@ -103,9 +190,6 @@ impl HostData {
                 })
             }
         };
-        page.loading = true;
-        page.error = None;
-        page.changed.clear();
         let started_seq = self
             .threads
             .values()
@@ -114,7 +198,6 @@ impl HostData {
             .unwrap_or(0);
         self.thread_pages.generation = self.thread_pages.generation.wrapping_add(1);
         let generation = self.thread_pages.generation;
-        page.generation = generation;
         let query = ThreadsQuery {
             archived,
             window,
@@ -135,7 +218,12 @@ impl HostData {
                 })
                 .await;
         });
-        page.task = Some(AbortOnDropHandle::new(task));
+        self.thread_pages.pages[usize::from(archived)].load = PageLoad::Loading {
+            generation,
+            first: first_load,
+            changed: HashSet::new(),
+            _task: AbortOnDropHandle::new(task),
+        };
         self.pending_events.push(HostEvent::Changed);
     }
     pub(super) fn finish_thread_page(
@@ -144,22 +232,34 @@ impl HostData {
         direction: ThreadPageDirection,
         started_seq: artisan_api::Seq,
         generation: u64,
-        result: anyhow::Result<artisan_api::ThreadsPage>,
+        result: Result<artisan_api::ThreadsPage, crate::core::client::CallError>,
     ) -> bool {
         let page = &mut self.thread_pages.pages[usize::from(archived)];
-        if page.generation != generation || !page.loading {
-            return false;
-        }
-        page.loading = false;
-        page.loaded = true;
-        page.task = None;
+        let changed = match &mut page.load {
+            PageLoad::Loading {
+                generation: current,
+                changed,
+                ..
+            } if *current == generation => std::mem::take(changed),
+            PageLoad::Loading { .. }
+            | PageLoad::Unloaded
+            | PageLoad::Ready
+            | PageLoad::Failed(_) => {
+                return false;
+            }
+        };
         match result {
-            Err(error) => page.error = Some(format!("Couldn't load threads: {error:#}")),
-            Ok(result) => self.merge_thread_page(archived, direction, started_seq, result),
+            Err(error) => {
+                page.load = PageLoad::Failed(format!(
+                    "Couldn't load threads: {}",
+                    ::diagnostics::chain(&error)
+                ));
+            }
+            Ok(result) => {
+                page.load = PageLoad::Ready;
+                self.merge_thread_page(archived, direction, started_seq, result, &changed);
+            }
         }
-        self.thread_pages.pages[usize::from(archived)]
-            .changed
-            .clear();
         self.prune_threads();
         self.fill_threads();
         true
@@ -170,6 +270,7 @@ impl HostData {
         direction: ThreadPageDirection,
         started_seq: artisan_api::Seq,
         result: artisan_api::ThreadsPage,
+        changed: &HashSet<ThreadId>,
     ) {
         let older = matches!(direction, ThreadPageDirection::Older);
         let newer = matches!(direction, ThreadPageDirection::Newer);
@@ -216,7 +317,7 @@ impl HostData {
             }
         }
         if page.at_latest {
-            for id in &page.changed {
+            for id in changed {
                 if self.threads.get(id).is_some_and(|thread| {
                     thread.archived == archived && thread.parent_thread_id.is_none()
                 }) && !page.ids.contains(id)
@@ -245,7 +346,7 @@ impl HostData {
         if self.threads.contains_key(id) || self.thread_pages.direct.contains_key(id) {
             return;
         }
-        self.thread_pages.errors.remove(id);
+        self.thread_pages.unavailable.remove(id);
         self.thread_pages.queued.retain(|known| known != id);
         self.thread_pages.queued.push_back(id.clone());
         while self.thread_pages.queued.len() > 32 {
@@ -281,7 +382,7 @@ impl HostData {
         &mut self,
         id: ThreadId,
         generation: u64,
-        result: anyhow::Result<Thread>,
+        result: Result<Thread, crate::core::client::CallError>,
     ) -> bool {
         if !self
             .thread_pages
@@ -303,10 +404,21 @@ impl HostData {
                     self.threads.insert(id.clone(), thread);
                 }
             }
-            Err(error) => {
+            Err(source) => {
+                let error = LoadThreadError {
+                    host: self.id.clone(),
+                    thread: id.clone(),
+                    source,
+                };
+                tracing::warn!(
+                    host = %self.id,
+                    thread = %id,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't load a thread"
+                );
                 self.thread_pages
-                    .errors
-                    .insert(id.clone(), format!("Couldn't load thread: {error:#}"));
+                    .unavailable
+                    .insert(id.clone(), ThreadUnavailable::Failed(Arc::new(error)));
             }
         }
         self.prune_threads();
@@ -328,14 +440,10 @@ impl HostData {
         let top_level = thread.parent_thread_id.is_none();
         self.threads.insert(id.clone(), thread);
         for page in &mut self.thread_pages.pages {
-            if page.loading {
-                page.changed.insert(id.clone());
-                if page.changed.len() > CHANGES {
-                    page.task = None;
-                    page.loading = false;
-                    page.loaded = true;
-                    page.changed.clear();
-                    page.error = Some("The thread list changed while loading.".into());
+            if let PageLoad::Loading { changed, .. } = &mut page.load {
+                changed.insert(id.clone());
+                if changed.len() > CHANGES {
+                    page.load = PageLoad::Failed("The thread list changed while loading.".into());
                 }
             }
         }
@@ -343,7 +451,7 @@ impl HostData {
             .ids
             .retain(|known| known != &id);
         let page = &mut self.thread_pages.pages[index];
-        if top_level && page.loaded && (page.at_latest || page.ids.contains(&id)) {
+        if top_level && page.is_loaded() && (page.at_latest || page.ids.contains(&id)) {
             if !page.ids.contains(&id) {
                 page.ids.push(id);
             }
@@ -360,14 +468,15 @@ impl HostData {
         let pages = &mut self.thread_pages;
         for page in &mut pages.pages {
             page.ids.retain(|known| known != id);
-            page.changed.remove(id);
+            if let PageLoad::Loading { changed, .. } = &mut page.load {
+                changed.remove(id);
+            }
         }
         pages.direct.remove(id);
         pages.queued.retain(|known| known != id);
-        pages.errors.insert(
-            id.clone(),
-            "This thread was deleted after a long time without activity.".into(),
-        );
+        pages
+            .unavailable
+            .insert(id.clone(), ThreadUnavailable::Deleted);
         pages.removed.insert(id.clone());
         self.threads.remove(id);
         self.runs.remove(id);
@@ -378,7 +487,16 @@ impl HostData {
             .thread_pages
             .pages
             .iter()
-            .flat_map(|page| page.ids.iter().chain(page.changed.iter()).cloned())
+            .flat_map(|page| {
+                let changed = match &page.load {
+                    PageLoad::Loading { changed, .. } => Some(changed.iter()),
+                    PageLoad::Unloaded | PageLoad::Ready | PageLoad::Failed(_) => None,
+                };
+                page.ids
+                    .iter()
+                    .chain(changed.into_iter().flatten())
+                    .cloned()
+            })
             .chain(self.thread_pages.recent.iter().cloned())
             .collect();
         keep.extend(self.observed.borrow().iter().cloned());
@@ -402,7 +520,7 @@ impl HostData {
         self.waiting
             .retain(|id, items| self.threads.contains_key(id) || !items.is_empty());
         self.thread_pages
-            .errors
+            .unavailable
             .retain(|id, _| self.thread_pages.recent.contains(id));
     }
 }

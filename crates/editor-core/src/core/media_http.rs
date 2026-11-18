@@ -34,6 +34,38 @@ pub enum RedirectError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum MediaFetchError {
+    #[error("{url} is not a URL")]
+    Url {
+        url: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("{url} is not HTTP or HTTPS")]
+    Scheme { url: String },
+    #[error("fetch {url}")]
+    Fetch {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read {url}")]
+    Read {
+        url: String,
+        #[source]
+        source: crate::core::client::ReadBodyError,
+    },
+    #[error("follow a redirect")]
+    Redirect(#[source] RedirectError),
+    #[error("the fetch task for {url} stopped")]
+    Task {
+        url: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
 #[error("{host} has no address on the public internet")]
 struct NoPublicAddress {
     host: String,
@@ -83,35 +115,50 @@ impl MediaHttpClient {
         &self,
         url: &str,
         follow_redirects: bool,
-    ) -> BoxFuture<'static, anyhow::Result<MediaResponse>> {
+    ) -> BoxFuture<'static, Result<MediaResponse, MediaFetchError>> {
         let first = self.first.clone();
         let onward = self.onward.clone();
-        let url = url::Url::parse(url);
+        let requested = url.to_owned();
+        let parsed = url::Url::parse(url);
         Box::pin(async move {
-            let url = url?;
-            anyhow::ensure!(
-                matches!(url.scheme(), "http" | "https"),
-                "Media requires HTTP or HTTPS"
-            );
+            let url = parsed.map_err(|source| MediaFetchError::Url {
+                url: requested.clone(),
+                source,
+            })?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err(MediaFetchError::Scheme { url: requested });
+            }
             let task = AbortOnDropHandle::new(runtime().spawn(async move {
                 let mut url = url;
                 let mut client = first;
                 for _ in 0..=MAX_REDIRECTS {
-                    let response = client.get(url.clone()).send().await?;
+                    let response = client.get(url.clone()).send().await.map_err(|source| {
+                        MediaFetchError::Fetch {
+                            url: url.to_string(),
+                            source,
+                        }
+                    })?;
                     let status = response.status();
                     if !follow_redirects || !follows(status) {
-                        let body = crate::core::client::read_body(response, MAX_BODY_BYTES).await?;
-                        return Ok::<_, anyhow::Error>(MediaResponse { status, body });
+                        let body = crate::core::client::read_body(response, MAX_BODY_BYTES)
+                            .await
+                            .map_err(|source| MediaFetchError::Read {
+                                url: url.to_string(),
+                                source,
+                            })?;
+                        return Ok(MediaResponse { status, body });
                     }
-                    url = next_hop(&url, response.headers())?;
+                    url = next_hop(&url, response.headers()).map_err(MediaFetchError::Redirect)?;
                     client = onward.clone();
                 }
-                Err(RedirectError::TooMany {
+                Err(MediaFetchError::Redirect(RedirectError::TooMany {
                     url: url.to_string(),
-                }
-                .into())
+                }))
             }));
-            task.await?
+            task.await.map_err(|source| MediaFetchError::Task {
+                url: requested,
+                source,
+            })?
         })
     }
 }

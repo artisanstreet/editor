@@ -8,6 +8,8 @@ mod pages;
 mod preferences;
 #[path = "core/screen.rs"]
 mod screen;
+#[path = "core/host/settings.rs"]
+mod settings;
 #[path = "core/store.rs"]
 mod store;
 #[path = "core/hosts/wsl.rs"]

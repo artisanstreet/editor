@@ -93,3 +93,31 @@ fn an_unreadable_hosts_file_is_never_replaced() {
         b"{\"hosts\": [ truncated"
     );
 }
+
+#[test]
+fn local_addresses_are_recognised_in_any_spelling() {
+    for address in [
+        "localhost:4800",
+        "LOCALHOST:4800",
+        "LocalHost:4800",
+        "127.0.0.1:4800",
+        "127.8.9.10:4800",
+        "[::1]:4800",
+    ] {
+        assert!(
+            editor_core::hosts::is_loopback(address),
+            "{address} is this machine"
+        );
+    }
+    for address in [
+        "192.168.1.20:4800",
+        "[2001:db8::1]:4800",
+        "localhost.example.com:4800",
+        "forge.local:4800",
+    ] {
+        assert!(
+            !editor_core::hosts::is_loopback(address),
+            "{address} is another machine"
+        );
+    }
+}

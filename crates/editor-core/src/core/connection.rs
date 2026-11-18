@@ -1,9 +1,8 @@
-use crate::core::client::ForgeClient;
+use crate::core::client::{CallError, ForgeClient, ResponseError};
 use crate::core::delivery::MappedSender;
 use crate::core::host::HostMessage;
 use crate::core::hosts::HostId;
 use crate::core::runtime::runtime;
-use anyhow::{Context, Result, bail};
 use artisan_api::{Envelope, Event, Seq, ThreadId};
 use futures::StreamExt as _;
 use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
@@ -37,6 +36,60 @@ enum End {
     Closed,
     Reset,
     Observation,
+    Dropped,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("read Forge's state")]
+    State(#[source] CallError),
+    #[error("Forge did not open its event stream within 30 seconds")]
+    OpenTimedOut,
+    #[error("open the event stream")]
+    Open(#[source] reqwest::Error),
+    #[error("Forge refused the event stream")]
+    Refused(#[source] ResponseError),
+    #[error("read Forge's event stream")]
+    Read(#[source] reqwest::Error),
+    #[error("a Forge event exceeded the {limit}-byte frame limit; resnapshot required")]
+    FrameTooLarge { limit: usize },
+    #[error("Forge sent an invalid event; resnapshot required")]
+    InvalidEvent(#[source] serde_json::Error),
+    #[error("Forge's event protocol changed to {protocol}; update Forge or the Editor")]
+    ProtocolChanged { protocol: u32 },
+    #[error("subscribe to Forge's events through the Relay")]
+    Subscribe(#[source] artisan_account::relay_client::RelayCallError),
+    #[error("read Forge's events through the Relay")]
+    RelayEvent(#[source] artisan_account::relay_client::EventStreamError),
+    #[error("measure a Relay event")]
+    Encode(#[source] serde_json::Error),
+}
+
+impl SessionError {
+    fn code(&self) -> Option<artisan_api::ErrorCode> {
+        match self {
+            Self::State(error) => error.api_code(),
+            Self::Refused(error) => Some(error.code()),
+            Self::ProtocolChanged { .. } => Some(artisan_api::ErrorCode::VersionMismatch),
+            Self::Subscribe(error) => match &*error.failure {
+                artisan_account::relay_client::CallFailure::Refused(error) => Some(error.code),
+                artisan_account::relay_client::CallFailure::Closed
+                | artisan_account::relay_client::CallFailure::Open(_)
+                | artisan_account::relay_client::CallFailure::Exchange(_)
+                | artisan_account::relay_client::CallFailure::TimedOut
+                | artisan_account::relay_client::CallFailure::Decode(_)
+                | artisan_account::relay_client::CallFailure::Bytes(_)
+                | artisan_account::relay_client::CallFailure::TooLarge { .. } => None,
+            },
+            Self::OpenTimedOut
+            | Self::Open(_)
+            | Self::Read(_)
+            | Self::FrameTooLarge { .. }
+            | Self::InvalidEvent(_)
+            | Self::RelayEvent(_)
+            | Self::Encode(_) => None,
+        }
+    }
 }
 
 pub(super) fn follow(
@@ -81,14 +134,9 @@ pub(super) fn follow(
                         continue;
                     }
                     Ok(End::Observation) => continue,
+                    Ok(End::Dropped) => return,
                     Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
-                    Err(error) => (
-                        format!("{error:#}"),
-                        error
-                            .chain()
-                            .find_map(|cause| cause.downcast_ref::<artisan_api::ApiError>())
-                            .map(|error| error.code),
-                    ),
+                    Err(error) => (::diagnostics::chain(&error), error.code()),
                 };
                 attempt = attempt.saturating_add(1);
                 if updates
@@ -125,17 +173,15 @@ async fn session(
     observed: &mut watch::Receiver<Option<ThreadId>>,
     attempt: &mut u32,
     budget: &Arc<tokio::sync::Semaphore>,
-) -> Result<End> {
+) -> Result<End, SessionError> {
     let head = if let Some(head) = *since {
         head
     } else {
-        let state = client.state().await?;
+        let state = client.state().await.map_err(SessionError::State)?;
         let head = state.head;
-        updates
-            .send(Update::State(Box::new(state)))
-            .await
-            .ok()
-            .context("store closed")?;
+        if updates.send(Update::State(Box::new(state))).await.is_err() {
+            return Ok(End::Dropped);
+        }
         *since = Some(head);
         head
     };
@@ -160,14 +206,18 @@ async fn session(
             .send(),
     )
     .await
-    .context("Forge did not open its event stream")?
-    .context("open the event stream")?;
-    let response = crate::core::client::check(response).await?;
-    updates
+    .map_err(|_elapsed| SessionError::OpenTimedOut)?
+    .map_err(SessionError::Open)?;
+    let response = crate::core::client::check(response)
+        .await
+        .map_err(SessionError::Refused)?;
+    if updates
         .send(Update::Status(ConnectionStatus::Live))
         .await
-        .ok()
-        .context("store closed")?;
+        .is_err()
+    {
+        return Ok(End::Dropped);
+    }
     *attempt = 0;
     let mut stream = SseStream::with_decoder(SseDecoder::with_limit(FRAME_LIMIT));
     stream.attach(response.bytes_stream());
@@ -182,13 +232,12 @@ async fn session(
         };
         let event = match event {
             Ok(event) => event,
-            Err(SseStreamError::Inner(error)) => {
-                return Err(error).context("read Forge event stream");
-            }
-            Err(SseStreamError::PayloadTooLarge(error)) => {
+            Err(SseStreamError::Inner(error)) => return Err(SessionError::Read(error)),
+            Err(SseStreamError::PayloadTooLarge(_)) => {
                 *since = None;
-                return Err(error)
-                    .context("Forge event exceeded the frame limit; resnapshot required");
+                return Err(SessionError::FrameTooLarge {
+                    limit: FRAME_LIMIT.get(),
+                });
             }
         };
         let SseEvent::Message(message) = event else {
@@ -202,21 +251,22 @@ async fn session(
             && *protocol != artisan_api::PROTOCOL_VERSION
         {
             *since = None;
-            bail!(artisan_api::ApiError {
-                code: artisan_api::ErrorCode::VersionMismatch,
-                message: "Forge's event protocol changed; update Forge or the Editor".into()
+            return Err(SessionError::ProtocolChanged {
+                protocol: *protocol,
             });
         }
         let seq = envelope.seq;
         let permit = Arc::clone(budget)
             .acquire_many_owned(u32::try_from(message.data.len().max(1)).unwrap_or(u32::MAX))
             .await
-            .context("event queue closed")?;
-        updates
+            .expect("invariant: the event budget semaphore is never closed");
+        if updates
             .send(Update::Event(Box::new(envelope), permit))
             .await
-            .ok()
-            .context("store closed")?;
+            .is_err()
+        {
+            return Ok(End::Dropped);
+        }
         if let Some(seq) = seq {
             *since = Some(seq);
         }
@@ -236,34 +286,43 @@ async fn relay_session(
     observed: &mut watch::Receiver<Option<ThreadId>>,
     attempt: &mut u32,
     budget: &Arc<tokio::sync::Semaphore>,
-) -> Result<End> {
-    let relay = Arc::clone(client.relay().context("Relay transport missing")?);
+) -> Result<End, SessionError> {
+    let relay = Arc::clone(
+        client
+            .relay()
+            .expect("invariant: a relay session runs only for a Relay client"),
+    );
     let observation = observed.borrow_and_update().clone();
     let mut path = format!("/events?since={head}&summary=true");
     if let Some(thread) = observation {
         path.push_str("&thread=");
         path.push_str(&thread.to_string());
     }
-    let mut stream = relay.subscribe(&path).await?;
-    updates
+    let mut stream = relay
+        .subscribe(&path)
+        .await
+        .map_err(SessionError::Subscribe)?;
+    if updates
         .send(Update::Status(ConnectionStatus::Live))
         .await
-        .ok()
-        .context("store closed")?;
+        .is_err()
+    {
+        return Ok(End::Dropped);
+    }
     *attempt = 0;
     loop {
         let next = tokio::select! {
             next = stream.next_event() => next,
             () = retry.notified() => {
-                stream.unsubscribe().await.ok();
+                unsubscribe(&mut stream).await;
                 return Ok(End::Observation);
             },
             _ = observed.changed() => {
-                stream.unsubscribe().await.ok();
+                unsubscribe(&mut stream).await;
                 return Ok(End::Observation);
             },
         };
-        let Some(envelope) = next? else {
+        let Some(envelope) = next.map_err(SessionError::RelayEvent)? else {
             return Ok(End::Closed);
         };
         if matches!(envelope.event, Event::Reset) {
@@ -273,31 +332,41 @@ async fn relay_session(
             && *protocol != artisan_api::PROTOCOL_VERSION
         {
             *since = None;
-            bail!(artisan_api::ApiError {
-                code: artisan_api::ErrorCode::VersionMismatch,
-                message: "Forge's event protocol changed; update Forge or the Editor".into()
+            return Err(SessionError::ProtocolChanged {
+                protocol: *protocol,
             });
         }
         let seq = envelope.seq;
-        let raw = serde_json::to_vec(&envelope).context("encode the Forge event")?;
+        let raw = serde_json::to_vec(&envelope).map_err(SessionError::Encode)?;
         let permit = Arc::clone(budget)
             .acquire_many_owned(u32::try_from(raw.len().max(1)).unwrap_or(u32::MAX))
             .await
-            .context("event queue closed")?;
-        updates
+            .expect("invariant: the event budget semaphore is never closed");
+        if updates
             .send(Update::Event(Box::new(envelope), permit))
             .await
-            .ok()
-            .context("store closed")?;
+            .is_err()
+        {
+            return Ok(End::Dropped);
+        }
         if let Some(seq) = seq {
             *since = Some(seq);
         }
     }
 }
 
-fn decode_envelope(data: &str, since: &mut Option<Seq>) -> Result<Envelope> {
+async fn unsubscribe(stream: &mut artisan_account::relay_client::RelayEventStream) {
+    if let Err(error) = stream.unsubscribe().await {
+        tracing::debug!(
+            error = %::diagnostics::chain(&error),
+            "unsubscribe from Forge's events through the Relay"
+        );
+    }
+}
+
+fn decode_envelope(data: &str, since: &mut Option<Seq>) -> Result<Envelope, SessionError> {
     serde_json::from_str(data).map_err(|error| {
         *since = None;
-        anyhow::Error::from(error).context("Forge sent an invalid event; resnapshot required")
+        SessionError::InvalidEvent(error)
     })
 }

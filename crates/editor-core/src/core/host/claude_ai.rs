@@ -70,9 +70,13 @@ impl HostData {
         }
     }
 
-    pub(super) fn finish_claude_ai_handover(&mut self, ticket: Ticket, result: anyhow::Result<()>) {
+    pub(super) fn finish_claude_ai_handover(
+        &mut self,
+        ticket: Ticket,
+        result: Result<(), crate::core::client::CallError>,
+    ) {
         if let Err(error) = result {
-            tracing::warn!(host = %self.id, "the Forge did not take the renewed claude.ai session: {error:#}");
+            tracing::warn!(host = %self.id, "the Forge did not take the renewed claude.ai session: {}", ::diagnostics::chain(&error));
         }
         self.claude_ai.finished(ticket);
     }

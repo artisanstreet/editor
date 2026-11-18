@@ -908,7 +908,7 @@ impl Conversation {
                             origin,
                             fetch,
                             asked,
-                            result,
+                            result: result.map_err(anyhow::Error::from),
                         })
                         .await;
                 },
@@ -947,7 +947,7 @@ impl Conversation {
                 .send(Completion::Work {
                     origin,
                     first,
-                    result,
+                    result: result.map_err(anyhow::Error::from),
                 })
                 .await;
         })));
@@ -1169,7 +1169,7 @@ impl Conversation {
                     .send(Completion::Answer {
                         origin,
                         item: id,
-                        result,
+                        result: result.map_err(anyhow::Error::from),
                     })
                     .await;
             })),

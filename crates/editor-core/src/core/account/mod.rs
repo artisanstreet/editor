@@ -8,12 +8,11 @@ use crate::core::{
     runtime::runtime,
     services::Services,
 };
-use anyhow::{Context as _, Result};
 pub use artisan_account::browser::Provider;
 use artisan_account::browser::{self, Arrival, Handoff, Problem};
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
-use enrollment::AeBinding;
 pub use enrollment::LocalForge;
+use enrollment::{AeBinding, BindForgeError};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -96,6 +95,22 @@ impl SecondFactor {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum StartBrowserSignInError {
+    #[error("make the browser hand-off secrets")]
+    Handoff(#[source] getrandom::Error),
+    #[error("listen for the browser's redirect")]
+    Listen(#[source] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccountRequestError {
+    #[error("remove the Forge")]
+    RemoveForge(#[source] NetworkError),
+    #[error("sign out everywhere")]
+    SignOutEverywhere(#[source] NetworkError),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountEvent {
     Changed,
@@ -139,7 +154,7 @@ enum Message {
         Result<AccountProfile, NetworkError>,
         tokio::sync::oneshot::Sender<()>,
     ),
-    Binding(u64, Result<AeBinding>, bool),
+    Binding(u64, Result<AeBinding, BindForgeError>, bool),
     Request(u64, Result<(), NetworkError>, bool),
 }
 
@@ -339,15 +354,15 @@ impl Account {
     fn changed(&mut self) {
         self.events.account(AccountEvent::Changed);
     }
-    fn persist(&self) -> Result<()> {
-        Ok(config_file::write(
+    fn persist(&self) -> Result<(), config_file::WriteConfigError> {
+        config_file::write(
             &self.files.dir.join("account.json"),
             &AccountFile {
                 base_url: Some(self.base_url.clone()),
                 session_token: self.session.as_ref().map(|token| token.as_str().to_owned()),
                 profile: self.profile().cloned(),
             },
-        )?)
+        )
     }
     fn load_onboarding(&mut self) {
         let Some(id) = self.profile().map(|p| p.account_id.clone()) else {
@@ -358,13 +373,14 @@ impl Account {
             Ok(record) => self.onboarding = record,
             Err(error) => {
                 self.onboarding = None;
-                self.last_error = Some(format!("{error:#}"));
+                self.last_error = Some(::diagnostics::chain(&error));
             }
         }
     }
-    pub(crate) fn report(&mut self, error: &anyhow::Error) {
-        tracing::warn!("{error:#}");
-        self.last_error = Some(format!("{error:#}"));
+    pub(crate) fn report(&mut self, error: &dyn std::error::Error) {
+        let text = ::diagnostics::chain(error);
+        tracing::warn!(error = %text, "account step failed");
+        self.last_error = Some(text);
         self.changed();
     }
     fn clear_session(&mut self) {
@@ -380,7 +396,7 @@ impl Account {
         self.forge_generation += 1;
         self.request_generation += 1;
         if let Err(error) = self.persist() {
-            self.last_error = Some(format!("{error:#}"));
+            self.last_error = Some(::diagnostics::chain(&error));
         }
         self.changed();
     }
@@ -465,12 +481,19 @@ impl Account {
 
     pub fn sign_in_with(&mut self, provider: Provider, auth_origin: &str) -> Option<String> {
         let started = Handoff::generate()
-            .map_err(|error| anyhow::anyhow!("{error}"))
-            .and_then(|handoff| Ok((handoff, browser::bind()?)));
+            .map_err(StartBrowserSignInError::Handoff)
+            .and_then(|handoff| {
+                browser::bind()
+                    .map(|bound| (handoff, bound))
+                    .map_err(StartBrowserSignInError::Listen)
+            });
         let (handoff, (listener, port)) = match started {
             Ok(started) => started,
             Err(error) => {
-                tracing::warn!("couldn't start browser sign-in: {error:#}");
+                tracing::warn!(
+                    "couldn't start browser sign-in: {}",
+                    ::diagnostics::chain(&error)
+                );
                 self.phase = AccountPhase::Error {
                     message: format!("Couldn't start {} sign-in. Try again.", provider.name()),
                 };
@@ -584,7 +607,10 @@ impl Account {
             let http = self.http.clone();
             runtime().spawn(async move {
                 if let Err(error) = http.revoke_current(&session).await {
-                    tracing::warn!("couldn't revoke the session at Core: {error:#}");
+                    tracing::warn!(
+                        "couldn't revoke the session at Core: {}",
+                        ::diagnostics::chain(&error)
+                    );
                 }
             });
         }
@@ -650,15 +676,16 @@ impl Account {
                 if replace {
                     args.push("--replace");
                 }
+                let printed = ae.run(&args).await.map_err(BindForgeError::Enroll)?;
                 let enrollment: enrollment::Enrollment =
-                    serde_json::from_str(&ae.run(&args).await?)
-                        .context("read what `ae account enroll` printed")?;
+                    serde_json::from_str(&printed).map_err(BindForgeError::ReadEnrollment)?;
                 let code = artisan_account::normalise_code(&enrollment.code);
-                http.claim_enrollment(&session, &code).await?;
+                http.claim_enrollment(&session, &code)
+                    .await
+                    .map_err(BindForgeError::Claim)?;
                 enrollment::read_status(&ae, &core).await
             }
-            .await
-            .context("enroll this machine's Forge");
+            .await;
             let _ = sender
                 .send(Message::Binding(generation, result, false))
                 .await;
@@ -680,11 +707,12 @@ impl Account {
         self.last_error = None;
         self.forge = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = async {
-                http.claim_enrollment(&session, &code).await?;
+                http.claim_enrollment(&session, &code)
+                    .await
+                    .map_err(BindForgeError::Claim)?;
                 enrollment::read_status(&ae, &core).await
             }
-            .await
-            .context("claim the Forge's code");
+            .await;
             let _ = sender
                 .send(Message::Binding(generation, result, false))
                 .await;
@@ -713,11 +741,14 @@ impl Account {
                     "--account-id",
                     &account_id,
                 ])
-                .await?;
+                .await
+                .map_err(|source| BindForgeError::Confirm {
+                    account: account_id.clone(),
+                    source,
+                })?;
                 enrollment::read_status(&ae, &core).await
             }
-            .await
-            .context("confirm this machine's Forge");
+            .await;
             let _ = sender
                 .send(Message::Binding(generation, result, true))
                 .await;
@@ -809,7 +840,7 @@ impl Account {
                             self.session = Some(token);
                             self.phase = AccountPhase::Restoring;
                             if let Err(error) = self.persist() {
-                                self.last_error = Some(format!("{error:#}"));
+                                self.last_error = Some(::diagnostics::chain(&error));
                             }
                             self.changed();
                             self.refresh();
@@ -856,7 +887,7 @@ impl Account {
                                 self.load_onboarding();
                             }
                             if let Err(error) = self.persist() {
-                                self.last_error = Some(format!("{error:#}"));
+                                self.last_error = Some(::diagnostics::chain(&error));
                             }
                             if self.binding.is_none() && self.forge.is_none() {
                                 self.refresh_local_forge();
@@ -897,11 +928,11 @@ impl Account {
                         Ok(()) if remove => self.refresh(),
                         Ok(()) => self.clear_session(),
                         Err(error) if is_session_invalid(&error) => self.clear_session(),
-                        Err(error) => self.report(&anyhow::Error::new(error).context(if remove {
-                            "remove the Forge"
+                        Err(source) => self.report(&if remove {
+                            AccountRequestError::RemoveForge(source)
                         } else {
-                            "sign out everywhere"
-                        })),
+                            AccountRequestError::SignOutEverywhere(source)
+                        }),
                     }
                 }
                 _ => {}

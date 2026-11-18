@@ -160,7 +160,7 @@ impl SettingsController {
                 .sync(host.as_ref().and_then(|id| core.host(id)));
             if let Some(host) = host.as_ref().and_then(|id| core.host_mut(id)) {
                 let page = host.thread_page(true);
-                if !page.loaded && !page.loading {
+                if !page.is_loaded() && !page.is_loading() {
                     host.load_threads(true, ThreadPageDirection::Latest);
                 }
             }

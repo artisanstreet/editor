@@ -75,7 +75,7 @@ impl Silent {
     fn ids(&self, archived: bool) -> Vec<String> {
         let host = self.core.host(&self.host).expect("host");
         host.thread_page(archived)
-            .ids
+            .ids()
             .iter()
             .map(|id| id.0.clone())
             .collect()
@@ -92,7 +92,7 @@ impl Silent {
         let host = self.core.host_mut(&self.host).expect("host");
         host.load_threads(archived, direction);
         assert!(
-            host.thread_page(archived).loading,
+            host.thread_page(archived).is_loading(),
             "the page starts loading"
         );
         host.test_thread_page_generation(archived)
@@ -115,7 +115,7 @@ impl Silent {
                     .host(&host)
                     .expect("host")
                     .thread_page(archived)
-                    .loading
+                    .is_loading()
             },
         );
     }
@@ -254,7 +254,7 @@ fn archived_threads_land_only_in_the_archive_and_older_pages_append() {
             .host(&host)
             .expect("host")
             .thread_page(false)
-            .loading,
+            .is_loading(),
         "the list fills itself with the next older page"
     );
     let older = forge.generation(false);
