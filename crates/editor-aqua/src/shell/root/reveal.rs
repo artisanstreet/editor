@@ -29,6 +29,7 @@ enum Stage {
 
 pub(super) struct Reveal {
     hit: HitRow,
+    needle: String,
     stage: Stage,
     until: Instant,
 }
@@ -36,6 +37,7 @@ pub(super) struct Reveal {
 impl Reveal {
     pub(super) fn new(hit: HitRow) -> Self {
         Self {
+            needle: fold(&hit.needle),
             hit,
             stage: Stage::Opening,
             until: Instant::now() + PATIENCE,
@@ -43,24 +45,30 @@ impl Reveal {
     }
 }
 
+fn fold(needle: &str) -> String {
+    needle.chars().flat_map(char::to_lowercase).collect()
+}
+
 pub fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
-    let needle: String = needle.chars().flat_map(char::to_lowercase).collect();
+    find_folded(text, &fold(needle))
+}
+
+fn find_folded(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
     text.char_indices().find_map(|(start, _)| {
-        folded_match(text.get(start..)?, &needle).map(|end| start..start + end)
+        folded_match(text.get(start..)?, needle).map(|end| start..start + end)
     })
 }
 
 fn folded_match(text: &str, needle: &str) -> Option<usize> {
-    let mut folded = String::new();
+    let mut wanted = needle.chars().peekable();
+    wanted.peek()?;
     for (offset, character) in text.char_indices() {
-        if folded.len() >= needle.len() {
-            break;
+        for lower in character.to_lowercase() {
+            if wanted.next() != Some(lower) {
+                return None;
+            }
         }
-        folded.extend(character.to_lowercase());
-        if !needle.starts_with(&folded) {
-            return None;
-        }
-        if folded.len() == needle.len() {
+        if wanted.peek().is_none() {
             return Some(offset + character.len_utf8());
         }
     }
@@ -88,23 +96,23 @@ fn shown_match(
     ui: &UiApp,
     conversation: &Conversation,
     hit: &HitRow,
+    needle: &str,
 ) -> Option<(NodeId, std::ops::Range<usize>)> {
     item_rows(conversation, hit).into_iter().find_map(|index| {
         let key = crate::conversation::view::transcript::row_key_hash(
             &conversation.rows.get(index)?.0.key(),
         );
         let mut pending = vec![ui.tree().sole_node_with_key(key)?];
-        let mut texts = Vec::new();
         while let Some(node) = pending.pop() {
             let record = ui.tree().get(node)?;
             pending.extend(record.children.iter().rev().copied());
-            if let NodeKind::Text(text) = &record.kind {
-                texts.push((node, find_ignoring_case(text.text(), &hit.needle)));
+            if let NodeKind::Text(text) = &record.kind
+                && let Some(found) = find_folded(text.text(), needle)
+            {
+                return Some((node, found));
             }
         }
-        texts
-            .into_iter()
-            .find_map(|(node, found)| Some((node, found?)))
+        None
     })
 }
 
@@ -149,7 +157,7 @@ impl RootViews {
             }
             Stage::Jumped(_) | Stage::Deepened => {}
         }
-        if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit) {
+        if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit, &reveal.needle) {
             return match ui.select_text(node, range) {
                 true => {
                     self.reveal = None;
