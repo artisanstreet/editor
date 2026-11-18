@@ -1,5 +1,6 @@
 use super::AudioBlock;
 use crate::ui::kit::Space;
+use crate::ui::kit::control::focus_ring;
 use crate::ui::kit::{Button, ButtonSize, ButtonTone, Corner, IconSize, TextRole};
 
 const PLAY: f32 = 28.0;
@@ -9,11 +10,12 @@ use crate::ui::media::{
 };
 use crate::ui::rich::narrative::callout::GlyphFactory;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
-use aqua_core::{GpuiBackground, InputEvent, PointerButton, Rect};
+use aqua_core::{GpuiBackground, InputEvent, PointerButton, Rect, Role};
 use aqua_text::{FontFamily, overflow::OverflowMode};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{CaptureRequest, EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
+use aqua_ui::tree::ActivationSource;
 use editor_assets::AssetId;
 use editor_audio::{PlaybackState, Player, Snapshot};
 use editor_core::runtime::runtime;
@@ -31,7 +33,6 @@ use std::time::Duration;
 use tokio_util::task::AbortOnDropHandle;
 
 static NEXT_WAITER: AtomicU64 = AtomicU64::new(1);
-pub(crate) type ClickFactory = Rc<dyn Fn(Element, Rc<dyn Fn()>) -> Element>;
 struct Row {
     waiter: u64,
     line: Rc<Cell<Option<Rect>>>,
@@ -216,6 +217,61 @@ fn seek(player: &Player, line: &Rc<Cell<Option<Rect>>>, duration: Option<Duratio
         player.seek(duration.mul_f32(share));
     }
 }
+fn play_button(
+    row_id: &str,
+    theme: &ArtisanTheme,
+    shown: &Shown,
+    name: &str,
+    hovered: bool,
+    glyph: &GlyphFactory,
+    hover: Rc<dyn Fn(bool)>,
+    toggle: Rc<dyn Fn()>,
+) -> Element {
+    let button_color = if hovered {
+        theme.colors.pressed
+    } else {
+        theme.colors.hover
+    };
+    let (icon, action) = if matches!(shown, Shown::Playing { .. } | Shown::Loading) {
+        (AssetId::TABLER_PLAYER_PAUSE_FILLED, "Pause")
+    } else {
+        (AssetId::TABLER_PLAYER_PLAY_FILLED, "Play")
+    };
+    ui::Button::new()
+        .style(
+            Style::new()
+                .width(Length::Px(PLAY))
+                .height(Length::Px(PLAY))
+                .flex_shrink(0.0)
+                .align(aqua_ui::AlignItems::CENTER)
+                .justify(aqua_ui::JustifyContent::CENTER)
+                .gpui_background(GpuiBackground::Solid(button_color.to_reference_paint())),
+        )
+        .radius(Corner::Full.resolve(PLAY))
+        .child(glyph(
+            icon,
+            IconSize::Sm.px(),
+            theme.colors.text.to_reference_paint(),
+        ))
+        .on_activate_event(move |event| {
+            let secondary = matches!(
+                event.source,
+                Some(ActivationSource::Pointer { button, .. }) if button != PointerButton::Primary
+            );
+            if !secondary {
+                toggle();
+            }
+        })
+        .build()
+        .with_key(format!("{row_id}-button"))
+        .role(Role::Button)
+        .aria_label(format!("{action} {name}"))
+        .gpui_keyboard_activation()
+        .focusable(true)
+        .focus_visible_style(focus_ring(theme))
+        .cursor(aqua_core::CursorIcon::Pointer)
+        .on_hover_change(move |over| hover(over))
+}
 
 impl AudioBlock {
     pub(crate) fn view(
@@ -227,7 +283,6 @@ impl AudioBlock {
         player: &Player,
         state: AudioState,
         glyph: GlyphFactory,
-        click: ClickFactory,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let theme = *theme;
@@ -318,51 +373,27 @@ impl AudioBlock {
                 &row_id,
                 matches!(shown, Shown::Loading | Shown::Playing { .. }),
             );
-            let button_color = if hovered {
-                theme.colors.pressed
-            } else {
-                theme.colors.hover
-            };
-            let icon = if matches!(shown, Shown::Playing { .. } | Shown::Loading) {
-                AssetId::TABLER_PLAYER_PAUSE_FILLED
-            } else {
-                AssetId::TABLER_PLAYER_PLAY_FILLED
-            };
             let hovering = state.clone();
             let hover_id = row_id.clone();
             let hover_invalidate = invalidate.clone();
-            let button = ui::Box::new()
-                .style(
-                    Style::new()
-                        .width(Length::Px(PLAY))
-                        .height(Length::Px(PLAY))
-                        .flex_shrink(0.0)
-                        .align(aqua_ui::AlignItems::CENTER)
-                        .justify(aqua_ui::JustifyContent::CENTER)
-                        .gpui_background(GpuiBackground::Solid(button_color.to_reference_paint())),
-                )
-                .radius(Corner::Full.resolve(PLAY))
-                .child(glyph(
-                    icon,
-                    IconSize::Sm.px(),
-                    theme.colors.text.to_reference_paint(),
-                ))
-                .build()
-                .with_key(format!("{row_id}-button"))
-                .cursor(aqua_core::CursorIcon::Pointer)
-                .on_hover_change(move |over| {
-                    if let Some(row) = hovering.0.borrow_mut().rows.get_mut(&hover_id) {
-                        row.hovered = over;
-                    }
-                    hover_invalidate();
-                });
             let toggle_player = player.clone();
             let toggle_shown = shown.clone();
             let toggle_path = path.clone();
             let toggle_bytes = bytes.clone();
             let toggle_invalidate = invalidate.clone();
-            let button = click(
-                button,
+            let button = play_button(
+                &row_id,
+                &theme,
+                &shown,
+                &name,
+                hovered,
+                &glyph,
+                Rc::new(move |over| {
+                    if let Some(row) = hovering.0.borrow_mut().rows.get_mut(&hover_id) {
+                        row.hovered = over;
+                    }
+                    hover_invalidate();
+                }),
                 Rc::new(move || {
                     match &toggle_shown {
                         Shown::Playing { .. } | Shown::Loading => toggle_player.pause(),

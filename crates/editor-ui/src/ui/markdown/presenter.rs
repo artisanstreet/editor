@@ -1698,23 +1698,6 @@ impl MarkdownPresenter {
                     .entry(id.to_owned())
                     .or_default()
                     .insert(block_id.clone());
-                let click = Rc::new(move |element: Element, activate: Rc<dyn Fn()>| {
-                    ui::Button::new()
-                        .child(element)
-                        .on_activate_event(move |event| {
-                            if matches!(
-                                event.source,
-                                Some(aqua_ui::tree::ActivationSource::Pointer {
-                                    button: aqua_core::PointerButton::Primary,
-                                    ..
-                                })
-                            ) {
-                                activate();
-                            }
-                        })
-                        .build()
-                        .focusable(false)
-                });
                 let content = block.view(
                     &block_id,
                     theme,
@@ -1723,7 +1706,6 @@ impl MarkdownPresenter {
                     &services.player,
                     self.audio.clone(),
                     glyph.clone(),
-                    click,
                     invalidate.clone(),
                 );
                 let current_theme = *theme;

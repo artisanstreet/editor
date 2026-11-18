@@ -46,7 +46,6 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
             &player,
             state.clone(),
             Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build()),
-            Rc::new(|element, _| element),
             Rc::new(move || count.set(count.get() + 1)),
         )
     };
@@ -97,4 +96,76 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         );
         std::thread::yield_now();
     }
+}
+
+fn mounted(view: Element) -> aqua::UiApp {
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| view).unwrap();
+    app.set_viewport(600.0, 200.0, 1.0);
+    app.build_frame().unwrap();
+    app
+}
+
+fn press(app: &mut aqua::UiApp, key: Key) {
+    let event = KeyEvent {
+        key,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(event));
+    app.handle_input(&InputEvent::KeyUp(event));
+}
+
+fn node(app: &aqua::UiApp, role: aqua_core::Role, label: &str) -> aqua_core::SemanticNode {
+    app.tree()
+        .emit_semantics()
+        .into_iter()
+        .find(|node| node.role == role && node.label == label)
+        .unwrap_or_else(|| panic!("no {role:?} named {label:?}"))
+}
+
+fn fire(app: &aqua::UiApp, node: aqua_core::NodeId, kind: aqua_ui::tree::ActionKind) {
+    app.tree().fire_action(aqua_ui::tree::ActionEvent {
+        source: None,
+        node,
+        kind,
+        text: None,
+        focused: None,
+        request: None,
+    });
+}
+
+#[test]
+fn the_play_button_is_named_and_toggles_from_keyboard_and_assistive_tech() {
+    let toggles = Rc::new(Cell::new(0));
+    let count = Rc::clone(&toggles);
+    let button = |shown: &Shown| {
+        let count = Rc::clone(&count);
+        play_button(
+            "row",
+            &ArtisanTheme::resolved(),
+            shown,
+            "intro.ogg",
+            false,
+            &(Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build())
+                as GlyphFactory),
+            Rc::new(|_| {}),
+            Rc::new(move || count.set(count.get() + 1)),
+        )
+    };
+    let playing = mounted(button(&Shown::Playing {
+        position: Duration::ZERO,
+        duration: Duration::from_secs(1),
+    }));
+    node(&playing, aqua_core::Role::Button, "Pause intro.ogg");
+    let mut app = mounted(button(&Shown::Idle));
+    let play = node(&app, aqua_core::Role::Button, "Play intro.ogg");
+    assert!(play.focusable);
+    assert!(app.focus_key("row-button"));
+    press(&mut app, Key::Named(NamedKey::Enter));
+    assert_eq!(toggles.get(), 1);
+    press(&mut app, Key::Char(' '));
+    assert_eq!(toggles.get(), 2);
+    fire(&app, play.node, aqua_ui::tree::ActionKind::Activate);
+    assert_eq!(toggles.get(), 3);
 }
