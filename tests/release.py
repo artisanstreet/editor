@@ -220,6 +220,14 @@ class Release(unittest.TestCase):
         for version in ("1.2", "v1.2.3", "0.0.0-nightly.2026+aaaaaaaaaaaa", "1.2.3/../evil"):
             with self.assertRaises(ValueError):
                 release.tag_for(version)
+        self.assertTrue(release.advances("1.2.3", None))
+        self.assertTrue(release.advances("2.0.0", "1.9.9"))
+        self.assertTrue(release.advances("1.10.0", "1.9.0"))
+        self.assertFalse(release.advances("1.9.1", "2.0.0"))
+        self.assertFalse(release.advances("2.0.0", "2.0.0"))
+        self.assertTrue(release.advances("0.0.0-nightly.20261112220000+bbbbbbbbbbbb", "0.0.0-nightly.20261111220000+aaaaaaaaaaaa"))
+        self.assertFalse(release.advances("0.0.0-nightly.20261110220000+bbbbbbbbbbbb", "0.0.0-nightly.20261111220000+aaaaaaaaaaaa"))
+
     def test_version_stamp_updates_workspace_packages_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

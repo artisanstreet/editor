@@ -70,6 +70,19 @@ def tag_for(version):
     raise ValueError(f"no release tag for version {version!r}")
 
 
+def precedence(version):
+    if STABLE.fullmatch(version):
+        return tuple(int(part) for part in version.split(".")), 1, ""
+    nightly = NIGHTLY_VERSION.fullmatch(version)
+    if nightly:
+        return (0, 0, 0), 0, nightly[1]
+    raise ValueError(f"unordered release version {version!r}")
+
+
+def advances(candidate, current):
+    return current is None or precedence(candidate) > precedence(current)
+
+
 def public_key(value):
     value = value.strip().lower()
     if value.startswith(SPKI):
@@ -260,6 +273,9 @@ def main():
     listing.add_argument("--output", required=True)
     tagging = commands.add_parser("tag")
     tagging.add_argument("--version", required=True)
+    promotion = commands.add_parser("advances")
+    promotion.add_argument("--candidate", required=True)
+    promotion.add_argument("--current")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     if args.command == "key":
@@ -278,6 +294,8 @@ def main():
         print("\n".join(assets(Path(args.output))))
     elif args.command == "tag":
         print(tag_for(args.version))
+    elif args.command == "advances":
+        print(str(advances(args.candidate, args.current or None)).lower())
     elif args.command == "sign":
         sign(Path(args.output), os.environ["ARTISAN_RELEASE_SIGNING_KEY_PEM"], public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]))
 
