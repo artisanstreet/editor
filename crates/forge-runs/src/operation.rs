@@ -66,6 +66,13 @@ pub enum SendError {
         #[source]
         source: RegistryFileError,
     },
+    #[error("Forge stopped before it finished accepting message {item} for thread {thread}")]
+    Abandoned {
+        thread: ThreadId,
+        item: ItemId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
 }
 
 impl SendError {
@@ -77,7 +84,9 @@ impl SendError {
             Self::Store(store) => error::input(&store.cause),
             Self::Steer { source, .. } => source.class(),
             Self::Peer { source, .. } => source.class(),
-            Self::ReadThread(_) | Self::Route { .. } => ErrorClass::Internal,
+            Self::ReadThread(_) | Self::Route { .. } | Self::Abandoned { .. } => {
+                ErrorClass::Internal
+            }
         }
     }
 }

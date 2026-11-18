@@ -410,6 +410,30 @@ impl Hub {
         message: SendMessage,
         acceptance: forge_store::Acceptance,
     ) -> Result<Item, SendError> {
+        let hub = self.clone();
+        let thread = thread_id.clone();
+        let item = message.id.clone();
+        let accepting = self
+            .inner
+            .tasks
+            .spawn(async move { hub.accept_and_dispatch(&thread, message, acceptance).await });
+        match accepting.await {
+            Ok(accepted) => accepted,
+            Err(failure) if failure.is_panic() => std::panic::resume_unwind(failure.into_panic()),
+            Err(source) => Err(SendError::Abandoned {
+                thread: thread_id.clone(),
+                item,
+                source,
+            }),
+        }
+    }
+
+    async fn accept_and_dispatch(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+        acceptance: forge_store::Acceptance,
+    ) -> Result<Item, SendError> {
         let (item, created, saved_engine) = self
             .inner
             .store

@@ -416,6 +416,48 @@ async fn a_message_runs_and_the_reply_is_stored() {
     assert_eq!(thread.title.as_deref(), Some("Fix the login bug"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_whose_sender_hangs_up_mid_send_is_still_delivered() {
+    let fixture = fixture(Arc::new(|turn, io| {
+        Box::pin(async move {
+            io.emit(reply("m1", &format!("you said {}", turn.input.text)))
+                .await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    let mut sending = Box::pin(
+        fixture
+            .hub
+            .send_message(&fixture.thread_id, message("Ship the fix")),
+    );
+    assert!(
+        futures::poll!(sending.as_mut()).is_pending(),
+        "the send is still being written when the Editor's connection drops"
+    );
+    drop(sending);
+    test_support::wait::eventually(
+        "the message to be saved",
+        Duration::from_secs(10),
+        || async { !fixture.items().await.is_empty() },
+    )
+    .await;
+    let runs = fixture.settled().await;
+    assert_eq!(
+        runs.iter()
+            .map(artisan_api::Run::status)
+            .collect::<Vec<_>>(),
+        [RunStatus::Done]
+    );
+    assert_eq!(
+        texts(&fixture.items().await),
+        vec![
+            ("Ship the fix".to_owned(), Status::Done),
+            ("you said Ship the fix".to_owned(), Status::Done)
+        ]
+    );
+}
+
 /// Keeps a claude.ai session in the fixture's Claude home, as signing in
 /// does.
 fn sign_in_to_claude_ai(fixture: &Fixture) {
