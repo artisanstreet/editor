@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::SpansFixture;
 pub(crate) use view::{BarLabel, Services, SpansState, Tick, view};
 
 use super::super::kit;

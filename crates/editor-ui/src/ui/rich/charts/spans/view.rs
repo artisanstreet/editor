@@ -549,64 +549,6 @@ pub(crate) fn view(
     (services.navigation)(navigation, theme.colors.ring.to_reference_paint())
 }
 
-#[cfg(feature = "test-support")]
-pub struct SpansFixture {
-    model: Arc<Layout>,
-    state: SpansState,
-}
-#[cfg(feature = "test-support")]
-impl SpansFixture {
-    pub fn new(json: &str) -> Self {
-        let value = serde_json::from_str(json).expect("JSON");
-        let model = Arc::new(super::prepare(&value).expect("spans"));
-        let state = SpansState::default();
-        state.sync("test", &model);
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        let value = serde_json::from_str(json).expect("JSON");
-        self.model = Arc::new(super::prepare(&value).expect("spans"));
-        self.state.sync("test", &self.model);
-    }
-    pub fn selected(&self) -> Option<usize> {
-        self.state.sync("test", &self.model).0
-    }
-    pub fn generation(&self) -> u64 {
-        self.state.sync("test", &self.model).2
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        self.state.key("test", key, alt)
-    }
-    pub fn pending_reveal(&self) -> Option<(String, usize)> {
-        self.state.pending_reveal("test")
-    }
-    pub fn revealed(&self, key: &str, row: usize) {
-        self.state.revealed("test", key, row);
-    }
-    pub fn row(&self, index: usize) -> usize {
-        self.model.spans[index].row
-    }
-    pub fn hit(&self, row: usize, x: f32, y: f32) -> Option<usize> {
-        let (domain, _) = tick_values(&self.model, 560.0);
-        hit_bar(
-            &self.model,
-            domain,
-            row,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 560.0,
-                h: 32.0,
-            },
-            x,
-            y,
-        )
-    }
-    pub fn bar_center(&self, index: usize) -> f32 {
-        let (domain, _) = tick_values(&self.model, 560.0);
-        let span = &self.model.spans[index];
-        let left = 560.0 * domain.fraction(span.start);
-        let width = (560.0 * (domain.fraction(span.end) - domain.fraction(span.start))).max(2.0);
-        left + width / 2.0
-    }
-}
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/spans/view.rs"]
+mod tests;

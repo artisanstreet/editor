@@ -23,8 +23,6 @@ pub use sankey::SankeyFixture;
 pub mod scale;
 pub(crate) mod scene;
 pub(crate) mod spans;
-#[cfg(feature = "test-support")]
-pub use spans::SpansFixture;
 
 #[derive(Debug)]
 pub(crate) enum Prepared {
