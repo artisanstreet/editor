@@ -26,19 +26,26 @@ mod skills;
 mod tools;
 mod transport;
 
-pub use capabilities::{Capabilities, capabilities, usage};
+pub use capabilities::{Capabilities, CapabilitiesError, UsageError, capabilities, usage};
 pub use decoder::{ClaudeAiDecoder, ProtocolError, Stop};
 pub use rules::Rules;
-pub use session::{CookieChange, Session, cookie_change};
+pub use session::{
+    CookieChange, LoadSessionError, RemoveSessionError, SaveSessionError, Session,
+    UpdateSessionError, cookie_change,
+};
+pub use side::SideQueryError;
 pub use tools::{Allowed, Answer, Call, Plan, Runtime};
-pub use transport::{Backend, Events, HOST, Refusal, Request, Transport};
+pub use transport::{
+    Backend, BuildClientError, CompleteError, CreateConversationError, DeleteConversationError,
+    Events, HOST, OpenTransportError, Refusal, Refused, RenameConversationError, Request,
+    RequestError, StopError, StreamError, Transport, UploadError,
+};
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use anyhow::Context as _;
 use artisan_api::{ItemId, ItemKind, Status};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -89,7 +96,15 @@ impl Harness for ClaudeAiHarness {
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
-        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            side::compact(turn, cancel)
+                .await
+                .map_err(|source| crate::SideQueryError::ClaudeAi {
+                    thread,
+                    source: Box::new(source),
+                })
+        })
     }
 
     fn set_title(
@@ -109,7 +124,15 @@ impl Harness for ClaudeAiHarness {
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
-        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            side::compact(turn, cancel)
+                .await
+                .map_err(|source| crate::SideQueryError::ClaudeAi {
+                    thread,
+                    source: Box::new(source),
+                })
+        })
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -126,7 +149,12 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
                 "claude.ai mode is not signed in to claude.ai. Sign in under Settings → Claude Code → claude.ai mode, or run `ae engine login claude --claude-ai`.",
             );
         }
-        Err(error) => return Outcome::failed(format!("The claude.ai session: {error:#}")),
+        Err(error) => {
+            return Outcome::failed(format!(
+                "The claude.ai session: {}",
+                diagnostics::chain(&error)
+            ));
+        }
     };
     // A session claude.ai refused is not tried again until it is fixed, so
     // a turn does not knock on Cloudflare's door for nothing.
@@ -143,7 +171,7 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
     }
     let transport = match Transport::new(&turn.home, session) {
         Ok(transport) => transport,
-        Err(error) => return Outcome::failed(format!("{error:#}")),
+        Err(error) => return Outcome::failed(diagnostics::chain(&error)),
     };
     let thread = turn.thread_id.clone();
     let outcome = Box::pin(drive(&transport, turn, io)).await;
@@ -215,7 +243,7 @@ enum Read {
     /// We stopped reading while the provider may still be generating.
     Interrupted,
     /// The stream failed; its server completion still needs stopping.
-    Failed(anyhow::Error),
+    Failed(StreamError),
     /// The user stopped the turn.
     Cancelled,
 }
@@ -359,7 +387,8 @@ async fn drive_turn(
             () = io.cancel.cancelled() => {
                 if let Err(error) = stop(backend, &conversation).await {
                     return Outcome::failed(format!(
-                        "Could not stop claude.ai completion: {error:#}"
+                        "Could not stop claude.ai completion: {}",
+                        diagnostics::chain(&error)
                     ));
                 }
                 return Outcome::cancelled();
@@ -374,7 +403,7 @@ async fn drive_turn(
                 // thread's history.
                 if round == 0
                     && resumed.is_some()
-                    && error.downcast_ref::<Refusal>() == Some(&Refusal::ConversationGone)
+                    && error.refusal() == Some(&Refusal::ConversationGone)
                 {
                     tracing::info!(thread = %turn.thread_id, "the claude.ai conversation is gone; starting a new one");
                     emit(&io, EngineEvent::Session { id: String::new() }).await;
@@ -396,7 +425,8 @@ async fn drive_turn(
             if matches!(read, Read::Cancelled) {
                 if let Err(error) = stopped {
                     return Outcome::failed(format!(
-                        "Could not stop claude.ai completion: {error:#}"
+                        "Could not stop claude.ai completion: {}",
+                        diagnostics::chain(&error)
                     ));
                 }
                 return Outcome::cancelled();
@@ -410,7 +440,7 @@ async fn drive_turn(
         }
         drop(events);
         if let Some(failure) = decoder.take_failure() {
-            return refused(&anyhow::Error::new(failure));
+            return refused(&failure);
         }
         if let Some(error) = decoder.take_protocol_error() {
             return Outcome::failed(format!(
@@ -578,12 +608,32 @@ async fn read(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum StopCompletionError {
+    #[error("claude.ai did not confirm stopping the completion in conversation {conversation}")]
+    TimedOut { conversation: String },
+    #[error("stopping the previous claude.ai completion")]
+    Stop(#[source] StopError),
+}
+
+impl Refused for StopCompletionError {
+    fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Stop(source) => source.refusal(),
+            Self::TimedOut { .. } => None,
+        }
+    }
+}
+
 /// Bound cleanup even when the provider stops answering. A failed stop
 /// prevents a tool continuation from starting another server completion.
-async fn stop(backend: &dyn Backend, conversation: &str) -> anyhow::Result<()> {
+async fn stop(backend: &dyn Backend, conversation: &str) -> Result<(), StopCompletionError> {
     tokio::time::timeout(Duration::from_secs(15), backend.stop(conversation))
         .await
-        .context("claude.ai did not confirm stopping the previous completion")?
+        .map_err(|_elapsed| StopCompletionError::TimedOut {
+            conversation: conversation.to_owned(),
+        })?
+        .map_err(StopCompletionError::Stop)
 }
 
 /// Sends an event to Forge.
@@ -592,8 +642,8 @@ async fn emit(io: &RunIo, event: EngineEvent) {
 }
 
 /// The outcome of a request claude.ai refused, or that never reached it.
-fn refused(error: &anyhow::Error) -> Outcome {
-    match error.downcast_ref::<Refusal>() {
+fn refused(error: &impl Refused) -> Outcome {
+    match error.refusal() {
         Some(Refusal::Challenge) => Outcome::retryable(
             "claude.ai asked for a browser check. The device that signed in renews the session by itself; the turn carries on once it has.",
             Retry::Overloaded,
@@ -618,7 +668,7 @@ fn refused(error: &anyhow::Error) -> Outcome {
         Some(Refusal::Other(message)) => Outcome::failed(message.clone()),
         // It never reached claude.ai: the network is down or slow.
         None => Outcome::retryable(
-            format!("Could not reach claude.ai: {error:#}"),
+            format!("Could not reach claude.ai: {}", diagnostics::chain(error)),
             Retry::Overloaded,
         ),
     }
@@ -962,17 +1012,19 @@ async fn delete_conversation(ctx: &Calls<'_>, call: &Call, conversation: &str) {
         DELETE_TIMEOUT,
         ctx.backend.delete_conversation(conversation),
     )
-    .await
-    .unwrap_or_else(|_| Err(anyhow::anyhow!("claude.ai did not answer in time")));
-    if let Err(error) = deleted {
-        tracing::warn!(
-            thread = %ctx.turn.thread_id,
-            agent = %call.id,
-            conversation = %conversation,
-            step = "deleting a subagent's claude.ai conversation",
-            "the subagent's conversation was left behind: {error:#}"
-        );
-    }
+    .await;
+    let reason = match deleted {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => diagnostics::chain(&error),
+        Err(_elapsed) => "claude.ai did not answer in time".to_owned(),
+    };
+    tracing::warn!(
+        thread = %ctx.turn.thread_id,
+        agent = %call.id,
+        conversation = %conversation,
+        step = "deleting a subagent's claude.ai conversation",
+        "the subagent's conversation was left behind: {reason}"
+    );
 }
 
 /// Settles the agent item with the answer its nested turn produced.
@@ -1192,6 +1244,24 @@ async fn ask_user(call: &Call, inbox: &mut Inbox, io: &mut RunIo) -> Option<Answ
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AttachImageError {
+    #[error("creating {path} for an MCP image")]
+    Folder {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("writing the MCP image {path}")]
+    Write {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("uploading an MCP image")]
+    Upload(#[source] UploadError),
+}
+
 /// Uploads the images a call's MCP server returned, for the message that
 /// carries the results: claude.ai shows the model a message's files, not
 /// images inside its text.
@@ -1211,15 +1281,28 @@ async fn attach_images(
     for (index, image) in images.iter().enumerate() {
         let path = dir.join(format!("image-{}.{}", index + 1, image.extension()));
         let uploaded = async {
-            tokio::fs::create_dir_all(&dir).await?;
-            tokio::fs::write(&path, &image.data).await?;
-            backend.upload(&path).await
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|source| AttachImageError::Folder {
+                    path: dir.clone(),
+                    source,
+                })?;
+            tokio::fs::write(&path, &image.data)
+                .await
+                .map_err(|source| AttachImageError::Write {
+                    path: path.clone(),
+                    source,
+                })?;
+            backend
+                .upload(&path)
+                .await
+                .map_err(AttachImageError::Upload)
         }
         .await;
         match uploaded {
             Ok(file) => files.push(file),
             Err(error) => {
-                tracing::warn!(thread = %turn.thread_id, step = "uploading an MCP image", mime = %image.mime, "an MCP image could not be attached: {error:#}");
+                tracing::warn!(thread = %turn.thread_id, step = "uploading an MCP image", mime = %image.mime, "an MCP image could not be attached: {}", diagnostics::chain(&error));
                 failed += 1;
             }
         }
@@ -1392,7 +1475,7 @@ mod tests;
 pub(crate) async fn compact(
     turn: Turn,
     cancel: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<crate::SideReply> {
+) -> Result<crate::SideReply, SideQueryError> {
     side::compact(turn, cancel).await
 }
 
@@ -1402,6 +1485,33 @@ pub(crate) async fn compact(
 pub(crate) async fn side_query(
     turn: Turn,
     cancel: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<crate::SideReply> {
+) -> Result<crate::SideReply, SideQueryError> {
     side::compact(turn, cancel).await
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetTitleError {
+    #[error("opening claude.ai to rename conversation {conversation}")]
+    Open {
+        conversation: String,
+        #[source]
+        source: OpenTransportError,
+    },
+    #[error("renaming the claude.ai conversation")]
+    Rename(#[source] RenameConversationError),
+}
+
+pub(crate) async fn set_title(
+    home: &Path,
+    conversation: &str,
+    title: &str,
+) -> Result<(), SetTitleError> {
+    Transport::open(home)
+        .map_err(|source| SetTitleError::Open {
+            conversation: conversation.to_owned(),
+            source,
+        })?
+        .rename_conversation(conversation, title)
+        .await
+        .map_err(SetTitleError::Rename)
 }

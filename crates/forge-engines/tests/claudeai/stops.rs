@@ -10,13 +10,17 @@ fn ending(reason: &str) -> Reply {
 }
 
 fn reply_phase(log: &[EngineEvent]) -> Option<Phase> {
-    log.iter().rev().find_map(|event| match event {
-        EngineEvent::Item {
+    log.iter().rev().find_map(|event| {
+        if let EngineEvent::Item {
             status: Status::Done,
             kind: ItemKind::AssistantMessage { phase, .. },
             ..
-        } => Some(*phase),
-        _ => None,
+        } = event
+        {
+            Some(*phase)
+        } else {
+            None
+        }
     })
 }
 

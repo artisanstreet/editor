@@ -10,14 +10,13 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use sse_core::{SseDecoder, SseEvent, SseStream};
+use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
 
-use super::session::{Session, cookie_change};
+use super::session::{LoadSessionError, Session, cookie_change};
 use crate::process::MAX_LINE_BYTES;
 
 /// Where claude.ai lives.
@@ -237,29 +236,219 @@ fn quote(body: &str, status: reqwest::StatusCode) -> String {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RequestError {
+    #[error("reaching claude.ai for {method} {path}")]
+    Unreachable {
+        method: reqwest::Method,
+        path: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("claude.ai refused {method} {path}")]
+    Refused {
+        method: reqwest::Method,
+        path: String,
+        #[source]
+        source: Refusal,
+    },
+    #[error("reading claude.ai's answer to {method} {path}")]
+    Body {
+        method: reqwest::Method,
+        path: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("claude.ai's answer to {method} {path} is not JSON")]
+    NotJson {
+        method: reqwest::Method,
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+pub trait Refused: std::error::Error {
+    fn refusal(&self) -> Option<&Refusal>;
+}
+
+impl Refused for Refusal {
+    fn refusal(&self) -> Option<&Refusal> {
+        Some(self)
+    }
+}
+
+impl Refused for RequestError {
+    fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Refused { source, .. } => Some(source),
+            Self::Unreachable { .. } | Self::Body { .. } | Self::NotJson { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenTransportError {
+    #[error("reading the claude.ai session in {home}")]
+    Load {
+        home: PathBuf,
+        #[source]
+        source: LoadSessionError,
+    },
+    #[error("there is no claude.ai session in {home}")]
+    NoSession { home: PathBuf },
+    #[error("building the claude.ai client")]
+    Client(#[source] BuildClientError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("building the claude.ai client for {home}")]
+pub struct BuildClientError {
+    pub home: PathBuf,
+    #[source]
+    pub source: reqwest::Error,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("renaming claude.ai conversation {conversation}")]
+pub struct RenameConversationError {
+    pub conversation: String,
+    #[source]
+    pub source: RequestError,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CreateConversationError {
+    #[error("starting a claude.ai conversation")]
+    Request(#[source] RequestError),
+    #[error("claude.ai started a conversation without a uuid")]
+    NoUuid,
+}
+
+impl Refused for CreateConversationError {
+    fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Request(source) => source.refusal(),
+            Self::NoUuid => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("asking claude.ai to continue conversation {conversation}")]
+pub struct CompleteError {
+    pub conversation: String,
+    #[source]
+    pub source: RequestError,
+}
+
+impl Refused for CompleteError {
+    fn refusal(&self) -> Option<&Refusal> {
+        self.source.refusal()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the claude.ai event stream of conversation {conversation} failed")]
+pub struct StreamError {
+    pub conversation: String,
+    #[source]
+    pub source: SseStreamError<reqwest::Error>,
+}
+
+impl Refused for StreamError {
+    fn refusal(&self) -> Option<&Refusal> {
+        None
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UploadError {
+    #[error("reading {path} to upload it to claude.ai")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("uploading {path} to claude.ai")]
+    Request {
+        path: PathBuf,
+        #[source]
+        source: RequestError,
+    },
+    #[error("claude.ai took {path} without naming a file id")]
+    NoFileId { path: PathBuf },
+}
+
+impl Refused for UploadError {
+    fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Request { source, .. } => source.refusal(),
+            Self::Read { .. } | Self::NoFileId { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("stopping claude.ai's completion in conversation {conversation}")]
+pub struct StopError {
+    pub conversation: String,
+    #[source]
+    pub source: RequestError,
+}
+
+impl Refused for StopError {
+    fn refusal(&self) -> Option<&Refusal> {
+        self.source.refusal()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteConversationError {
+    #[error("reaching claude.ai to delete conversation {conversation}")]
+    Unreachable {
+        conversation: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("reading claude.ai's {status} answer to deleting conversation {conversation}")]
+    Body {
+        conversation: String,
+        status: reqwest::StatusCode,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("claude.ai answered {status} to deleting conversation {conversation}: {body}")]
+    Refused {
+        conversation: String,
+        status: reqwest::StatusCode,
+        body: String,
+    },
+}
+
 /// The stream of one completion: claude.ai's events, parsed.
-pub type Events = BoxStream<'static, anyhow::Result<Value>>;
+pub type Events = BoxStream<'static, Result<Value, StreamError>>;
 
 /// What a turn needs from claude.ai. The transport speaks to claude.ai;
 /// tests replay recorded streams.
 pub trait Backend: Send + Sync {
     /// Starts a conversation and returns its id.
-    fn create_conversation(&self) -> BoxFuture<'_, anyhow::Result<String>>;
+    fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>>;
     /// Asks claude.ai to continue a conversation.
     fn complete<'a>(
         &'a self,
         conversation: &'a str,
         request: &'a Request,
-    ) -> BoxFuture<'a, anyhow::Result<Events>>;
+    ) -> BoxFuture<'a, Result<Events, CompleteError>>;
     /// Uploads a file and returns its id for [`Request::files`].
-    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, anyhow::Result<String>>;
+    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>>;
     /// Stops the server's completion before another one may start.
-    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
+    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, Result<(), StopError>>;
     /// Deletes a conversation nothing will continue (a subagent's).
     fn delete_conversation<'a>(
         &'a self,
         conversation: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>>;
+    ) -> BoxFuture<'a, Result<(), DeleteConversationError>>;
 }
 
 /// A client for claude.ai's chat API.
@@ -276,9 +465,16 @@ impl Transport {
     ///
     /// Returns the error if there is no usable session or the HTTP client
     /// cannot be built.
-    pub fn open(home: &Path) -> anyhow::Result<Self> {
-        let session = Session::load(home)?.context("there is no claude.ai session")?;
-        Self::new(home, session)
+    pub fn open(home: &Path) -> Result<Self, OpenTransportError> {
+        let session = Session::load(home)
+            .map_err(|source| OpenTransportError::Load {
+                home: home.to_owned(),
+                source,
+            })?
+            .ok_or_else(|| OpenTransportError::NoSession {
+                home: home.to_owned(),
+            })?;
+        Self::new(home, session).map_err(OpenTransportError::Client)
     }
 
     /// A transport that talks as `session`, writing its cookies back to
@@ -287,14 +483,15 @@ impl Transport {
     /// # Errors
     ///
     /// Returns the error if the HTTP client cannot be built.
-    pub fn new(home: &Path, session: Session) -> anyhow::Result<Self> {
+    pub fn new(home: &Path, session: Session) -> Result<Self, BuildClientError> {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
-            // A completion's stream stays quiet while the model thinks, but
-            // claude.ai pings it every 15 seconds.
             .read_timeout(std::time::Duration::from_secs(120))
             .build()
-            .context("building the claude.ai client")?;
+            .map_err(|source| BuildClientError {
+                home: home.to_owned(),
+                source,
+            })?;
         Ok(Self {
             client,
             home: home.to_owned(),
@@ -326,8 +523,20 @@ impl Transport {
 
     /// Sends a request; claude.ai's cookie changes are kept, and a refusal
     /// is classified and recorded on the session.
-    async fn send(&self, request: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
-        let response = request.send().await.context("reaching claude.ai")?;
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        build: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, RequestError> {
+        let response = build(self.builder(method.clone(), path))
+            .send()
+            .await
+            .map_err(|source| RequestError::Unreachable {
+                method: method.clone(),
+                path: path.to_owned(),
+                source,
+            })?;
         self.keep_cookies(&response);
         let status = response.status();
         if status.is_success() {
@@ -337,10 +546,35 @@ impl Transport {
             .headers()
             .get("cf-mitigated")
             .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"challenge"));
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().await.map_err(|source| RequestError::Body {
+            method: method.clone(),
+            path: path.to_owned(),
+            source,
+        })?;
         let refusal = refusal(status, challenge, &body);
         self.record(&refusal);
-        Err(refusal.into())
+        Err(RequestError::Refused {
+            method,
+            path: path.to_owned(),
+            source: refusal,
+        })
+    }
+
+    async fn json(
+        method: reqwest::Method,
+        path: &str,
+        response: reqwest::Response,
+    ) -> Result<Value, RequestError> {
+        let text = response.text().await.map_err(|source| RequestError::Body {
+            method: method.clone(),
+            path: path.to_owned(),
+            source,
+        })?;
+        serde_json::from_str(&text).map_err(|source| RequestError::NotJson {
+            method,
+            path: path.to_owned(),
+            source,
+        })
     }
 
     /// Writes the cookies a response set back to the session.
@@ -363,7 +597,10 @@ impl Transport {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .apply(&changes);
         if let Err(error) = Session::update(&self.home, |session| session.apply(&changes)) {
-            tracing::warn!("keeping claude.ai's cookies failed: {error:#}");
+            tracing::warn!(
+                "keeping claude.ai's cookies failed: {}",
+                diagnostics::chain(&error)
+            );
         }
     }
 
@@ -383,7 +620,10 @@ impl Transport {
             | Refusal::Other(_) => return,
         };
         if let Err(error) = Session::update(&self.home, change) {
-            tracing::warn!("marking the claude.ai session failed: {error:#}");
+            tracing::warn!(
+                "marking the claude.ai session failed: {}",
+                diagnostics::chain(&error)
+            );
         }
     }
 
@@ -391,28 +631,40 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// Returns the error if claude.ai refuses the request.
-    pub async fn get(&self, path: &str) -> anyhow::Result<Value> {
-        let response = self.send(self.builder(reqwest::Method::GET, path)).await?;
-        let text = response
-            .text()
-            .await
-            .context("reading claude.ai's answer")?;
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    /// Returns the error if claude.ai refuses the request or its answer is
+    /// not JSON.
+    pub async fn get(&self, path: &str) -> Result<Value, RequestError> {
+        let response = self
+            .send(reqwest::Method::GET, path, |request| request)
+            .await?;
+        Self::json(reqwest::Method::GET, path, response).await
     }
 
     /// Saves the sidebar title on the native conversation too.
-    pub async fn rename_conversation(&self, conversation: &str, title: &str) -> anyhow::Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if claude.ai does not take the new name.
+    pub async fn rename_conversation(
+        &self,
+        conversation: &str,
+        title: &str,
+    ) -> Result<(), RenameConversationError> {
         let path = format!(
             "/api/organizations/{}/chat_conversations/{conversation}",
             self.org()
         );
-        self.send(
-            self.builder(reqwest::Method::PUT, &path)
+        let body = json!({ "name": title }).to_string();
+        self.send(reqwest::Method::PUT, &path, |request| {
+            request
                 .header("content-type", "application/json")
-                .body(serde_json::to_string(&json!({ "name": title }))?),
-        )
-        .await?;
+                .body(body)
+        })
+        .await
+        .map_err(|source| RenameConversationError {
+            conversation: conversation.to_owned(),
+            source,
+        })?;
         Ok(())
     }
 
@@ -421,19 +673,19 @@ impl Transport {
         path: &str,
         body: &Value,
         accept: &str,
-    ) -> anyhow::Result<reqwest::Response> {
-        self.send(
-            self.builder(reqwest::Method::POST, path)
+    ) -> Result<reqwest::Response, RequestError> {
+        self.send(reqwest::Method::POST, path, |request| {
+            request
                 .header("accept", accept)
                 .header("content-type", "application/json")
-                .body(serde_json::to_string(body)?),
-        )
+                .body(body.to_string())
+        })
         .await
     }
 }
 
 impl Backend for Transport {
-    fn create_conversation(&self) -> BoxFuture<'_, anyhow::Result<String>> {
+    fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>> {
         Box::pin(async move {
             let path = format!("/api/organizations/{}/chat_conversations", self.org());
             // Temporary: Forge's conversations stay out of the user's
@@ -443,13 +695,14 @@ impl Backend for Transport {
             let response = self
                 .post_json(&path, &body, "application/json")
                 .await
-                .context("starting a claude.ai conversation")?;
-            let value: Value = serde_json::from_str(&response.text().await?)
-                .context("the conversation is not JSON")?;
+                .map_err(CreateConversationError::Request)?;
+            let value = Self::json(reqwest::Method::POST, &path, response)
+                .await
+                .map_err(CreateConversationError::Request)?;
             value["uuid"]
                 .as_str()
                 .map(str::to_owned)
-                .context("the conversation has no uuid")
+                .ok_or(CreateConversationError::NoUuid)
         })
     }
 
@@ -457,7 +710,7 @@ impl Backend for Transport {
         &'a self,
         conversation: &'a str,
         request: &'a Request,
-    ) -> BoxFuture<'a, anyhow::Result<Events>> {
+    ) -> BoxFuture<'a, Result<Events, CompleteError>> {
         Box::pin(async move {
             let path = format!(
                 "/api/organizations/{}/chat_conversations/{conversation}/completion",
@@ -465,29 +718,41 @@ impl Backend for Transport {
             );
             let response = self
                 .post_json(&path, &request.body(), "text/event-stream")
-                .await?;
+                .await
+                .map_err(|source| CompleteError {
+                    conversation: conversation.to_owned(),
+                    source,
+                })?;
             let mut stream = SseStream::with_decoder(SseDecoder::with_limit(MAX_EVENT_BYTES));
             stream.attach(response.bytes_stream());
-            let events = stream.filter_map(|event| async move {
-                match event {
-                    Ok(SseEvent::Message(message)) => {
-                        serde_json::from_str::<Value>(&message.data).ok().map(Ok)
+            let conversation = conversation.to_owned();
+            let events = stream.filter_map(move |event| {
+                let conversation = conversation.clone();
+                async move {
+                    match event {
+                        Ok(SseEvent::Message(message)) => {
+                            serde_json::from_str::<Value>(&message.data).ok().map(Ok)
+                        }
+                        Ok(SseEvent::Retry(_)) => None,
+                        Err(source) => Some(Err(StreamError {
+                            conversation,
+                            source,
+                        })),
                     }
-                    Ok(SseEvent::Retry(_)) => None,
-                    Err(error) => Some(Err(anyhow::anyhow!(
-                        "the claude.ai event stream failed: {error}"
-                    ))),
                 }
             });
             Ok(events.boxed())
         })
     }
 
-    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, anyhow::Result<String>> {
+    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>> {
         Box::pin(async move {
             let bytes = tokio::fs::read(path)
                 .await
-                .with_context(|| format!("reading {}", path.display()))?;
+                .map_err(|source| UploadError::Read {
+                    path: path.to_owned(),
+                    source,
+                })?;
             let name = path.file_name().map_or_else(
                 || "image".to_owned(),
                 |name| name.to_string_lossy().into_owned(),
@@ -506,37 +771,46 @@ impl Backend for Transport {
             .into_bytes();
             body.extend_from_slice(&bytes);
             body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            let upload = format!("/api/{}/upload", self.org());
+            let failed = |source| UploadError::Request {
+                path: path.to_owned(),
+                source,
+            };
             let response = self
-                .send(
-                    self.builder(
-                        reqwest::Method::POST,
-                        &format!("/api/{}/upload", self.org()),
-                    )
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={boundary}"),
-                    )
-                    .body(body),
-                )
+                .send(reqwest::Method::POST, &upload, |request| {
+                    request
+                        .header(
+                            "content-type",
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .body(body)
+                })
                 .await
-                .context("uploading an image to claude.ai")?;
-            let value: Value =
-                serde_json::from_str(&response.text().await?).context("the upload is not JSON")?;
+                .map_err(failed)?;
+            let value = Self::json(reqwest::Method::POST, &upload, response)
+                .await
+                .map_err(failed)?;
             value["file_uuid"]
                 .as_str()
                 .map(str::to_owned)
-                .context("the upload has no file id")
+                .ok_or_else(|| UploadError::NoFileId {
+                    path: path.to_owned(),
+                })
         })
     }
 
-    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, Result<(), StopError>> {
         Box::pin(async move {
             let path = format!(
                 "/api/organizations/{}/chat_conversations/{conversation}/stop_response",
                 self.org()
             );
             self.post_json(&path, &json!({}), "application/json")
-                .await?;
+                .await
+                .map_err(|source| StopError {
+                    conversation: conversation.to_owned(),
+                    source,
+                })?;
             Ok(())
         })
     }
@@ -544,7 +818,7 @@ impl Backend for Transport {
     fn delete_conversation<'a>(
         &'a self,
         conversation: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
+    ) -> BoxFuture<'a, Result<(), DeleteConversationError>> {
         Box::pin(async move {
             let path = format!(
                 "/api/organizations/{}/chat_conversations/{conversation}",
@@ -556,15 +830,29 @@ impl Backend for Transport {
                 .builder(reqwest::Method::DELETE, &path)
                 .send()
                 .await
-                .context("reaching claude.ai")?;
+                .map_err(|source| DeleteConversationError::Unreachable {
+                    conversation: conversation.to_owned(),
+                    source,
+                })?;
             self.keep_cookies(&response);
             let status = response.status();
             // Gone already is as good as deleted.
             if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(());
             }
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("claude.ai answered {status}: {}", quote(&body, status))
+            let body = response
+                .text()
+                .await
+                .map_err(|source| DeleteConversationError::Body {
+                    conversation: conversation.to_owned(),
+                    status,
+                    source,
+                })?;
+            Err(DeleteConversationError::Refused {
+                conversation: conversation.to_owned(),
+                status,
+                body: quote(&body, status),
+            })
         })
     }
 }

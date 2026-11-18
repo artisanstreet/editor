@@ -321,7 +321,10 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
         "progress kept the call open for {:?}",
         started.elapsed()
     );
-    assert!(error.to_string().contains("did not answer"), "{error}");
+    assert!(
+        matches!(&error, RequestError::TimedOut { method, .. } if method == "tools/call"),
+        "{error}"
+    );
     assert!(
         logged(&log, "cancelled").await,
         "the server was not told: {:?}",
@@ -398,7 +401,13 @@ async fn an_oversized_line_fails_its_call_and_the_server_carries_on() {
         )
         .await
         .expect_err("the answer is over the limit");
-    assert!(error.to_string().contains("larger than 64 KB"), "{error}");
+    assert!(
+        matches!(
+            error,
+            RequestError::Undelivered(Undelivered::TooLarge { limit: 65_536 })
+        ),
+        "{error}"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the call waited for its deadline"
@@ -829,7 +838,10 @@ fn sse_bodies_yield_their_json_messages() {
 fn a_json_rpc_error_becomes_the_error() {
     let reply = json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "Unknown method" } });
     let error = response_result(&reply).unwrap_err();
-    assert!(error.to_string().contains("Unknown method"));
+    assert!(
+        matches!(&error, RequestError::Rpc(RpcError { code: -32601, message }) if message == "Unknown method"),
+        "{error}"
+    );
 }
 
 #[test]

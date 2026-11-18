@@ -15,9 +15,56 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::Context as _;
 use artisan_api::{ClaudeAiSession, ClaudeAiState};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadSessionError {
+    #[error("reading the claude.ai session {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path} is not a claude.ai session")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SaveSessionError {
+    #[error("encoding the claude.ai session for {path}")]
+    Encode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("writing the claude.ai session {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: artisan_paths::private::PrivateFileError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UpdateSessionError {
+    #[error("reading the claude.ai session to update it")]
+    Load(#[source] LoadSessionError),
+    #[error("writing the updated claude.ai session")]
+    Save(#[source] SaveSessionError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("removing the claude.ai session {path}")]
+pub struct RemoveSessionError {
+    pub path: PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
 
 /// Serialises every read-modify-write of a session file in this process:
 /// runs on several threads write their cookies back at once.
@@ -144,18 +191,16 @@ impl Session {
     /// # Errors
     ///
     /// Returns the error if the file is there but unreadable.
-    pub fn load(home: &Path) -> anyhow::Result<Option<Self>> {
+    pub fn load(home: &Path) -> Result<Option<Self>, LoadSessionError> {
         let path = Self::path(home);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading {}", path.display()));
-            }
+            Err(source) => return Err(LoadSessionError::Read { path, source }),
         };
         serde_json::from_str(&text)
             .map(Some)
-            .with_context(|| format!("{} is not a session", path.display()))
+            .map_err(|source| LoadSessionError::Parse { path, source })
     }
 
     /// Writes the session into an engine home, readable by this user only.
@@ -163,36 +208,22 @@ impl Session {
     /// # Errors
     ///
     /// Returns the error if the directory or file cannot be written.
-    pub fn save(&self, home: &Path) -> anyhow::Result<()> {
+    pub fn save(&self, home: &Path) -> Result<(), SaveSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.write(home)
     }
 
-    fn write(&self, home: &Path) -> anyhow::Result<()> {
+    fn write(&self, home: &Path) -> Result<(), SaveSessionError> {
         let path = Self::path(home);
-        let dir = path.parent().context("the session has no folder")?;
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        #[cfg(unix)]
-        restrict(dir, 0o700)?;
-        let temporary = dir.join(format!("session.json.{}.tmp", std::process::id()));
-        {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options
-                .open(&temporary)
-                .with_context(|| format!("creating {}", temporary.display()))?;
-            #[cfg(unix)]
-            restrict(&temporary, 0o600)?;
-            std::io::Write::write_all(&mut file, serde_json::to_string_pretty(self)?.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, &path)
-            .with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
+        let text =
+            serde_json::to_string_pretty(self).map_err(|source| SaveSessionError::Encode {
+                path: path.clone(),
+                source,
+            })?;
+        artisan_paths::private::write_file(&path, text.as_bytes())
+            .map_err(|source| SaveSessionError::Write { path, source })
     }
 
     /// Changes the session on disk: reads what is there now, so another
@@ -202,15 +233,15 @@ impl Session {
     /// # Errors
     ///
     /// Returns the error if the file cannot be read or written.
-    pub fn update(home: &Path, change: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
+    pub fn update(home: &Path, change: impl FnOnce(&mut Self)) -> Result<(), UpdateSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(mut session) = Self::load(home)? else {
+        let Some(mut session) = Self::load(home).map_err(UpdateSessionError::Load)? else {
             return Ok(());
         };
         change(&mut session);
-        session.write(home)
+        session.write(home).map_err(UpdateSessionError::Save)
     }
 
     /// Forgets the session.
@@ -218,12 +249,15 @@ impl Session {
     /// # Errors
     ///
     /// Returns the error if the file is there but cannot be removed.
-    pub fn remove(home: &Path) -> anyhow::Result<()> {
+    pub fn remove(home: &Path) -> Result<(), RemoveSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match std::fs::remove_file(Self::path(home)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        let path = Self::path(home);
+        match std::fs::remove_file(&path) {
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                Err(RemoveSessionError { path, source })
+            }
             _ => Ok(()),
         }
     }
@@ -243,15 +277,6 @@ impl Session {
             }
         }
     }
-}
-
-/// Makes a path this user's alone. Windows keeps per-user ACLs on the
-/// profile folder the data lives in.
-#[cfg(unix)]
-fn restrict(path: &Path, mode: u32) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .with_context(|| format!("restricting {}", path.display()))
 }
 
 /// What one `Set-Cookie` header does to the session, when it is claude.ai's.

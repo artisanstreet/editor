@@ -6,7 +6,19 @@
 use artisan_api::{UsageCadence, UsageLimits, UsageWindow};
 use serde_json::Value;
 
-use super::transport::Transport;
+use super::transport::{RequestError, Transport};
+
+#[derive(Debug, thiserror::Error)]
+#[error("reading the claude.ai account's bootstrap")]
+pub struct CapabilitiesError(#[source] pub RequestError);
+
+#[derive(Debug, thiserror::Error)]
+#[error("reading the usage of claude.ai organization {org}")]
+pub struct UsageError {
+    pub org: String,
+    #[source]
+    pub source: RequestError,
+}
 
 /// What the account is and what it may do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,19 +40,29 @@ pub struct Capabilities {
 /// # Errors
 ///
 /// Returns the error when the session is not signed in.
-pub async fn capabilities(transport: &Transport) -> anyhow::Result<Capabilities> {
+pub async fn capabilities(transport: &Transport) -> Result<Capabilities, CapabilitiesError> {
     let org_uuid = transport.session().org_uuid.clone();
     // The organization's own record answers when the session is good; the
     // bootstrap answers what the account is.
-    let organization = transport
+    let organization = match transport
         .get(&format!("/api/organizations/{org_uuid}"))
         .await
-        .unwrap_or(Value::Null);
-    let bootstrap = transport.get("/api/bootstrap").await.unwrap_or(Value::Null);
+    {
+        Ok(organization) => Some(organization),
+        Err(error) => {
+            tracing::info!(org = %org_uuid, "claude.ai's chat does not answer this session: {}", diagnostics::chain(&error));
+            None
+        }
+    };
+    let bootstrap = transport
+        .get("/api/bootstrap")
+        .await
+        .map_err(CapabilitiesError)?;
 
     let account = account_of(&bootstrap);
-    let rate_limit_tier = organization["rate_limit_tier"]
-        .as_str()
+    let rate_limit_tier = organization
+        .as_ref()
+        .and_then(|organization| organization["rate_limit_tier"].as_str())
         .or_else(|| {
             bootstrap["account"]["memberships"]
                 .as_array()
@@ -56,7 +78,7 @@ pub async fn capabilities(transport: &Transport) -> anyhow::Result<Capabilities>
         })
         .map(str::to_owned);
     Ok(Capabilities {
-        chat: !organization.is_null(),
+        chat: organization.is_some(),
         client_tools: true,
         org_uuid,
         account,
@@ -78,11 +100,15 @@ fn account_of(bootstrap: &Value) -> Option<String> {
 /// # Errors
 ///
 /// Returns the error when the session is not signed in.
-pub async fn usage(transport: &Transport) -> anyhow::Result<UsageLimits> {
+pub async fn usage(transport: &Transport) -> Result<UsageLimits, UsageError> {
     let org_uuid = transport.session().org_uuid.clone();
     let usage = transport
         .get(&format!("/api/organizations/{org_uuid}/usage"))
-        .await?;
+        .await
+        .map_err(|source| UsageError {
+            org: org_uuid.clone(),
+            source,
+        })?;
     Ok(UsageLimits {
         windows: windows_of(&usage),
         spend: None,

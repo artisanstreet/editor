@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{Backend, Events, Refusal, Request, drive};
+use super::{
+    Backend, CompleteError, CreateConversationError, DeleteConversationError, Events, Refusal,
+    Request, RequestError, StopError, UploadError, drive,
+};
 #[path = "../../tests/claudeai/cancellation.rs"]
 mod cancellation;
 use crate::{EngineEvent, Input, Launch, Outcome, RunIo, Turn, UserInput};
@@ -55,7 +58,7 @@ struct Script {
 }
 
 impl Backend for Script {
-    fn create_conversation(&self) -> BoxFuture<'_, anyhow::Result<String>> {
+    fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>> {
         let mut created = self.created.lock().expect("lock");
         *created += 1;
         let id = format!("conv-{created}");
@@ -67,7 +70,7 @@ impl Backend for Script {
         &'a self,
         conversation: &'a str,
         request: &'a Request,
-    ) -> BoxFuture<'a, anyhow::Result<Events>> {
+    ) -> BoxFuture<'a, Result<Events, CompleteError>> {
         assert!(
             !self.active.lock().expect("lock").contains(conversation),
             "another completion started before the server stopped its predecessor"
@@ -92,7 +95,12 @@ impl Backend for Script {
                     stream::iter(events.into_iter().map(Ok)),
                     stream::pending(),
                 )),
-                Reply::Refuses(refusal) => return Err(refusal.into()),
+                Reply::Refuses(refusal) => {
+                    return Err(CompleteError {
+                        conversation: conversation.to_owned(),
+                        source: refused(refusal),
+                    });
+                }
                 Reply::From(_) => unreachable!("made above"),
             };
             let mut active_set = self.active.lock().expect("lock");
@@ -112,7 +120,7 @@ impl Backend for Script {
         })
     }
 
-    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, anyhow::Result<String>> {
+    fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>> {
         self.uploads.lock().expect("lock").push(path.to_owned());
         self.uploaded
             .lock()
@@ -121,7 +129,7 @@ impl Backend for Script {
         Box::pin(async { Ok("file-1".to_owned()) })
     }
 
-    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+    fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, Result<(), StopError>> {
         Box::pin(async move {
             let delay = *self.stop_delay.lock().expect("lock");
             if let Some(delay) = delay {
@@ -133,7 +141,10 @@ impl Backend for Script {
                 .push(conversation.to_owned());
             let error = self.stop_error.lock().expect("lock").take();
             if let Some(error) = error {
-                return Err(error.into());
+                return Err(StopError {
+                    conversation: conversation.to_owned(),
+                    source: refused(error),
+                });
             }
             self.active.lock().expect("lock").remove(conversation);
             Ok(())
@@ -143,12 +154,20 @@ impl Backend for Script {
     fn delete_conversation<'a>(
         &'a self,
         conversation: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
+    ) -> BoxFuture<'a, Result<(), DeleteConversationError>> {
         self.deleted
             .lock()
             .expect("lock")
             .push(conversation.to_owned());
         Box::pin(async { Ok(()) })
+    }
+}
+
+fn refused(refusal: Refusal) -> RequestError {
+    RequestError::Refused {
+        method: reqwest::Method::POST,
+        path: "/api/organizations/org/chat_conversations".to_owned(),
+        source: refusal,
     }
 }
 
@@ -1745,7 +1764,10 @@ async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallba
     let error = super::side::compact_with(&backend, &source, CancellationToken::new())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("saved message UUID"));
+    assert!(
+        matches!(&error, super::SideQueryError::NoSavedMessage { session } if session == "claude.ai:source"),
+        "{error:?}"
+    );
     assert!(backend.sent.lock().unwrap().is_empty());
     assert_eq!(*backend.created.lock().unwrap(), 0);
 }
