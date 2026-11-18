@@ -777,7 +777,9 @@ impl Composer {
                 SessionEvent::Changed => {}
             }
         }
-        if failed && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored) {
+        if failed
+            && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored)
+        {
             self.restore_sent(sent);
         }
         let holding = sending && matches!(self.outbox, Outbox::Restored);
@@ -973,7 +975,8 @@ impl Composer {
             .session
             .as_ref()
             .is_some_and(|session| session.read(|state| state.sending()));
-        let can_continue = !sending && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
+        let can_continue = !sending
+            && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
         if working && !ready {
             (super::view::Primary::Stop, self.cancelling)
         } else if !working && !ready && can_continue {
@@ -1099,16 +1102,13 @@ fn last_project(host: &HostData) -> Option<ProjectId> {
 }
 
 fn remembered_config(host: &HostData) -> Option<EngineConfig> {
-    let mut config: EngineConfig =
-        serde_json::from_value(host.setting("default_engine_config")?.clone()).ok()?;
-    if let Some(saved) = config.model.as_deref().and_then(|model| {
-        artisan_api::saved_model_config(
-            host.setting(artisan_api::MODEL_CONFIGS_KEY)?,
-            config.engine,
-            model,
-        )
-    }) {
-        config = saved;
+    let mut config = host.settings.default_engine_config()?.clone();
+    if let Some(saved) = config
+        .model
+        .as_deref()
+        .and_then(|model| host.settings.saved_model_config(config.engine, model))
+    {
+        config = saved.clone();
     }
     fitted_remembered_config(host, config)
 }
@@ -1157,4 +1157,3 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     config.effort = None;
     Some(config)
 }
-

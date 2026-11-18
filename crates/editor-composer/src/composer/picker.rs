@@ -1,5 +1,5 @@
-use artisan_api::{EngineConfig, EngineId, Model};
 pub use artisan_api::ModelAxis as Axis;
+use artisan_api::{EngineConfig, EngineId, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TooltipPlacement {
@@ -130,8 +130,10 @@ pub fn gate(status: &artisan_api::EngineStatus) -> Option<&'static str> {
         SignInState::LoggingIn { .. } => Some("Signing in…"),
         SignInState::Unknown if status.models.is_empty() => Some("Checking…"),
         SignInState::SignedIn { .. } if status.models.is_empty() => match status.discovery {
-            artisan_api::DiscoveryState::Unknown | artisan_api::DiscoveryState::Refreshing { .. } => Some("Discovering models…"),
-            artisan_api::DiscoveryState::Unavailable { .. } | artisan_api::DiscoveryState::Stale { .. } => Some("Discovery failed"),
+            artisan_api::DiscoveryState::Unknown
+            | artisan_api::DiscoveryState::Refreshing { .. } => Some("Discovering models…"),
+            artisan_api::DiscoveryState::Unavailable { .. }
+            | artisan_api::DiscoveryState::Stale { .. } => Some("Discovery failed"),
             artisan_api::DiscoveryState::Fresh { .. } => Some("No models"),
         },
         SignInState::Unknown | SignInState::SignedIn { .. } => None,
@@ -201,12 +203,17 @@ pub struct PickerState {
 }
 impl PickerState {
     pub fn refresh_settings(&mut self, core: &editor_core::Core, host: &editor_core::HostData) {
-        self.show_all_models = core.settings
-            .get(artisan_api::SHOW_ALL_MODELS_KEY).and_then(serde_json::Value::as_bool).unwrap_or(false);
-        self.hide_bad_model_options = core.settings
-            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY).and_then(serde_json::Value::as_bool).unwrap_or(true);
-        self.customizations = host.setting(artisan_api::MODEL_CUSTOMIZATIONS_KEY)
-            .and_then(|value| artisan_api::model_customizations(value).ok()).unwrap_or_default();
+        self.show_all_models = core
+            .settings
+            .get(artisan_api::SHOW_ALL_MODELS_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        self.hide_bad_model_options = core
+            .settings
+            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        self.customizations = host.settings.model_customizations().to_vec();
     }
 
     pub fn for_target(core: &editor_core::Core, host: &editor_core::HostId) -> Self {
@@ -350,29 +357,27 @@ impl PickerState {
             .find(|model| model.id == id)?;
         let preference = current.clone();
         let current = current.filter(|config| config.engine == engine);
-        let saved = host.setting(artisan_api::MODEL_CONFIGS_KEY)
-            .and_then(|setting| artisan_api::saved_model_config(setting, engine, id));
-        let carry = saved.is_none() && preference.as_ref().is_some_and(|config| config.model.as_deref() != Some(id) || config.engine != engine);
+        let saved = host.settings.saved_model_config(engine, id).cloned();
+        let carry = saved.is_none()
+            && preference.as_ref().is_some_and(|config| {
+                config.model.as_deref() != Some(id) || config.engine != engine
+            });
         let mut config = match current {
             Some(config) if config.model.as_deref() == Some(id) => config,
-            current => host
-                .setting(artisan_api::MODEL_CONFIGS_KEY)
-                .and_then(|setting| artisan_api::saved_model_config(setting, engine, id))
-                .unwrap_or_else(|| {
-                    let mut config = current.unwrap_or_else(|| EngineConfig::new(engine));
-                    config.model = Some(id.to_owned());
-                    config.effort = None;
-                    config.speed = None;
-                    config.variant = None;
-                    config
-                }),
+            current => saved.unwrap_or_else(|| {
+                let mut config = current.unwrap_or_else(|| EngineConfig::new(engine));
+                config.model = Some(id.to_owned());
+                config.effort = None;
+                config.speed = None;
+                config.variant = None;
+                config
+            }),
         };
-        let customizations = host.setting(artisan_api::MODEL_CUSTOMIZATIONS_KEY)
-            .and_then(|value| artisan_api::model_customizations(value).ok()).unwrap_or_default();
+        let customizations = host.settings.model_customizations();
         if carry && let Some(preference) = &preference {
-            config = model.carry_thinking_preference(preference, &config, &customizations);
+            config = model.carry_thinking_preference(preference, &config, customizations);
         }
-        config = model.resolve_config(&config, &customizations).effective;
+        config = model.resolve_config(&config, customizations).effective;
         Some(config)
     }
     pub fn pane_config(
@@ -408,7 +413,9 @@ impl PickerState {
     ) {
         let engine = status.engine;
         let gated = gate(status);
-        if matches!(gated, Some("Not installed" | "Sign in")) || (gated.is_some() && status.models.is_empty()) {
+        if matches!(gated, Some("Not installed" | "Sign in"))
+            || (gated.is_some() && status.models.is_empty())
+        {
             rows.push(ModelRow::Engine(engine));
             rows.push(ModelRow::Gate(engine));
             return;
@@ -441,15 +448,12 @@ impl PickerState {
                 .iter()
                 .any(|(_, model)| chosen == Some(model.id.as_str()))
         });
-        let saved = host
-            .setting(artisan_api::MODEL_GROUPS_KEY)
-            .and_then(|groups| groups.get(engine.as_str()));
         for (position, (name, members)) in groups.into_iter().enumerate() {
             let open = self
                 .groups
                 .get(&(engine, name.to_owned()))
                 .copied()
-                .or_else(|| saved?.get(name)?.as_bool())
+                .or_else(|| host.settings.model_group_open(engine, name))
                 .unwrap_or_else(|| selected.unwrap_or(0) == position);
             rows.push(ModelRow::Group {
                 engine,

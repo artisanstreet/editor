@@ -31,9 +31,10 @@ pub use client::ForgeClient;
 pub use clock::{Clock, TimeSource};
 pub use connection::ConnectionStatus;
 pub use host::{
-    Attention, BlobImage, HostData, HostEvent, HostInstance, HostSettings, LiveSnapshot,
-    LoadThreadError, MCP_SERVERS_KEY, McpServersError, ProjectionLoad, ThreadPage,
-    ThreadPageDirection, ThreadSummary, ThreadUnavailable, WslStatus,
+    Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, HostData, HostEvent, HostInstance,
+    HostSettingError, HostSettings, LiveSnapshot, LoadThreadError, MCP_SERVERS_KEY,
+    McpServersError, ProjectionLoad, ThreadPage, ThreadPageDirection, ThreadSummary,
+    ThreadUnavailable, WslStatus,
 };
 pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,

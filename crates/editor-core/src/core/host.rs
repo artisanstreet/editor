@@ -5,7 +5,9 @@ pub use images::{BlobImage, BlobImages};
 mod preferences;
 mod project_icons;
 mod settings;
-pub use settings::{HostSettings, MCP_SERVERS_KEY, McpServersError};
+pub use settings::{
+    DEFAULT_ENGINE_CONFIG_KEY, HostSettingError, HostSettings, MCP_SERVERS_KEY, McpServersError,
+};
 pub mod stopping;
 mod wsl;
 pub use pages::{LoadThreadError, ThreadPage, ThreadPageDirection, ThreadUnavailable};

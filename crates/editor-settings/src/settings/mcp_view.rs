@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::rc::Rc;
 
 use aqua_ui::{
     element::{Box as UiBox, Element},
     style::{Length, Style},
 };
-use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer};
+use artisan_api::{McpAuthStatus, McpServer};
 
 use super::{
     controller::SettingsController,
@@ -214,13 +214,19 @@ pub fn section(
         .mcp_servers()
         .map(<[McpServer]>::to_vec)
         .map_err(|error| format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error)));
-    let auth: BTreeMap<String, McpAuthStatus> = host
-        .setting(MCP_AUTH_KEY)
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
+    let auth = host.settings.mcp_auth();
     let mut rows = Vec::new();
     if let Err(error) = &servers {
         rows.push(ui::block(ui::error_text(theme, error)));
+    }
+    if let Err(error) = auth {
+        rows.push(ui::block(ui::error_text(
+            theme,
+            format!(
+                "Couldn't read MCP sign-in states: {}",
+                ::diagnostics::chain(error)
+            ),
+        )));
     }
     for server in servers.unwrap_or_default() {
         let target = server.url.clone().unwrap_or_else(|| {
@@ -230,7 +236,10 @@ pub fn section(
                 serde_json::to_string(&server.args).unwrap_or_default()
             )
         });
-        let status = auth.get(&server.name).copied();
+        let status = match auth {
+            Ok(auth) => auth.get(&server.name).copied(),
+            Err(_shown_above) => None,
+        };
         let sign_in = core.mcp_sign_in(&host.id, &server.name);
         let summary =
             note(status, sign_in).map_or(target.clone(), |note| format!("{target} · {note}"));
