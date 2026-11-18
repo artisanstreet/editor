@@ -54,7 +54,11 @@ impl fmt::Display for Time {
                 let date = epoch
                     .checked_add_signed(chrono::Duration::days(days))
                     .ok_or(fmt::Error)?;
-                write!(f, "{}", date.format("%b %-d, %Y"))
+                write!(
+                    f,
+                    "{}",
+                    crate::ui::locale::with_system(|formats| formats.date(date))
+                )
             }
         }
     }

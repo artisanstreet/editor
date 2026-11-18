@@ -44,12 +44,11 @@ pub fn compact_tokens(count: u64) -> String {
     } else {
         (value, "")
     };
-    let text = if scaled < 10.0 && !suffix.is_empty() {
-        format!("{scaled:.1}")
-    } else {
-        format!("{scaled:.0}")
+    let digits = match scaled < 10.0 && !suffix.is_empty() {
+        true => 1,
+        false => 0,
     };
-    format!("{}{suffix}", text.strip_suffix(".0").unwrap_or(&text))
+    format!("{}{suffix}", editor_ui::locale::trimmed(scaled, digits))
 }
 
 pub fn reading(

@@ -43,6 +43,10 @@ usvg = { version = "0.48.1", default-features = false, features = ["text"] }
 vte.workspace = true
 unicode-width.workspace = true
 icu_normalizer.workspace = true
+icu_calendar.workspace = true
+icu_datetime.workspace = true
+icu_decimal.workspace = true
+icu_locale_core.workspace = true
 ufbx.workspace = true
 stl_io.workspace = true
 ply-rs-bw.workspace = true
@@ -51,6 +55,10 @@ glam.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 data-url.workspace = true
 editor-core.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
 
 [dev-dependencies]
 divan.workspace = true

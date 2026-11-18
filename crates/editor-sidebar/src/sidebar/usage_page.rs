@@ -172,9 +172,15 @@ fn meters(
 
 fn token_count(tokens: u64) -> String {
     match tokens {
-        0..1_000 => format!("{tokens} tokens"),
-        1_000..1_000_000 => format!("{:.1}K tokens", tokens as f64 / 1e3),
-        _ => format!("{:.1}M tokens", tokens as f64 / 1e6),
+        0..1_000 => editor_ui::locale::count(tokens, "token", "tokens"),
+        1_000..1_000_000 => format!(
+            "{}K tokens",
+            editor_ui::locale::decimal(tokens as f64 / 1e3, 1)
+        ),
+        _ => format!(
+            "{}M tokens",
+            editor_ui::locale::decimal(tokens as f64 / 1e6, 1)
+        ),
     }
 }
 
@@ -193,7 +199,7 @@ fn spend_group(
                 text(theme, token_count(spend.tokens), muted),
                 trailing(text(
                     theme,
-                    format!("${:.2}", spend.cost_usd),
+                    format!("${}", editor_ui::locale::decimal(spend.cost_usd, 2)),
                     theme.colors.text.to_reference_text_color(),
                 )),
             ],

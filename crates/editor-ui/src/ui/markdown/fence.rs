@@ -236,7 +236,10 @@ impl Fence {
         if count > 24 {
             content = content.child(crate::ui::rich::narrative::callout::text(
                 &theme,
-                &format!("{count} lines · Scroll to read more"),
+                &format!(
+                    "{} · Scroll to read more",
+                    crate::ui::locale::count(count, "line", "lines")
+                ),
                 TextRole::Caption,
                 theme.colors.text_muted,
             ));

@@ -109,6 +109,10 @@ data-url = "=0.3.2"
 unicode-width = "=0.2.2"
 icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_calendar = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_datetime = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "=2.3.0", default-features = false }
 vte = { version = "=0.15.0", default-features = false }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
 clap = { version = "=4.6.6", features = ["derive", "env"] }

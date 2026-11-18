@@ -170,7 +170,13 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
     let height = viewport(entry_height(), max_height);
     let mut body = stack().child(
         TextRole::Title
-            .text(&theme, format!("{title} · {count} entries"))
+            .text(
+                &theme,
+                format!(
+                    "{title} · {}",
+                    editor_ui::locale::count(count, "entry", "entries")
+                ),
+            )
             .build(),
     );
     if count_native != 0 {

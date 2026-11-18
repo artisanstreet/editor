@@ -674,15 +674,10 @@ impl ModelBlock {
             }
             reset_invalidate();
         });
-        let noun = if model.triangles == 1 {
-            "triangle"
-        } else {
-            "triangles"
-        };
         let facts = format!(
-            "{} · {} {noun}",
+            "{} · {}",
             model.format.label(),
-            crate::ui::rich::kit::format_number(model.triangles as f64)
+            crate::ui::locale::count(model.triangles, "triangle", "triangles")
         );
         let frame = (services.frame)(canvas, width, aspect, &self.display_name(), Some(dragging));
         let toolbar = (services.toolbar)(shading, moved, &facts, change_shading, reset);

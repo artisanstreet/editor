@@ -19,6 +19,7 @@ use editor_assets::AssetId;
 use super::{Change, FileTree, Model, Row, RowKind};
 use crate::ui::{
     kit::{self, Density, Hover, IconSize, Space, Spaced, Surface, TextRole, live},
+    locale,
     rich::actions::{OpenReference, ResourceScope},
     theme::{ArtisanTheme, Oklch},
 };
@@ -227,14 +228,6 @@ fn text(
         .build()
 }
 
-fn count(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
 fn row(
     tree: &FileTree,
     id: &str,
@@ -257,7 +250,7 @@ fn row(
                     },
                     theme.colors.text_muted,
                     theme.colors.text,
-                    (!open).then(|| count(*files, "file")),
+                    (!open).then(|| locale::count(*files, "file", "files")),
                     None,
                     row.name.clone(),
                     false,
@@ -479,7 +472,7 @@ impl FileTree {
             .style(Style::new().align(AlignItems::CENTER).wrap(true))
             .child(text(
                 theme,
-                count(self.0.entries.len(), "file"),
+                locale::count(self.0.entries.len(), "file", "files"),
                 TextRole::Caption,
                 theme.colors.text_muted,
                 false,

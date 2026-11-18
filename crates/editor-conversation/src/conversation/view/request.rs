@@ -1,12 +1,12 @@
 use crate::conversation::adapter::Action;
 use crate::conversation::content::SourceField;
-use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{
     Answer, ApprovalRequest, Collection, Decision, Item, ItemKind, Status, ToolKind,
 };
+use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
@@ -71,7 +71,11 @@ pub fn approval<E>(
                 } => changes.iter().map(|change| change.path.clone()).collect(),
                 ToolKind::Edit {
                     changes: Collection::Stored(source),
-                } => vec![format!("{} file changes", source.count)],
+                } => vec![editor_ui::locale::count(
+                    source.count,
+                    "file change",
+                    "file changes",
+                )],
                 _ => Vec::new(),
             };
             (approval.as_ref(), files)

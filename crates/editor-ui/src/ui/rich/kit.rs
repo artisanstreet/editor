@@ -60,6 +60,10 @@ pub(crate) fn diverging_color(
 }
 
 pub(crate) fn format_number(value: f64) -> String {
+    crate::ui::locale::with_system(|formats| compact_number(formats, value))
+}
+
+pub fn compact_number(formats: &crate::ui::locale::Formats, value: f64) -> String {
     if !value.is_finite() {
         return "–".to_owned();
     }
@@ -73,20 +77,14 @@ pub(crate) fn format_number(value: f64) -> String {
     } else {
         (value, "")
     };
-    let decimals = if scaled.abs() >= 100.0 || scaled.fract() == 0.0 {
+    let decimals = if scaled.abs() >= 100.0 {
         0
     } else if scaled.abs() >= 10.0 {
         1
     } else {
         2
     };
-    let text = format!("{scaled:.decimals$}");
-    let text = if text.contains('.') {
-        text.trim_end_matches('0').trim_end_matches('.').to_owned()
-    } else {
-        text
-    };
-    format!("{text}{suffix}")
+    format!("{}{suffix}", formats.trimmed(scaled, decimals))
 }
 
 pub(crate) fn with_unit(value: &str, unit: Option<&str>) -> String {
@@ -227,3 +225,7 @@ pub(crate) fn retained_strings(values: &Vec<String>) -> usize {
 pub(crate) fn retained_optional(value: Option<&String>) -> usize {
     value.map_or(0, String::capacity)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/rich/kit.rs"]
+mod tests;

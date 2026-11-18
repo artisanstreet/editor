@@ -30,7 +30,7 @@ impl ActivityCategory {
             if count == 1 {
                 one.to_owned()
             } else {
-                many.replace("{n}", &count.to_string())
+                many.replace("{n}", &editor_ui::locale::integer(count))
             }
         };
         match self {
@@ -200,7 +200,9 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
                     _ => tense("Edited", "Editing"),
                 };
                 let object = match changes {
-                    artisan_api::Collection::Stored(source) => format!("{} files", source.count),
+                    artisan_api::Collection::Stored(source) => {
+                        editor_ui::locale::count(source.count, "file", "files")
+                    }
                     artisan_api::Collection::Inline(changes) => match changes.as_slice() {
                         [] => "a file".to_owned(),
                         [one] => match &one.op {
@@ -440,11 +442,18 @@ pub fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String
     match running.as_slice() {
         [] => None,
         [one] => Some(doing_one(one, agents)),
-        many if all(ActivityCategory::Command) => Some(format!("Running {} commands", many.len())),
-        many if all(ActivityCategory::Subagent) => {
-            Some(format!("Waiting on {} agents", many.len()))
-        }
-        many => Some(format!("Using {} tools", many.len())),
+        many if all(ActivityCategory::Command) => Some(format!(
+            "Running {}",
+            editor_ui::locale::count(many.len(), "command", "commands")
+        )),
+        many if all(ActivityCategory::Subagent) => Some(format!(
+            "Waiting on {}",
+            editor_ui::locale::count(many.len(), "agent", "agents")
+        )),
+        many => Some(format!(
+            "Using {}",
+            editor_ui::locale::count(many.len(), "tool", "tools")
+        )),
     }
 }
 
@@ -641,7 +650,7 @@ fn counted_agents(count: usize) -> String {
     match count {
         0 => "agents".to_owned(),
         1 => "an agent".to_owned(),
-        count => format!("{count} agents"),
+        count => editor_ui::locale::count(count, "agent", "agents"),
     }
 }
 
@@ -802,3 +811,7 @@ pub fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_
         | ActivityCategory::Tool => AssetId::TABLER_TOOL,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/activity.rs"]
+mod tests;

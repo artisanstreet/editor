@@ -51,7 +51,9 @@ fn entries() -> Vec<SelectEntry<Option<u32>>> {
                 match days {
                     None => "Never".into(),
                     Some(365) => "After a year".into(),
-                    Some(days) => format!("After {days} days"),
+                    Some(days) => {
+                        format!("After {}", editor_ui::locale::count(*days, "day", "days"))
+                    }
                 },
             )
         })
@@ -121,17 +123,13 @@ pub fn cleanup(
 fn span(millis: i64) -> String {
     let left = millis.max(60_000);
     let (count, unit) = if left >= 86_400_000 {
-        (left / 86_400_000, "day")
+        (left / 86_400_000, ("day", "days"))
     } else if left >= 3_600_000 {
-        (left / 3_600_000, "hour")
+        (left / 3_600_000, ("hour", "hours"))
     } else {
-        (left / 60_000, "minute")
+        (left / 60_000, ("minute", "minutes"))
     };
-    if count == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{count} {unit}s")
-    }
+    editor_ui::locale::count(count, unit.0, unit.1)
 }
 
 #[derive(Clone)]

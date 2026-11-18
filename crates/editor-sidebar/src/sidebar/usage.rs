@@ -74,17 +74,13 @@ pub fn reset_remaining(at: Timestamp, now: Timestamp) -> Option<String> {
     }
     let minutes = (at.saturating_sub(now).saturating_add(MINUTE - 1) / MINUTE).max(1);
     let (amount, unit) = if minutes < 60 {
-        (minutes, "minute")
+        (minutes, ("minute", "minutes"))
     } else if minutes < 24 * 60 {
-        ((minutes + 59) / 60, "hour")
+        ((minutes + 59) / 60, ("hour", "hours"))
     } else {
-        ((minutes + 24 * 60 - 1) / (24 * 60), "day")
+        ((minutes + 24 * 60 - 1) / (24 * 60), ("day", "days"))
     };
-    Some(if amount == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{amount} {unit}s")
-    })
+    Some(editor_ui::locale::count(amount, unit.0, unit.1))
 }
 pub fn checked_label(read_at: Timestamp, now: Timestamp) -> String {
     let minutes = (now.saturating_sub(read_at) / 60_000).max(0);
@@ -92,13 +88,19 @@ pub fn checked_label(read_at: Timestamp, now: Timestamp) -> String {
         return "last checked now".to_owned();
     }
     if minutes < 60 {
-        return format!("last checked {minutes} min ago");
+        return format!(
+            "last checked {} min ago",
+            editor_ui::locale::integer(minutes)
+        );
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return format!("last checked {hours} hr ago");
+        return format!("last checked {} hr ago", editor_ui::locale::integer(hours));
     }
-    format!("last checked {} d ago", hours / 24)
+    format!(
+        "last checked {} d ago",
+        editor_ui::locale::integer(hours / 24)
+    )
 }
 pub fn lit_of(used_percent: f64, segments: usize) -> usize {
     if !used_percent.is_finite() || used_percent <= 0.0 {

@@ -19,6 +19,7 @@ pub mod icon;
 pub mod inline_code_text;
 pub mod kit;
 pub mod local_time;
+pub mod locale;
 pub mod markdown;
 pub mod marquee;
 pub mod media;

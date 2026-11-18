@@ -1,7 +1,7 @@
 use crate::conversation::controller::Conversation;
 use crate::conversation::presentation::PresentationScope;
-use editor_core::Core;
 use artisan_api::{ItemId, LiveCoverage, LiveTarget, Status};
+use editor_core::Core;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -54,8 +54,9 @@ impl LiveBinding {
 
     pub fn preview_notice(&self) -> Option<String> {
         (!self.coverage.is_complete(self.text.len_bytes())).then(|| format!(
-            "Live preview shows {} of {} bytes. Complete content is available after the reply is saved.",
-            self.text.len_bytes(), self.coverage.total,
+            "Live preview shows {} of {}. Complete content is available after the reply is saved.",
+            editor_ui::locale::integer(self.text.len_bytes()),
+            editor_ui::locale::count(self.coverage.total, "byte", "bytes"),
         ))
     }
 }

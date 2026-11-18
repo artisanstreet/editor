@@ -153,7 +153,11 @@ pub fn card(
             .build()
             .with_key(AGENTS_KEY)
             .role(Role::List)
-            .aria_label(format!("{} agents", overview.agents.len()))
+            .aria_label(editor_ui::locale::count(
+                overview.agents.len(),
+                "agent",
+                "agents",
+            ))
     });
     let content = UiBox::new()
         .layout("column")

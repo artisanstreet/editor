@@ -562,7 +562,10 @@ pub fn inspector_view(
                         "inspector-checklist",
                         theme,
                         ButtonTone::Quiet,
-                        format!("Read {} steps", summary.plan.len()),
+                        format!(
+                            "Read {}",
+                            editor_ui::locale::count(summary.plan.len(), "step", "steps")
+                        ),
                     )
                     .within(LIST)
                     .on_activate(move |_| callback(InspectorAction::OpenPlan))

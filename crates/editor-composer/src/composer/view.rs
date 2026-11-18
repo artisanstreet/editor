@@ -792,7 +792,10 @@ fn other_questionnaires(
         if other.questions.len() > 1 {
             row = row.trailing(
                 TextRole::Caption
-                    .text(&theme, format!("{} questions", other.questions.len()))
+                    .text(
+                        &theme,
+                        editor_ui::locale::count(other.questions.len(), "question", "questions"),
+                    )
                     .gpui_source_color(muted.to_reference_text_color())
                     .wrap(false)
                     .build(),

@@ -157,8 +157,10 @@ pub fn by_name(listings: &[artisan_api::Listing]) -> Vec<(&artisan_api::Listing,
 pub fn listing_item(listing: &artisan_api::Listing, others: usize) -> Item {
     let others = match others {
         0 => String::new(),
-        1 => " \u{b7} 1 other publisher".to_owned(),
-        others => format!(" \u{b7} {others} other publishers"),
+        others => format!(
+            " \u{b7} {}",
+            editor_ui::locale::count(others, "other publisher", "other publishers")
+        ),
     };
     let meta = format!(
         "{} \u{b7} {}{others}",
@@ -177,15 +179,13 @@ pub fn listing_item(listing: &artisan_api::Listing, others: usize) -> Item {
     reason = "the count is shown rounded to a tenth of a million"
 )]
 fn installs_label(installs: u64) -> String {
-    let count = match installs {
-        0..1_000 => installs.to_string(),
-        1_000..1_000_000 => format!("{}K", installs / 1_000),
-        _ => format!("{:.1}M", installs as f64 / 1_000_000.0),
-    };
-    if installs == 1 {
-        "1 install".to_owned()
-    } else {
-        format!("{count} installs")
+    match installs {
+        0..1_000 => editor_ui::locale::count(installs, "install", "installs"),
+        1_000..1_000_000 => format!("{}K installs", editor_ui::locale::integer(installs / 1_000)),
+        _ => format!(
+            "{}M installs",
+            editor_ui::locale::decimal(installs as f64 / 1_000_000.0, 1)
+        ),
     }
 }
 
@@ -306,8 +306,8 @@ pub fn found_summary(items: &[Item]) -> Option<String> {
     engines.sort_by_key(|engine| engine.as_str());
     let names: Vec<&str> = engines.into_iter().map(engine_name).collect();
     Some(format!(
-        "Quarantined {count} {} from {} that Artisan didn't install.",
-        if count == 1 { "skill" } else { "skills" },
+        "Quarantined {} from {} that Artisan didn't install.",
+        editor_ui::locale::count(count, "skill", "skills"),
         join_names(&names),
     ))
 }
@@ -326,17 +326,16 @@ fn join_names(names: &[&str]) -> String {
 }
 
 fn size_label(files: u32, bytes: u64) -> String {
-    let files = if files == 1 {
-        "1 file".to_owned()
-    } else {
-        format!("{files} files")
-    };
+    let files = editor_ui::locale::count(files, "file", "files");
     let size = if bytes < 1024 {
-        format!("{bytes} B")
+        format!("{} B", editor_ui::locale::integer(bytes))
     } else if bytes < 1024 * 1024 {
-        format!("{} KB", bytes.div_ceil(1024))
+        format!("{} KB", editor_ui::locale::integer(bytes.div_ceil(1024)))
     } else {
-        format!("{} MB", bytes.div_ceil(1024 * 1024))
+        format!(
+            "{} MB",
+            editor_ui::locale::integer(bytes.div_ceil(1024 * 1024))
+        )
     };
     format!("{files} \u{b7} {size}")
 }
