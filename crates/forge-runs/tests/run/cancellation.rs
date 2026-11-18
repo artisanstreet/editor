@@ -332,3 +332,89 @@ async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
         |item| matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_has() {
+    let asked = Asked::default();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let script: Script = {
+        let asked = Arc::clone(&asked);
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        Arc::new(move |turn, io| {
+            let asked = Arc::clone(&asked);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let first = {
+                    let mut asked = asked.lock().unwrap();
+                    asked.push((turn.input.text.clone(), turn.session_id.clone()));
+                    asked.len() == 1
+                };
+                if first {
+                    io.cancel.cancelled().await;
+                    entered.notify_one();
+                    release.notified().await;
+                    return Outcome::cancelled();
+                }
+                io.emit(reply("done", "picked it back up")).await;
+                Outcome::done()
+            })
+        })
+    };
+    let fixture = fixture(script).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("refactor the parser"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| {
+            items.iter().any(|item| {
+                matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+            })
+        })
+        .await;
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .hub
+            .store()
+            .latest_run(&fixture.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status(),
+        RunStatus::Cancelled
+    );
+    assert!(fixture.hub.is_live(&fixture.thread_id));
+
+    fixture
+        .hub
+        .continue_turn(&fixture.thread_id)
+        .await
+        .expect("Continue on a stopped turn is accepted while the engine winds down");
+    fixture
+        .hub
+        .continue_turn(&fixture.thread_id)
+        .await
+        .expect("pressing Continue twice queues it once");
+    release.notify_one();
+
+    let continued = fixture.settled().await.remove(0);
+    assert_eq!(continued.status(), RunStatus::Done);
+    assert_eq!(
+        continued.continuation,
+        Some(artisan_api::Continuation::Requested)
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert!(
+        texts(&fixture.items().await)
+            .iter()
+            .any(|(text, _)| text == "picked it back up")
+    );
+}

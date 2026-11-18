@@ -27,7 +27,6 @@ pub(crate) struct Replay {
     _dir: tempfile::TempDir,
     folder: PathBuf,
     engine: EngineId,
-    hub: forge_runs::Hub,
     editor: Device,
     project: ProjectId,
 }
@@ -88,7 +87,6 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
     .expect("Forge starts");
     let address = server.local_addr().expect("Forge listens");
     let store = server.store().clone();
-    let hub = server.hub.clone();
     tokio::spawn(server.run());
     for key in SIDE_QUERIES {
         store
@@ -116,7 +114,6 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
         _dir: dir,
         folder,
         engine,
-        hub,
         editor,
         project,
     }
@@ -171,13 +168,6 @@ impl Replay {
 
     pub(crate) async fn stop(&self, thread: &ThreadId) {
         self.post(&format!("/threads/{thread}/cancel"), &()).await;
-    }
-
-    pub(crate) async fn wound_down(&self, thread: &ThreadId) {
-        test_support::wait::eventually("the stopped turn to wind down", SETTLE, || async {
-            !self.hub.is_live(thread)
-        })
-        .await;
     }
 
     pub(crate) async fn carry_on(&self, thread: &ThreadId) {

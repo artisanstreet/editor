@@ -83,7 +83,6 @@ async fn continuing_a_stopped_claude_turn_does_not_send_its_delivered_message_ag
     let stopped = replay.settled(since, &thread, 1).await;
     assert_eq!(stopped.runs(&thread), [(RunStatus::Cancelled, None)]);
 
-    replay.wound_down(&thread).await;
     replay.carry_on(&thread).await;
     let screen = replay.settled(since, &thread, 2).await;
     assert_eq!(

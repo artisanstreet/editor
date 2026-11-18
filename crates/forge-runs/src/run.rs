@@ -615,7 +615,10 @@ async fn execute(
         && !hub.inner.shutdown.is_cancelled()
     {
         match announce_stop(hub, run, items, pending).await {
-            Ok(stopped) => *run = stopped,
+            Ok(stopped) => {
+                *run = stopped;
+                hub.announce_stopping(&run.thread_id, &run.id);
+            }
             Err(error) => {
                 tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {}", diagnostics::chain(&error));
             }

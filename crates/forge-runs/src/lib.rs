@@ -142,6 +142,14 @@ struct LiveRun {
     /// Streaming text, reasoning, shell output and progress, by target.
     live: HashMap<LiveTarget, LivePreview>,
     live_bytes: usize,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy)]
+enum Phase {
+    Working,
+    Stopping,
+    ContinueAfterStop,
 }
 
 /// The guess at a thread's next message, kept until the thread runs again.
@@ -509,21 +517,40 @@ impl Hub {
     }
 
     pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
-        let refused = |message: &str| ContinueError::Refused {
+        let busy = || ContinueError::Refused {
             thread: thread_id.clone(),
-            refused: Refused(message.to_owned()),
+            refused: Refused("The thread is already working.".to_owned()),
         };
         let _admission = self.inner.admission.lock().await;
-        if self.is_live(thread_id) {
-            return Err(refused("The thread is already working."));
+        let phase = self.lock().get_mut(thread_id).map(|run| {
+            run.phase = match run.phase {
+                Phase::Working => Phase::Working,
+                Phase::Stopping | Phase::ContinueAfterStop => Phase::ContinueAfterStop,
+            };
+            run.phase
+        });
+        match phase {
+            Some(Phase::ContinueAfterStop) => return Ok(()),
+            Some(Phase::Working | Phase::Stopping) => return Err(busy()),
+            None if self.is_live(thread_id) => return Err(busy()),
+            None => {}
         }
+        self.carry_on(thread_id).await?;
+        self.resume_pending();
+        Ok(())
+    }
+
+    async fn carry_on(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
         let stopped = self
             .store()
             .latest_run(thread_id)
             .await?
             .is_some_and(|run| run.status().is_stopped());
         if !stopped {
-            return Err(refused("The thread has no stopped turn to continue."));
+            return Err(ContinueError::Refused {
+                thread: thread_id.clone(),
+                refused: Refused("The thread has no stopped turn to continue.".to_owned()),
+            });
         }
         if self
             .store()
@@ -533,8 +560,17 @@ impl Hub {
         {
             self.store().request_continue(thread_id.clone()).await?;
         }
-        self.resume_pending();
         Ok(())
+    }
+
+    fn announce_stopping(&self, thread_id: &ThreadId, run_id: &RunId) {
+        self.lock()
+            .get_mut(thread_id)
+            .filter(|run| &run.id == run_id)
+            .unwrap_or_else(|| {
+                unreachable!("invariant: run {run_id} of thread {thread_id} is live while it stops")
+            })
+            .phase = Phase::Stopping;
     }
 
     pub async fn update_thread(
@@ -1087,6 +1123,7 @@ impl Hub {
                 cancel_through: Arc::clone(&cancel_through),
                 live: HashMap::new(),
                 live_bytes: 0,
+                phase: Phase::Working,
             },
         );
         let hub = self.clone();
@@ -1103,9 +1140,9 @@ impl Hub {
             if let Err(error) = &outcome {
                 tracing::error!(thread = %thread_id, run = %run_id, "run failed: {}", diagnostics::chain(&error));
             }
-            hub.lock().remove(&thread_id);
+            let continued = hub.end_live(&thread_id).await;
             drop(permit);
-            if outcome.is_ok() && !hub.inner.shutdown.is_cancelled() {
+            if (outcome.is_ok() || continued) && !hub.inner.shutdown.is_cancelled() {
                 hub.resume_pending();
             }
             if !hub.inner.shutdown.is_cancelled() {
@@ -1121,6 +1158,18 @@ impl Hub {
         self.inner
             .tasks
             .spawn(tracing::Instrument::instrument(run, span));
+    }
+
+    async fn end_live(&self, thread_id: &ThreadId) -> bool {
+        let _admission = self.inner.admission.lock().await;
+        let phase = self.lock().get(thread_id).map(|run| run.phase);
+        let continued =
+            matches!(phase, Some(Phase::ContinueAfterStop)) && !self.inner.shutdown.is_cancelled();
+        if continued && let Err(error) = self.carry_on(thread_id).await {
+            tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down: {}", diagnostics::chain(&error));
+        }
+        self.lock().remove(thread_id);
+        continued
     }
 
     #[must_use]
