@@ -611,12 +611,15 @@ pub fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
         });
     }
     let source = ContentRef::from_text(value);
-    let totals = diff_totals(value);
-    let inserted = conn.execute(
-        "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO NOTHING",
-        params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()],
-    )?;
-    if inserted != 0 {
+    let exists: bool = conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM content WHERE id=?1)")?
+        .query_row([source.id.as_str()], |row| row.get(0))?;
+    if !exists {
+        let totals = diff_totals(value);
+        conn.prepare_cached(
+            "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6)",
+        )?
+        .execute(params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()])?;
         let mut insert = conn
             .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
         let mut start = 0;
