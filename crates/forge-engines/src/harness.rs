@@ -46,8 +46,6 @@ pub struct UserInput {
 pub struct Launch {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
-    /// Forge's own servers for the thread (name, address), for engines that
-    /// take them per thread rather than per process (Codex `thread/start`).
     pub gateway_mcp: Vec<(String, String)>,
     /// Every MCP server this launch carries, user-configured and Forge's
     /// own. Adapters that run without a process of their own (the claude.ai
