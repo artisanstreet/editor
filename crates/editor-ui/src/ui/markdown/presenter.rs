@@ -777,31 +777,16 @@ impl MarkdownPresenter {
                         fence: &super::fence::Fence,
                         sources: &[SelectionSource],
                         note: Option<&str>| {
-            let services = code.ok_or(PresenterError::Unavailable("code copy services"))?;
-            let card = fence.render(
+            code_card(
+                fence,
                 &format!("{id}-code-{row}"),
                 theme,
                 entry.document,
                 sources,
-                services.copy_enabled.then(|| services.copy.clone()),
+                code,
                 color_action.clone(),
-            );
-            Ok(if let Some(note) = note {
-                ui::Box::new()
-                    .layout("column")
-                    .width(Length::Pct(100.0))
-                    .spaced(Space::S6)
-                    .child(card)
-                    .child(crate::ui::rich::narrative::callout::text(
-                        theme,
-                        note,
-                        TextRole::Label,
-                        theme.colors.text_muted,
-                    ))
-                    .build()
-            } else {
-                card
-            })
+                note,
+            )
         };
         let reveal = self
             .reveals
@@ -1005,31 +990,16 @@ impl MarkdownPresenter {
                         fence: &super::fence::Fence,
                         sources: &[SelectionSource],
                         note: Option<&str>| {
-            let services = code.ok_or(PresenterError::Unavailable("code copy services"))?;
-            let card = fence.render(
+            code_card(
+                fence,
                 &format!("{id}-code-{ordinal}"),
                 theme,
                 document,
                 sources,
-                services.copy_enabled.then(|| services.copy.clone()),
+                code,
                 color_action.clone(),
-            );
-            Ok(if let Some(note) = note {
-                ui::Box::new()
-                    .layout("column")
-                    .width(Length::Pct(100.0))
-                    .spaced(Space::S6)
-                    .child(card)
-                    .child(crate::ui::rich::narrative::callout::text(
-                        theme,
-                        note,
-                        TextRole::Label,
-                        theme.colors.text_muted,
-                    ))
-                    .build()
-            } else {
-                card
-            })
+                note,
+            )
         };
         let reveal = self
             .reveals
@@ -1558,18 +1528,7 @@ impl MarkdownPresenter {
                     self.models.clone(),
                     &services,
                 );
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Image(model) => {
                 let services = self
@@ -1672,18 +1631,7 @@ impl MarkdownPresenter {
                     .borrow()
                     .view(model, *theme, &block_id, services.width, emit)
                     .map_err(PresenterError::Unavailable)?;
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Audio(block) => {
                 let services = self
@@ -1708,18 +1656,7 @@ impl MarkdownPresenter {
                     glyph.clone(),
                     invalidate.clone(),
                 );
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::ImageCompare(model) => {
                 let services = self
@@ -1777,28 +1714,10 @@ impl MarkdownPresenter {
                     .borrow()
                     .view(model, *theme, &block_id, services.width, emit)
                     .map_err(PresenterError::Unavailable)?;
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::AnnotatedCode(block) => {
-                let services = code.ok_or(PresenterError::Unavailable("code services"))?;
-                let reference = services
-                    .reference
-                    .as_ref()
-                    .ok_or(PresenterError::Unavailable("reference services"))?;
-                if reference_scope.is_some() && reference.instance.is_none() {
-                    return Err(PresenterError::Unavailable("reference host instance"));
-                }
+                let (services, reference) = reference_services(code, reference_scope.as_ref())?;
                 let block_id = format!("{id}-rich-{}-annotated", entry.id);
                 self.annotated_ids
                     .borrow_mut()
@@ -1824,30 +1743,10 @@ impl MarkdownPresenter {
                     state,
                     invalidate.clone(),
                 );
-                let content = crate::ui::rich::code::card::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                );
-                let copy = services.copy_enabled.then(|| {
-                    (
-                        (services.copy)(&format!("{block_id}-copy"), &block.copy()),
-                        crate::ui::rich::code::card::CopyPlacement::TopRight,
-                    )
-                });
-                crate::ui::rich::code::card::render(theme, content, copy, false)
+                code_envelope(theme, envelope, content, services, &block_id, &block.copy())
             }
             Prepared::FileTree(tree) => {
-                let services = code.ok_or(PresenterError::Unavailable("code services"))?;
-                let reference = services
-                    .reference
-                    .as_ref()
-                    .ok_or(PresenterError::Unavailable("reference services"))?;
-                if reference_scope.is_some() && reference.instance.is_none() {
-                    return Err(PresenterError::Unavailable("reference host instance"));
-                }
+                let (_, reference) = reference_services(code, reference_scope.as_ref())?;
                 let block_id = format!("{id}-rich-{}-file-tree", entry.id);
                 self.file_tree_ids
                     .borrow_mut()
@@ -1888,28 +1787,10 @@ impl MarkdownPresenter {
                     }
                 });
                 let content = tree.render(theme, &block_id, state, emit);
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::CodeRef(reference) => {
-                let services = code.ok_or(PresenterError::Unavailable("code services"))?;
-                let open = services
-                    .reference
-                    .as_ref()
-                    .ok_or(PresenterError::Unavailable("reference services"))?;
-                if reference_scope.is_some() && open.instance.is_none() {
-                    return Err(PresenterError::Unavailable("reference host instance"));
-                }
+                let (services, open) = reference_services(code, reference_scope.as_ref())?;
                 let block_id = format!("{id}-rich-{}-code-ref", entry.id);
                 let content = reference.render(
                     theme,
@@ -1918,20 +1799,14 @@ impl MarkdownPresenter {
                     open.instance,
                     open.open.clone(),
                 );
-                let content = crate::ui::rich::code::card::envelope(
+                code_envelope(
                     theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
+                    envelope,
                     content,
-                );
-                let copy = services.copy_enabled.then(|| {
-                    (
-                        (services.copy)(&format!("{block_id}-copy"), &reference.copy()),
-                        crate::ui::rich::code::card::CopyPlacement::TopRight,
-                    )
-                });
-                crate::ui::rich::code::card::render(theme, content, copy, false)
+                    services,
+                    &block_id,
+                    &reference.copy(),
+                )
             }
             Prepared::Compare(compare) => {
                 let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -1948,18 +1823,7 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Stats(stats) => {
                 let block_id = format!("{id}-rich-{}-stats", entry.id);
@@ -1976,18 +1840,7 @@ impl MarkdownPresenter {
                     Rc::new(charts::frame::stats_hint),
                     invalidate.clone(),
                 );
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Callout(callout) => {
                 let glyph: GlyphFactory = glyph.clone();
@@ -2067,17 +1920,7 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Funnel(spec)) => {
                 let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2115,17 +1958,7 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Spans(layout)) => {
                 let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2245,17 +2078,7 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Hierarchy(spec)) => {
                 let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2425,17 +2248,7 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Sankey(graph)) => {
                 let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2526,17 +2339,7 @@ impl MarkdownPresenter {
                     shared.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Chart(style, model)) => {
                 let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2668,17 +2471,7 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Distribution(spec)) => {
                 let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2755,17 +2548,7 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
             Prepared::Chart(charts::Prepared::Concentration(spec)) => {
                 let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -2786,18 +2569,7 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let current_theme = *theme;
-                let text = Rc::new(move |value: &str, role, color| {
-                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
-                });
-                charts::heatmap::envelope(
-                    theme,
-                    envelope.title.as_deref(),
-                    envelope.subtitle.as_deref(),
-                    envelope.caption.as_deref(),
-                    content,
-                    text,
-                )
+                enveloped(theme, envelope, content)
             }
         };
         Ok(element)
@@ -3048,6 +2820,97 @@ fn legend_toggle(
         .focusable(true)
         .cursor(aqua_core::CursorIcon::Pointer);
     live::track(element)
+}
+
+fn code_card(
+    fence: &super::fence::Fence,
+    id: &str,
+    theme: &ArtisanTheme,
+    document: aqua_text::document::SelectionDocumentId,
+    sources: &[SelectionSource],
+    code: Option<&CodeServices>,
+    on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
+    note: Option<&str>,
+) -> Result<Element, PresenterError> {
+    let services = code.ok_or(PresenterError::Unavailable("code copy services"))?;
+    let card = fence.render(
+        id,
+        theme,
+        document,
+        sources,
+        services.copy_enabled.then(|| services.copy.clone()),
+        on_color,
+    );
+    Ok(if let Some(note) = note {
+        ui::Box::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .spaced(Space::S6)
+            .child(card)
+            .child(crate::ui::rich::narrative::callout::text(
+                theme,
+                note,
+                TextRole::Label,
+                theme.colors.text_muted,
+            ))
+            .build()
+    } else {
+        card
+    })
+}
+
+fn reference_services<'a>(
+    code: Option<&'a CodeServices>,
+    scope: Option<&crate::ui::rich::actions::ResourceScope>,
+) -> Result<(&'a CodeServices, &'a ReferenceServices), PresenterError> {
+    let services = code.ok_or(PresenterError::Unavailable("code services"))?;
+    let reference = services
+        .reference
+        .as_ref()
+        .ok_or(PresenterError::Unavailable("reference services"))?;
+    if scope.is_some() && reference.instance.is_none() {
+        return Err(PresenterError::Unavailable("reference host instance"));
+    }
+    Ok((services, reference))
+}
+
+fn code_envelope(
+    theme: &ArtisanTheme,
+    envelope: &rich::Envelope,
+    content: Element,
+    services: &CodeServices,
+    block_id: &str,
+    copy_text: &str,
+) -> Element {
+    let content = crate::ui::rich::code::card::envelope(
+        theme,
+        envelope.title.as_deref(),
+        envelope.subtitle.as_deref(),
+        envelope.caption.as_deref(),
+        content,
+    );
+    let copy = services.copy_enabled.then(|| {
+        (
+            (services.copy)(&format!("{block_id}-copy"), copy_text),
+            crate::ui::rich::code::card::CopyPlacement::TopRight,
+        )
+    });
+    crate::ui::rich::code::card::render(theme, content, copy, false)
+}
+
+fn enveloped(theme: &ArtisanTheme, envelope: &rich::Envelope, content: Element) -> Element {
+    let current_theme = *theme;
+    let text = Rc::new(move |value: &str, role, color| {
+        crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
+    });
+    charts::heatmap::envelope(
+        theme,
+        envelope.title.as_deref(),
+        envelope.subtitle.as_deref(),
+        envelope.caption.as_deref(),
+        content,
+        text,
+    )
 }
 
 #[cfg(test)]
