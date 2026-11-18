@@ -6,7 +6,9 @@ use editor_conversation::adapter::RowModel;
 use editor_conversation::disclosure::RowDisclosure;
 use editor_conversation::fold::{Row, RowKey};
 use editor_conversation::presentation::{MarkdownOwners, PresentationScope};
-use editor_conversation::view::factory::{RealizedRow, RowFactory};
+use editor_conversation::view::Dispatch;
+use editor_conversation::view::factory::{RealizedRow, RowFactory, WorkResources};
+use editor_conversation::view::motion::RowMotion;
 use editor_conversation::view::status::StatusShimmers;
 use editor_ui::theme::{ArtisanTheme, ThemeMode};
 use std::cell::{Cell, RefCell};
@@ -79,6 +81,32 @@ pub fn row_factory_at(
     allocate: Rc<dyn Fn() -> SelectionSourceId>,
     now: std::time::Instant,
 ) -> RowFactory {
+    row_factory_with(
+        rows,
+        scope,
+        markdown,
+        reduced_motion,
+        allocate,
+        now,
+        Rc::new(|_| {}),
+        Rc::new(RefCell::new(RowMotion::default())),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors RowFactory::new with test defaults for the rest"
+)]
+pub fn row_factory_with(
+    rows: Vec<RealizedRow>,
+    scope: PresentationScope,
+    markdown: Rc<RefCell<MarkdownOwners>>,
+    reduced_motion: bool,
+    allocate: Rc<dyn Fn() -> SelectionSourceId>,
+    now: std::time::Instant,
+    dispatch: Dispatch,
+    motion: Rc<RefCell<RowMotion>>,
+) -> RowFactory {
     RowFactory::new(
         rows,
         scope,
@@ -92,6 +120,13 @@ pub fn row_factory_at(
         Rc::new(|_| {}),
         Rc::new(|_| {}),
         Rc::new(|_| {}),
+        dispatch,
+        WorkResources {
+            motion,
+            names: HashMap::new(),
+            seconds: 0.0,
+            timestamp: 0,
+        },
     )
 }
 

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use test_support::editor::core::{OpenThread, connect, remote_host, test_core};
 use test_support::editor::rows::{
-    fixed_source, listed, realized, row_factory, row_factory_at, row_list, row_model, source_ids,
+    fixed_source, listed, realized, row_factory, row_factory_with, row_list, row_model, source_ids,
 };
 use test_support::editor::ui::{click, mount, mounted, node_with_key, painted_texts, ui_app};
 use test_support::items::{self, assistant_reply, read_tool, user_message};
@@ -129,18 +129,18 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     };
     let factory = |at| {
         Rc::new(
-            row_factory_at(
+            row_factory_with(
                 rows(),
                 scope.clone(),
                 markdown.clone(),
                 false,
                 fixed_source(9000),
                 at,
+                Rc::new(|_| {}),
+                motion.clone(),
             )
-            .with_dispatch(Rc::new(|_| {}))
             .with_admission(conversation.reveal.clone())
-            .with_row_cache(row_cache.clone())
-            .with_work(motion.clone(), HashMap::new(), 0.0, 0),
+            .with_row_cache(row_cache.clone()),
         )
     };
     let first = factory(now);
@@ -169,15 +169,17 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     connect(&mut core, &config);
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
     let replacement_scope = PresentationScope::capture(&conversation, &core).unwrap();
-    let _replacement_factory = row_factory(
+    let _replacement_factory = row_factory_with(
         Vec::new(),
         replacement_scope,
         markdown.clone(),
         false,
         fixed_source(9001),
+        Instant::now(),
+        Rc::new(|_| {}),
+        motion.clone(),
     )
-    .with_row_cache(row_cache.clone())
-    .with_work(motion.clone(), HashMap::new(), 0.0, 0);
+    .with_row_cache(row_cache.clone());
     assert!(next.realize(0, &keys[0]).is_err());
     first.dispose();
     assert!(first.realize(0, &keys[0]).is_err());
@@ -524,7 +526,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
 
     let activations = Rc::new(Cell::new(0));
     let activated = activations.clone();
-    let gap_factory = row_factory(
+    let gap_factory = row_factory_with(
         vec![realized(RowModel {
             version: 3,
             ..row_model(Row::Gap, [])
@@ -533,8 +535,10 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
         markdown.clone(),
         true,
         fixed_source(999),
+        std::time::Instant::now(),
+        Rc::new(move |_| activated.set(activated.get() + 1)),
+        Rc::default(),
     )
-    .with_dispatch(Rc::new(move |_| activated.set(activated.get() + 1)))
     .with_observations(
         editor_aqua::conversation::view::transcript::TranscriptObservations::default(),
     );

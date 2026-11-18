@@ -784,6 +784,13 @@ impl RootViews {
                 on_link,
                 on_color,
                 workspace.code_action_emit(),
+                Rc::clone(&dispatch),
+                crate::conversation::view::factory::WorkResources {
+                    motion: Rc::clone(&self.row_motion),
+                    names: crate::conversation::adapter::agent_names(&workspace.conversation),
+                    seconds,
+                    timestamp: core.clock().timestamp(),
+                },
             )
             .with_active(row_token)
             .with_settled(settled, self.row_style_epoch)
@@ -798,7 +805,6 @@ impl RootViews {
                 }),
             )?
             .with_stored(Rc::clone(&self.stored), source_provider)?
-            .with_dispatch(Rc::clone(&dispatch))
             .with_copy({
                 let copy_actions = Rc::clone(&self.conversation_actions);
                 let copy_scope = scope.clone();
@@ -829,12 +835,6 @@ impl RootViews {
                 swift,
             )?
             .with_observations(self.observations.clone())
-            .with_work(
-                Rc::clone(&self.row_motion),
-                crate::conversation::adapter::agent_names(&workspace.conversation),
-                seconds,
-                core.clock().timestamp(),
-            )
             .with_engine(Rc::clone(&self.markdown_engine))
             .with_media(Rc::new(move |key, width| {
                 let (fetcher, revision) = providers.get(&key.item)?;

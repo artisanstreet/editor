@@ -98,11 +98,11 @@ fn bubble_sender(
     }
 }
 
-struct WorkResources {
-    motion: Rc<RefCell<super::motion::RowMotion>>,
-    names: HashMap<artisan_api::ItemId, String>,
-    seconds: f64,
-    timestamp: artisan_api::Timestamp,
+pub struct WorkResources {
+    pub motion: Rc<RefCell<super::motion::RowMotion>>,
+    pub names: HashMap<artisan_api::ItemId, String>,
+    pub seconds: f64,
+    pub timestamp: artisan_api::Timestamp,
 }
 
 struct RevealResources {
@@ -114,10 +114,18 @@ struct RevealResources {
     swift: bool,
 }
 
-struct LazyRows {
-    snapshots: crate::conversation::adapter::RowSnapshots,
-    disclosure: Vec<RowDisclosure>,
-    held: Vec<bool>,
+enum RowSource {
+    Realized(Vec<RealizedRow>),
+    Snapshots {
+        snapshots: crate::conversation::adapter::RowSnapshots,
+        rows: Vec<SnapshotRow>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct SnapshotRow {
+    disclosure: RowDisclosure,
+    held: bool,
 }
 
 #[derive(Clone)]
@@ -151,8 +159,6 @@ struct StoredResources {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Service {
-    Actions,
-    Work,
     Sources,
     SourceProvider,
     Stored,
@@ -164,8 +170,6 @@ pub enum Part {
     Row,
     Item,
     Run,
-    Disclosure,
-    Admission,
     Source,
     SourceField,
     SourceView,
@@ -248,8 +252,7 @@ pub struct AfterLayout {
 }
 
 pub struct RowFactory {
-    pub rows: Vec<RealizedRow>,
-    lazy_rows: Option<LazyRows>,
+    rows: RowSource,
     pub scope: PresentationScope,
     pub markdown: Rc<RefCell<MarkdownOwners>>,
     pub statuses: Rc<RefCell<status::StatusShimmers>>,
@@ -261,9 +264,9 @@ pub struct RowFactory {
     pub on_link: Rc<dyn Fn(LinkAction)>,
     pub on_color: Rc<dyn Fn(ShowCopyMenu)>,
     pub on_code: Rc<dyn Fn(ScopedCodeAction)>,
-    dispatch: Option<super::Dispatch>,
+    dispatch: super::Dispatch,
     copy: Option<Rc<dyn Fn(super::source_actions::CopySource)>>,
-    work: Option<WorkResources>,
+    work: WorkResources,
     engine: Rc<RefCell<Option<editor_ui::markdown::MarkdownEngine>>>,
     projection_versions: HashMap<BodyKey, u64>,
     shape_counts: HashMap<BodyKey, usize>,
@@ -1250,13 +1253,19 @@ impl RowFactory {
         on_link: Rc<dyn Fn(LinkAction)>,
         on_color: Rc<dyn Fn(ShowCopyMenu)>,
         on_code: Rc<dyn Fn(ScopedCodeAction)>,
+        dispatch: super::Dispatch,
+        work: WorkResources,
     ) -> Self {
         statuses.borrow_mut().set_scope(&scope);
+        {
+            let mut motion = work.motion.borrow_mut();
+            motion.rebind_scope(&scope);
+            motion.begin_frame();
+        }
         let mut row_cache = super::row_cache::RowCache::default();
         row_cache.rebind(Some(scope.clone()));
         Self {
-            rows,
-            lazy_rows: None,
+            rows: RowSource::Realized(rows),
             scope,
             markdown,
             statuses,
@@ -1268,9 +1277,9 @@ impl RowFactory {
             on_link,
             on_color,
             on_code,
-            dispatch: None,
+            dispatch,
             copy: None,
-            work: None,
+            work,
             engine: Rc::new(RefCell::new(None)),
             projection_versions: HashMap::new(),
             shape_counts: HashMap::new(),
@@ -1310,8 +1319,11 @@ impl RowFactory {
     }
 
     fn fingerprint(&self, index: usize, key: &RowKey) -> Option<u64> {
-        let lazy = self.lazy_rows.as_ref()?;
-        let model = lazy.snapshots.model(index)?;
+        let RowSource::Snapshots { snapshots, rows } = &self.rows else {
+            return None;
+        };
+        let model = snapshots.model(index)?;
+        let row = rows.get(index)?;
         if &model.row.key() != key {
             return None;
         }
@@ -1330,17 +1342,15 @@ impl RowFactory {
             Row::Work { .. } | Row::WorkHeader(_)
                 if model.run.as_ref().is_some_and(|run| run.live()) =>
             {
-                self.work
-                    .as_ref()
-                    .and_then(|work| u64::try_from(work.timestamp / 1_000).ok())
+                u64::try_from(self.work.timestamp / 1_000).ok()
             }
             _ => None,
         };
         Some(
             RowFingerprint {
                 model: &model,
-                disclosure: lazy.disclosure.get(index)?,
-                held: *lazy.held.get(index)?,
+                disclosure: &row.disclosure,
+                held: row.held,
                 body_version,
                 style_epoch: self.style_epoch,
             }
@@ -1393,11 +1403,6 @@ impl RowFactory {
         owner.borrow_mut().rebind(Some(self.scope.clone()));
         self.stored = Some(StoredResources { owner, provider });
         Ok(self)
-    }
-
-    pub fn with_dispatch(mut self, dispatch: super::Dispatch) -> Self {
-        self.dispatch = Some(dispatch);
-        self
     }
 
     pub fn with_copy(mut self, copy: Rc<dyn Fn(super::source_actions::CopySource)>) -> Self {
@@ -1468,13 +1473,12 @@ impl RowFactory {
             .reveal_frontier
             .as_ref()
             .and_then(|frontier| conversation.row_position(frontier));
-        let mut disclosure = Vec::with_capacity(conversation.rows.len());
-        let mut held = Vec::with_capacity(conversation.rows.len());
+        let mut rows = Vec::with_capacity(conversation.rows.len());
         for (index, (row, _)) in conversation.rows.iter().enumerate() {
-            disclosure.push(conversation.disclosures.row_disclosure(row));
-            held.push(crate::conversation::admission::behind_reveal(
-                index, row, frontier,
-            ));
+            rows.push(SnapshotRow {
+                disclosure: conversation.disclosures.row_disclosure(row),
+                held: crate::conversation::admission::behind_reveal(index, row, frontier),
+            });
             if let Row::Text { id, slot, .. } = row.semantic() {
                 let key = BodyKey {
                     item: id.clone(),
@@ -1488,12 +1492,7 @@ impl RowFactory {
                 }
             }
         }
-        self.rows.clear();
-        self.lazy_rows = Some(LazyRows {
-            snapshots,
-            disclosure,
-            held,
-        });
+        self.rows = RowSource::Snapshots { snapshots, rows };
         Ok(self)
     }
 
@@ -1522,27 +1521,6 @@ impl RowFactory {
             .as_ref()
             .ok_or(ConfigureRowsError::NoObservations)?;
         Ok(observations.viewport_callback(self.active.clone()))
-    }
-
-    pub fn with_work(
-        mut self,
-        motion: Rc<RefCell<super::motion::RowMotion>>,
-        names: HashMap<artisan_api::ItemId, String>,
-        seconds: f64,
-        timestamp: artisan_api::Timestamp,
-    ) -> Self {
-        {
-            let mut motion = motion.borrow_mut();
-            motion.rebind_scope(&self.scope);
-            motion.begin_frame();
-        }
-        self.work = Some(WorkResources {
-            motion,
-            names,
-            seconds,
-            timestamp,
-        });
-        self
     }
 
     pub fn with_engine(
@@ -1585,11 +1563,7 @@ impl RowFactory {
         if !self.live.get() || !self.row_cache.borrow().scope_is(&self.scope) {
             return AfterLayout::default();
         }
-        if self
-            .work
-            .as_ref()
-            .is_some_and(|work| !work.motion.borrow().scope_is(&self.scope))
-        {
+        if !self.work.motion.borrow().scope_is(&self.scope) {
             return AfterLayout::default();
         }
         let reveal = self.markdown.borrow().reveal_heatmaps(app);
@@ -1733,34 +1707,27 @@ impl RowFactory {
         if !self.row_cache.borrow().scope_is(&self.scope) {
             return Err(RealizeRowError::Stale(Staleness::RowCache));
         }
-        if !self
-            .work
-            .as_ref()
-            .is_none_or(|work| work.motion.borrow().scope_is(&self.scope))
-        {
+        if !self.work.motion.borrow().scope_is(&self.scope) {
             return Err(RealizeRowError::Stale(Staleness::MotionScope));
         }
         let generated;
-        let row = if let Some(lazy) = &self.lazy_rows {
-            generated = RealizedRow {
-                model: lazy
-                    .snapshots
-                    .model(index)
-                    .ok_or(RealizeRowError::Unavailable(Part::Row))?,
-                disclosure: *lazy
-                    .disclosure
+        let row = match &self.rows {
+            RowSource::Snapshots { snapshots, rows } => {
+                let state = rows
                     .get(index)
-                    .ok_or(RealizeRowError::Unavailable(Part::Disclosure))?,
-                held: *lazy
-                    .held
-                    .get(index)
-                    .ok_or(RealizeRowError::Unavailable(Part::Admission))?,
-            };
-            &generated
-        } else {
-            self.rows
+                    .ok_or(RealizeRowError::Unavailable(Part::Row))?;
+                generated = RealizedRow {
+                    model: snapshots
+                        .model(index)
+                        .ok_or(RealizeRowError::Unavailable(Part::Row))?,
+                    disclosure: state.disclosure,
+                    held: state.held,
+                };
+                &generated
+            }
+            RowSource::Realized(rows) => rows
                 .get(index)
-                .ok_or(RealizeRowError::Unavailable(Part::Row))?
+                .ok_or(RealizeRowError::Unavailable(Part::Row))?,
         };
         if &row.model.row.key() != key {
             return Err(RealizeRowError::Stale(Staleness::RowIdentity));
@@ -1852,10 +1819,7 @@ impl RowFactory {
         let mut stored_proof = None;
         let content = match &row.model.row {
             Row::Gap | Row::EarlierWork { .. } => {
-                let dispatch = self
-                    .dispatch
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
+                let dispatch = &self.dispatch;
                 super::load_row(&row.model.row, self.theme, Rc::clone(dispatch))
             }
             header @ (Row::Work { .. } | Row::WorkHeader(_)) => {
@@ -1872,14 +1836,8 @@ impl RowFactory {
                     Row::WorkHeader(run) => (Some(run), 0, false),
                     _ => unreachable!("invariant: the arm matched only work rows"),
                 };
-                let work = self
-                    .work
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Work))?;
-                let dispatch = self
-                    .dispatch
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
+                let work = &self.work;
+                let dispatch = &self.dispatch;
                 if segment != 0 || row.model.run.is_none() {
                     None
                 } else {
@@ -1919,14 +1877,8 @@ impl RowFactory {
                 }
             }
             Row::Chain { ids, .. } => {
-                let work = self
-                    .work
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Work))?;
-                let dispatch = self
-                    .dispatch
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
+                let work = &self.work;
+                let dispatch = &self.dispatch;
                 let open = row
                     .model
                     .ui
@@ -1964,14 +1916,8 @@ impl RowFactory {
                 )
             }
             Row::WorkEntry { id, .. } => {
-                let work = self
-                    .work
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Work))?;
-                let dispatch = self
-                    .dispatch
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
+                let work = &self.work;
+                let dispatch = &self.dispatch;
                 let item = row
                     .model
                     .items
@@ -2456,10 +2402,7 @@ impl RowFactory {
                 if matches!(&item.kind, ItemKind::Question { .. }) {
                     self.question_card(&row_owner, item, &mut batches)?
                 } else {
-                    let dispatch = self
-                        .dispatch
-                        .as_ref()
-                        .ok_or(RealizeRowError::Missing(Service::Actions))?;
+                    let dispatch = &self.dispatch;
                     let approval = self.approval_card(
                         &row_owner,
                         item,
@@ -2470,10 +2413,7 @@ impl RowFactory {
                     if approval.is_some() {
                         approval
                     } else {
-                        let work = self
-                            .work
-                            .as_ref()
-                            .ok_or(RealizeRowError::Missing(Service::Work))?;
+                        let work = &self.work;
                         match &item.kind {
                             ItemKind::Tool { .. }
                             | ItemKind::UserMessage {
@@ -2613,8 +2553,8 @@ impl RowFactory {
             _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
         };
         let mut work_settling = false;
-        let content = match (content, &self.work) {
-            (Some(element), Some(_)) => {
+        let content = match content {
+            Some(element) => {
                 let (id, standalone) = match row.model.row.semantic() {
                     Row::WorkEntry { id, .. } => (Some(id), false),
                     Row::Chain { ids, .. } => (Some(ids.first()), false),
@@ -2651,7 +2591,7 @@ impl RowFactory {
                     Some(element)
                 }
             }
-            (other, _) => other,
+            None => None,
         };
         if let Some(queue) = &self.admission {
             let position = row

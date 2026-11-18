@@ -2,7 +2,6 @@
     clippy::assertions_on_result_states,
     clippy::cast_possible_truncation,
     clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
     clippy::float_cmp,
     clippy::iter_on_single_items,
     clippy::let_underscore_untyped,

@@ -14,7 +14,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use test_support::editor::core::{OpenThread, connect};
-use test_support::editor::rows::{fixed_source, realized, row_factory, row_model};
+use test_support::editor::rows::{
+    fixed_source, realized, row_factory, row_factory_with, row_model,
+};
 use test_support::editor::ui::{click, mounted};
 use test_support::items;
 
@@ -84,12 +86,23 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         })
     };
     let factory = |sending| {
-        row_factory(
+        row_factory_with(
             vec![row(sending)],
             scope.clone(),
             markdown.clone(),
             true,
             fixed_source(511),
+            Instant::now(),
+            {
+                let observed = observed.clone();
+                let action_scope = action_scope.clone();
+                Rc::new(move |action: Action| {
+                    observed
+                        .borrow_mut()
+                        .push((action.clone(), action_scope.bind(action)))
+                })
+            },
+            Rc::default(),
         )
         .with_row_cache(cache.clone())
         .with_sources(provider.clone(), SelectionDocumentId(510), {
@@ -97,15 +110,6 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
             Rc::new(move |action| observed_sources.borrow_mut().push(action))
         })
         .unwrap()
-        .with_dispatch({
-            let observed = observed.clone();
-            let action_scope = action_scope.clone();
-            Rc::new(move |action: Action| {
-                observed
-                    .borrow_mut()
-                    .push((action.clone(), action_scope.bind(action)))
-            })
-        })
     };
     let ready = factory(false);
     let mut app = mounted(800.0, 900.0, ready.realize(0, &key).unwrap().element);
@@ -165,14 +169,7 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         let observed_sources = observed_sources.clone();
         Rc::new(move |action| observed_sources.borrow_mut().push(action))
     })
-    .unwrap()
-    .with_dispatch(Rc::new(|_| {}))
-    .with_work(
-        Rc::new(RefCell::new(Default::default())),
-        HashMap::new(),
-        0.0,
-        0,
-    );
+    .unwrap();
     let mut notice_app = mounted(
         800.0,
         900.0,
