@@ -3,7 +3,9 @@ pub use artisan_markdown_index::{BlockShape, IndexedLeaf, LeafContext, LeafSpaci
 #[derive(Debug, thiserror::Error)]
 pub enum MarkdownIndexError {
     #[error(transparent)]
-    Index(#[from] artisan_markdown_index::MarkdownIndexError),
+    Index(#[from] artisan_markdown_index::BuildIndexError),
+    #[error(transparent)]
+    Replay(#[from] artisan_markdown_index::ReplayLeafError),
     #[error(transparent)]
     Parse(#[from] super::MarkdownError),
     #[error("The indexed Markdown leaf has an unexpected semantic shape")]

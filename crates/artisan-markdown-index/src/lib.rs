@@ -37,17 +37,35 @@ const SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const INDEX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub enum MarkdownIndexError {
-    #[error("Markdown source exceeds the 64 MiB indexing admission limit")]
-    SourceBudget,
+pub enum BuildIndexError {
+    #[error("Markdown source of {bytes} bytes exceeds the 64 MiB indexing admission limit")]
+    SourceTooLarge { bytes: usize },
     #[error("Markdown index exceeds its 16 MiB memory limit")]
-    IndexBudget,
+    IndexTooLarge,
     #[error("Markdown nesting exceeds 96 tags")]
-    NestingBudget,
-    #[error("The fetched Markdown leaf does not cover its complete indexed source range")]
-    IncompleteRange,
-    #[error("The indexed Markdown leaf has an unexpected semantic shape")]
-    InvalidShape,
+    NestingTooDeep,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayLeafError {
+    #[error(
+        "the fetched Markdown source at {fetched_start} ({fetched_bytes} bytes) does not cover leaf {leaf:?}"
+    )]
+    IncompleteRange {
+        leaf: Range<usize>,
+        fetched_start: usize,
+        fetched_bytes: usize,
+    },
+    #[error("the Markdown token {token:?} in leaf {leaf:?} is text stored as structure")]
+    InvalidShape {
+        leaf: Range<usize>,
+        token: Range<usize>,
+    },
+    #[error("the Markdown token {token:?} lies outside its leaf {leaf:?}")]
+    TokenOutsideLeaf {
+        leaf: Range<usize>,
+        token: Range<usize>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -136,7 +154,7 @@ pub struct MarkdownIndex {
 }
 
 impl MarkdownIndex {
-    pub fn build(source: &str) -> Result<Self, MarkdownIndexError> {
+    pub fn build(source: &str) -> Result<Self, BuildIndexError> {
         build::build(source)
     }
 
@@ -207,35 +225,27 @@ impl MarkdownIndex {
 
 fn resolve_text<'a>(
     text: &'a Text,
-    source: &'a str,
-    origin: usize,
-) -> Result<pulldown_cmark::CowStr<'a>, MarkdownIndexError> {
+    exact: &'a str,
+    leaf: &Range<usize>,
+) -> Result<pulldown_cmark::CowStr<'a>, ReplayLeafError> {
     let value = match text {
-        Text::Range(range) => source
-            .get(local_range(range, source, origin)?)
-            .ok_or(MarkdownIndexError::IncompleteRange)?,
+        Text::Range(range) => local_range(range, leaf)
+            .and_then(|local| exact.get(local))
+            .ok_or_else(|| ReplayLeafError::TokenOutsideLeaf {
+                leaf: leaf.clone(),
+                token: range.clone(),
+            })?,
         Text::Decoded(value) => value.as_ref(),
     };
     Ok(value.into())
 }
 
-fn local_range(
-    range: &Range<usize>,
-    source: &str,
-    origin: usize,
-) -> Result<Range<usize>, MarkdownIndexError> {
-    let start = range
-        .start
-        .checked_sub(origin)
-        .ok_or(MarkdownIndexError::IncompleteRange)?;
-    let end = range
-        .end
-        .checked_sub(origin)
-        .ok_or(MarkdownIndexError::IncompleteRange)?;
-    match source.get(start..end) {
-        Some(_) => Ok(start..end),
-        None => Err(MarkdownIndexError::IncompleteRange),
-    }
+fn local_range(range: &Range<usize>, leaf: &Range<usize>) -> Option<Range<usize>> {
+    Some(range.start.checked_sub(leaf.start)?..range.end.checked_sub(leaf.start)?)
+}
+
+fn local_slice(range: &Range<usize>, exact: &str, leaf: &Range<usize>) -> Option<Range<usize>> {
+    local_range(range, leaf).filter(|local| exact.get(local.clone()).is_some())
 }
 
 #[expect(
@@ -315,22 +325,15 @@ impl LeafRecord {
         &self,
         start: usize,
         source: &str,
-    ) -> Result<Vec<(Event<'static>, Range<usize>)>, MarkdownIndexError> {
+    ) -> Result<Vec<(Event<'static>, Range<usize>)>, ReplayLeafError> {
         let leaf = &self.leaf;
-        let local_start = leaf
-            .range
-            .start
-            .checked_sub(start)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let local_end = leaf
-            .range
-            .end
-            .checked_sub(start)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let exact = source
-            .get(local_start..local_end)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let origin = leaf.range.start;
+        let exact = local_range(&leaf.range, &(start..start))
+            .and_then(|local| source.get(local))
+            .ok_or_else(|| ReplayLeafError::IncompleteRange {
+                leaf: leaf.range.clone(),
+                fetched_start: start,
+                fetched_bytes: source.len(),
+            })?;
         let mut events = Vec::with_capacity(leaf.events.len() + 2);
         if let Kind::TableRow { .. } = leaf.kind {
             let alignments = self
@@ -350,14 +353,26 @@ impl LeafRecord {
             let value = match &event.token {
                 Token::Structural(
                     Event::Text(_) | Event::Code(_) | Event::Html(_) | Event::InlineHtml(_),
-                ) => return Err(MarkdownIndexError::InvalidShape),
+                ) => {
+                    return Err(ReplayLeafError::InvalidShape {
+                        leaf: leaf.range.clone(),
+                        token: event.range.clone(),
+                    });
+                }
                 Token::Structural(event) => event.clone(),
-                Token::Text(value) => Event::Text(resolve_text(value, exact, origin)?),
-                Token::Code(value) => Event::Code(resolve_text(value, exact, origin)?),
-                Token::Html(value) => Event::Html(resolve_text(value, exact, origin)?),
-                Token::InlineHtml(value) => Event::InlineHtml(resolve_text(value, exact, origin)?),
+                Token::Text(value) => Event::Text(resolve_text(value, exact, &leaf.range)?),
+                Token::Code(value) => Event::Code(resolve_text(value, exact, &leaf.range)?),
+                Token::Html(value) => Event::Html(resolve_text(value, exact, &leaf.range)?),
+                Token::InlineHtml(value) => {
+                    Event::InlineHtml(resolve_text(value, exact, &leaf.range)?)
+                }
             };
-            let range = local_range(&event.range, exact, origin)?;
+            let range = local_slice(&event.range, exact, &leaf.range).ok_or_else(|| {
+                ReplayLeafError::TokenOutsideLeaf {
+                    leaf: leaf.range.clone(),
+                    token: event.range.clone(),
+                }
+            })?;
             events.push((value.into_static(), range));
         }
         if matches!(leaf.kind, Kind::TableRow { .. }) {

@@ -1,8 +1,8 @@
 use super::PARSE_OPTIONS;
 use super::{
-    Arc, BlockShape, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind, LeafContext, LeafSpacing,
-    ListLevel, MarkdownIndex, MarkdownIndexError, SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text,
-    Token, event_heap_bytes,
+    Arc, BlockShape, BuildIndexError, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind,
+    LeafContext, LeafSpacing, ListLevel, MarkdownIndex, SOURCE_BYTES, TableAlignment, Tag, TagEnd,
+    Text, Token, event_heap_bytes,
 };
 use pulldown_cmark::Parser;
 use std::collections::{HashMap, HashSet};
@@ -32,9 +32,11 @@ struct ActiveLeaf {
     clippy::wildcard_enum_match_arm,
     reason = "pulldown-cmark's events and tags: only the ones named here shape the index"
 )]
-pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
+pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
     if source.len() > SOURCE_BYTES {
-        return Err(MarkdownIndexError::SourceBudget);
+        return Err(BuildIndexError::SourceTooLarge {
+            bytes: source.len(),
+        });
     }
     let mut result = MarkdownIndex {
         leaves: Vec::new(),
@@ -56,12 +58,12 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     let mut admission_bytes = 0usize;
     for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
         if admission_bytes > INDEX_BYTES {
-            return Err(MarkdownIndexError::IndexBudget);
+            return Err(BuildIndexError::IndexTooLarge);
         }
         if let Event::Start(_) = &event {
             depth += 1;
             if depth > 96 {
-                return Err(MarkdownIndexError::NestingBudget);
+                return Err(BuildIndexError::NestingTooDeep);
             }
         } else if let Event::End(_) = &event {
             depth = depth.saturating_sub(1);
@@ -342,7 +344,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
             other => {
                 admission_bytes += event_heap_bytes(&other);
                 if admission_bytes > INDEX_BYTES {
-                    return Err(MarkdownIndexError::IndexBudget);
+                    return Err(BuildIndexError::IndexTooLarge);
                 }
                 Token::Structural(other.into_static())
             }
@@ -350,7 +352,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         current.leaf.events.push(IndexedEvent { token, range });
         admission_bytes += 2 * std::mem::size_of::<IndexedEvent>();
         if admission_bytes > INDEX_BYTES {
-            return Err(MarkdownIndexError::IndexBudget);
+            return Err(BuildIndexError::IndexTooLarge);
         }
         if finishes && let Some(done) = active.take() {
             result.leaves.push(done.leaf);
@@ -370,7 +372,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     }
     result.decoded = decoded.into_iter().collect();
     if result.resident_bytes() > INDEX_BYTES {
-        return Err(MarkdownIndexError::IndexBudget);
+        return Err(BuildIndexError::IndexTooLarge);
     }
     Ok(result)
 }
@@ -419,7 +421,7 @@ fn intern_text(
     source: &str,
     decoded: &mut HashSet<Arc<str>>,
     bytes: &mut usize,
-) -> Result<Text, MarkdownIndexError> {
+) -> Result<Text, BuildIndexError> {
     let start = (text.as_ptr() as usize).checked_sub(source.as_ptr() as usize);
     if let Some(start) = start.filter(|start| *start <= source.len())
         && source.get(start..start.saturating_add(text.len())) == Some(text)
@@ -430,7 +432,7 @@ fn intern_text(
         return Ok(Text::Decoded(Arc::clone(known)));
     }
     if bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64) > INDEX_BYTES {
-        return Err(MarkdownIndexError::IndexBudget);
+        return Err(BuildIndexError::IndexTooLarge);
     }
     let text: Arc<str> = Arc::from(text);
     *bytes = bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64);

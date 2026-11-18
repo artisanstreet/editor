@@ -729,7 +729,7 @@ fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting
         assert!(
             matches!(
                 result,
-                Err(crate::ui::markdown::MarkdownIndexError::Index(_))
+                Err(crate::ui::markdown::MarkdownIndexError::Replay(_))
             ),
             "{result:?}"
         );
