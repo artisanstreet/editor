@@ -16,13 +16,13 @@ impl Default for SignInForm {
 }
 
 impl SignInForm {
-    pub fn request_link(&self, core: &mut editor_core::Core) {
+    pub(crate) fn request_link(&self, core: &mut editor_core::Core) {
         let device_name = core.device_name.clone();
         core.account_mut()
             .request_link(self.email.borrow().text(), device_name);
     }
 
-    pub fn finish_sign_in(&mut self, core: &mut editor_core::Core) {
+    pub(crate) fn finish_sign_in(&mut self, core: &mut editor_core::Core) {
         let factor = editor_core::account::SecondFactor::parse(self.second_factor.borrow().text());
         core.account_mut().finish_sign_in(factor);
         self.second_factor.borrow_mut().set_text("");

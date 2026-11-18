@@ -6,26 +6,26 @@ use editor_core::HostData;
 
 #[derive(Default)]
 pub struct ArchiveForm {
-    pub host: Option<String>,
-    pub restoring: HashSet<ThreadId>,
-    pub error: Option<String>,
-    pub ids: Vec<ThreadId>,
+    pub(crate) host: Option<String>,
+    pub(crate) restoring: HashSet<ThreadId>,
+    pub(crate) error: Option<String>,
+    pub(crate) ids: Vec<ThreadId>,
     generation: u64,
     dirty: bool,
 }
 
 pub struct ArchiveRequest {
-    pub host: String,
-    pub thread: ThreadId,
+    pub(crate) host: String,
+    pub(crate) thread: ThreadId,
     generation: u64,
 }
 
 impl ArchiveForm {
-    pub fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self) {
         self.dirty = true;
     }
 
-    pub fn sync(&mut self, host: Option<&HostData>) {
+    pub(crate) fn sync(&mut self, host: Option<&HostData>) {
         let id = host.map(|host| host.id.0.clone());
         if self.host != id {
             self.host = id;
@@ -50,7 +50,7 @@ impl ArchiveForm {
             .unwrap_or_default();
     }
 
-    pub fn begin(&mut self, thread: ThreadId) -> Option<ArchiveRequest> {
+    pub(crate) fn begin(&mut self, thread: ThreadId) -> Option<ArchiveRequest> {
         let host = self.host.clone()?;
         if !self.restoring.insert(thread.clone()) {
             return None;
@@ -63,7 +63,7 @@ impl ArchiveForm {
         })
     }
 
-    pub fn complete(&mut self, request: &ArchiveRequest, result: Result<(), String>) {
+    pub(crate) fn complete(&mut self, request: &ArchiveRequest, result: Result<(), String>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }

@@ -47,22 +47,22 @@ pub enum ClaudeAiSignInError {
 }
 
 pub struct SettingsController {
-    pub reported_prompt_dirty: bool,
-    pub reported_font_menu: bool,
-    pub reported_streaming_menu: bool,
-    pub reported_retention_menu: bool,
+    pub(crate) reported_prompt_dirty: bool,
+    pub(crate) reported_font_menu: bool,
+    pub(crate) reported_streaming_menu: bool,
+    pub(crate) reported_retention_menu: bool,
     pub mcp_editors: Vec<Rc<RefCell<Editor>>>,
     pub retention_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
     pub font_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
     pub streaming_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
     pub sign_in: super::sign_in::SignInForm,
-    pub forge_code: Rc<RefCell<Editor>>,
-    pub archive: ArchiveForm,
+    pub(crate) forge_code: Rc<RefCell<Editor>>,
+    pub(crate) archive: ArchiveForm,
     pub engines: EnginesForm,
     pub extensions: ExtensionsForm,
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
-    pub editor_setting_error: Option<String>,
+    pub(crate) editor_setting_error: Option<String>,
     parked_prompts: HashMap<String, (PromptForm, String)>,
     setting_writes: SettingWrites,
     completion: OwnedDelivery<HostCompletion>,
@@ -220,7 +220,7 @@ impl SettingsController {
         self.parked_prompts.insert(host, (form, text));
     }
 
-    pub fn set_editor_setting(&mut self, core: &mut Core, key: &'static str, value: Value) {
+    pub(crate) fn set_editor_setting(&mut self, core: &mut Core, key: &'static str, value: Value) {
         match core.set_setting(key, value) {
             Ok(()) => self.editor_setting_error = None,
             Err(error) => {
@@ -231,7 +231,7 @@ impl SettingsController {
         }
     }
 
-    pub fn reload_editor_settings(&mut self, core: &mut Core) {
+    pub(crate) fn reload_editor_settings(&mut self, core: &mut Core) {
         self.editor_setting_error = None;
         core.reload_settings();
     }
@@ -262,13 +262,13 @@ impl SettingsController {
         self.sync(core);
     }
 
-    pub fn claim_forge(&mut self, core: &mut Core) {
+    pub(crate) fn claim_forge(&mut self, core: &mut Core) {
         let code = self.forge_code.borrow().text().to_owned();
         core.account_mut().claim_code(code);
         self.forge_code.borrow_mut().set_text("");
     }
 
-    pub fn unarchive(&mut self, core: &Core, thread: artisan_api::ThreadId) {
+    pub(crate) fn unarchive(&mut self, core: &Core, thread: artisan_api::ThreadId) {
         if core.active_host().map(|host| host.instance()) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.archive.host.as_ref()
         {
@@ -329,14 +329,14 @@ impl SettingsController {
         }
     }
 
-    pub fn setting_failures(
+    pub(crate) fn setting_failures(
         &self,
         host: &editor_core::HostData,
     ) -> Vec<(SettingKey, SettingFailure)> {
         self.setting_writes.failures_for(&host.id, host.instance())
     }
 
-    pub fn retry_setting(&mut self, core: &mut Core, target: SettingKey) {
+    pub(crate) fn retry_setting(&mut self, core: &mut Core, target: SettingKey) {
         if let Some(failure) = self.setting_writes.failure(&target).cloned() {
             self.set_host_setting_for(
                 core,
@@ -348,7 +348,7 @@ impl SettingsController {
         }
     }
 
-    pub fn dismiss_setting_failure(&mut self, target: &SettingKey) {
+    pub(crate) fn dismiss_setting_failure(&mut self, target: &SettingKey) {
         self.setting_writes.dismiss(target);
     }
 
@@ -416,7 +416,7 @@ impl SettingsController {
         self.lock_mcp_fields();
     }
 
-    pub fn remove_mcp(&mut self, core: &Core, previous: artisan_api::McpServer) {
+    pub(crate) fn remove_mcp(&mut self, core: &Core, previous: artisan_api::McpServer) {
         if !self.active_form_host(core) {
             return;
         }
@@ -426,7 +426,7 @@ impl SettingsController {
         self.lock_mcp_fields();
     }
 
-    pub fn sign_in_mcp(&mut self, core: &mut Core, server: &str) {
+    pub(crate) fn sign_in_mcp(&mut self, core: &mut Core, server: &str) {
         if !self.active_form_host(core) {
             return;
         }
@@ -437,7 +437,7 @@ impl SettingsController {
         drop(core.start_mcp_sign_in(&host, server, true));
     }
 
-    pub fn cancel_mcp_sign_in(&mut self, core: &mut Core, server: &str) {
+    pub(crate) fn cancel_mcp_sign_in(&mut self, core: &mut Core, server: &str) {
         if !self.active_form_host(core) {
             return;
         }
@@ -446,7 +446,7 @@ impl SettingsController {
         }
     }
 
-    pub fn sign_out_mcp(&mut self, core: &Core, server: String) {
+    pub(crate) fn sign_out_mcp(&mut self, core: &Core, server: String) {
         if !self.active_form_host(core) {
             return;
         }
@@ -477,7 +477,7 @@ impl SettingsController {
         ));
     }
 
-    pub fn sign_in_claude_ai(&mut self, core: &Core) {
+    pub(crate) fn sign_in_claude_ai(&mut self, core: &Core) {
         if core.active_host().map(|host| host.instance()) != self.active_instance {
             return;
         }
@@ -562,7 +562,7 @@ impl SettingsController {
         ));
     }
 
-    pub fn engine_action(&mut self, core: &Core, engine: EngineId, action: EngineCommand) {
+    pub(crate) fn engine_action(&mut self, core: &Core, engine: EngineId, action: EngineCommand) {
         if core.active_host().map(|host| host.instance()) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.engines.host.as_ref()
         {
@@ -604,11 +604,11 @@ impl SettingsController {
         ));
     }
 
-    pub fn save_prompt(&mut self, core: &Core) {
+    pub(crate) fn save_prompt(&mut self, core: &Core) {
         self.submit_prompt(core, None);
     }
 
-    pub fn resolve_prompt(&mut self, core: &Core, resolution: artisan_api::ResolvePrompt) {
+    pub(crate) fn resolve_prompt(&mut self, core: &Core, resolution: artisan_api::ResolvePrompt) {
         self.submit_prompt(core, Some(resolution));
     }
 
@@ -655,7 +655,7 @@ impl SettingsController {
             && core.active_host().map(|host| &host.id.0) == self.extensions.host.as_ref()
     }
 
-    pub fn load_latest_prompt(&mut self, core: &Core) {
+    pub(crate) fn load_latest_prompt(&mut self, core: &Core) {
         if let Some(prompt) = core
             .active_host()
             .and_then(|host| host.global_prompt.as_ref())
@@ -780,7 +780,7 @@ fn engine_verb(action: &EngineCommand) -> &'static str {
     }
 }
 
-pub fn same_host_instance<I: PartialEq, T: PartialEq>(
+fn same_host_instance<I: PartialEq, T: PartialEq>(
     expected: Option<(&I, T)>,
     current: Option<(&I, T)>,
 ) -> bool {

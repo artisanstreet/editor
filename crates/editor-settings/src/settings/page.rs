@@ -1,6 +1,6 @@
 use editor_core::SettingsPage;
 
-pub const fn description(page: SettingsPage) -> &'static str {
+pub(crate) const fn description(page: SettingsPage) -> &'static str {
     match page {
         SettingsPage::Section(section) => match section {
             editor_core::SettingsSection::Appearance => {

@@ -2,12 +2,12 @@ use artisan_api::{GlobalPrompt, SavePrompt};
 
 #[derive(Clone, Debug, Default)]
 pub struct PromptForm {
-    pub host: Option<String>,
+    pub(crate) host: Option<String>,
     pub loaded: bool,
     pub saved: String,
-    pub base_version: u64,
-    pub newer: bool,
-    pub pending: bool,
+    base_version: u64,
+    pub(crate) newer: bool,
+    pub(crate) pending: bool,
     pub error: Option<String>,
     generation: u64,
     edit_revision: u64,
@@ -15,8 +15,8 @@ pub struct PromptForm {
 
 #[derive(Clone, Debug)]
 pub struct PromptRequest {
-    pub host: String,
-    pub save: SavePrompt,
+    pub(crate) host: String,
+    pub(crate) save: SavePrompt,
     generation: u64,
     revision: u64,
 }
@@ -26,7 +26,7 @@ impl PromptForm {
         self.edit_revision = self.edit_revision.wrapping_add(1);
     }
 
-    pub fn park(&mut self) {
+    pub(crate) fn park(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.pending = false;
     }
@@ -88,7 +88,7 @@ impl PromptForm {
         })
     }
 
-    pub fn accepts(&self, request: &PromptRequest) -> bool {
+    pub(crate) fn accepts(&self, request: &PromptRequest) -> bool {
         self.host.as_ref() == Some(&request.host) && self.generation == request.generation
     }
 

@@ -13,7 +13,7 @@ use editor_ui::{
 };
 
 const CARD: Surface = Surface::Card;
-pub const CONTROL_WIDTH: f32 = 144.0;
+pub(crate) const CONTROL_WIDTH: f32 = 144.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ink {
@@ -40,11 +40,16 @@ fn styled(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: String, wraps: 
         .build()
 }
 
-pub fn text(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: impl Into<String>) -> Element {
+pub(crate) fn text(
+    theme: &ArtisanTheme,
+    role: TextRole,
+    ink: Ink,
+    value: impl Into<String>,
+) -> Element {
     styled(theme, role, ink, value.into(), true)
 }
 
-pub fn markdown(theme: &ArtisanTheme, role: TextRole, ink: Ink, source: &str) -> Element {
+pub(crate) fn markdown(theme: &ArtisanTheme, role: TextRole, ink: Ink, source: &str) -> Element {
     let color = ink_color(theme, ink).to_reference_text_color();
     let runs = editor_ui::inline_code_text::inline_runs(source);
     let spans = runs.styled_spans(&role.style(theme), color, theme);
@@ -55,19 +60,24 @@ pub fn markdown(theme: &ArtisanTheme, role: TextRole, ink: Ink, source: &str) ->
         .build()
 }
 
-pub fn line(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: impl Into<String>) -> Element {
+pub(crate) fn line(
+    theme: &ArtisanTheme,
+    role: TextRole,
+    ink: Ink,
+    value: impl Into<String>,
+) -> Element {
     styled(theme, role, ink, value.into(), false)
 }
 
-pub fn column() -> UiBox {
+pub(crate) fn column() -> UiBox {
     UiBox::new().layout("column").spaced(Space::S32)
 }
 
-pub fn stack(space: Space) -> UiBox {
+pub(crate) fn stack(space: Space) -> UiBox {
     UiBox::new().layout("column").spaced(space)
 }
 
-pub fn actions() -> UiBox {
+pub(crate) fn actions() -> UiBox {
     UiBox::new().spaced(Space::S8).style(
         Style::new()
             .align(AlignItems::CENTER)
@@ -75,7 +85,7 @@ pub fn actions() -> UiBox {
     )
 }
 
-pub fn fixed(child: Element) -> Element {
+pub(crate) fn fixed(child: Element) -> Element {
     UiBox::new()
         .width(CONTROL_WIDTH)
         .style(Style::new().flex_shrink(0.0))
@@ -83,14 +93,14 @@ pub fn fixed(child: Element) -> Element {
         .build()
 }
 
-pub fn grow(child: Element) -> Element {
+pub(crate) fn grow(child: Element) -> Element {
     UiBox::new()
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(child)
         .build()
 }
 
-pub fn button(
+pub(crate) fn button(
     theme: &ArtisanTheme,
     id: impl Into<String>,
     label: impl Into<String>,
@@ -104,14 +114,14 @@ pub fn button(
         .build()
 }
 
-pub fn header(theme: &ArtisanTheme, title: &str, description: &str) -> Element {
+pub(crate) fn header(theme: &ArtisanTheme, title: &str, description: &str) -> Element {
     stack(Space::S8)
         .child(text(theme, TextRole::Heading, Ink::Plain, title))
         .child(text(theme, TextRole::Label, Ink::Muted, description))
         .build()
 }
 
-pub fn section(
+pub(crate) fn section(
     theme: &ArtisanTheme,
     title: &str,
     intro: Option<&str>,
@@ -136,7 +146,7 @@ pub fn section(
     stack(Space::S12).child(head.build()).child(body).build()
 }
 
-pub fn card(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
+pub(crate) fn card(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
     let bleed = CARD.padding_px() - Space::S2.px();
     let children = blocks
         .into_iter()
@@ -149,7 +159,7 @@ pub fn card(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
     CARD.build(theme, children)
 }
 
-pub fn row(
+pub(crate) fn row(
     theme: &ArtisanTheme,
     title: impl Into<String>,
     description: impl Into<String>,
@@ -175,7 +185,7 @@ pub fn row(
     .build()
 }
 
-pub fn block(content: Element) -> Element {
+pub(crate) fn block(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -184,15 +194,15 @@ pub fn block(content: Element) -> Element {
         .build()
 }
 
-pub fn note(theme: &ArtisanTheme, value: &str) -> Element {
+pub(crate) fn note(theme: &ArtisanTheme, value: &str) -> Element {
     block(text(theme, TextRole::Label, Ink::Muted, value))
 }
 
-pub fn error_text(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
+pub(crate) fn error_text(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
     text(theme, TextRole::Caption, Ink::Danger, value)
 }
 
-pub fn callout(theme: &ArtisanTheme, tone: Tone, value: impl Into<String>) -> Element {
+pub(crate) fn callout(theme: &ArtisanTheme, tone: Tone, value: impl Into<String>) -> Element {
     let words = TextRole::Label
         .text(theme, value.into())
         .gpui_source_color(tint(theme, tone).to_reference_text_color())

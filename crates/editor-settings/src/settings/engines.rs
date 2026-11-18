@@ -8,12 +8,12 @@ use std::{
 
 #[derive(Default)]
 pub struct EnginesForm {
-    pub host: Option<String>,
+    pub(crate) host: Option<String>,
     pub login_codes: HashMap<EngineId, Rc<RefCell<Editor>>>,
     pub busy: BTreeSet<EngineId>,
     pub cancelling: BTreeSet<EngineId>,
     pub errors: HashMap<EngineId, String>,
-    pub choosing_version: HashSet<EngineId>,
+    pub(crate) choosing_version: HashSet<EngineId>,
     generation: u64,
 }
 
@@ -25,8 +25,8 @@ enum Lane {
 
 #[derive(Clone, Debug)]
 pub struct EngineRequest {
-    pub host: String,
-    pub engine: EngineId,
+    pub(crate) host: String,
+    engine: EngineId,
     lane: Lane,
     generation: u64,
 }
@@ -45,7 +45,7 @@ impl EnginesForm {
         self.choosing_version.clear();
     }
 
-    pub fn begin(&mut self, engine: EngineId) -> Option<EngineRequest> {
+    pub(crate) fn begin(&mut self, engine: EngineId) -> Option<EngineRequest> {
         let host = self.host.clone()?;
         if self.busy.contains(&engine) {
             return None;
@@ -60,7 +60,7 @@ impl EnginesForm {
         })
     }
 
-    pub fn begin_cancel(&mut self, engine: EngineId) -> Option<EngineRequest> {
+    pub(crate) fn begin_cancel(&mut self, engine: EngineId) -> Option<EngineRequest> {
         let host = self.host.clone()?;
         if !self.cancelling.insert(engine) {
             return None;
@@ -74,7 +74,7 @@ impl EnginesForm {
         })
     }
 
-    pub fn complete(&mut self, request: &EngineRequest, error: Option<String>) {
+    pub(crate) fn complete(&mut self, request: &EngineRequest, error: Option<String>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }

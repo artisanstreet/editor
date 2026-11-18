@@ -90,7 +90,7 @@ pub fn retention_menu(
     .on_open_change(move |open| emit(ViewAction::RetentionMenu(open)))
 }
 
-pub fn cleanup(
+pub(crate) fn cleanup(
     controller: &SettingsController,
     host: &HostData,
     theme: &ArtisanTheme,
@@ -141,7 +141,7 @@ struct Row {
     restoring: bool,
 }
 
-pub fn archived(
+pub(crate) fn archived(
     controller: &SettingsController,
     host: &HostData,
     theme: &ArtisanTheme,

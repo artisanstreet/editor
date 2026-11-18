@@ -490,7 +490,7 @@ fn claude(
     )
 }
 
-pub fn page(
+pub(crate) fn page(
     controller: &SettingsController,
     core: &Core,
     host: &HostData,

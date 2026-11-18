@@ -17,8 +17,8 @@ pub struct SettingRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingFailure {
-    pub value: Value,
-    pub cause: String,
+    pub(crate) value: Value,
+    pub(crate) cause: String,
 }
 
 struct KeyWrite {
@@ -113,18 +113,18 @@ impl SettingWrites {
         None
     }
 
-    pub fn retain_instances(&mut self, live: impl Fn(&HostId, HostInstance) -> bool) {
+    pub(crate) fn retain_instances(&mut self, live: impl Fn(&HostId, HostInstance) -> bool) {
         self.keys
             .retain(|target, _| live(&target.host, target.instance));
         self.failures
             .retain(|target, _| live(&target.host, target.instance));
     }
 
-    pub fn failure(&self, target: &SettingKey) -> Option<&SettingFailure> {
+    pub(crate) fn failure(&self, target: &SettingKey) -> Option<&SettingFailure> {
         self.failures.get(target)
     }
 
-    pub fn failures_for(
+    pub(crate) fn failures_for(
         &self,
         host: &HostId,
         instance: HostInstance,
@@ -139,7 +139,7 @@ impl SettingWrites {
         failures
     }
 
-    pub fn dismiss(&mut self, target: &SettingKey) -> bool {
+    pub(crate) fn dismiss(&mut self, target: &SettingKey) -> bool {
         self.failures.remove(target).is_some()
     }
 }

@@ -8,7 +8,7 @@ pub struct BuildInfo {
     pub target: String,
 }
 
-pub fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'static str, String)> {
+pub(crate) fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'static str, String)> {
     let mut rows = vec![("Version", build.version.clone())];
     rows.push((
         "Commit",

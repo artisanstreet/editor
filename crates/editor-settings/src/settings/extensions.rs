@@ -1,8 +1,6 @@
 use artisan_api::{McpMutation, McpServer};
 use std::collections::BTreeMap;
 
-pub const MCP_SERVERS_KEY: &str = "mcp_servers";
-
 #[derive(Clone, Debug, Default)]
 pub struct ServerFields {
     pub name: String,
@@ -14,7 +12,7 @@ pub struct ServerFields {
 }
 
 impl ServerFields {
-    pub fn from_server(server: &McpServer) -> Self {
+    fn from_server(server: &McpServer) -> Self {
         Self {
             name: server.name.clone(),
             command: server.command.clone(),
@@ -79,20 +77,20 @@ impl ServerFields {
 
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionsForm {
-    pub host: Option<String>,
+    pub(crate) host: Option<String>,
     pub editing: Option<Option<McpServer>>,
     pub fields: ServerFields,
     pub saving: bool,
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     generation: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct MutationRequest {
-    pub host: String,
-    pub generation: u64,
-    pub mutation: McpMutation,
-    pub close_form: bool,
+    pub(crate) host: String,
+    pub(crate) generation: u64,
+    pub(crate) mutation: McpMutation,
+    pub(crate) close_form: bool,
 }
 
 impl ExtensionsForm {
@@ -115,7 +113,7 @@ impl ExtensionsForm {
         self.error = None;
     }
 
-    pub fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         if self.saving {
             return;
         }
@@ -140,7 +138,7 @@ impl ExtensionsForm {
         }
     }
 
-    pub fn remove(&mut self, previous: McpServer) -> Option<MutationRequest> {
+    pub(crate) fn remove(&mut self, previous: McpServer) -> Option<MutationRequest> {
         if self.saving {
             return None;
         }

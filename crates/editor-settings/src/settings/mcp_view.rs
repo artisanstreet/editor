@@ -221,7 +221,7 @@ fn form(
     ui::block(body.child(actions.build()).build())
 }
 
-pub fn section(
+pub(crate) fn section(
     controller: &SettingsController,
     core: &Core,
     host: &HostData,

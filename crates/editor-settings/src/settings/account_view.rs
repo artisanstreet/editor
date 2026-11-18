@@ -54,7 +54,7 @@ fn editor(
     .element_with_notice_keyed(key, Mode::SingleLine, theme, placeholder, false, false)
 }
 
-pub fn sign_in(
+fn sign_in(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
@@ -329,7 +329,7 @@ pub fn forges(
     rows.build()
 }
 
-pub fn page(
+pub(crate) fn page(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
