@@ -173,6 +173,35 @@ pub enum RestoreSnapshotError {
     },
     #[error("copy the snapshot back")]
     Copy(#[source] CopyTreeError),
+    #[error("{} has no parent folder to stage a restore beside", path.display())]
+    NoParent { path: PathBuf },
+    #[error("{} is left over but isn't a qualification folder", path.display())]
+    Leftover {
+        path: PathBuf,
+        #[source]
+        source: MarkerError,
+    },
+    #[error("create the staging folder {}", path.display())]
+    Stage {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move {} to {}", from.display(), to.display())]
+    Swap {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move {} back to {} after {failed}", from.display(), to.display())]
+    RollBack {
+        from: PathBuf,
+        to: PathBuf,
+        failed: std::io::Error,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -614,23 +643,82 @@ impl SeedSnapshot {
             return Err(RestoreSnapshotError::SnapshotChanged { path: snapshot_dir });
         }
         checkpoint_database(&logical_path).map_err(RestoreSnapshotError::Checkpoint)?;
-        let old =
-            TreeManifest::capture_stable(&logical_path).map_err(RestoreSnapshotError::Capture)?;
-        let remove = |path: PathBuf, removed: std::io::Result<()>| {
-            removed.map_err(|source| RestoreSnapshotError::Remove { path, source })
-        };
-        for file in old.files.keys() {
-            if file != Path::new(".artisan-qualification") {
-                let path = logical_path.join(file);
-                remove(path.clone(), std::fs::remove_file(&path))?;
+        let staging = beside(&logical_path, "restoring")?;
+        let previous = beside(&logical_path, "previous")?;
+        clear_leftover(&staging)?;
+        clear_leftover(&previous)?;
+        std::fs::create_dir(&staging)
+            .and_then(|()| std::fs::write(staging.join(".artisan-qualification"), MARKER))
+            .map_err(|source| RestoreSnapshotError::Stage {
+                path: staging.clone(),
+                source,
+            })?;
+        if let Err(error) = copy_tree(&snapshot_dir, &staging, &self.tree) {
+            clear_leftover(&staging)?;
+            return Err(RestoreSnapshotError::Copy(error));
+        }
+        std::fs::rename(&logical_path, &previous).map_err(|source| {
+            RestoreSnapshotError::Swap {
+                from: logical_path.clone(),
+                to: previous.clone(),
+                source,
             }
+        })?;
+        if let Err(failed) = std::fs::rename(&staging, &logical_path) {
+            return Err(match std::fs::rename(&previous, &logical_path) {
+                Ok(()) => RestoreSnapshotError::Swap {
+                    from: staging,
+                    to: logical_path,
+                    source: failed,
+                },
+                Err(source) => RestoreSnapshotError::RollBack {
+                    from: previous,
+                    to: logical_path,
+                    failed,
+                    source,
+                },
+            });
         }
-        for directory in old.directories.iter().rev() {
-            let path = logical_path.join(directory);
-            remove(path.clone(), std::fs::remove_dir(&path))?;
-        }
-        copy_tree(&snapshot_dir, &logical_path, &self.tree).map_err(RestoreSnapshotError::Copy)
+        clear_leftover(&previous)
     }
+}
+
+fn beside(path: &Path, purpose: &str) -> Result<PathBuf, RestoreSnapshotError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| RestoreSnapshotError::NoParent {
+            path: path.to_owned(),
+        })?;
+    let mut sibling = name.to_owned();
+    sibling.push(format!(".{purpose}"));
+    Ok(path.with_file_name(sibling))
+}
+
+fn clear_leftover(path: &Path) -> Result<(), RestoreSnapshotError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let marked = marked_directory(path).map_err(|source| RestoreSnapshotError::Leftover {
+        path: path.to_owned(),
+        source,
+    })?;
+    let removal = |path: PathBuf| move |source| RestoreSnapshotError::Remove { path, source };
+    let marker = marked.join(".artisan-qualification");
+    for entry in std::fs::read_dir(&marked).map_err(removal(marked.clone()))? {
+        let entry = entry.map_err(removal(marked.clone()))?;
+        let path = entry.path();
+        if path == marker {
+            continue;
+        }
+        let kind = entry.file_type().map_err(removal(path.clone()))?;
+        match kind.is_dir() {
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
+        }
+        .map_err(removal(path))?;
+    }
+    std::fs::remove_file(&marker).map_err(removal(marker))?;
+    std::fs::remove_dir(&marked).map_err(removal(marked))
 }
 
 #[derive(Clone, Debug, Deserialize)]

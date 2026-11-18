@@ -408,3 +408,59 @@ fn strip_verbatim_rewrites_only_drive_paths() {
         PathBuf::from("/tmp/forge")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let forge = directory.path().join("forge");
+    let snapshot_dir = directory.path().join("snapshot");
+    for dir in [&forge, &snapshot_dir] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::write(
+            dir.join(".artisan-qualification"),
+            b"artisan-qualification-v1\n",
+        )
+        .unwrap();
+    }
+    runtime.block_on(async {
+        let input = fixture();
+        let server = ForgeServer::start(forge.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let snapshot = SeedSnapshot::produce(server, &input, &forge, &snapshot_dir)
+            .await
+            .unwrap();
+        let locked = forge.join("zz-locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("held"), b"held").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let before = TreeManifest::capture_stable(&forge).unwrap();
+        let restored = snapshot.restore_after_all_forge_handles_closed(&snapshot_dir, &forge);
+        let after = TreeManifest::capture_stable(&forge).unwrap();
+        for leftover in [forge.join("zz-locked"), directory.path().join("forge.previous/zz-locked")]
+        {
+            if leftover.exists() {
+                std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        assert!(
+            after == snapshot.tree || after == before,
+            "the Forge folder is either the snapshot or untouched, never partial: {restored:?}"
+        );
+        snapshot
+            .restore_after_all_forge_handles_closed(&snapshot_dir, &forge)
+            .unwrap();
+        assert_eq!(TreeManifest::capture_stable(&forge).unwrap(), snapshot.tree);
+        assert!(!directory.path().join("forge.previous").exists());
+        assert!(!directory.path().join("forge.restoring").exists());
+    });
+}
