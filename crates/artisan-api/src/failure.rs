@@ -618,7 +618,14 @@ impl<'de> Deserialize<'de> for ApiError {
         let legacy = Failure::Legacy { code: wire.code };
         let failure = match wire.failure.map(Failure::deserialize) {
             Some(Ok(failure)) if !failure.is_legacy() => failure,
-            Some(Ok(_) | Err(_)) | None => legacy,
+            Some(Err(error)) => {
+                tracing::warn!(
+                    code = ?wire.code,
+                    "read a refusal's typed failure this build doesn't know, so it stays untyped: {error}"
+                );
+                legacy
+            }
+            Some(Ok(_)) | None => legacy,
         };
         Ok(Self {
             code: wire.code,

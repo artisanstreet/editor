@@ -36,6 +36,22 @@ fn a_failure_this_editor_does_not_know_decodes_as_legacy_instead_of_failing() {
 }
 
 #[test]
+fn a_failure_this_editor_does_not_know_leaves_why_in_the_log() {
+    let (log, _guard) = test_support::logs::capture();
+    let _refusal: ApiError = serde_json::from_value(json!({
+        "code": "conflict",
+        "message": "something new",
+        "failure": { "family": "run", "kind": "something_new", "thread": "t1" },
+    }))
+    .expect("an unknown variant still decodes");
+    let text = log.text();
+    assert!(
+        text.contains("Conflict") && text.contains("something_new"),
+        "the log names the refusal's code and the variant it couldn't read: {text}"
+    );
+}
+
+#[test]
 fn a_typed_refusal_round_trips_with_its_ids_and_limits() {
     for failure in [
         Failure::Thread(ThreadFailure::NotFound {
