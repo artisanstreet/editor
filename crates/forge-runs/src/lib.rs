@@ -38,10 +38,8 @@ pub use mcp_auth::{
     Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
     ReadMcpServersError,
 };
-pub use operation::{
-    AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
-    ContinueRefusal, InputError, SendError, UpdateError,
-};
+pub use operation::{AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError, ContinueRefusal, SendError, UpdateError};
+pub(crate) use operation::{InputError};
 pub use retention::RemoveInactiveThreadsError;
 pub use run::PrepareError;
 pub use sandbox::auto_notice_on_this_host;

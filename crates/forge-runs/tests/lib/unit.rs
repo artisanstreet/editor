@@ -1473,7 +1473,6 @@ async fn adopting_a_skill_found_in_an_engine_copies_it_into_forge() {
         "adopting twice is refused: {}",
         diagnostics::chain(&again)
     );
-    assert_eq!(again.class(), ErrorClass::Conflict);
 }
 
 #[tokio::test(flavor = "multi_thread")]

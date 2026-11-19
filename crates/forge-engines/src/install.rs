@@ -27,7 +27,6 @@ pub(crate) enum Event {
     Downloaded,
     Done { version: String },
     Fail { message: String },
-    UpdateAvailable { version: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +34,6 @@ pub(crate) enum State {
     Absent {},
     Installed {
         version: String,
-        update: Option<String>,
     },
     Downloading {
         version: String,
@@ -84,7 +82,6 @@ impl Machine {
                 | Event::Done { version: found },
             ) if found != version => Some(State::Installed {
                 version: found.clone(),
-                update: None,
             }),
             (State::Installed { version, .. }, Event::Start { version: target }) => {
                 Some(State::Downloading {
@@ -98,10 +95,6 @@ impl Machine {
                 message: message.clone(),
                 serving: Some(version.clone()),
             }),
-            (State::Installed { version, update }, Event::UpdateAvailable { version: newer }) => {
-                *update = (newer != version).then(|| newer.clone());
-                None
-            }
             (
                 State::Downloading {
                     received, total, ..
@@ -142,7 +135,6 @@ impl Machine {
                 },
             ) => Some(State::Installed {
                 version: version.clone(),
-                update: None,
             }),
             (
                 State::Downloading { serving, .. } | State::Verifying { serving, .. },
@@ -187,9 +179,9 @@ pub(crate) fn view(state: &State) -> InstallState {
         State::Verifying { version, .. } => InstallState::Verifying {
             version: version.clone(),
         },
-        State::Installed { version, update } => InstallState::Installed {
+        State::Installed { version } => InstallState::Installed {
             version: version.clone(),
-            update: update.clone(),
+            update: None,
         },
         State::Failed { message, serving } => InstallState::Failed {
             message: serving.as_ref().map_or_else(

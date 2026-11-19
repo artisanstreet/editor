@@ -132,18 +132,6 @@ pub struct Discovery {
     scope: Option<String>,
 }
 
-impl Discovery {
-    #[must_use]
-    pub const fn issuer(&self) -> &SecureUrl {
-        &self.issuer
-    }
-
-    #[must_use]
-    pub const fn resource(&self) -> &SecureUrl {
-        &self.resource
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Client {
     #[serde(rename = "client_id")]
@@ -163,10 +151,6 @@ impl Client {
             && self.resource == discovery.resource
     }
 
-    #[must_use]
-    pub fn client_id(&self) -> &str {
-        &self.id
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

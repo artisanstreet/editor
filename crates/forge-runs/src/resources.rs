@@ -1,5 +1,4 @@
 use crate::Hub;
-use crate::error::ErrorClass;
 use crate::scratch::ThreadFolderError;
 use artisan_api::{EngineId, ItemId, Thread, ThreadId};
 use forge_engines::claudeai::{ReadRefusal, Rules};
@@ -57,23 +56,6 @@ pub enum ResourceError {
         #[source]
         source: tokio::task::JoinError,
     },
-}
-
-impl ResourceError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Missing => ErrorClass::NotFound,
-            Self::InvalidUrl { .. }
-            | Self::OtherDistribution { .. }
-            | Self::NoHome
-            | Self::NotRegular { .. }
-            | Self::Outside { .. }
-            | Self::Refused { .. } => ErrorClass::BadRequest,
-            Self::Read { .. } | Self::Task { .. } => ErrorClass::Internal,
-            Self::Folder(source) => source.class(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

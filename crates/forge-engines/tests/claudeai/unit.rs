@@ -13,8 +13,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::transport::DeleteConversationError;
 use super::{
-    Backend, CompleteError, CreateConversationError, DeleteConversationError, Events, Refusal,
+    Backend, CompleteError, CreateConversationError, Events, Refusal,
     Request, RequestError, StopError, UploadError, drive,
 };
 #[path = "cancellation.rs"]

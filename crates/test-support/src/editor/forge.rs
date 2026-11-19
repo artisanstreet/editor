@@ -21,20 +21,9 @@ pub struct HeldRequest {
 }
 
 impl HeldRequest {
-    pub const fn method(&self) -> &Method {
-        &self.method
-    }
-
-    pub fn path(&self) -> &str {
-        &self.path
-    }
 
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
-    }
-
-    pub const fn body(&self) -> &Bytes {
-        &self.body
     }
 
     pub(crate) fn hold(
@@ -68,10 +57,6 @@ impl HeldRequest {
         self.send(
             axum::Json(serde_json::to_value(value).expect("encode a stub answer")).into_response(),
         );
-    }
-
-    pub fn respond_empty(self) {
-        self.send(StatusCode::NO_CONTENT.into_response());
     }
 
     pub fn respond_bytes(self, content_type: &'static str, bytes: Vec<u8>) {
@@ -264,14 +249,6 @@ impl StubForge {
 
     pub fn fingerprint(&self) -> &str {
         self.server.fingerprint()
-    }
-
-    pub fn client(&self) -> editor_core::ForgeClient {
-        self.server.client()
-    }
-
-    pub fn update_state(&self, change: impl FnOnce(&mut State)) {
-        change(&mut self.log().state);
     }
 
     pub fn publish(&self, event: Event) -> Seq {

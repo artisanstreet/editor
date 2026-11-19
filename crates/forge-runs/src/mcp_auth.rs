@@ -144,23 +144,6 @@ pub enum McpStoreError {
     },
 }
 
-impl McpStoreError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Servers(_)
-            | Self::ReadStatuses(_)
-            | Self::EncodeStatuses(_)
-            | Self::RecordStatuses(_)
-            | Self::RecordAuth { .. }
-            | Self::ReadSecret { .. }
-            | Self::SaveSecret { .. }
-            | Self::ForgetSecret { .. }
-            | Self::Encoding { .. } => ErrorClass::Internal,
-        }
-    }
-}
-
 fn read_secret_error<'a>(
     server: &'a str,
     step: &'static str,

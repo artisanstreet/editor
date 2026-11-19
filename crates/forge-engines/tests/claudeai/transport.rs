@@ -131,7 +131,7 @@ fn other_requests_run_while_a_new_cookie_waits_for_a_slow_disk() {
     });
     assert_eq!(slow_disk.join().unwrap(), SessionRelease::WhileWaiting);
     let kept = Session::load(home.path()).unwrap().unwrap();
-    assert_eq!(kept.cookie("sessionKey"), Some("new"));
+    assert_eq!(cookie(&kept, "sessionKey").as_deref(), Some("new"));
 }
 
 #[cfg(unix)]
@@ -151,10 +151,20 @@ async fn a_response_repeating_the_current_cookie_does_not_rewrite_the_session() 
         written
     );
     assert_eq!(
-        Session::load(home.path())
-            .unwrap()
-            .unwrap()
-            .cookie("sessionKey"),
+        cookie(
+            &Session::load(home.path()).unwrap().unwrap(),
+            "sessionKey"
+        )
+        .as_deref(),
         Some("new")
     );
+}
+
+#[cfg(unix)]
+fn cookie(session: &Session, name: &str) -> Option<String> {
+    session.cookie_header().split("; ").find_map(|pair| {
+        pair.strip_prefix(name)?
+            .strip_prefix('=')
+            .map(str::to_owned)
+    })
 }

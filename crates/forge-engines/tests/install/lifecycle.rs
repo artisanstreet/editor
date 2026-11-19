@@ -46,44 +46,8 @@ fn a_failed_replacement_keeps_the_serving_version_and_retry_replaces_it() {
     assert_eq!(
         machine.state(),
         &State::Installed {
-            version: "2".into(),
-            update: None
+            version: "2".into()
         }
     );
 }
 
-#[test]
-fn repeated_disk_or_completion_events_preserve_a_known_update() {
-    let mut machine = machine();
-    machine.handle(&Event::Loaded {
-        version: Some("1".into()),
-    });
-    machine.handle(&Event::UpdateAvailable {
-        version: "2".into(),
-    });
-    machine.handle(&Event::Done {
-        version: "1".into(),
-    });
-    machine.handle(&Event::Loaded {
-        version: Some("1".into()),
-    });
-    assert_eq!(
-        machine.state(),
-        &State::Installed {
-            version: "1".into(),
-            update: Some("2".into())
-        }
-    );
-    machine.handle(&Event::Loaded {
-        version: Some("2".into()),
-    });
-    assert_eq!(
-        machine.state(),
-        &State::Installed {
-            version: "2".into(),
-            update: None
-        }
-    );
-    machine.handle(&Event::Loaded { version: None });
-    assert_eq!(machine.state(), &State::Absent {});
-}

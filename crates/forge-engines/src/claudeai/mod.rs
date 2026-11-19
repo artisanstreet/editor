@@ -1,4 +1,3 @@
-mod capabilities;
 mod decoder;
 mod files;
 mod mcp;
@@ -11,20 +10,14 @@ mod skills;
 mod tools;
 mod transport;
 
-pub use capabilities::{Capabilities, CapabilitiesError, UsageError, capabilities, usage};
 pub use decoder::{ClaudeAiDecoder, ProtocolError, Stop};
 pub use rules::{ReadRefusal, Rules};
-pub use session::{
-    CookieChange, LoadSessionError, RemoveSessionError, SaveSessionError, Session,
-    UpdateSessionError, cookie_change,
-};
+pub use session::{LoadSessionError, RemoveSessionError, SaveSessionError, Session};
 pub use side::SideQueryError;
-pub use tools::{Allowed, Answer, Call, Plan, Runtime, html_to_text};
-pub use transport::{
-    Backend, BuildClientError, CompleteError, CreateConversationError, DeleteConversationError,
-    Events, HOST, OpenTransportError, Refusal, Refused, RenameConversationError, Request,
-    RequestError, StopError, StreamError, Transport, UploadError,
-};
+pub use tools::{Call, html_to_text};
+pub(crate) use tools::{Allowed, Answer, Plan, Runtime};
+pub use transport::{BuildClientError, CompleteError, CreateConversationError, OpenTransportError, Refusal, RenameConversationError, RequestError, StopError, StreamError};
+pub(crate) use transport::{Backend, Events, Refused, Request, Transport, UploadError};
 
 use std::fmt::Write as _;
 use std::path::Path;

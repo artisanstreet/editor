@@ -91,15 +91,6 @@ pub enum EnabledSkillsError {
     Read(#[source] forge_engines::ReadSkillsError),
 }
 
-impl EnabledSkillsError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Customisation(_) | Self::Homes(_) | Self::Read(_) => ErrorClass::Internal,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ReconcileSkillsError {
     #[error("read which skills are turned off")]
@@ -199,19 +190,6 @@ pub enum AdoptSkillError {
     },
 }
 
-impl AdoptSkillError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Customisation { .. } | Self::Homes { .. } => ErrorClass::Internal,
-            Self::Adopt { .. } => ErrorClass::Conflict,
-            Self::Reconcile { source, .. } => source.class(),
-            Self::Bump { source, .. } => error::setting(&source.cause),
-            Self::Catalog { source, .. } => source.class(),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DiscardSkillError {
     #[error("read which skills are turned off to discard skill {skill}")]
@@ -244,18 +222,6 @@ pub enum DiscardSkillError {
         #[source]
         source: SkillCatalogError,
     },
-}
-
-impl DiscardSkillError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Customisation { .. } | Self::Homes { .. } => ErrorClass::Internal,
-            Self::Discard { .. } => ErrorClass::Conflict,
-            Self::Bump { source, .. } => error::setting(&source.cause),
-            Self::Catalog { source, .. } => source.class(),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -321,15 +287,6 @@ pub enum MarketplaceSearchError {
     },
 }
 
-impl MarketplaceSearchError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Search { .. } => ErrorClass::Conflict,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum MarketplaceInstallError {
     #[error("make a staging folder in {} for listing {listing}", path.display())]
@@ -363,18 +320,6 @@ pub enum MarketplaceInstallError {
         #[source]
         source: SkillCatalogError,
     },
-}
-
-impl MarketplaceInstallError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Staging { .. } | Self::StagingTask { .. } => ErrorClass::Internal,
-            Self::Fetch { .. } => ErrorClass::Conflict,
-            Self::Install { source, .. } => source.class(),
-            Self::Catalog { source, .. } => source.class(),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -474,20 +419,6 @@ pub enum ResolveGlobalPromptError {
     Reconcile(#[source] GlobalPromptError),
     #[error("announce the resolved global prompt")]
     Bump(#[source] BumpRevisionError),
-}
-
-impl ResolveGlobalPromptError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Current(source) | Self::Reconcile(source) => source.class(),
-            Self::NotDrifted { .. } | Self::NoCandidate { .. } | Self::Changed { .. } => {
-                ErrorClass::Conflict
-            }
-            Self::Save { source, .. } => error::write(&source.cause),
-            Self::Bump(source) => error::setting(&source.cause),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -219,11 +219,6 @@ impl Workspace {
         &self.markdown
     }
 
-    #[must_use]
-    pub const fn conversation(&self) -> &crate::conversation::controller::Conversation {
-        &self.conversation
-    }
-
     pub const fn conversation_mut(&mut self) -> &mut crate::conversation::controller::Conversation {
         &mut self.conversation
     }
@@ -231,10 +226,6 @@ impl Workspace {
     #[must_use]
     pub const fn composer(&self) -> Option<&crate::composer::view::ComposerOwner> {
         self.composer.as_ref()
-    }
-
-    pub const fn composer_mut(&mut self) -> Option<&mut crate::composer::view::ComposerOwner> {
-        self.composer.as_mut()
     }
 
     pub fn new(

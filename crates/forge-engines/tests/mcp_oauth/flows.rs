@@ -122,8 +122,8 @@ async fn a_sign_in_is_found_through_the_resource_metadata() {
     let Probe::SignIn(discovery) = probe_stub(&base).await.expect("probe") else {
         panic!("a 401 with OAuth metadata offers a sign-in");
     };
-    assert_eq!(discovery.issuer().as_str(), base.url("/"));
-    assert_eq!(discovery.resource().as_str(), base.url("/mcp"));
+    assert_eq!(discovery.issuer.as_str(), base.url("/"));
+    assert_eq!(discovery.resource.as_str(), base.url("/mcp"));
     assert_eq!(discovery.token_endpoint.as_str(), base.url("/token"));
 }
 

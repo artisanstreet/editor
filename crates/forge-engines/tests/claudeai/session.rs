@@ -21,7 +21,7 @@ fn a_session_round_trips_and_only_its_user_can_read_it() {
     let read = Session::load(home.path())
         .expect("the session loads")
         .expect("there is a session");
-    assert_eq!(read.cookie("sessionKey"), Some("abc"));
+    assert_eq!(cookie(&read, "sessionKey").as_deref(), Some("abc"));
     assert_eq!(
         Session::state(home.path()),
         ClaudeAiState::SignedIn {
@@ -57,15 +57,15 @@ fn a_response_s_cookies_are_written_back() {
     let read = Session::load(home.path())
         .expect("the session loads")
         .expect("there is a session");
-    assert_eq!(read.cookie("__cf_bm"), Some("new"));
-    assert_eq!(read.cookie("routingHint"), Some("r1"));
+    assert_eq!(cookie(&read, "__cf_bm").as_deref(), Some("new"));
+    assert_eq!(cookie(&read, "routingHint").as_deref(), Some("r1"));
     assert_eq!(
-        read.cookie("tracker"),
+        cookie(&read, "tracker").as_deref(),
         None,
         "another site's cookie is not kept"
     );
     assert_eq!(
-        read.cookie("sessionKey"),
+        cookie(&read, "sessionKey").as_deref(),
         None,
         "a cleared cookie is dropped"
     );
@@ -83,4 +83,12 @@ fn a_debug_print_never_shows_a_cookie_value() {
     let printed = format!("{:?}", session());
     assert!(printed.contains("sessionKey"));
     assert!(!printed.contains("abc"));
+}
+
+fn cookie(session: &Session, name: &str) -> Option<String> {
+    session.cookie_header().split("; ").find_map(|pair| {
+        pair.strip_prefix(name)?
+            .strip_prefix('=')
+            .map(str::to_owned)
+    })
 }

@@ -23,8 +23,16 @@ pub(crate) enum Verdict {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Grammar {
     #[cfg_attr(not(windows), default)]
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(dead_code, reason = "only Unix defaults to the POSIX grammar")
+    )]
     Posix,
     #[cfg_attr(windows, default)]
+    #[cfg_attr(
+        not(any(windows, test)),
+        expect(dead_code, reason = "only Windows defaults to the cmd grammar")
+    )]
     Cmd,
 }
 

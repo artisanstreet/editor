@@ -1,10 +1,9 @@
 use crate::catalog::{self, Listing, Program};
-use crate::engines::{Artifact, Feed, compare_versions, host_spec, meets_minimum};
+use crate::engines::{Artifact, Feed, host_spec, meets_minimum};
 use crate::install::{self, Event, Layout, Machine, Resolved};
 use artisan_api::{
     EngineId, EngineStatus, InstallState, Integrity, Model, PublishedVersion, SlashCommand,
 };
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -185,18 +184,6 @@ pub enum ListVersionsError {
         engine: EngineId,
         #[source]
         source: tokio::task::JoinError,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CheckUpdateError {
-    #[error(transparent)]
-    NoBuild(NoBuild),
-    #[error("find the latest {} version", engine.display_name())]
-    Latest {
-        engine: EngineId,
-        #[source]
-        source: install::LatestVersionError,
     },
 }
 
@@ -531,26 +518,6 @@ impl Engines {
 
     pub async fn rollback(&self, engine: EngineId) -> Result<String, InstallError> {
         self.change(engine, Target::Previous).await
-    }
-
-    pub async fn check_update(&self, engine: EngineId) -> Result<Option<String>, CheckUpdateError> {
-        let artifact = artifact(engine).map_err(CheckUpdateError::NoBuild)?;
-        let latest = install::latest_version(&self.inner.http, artifact.feed)
-            .await
-            .map_err(|source| CheckUpdateError::Latest { engine, source })?;
-        let current = self.inner.layout.current(engine);
-        let newer = current
-            .is_some_and(|current| compare_versions(&latest, &current) == Ordering::Greater)
-            .then_some(latest);
-        if let Some(version) = &newer {
-            self.apply(
-                engine,
-                &Event::UpdateAvailable {
-                    version: version.clone(),
-                },
-            );
-        }
-        Ok(newer)
     }
 
     async fn change(&self, engine: EngineId, target: Target) -> Result<String, InstallError> {

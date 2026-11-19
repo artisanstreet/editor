@@ -161,16 +161,6 @@ pub enum ContinueRefusal {
     NothingStopped,
 }
 
-impl ContinueError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Refused { .. } => ErrorClass::Conflict,
-            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) => ErrorClass::Internal,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
     #[error(transparent)]

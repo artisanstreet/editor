@@ -22,7 +22,7 @@ impl CompletionKey {
 #[derive(Debug)]
 struct Running {
     key: CompletionKey,
-    task: AbortOnDropHandle<()>,
+    _abort_on_drop: AbortOnDropHandle<()>,
 }
 
 #[derive(Debug, Default)]
@@ -47,10 +47,9 @@ impl CompletionSlot {
             instance,
             generation: self.generation,
         };
-        let task = AbortOnDropHandle::new(runtime().spawn(task(key.clone())));
         self.running = Some(Running {
             key: key.clone(),
-            task,
+            _abort_on_drop: AbortOnDropHandle::new(runtime().spawn(task(key.clone()))),
         });
         key
     }
@@ -65,12 +64,6 @@ impl CompletionSlot {
 
     fn current(&self) -> Option<&CompletionKey> {
         self.running.as_ref().map(|running| &running.key)
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.running
-            .as_ref()
-            .is_some_and(|running| running.task.is_finished())
     }
 
     pub fn finish(&mut self, core: &Core, key: &CompletionKey) -> bool {

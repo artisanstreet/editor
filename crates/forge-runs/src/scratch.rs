@@ -1,5 +1,4 @@
 use crate::Hub;
-use crate::error::ErrorClass;
 use artisan_api::{CreateProject, ProjectId, Thread, ThreadId, Timestamp};
 use forge_store::{CreateProjectError, ReadProjectError};
 use std::path::{Path, PathBuf};
@@ -48,18 +47,6 @@ pub enum ThreadFolderError {
         thread: ThreadId,
         project: ProjectId,
     },
-}
-
-impl ThreadFolderError {
-    #[must_use]
-    pub(crate) const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Task { .. }
-            | Self::Scratch { .. }
-            | Self::ReadProject { .. }
-            | Self::NoProject { .. } => ErrorClass::Internal,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

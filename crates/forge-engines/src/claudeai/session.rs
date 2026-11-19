@@ -115,14 +115,6 @@ impl Session {
     }
 
     #[must_use]
-    pub fn cookie(&self, name: &str) -> Option<&str> {
-        self.cookies
-            .iter()
-            .find(|(cookie, _)| cookie == name)
-            .map(|(_, value)| value.as_str())
-    }
-
-    #[must_use]
     pub fn path(home: &Path) -> PathBuf {
         home.join(".claude-ai").join("session.json")
     }

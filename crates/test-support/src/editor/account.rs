@@ -181,10 +181,6 @@ pub fn fail_syncs(account_id: &str, status: StatusCode) {
     session(account_id, |session| session.sync = SyncReply::Fail(status));
 }
 
-pub fn answer_syncs(account_id: &str) {
-    session(account_id, |session| session.sync = SyncReply::Answer);
-}
-
 pub fn hold_syncs(account_id: &str) -> HeldSyncs {
     let (sender, receiver) = std::sync::mpsc::sync_channel(64);
     session(account_id, |session| {
@@ -202,10 +198,6 @@ impl HeldSyncs {
         self.0
             .recv_timeout(crate::wait::LIVENESS)
             .expect("the Editor never synced the account")
-    }
-
-    pub fn try_take(&self) -> Option<HeldRequest> {
-        self.0.try_recv().ok()
     }
 
     pub fn wait(&self, limit: std::time::Duration) -> Option<HeldRequest> {
@@ -279,19 +271,6 @@ pub(crate) fn add_machine(account_id: &str, entry: MachineEntry, client: ForgeCl
         .retain(|known| known.id != entry.id);
     session.clients.insert(entry.id.clone(), client);
     session.profile.machines.push(entry);
-}
-
-pub fn revoke_machine(account_id: &str, machine_id: &str) {
-    let mut sessions = sessions();
-    let session = sessions
-        .get_mut(account_id)
-        .unwrap_or_else(|| panic!("invariant: account {account_id} was opened by the fixture"));
-    session
-        .profile
-        .machines
-        .iter_mut()
-        .filter(|machine| machine.id == machine_id)
-        .for_each(|machine| machine.revoked_at = Some("2026-01-02T00:00:00.000Z".to_owned()));
 }
 
 #[derive(Debug, Clone, Copy)]
