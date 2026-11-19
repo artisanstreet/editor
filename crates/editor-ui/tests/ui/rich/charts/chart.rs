@@ -52,14 +52,15 @@ fn the_keyboard_explorable_plot_is_a_named_focusable_group_for_assistive_tech() 
         empty: Rc::new(move |_| blank()),
         navigation: Rc::new(|plot, _| plot),
     };
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let chart = view(
-        "chart".to_owned(),
+        "chart",
         &ArtisanTheme::resolved(),
-        Arc::new(spec),
-        Arc::new(model),
+        &Arc::new(spec),
+        &Arc::new(model),
         ChartState::default(),
         &services,
-        Rc::new(|| {}),
+        &invalidate,
     );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| chart).unwrap();

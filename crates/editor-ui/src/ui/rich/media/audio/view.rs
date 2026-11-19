@@ -400,9 +400,9 @@ impl AudioBlock {
         fetcher: Option<&MediaFetcher>,
         assets: &AudioAssets,
         player: &Player,
-        state: AudioState,
-        glyph: GlyphFactory,
-        invalidate: Rc<dyn Fn()>,
+        state: &AudioState,
+        glyph: &GlyphFactory,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let theme = *theme;
         state.retain_rows(id, self.tracks.len());
@@ -422,7 +422,7 @@ impl AudioBlock {
                     transcript,
                     disclosure,
                     state.clone(),
-                    Rc::clone(&invalidate),
+                    Rc::clone(invalidate),
                 )
             });
             let wake = crate::ui::media::wake_on(&state.0.borrow().wake);
@@ -448,7 +448,7 @@ impl AudioBlock {
                         let fetcher = fetcher.cloned();
                         let source = track.src.clone();
                         let part = row_id.clone();
-                        let invalidate = Rc::clone(&invalidate);
+                        let invalidate = Rc::clone(invalidate);
                         Button::text(
                             format!("{row_id}-retry"),
                             theme,
@@ -502,19 +502,19 @@ impl AudioBlock {
             );
             let hovering = state.clone();
             let hover_id = row_id.clone();
-            let hover_invalidate = Rc::clone(&invalidate);
+            let hover_invalidate = Rc::clone(invalidate);
             let toggle_player = player.clone();
             let toggle_shown = shown.clone();
             let toggle_path = path.clone();
             let toggle_bytes = Arc::clone(&bytes);
-            let toggle_invalidate = Rc::clone(&invalidate);
+            let toggle_invalidate = Rc::clone(invalidate);
             let button = play_button(
                 &row_id,
                 &theme,
                 &shown,
                 &name,
                 hovered,
-                &glyph,
+                glyph,
                 Rc::new(move |over| {
                     if let Some(row) = hovering.0.borrow_mut().rows.get_mut(&hover_id) {
                         row.hovered = over;
@@ -570,7 +570,7 @@ impl AudioBlock {
                     },
                     state.clone(),
                     line,
-                    Rc::clone(&invalidate),
+                    Rc::clone(invalidate),
                 ),
             };
             let time = match shown {

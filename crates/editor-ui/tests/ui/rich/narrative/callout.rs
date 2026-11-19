@@ -46,6 +46,9 @@ fn a_collapsed_callout_opens_from_the_keyboard_and_assistive_tech() {
     .unwrap();
     let states = CalloutState::default();
     let render = || {
+        let glyph: GlyphFactory =
+            Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         mounted(callout.view(
             "c".to_owned(),
             &ArtisanTheme::resolved(),
@@ -54,8 +57,8 @@ fn a_collapsed_callout_opens_from_the_keyboard_and_assistive_tech() {
                 caption: None,
             },
             states.clone(),
-            Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build()),
-            Rc::new(|| {}),
+            &glyph,
+            invalidate,
         ))
     };
     let mut app = render();

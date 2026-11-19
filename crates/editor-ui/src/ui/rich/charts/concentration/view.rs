@@ -179,20 +179,20 @@ fn shapes(
 impl Concentration {
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: ConcentrationState,
-        frame: FrameFactory,
-        plot_label: PlotLabelFactory,
-        readout: ReadoutFactory,
-        empty: EmptyFactory,
-        navigation_frame: NavigationFrame,
+        frame: &FrameFactory,
+        plot_label: &PlotLabelFactory,
+        readout: &ReadoutFactory,
+        empty: &EmptyFactory,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let Some(curve) = self.curve() else {
             return empty("No values to rank");
         };
-        let (hover, probe) = states.ensure(&id);
+        let (hover, probe) = states.ensure(id);
         let cutoff = self.highlight();
         let held = Self::share_of_total(&curve, cutoff);
         let shape_list: Rc<[Shape]> = shapes(theme, &curve, cutoff, hover).into();
@@ -244,11 +244,11 @@ impl Concentration {
             ));
         }
         let moving = states.clone();
-        let move_id = id.clone();
+        let move_id = id.to_owned();
         let move_probe = probe;
         let move_invalidate = Rc::clone(&invalidate);
         let leaving = states.clone();
-        let leave_id = id.clone();
+        let leave_id = id.to_owned();
         let leave_invalidate = Rc::clone(&invalidate);
         let plot = plot
             .build()
@@ -278,7 +278,7 @@ impl Concentration {
             label.push_str(selection);
         }
         let keyboard = states;
-        let key = id.clone();
+        let key = id.to_owned();
         let nav = navigation_group(
             ui::Box::new()
                 .style(
@@ -288,7 +288,7 @@ impl Concentration {
                 )
                 .child(plot)
                 .build(),
-            &id,
+            id,
             label,
             selection_label,
             move |code, alt| {

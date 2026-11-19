@@ -252,7 +252,7 @@ impl RootViews {
                 let emit = self.sidebar.emit();
                 crate::ui::chrome::account::trigger(
                     theme,
-                    crate::ui::chrome::account::Trigger {
+                    &crate::ui::chrome::account::Trigger {
                         account,
                         menu: self.sidebar.menu(),
                         now,

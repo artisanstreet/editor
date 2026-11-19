@@ -261,9 +261,9 @@ pub(crate) struct Services {
 }
 
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    data: Arc<Distribution>,
+    data: &Arc<Distribution>,
     states: DistributionState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -272,7 +272,7 @@ pub(crate) fn view(
         return (services.empty)("No values to plot");
     }
     let theme = *theme;
-    let (hover, probe, slider, reset) = states.sync(&id, &data);
+    let (hover, probe, slider, reset) = states.sync(id, data);
     let width = probe.get().map_or(480.0, |bounds| bounds.w);
     if data.mode == Mode::Box {
         return boxes(
@@ -461,11 +461,11 @@ pub(crate) fn view(
         plot = plot.child((services.readout)(readout_x, &heading, readout_rows));
     }
     let moving = states.clone();
-    let moving_id = id.clone();
+    let moving_id = id.to_owned();
     let moving_probe = probe;
     let moving_invalidate = Rc::clone(&invalidate);
     let leaving = states.clone();
-    let leaving_id = id.clone();
+    let leaving_id = id.to_owned();
     let leaving_invalidate = Rc::clone(&invalidate);
     let plot = plot
         .build()
@@ -493,14 +493,14 @@ pub(crate) fn view(
         101
     };
     let nav = navigation(
-        &id,
+        id,
         plot,
         data.mode,
         count,
         selection,
         states,
         theme.colors.ring.to_reference_paint(),
-        Rc::clone(&services.navigation),
+        &services.navigation,
         Rc::clone(&invalidate),
     );
     let framed = (services.frame)(
@@ -576,7 +576,7 @@ fn navigation(
     selection: Option<String>,
     states: DistributionState,
     ring: GpuiHsla,
-    frame: NavigationFrame,
+    frame: &NavigationFrame,
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     let prefix = if mode == Mode::Box {
@@ -609,9 +609,9 @@ fn navigation(
 }
 
 fn boxes(
-    id: String,
+    id: &str,
     theme: ArtisanTheme,
-    data: Arc<Distribution>,
+    data: &Arc<Distribution>,
     states: DistributionState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -644,9 +644,9 @@ fn boxes(
             )
         })
         .collect();
-    let model = Arc::clone(&data);
+    let model = Arc::clone(data);
     let row_states = states.clone();
-    let row_id = id.clone();
+    let row_id = id.to_owned();
     let row_invalidate = Rc::clone(&invalidate);
     let row_text = Rc::clone(&services.text);
     let pitch = theme.density.control_sm;
@@ -798,14 +798,14 @@ fn boxes(
         content = content.child((services.readout)(0.5, &sample.name, rows));
     }
     navigation(
-        &id,
+        id,
         content.build(),
         Mode::Box,
         count,
         selection,
         states,
         theme.colors.ring.to_reference_paint(),
-        Rc::clone(&services.navigation),
+        &services.navigation,
         invalidate,
     )
 }

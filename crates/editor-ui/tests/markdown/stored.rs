@@ -93,6 +93,9 @@ fn render_leaf(
     ordinal: usize,
     slot_start: usize,
 ) -> Result<StoredProjectedMarkdown, PresenterError> {
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     presenter.render_stored_leaf(
         owner,
         "row",
@@ -101,8 +104,8 @@ fn render_leaf(
         true,
         crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
         BodyTone::Foreground,
-        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-        Rc::new(|| {}),
+        &glyph,
+        &invalidate,
         None,
         None,
         None,
@@ -134,7 +137,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
     let mut collector = RangeCollector::new(reference.clone(), 3..full.len() - 3).unwrap();
     assert_eq!(collector.next_request(), Some((3, 6)));
     collector
-        .push(ContentRange {
+        .push(&ContentRange {
             id: reference.id.clone(),
             total: reference.bytes,
             start: 2,
@@ -143,7 +146,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
         })
         .unwrap();
     collector
-        .push(ContentRange {
+        .push(&ContentRange {
             id: reference.id.clone(),
             total: reference.bytes,
             start: 5,
@@ -155,7 +158,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
     let mut incomplete = RangeCollector::new(reference.clone(), 3..9).unwrap();
     assert!(
         incomplete
-            .push(ContentRange {
+            .push(&ContentRange {
                 id: reference.id.clone(),
                 total: reference.bytes,
                 start: 3,
@@ -167,7 +170,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
     let mut split = RangeCollector::new(reference.clone(), 4..9).unwrap();
     assert!(
         split
-            .push(ContentRange {
+            .push(&ContentRange {
                 id: reference.id.clone(),
                 total: reference.bytes,
                 start: 3,
@@ -778,7 +781,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     render(&presenter, &owner).expect_err("a released row no longer renders");
 }
 
-fn tampered_record(token: serde_json::Value) -> artisan_markdown_index::LeafRecord {
+fn tampered_record(token: &serde_json::Value) -> artisan_markdown_index::LeafRecord {
     let mut record =
         serde_json::to_value(artisan_markdown_index::LeafRecord::literal(0..1)).unwrap();
     record["leaf"]["events"] = serde_json::json!([
@@ -795,7 +798,7 @@ fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting
         serde_json::json!({ "Html": { "Range": { "start": 0, "end": 1 } } }),
     ] {
         let result = normalize_record(
-            &tampered_record(token),
+            &tampered_record(&token),
             0,
             "<",
             &engine,

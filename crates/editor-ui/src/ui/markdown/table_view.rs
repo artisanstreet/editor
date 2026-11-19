@@ -17,9 +17,9 @@ pub(super) fn render(
     prefix: &[u64],
     source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
     sources: &mut Vec<SelectionSource>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
+    on_link: Option<&Rc<dyn Fn(LinkAction)>>,
+    on_color: Option<&Rc<dyn Fn(ShowCopyMenu)>>,
+    scope: Option<&ResourceScope>,
 ) -> Result<Element, PresenterError> {
     let columns = table.alignments.len();
     if columns == 0 {
@@ -90,9 +90,9 @@ pub(super) fn render(
                     source_id(sources.len()),
                     order,
                     if column == 0 { "\n" } else { "\t" },
-                    on_link.clone(),
-                    on_color.clone(),
-                    scope.clone(),
+                    on_link.cloned(),
+                    on_color.cloned(),
+                    scope.cloned(),
                 )
                 .map_err(PresenterError::Inline)?;
                 sources.push(leaf.source);

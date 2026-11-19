@@ -194,22 +194,22 @@ fn canvas(shapes: Rc<[Shape]>, probe: Probe) -> Element {
 }
 
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    spec: Arc<ChartStyle>,
-    model: Arc<Model>,
+    spec: &Arc<ChartStyle>,
+    model: &Arc<Model>,
     states: ChartState,
     services: &Services,
-    invalidate: Rc<dyn Fn()>,
+    invalidate: &Rc<dyn Fn()>,
 ) -> Element {
     if !model.has_values() {
         return (services.empty)("No data to chart");
     }
-    states.sync(&id, &spec, &model);
+    states.sync(id, spec, model);
     let theme = *theme;
     let (hidden, hover, zoom, drag, probe, sliders) = {
         let entries = states.0.borrow();
-        let entry = &entries[&id];
+        let entry = &entries[id];
         let sliders = spec
             .thresholds()
             .map(|(index, param)| {
@@ -259,7 +259,7 @@ pub(crate) fn view(
     let geometry = {
         let mut entries = states.0.borrow_mut();
         let entry = entries
-            .get_mut(&id)
+            .get_mut(id)
             .unwrap_or_else(|| panic!("invariant: chart {id} is synced before its geometry"));
         if let Some((known, geometry)) = &entry.geometry
             && *known == key
@@ -274,13 +274,13 @@ pub(crate) fn view(
                 thresholds,
                 width,
             };
-            let geometry = Rc::new(plot::layout(&theme, &spec, &model, &stable));
+            let geometry = Rc::new(plot::layout(&theme, spec, model, &stable));
             entry.geometry = Some((key, Rc::clone(&geometry)));
             geometry
         }
     };
     let interaction: Rc<[Shape]> =
-        plot::interaction(&theme, &spec, &model, &geometry, &snapshot).into();
+        plot::interaction(&theme, spec, model, &geometry, &snapshot).into();
     let visible = snapshot.visible(model.series.len());
     let mut selection = None;
     let mut plot = ui::Box::new()
@@ -360,15 +360,15 @@ pub(crate) fn view(
     }
     let view = geometry.view;
     let moving = states.clone();
-    let moving_id = id.clone();
+    let moving_id = id.to_owned();
     let moving_probe = Rc::clone(&probe);
-    let moving_invalidate = Rc::clone(&invalidate);
+    let moving_invalidate = Rc::clone(invalidate);
     let releasing = states.clone();
-    let releasing_id = id.clone();
-    let releasing_invalidate = Rc::clone(&invalidate);
+    let releasing_id = id.to_owned();
+    let releasing_invalidate = Rc::clone(invalidate);
     let leaving = states.clone();
-    let leaving_id = id.clone();
-    let leaving_invalidate = Rc::clone(&invalidate);
+    let leaving_id = id.to_owned();
+    let leaving_invalidate = Rc::clone(invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -429,9 +429,9 @@ pub(crate) fn view(
             }
         });
     let pressing = states.clone();
-    let pressing_id = id.clone();
+    let pressing_id = id.to_owned();
     let pressing_probe = probe;
-    let pressing_invalidate = Rc::clone(&invalidate);
+    let pressing_invalidate = Rc::clone(invalidate);
     let plot = (services.press)(
         plot,
         Rc::new(move |position, click_count| {
@@ -462,8 +462,8 @@ pub(crate) fn view(
         label.push_str(value);
     }
     let keyboard = states.clone();
-    let keyboard_id = id.clone();
-    let keyboard_invalidate = Rc::clone(&invalidate);
+    let keyboard_id = id.to_owned();
+    let keyboard_invalidate = Rc::clone(invalidate);
     let nav = navigation_group(
         ui::Box::new()
             .style(
@@ -473,7 +473,7 @@ pub(crate) fn view(
             )
             .child(plot)
             .build(),
-        &id,
+        id,
         label,
         selection,
         move |code, alt| {
@@ -494,8 +494,8 @@ pub(crate) fn view(
         axis_title(spec.x.label.as_deref(), spec.x.unit.as_deref()),
     );
     let toggling = states.clone();
-    let toggle_id = id.clone();
-    let toggle_invalidate = Rc::clone(&invalidate);
+    let toggle_id = id.to_owned();
+    let toggle_invalidate = Rc::clone(invalidate);
     let toggle = Rc::new(move |index: usize| {
         let mut entries = toggling.0.borrow_mut();
         if let Some(value) = entries
@@ -531,8 +531,8 @@ pub(crate) fn view(
         .child(ui::Box::new().style(Style::new().flex_grow(1.0)).build());
     if zoom.is_some() {
         let resetting = states;
-        let reset_id = id.clone();
-        let reset_invalidate = Rc::clone(&invalidate);
+        let reset_id = id.to_owned();
+        let reset_invalidate = Rc::clone(invalidate);
         header = header.child((services.reset)(Rc::new(move || {
             if let Some(entry) = resetting.0.borrow_mut().get_mut(&reset_id) {
                 entry.zoom = None;
@@ -553,12 +553,12 @@ pub(crate) fn view(
         } else {
             percent(f64_of(above) / f64_of(all))
         };
-        let unit = plot::effective_axis(&spec).unit;
+        let unit = plot::effective_axis(spec).unit;
         let readout = format!(
             "{} · {share} of points at or above ({above} of {all})",
             reading(value, unit.as_deref())
         );
-        let refresh = Rc::clone(&invalidate);
+        let refresh = Rc::clone(invalidate);
         root = root.child(
             Slider::new(
                 format!("{id}-slider-{index}"),
@@ -626,7 +626,9 @@ impl ChartFixture {
     }
     pub fn drag(&self, from: f64, to: f64, width: f32) {
         let mut entries = self.state.0.borrow_mut();
-        let entry = entries.get_mut("test").unwrap();
+        let entry = entries
+            .get_mut("test")
+            .expect("invariant: the fixture syncs chart `test` when it is built");
         let view = entry
             .zoom
             .unwrap_or_else(|| self.model.x_domain(self.spec.mark));

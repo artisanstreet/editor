@@ -117,7 +117,7 @@ impl ProjectedMarkdown {
             .text
             .iter()
             .map(|leaf| {
-                let fades = reveal.fades(leaf.slot, Arc::clone(&leaf.text));
+                let fades = reveal.fades(leaf.slot, &leaf.text);
                 let end = reveal.visible_end(leaf.slot, &leaf.text);
                 ProjectedRevealText {
                     key: leaf.key.clone(),
@@ -156,7 +156,7 @@ impl StoredProjectedMarkdown {
                 key: leaf.key.clone(),
                 text: Arc::clone(&leaf.text),
                 end: reveal.visible_end(leaf.slot, &leaf.text),
-                fades: reveal.fades(leaf.slot, Arc::clone(&leaf.text)),
+                fades: reveal.fades(leaf.slot, &leaf.text),
             })
             .collect()
     }
@@ -555,7 +555,7 @@ impl MarkdownPresenter {
 
 fn enveloped(theme: &ArtisanTheme, envelope: &rich::Envelope, content: Element) -> Element {
     let current_theme = *theme;
-    let text = Rc::new(move |value: &str, role, color| {
+    let text: charts::heatmap::EnvelopeTextFactory = Rc::new(move |value: &str, role, color| {
         rich::narrative::callout::text(&current_theme, value, role, color)
     });
     charts::heatmap::envelope(
@@ -564,7 +564,7 @@ fn enveloped(theme: &ArtisanTheme, envelope: &rich::Envelope, content: Element) 
         envelope.subtitle.as_deref(),
         envelope.caption.as_deref(),
         content,
-        text,
+        &text,
     )
 }
 

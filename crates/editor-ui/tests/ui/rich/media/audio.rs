@@ -42,15 +42,18 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
     let invalidated = Rc::new(Cell::new(0));
     let render = || {
         let count = Rc::clone(&invalidated);
+        let glyph: GlyphFactory =
+            Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(move || count.set(count.get() + 1));
         block.view(
             "audio",
             &ArtisanTheme::resolved(),
             Some(&fetcher),
             &assets,
             &player,
-            state.clone(),
-            Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build()),
-            Rc::new(move || count.set(count.get() + 1)),
+            &state,
+            &glyph,
+            &invalidate,
         )
     };
     let mount = |view: Element| {

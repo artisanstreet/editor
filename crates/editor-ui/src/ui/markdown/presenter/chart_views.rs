@@ -69,12 +69,12 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let services = heatmap.ok_or(PresenterError::Unavailable("heatmap services"))?;
         let current_theme = *theme;
-        let text = Rc::new(
+        let text: charts::heatmap::TextFactory = Rc::new(
             move |role: HeatmapTextRole,
                   value: &str,
                   size,
@@ -120,14 +120,14 @@ impl MarkdownPresenter {
             .or_default()
             .insert(block_id.clone());
         let content = spec.view(
-            block_id,
+            &block_id,
             theme,
             self.heatmaps.clone(),
-            text,
-            Rc::clone(&services.empty),
-            Rc::clone(&services.readout),
-            Rc::clone(&services.navigation_frame),
-            Rc::clone(&invalidate),
+            &text,
+            &services.empty,
+            &services.readout,
+            &services.navigation_frame,
+            invalidate,
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -139,12 +139,12 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let current_theme = *theme;
-        let text = Rc::new(
+        let text: charts::funnel::TextFactory = Rc::new(
             move |role: FunnelTextRole, value: &str, size, line, weight, color| {
                 let text = charts::frame::mark_text(
                     &current_theme,
@@ -169,13 +169,13 @@ impl MarkdownPresenter {
             .or_default()
             .insert(block_id.clone());
         let content = spec.view(
-            block_id,
+            &block_id,
             theme,
             self.funnels.clone(),
-            text,
-            Rc::clone(&services.empty),
-            Rc::clone(&services.navigation_frame),
-            Rc::clone(&invalidate),
+            &text,
+            &services.empty,
+            &services.navigation_frame,
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -187,7 +187,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -293,12 +293,12 @@ impl MarkdownPresenter {
             navigation: Rc::clone(&shared.navigation_frame),
         };
         let content = charts::spans::view(
-            block_id,
+            &block_id,
             theme,
-            Arc::clone(layout),
+            layout,
             self.spans.clone(),
             &services,
-            Rc::clone(&invalidate),
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -310,7 +310,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -472,13 +472,13 @@ impl MarkdownPresenter {
         let content = charts::hierarchy::view(
             block_id,
             theme,
-            Arc::clone(&spec.tree),
+            &spec.tree,
             spec.layout,
-            spec.unit.clone(),
+            spec.unit.clone().as_ref(),
             charts::hierarchy::levels(spec.layout, spec.depth),
             self.hierarchies.clone(),
             &services,
-            Rc::clone(&invalidate),
+            invalidate,
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -490,7 +490,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -501,58 +501,59 @@ impl MarkdownPresenter {
             .or_default()
             .insert(block_id.clone());
         let current_theme = *theme;
-        let label = Rc::new(move |label: charts::sankey::NodeLabel| {
-            let style = aqua_text::TextStyle {
-                families: vec![aqua_text::FontFamily::Named(
-                    current_theme.typography.sans.family.to_owned(),
-                )],
-                size_px: current_theme.typography.control_text,
-                line_height_px: label.line_height,
-                ..aqua_text::TextStyle::default()
-            };
-            let name = ui::Text::new(label.name)
-                .text_style(style.clone())
-                .gpui_source_color(current_theme.colors.text.to_reference_text_color())
-                .wrap(false)
-                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                .build();
-            let value = ui::Text::new(label.value)
-                .text_style(style)
-                .gpui_source_color(current_theme.colors.text_muted.to_reference_text_color())
-                .wrap(false)
-                .build();
-            let (left, right) = if label.last {
-                (None, Some(label.x))
-            } else {
-                (Some(label.x), None)
-            };
-            ui::Box::new()
-                .layout("row")
-                .gap(4.0)
-                .height(label.line_height)
-                .style(
-                    Style::new()
-                        .absolute_at(left, Some(label.y), right, None)
-                        .max_width(Length::Px(label.max_width))
-                        .min_width(Length::Px(0.0))
-                        .clip(true)
-                        .opacity(label.alpha),
-                )
-                .child(
-                    ui::Box::new()
-                        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                        .child(name)
-                        .build(),
-                )
-                .child(
-                    ui::Box::new()
-                        .style(Style::new().flex_shrink(0.0))
-                        .child(value)
-                        .build(),
-                )
-                .build()
-        });
-        let readout = Rc::new(
+        let label: charts::sankey::LabelFactory =
+            Rc::new(move |label: charts::sankey::NodeLabel| {
+                let style = aqua_text::TextStyle {
+                    families: vec![aqua_text::FontFamily::Named(
+                        current_theme.typography.sans.family.to_owned(),
+                    )],
+                    size_px: current_theme.typography.control_text,
+                    line_height_px: label.line_height,
+                    ..aqua_text::TextStyle::default()
+                };
+                let name = ui::Text::new(label.name)
+                    .text_style(style.clone())
+                    .gpui_source_color(current_theme.colors.text.to_reference_text_color())
+                    .wrap(false)
+                    .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                    .build();
+                let value = ui::Text::new(label.value)
+                    .text_style(style)
+                    .gpui_source_color(current_theme.colors.text_muted.to_reference_text_color())
+                    .wrap(false)
+                    .build();
+                let (left, right) = if label.last {
+                    (None, Some(label.x))
+                } else {
+                    (Some(label.x), None)
+                };
+                ui::Box::new()
+                    .layout("row")
+                    .gap(4.0)
+                    .height(label.line_height)
+                    .style(
+                        Style::new()
+                            .absolute_at(left, Some(label.y), right, None)
+                            .max_width(Length::Px(label.max_width))
+                            .min_width(Length::Px(0.0))
+                            .clip(true)
+                            .opacity(label.alpha),
+                    )
+                    .child(
+                        ui::Box::new()
+                            .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                            .child(name)
+                            .build(),
+                    )
+                    .child(
+                        ui::Box::new()
+                            .style(Style::new().flex_shrink(0.0))
+                            .child(value)
+                            .build(),
+                    )
+                    .build()
+            });
+        let readout: charts::sankey::ReadoutFactory = Rc::new(
             move |x, heading: &str, rows: Vec<(Option<GpuiHsla>, String, String)>| {
                 charts::frame::readout_rows(
                     &current_theme,
@@ -569,15 +570,15 @@ impl MarkdownPresenter {
             },
         );
         let content = charts::sankey::view(
-            block_id,
+            &block_id,
             theme,
-            Arc::clone(graph),
+            graph,
             self.sankeys.clone(),
-            label,
-            readout,
-            Rc::clone(&shared.empty),
-            Rc::clone(&shared.navigation_frame),
-            Rc::clone(&invalidate),
+            &label,
+            &readout,
+            &shared.empty,
+            &shared.navigation_frame,
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -590,7 +591,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -714,13 +715,13 @@ impl MarkdownPresenter {
             navigation: Rc::clone(&shared.navigation_frame),
         };
         let content = charts::chart::view(
-            block_id,
+            &block_id,
             theme,
-            Arc::clone(style),
-            Arc::clone(model),
+            style,
+            model,
             self.charts.clone(),
             &services,
-            Rc::clone(&invalidate),
+            invalidate,
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -732,7 +733,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -798,12 +799,12 @@ impl MarkdownPresenter {
             tick_strip: Rc::new(move |ticks| charts::frame::tick_strip(&current_theme, ticks)),
         };
         let content = charts::distribution::view(
-            block_id,
+            &block_id,
             theme,
-            Arc::clone(spec),
+            &Arc::clone(spec),
             self.distributions.clone(),
             &services,
-            Rc::clone(&invalidate),
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -815,7 +816,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -826,15 +827,15 @@ impl MarkdownPresenter {
             .or_default()
             .insert(block_id.clone());
         let content = spec.view(
-            block_id,
+            &block_id,
             theme,
             self.concentrations.clone(),
-            Rc::clone(&services.concentration.frame),
-            Rc::clone(&services.concentration.plot_label),
-            Rc::clone(&services.concentration.readout),
-            Rc::clone(&services.empty),
-            Rc::clone(&services.navigation_frame),
-            Rc::clone(&invalidate),
+            &services.concentration.frame,
+            &services.concentration.plot_label,
+            &services.concentration.readout,
+            &services.empty,
+            &services.navigation_frame,
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }

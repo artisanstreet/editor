@@ -448,7 +448,7 @@ impl LiteralOwner {
             let result = completion
                 .result
                 .map_err(|error| error.to_string())
-                .and_then(|page| collector.push(page));
+                .and_then(|page| collector.push(&page));
             if let Err(error) = result {
                 entry.phase = Phase::Failed(error);
             } else {

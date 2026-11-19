@@ -16,8 +16,8 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Result<Element, PresenterError> {
         let media = self
             .media_services
@@ -45,10 +45,10 @@ impl MarkdownPresenter {
             *theme,
             media.model_assets.clone(),
             Rc::clone(&media.model_capability),
-            Rc::clone(&glyph),
+            glyph,
             Rc::clone(&media.effect),
             hovered,
-            Rc::clone(&invalidate),
+            Rc::clone(invalidate),
         );
         let content = model.view(
             &block_id,
@@ -68,7 +68,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Result<Element, PresenterError> {
         let services = self
             .media_services
@@ -128,8 +128,8 @@ impl MarkdownPresenter {
         let event_state = Rc::downgrade(&state);
         let event_id = block_id.clone();
         let effect = Rc::clone(&services.effect);
-        let refresh = Rc::clone(&invalidate);
-        let emit = Rc::new(move |action| {
+        let refresh = Rc::clone(invalidate);
+        let emit: Rc<dyn Fn(rich::media::image::Action)> = Rc::new(move |action| {
             let Some(state) = event_state.upgrade() else {
                 return;
             };
@@ -173,7 +173,7 @@ impl MarkdownPresenter {
         });
         let content = state
             .borrow()
-            .view(model, *theme, &block_id, services.width, emit)
+            .view(model, *theme, &block_id, services.width, &emit)
             .map_err(PresenterError::Unavailable)?;
         Ok(enveloped(theme, envelope, content))
     }
@@ -185,8 +185,8 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Result<Element, PresenterError> {
         let services = self
             .media_services
@@ -206,9 +206,9 @@ impl MarkdownPresenter {
             Some(&services.fetcher),
             &services.audio_assets,
             &services.player,
-            self.audio.clone(),
-            Rc::clone(&glyph),
-            Rc::clone(&invalidate),
+            &self.audio,
+            glyph,
+            invalidate,
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -220,7 +220,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Result<Element, PresenterError> {
         let services = self
             .media_services
@@ -265,7 +265,7 @@ impl MarkdownPresenter {
         };
         state.borrow_mut().refresh();
         let state_for_events = Rc::downgrade(&state);
-        let refresh = Rc::clone(&invalidate);
+        let refresh = Rc::clone(invalidate);
         let emit = Rc::new(move |action| {
             if let Some(state) = state_for_events.upgrade()
                 && state.borrow_mut().dispatch(action)

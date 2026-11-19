@@ -284,21 +284,21 @@ fn paint(
 }
 
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    graph: Arc<Graph>,
+    graph: &Arc<Graph>,
     state: SankeyState,
-    label: LabelFactory,
-    readout: ReadoutFactory,
-    empty: EmptyFactory,
-    navigation_frame: NavigationFrame,
+    label: &LabelFactory,
+    readout: &ReadoutFactory,
+    empty: &EmptyFactory,
+    navigation_frame: &NavigationFrame,
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     if graph.links.is_empty() {
         return empty("No flows to draw");
     }
     let theme = *theme;
-    let (hover, probe, laid) = state.sync(&id, &graph);
+    let (hover, probe, laid) = state.sync(id, graph);
     let height = (f32_of_count(graph.tallest) * 44.0).clamp(200.0, 380.0);
     let width = probe.get().map_or(640.0, |rect| rect.w);
     let node_lit = |node: usize| match hover {
@@ -346,7 +346,7 @@ pub(crate) fn view(
                 .to_reference_paint()
         })
         .collect::<Vec<_>>();
-    let draw_graph = Arc::clone(&graph);
+    let draw_graph = Arc::clone(graph);
     let draw_layout = Rc::clone(&laid);
     let draw_probe = Rc::clone(&probe);
     let canvas = ui::Canvas::new()
@@ -443,12 +443,12 @@ pub(crate) fn view(
         content = content.child(readout(at, &heading, rows));
     }
     let moving = state.clone();
-    let moving_id = id.clone();
+    let moving_id = id.to_owned();
     let moving_probe = probe;
     let moving_layout = laid;
     let moving_invalidate = Rc::clone(&invalidate);
     let leaving = state.clone();
-    let leaving_id = id.clone();
+    let leaving_id = id.to_owned();
     let leaving_invalidate = Rc::clone(&invalidate);
     let content = content
         .build()
@@ -481,15 +481,15 @@ pub(crate) fn view(
         aria.push_str(selection);
     }
     let keyboard = state;
-    let keyboard_id = id.clone();
-    let keyboard_graph = Arc::clone(&graph);
+    let keyboard_id = id.to_owned();
+    let keyboard_graph = Arc::clone(graph);
     let nav = navigation_group(
         ui::Box::new()
             .width(Length::Pct(100.0))
             .height(Length::Pct(100.0))
             .child(content)
             .build(),
-        &id,
+        id,
         aria,
         selection,
         move |code, alt| {

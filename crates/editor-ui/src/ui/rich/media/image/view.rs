@@ -142,7 +142,7 @@ impl ImageState {
         theme: ArtisanTheme,
         id: &str,
         width: f32,
-        emit: Rc<dyn Fn(Action)>,
+        emit: &Rc<dyn Fn(Action)>,
     ) -> Result<aqua_ui::element::Element, &'static str> {
         if !width.is_finite() || width <= 0.0 {
             return Err("Image gallery needs its measured content width.");
@@ -184,7 +184,7 @@ impl ImageState {
                 let slot = index;
                 let retry =
                     matches!(loaded, Loaded::Failed(error) if error.retryable()).then(|| {
-                        let retry = Rc::clone(&emit);
+                        let retry = Rc::clone(emit);
                         Button::text(
                             format!("{id}-retry-{index}"),
                             theme,
@@ -222,9 +222,9 @@ impl ImageState {
                 let anchor = Rc::clone(&self.anchors[index]);
                 let key_anchor = Rc::clone(&anchor);
                 let entered = Rc::clone(&anchor);
-                let keyed = Rc::clone(&emit);
-                let requested = Rc::clone(&emit);
-                let copied = Rc::clone(&emit);
+                let keyed = Rc::clone(emit);
+                let requested = Rc::clone(emit);
+                let copied = Rc::clone(emit);
                 frame =
                     frame
                         .on_input(InputKind::PointerEnter, EventPhase::Bubble, move |event| {
@@ -315,8 +315,8 @@ impl ImageState {
                     Loaded::Ready(image) => {
                         let image = image.clone();
                         let cancelled = Rc::clone(&pressed);
-                        let activate = Rc::clone(&emit);
-                        let access = Rc::clone(&emit);
+                        let activate = Rc::clone(emit);
+                        let access = Rc::clone(emit);
                         let accessible_image = image.clone();
                         frame = frame
                             .role(aqua_core::Role::Button)
@@ -357,8 +357,8 @@ impl ImageState {
                             });
                     }
                     Loaded::Failed(ImageError::NeedsConsent) => {
-                        let click = Rc::clone(&emit);
-                        let access = Rc::clone(&emit);
+                        let click = Rc::clone(emit);
+                        let access = Rc::clone(emit);
                         frame = frame
                             .role(aqua_core::Role::Button)
                             .aria_label(format!("{alt}. Load remote images"))

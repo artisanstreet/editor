@@ -112,8 +112,8 @@ impl MarkdownPresenter {
         document: SelectionDocumentId,
         order: &[u64],
         source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
         on_link: Option<Rc<dyn Fn(LinkAction)>>,
         on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
         scope: Option<crate::ui::rich::actions::ResourceScope>,
@@ -134,8 +134,8 @@ impl MarkdownPresenter {
         document: SelectionDocumentId,
         order: &[u64],
         mut source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
         on_link: Option<Rc<dyn Fn(LinkAction)>>,
         on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
         scope: Option<crate::ui::rich::actions::ResourceScope>,
@@ -152,7 +152,7 @@ impl MarkdownPresenter {
         let reference_scope = scope.clone();
         let rich = |index: usize, fence: &CodeFence| {
             if fence.diagram.is_some() {
-                return Ok(self.render_diagram(id, index, fence, theme, &invalidate, code));
+                return Ok(self.render_diagram(id, index, fence, theme, invalidate, code));
             }
             let entry = self
                 .rich
@@ -163,8 +163,8 @@ impl MarkdownPresenter {
                 entry,
                 id,
                 theme,
-                Rc::clone(&glyph),
-                Rc::clone(&invalidate),
+                &Rc::clone(glyph),
+                &Rc::clone(invalidate),
                 charts,
                 code,
                 reference_scope.clone(),

@@ -110,10 +110,10 @@ impl Stats {
         &self,
         id: String,
         theme: &ArtisanTheme,
-        states: StatsState,
-        glyph: GlyphFactory,
-        hint: HintFactory,
-        invalidate: Rc<dyn Fn()>,
+        states: &StatsState,
+        glyph: &GlyphFactory,
+        hint: &HintFactory,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let hovered = states
             .0
@@ -260,7 +260,7 @@ impl Stats {
             if tile.hint().is_some() {
                 let state = states.clone();
                 let key = id.clone();
-                let invalidate = Rc::clone(&invalidate);
+                let invalidate = Rc::clone(invalidate);
                 cell = cell.on_hover_change(move |over| {
                     let mut state = state.0.borrow_mut();
                     if over {

@@ -41,7 +41,7 @@ pub(crate) enum Navigation {
     Right,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Activate(usize),
     Navigate(usize, Navigation),
@@ -461,7 +461,7 @@ impl FileTree {
         &self,
         theme: &ArtisanTheme,
         id: &str,
-        state: Rc<RefCell<FileTreeState>>,
+        state: &Rc<RefCell<FileTreeState>>,
         emit: Rc<dyn Fn(Action)>,
     ) -> Element {
         state.borrow_mut().reconcile(self);

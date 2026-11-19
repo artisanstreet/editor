@@ -204,12 +204,14 @@ fn the_model_viewport_shows_a_focus_ring_when_tab_reaches_it() {
     )
     .unwrap();
     let assets = ModelAssets::new();
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build());
     let services = crate::ui::rich::media::model::services(
         "model",
         crate::ui::theme::ArtisanTheme::resolved(),
         assets.clone(),
         Rc::new(|| Some(RendererCapability::Software)),
-        Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build()),
+        &glyph,
         Rc::new(|_| {}),
         Rc::new(Cell::new(false)),
         Rc::new(|| {}),

@@ -146,9 +146,9 @@ pub(super) fn render(
     prefix: &[u64],
     source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
     sources: &mut Vec<SelectionSource>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
+    on_link: Option<&Rc<dyn Fn(LinkAction)>>,
+    on_color: Option<&Rc<dyn Fn(ShowCopyMenu)>>,
+    scope: Option<&ResourceScope>,
 ) -> Result<Element, PresenterError> {
     let mut rows = Vec::new();
     visit_items(ordered, start.unwrap_or(1), items, 0, &mut rows);
@@ -166,9 +166,9 @@ pub(super) fn render(
                 id,
                 order,
                 "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
+                on_link.cloned(),
+                on_color.cloned(),
+                scope.cloned(),
                 None,
             )
             .map_err(PresenterError::Inline)?,
@@ -180,9 +180,9 @@ pub(super) fn render(
                 id,
                 order,
                 "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
+                on_link.cloned(),
+                on_color.cloned(),
+                scope.cloned(),
                 Some(*level),
             )
             .map_err(PresenterError::Inline)?,
@@ -197,9 +197,9 @@ pub(super) fn render(
                 id,
                 order,
                 "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
+                on_link.cloned(),
+                on_color.cloned(),
+                scope.cloned(),
                 None,
             )
             .map_err(PresenterError::Inline)?,

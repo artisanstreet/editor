@@ -92,7 +92,7 @@ impl RangeCollector {
         })
     }
 
-    pub(crate) fn push(&mut self, page: ContentRange) -> Result<(), String> {
+    pub(crate) fn push(&mut self, page: &ContentRange) -> Result<(), String> {
         let cursor = self.cursor as u64;
         if page.id != self.reference.id
             || page.total != self.reference.bytes
@@ -1133,7 +1133,7 @@ impl StoredOwner {
                     entry.phase = match (phase, result) {
                         (_, Err(error)) => LeafPhase::Failed(error),
                         (LeafPhase::Metadata(mut collector), Ok(page)) => {
-                            match collector.push(page) {
+                            match collector.push(&page) {
                                 Err(error) => LeafPhase::Failed(error),
                                 Ok(()) if collector.next_request().is_some() => {
                                     LeafPhase::Metadata(collector)
@@ -1171,7 +1171,7 @@ impl StoredOwner {
                                 mut collector,
                             },
                             Ok(page),
-                        ) => match collector.push(page) {
+                        ) => match collector.push(&page) {
                             Err(error) => LeafPhase::Failed(error),
                             Ok(()) if collector.next_request().is_some() => LeafPhase::Source {
                                 metadata,

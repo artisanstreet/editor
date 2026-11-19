@@ -225,6 +225,9 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
         )
         .unwrap();
     let render = |presenter: &MarkdownPresenter, owner: &StoredOwner| {
+        let glyph: editor_aqua::ui::markdown::GlyphFactory =
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         presenter.render_stored_leaf(
             owner,
             "row",
@@ -233,8 +236,8 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             true,
             theme,
             BodyTone::Foreground,
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
             None,

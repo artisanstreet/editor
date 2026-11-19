@@ -418,21 +418,21 @@ fn reading(size: f64, unit: Option<&str>) -> String {
 pub(crate) fn view(
     id: String,
     theme: &ArtisanTheme,
-    tree: Arc<Tree>,
+    tree: &Arc<Tree>,
     layout: Layout,
-    unit: Option<String>,
+    unit: Option<&String>,
     levels: usize,
     state: HierarchyState,
     services: &Services,
-    invalidate: Rc<dyn Fn()>,
+    invalidate: &Rc<dyn Fn()>,
 ) -> Element {
     let theme = *theme;
-    let (focus, hover, probe) = state.sync(&id, &tree);
+    let (focus, hover, probe) = state.sync(&id, tree);
     let width = probe.get().map_or(640.0, |bounds| bounds.w);
-    let geometry = state.geometry(&id, &tree, layout, levels, width);
+    let geometry = state.geometry(&id, tree, layout, levels, width);
     let height = geometry.height;
     let draw_geometry = Arc::clone(&geometry);
-    let draw_tree = Arc::clone(&tree);
+    let draw_tree = Arc::clone(tree);
     let draw_probe = Rc::clone(&probe);
     let canvas = ui::Canvas::new()
         .style(
@@ -461,7 +461,7 @@ pub(crate) fn view(
         }
         let node = tree.node(part.node);
         let value = (layout == Layout::Treemap && (part.group || h >= 36.0))
-            .then(|| reading(node.size, unit.as_deref()));
+            .then(|| reading(node.size, unit.map(String::as_str)));
         plot = plot.child((services.label)(PartLabel {
             x: part.x,
             y: part.y,
@@ -478,7 +478,7 @@ pub(crate) fn view(
         format!(
             "{}: {}",
             tree.node(node).name,
-            reading(tree.node(node).size, unit.as_deref())
+            reading(tree.node(node).size, unit.map(String::as_str))
         )
     });
     if let Some((node, part)) = hover.and_then(|node| {
@@ -500,7 +500,7 @@ pub(crate) fn view(
         let mut rows = vec![(
             Some(swatch),
             "Size".to_owned(),
-            reading(current.size, unit.as_deref()),
+            reading(current.size, unit.map(String::as_str)),
         )];
         if node != focus && focused.size > 0.0 {
             rows.push((
@@ -529,7 +529,11 @@ pub(crate) fn view(
                 .map(|child| tree.node(*child).size)
                 .sum::<f64>();
         if !current.children.is_empty() && own > current.size * 1e-9 {
-            rows.push((None, "Own".to_owned(), reading(own, unit.as_deref())));
+            rows.push((
+                None,
+                "Own".to_owned(),
+                reading(own, unit.map(String::as_str)),
+            ));
         }
         plot = plot.child((services.readout)(
             part.y + part.h / 2.0 < 0.5,
@@ -542,10 +546,10 @@ pub(crate) fn view(
     let moving_id = id.clone();
     let moving_geometry = Arc::clone(&geometry);
     let moving_probe = Rc::clone(&probe);
-    let moving_invalidate = Rc::clone(&invalidate);
+    let moving_invalidate = Rc::clone(invalidate);
     let leaving = state.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = Rc::clone(&invalidate);
+    let leaving_invalidate = Rc::clone(invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -575,7 +579,7 @@ pub(crate) fn view(
     let clicked_id = id.clone();
     let clicked_geometry = Arc::clone(&geometry);
     let clicked_probe = probe;
-    let clicked_invalidate = Rc::clone(&invalidate);
+    let clicked_invalidate = Rc::clone(invalidate);
     let plot = (services.click)(
         plot,
         Rc::new(move |position| {
@@ -603,7 +607,7 @@ pub(crate) fn view(
     let keyboard = state.clone();
     let keyboard_id = id.clone();
     let keyboard_nodes = Arc::clone(&geometry.nodes);
-    let keyboard_invalidate = Rc::clone(&invalidate);
+    let keyboard_invalidate = Rc::clone(invalidate);
     let nav = navigation_group(
         ui::Box::new()
             .width(Length::Pct(100.0))
@@ -631,7 +635,7 @@ pub(crate) fn view(
         .collect();
     let trail_state = state;
     let trail_id = id;
-    let trail_invalidate = Rc::clone(&invalidate);
+    let trail_invalidate = Rc::clone(invalidate);
     let trail = (services.trail)(
         entries,
         Rc::new(move |node| {

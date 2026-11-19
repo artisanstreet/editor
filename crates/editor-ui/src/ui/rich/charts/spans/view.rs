@@ -276,9 +276,9 @@ fn hit_bar(
 }
 
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    layout: Arc<Layout>,
+    layout: &Arc<Layout>,
     state: SpansState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -287,12 +287,12 @@ pub(crate) fn view(
         return (services.empty)("No spans");
     }
     let theme = *theme;
-    let (hover, probe, reset) = state.sync(&id, &layout);
+    let (hover, probe, reset) = state.sync(id, layout);
     let width = probe.get().map_or(560.0, |bounds| bounds.w);
-    let (domain, ticks) = tick_values(&layout, width);
+    let (domain, ticks) = tick_values(layout, width);
     let pitch = theme.density.control_sm;
-    let model = Arc::clone(&layout);
-    let row_id = id.clone();
+    let model = Arc::clone(layout);
+    let row_id = id.to_owned();
     let row_ticks = ticks.clone();
     let row_state = state.clone();
     let row_invalidate = Rc::clone(&invalidate);
@@ -525,8 +525,8 @@ pub(crate) fn view(
         aria.push_str(value);
     }
     let keyboard = state;
-    let keyboard_id = id.clone();
-    let navigation = navigation_group(plot.build(), &id, aria, selection, move |code, alt| {
+    let keyboard_id = id.to_owned();
+    let navigation = navigation_group(plot.build(), id, aria, selection, move |code, alt| {
         let handled = keyboard.key(&keyboard_id, code, alt);
         if handled {
             invalidate();

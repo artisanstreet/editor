@@ -14,6 +14,9 @@ fn rendered_rows(source: &str) -> Vec<Result<(), String>> {
     let services = HeatmapServices::new(*theme);
     (0..presenter.projected_count().expect("projected"))
         .map(|row| {
+            let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+            let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
             presenter
                 .render_projected_with_services(
                     row,
@@ -23,8 +26,8 @@ fn rendered_rows(source: &str) -> Vec<Result<(), String>> {
                     SelectionDocumentId(1),
                     &[1],
                     |index| SelectionSourceId(index as u64),
-                    Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                    Rc::new(|| {}),
+                    &glyph,
+                    &invalidate,
                     None,
                     None,
                     None,
@@ -120,6 +123,9 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
             .expect("streamed prepare");
     }
     streamed.prepare_document(&engine).expect("whole document");
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     streamed
         .render_with_services(
             "item",
@@ -128,8 +134,8 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
             SelectionDocumentId(1),
             &[1],
             |index| SelectionSourceId(index as u64),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
             Some(&HeatmapServices::new(*theme)),

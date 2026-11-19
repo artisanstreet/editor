@@ -26,6 +26,7 @@ mod source_index;
 pub mod stored;
 mod table;
 mod table_view;
+pub use crate::ui::rich::narrative::callout::GlyphFactory;
 pub use projected::ShapedSource;
 use source_index::normalize_record;
 pub use source_index::{

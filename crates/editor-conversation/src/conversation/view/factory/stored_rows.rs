@@ -168,7 +168,7 @@ impl RowFactory {
             &self.theme,
             BodyTone::Foreground,
             self.allocate.as_ref(),
-            Rc::clone(&self.invalidate),
+            &Rc::clone(&self.invalidate),
             Rc::clone(&self.on_link),
             Rc::clone(&self.on_color),
             ResourceScope {

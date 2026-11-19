@@ -91,6 +91,9 @@ fn completed_image_invalidates_retained_loading_row() {
             .row(move |_| {
                 renders.set(renders.get() + 1);
                 let invalidated = Rc::clone(&settled);
+                let glyph: editor_aqua::ui::markdown::GlyphFactory =
+                    Rc::new(|_, _, _| aqua_ui::element::Box::new().build());
+                let invalidate: Rc<dyn Fn()> = Rc::new(move || invalidated.set(false));
                 let element = presenter
                     .render(
                         "item",
@@ -99,8 +102,8 @@ fn completed_image_invalidates_retained_loading_row() {
                         SelectionDocumentId(1),
                         &[1],
                         |index| SelectionSourceId(index as u64 + 1),
-                        Rc::new(|_, _, _| aqua_ui::element::Box::new().build()),
-                        Rc::new(move || invalidated.set(false)),
+                        &glyph,
+                        &invalidate,
                     )
                     .unwrap()
                     .element;
@@ -202,6 +205,9 @@ fn preparation_proof_and_complete_selection_follow_source_revision() {
         .prepare(&engine, "## Heading\n\nA **strong** paragraph.")
         .unwrap();
     presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
@@ -210,8 +216,8 @@ fn preparation_proof_and_complete_selection_follow_source_revision() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
         )
         .unwrap();
     assert_eq!(rendered.selection_sources.len(), 2);
@@ -232,6 +238,9 @@ fn nested_lists_keep_selection_leaves_in_source_order() {
         .prepare(&engine, "Before\n\n- alpha\n  - beta\n- gamma\n\nAfter")
         .unwrap();
     presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
@@ -240,8 +249,8 @@ fn nested_lists_keep_selection_leaves_in_source_order() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -267,6 +276,9 @@ fn table_cells_register_tab_and_row_separators_in_order() {
         .prepare(&engine, "| A | B |\n|---|---|\n| one | two |")
         .unwrap();
     presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
@@ -275,8 +287,8 @@ fn table_cells_register_tab_and_row_separators_in_order() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -400,6 +412,9 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
     presenter.prepare(&engine, source).unwrap();
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     let services = editor_aqua::ui::markdown::presenter::HeatmapServices::new(*theme);
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let row = presenter
         .render_projected_with_services(
             1,
@@ -409,8 +424,8 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
             None,
@@ -449,6 +464,9 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
         }),
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let row = presenter
         .render_projected_with_code(
             1,
@@ -458,8 +476,8 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
             None,
@@ -566,6 +584,9 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     let render = |row: usize| {
+        let glyph: editor_aqua::ui::markdown::GlyphFactory =
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         presenter
             .render_projected_with_code(
                 row,
@@ -575,8 +596,8 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
                 SelectionDocumentId(1),
                 &[7],
                 |index| SelectionSourceId(index as u64 + 10),
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
+                &glyph,
+                &invalidate,
                 None,
                 None,
                 None,
@@ -613,6 +634,9 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     for row in 0..presenter.projected_count().unwrap() {
+        let glyph: editor_aqua::ui::markdown::GlyphFactory =
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         presenter
             .render_projected_with_code(
                 row,
@@ -622,8 +646,8 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
                 SelectionDocumentId(1),
                 &[7],
                 |index| SelectionSourceId(index as u64 + 10),
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
+                &glyph,
+                &invalidate,
                 None,
                 None,
                 None,
@@ -645,6 +669,9 @@ fn callout_draws_the_documented_subtitle_and_caption() {
         reference: None,
         copy: Rc::new(|_, _| aqua_ui::element::ui::Box::new().build()),
     };
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let drawn = presenter
         .render_projected_with_code(
             0,
@@ -654,8 +681,8 @@ fn callout_draws_the_documented_subtitle_and_caption() {
             SelectionDocumentId(1),
             &[7],
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
             None,

@@ -140,8 +140,8 @@ impl MarkdownPresenter {
         final_row: bool,
         theme: &ArtisanTheme,
         tone: BodyTone,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
         on_link: Option<Rc<dyn Fn(LinkAction)>>,
         on_color: Option<Rc<dyn Fn(rich::actions::ShowCopyMenu)>>,
         scope: Option<rich::actions::ResourceScope>,
@@ -158,7 +158,7 @@ impl MarkdownPresenter {
         let rich_scope = scope.clone();
         let rich = |index: usize, fence: &CodeFence| {
             if fence.diagram.is_some() {
-                return Ok(self.render_diagram(id, index, fence, theme, &invalidate, code));
+                return Ok(self.render_diagram(id, index, fence, theme, invalidate, code));
             }
             self.render_rich(
                 entry
@@ -167,8 +167,8 @@ impl MarkdownPresenter {
                     .ok_or(PresenterError::Unavailable("nested rich block"))?,
                 id,
                 theme,
-                Rc::clone(&glyph),
-                Rc::clone(&invalidate),
+                &Rc::clone(glyph),
+                &Rc::clone(invalidate),
                 charts,
                 code,
                 rich_scope.clone(),

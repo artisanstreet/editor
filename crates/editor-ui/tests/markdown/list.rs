@@ -42,6 +42,9 @@ fn items(nodes: &[SemanticNode]) -> Vec<Item> {
 #[test]
 fn rendered_lists_expose_items_nesting_and_task_state() {
     let presenter = prepared(TASKS);
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render_with_context(
             "answer",
@@ -50,8 +53,8 @@ fn rendered_lists_expose_items_nesting_and_task_state() {
             SelectionDocumentId(1),
             &[0],
             |index| SelectionSourceId(index as u64 + 1),
-            Rc::new(|_, _, _| ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
         )

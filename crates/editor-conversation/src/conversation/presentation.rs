@@ -450,12 +450,12 @@ impl MarkdownOwners {
                     }
                     body.ids[ordinal]
                 },
-                request.glyph,
-                request.invalidate,
-                Some(request.on_link),
-                Some(request.on_color),
+                &request.glyph,
+                &request.invalidate,
+                Some(&request.on_link),
+                Some(&request.on_color),
                 Some(request.heatmap),
-                request.reference_scope,
+                request.reference_scope.as_ref(),
             )
             .map_err(|source| BodyError::Present {
                 key: request.key.clone(),
@@ -577,8 +577,8 @@ impl MarkdownOwners {
                     }
                     body.ids[ordinal]
                 },
-                request.glyph,
-                request.invalidate,
+                &request.glyph,
+                &request.invalidate,
                 Some(request.on_link),
                 Some(request.on_color),
                 request.reference_scope,

@@ -94,7 +94,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         code: Option<&CodeServices>,
         reference_scope: Option<rich::actions::ResourceScope>,
     ) -> Result<Element, PresenterError> {
@@ -122,7 +122,7 @@ impl MarkdownPresenter {
             reference.instance,
             Rc::clone(&reference.open),
             state,
-            Rc::clone(&invalidate),
+            Rc::clone(invalidate),
         );
         Ok(code_envelope(
             theme,
@@ -141,7 +141,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         code: Option<&CodeServices>,
         reference_scope: Option<rich::actions::ResourceScope>,
     ) -> Result<Element, PresenterError> {
@@ -167,7 +167,7 @@ impl MarkdownPresenter {
         let pending = Rc::clone(&self.file_tree_focus);
         let open = Rc::clone(&reference.open);
         let instance = reference.instance;
-        let refresh = Rc::clone(&invalidate);
+        let refresh = Rc::clone(invalidate);
         let emit = Rc::new(move |action| {
             let effect = state_for_events.borrow_mut().dispatch(
                 &tree_for_events,
@@ -185,7 +185,7 @@ impl MarkdownPresenter {
                 refresh();
             }
         });
-        let content = tree.render(theme, &block_id, state, emit);
+        let content = tree.render(theme, &block_id, &state, emit);
         Ok(enveloped(theme, envelope, content))
     }
 

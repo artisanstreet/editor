@@ -6,11 +6,15 @@ use aqua_text::{SharedFonts, SharedRuns};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn answer(source: &str, on_link: Rc<dyn Fn(LinkAction)>) -> aqua::UiApp {
+fn answer(source: &str, on_link: impl Fn(LinkAction) + 'static) -> aqua::UiApp {
+    let on_link: Rc<dyn Fn(LinkAction)> = Rc::new(on_link);
     let engine = MarkdownEngine::new().unwrap();
     let mut presenter = MarkdownPresenter::default();
     presenter.prepare(&engine, source).unwrap();
     presenter.prepare_document(&engine).unwrap();
+    let glyph: crate::ui::markdown::GlyphFactory = Rc::new(|_, _, _| ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let on_color: Rc<dyn Fn(ShowCopyMenu)> = Rc::new(|_| {});
     let rendered = presenter
         .render_with_context(
             "answer",
@@ -19,10 +23,10 @@ fn answer(source: &str, on_link: Rc<dyn Fn(LinkAction)>) -> aqua::UiApp {
             SelectionDocumentId(1),
             &[0],
             |index| SelectionSourceId(index as u64 + 1),
-            Rc::new(|_, _, _| ui::Box::new().build()),
-            Rc::new(|| {}),
-            Some(on_link),
-            Some(Rc::new(|_| {})),
+            &glyph,
+            &invalidate,
+            Some(&on_link),
+            Some(&on_color),
         )
         .unwrap();
     let fonts = SharedFonts::new();
@@ -65,7 +69,7 @@ fn answer_links_are_announced_and_open_from_the_keyboard() {
     let sink = Rc::clone(&opened);
     let mut app = answer(
         "Read [the docs](https://docs.example) or [the guide](https://guide.example).",
-        Rc::new(move |action| sink.borrow_mut().push(action)),
+        move |action| sink.borrow_mut().push(action),
     );
     assert_eq!(
         links(&app),
@@ -91,7 +95,7 @@ fn answer_links_are_announced_and_open_from_the_keyboard() {
 
 #[test]
 fn answer_headings_are_exposed_with_their_level() {
-    let app = answer("# Overview\n\nBody text.\n\n### Details", Rc::new(|_| {}));
+    let app = answer("# Overview\n\nBody text.\n\n### Details", |_| {});
     let headings: Vec<_> = semantics(&app)
         .into_iter()
         .filter_map(|node| match node.role {
@@ -138,7 +142,7 @@ fn answer_headings_are_exposed_with_their_level() {
 
 #[test]
 fn colour_swatches_keep_their_value_in_the_accessible_text() {
-    let app = answer("Use #ff0000 for errors.", Rc::new(|_| {}));
+    let app = answer("Use #ff0000 for errors.", |_| {});
     assert!(
         semantics(&app)
             .iter()

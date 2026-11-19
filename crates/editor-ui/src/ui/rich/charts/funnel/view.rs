@@ -164,25 +164,25 @@ fn summary(funnel: &Funnel, selected: Option<usize>) -> String {
 impl Funnel {
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: FunnelState,
-        text: TextFactory,
-        empty: EmptyFactory,
-        navigation_frame: NavigationFrame,
+        text: &TextFactory,
+        empty: &EmptyFactory,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let count = self.steps.len();
         if count == 0 {
             return empty("No steps");
         }
-        let (selected, reset) = states.sync(&id, self);
+        let (selected, reset) = states.sync(id, self);
         let theme = *theme;
         let height = theme.density.control_sm;
         let model = self.clone();
         let row_state = states.clone();
-        let row_id = id.clone();
-        let row_text = Rc::clone(&text);
+        let row_id = id.to_owned();
+        let row_text = Rc::clone(text);
         let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..count)
@@ -331,13 +331,13 @@ impl Funnel {
             label.push_str(value);
         }
         let keyboard = states;
-        let key = id.clone();
+        let key = id.to_owned();
         let navigation = navigation_group(
             ui::Box::new()
                 .width(Length::Pct(100.0))
                 .child(content)
                 .build(),
-            &id,
+            id,
             label,
             selection_label,
             move |code, alt| {

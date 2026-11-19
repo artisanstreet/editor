@@ -127,14 +127,9 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     }
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
+    let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));
     let view = state
-        .view(
-            &block,
-            ArtisanTheme::resolved(),
-            "gallery",
-            400.0,
-            Rc::new(move |action| sink.borrow_mut().push(action)),
-        )
+        .view(&block, ArtisanTheme::resolved(), "gallery", 400.0, &emit)
         .unwrap();
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| view).unwrap();
@@ -186,14 +181,9 @@ fn the_copy_path_menu_opens_from_the_keyboard_and_assistive_tech() {
     }
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
+    let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));
     let view = state
-        .view(
-            &block,
-            ArtisanTheme::resolved(),
-            "gallery",
-            400.0,
-            Rc::new(move |action| sink.borrow_mut().push(action)),
-        )
+        .view(&block, ArtisanTheme::resolved(), "gallery", 400.0, &emit)
         .unwrap();
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| view).unwrap();

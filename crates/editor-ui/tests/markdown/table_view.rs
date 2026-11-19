@@ -100,6 +100,9 @@ fn expected() -> Vec<Vec<(Role, String)>> {
 
 #[test]
 fn rendered_tables_keep_rows_and_column_headers() {
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = prepared()
         .render_with_context(
             "answer",
@@ -108,8 +111,8 @@ fn rendered_tables_keep_rows_and_column_headers() {
             SelectionDocumentId(1),
             &[0],
             |index| SelectionSourceId(index as u64 + 1),
-            Rc::new(|_, _, _| ui::Box::new().build()),
-            Rc::new(|| {}),
+            &glyph,
+            &invalidate,
             None,
             None,
         )

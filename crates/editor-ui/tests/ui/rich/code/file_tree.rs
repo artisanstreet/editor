@@ -120,7 +120,7 @@ fn rows_expose_tree_levels_and_open_from_enter_space_pointer_and_assistive_tech(
         tree.render(
             &ArtisanTheme::resolved(),
             "block",
-            Rc::clone(&state),
+            &Rc::clone(&state),
             Rc::new(move |action| sink.borrow_mut().push(action)),
         )
     })

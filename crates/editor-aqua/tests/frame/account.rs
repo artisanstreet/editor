@@ -93,7 +93,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
     let content = || {
         menu(
             &ArtisanTheme::resolved(),
-            Sheet {
+            &Sheet {
                 account: &account,
                 menu: &state,
                 width: 300.0,
@@ -177,7 +177,7 @@ fn every_entry_in_the_account_menu_leads_somewhere() {
         600.0,
         menu(
             &ArtisanTheme::resolved(),
-            Sheet {
+            &Sheet {
                 account: &account,
                 menu: &state,
                 width: 300.0,

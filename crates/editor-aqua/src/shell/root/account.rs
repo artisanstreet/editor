@@ -140,7 +140,7 @@ impl RootViews {
         let content = move || {
             crate::ui::chrome::account::menu(
                 &theme,
-                crate::ui::chrome::account::Sheet {
+                &crate::ui::chrome::account::Sheet {
                     account: &account,
                     menu: &menu,
                     width,

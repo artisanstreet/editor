@@ -545,7 +545,7 @@ fn render_leaf(
         text.iter()
             .map(|leaf| {
                 reveal
-                    .fades(leaf.slot, Arc::clone(&leaf.text))
+                    .fades(leaf.slot, &leaf.text)
                     .into_iter()
                     .map(|fade| aqua_core::scene::GpuiTextOpacityRange {
                         bytes: fade.range,
@@ -634,9 +634,9 @@ fn render_leaf(
             &target_ids,
             &text_key,
             &opacity,
-            on_link,
-            on_color,
-            scope,
+            on_link.as_ref(),
+            on_color.as_ref(),
+            scope.as_ref(),
         )?,
         IndexedLeafContent::Block(Block::Code(fence)) => {
             if let Some(code) = target.fence {
@@ -937,9 +937,9 @@ fn table_row(
     ids: &[SelectionSourceId],
     text_key: &dyn Fn(SelectionSourceId) -> String,
     opacity: &[Vec<aqua_core::scene::GpuiTextOpacityRange>],
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
+    on_link: Option<&Rc<dyn Fn(LinkAction)>>,
+    on_color: Option<&Rc<dyn Fn(ShowCopyMenu)>>,
+    scope: Option<&ResourceScope>,
 ) -> Result<Element, PresenterError> {
     let count = alignments.len();
     if count == 0 {
@@ -994,9 +994,9 @@ fn table_row(
                     *id,
                     order,
                     if column == 0 { "\n" } else { "\t" },
-                    on_link.clone(),
-                    on_color.clone(),
-                    scope.clone(),
+                    on_link.cloned(),
+                    on_color.cloned(),
+                    scope.cloned(),
                     opacity.get(column).cloned().unwrap_or_default(),
                 )
                 .map_err(PresenterError::Inline)?

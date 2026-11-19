@@ -230,7 +230,7 @@ impl PreparedReveal {
                 )
             })
     }
-    pub fn fades(&self, slot: usize, text: Arc<str>) -> Vec<Fade> {
+    pub fn fades(&self, slot: usize, text: &Arc<str>) -> Vec<Fade> {
         if self.reduced.get() || self.swift.get() || self.rushed.get() {
             self.leaves.borrow_mut().clear();
             return Vec::new();
@@ -241,16 +241,16 @@ impl PreparedReveal {
         }
         let now = self.now.get();
         let leaf = leaves.entry(slot).or_insert_with(|| Leaf {
-            text: Arc::clone(&text),
+            text: Arc::clone(text),
             visible: if self.fresh.get() { 0 } else { text.len() },
             marks: VecDeque::new(),
         });
-        if !Arc::ptr_eq(&leaf.text, &text) {
+        if !Arc::ptr_eq(&leaf.text, text) {
             if !text.starts_with(leaf.text.as_ref()) {
                 leaf.visible = text.len();
                 leaf.marks.clear();
             }
-            leaf.text = Arc::clone(&text);
+            leaf.text = Arc::clone(text);
         }
         if !self.paused.get() && leaf.visible < text.len() {
             leaf.marks.push_back((leaf.visible..text.len(), now));

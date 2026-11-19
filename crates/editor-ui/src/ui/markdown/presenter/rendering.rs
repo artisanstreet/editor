@@ -27,8 +27,8 @@ impl MarkdownPresenter {
         selection_document: SelectionDocumentId,
         order: &[u64],
         source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Result<RenderedMarkdown, PresenterError> {
         self.render_with_actions(
             id,
@@ -51,9 +51,9 @@ impl MarkdownPresenter {
         selection_document: SelectionDocumentId,
         order: &[u64],
         source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
+        on_link: Option<&Rc<dyn Fn(LinkAction)>>,
     ) -> Result<RenderedMarkdown, PresenterError> {
         self.render_with_context(
             id,
@@ -77,10 +77,10 @@ impl MarkdownPresenter {
         selection_document: SelectionDocumentId,
         order: &[u64],
         source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
+        on_link: Option<&Rc<dyn Fn(LinkAction)>>,
+        on_color: Option<&Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
     ) -> Result<RenderedMarkdown, PresenterError> {
         self.render_with_services(
             id,
@@ -148,12 +148,12 @@ impl MarkdownPresenter {
         selection_document: SelectionDocumentId,
         order: &[u64],
         mut source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
+        on_link: Option<&Rc<dyn Fn(LinkAction)>>,
+        on_color: Option<&Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
         heatmap: Option<&HeatmapServices>,
-        reference_scope: Option<crate::ui::rich::actions::ResourceScope>,
+        reference_scope: Option<&crate::ui::rich::actions::ResourceScope>,
     ) -> Result<RenderedMarkdown, PresenterError> {
         let document = self
             .document
@@ -183,9 +183,9 @@ impl MarkdownPresenter {
                         source_id(sources.len()),
                         leaf_order,
                         "\n\n",
-                        on_link.clone(),
-                        on_color.clone(),
-                        reference_scope.clone(),
+                        on_link.cloned(),
+                        on_color.cloned(),
+                        reference_scope.cloned(),
                         None,
                     )
                     .map_err(PresenterError::Inline)?;
@@ -207,11 +207,11 @@ impl MarkdownPresenter {
                         entry,
                         id,
                         theme,
-                        Rc::clone(&glyph),
-                        Rc::clone(&invalidate),
+                        &Rc::clone(glyph),
+                        &Rc::clone(invalidate),
                         heatmap,
                         None,
-                        reference_scope.clone(),
+                        reference_scope.cloned(),
                     )?;
                     (
                         ProseTypography::FENCE_MARGIN_PX,
@@ -230,9 +230,9 @@ impl MarkdownPresenter {
                         source_id(sources.len()),
                         leaf_order,
                         "\n\n",
-                        on_link.clone(),
-                        on_color.clone(),
-                        reference_scope.clone(),
+                        on_link.cloned(),
+                        on_color.cloned(),
+                        reference_scope.cloned(),
                         Some(*level),
                     )
                     .map_err(PresenterError::Inline)?;
@@ -281,9 +281,9 @@ impl MarkdownPresenter {
                         &prefix,
                         &mut source_id,
                         &mut sources,
-                        on_link.clone(),
-                        on_color.clone(),
-                        reference_scope.clone(),
+                        on_link,
+                        on_color,
+                        reference_scope,
                     )?;
                     (
                         ProseTypography::LIST_MARGIN_PX,
@@ -302,9 +302,9 @@ impl MarkdownPresenter {
                         &prefix,
                         &mut source_id,
                         &mut sources,
-                        on_link.clone(),
-                        on_color.clone(),
-                        reference_scope.clone(),
+                        on_link,
+                        on_color,
+                        reference_scope,
                     )?;
                     (
                         ProseTypography::TABLE_MARGIN_PX,
@@ -345,8 +345,8 @@ impl MarkdownPresenter {
         entry: &RetainedRich,
         id: &str,
         theme: &ArtisanTheme,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
         code: Option<&CodeServices>,
         reference_scope: Option<crate::ui::rich::actions::ResourceScope>,
@@ -377,7 +377,7 @@ impl MarkdownPresenter {
         ) {
             self.media_invalidations
                 .borrow_mut()
-                .insert(id.to_owned(), Rc::clone(&invalidate));
+                .insert(id.to_owned(), Rc::clone(invalidate));
         }
         let element = match &envelope.block {
             Prepared::Model(model) => {

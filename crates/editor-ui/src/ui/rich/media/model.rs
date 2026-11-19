@@ -130,7 +130,7 @@ pub(crate) fn services(
     theme: crate::ui::theme::ArtisanTheme,
     assets: crate::ui::media::model::load::ModelAssets,
     capability: Rc<dyn Fn() -> Option<crate::ui::media::model::load::RendererCapability>>,
-    glyph: crate::ui::rich::narrative::callout::GlyphFactory,
+    glyph: &crate::ui::rich::narrative::callout::GlyphFactory,
     effect: Rc<dyn Fn(crate::ui::media::preview::Effect)>,
     hovered: Rc<std::cell::Cell<bool>>,
     invalidate: Rc<dyn Fn()>,
@@ -183,7 +183,7 @@ pub(crate) fn services(
             })
         },
     );
-    let placeholder_glyph = Rc::clone(&glyph);
+    let placeholder_glyph = Rc::clone(glyph);
     let placeholder = Rc::new(move |message: &str, failed: bool| {
         let mut content = ui::Box::new()
             .layout("column")

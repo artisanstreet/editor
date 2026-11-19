@@ -16,7 +16,7 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        invalidate: Rc<dyn Fn()>,
+        invalidate: &Rc<dyn Fn()>,
         heatmap: Option<&HeatmapServices>,
     ) -> Result<Element, PresenterError> {
         let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
@@ -27,11 +27,11 @@ impl MarkdownPresenter {
             .or_default()
             .insert(block_id.clone());
         let content = compare.view(
-            block_id,
+            &block_id,
             theme,
             self.comparisons.clone(),
-            Rc::clone(&services.navigation_frame),
-            Rc::clone(&invalidate),
+            &services.navigation_frame,
+            Rc::clone(invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -43,8 +43,8 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let block_id = format!("{id}-rich-{}-stats", entry.id);
         self.stats_ids
@@ -52,14 +52,8 @@ impl MarkdownPresenter {
             .entry(id.to_owned())
             .or_default()
             .insert(block_id.clone());
-        let content = stats.view(
-            block_id,
-            theme,
-            self.stats.clone(),
-            Rc::clone(&glyph),
-            Rc::new(charts::frame::stats_hint),
-            Rc::clone(&invalidate),
-        );
+        let hint: rich::data::stats::HintFactory = Rc::new(charts::frame::stats_hint);
+        let content = stats.view(block_id, theme, &self.stats, glyph, &hint, invalidate);
         enveloped(theme, envelope, content)
     }
 
@@ -70,10 +64,10 @@ impl MarkdownPresenter {
         envelope: &rich::Envelope,
         id: &str,
         theme: &ArtisanTheme,
-        glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: Rc<dyn Fn()>,
+        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
-        let glyph: GlyphFactory = Rc::clone(&glyph);
+        let glyph: GlyphFactory = Rc::clone(glyph);
         let block_id = format!("{id}-rich-{}-callout", entry.id);
         self.callout_ids
             .borrow_mut()
@@ -88,8 +82,8 @@ impl MarkdownPresenter {
                 caption: envelope.caption.as_deref(),
             },
             self.callouts.clone(),
-            glyph,
-            Rc::clone(&invalidate),
+            &glyph,
+            Rc::clone(invalidate),
         )
     }
 }

@@ -124,16 +124,16 @@ fn criterion(theme: &ArtisanTheme, label: &str) -> Element {
 impl Compare {
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: CompareState,
-        navigation_frame: NavigationFrame,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let selected = {
             let mut state = states.0.borrow_mut();
             let entry = state
-                .entry(id.clone())
+                .entry(id.to_owned())
                 .or_insert_with(|| (Arc::downgrade(&self.0), None));
             if !std::sync::Weak::ptr_eq(&entry.0, &Arc::downgrade(&self.0)) {
                 *entry = (Arc::downgrade(&self.0), None);
@@ -171,13 +171,13 @@ impl Compare {
                 selected,
                 theme,
                 states.clone(),
-                id.clone(),
+                id.to_owned(),
                 Rc::clone(&invalidate),
             ));
         }
         let data = Arc::clone(&self.0);
         let row_states = states.clone();
-        let row_id = id.clone();
+        let row_id = id.to_owned();
         let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..data.rows.len())
@@ -262,7 +262,7 @@ impl Compare {
             label.push_str(option);
         }
         let state = states;
-        let key = id.clone();
+        let key = id.to_owned();
         let mut root = ui::Box::new()
             .width(Length::Pct(100.0))
             .child(table)

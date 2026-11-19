@@ -61,7 +61,7 @@ pub(crate) struct CalloutNotes<'a> {
     pub(crate) caption: Option<&'a str>,
 }
 
-pub(crate) type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
+pub type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
 
 impl Kind {
     fn presentation(self, theme: &ArtisanTheme) -> (&'static str, AssetId, Oklch, Tone) {
@@ -139,7 +139,7 @@ impl Callout {
         theme: &ArtisanTheme,
         notes: CalloutNotes<'_>,
         states: CalloutState,
-        glyph: GlyphFactory,
+        glyph: &GlyphFactory,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let open = *states

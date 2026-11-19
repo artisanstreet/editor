@@ -120,7 +120,7 @@ impl std::fmt::Debug for Trigger<'_> {
 }
 
 #[must_use]
-pub fn trigger(theme: &ArtisanTheme, trigger: Trigger<'_>) -> Element {
+pub fn trigger(theme: &ArtisanTheme, trigger: &Trigger<'_>) -> Element {
     let palette = Palette::of(theme);
     let hover = Rc::clone(&trigger.emit);
     let pick = Rc::clone(&trigger.emit);
@@ -180,7 +180,7 @@ fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     Surface::Menu.build(theme, children)
 }
 
-pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
+pub fn menu(theme: &ArtisanTheme, sheet: &Sheet<'_>) -> Element {
     let palette = Palette::of(theme);
     let entry = |spot, title: &str, icon| item(theme, &palette, spot, title, icon, &sheet.emit);
     let theme_icon = if palette.dark {
@@ -190,7 +190,7 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
     };
     let content = Aqua::Box()
         .layout("column")
-        .child(header(theme, &palette, &sheet))
+        .child(header(theme, &palette, sheet))
         .child(crate::ui::chrome::card::double_rule(theme, MENU_PADDING))
         .child(entry(Spot::Theme, "Theme", theme_icon))
         .child(entry(Spot::Settings, "Settings", AssetId::TABLER_SETTINGS))

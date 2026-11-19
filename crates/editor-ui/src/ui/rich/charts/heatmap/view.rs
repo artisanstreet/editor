@@ -34,7 +34,7 @@ pub(crate) fn envelope(
     subtitle: Option<&str>,
     caption: Option<&str>,
     content: Element,
-    text: EnvelopeTextFactory,
+    text: &EnvelopeTextFactory,
 ) -> Element {
     use crate::ui::kit::{Spaced, TextRole as Type};
     let mut body = ui::Box::new().layout("column").spaced(Space::S12).style(
@@ -167,26 +167,26 @@ impl HeatmapState {
 impl Heatmap {
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: HeatmapState,
-        text: TextFactory,
-        empty: EmptyFactory,
-        readout: ReadoutFactory,
-        navigation_frame: NavigationFrame,
-        invalidate: Rc<dyn Fn()>,
+        text: &TextFactory,
+        empty: &EmptyFactory,
+        readout: &ReadoutFactory,
+        navigation_frame: &NavigationFrame,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let (rows, columns) = (self.rows(), self.columns());
         if rows == 0 || columns == 0 || !self.has_data {
             return empty("No data to map");
         }
-        let (selected, plot, reset) = states.sync(&id, self);
+        let (selected, plot, reset) = states.sync(id, self);
         let theme = *theme;
         let model = self.clone();
         let row_states = states.clone();
-        let row_id = id.clone();
-        let row_text = Rc::clone(&text);
-        let row_invalidate = Rc::clone(&invalidate);
+        let row_id = id.to_owned();
+        let row_text = Rc::clone(text);
+        let row_invalidate = Rc::clone(invalidate);
         let height = theme.density.control_sm;
         let list = List::new()
             .items(0..rows)
@@ -340,11 +340,11 @@ impl Heatmap {
             label.push_str(selection);
         }
         let keyboard = states;
-        let key = id.clone();
-        let keyboard_invalidate = Rc::clone(&invalidate);
+        let key = id.to_owned();
+        let keyboard_invalidate = Rc::clone(invalidate);
         let navigation = navigation_group(
             content.build(),
-            &id,
+            id,
             label,
             selection_label,
             move |code, alt| {
