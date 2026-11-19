@@ -180,7 +180,7 @@ impl Images {
                     let result =
                         source::load_image_bytes(&source, Some(&transport), &media_http::client())
                             .await;
-                    crate::ui::deliver::deliver(&sender, Completion { id, result }).await;
+                    sender.offer(Completion { id, result }).await;
                 });
                 let abort = task.abort_handle();
                 if ticket.attach(abort.clone()) {

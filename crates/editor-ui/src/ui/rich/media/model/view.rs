@@ -271,16 +271,14 @@ impl ModelState {
                 Err(error) if error.is_cancelled() => return,
                 Err(error) => std::panic::resume_unwind(error.into_panic()),
             };
-            crate::ui::deliver::deliver(
-                &sender,
-                Completion {
+            sender
+                .offer(Completion {
                     id,
                     generation,
                     key,
                     frame,
-                },
-            )
-            .await;
+                })
+                .await;
         });
         entry.rendering = Some(Rendering { key, stop });
     }

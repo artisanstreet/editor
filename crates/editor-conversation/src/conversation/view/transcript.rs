@@ -825,10 +825,17 @@ const LANDING_OVERSCAN_PIXELS: f32 = 320.0;
 const SETTLED_OVERSCAN_PIXELS: f32 = 800.0;
 
 fn overscan_from_environment(name: &str, fallback: f32) -> f32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
+    match std::env::var(name) {
+        Ok(value) => value.parse().unwrap_or_else(|error| {
+            tracing::warn!(name, value, %error, fallback, "read overscan override; using the default");
+            fallback
+        }),
+        Err(std::env::VarError::NotPresent) => fallback,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(name, %error, fallback, "read overscan override; using the default");
+            fallback
+        }
+    }
 }
 
 fn transcript_overscan_pixels(conversation: &Conversation) -> f32 {

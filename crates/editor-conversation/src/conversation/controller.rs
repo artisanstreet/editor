@@ -223,7 +223,7 @@ impl Conversation {
             answer_tasks: HashMap::new(),
             next_answer: 0,
             delivery: Delivery::with_wake(
-                NonZeroUsize::new(64).unwrap(),
+                const { NonZeroUsize::new(64).expect("64 is not zero") },
                 core.wake_mailbox().sender(),
             ),
             scroll: Vec::new(),
@@ -383,7 +383,7 @@ impl Conversation {
         let held = origin.clone();
         let timeout = AbortOnDropHandle::new(runtime().spawn(async move {
             tokio::time::sleep(HOLD).await;
-            let _ = sender.send(Completion::Held { origin: held }).await;
+            sender.offer(Completion::Held { origin: held }).await;
         }));
         self.pending = Some(Pending {
             origin,
@@ -934,8 +934,8 @@ impl Conversation {
                                 .await
                         }
                     };
-                    let _ = sender
-                        .send(Completion::Page {
+                    sender
+                        .offer(Completion::Page {
                             origin,
                             fetch,
                             asked,
@@ -974,8 +974,8 @@ impl Conversation {
         self.work_reading = Some(first);
         self.work_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = client.work(&thread, &query).await;
-            let _ = sender
-                .send(Completion::Work {
+            sender
+                .offer(Completion::Work {
                     origin,
                     first,
                     result,
@@ -1075,8 +1075,8 @@ impl Conversation {
                     if next.is_some() {
                         error = Some("Agent ancestry exceeds 16 levels".to_owned());
                     }
-                    let _ = sender
-                        .send(Completion::Agent {
+                    sender
+                        .offer(Completion::Agent {
                             origin,
                             context,
                             error,
@@ -1225,8 +1225,8 @@ impl Conversation {
             request,
             AbortOnDropHandle::new(runtime().spawn(async move {
                 let result = client.answer(&id, &answer).await;
-                let _ = sender
-                    .send(Completion::Answer {
+                sender
+                    .offer(Completion::Answer {
                         origin,
                         item: id,
                         request,

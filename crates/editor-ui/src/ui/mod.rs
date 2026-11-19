@@ -7,7 +7,6 @@ pub mod chrome;
 pub mod clock;
 pub mod code_copy;
 pub mod color_copy_menu;
-mod deliver;
 pub mod dialog;
 pub mod dialogs;
 pub mod engine;

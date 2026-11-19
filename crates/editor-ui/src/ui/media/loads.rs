@@ -80,7 +80,7 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
         let sender = state.delivery.sender();
         let task = runtime::runtime().spawn(async move {
             let value = load.await;
-            crate::ui::deliver::deliver(&sender, Completion { id, value }).await;
+            sender.offer(Completion { id, value }).await;
         });
         let abort = task.abort_handle();
         if ticket.attach(abort.clone()) {

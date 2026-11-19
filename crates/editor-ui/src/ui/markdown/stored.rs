@@ -578,16 +578,14 @@ impl StoredOwner {
             runtime::runtime()
                 .spawn(async move {
                     let result = future.await.map_err(|error| error.to_string());
-                    crate::ui::deliver::deliver(
-                        &sender,
-                        Completion::Index {
+                    sender
+                        .offer(Completion::Index {
                             owner,
                             revision,
                             offset,
                             result,
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                 })
                 .abort_handle(),
         )
@@ -890,15 +888,13 @@ impl StoredOwner {
                     .spawn(async move {
                         let _capacity = capacity;
                         let result = future.await.map_err(|error| error.to_string());
-                        crate::ui::deliver::deliver(
-                            &sender,
-                            Completion::Range {
+                        sender
+                            .offer(Completion::Range {
                                 key,
                                 generation,
                                 result,
-                            },
-                        )
-                        .await;
+                            })
+                            .await;
                     })
                     .abort_handle(),
             );
@@ -1032,17 +1028,15 @@ impl StoredOwner {
                         Ok((result, capacity)) => (result, None, Some(capacity)),
                         Err(error) => (Err(error.to_string()), None, None),
                     };
-                    crate::ui::deliver::deliver(
-                        &sender,
-                        Completion::Prepared {
+                    sender
+                        .offer(Completion::Prepared {
                             key,
                             generation,
                             result,
                             _worker: worker,
                             _capacity: capacity,
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                 })
                 .abort_handle(),
         );

@@ -1,4 +1,4 @@
-#![expect(
+#![allow(
     clippy::collapsible_if,
     clippy::derivable_impls,
     clippy::large_types_passed_by_value,
@@ -20,7 +20,7 @@
     let_underscore_drop,
     missing_debug_implementations,
     unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
 )]
 extern crate self as editor_inspector;
 

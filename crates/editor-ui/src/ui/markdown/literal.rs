@@ -379,15 +379,13 @@ impl LiteralOwner {
                 runtime::runtime()
                     .spawn(async move {
                         let result = future.await;
-                        crate::ui::deliver::deliver(
-                            &sender,
-                            Completion {
+                        sender
+                            .offer(Completion {
                                 key,
                                 generation,
                                 result,
-                            },
-                        )
-                        .await;
+                            })
+                            .await;
                     })
                     .abort_handle(),
             );

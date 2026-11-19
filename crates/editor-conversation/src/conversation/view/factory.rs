@@ -31,6 +31,11 @@ pub(crate) use self::bubbles::message_author;
 use self::bubbles::{authored, bubble_sender, media_width, truncate, user_bubble};
 use self::stored_rows::plain_block;
 
+type HeldByRow = (
+    Rc<super::row_cache::RowOwner>,
+    Option<Rc<crate::conversation::stored::StoredLeafLease>>,
+);
+
 #[derive(Debug)]
 pub struct WorkResources {
     pub motion: Rc<RefCell<super::motion::RowMotion>>,
@@ -1409,6 +1414,7 @@ impl RowFactory {
             .borrow_mut()
             .insert(key.clone(), Rc::downgrade(&row_owner));
         let stored_lease = row_owner.stored_leaf.borrow().clone();
+        let held: HeldByRow = (row_owner, stored_lease);
         let lease = aqua_ui::element::Canvas::new()
             .style(aqua_ui::style::Style::new().absolute_at(
                 Some(0.0),
@@ -1417,8 +1423,7 @@ impl RowFactory {
                 Some(0.0),
             ))
             .on_prepaint(move |_, _| {
-                let _ = &row_owner;
-                let _ = &stored_lease;
+                let _: &HeldByRow = &held;
             })
             .build()
             .exclude_from_hit_testing();

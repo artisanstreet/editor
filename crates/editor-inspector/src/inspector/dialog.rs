@@ -142,7 +142,7 @@ impl TerminalDialog {
         self.fetch
             .spawn(&job.host, job.instance, move |key| async move {
                 let result = client.item(&item).await;
-                let _ = sender.send(Completion(key, result)).await;
+                sender.offer(Completion(key, result)).await;
             });
     }
 

@@ -143,8 +143,14 @@ impl Projections {
         let shaped = match self.shapes.remove(key).and_then(|shape| shape.streaming) {
             Some(previous) => previous.extend(&text, command),
             None => editor_ui::markdown::ShapedSource::new(&text, command),
-        }
-        .ok()?;
+        };
+        let shaped = match shaped {
+            Ok(shaped) => shaped,
+            Err(error) => {
+                tracing::warn!(item = %key.item, slot = ?key.slot, %error, "shape message body; showing it as one block");
+                return None;
+            }
+        };
         let signatures = Arc::clone(shaped.signatures());
         self.shapes.insert(
             key.clone(),
