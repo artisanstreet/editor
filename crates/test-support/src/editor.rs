@@ -1,6 +1,7 @@
 pub mod account;
 pub mod core;
 pub mod forge;
+pub mod media;
 
 #[cfg(feature = "editor")]
 pub mod rich;

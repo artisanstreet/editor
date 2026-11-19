@@ -49,9 +49,7 @@ fn consecutive_media_loads_share_one_connection() {
     });
     let url = format!("http://{address}/image.png");
     let http =
-        media_http::MediaHttpClient::new(media_http::AddressPolicy::PublicInternetAnd(vec![
-            address,
-        ]));
+        media_http::MediaHttpClient::new(test_support::editor::media::LoopbackStubs(vec![address]));
     for _ in 0..3 {
         let response = runtime().block_on(within(
             "the media response",

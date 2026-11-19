@@ -16,37 +16,23 @@ pub struct MediaResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AddressPolicy {
-    PublicInternet,
-    PublicInternetAnd(Vec<SocketAddr>),
+pub trait AddressPolicy: Send + Sync + std::fmt::Debug {
+    fn admits(&self, url: &url::Url) -> bool;
 }
 
-impl AddressPolicy {
+#[derive(Clone, Copy, Debug)]
+pub struct PublicInternet;
+
+impl AddressPolicy for PublicInternet {
     fn admits(&self, url: &url::Url) -> bool {
         public_destination(url)
-            || match self {
-                Self::PublicInternet => false,
-                Self::PublicInternetAnd(endpoints) => {
-                    endpoint(url).is_some_and(|endpoint| endpoints.contains(&endpoint))
-                }
-            }
     }
-}
-
-fn endpoint(url: &url::Url) -> Option<SocketAddr> {
-    let address = match url.host()? {
-        url::Host::Ipv4(address) => IpAddr::V4(address),
-        url::Host::Ipv6(address) => IpAddr::V6(address),
-        url::Host::Domain(_) => return None,
-    };
-    Some(SocketAddr::new(address, url.port_or_known_default()?))
 }
 
 #[derive(Debug)]
 pub struct MediaHttpClient {
     http: reqwest::Client,
-    policy: Arc<AddressPolicy>,
+    policy: Arc<dyn AddressPolicy>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -143,7 +129,7 @@ fn public_client() -> reqwest::Client {
 }
 
 static SHARED: LazyLock<Arc<MediaHttpClient>> =
-    LazyLock::new(|| Arc::new(MediaHttpClient::new(AddressPolicy::PublicInternet)));
+    LazyLock::new(|| Arc::new(MediaHttpClient::new(PublicInternet)));
 
 pub fn client() -> Arc<MediaHttpClient> {
     Arc::clone(&SHARED)
@@ -151,7 +137,7 @@ pub fn client() -> Arc<MediaHttpClient> {
 
 impl MediaHttpClient {
     #[must_use]
-    pub fn new(policy: AddressPolicy) -> Self {
+    pub fn new(policy: impl AddressPolicy + 'static) -> Self {
         Self {
             http: public_client(),
             policy: Arc::new(policy),
@@ -197,7 +183,7 @@ impl MediaHttpClient {
                             })?;
                         return Ok(MediaResponse { status, body });
                     }
-                    url = next_hop(&url, response.headers(), &policy)
+                    url = next_hop(&url, response.headers(), policy.as_ref())
                         .map_err(MediaFetchError::Redirect)?;
                 }
                 Err(MediaFetchError::Redirect(RedirectError::TooMany {
@@ -219,7 +205,7 @@ fn follows(status: reqwest::StatusCode) -> bool {
 fn next_hop(
     url: &url::Url,
     headers: &reqwest::header::HeaderMap,
-    policy: &AddressPolicy,
+    policy: &dyn AddressPolicy,
 ) -> Result<url::Url, RedirectError> {
     let location = headers
         .get(reqwest::header::LOCATION)

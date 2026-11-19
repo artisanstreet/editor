@@ -40,9 +40,10 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
     ] {
         let (outer, outer_hits) = serve(redirect_to(target.clone())).await;
         let http = editor_core::media_http::MediaHttpClient::new(
-            editor_core::media_http::AddressPolicy::PublicInternetAnd(vec![
-                std::net::SocketAddr::from(([127, 0, 0, 1], outer)),
-            ]),
+            test_support::editor::media::LoopbackStubs(vec![std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                outer,
+            ))]),
         );
         let source = MediaSource::from(format!("http://127.0.0.1:{outer}/pixel.png"));
         let result = load_image_bytes(&source, None, &http).await;
