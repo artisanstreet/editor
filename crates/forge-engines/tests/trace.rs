@@ -105,7 +105,7 @@ fn launch_credentials_never_reach_the_trace() {
         "OPENCODE_SERVER_PASSWORD".to_owned(),
         "server-password-42".to_owned(),
     ));
-    let started = Trace::start(dir.path(), "codex-t-3", Secrets::of(&launch)).unwrap();
+    let started = Trace::start(dir.path(), "codex-t-3", Secrets::of(&launch, &[])).unwrap();
     let frame = serde_json::json!({
         "method": "thread/start",
         "params": {
@@ -163,8 +163,12 @@ fn a_credential_split_across_stderr_reads_is_redacted_at_every_split() {
     let line = "error: login with server-pässword-42 failed\n".as_bytes();
     for split in 0..=line.len() {
         let dir = tempfile::tempdir().unwrap();
-        let started =
-            Trace::start(dir.path(), "opencode-t-4", Secrets::of(&password_launch())).unwrap();
+        let started = Trace::start(
+            dir.path(),
+            "opencode-t-4",
+            Secrets::of(&password_launch(), &[]),
+        )
+        .unwrap();
         let mut stderr = started.trace.stream(Kind::Stderr);
         stderr.write(&line[..split]);
         stderr.write(&line[split..]);
@@ -181,8 +185,12 @@ fn a_credential_split_across_stderr_reads_is_redacted_at_every_split() {
 #[test]
 fn credentials_in_long_unbroken_stderr_are_redacted_across_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let started =
-        Trace::start(dir.path(), "opencode-t-5", Secrets::of(&password_launch())).unwrap();
+    let started = Trace::start(
+        dir.path(),
+        "opencode-t-5",
+        Secrets::of(&password_launch(), &[]),
+    )
+    .unwrap();
     let filler = "é".repeat(487);
     let written = format!("{filler}server-pässword-42").repeat(64);
     let mut stderr = started.trace.stream(Kind::Stderr);
@@ -266,5 +274,33 @@ fn starting_a_trace_makes_room_for_it_and_drops_stale_ones() {
     assert!(
         left.iter().any(|name| name.starts_with("claude-c-3-")),
         "{left:?}"
+    );
+}
+
+#[test]
+fn a_short_credential_is_redacted_wherever_it_stands_alone_and_switches_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut launch = forge_engines::Launch::default();
+    launch.mcp_servers.push(forge_engines::McpServer {
+        name: "db".to_owned(),
+        command: "db-server".to_owned(),
+        env: [("DB_PASSWORD".to_owned(), "abc123".to_owned())].into(),
+        ..forge_engines::McpServer::default()
+    });
+    let environment = [("FEATURE_AUTH_ENABLED".to_owned(), "1".to_owned())];
+    let started = Trace::start(
+        dir.path(),
+        "claude-short",
+        Secrets::of(&launch, &environment),
+    )
+    .unwrap();
+    started.trace.record(
+        Kind::Stderr,
+        "login abc123 failed; {\"password\":\"abc123\"}; abc1234 and xabc123 are other words; step 1 of 2",
+    );
+    finish(started);
+    assert_eq!(
+        of_kind(&records(dir.path()), "stderr")[0]["text"],
+        "login [redacted] failed; {\"password\":\"[redacted]\"}; abc1234 and xabc123 are other words; step 1 of 2"
     );
 }

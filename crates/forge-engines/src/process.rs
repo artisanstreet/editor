@@ -225,7 +225,8 @@ pub(crate) fn spawn_in(
         .trace_dir
         .as_deref()
         .map_or_else(Trace::default, |dir| {
-            Trace::start(dir, name, Secrets::of(&turn.launch)).map_or_else(
+            let environment = crate::trace::effective_environment(command.as_std());
+            Trace::start(dir, name, Secrets::of(&turn.launch, &environment)).map_or_else(
                 |failure| {
                     let error: &dyn std::error::Error = &failure;
                     tracing::warn!(error, "this engine process runs without a diagnostic trace");
@@ -610,3 +611,8 @@ mod reform_tests;
 #[cfg(windows)]
 #[path = "../tests/process/windows_owner.rs"]
 mod windows_owner_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/redaction.rs"]
+mod redaction_tests;

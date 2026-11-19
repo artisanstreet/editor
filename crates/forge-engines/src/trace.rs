@@ -78,7 +78,77 @@ impl Record {
 }
 
 #[derive(Clone, Default)]
-pub struct Secrets(Arc<[String]>);
+pub struct Secrets(Arc<[Secret]>);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Secret {
+    Anywhere(String),
+    WholeToken(String),
+}
+
+impl Secret {
+    fn of(text: &str) -> Option<Self> {
+        match text.len() {
+            0 => None,
+            length if length < WHOLE_TOKEN_BELOW_BYTES => Some(Self::WholeToken(text.to_owned())),
+            _ => Some(Self::Anywhere(text.to_owned())),
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Self::Anywhere(text) | Self::WholeToken(text) => text,
+        }
+    }
+
+    fn escaped(&self) -> Self {
+        let quoted = serde_json::Value::from(self.text()).to_string();
+        let escaped = quoted
+            .strip_prefix('"')
+            .and_then(|quoted| quoted.strip_suffix('"'))
+            .expect("invariant: a JSON string is quoted")
+            .to_owned();
+        match self {
+            Self::Anywhere(_) => Self::Anywhere(escaped),
+            Self::WholeToken(_) => Self::WholeToken(escaped),
+        }
+    }
+
+    fn redact(&self, text: &str) -> String {
+        match self {
+            Self::Anywhere(secret) => text.replace(secret.as_str(), REDACTED),
+            Self::WholeToken(secret) => {
+                let bytes = text.as_bytes();
+                let mut redacted = String::with_capacity(text.len());
+                let mut kept = 0;
+                for (start, _) in text.match_indices(secret.as_str()) {
+                    let end = start + secret.len();
+                    let bounded = start
+                        .checked_sub(1)
+                        .is_none_or(|before| !is_word(bytes[before]))
+                        && bytes.get(end).is_none_or(|after| !is_word(*after));
+                    if bounded && start >= kept {
+                        redacted.push_str(
+                            text.get(kept..start)
+                                .expect("invariant: matches start and end on char boundaries"),
+                        );
+                        redacted.push_str(REDACTED);
+                        kept = end;
+                    }
+                }
+                redacted.push_str(
+                    text.get(kept..)
+                        .expect("invariant: a match ends on a char boundary"),
+                );
+                redacted
+            }
+        }
+    }
+}
+
+const fn is_word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
 
 impl std::fmt::Debug for Secrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,7 +156,7 @@ impl std::fmt::Debug for Secrets {
     }
 }
 
-const MIN_SECRET_BYTES: usize = 8;
+const WHOLE_TOKEN_BELOW_BYTES: usize = 8;
 const SECRET_ENV_MARKERS: [&str; 7] = [
     "KEY",
     "TOKEN",
@@ -96,56 +166,90 @@ const SECRET_ENV_MARKERS: [&str; 7] = [
     "CREDENTIAL",
     "COOKIE",
 ];
+const SWITCH_VALUES: [&str; 8] = ["0", "1", "true", "false", "yes", "no", "on", "off"];
 const REDACTED: &str = "[redacted]";
 const HELD_STREAM_BYTES: usize = 16 * 1024;
 
+fn names_a_credential(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key == "OPENCODE_CONFIG_CONTENT" || SECRET_ENV_MARKERS.iter().any(|marker| key.contains(marker))
+}
+
+fn is_switch(value: &str) -> bool {
+    SWITCH_VALUES
+        .iter()
+        .any(|switch| value.trim().eq_ignore_ascii_case(switch))
+}
+
+#[must_use]
+pub fn effective_environment(command: &std::process::Command) -> Vec<(String, String)> {
+    let mut environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
+        std::env::vars_os().collect();
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => {
+                environment.insert(key.to_owned(), value.to_owned());
+            }
+            None => {
+                environment.remove(key);
+            }
+        }
+    }
+    environment
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
 impl Secrets {
     #[must_use]
-    pub fn of(launch: &crate::Launch) -> Self {
-        let servers = launch.mcp_servers.iter().flat_map(|server| {
+    pub fn of(launch: &crate::Launch, environment: &[(String, String)]) -> Self {
+        let configured = launch.mcp_servers.iter().flat_map(|server| {
             server
                 .url
                 .iter()
                 .chain(server.headers.values())
                 .chain(server.env.values())
+                .map(String::as_str)
         });
         let gateway = launch
             .gateway_mcp
             .iter()
             .flat_map(|(_, url)| std::iter::once(url.as_str()).chain(url.rsplit('/').next()));
-        let env = launch
-            .env
+        let inherited = environment
             .iter()
-            .filter(|(key, _)| {
-                let key = key.to_ascii_uppercase();
-                key == "OPENCODE_CONFIG_CONTENT"
-                    || SECRET_ENV_MARKERS.iter().any(|marker| key.contains(marker))
-            })
+            .chain(&launch.env)
+            .filter(|(key, value)| names_a_credential(key) && !is_switch(value))
             .map(|(_, value)| value.as_str());
-        let mut secrets: Vec<String> = servers
-            .map(String::as_str)
+        let mut secrets: Vec<Secret> = configured
             .chain(gateway)
-            .chain(env)
-            .filter(|secret| secret.len() >= MIN_SECRET_BYTES)
+            .chain(inherited)
+            .filter_map(Secret::of)
             .flat_map(|secret| {
-                let escaped = serde_json::Value::from(secret).to_string();
-                let escaped = escaped
-                    .strip_prefix('"')
-                    .and_then(|quoted| quoted.strip_suffix('"'))
-                    .expect("invariant: a JSON string is quoted")
-                    .to_owned();
-                [secret.to_owned(), escaped]
+                let escaped = secret.escaped();
+                [secret, escaped]
             })
             .collect();
-        secrets.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        secrets.sort_by(|left, right| {
+            right
+                .text()
+                .len()
+                .cmp(&left.text().len())
+                .then_with(|| left.cmp(right))
+        });
         secrets.dedup();
         Self(secrets.into())
     }
 
     fn redact(&self, text: &str) -> String {
-        self.0.iter().fold(text.to_owned(), |text, secret| {
-            text.replace(secret.as_str(), REDACTED)
-        })
+        self.0
+            .iter()
+            .fold(text.to_owned(), |text, secret| secret.redact(&text))
     }
 
     fn clear_of_secrets(&self, bytes: &[u8], mut cut: usize) -> usize {
@@ -154,8 +258,8 @@ impl Secrets {
                 .0
                 .iter()
                 .filter_map(|secret| {
-                    let secret = secret.as_bytes();
-                    (cut.saturating_sub(secret.len() - 1)..cut).find(|&start| {
+                    let secret = secret.text().as_bytes();
+                    (cut.saturating_sub(secret.len())..cut).find(|&start| {
                         let seen = &bytes[start..bytes.len().min(start + secret.len())];
                         secret.starts_with(seen)
                     })
