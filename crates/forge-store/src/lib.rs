@@ -12,9 +12,11 @@ mod feed;
 pub mod hot;
 mod items;
 mod pairing;
+mod progress;
 mod read;
 mod recall;
 mod resources;
+mod retained;
 mod retention;
 mod rollbacks;
 mod schema;
@@ -79,9 +81,12 @@ pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
     keep as keep_resource_snapshot,
 };
+pub use retained::RetainedError;
 pub use retention::RemoveInactiveError;
 pub use rollbacks::DismissRollbackError;
-pub use schema::{BackupError, MigrationFailure, QuestionPart, RollbackError, SchemaError};
+pub use schema::{
+    BackupError, FinishUpgradeError, MigrationFailure, QuestionPart, RollbackError, SchemaError,
+};
 pub use settings::{
     BumpRevisionError, McpSecret, MutateMcpError, PromptVersionError, ReadDraftError,
     ReadSecretError, ReadSettingError, SavePromptError, SetDefaultModelError, SetDraftError,
@@ -378,7 +383,7 @@ pub enum OpenStoreError {
     RollBack {
         database: PathBuf,
         #[source]
-        source: RollbackError,
+        source: Box<RollbackError>,
     },
     #[error("upgrade {}", database.display())]
     Migrate {
@@ -408,6 +413,12 @@ pub enum OpenStoreError {
         database: PathBuf,
         #[source]
         source: RefreshIndexError,
+    },
+    #[error("read whether a rollback of {} is still to be reported", database.display())]
+    PendingRollback {
+        database: PathBuf,
+        #[source]
+        source: Box<RetainedError>,
     },
     #[error(
         "online upgrade requires database schema {expected}, the running store uses {found}; the current Forge was left running"
@@ -506,8 +517,9 @@ fn secure_database(dir: &Path, database: &Path) -> Result<(), SecureDatabaseErro
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 enum Opening {
-    Upgrade(Option<artisan_api::DatabaseRollback>),
+    Upgrade,
     Join,
 }
 
@@ -518,20 +530,26 @@ fn recover_after_opening(
 ) -> Result<(), OpenStoreError> {
     match opening {
         Opening::Join => Ok(()),
-        Opening::Upgrade(rolled_back) => {
+        Opening::Upgrade => {
             writer
                 .transact(Durability::Background, |tx| tx.recover_threads(None))
                 .map_err(OpenStoreError::Recover)?;
-            rolled_back.map_or(Ok(()), |rolled_back| {
-                writer
-                    .transact(Durability::Acknowledged, |tx| {
-                        tx.record_rollback(&rolled_back)
-                    })
-                    .map_err(|source| OpenStoreError::RecordRollback {
-                        database: database.to_owned(),
-                        source,
-                    })
-            })
+            let pending = |source| OpenStoreError::PendingRollback {
+                database: database.to_owned(),
+                source: Box::new(source),
+            };
+            let Some(rolled_back) = retained::pending_notice(database).map_err(pending)? else {
+                return Ok(());
+            };
+            writer
+                .transact(Durability::Acknowledged, |tx| {
+                    tx.record_rollback(&rolled_back)
+                })
+                .map_err(|source| OpenStoreError::RecordRollback {
+                    database: database.to_owned(),
+                    source,
+                })?;
+            retained::release_notice(database).map_err(pending)
         }
     }
 }
@@ -597,7 +615,7 @@ impl Store {
             database,
             blob_dir,
             dir.join("resources"),
-            Opening::Upgrade(None),
+            Opening::Upgrade,
             environment,
         )
     }
@@ -613,39 +631,33 @@ impl Store {
     ) -> Result<Self, OpenStoreError> {
         data_lock.guards(dir);
         let (database, blob_dir) = Self::prepare(dir)?;
-        let rolled_back = match schema::roll_back(&database).map_err(|source| {
-            OpenStoreError::RollBack {
-                database: database.clone(),
-                source,
-            }
+        match schema::roll_back(
+            &database,
+            environment.clock.now(),
+            environment.progress_every,
+        )
+        .map_err(|source| OpenStoreError::RollBack {
+            database: database.clone(),
+            source: Box::new(source),
         })? {
-            schema::Rollback::Current => None,
+            schema::Rollback::Current => {}
             schema::Rollback::Restored {
                 found,
                 restored,
                 aside,
-            } => {
-                tracing::warn!(
-                    database = %database.display(),
-                    found,
-                    restored,
-                    aside = %aside.display(),
-                    "rolled the database back to the schema this Forge supports; newer data was set aside"
-                );
-                Some(artisan_api::DatabaseRollback {
-                    found: u32::try_from(found).expect("invariant: schema versions fit in u32"),
-                    restored: u32::try_from(restored)
-                        .expect("invariant: schema versions fit in u32"),
-                    set_aside: aside.display().to_string(),
-                    at: environment.clock.now(),
-                })
-            }
-        };
+            } => tracing::warn!(
+                database = %database.display(),
+                found,
+                restored,
+                aside = %aside.display(),
+                "rolled the database back to a schema this Forge supports; newer data was set aside"
+            ),
+        }
         Self::start(
             database,
             blob_dir,
             dir.join("resources"),
-            Opening::Upgrade(rolled_back),
+            Opening::Upgrade,
             environment,
         )
     }
@@ -710,8 +722,10 @@ impl Store {
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
         let upgrading = schema::Upgrade::of(&environment);
-        let Environment { connections, clock } = environment;
-        let recover = matches!(opening, Opening::Upgrade(_));
+        let Environment {
+            connections, clock, ..
+        } = environment;
+        let recover = matches!(opening, Opening::Upgrade);
         let prepare = |source| OpenStoreError::Database {
             database: database.clone(),
             source,

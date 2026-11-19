@@ -167,6 +167,7 @@ impl Forge {
                 forge_store::Environment {
                     connections: self.disk.connections(),
                     clock: self.clock.wall(),
+                    ..forge_store::Environment::system()
                 },
             ))
             .unwrap_or_else(|error| panic!("Forge starts: {}", diagnostics::chain(&error)));

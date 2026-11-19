@@ -39,7 +39,7 @@ pub(crate) fn current(conn: &Connection) -> Result<Option<DatabaseRollback>, Sto
 
 impl Store {
     pub async fn dismiss_rollback(&self) -> Result<(), DismissRollbackError> {
-        self.write(|tx| {
+        self.write_acknowledged(|tx| {
             tx.execute(include_str!("sql/rollbacks/dismiss.sql"), [])?;
             Ok::<_, StorageError>(())
         })

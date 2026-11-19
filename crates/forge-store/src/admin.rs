@@ -1,5 +1,5 @@
 use crate::error::StorageError;
-use crate::{BUSY_TIMEOUT, Device, PairCodeHash, schema};
+use crate::{BUSY_TIMEOUT, DataLock, Device, Environment, PairCodeHash, schema};
 use artisan_api::{DeviceId, Timestamp, WallClock};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -21,6 +21,16 @@ pub enum AdminError {
         path: PathBuf,
         found: usize,
         expected: usize,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RolledBack {
+    Current,
+    Restored {
+        found: usize,
+        restored: usize,
+        aside: PathBuf,
     },
 }
 
@@ -185,6 +195,34 @@ pub fn schema_version(dir: &Path) -> Result<Option<usize>, AdminError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     version(&path, &conn).map(Some)
+}
+
+pub fn roll_back_for(
+    dir: &Path,
+    data_lock: &DataLock,
+    supported: usize,
+) -> Result<RolledBack, schema::RollbackError> {
+    data_lock.guards(dir);
+    let environment = Environment::system();
+    Ok(
+        match schema::roll_back_to(
+            &dir.join(DATABASE),
+            supported,
+            environment.clock.now(),
+            environment.progress_every,
+        )? {
+            schema::Rollback::Current => RolledBack::Current,
+            schema::Rollback::Restored {
+                found,
+                restored,
+                aside,
+            } => RolledBack::Restored {
+                found,
+                restored,
+                aside,
+            },
+        },
+    )
 }
 
 fn existing(dir: &Path) -> Result<PathBuf, AdminError> {

@@ -207,8 +207,8 @@ async fn fixture_in(
     let store = Store::open_in(
         &data.join("forge"),
         forge_store::Environment {
-            connections: forge_store::Connections::system(),
             clock: clock.wall(),
+            ..forge_store::Environment::system()
         },
     )
     .unwrap();

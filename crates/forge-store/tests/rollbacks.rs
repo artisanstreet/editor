@@ -146,3 +146,92 @@ async fn forge_rolls_back_a_newer_database_and_reports_it_until_dismissed() {
         None
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_only_the_set_aside_database_uses_survives_blob_collection() {
+    use artisan_api::{ItemId, SendMessage};
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().expect("create the data folder");
+    let store = Store::open(dir.path()).expect("this Forge creates its database");
+    thread(&store, "Before the upgrade").await;
+    let id = store.state().await.expect("read the state").threads[0]
+        .id
+        .clone();
+    drop(store);
+    let backup = dir
+        .path()
+        .join(format!("forge.sqlite3.schema-{}", Store::schema_version()));
+    raw(dir.path())
+        .execute(
+            include_str!("rollbacks/back_up.sql"),
+            [backup.to_str().expect("a Unicode temp path")],
+        )
+        .expect("the newer Forge backs up the older schema");
+    let store = Store::open(dir.path()).expect("the newer Forge opens");
+    let image = webp::Encoder::from_rgb(&[9, 9, 9], 1, 1)
+        .encode_lossless()
+        .to_vec();
+    let hash = store.put_blob(image).await.expect("store the image").hash;
+    store
+        .send_message(
+            id,
+            SendMessage {
+                id: ItemId::new(),
+                text: "Look at this".into(),
+                images: vec![hash.clone()],
+                config: None,
+                draft: None,
+            },
+            forge_store::Acceptance::default(),
+        )
+        .await
+        .expect("send the image after the upgrade");
+    drop(store);
+    raw(dir.path())
+        .execute_batch(include_str!("rollbacks/newer.sql"))
+        .expect("the newer Forge stamps its schema");
+
+    let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
+    let store = Store::open_restoring(dir.path(), &lock).expect("Forge rolls back");
+    std::fs::File::options()
+        .write(true)
+        .open(store.blob_path(&hash).expect("the image is still on disk"))
+        .expect("open the image")
+        .set_modified(SystemTime::now() - Duration::from_hours(2))
+        .expect("age the image past the collection grace");
+    store.gc_blobs().await.expect("collect unreferenced images");
+
+    assert!(
+        store.blob_path(&hash).is_some(),
+        "the image the set-aside database shows is still on disk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_done_for_an_older_forge_is_reported_by_the_next_forge() {
+    let dir = tempfile::tempdir().expect("create the data folder");
+    upgraded_by_a_newer_forge(dir.path()).await;
+    let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
+
+    let rolled_back = forge_store::admin::roll_back_for(dir.path(), &lock, Store::schema_version())
+        .expect("ae rolls back for the older Forge");
+    assert!(
+        matches!(
+            rolled_back,
+            forge_store::admin::RolledBack::Restored { found: NEWER, .. }
+        ),
+        "{rolled_back:?}"
+    );
+    assert_eq!(version(dir.path()), Store::schema_version());
+
+    let store = Store::open_restoring(dir.path(), &lock).expect("the next Forge starts");
+    assert!(
+        store
+            .state()
+            .await
+            .expect("read the state")
+            .database_rollback
+            .is_some(),
+        "the next Forge tells the user what was set aside"
+    );
+}

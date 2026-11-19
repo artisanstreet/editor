@@ -2,6 +2,9 @@ use artisan_api::WallClock;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+const PROGRESS_EVERY: Duration = Duration::from_secs(5);
 
 type Open = dyn Fn(&Path) -> rusqlite::Result<Connection> + Send + Sync;
 
@@ -35,6 +38,7 @@ impl std::fmt::Debug for Connections {
 pub struct Environment {
     pub connections: Connections,
     pub clock: WallClock,
+    pub progress_every: Duration,
 }
 
 impl Environment {
@@ -43,6 +47,7 @@ impl Environment {
         Self {
             connections: Connections::system(),
             clock: WallClock::system(),
+            progress_every: PROGRESS_EVERY,
         }
     }
 }

@@ -2,22 +2,29 @@ use crate::content::ContentError;
 use crate::error::StorageError;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 mod backup;
 mod frozen;
 
 pub(crate) use backup::Rollback;
-pub use backup::{BackupError, RollbackError};
+pub use backup::{BackupError, FinishUpgradeError, RollbackError};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Upgrade {
     pub(crate) at: artisan_api::Timestamp,
+    pub(crate) now: SystemTime,
+    pub(crate) every: Duration,
 }
 
 impl Upgrade {
     pub(crate) fn of(environment: &crate::Environment) -> Self {
+        let at = environment.clock.now();
+        let millis = u64::try_from(at).expect("invariant: the wall clock reads after 1970");
         Self {
-            at: environment.clock.now(),
+            at,
+            now: SystemTime::UNIX_EPOCH + Duration::from_millis(millis),
+            every: environment.progress_every,
         }
     }
 }
@@ -76,11 +83,23 @@ pub enum SchemaError {
         #[source]
         source: BackupError,
     },
+    #[error("report progress while applying schema migration {migration}")]
+    Progress {
+        migration: usize,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
     #[error("apply schema migration {migration}")]
     Step {
         migration: usize,
         #[source]
         source: MigrationFailure,
+    },
+    #[error("finish the upgrade to schema {version}")]
+    Finish {
+        version: usize,
+        #[source]
+        source: FinishUpgradeError,
     },
 }
 
@@ -291,8 +310,21 @@ pub(crate) fn migrate(conn: &mut Connection, upgrade: Upgrade) -> Result<(), Sch
     migrate_to(conn, MIGRATIONS.len(), upgrade)
 }
 
-pub(crate) fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
-    backup::roll_back(database, MIGRATIONS.len())
+pub(crate) fn roll_back(
+    database: &Path,
+    at: artisan_api::Timestamp,
+    every: Duration,
+) -> Result<Rollback, RollbackError> {
+    backup::roll_back(database, MIGRATIONS.len(), at, every)
+}
+
+pub(crate) fn roll_back_to(
+    database: &Path,
+    supported: usize,
+    at: artisan_api::Timestamp,
+    every: Duration,
+) -> Result<Rollback, RollbackError> {
+    backup::roll_back(database, supported, at, every)
 }
 
 fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<(), SchemaError> {
@@ -306,18 +338,35 @@ fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<
         });
     }
     if version < target {
-        backup::before_migrating(conn, version)
+        backup::before_migrating(conn, version, upgrade.every)
             .map_err(|source| SchemaError::Backup { version, source })?;
     }
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;
         tracing::info!("upgrading the database to schema {next} of {target}");
-        apply(conn, next, steps, upgrade.at).map_err(|source| SchemaError::Step {
+        let progress = |source| SchemaError::Progress {
+            migration: next,
+            source: Box::new(source),
+        };
+        crate::progress::watch(
+            conn,
+            crate::progress::Step::Migration { next },
+            upgrade.every,
+        )
+        .map_err(progress)?;
+        let applied = apply(conn, next, steps, upgrade.at);
+        crate::progress::unwatch(conn).map_err(progress)?;
+        applied.map_err(|source| SchemaError::Step {
             migration: next,
             source,
         })?;
     }
-    Ok(())
+    backup::after_migrating(conn, upgrade.now, upgrade.every).map_err(|source| {
+        SchemaError::Finish {
+            version: target,
+            source,
+        }
+    })
 }
 
 fn apply(

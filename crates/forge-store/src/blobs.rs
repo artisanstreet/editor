@@ -77,6 +77,8 @@ pub enum BlobFailure {
         #[source]
         source: std::io::Error,
     },
+    #[error("read which images the kept databases use")]
+    KeptImages(#[source] crate::retained::RetainedError),
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -340,11 +342,14 @@ impl Store {
     async fn collect_blobs(&self) -> Result<usize> {
         let inner = std::sync::Arc::clone(&self.inner);
         let (seen, candidates) = tokio::task::spawn_blocking(move || {
-            let (seen, referenced) = inner.with_reader(|conn| {
+            let (seen, mut referenced) = inner.with_reader(|conn| {
                 let snapshot = conn.unchecked_transaction()?;
                 let seen = crate::read::max_seq(&snapshot)?;
                 Ok::<_, BlobFailure>((seen, referenced_since(&snapshot, 0)?))
             })?;
+            referenced.extend(
+                crate::retained::kept_images(&inner.database).map_err(BlobFailure::KeptImages)?,
+            );
             Ok::<_, BlobFailure>((seen, unreferenced(&inner.blob_dir, &referenced)?))
         })
         .await

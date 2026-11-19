@@ -141,7 +141,14 @@ async fn the_last_released_database_opens_with_its_threads_and_can_go_back_to_th
         "the upgrade kept the released database"
     );
 
-    match backup::roll_back(&database, RELEASED_SCHEMA).expect("go back to the release") {
+    match backup::roll_back(
+        &database,
+        RELEASED_SCHEMA,
+        1,
+        std::time::Duration::from_secs(5),
+    )
+    .expect("go back to the release")
+    {
         Rollback::Restored {
             found,
             restored,

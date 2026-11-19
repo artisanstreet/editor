@@ -430,6 +430,7 @@ pub fn blob(failure: &BlobFailure) -> Failure {
         | BlobFailure::WebPEncoder
         | BlobFailure::WebPEncode { .. }
         | BlobFailure::Io { .. }
+        | BlobFailure::KeptImages(_)
         | BlobFailure::Storage(_) => Failure::Internal,
     }
 }
