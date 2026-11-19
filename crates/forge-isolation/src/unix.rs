@@ -6,6 +6,9 @@ const ENGINE_NICENESS: i32 = 5;
 const SHELL: &std::ffi::CStr = c"/bin/sh";
 const SHELL_COMMAND: &std::ffi::CStr = c"-c";
 const KILL_GROUP_WHEN_FORGE_ENDS: &std::ffi::CStr = c"read -r _; kill -s KILL 0";
+const SWEEP_GROUP_WHEN_FORGE_ENDS: &std::ffi::CStr =
+    c"read -r _; while kill -s KILL -- \"-$1\" 2>/dev/null; do sleep 0.05; done";
+const SCRIPT_NAME: &std::ffi::CStr = c"sh";
 const DEV_NULL: &std::ffi::CStr = c"/dev/null";
 
 struct Lifeline {
@@ -76,11 +79,16 @@ fn lead_group_watched_by(forge_alive: RawFd) -> std::io::Result<()> {
         if libc::setpgid(0, 0) != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let group = Decimal::of(libc::getpid().unsigned_abs());
         match libc::fork() {
             -1 => Err(std::io::Error::last_os_error()),
             0 => {
                 if libc::fork() == 0 {
-                    become_watcher(forge_alive);
+                    become_watcher(forge_alive, KILL_GROUP_WHEN_FORGE_ENDS, &group);
+                }
+                if libc::fork() == 0 {
+                    libc::setpgid(0, 0);
+                    become_watcher(forge_alive, SWEEP_GROUP_WHEN_FORGE_ENDS, &group);
                 }
                 libc::_exit(0)
             }
@@ -92,7 +100,7 @@ fn lead_group_watched_by(forge_alive: RawFd) -> std::io::Result<()> {
     }
 }
 
-unsafe fn become_watcher(forge_alive: RawFd) -> ! {
+unsafe fn become_watcher(forge_alive: RawFd, script: &std::ffi::CStr, group: &Decimal) -> ! {
     unsafe {
         let null = libc::open(DEV_NULL.as_ptr(), libc::O_RDWR);
         libc::dup2(forge_alive, 0);
@@ -101,10 +109,37 @@ unsafe fn become_watcher(forge_alive: RawFd) -> ! {
         let argv = [
             SHELL.as_ptr(),
             SHELL_COMMAND.as_ptr(),
-            KILL_GROUP_WHEN_FORGE_ENDS.as_ptr(),
+            script.as_ptr(),
+            SCRIPT_NAME.as_ptr(),
+            group.as_ptr(),
             std::ptr::null(),
         ];
         libc::execv(SHELL.as_ptr(), argv.as_ptr());
         libc::_exit(127)
+    }
+}
+
+struct Decimal([u8; 11]);
+
+impl Decimal {
+    const fn of(value: u32) -> Self {
+        let mut text = [0_u8; 11];
+        let mut length = 1;
+        let mut scale = value / 10;
+        while scale > 0 {
+            length += 1;
+            scale /= 10;
+        }
+        let mut rest = value;
+        while length > 0 {
+            length -= 1;
+            text[length] = b'0' + (rest % 10) as u8;
+            rest /= 10;
+        }
+        Self(text)
+    }
+
+    const fn as_ptr(&self) -> *const std::ffi::c_char {
+        self.0.as_ptr().cast()
     }
 }
