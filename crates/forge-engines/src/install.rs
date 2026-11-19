@@ -227,11 +227,11 @@ impl Layout {
         self.engine_dir(engine).join("home")
     }
 
-    pub(crate) fn current(&self, engine: EngineId) -> Option<String> {
+    pub(crate) fn current(&self, engine: EngineId) -> Result<Option<String>, ReadPointerError> {
         read_pointer(&self.engine_dir(engine).join("current"))
     }
 
-    pub(crate) fn previous(&self, engine: EngineId) -> Option<String> {
+    pub(crate) fn previous(&self, engine: EngineId) -> Result<Option<String>, ReadPointerError> {
         read_pointer(&self.engine_dir(engine).join("previous"))
     }
 
@@ -241,16 +241,52 @@ impl Layout {
         path.is_file().then_some(path)
     }
 
-    pub(crate) fn binary(&self, engine: EngineId) -> Option<PathBuf> {
-        self.executable(engine, &self.current(engine)?)
+    pub(crate) fn installed(&self, engine: EngineId) -> Result<Option<String>, ReadPointerError> {
+        Ok(self
+            .current(engine)?
+            .filter(|version| self.executable(engine, version).is_some()))
+    }
+
+    pub(crate) fn binary(&self, engine: EngineId) -> Result<Option<PathBuf>, ReadPointerError> {
+        Ok(self
+            .current(engine)?
+            .and_then(|version| self.executable(engine, &version)))
     }
 }
 
-fn read_pointer(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
+#[derive(Debug, thiserror::Error)]
+pub enum ReadPointerError {
+    #[error("read the engine version pointer {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the engine version pointer {} names an unusable version", path.display())]
+    Unusable {
+        path: PathBuf,
+        #[source]
+        source: UnusableVersion,
+    },
+}
+
+fn read_pointer(path: &Path) -> Result<Option<String>, ReadPointerError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ReadPointerError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
     let version = text.trim();
-    check_version(version).ok()?;
-    Some(version.to_owned())
+    check_version(version).map_err(|source| ReadPointerError::Unusable {
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(Some(version.to_owned()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -277,6 +313,8 @@ pub(crate) fn check_version(version: &str) -> Result<(), UnusableVersion> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SwitchError {
+    #[error(transparent)]
+    Pointer(ReadPointerError),
     #[error("write {}", path.display())]
     Write {
         path: PathBuf,
@@ -305,7 +343,7 @@ fn write_pointer(path: &Path, version: &str) -> Result<(), SwitchError> {
 
 pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<(), SwitchError> {
     let dir = layout.engine_dir(engine);
-    let current = layout.current(engine);
+    let current = layout.current(engine).map_err(SwitchError::Pointer)?;
     if current.as_deref() != Some(version) {
         if let Some(old) = &current {
             write_pointer(&dir.join("previous"), old)?;
@@ -352,18 +390,66 @@ pub(crate) fn usage_lock(home: &Path) -> Result<fs::File, UsageLockError> {
         .map_err(|source| UsageLockError::Open { path, source })
 }
 
-pub(crate) fn prune(layout: &Layout, engine: EngineId) {
-    let Ok(usage) = usage_lock(&layout.home(engine)) else {
-        return;
-    };
-    if fs2::FileExt::try_lock_exclusive(&usage).is_err() {
-        return;
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PruneError {
+    #[error("open the {} usage lock", engine.display_name())]
+    UsageLock {
+        engine: EngineId,
+        #[source]
+        source: UsageLockError,
+    },
+    #[error("try the {} usage lock", engine.display_name())]
+    TryLock {
+        engine: EngineId,
+        #[source]
+        source: io::Error,
+    },
+    #[error("find the {} versions to keep", engine.display_name())]
+    Pointer {
+        engine: EngineId,
+        #[source]
+        source: ReadPointerError,
+    },
+    #[error("list the installed {} versions in {}", engine.display_name(), path.display())]
+    List {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub(crate) fn prune(layout: &Layout, engine: EngineId) -> Result<(), PruneError> {
+    let usage = usage_lock(&layout.home(engine))
+        .map_err(|source| PruneError::UsageLock { engine, source })?;
+    match fs2::FileExt::try_lock_exclusive(&usage) {
+        Ok(()) => {}
+        Err(error) if error.kind() == fs2::lock_contended_error().kind() => return Ok(()),
+        Err(source) => return Err(PruneError::TryLock { engine, source }),
     }
-    let keep = [layout.current(engine), layout.previous(engine)];
-    let Ok(entries) = fs::read_dir(layout.versions(engine)) else {
-        return;
+    let pointer = |source| PruneError::Pointer { engine, source };
+    let keep = [
+        layout.current(engine).map_err(pointer)?,
+        layout.previous(engine).map_err(pointer)?,
+    ];
+    let versions = layout.versions(engine);
+    let entries = match fs::read_dir(&versions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(PruneError::List {
+                engine,
+                path: versions,
+                source,
+            });
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|source| PruneError::List {
+            engine,
+            path: versions.clone(),
+            source,
+        })?;
         let name = entry.file_name();
         if keep
             .iter()
@@ -382,6 +468,7 @@ pub(crate) fn prune(layout: &Layout, engine: EngineId) {
             tracing::warn!(%engine, path = %path.display(), %error, "could not remove an old engine version");
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

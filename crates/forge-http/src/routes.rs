@@ -509,6 +509,9 @@ fn list_versions(error: &forge_engines::ListVersionsError) -> artisan_api::Failu
         List::Get { engine, source } => {
             engines_failure(*engine, EngineKind::Versions(diagnostics::chain(source)))
         }
+        List::Pointer { engine, source } => {
+            engines_failure(*engine, EngineKind::Versions(diagnostics::chain(source)))
+        }
         List::Task { .. } => artisan_api::Failure::Internal,
     }
 }

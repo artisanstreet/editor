@@ -93,16 +93,46 @@ fn an_independent_manager_cannot_prune_a_leased_binary() {
     switch(&layout, engine, "0.151.0").unwrap();
     switch(&layout, engine, "0.152.0").unwrap();
     let cli_layout = Layout::new(data.path());
-    prune(&cli_layout, engine);
+    prune(&cli_layout, engine).unwrap();
     assert!(
         lease.path().is_file(),
         "another owner pruned the active binary"
     );
     drop(lease);
-    prune(&cli_layout, engine);
+    prune(&cli_layout, engine).unwrap();
     assert_eq!(
         versions_on_disk(data.path(), engine),
         ["0.151.0", "0.152.0"]
+    );
+}
+
+#[test]
+fn an_unreadable_version_pointer_keeps_every_installed_version_and_says_so() {
+    let data = tempfile::tempdir().unwrap();
+    let layout = Layout::new(data.path());
+    let engine = EngineId::Codex;
+    for version in ["0.150.0", "0.151.0", "0.152.0"] {
+        let binary = layout
+            .version_dir(engine, version)
+            .join(host_spec(engine).artifact.unwrap().entry);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(binary, script(version)).unwrap();
+    }
+    switch(&layout, engine, "0.151.0").unwrap();
+    switch(&layout, engine, "0.152.0").unwrap();
+    fs::write(layout.engine_dir(engine).join("current"), "../0.152.0\n").unwrap();
+    assert!(matches!(
+        prune(&layout, engine),
+        Err(PruneError::Pointer { .. })
+    ));
+    assert_eq!(
+        versions_on_disk(data.path(), engine),
+        ["0.150.0", "0.151.0", "0.152.0"]
+    );
+    let install = Engines::new(data.path()).status(engine).install;
+    assert!(
+        matches!(&install, InstallState::Failed { message } if message.contains("unusable version")),
+        "{install:?}"
     );
 }
 
@@ -192,7 +222,10 @@ async fn updates_swap_current_and_keep_one_previous() {
             .contains("0.151.0")
     );
     assert_eq!(
-        Layout::new(data.path()).previous(engine).as_deref(),
+        Layout::new(data.path())
+            .previous(engine)
+            .unwrap()
+            .as_deref(),
         Some("0.152.0")
     );
 }

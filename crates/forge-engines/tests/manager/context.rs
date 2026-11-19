@@ -160,11 +160,11 @@ esac
         std::fs::copy(&old_binary, next).unwrap();
         install::switch(&layout, EngineId::Codex, version).unwrap();
     }
-    install::prune(&layout, EngineId::Codex);
+    install::prune(&layout, EngineId::Codex).unwrap();
     assert!(old_binary.is_file());
     engines.cancel_login(EngineId::Codex);
     wait_until(|| {
-        install::prune(&layout, EngineId::Codex);
+        install::prune(&layout, EngineId::Codex).unwrap();
         !old_binary.exists()
     })
     .await;

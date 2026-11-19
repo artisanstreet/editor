@@ -167,6 +167,12 @@ pub enum InstallError {
     },
     #[error(transparent)]
     Fetch(install::FetchError),
+    #[error("find the current {} version", engine.display_name())]
+    Pointer {
+        engine: EngineId,
+        #[source]
+        source: install::ReadPointerError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +190,12 @@ pub enum ListVersionsError {
         engine: EngineId,
         #[source]
         source: tokio::task::JoinError,
+    },
+    #[error("find the current {} version", engine.display_name())]
+    Pointer {
+        engine: EngineId,
+        #[source]
+        source: install::ReadPointerError,
     },
 }
 
@@ -211,6 +223,23 @@ pub enum ClaudeAiSignInError {
     Save(#[source] crate::claudeai::SaveSessionError),
 }
 
+fn loaded(layout: &Layout, engine: EngineId) -> (Event, Option<String>) {
+    match layout.installed(engine) {
+        Ok(version) => (
+            Event::Loaded {
+                version: version.clone(),
+            },
+            version,
+        ),
+        Err(error) => (
+            Event::Fail {
+                message: diagnostics::chain(&error),
+            },
+            None,
+        ),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -228,11 +257,7 @@ impl Engines {
         let layout = Layout::new(data_dir.as_ref());
         let slots = EngineId::ALL.map(|engine| {
             let mut machine = install::machine();
-            machine.handle(&Event::Loaded {
-                version: layout
-                    .current(engine)
-                    .filter(|_| layout.binary(engine).is_some()),
-            });
+            machine.handle(&loaded(&layout, engine).0);
             Slot {
                 install: Mutex::new(machine),
                 models: Mutex::new(ModelCache::default()),
@@ -392,8 +417,10 @@ impl Engines {
             .map_err(|source| ListVersionsError::Get { engine, source })?;
         let layout = self.inner.layout.clone();
         let published = tokio::task::spawn_blocking(move || {
-            let current = layout.current(engine);
-            versions
+            let current = layout
+                .current(engine)
+                .map_err(|source| ListVersionsError::Pointer { engine, source })?;
+            Ok(versions
                 .into_iter()
                 .map(|version| PublishedVersion {
                     installed: layout.executable(engine, &version).is_some(),
@@ -401,27 +428,21 @@ impl Engines {
                     unsupported: !meets_minimum(engine, &version),
                     version,
                 })
-                .collect::<Arc<[PublishedVersion]>>()
+                .collect::<Arc<[PublishedVersion]>>())
         })
         .await
-        .map_err(|source| ListVersionsError::Task { engine, source })?;
+        .map_err(|source| ListVersionsError::Task { engine, source })??;
         *lock(&self.slot(engine).versions) = published;
         self.publish(engine);
         Ok(self.published(engine))
     }
 
     fn reconcile_install(&self, engine: EngineId) {
-        let current = self
-            .inner
-            .layout
-            .current(engine)
-            .filter(|_| self.binary(engine).is_some());
+        let (loaded, current) = loaded(&self.inner.layout, engine);
         {
             let mut machine = lock(&self.slot(engine).install);
             if install::settled(machine.state()) {
-                machine.handle(&Event::Loaded {
-                    version: current.clone(),
-                });
+                machine.handle(&loaded);
             }
         }
         let mut versions = lock(&self.slot(engine).versions);
@@ -461,7 +482,13 @@ impl Engines {
 
     #[must_use]
     pub fn binary(&self, engine: EngineId) -> Option<PathBuf> {
-        self.inner.layout.binary(engine)
+        match self.inner.layout.binary(engine) {
+            Ok(binary) => binary,
+            Err(error) => {
+                tracing::warn!(%engine, error = %diagnostics::chain(&error), "the engine's installed version can't be read");
+                None
+            }
+        }
     }
 
     pub fn lease(&self, engine: EngineId) -> Option<BinaryLease> {
@@ -530,8 +557,16 @@ impl Engines {
                     .await;
             }
         };
+        let installed = match layout.installed(engine) {
+            Ok(installed) => installed,
+            Err(source) => {
+                return self
+                    .finish(engine, Err(InstallError::Pointer { engine, source }))
+                    .await;
+            }
+        };
         if matches!(target, Target::Present)
-            && let Some(current) = self.binary(engine).and_then(|_| layout.current(engine))
+            && let Some(current) = installed
         {
             self.apply(
                 engine,
@@ -548,13 +583,14 @@ impl Engines {
         }
         let result = async {
             let current = layout
-                .current(engine)
-                .filter(|version| layout.executable(engine, version).is_some());
+                .installed(engine)
+                .map_err(|source| InstallError::Pointer { engine, source })?;
             let version = match (target, &current) {
                 (Target::Present, Some(current)) => return Ok(current.clone()),
                 (Target::Exact(version), _) => version,
                 (Target::Previous, _) => layout
                     .previous(engine)
+                    .map_err(|source| InstallError::Pointer { engine, source })?
                     .filter(|version| layout.executable(engine, version).is_some())
                     .ok_or(InstallError::NoPrevious { engine })?,
                 (Target::Present | Target::Latest, _) => {
@@ -624,7 +660,9 @@ impl Engines {
             Ok(version) => {
                 let engines = self.clone();
                 if let Err(error) = tokio::task::spawn_blocking(move || {
-                    install::prune(&engines.inner.layout, engine);
+                    if let Err(error) = install::prune(&engines.inner.layout, engine) {
+                        tracing::warn!(%engine, error = %diagnostics::chain(&error), "old engine versions were kept");
+                    }
                     engines.reconcile_install(engine);
                 })
                 .await
