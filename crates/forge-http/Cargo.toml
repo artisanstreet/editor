@@ -58,7 +58,7 @@ artisan-api = { workspace = true, features = ["tls"] }
 forge-store.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 sse-core.workspace = true
-test-support = { workspace = true, features = ["http", "sse", "replay"] }
+test-support = { workspace = true, features = ["http", "sse", "replay", "tokio"] }
 reqwest = { workspace = true, features = ["json", "zstd"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

@@ -1012,14 +1012,12 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
         result.is_err(),
         "the occupied listener rejects this controller"
     );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while owner.upgrade().is_some() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "failed startup retained Hub dispatcher/status owners"
-        );
-        tokio::task::yield_now().await;
-    }
+    test_support::wait::eventually(
+        "a failed startup to release the Hub's dispatcher and status owners",
+        test_support::wait::LIVENESS,
+        || async { owner.upgrade().is_none() },
+    )
+    .await;
     assert!(
         store.state().await.unwrap().runs.is_empty(),
         "a failed bind must not claim pending inputs"
@@ -1028,20 +1026,24 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
         store.item(&input_id).await.unwrap().unwrap().status,
         artisan_api::Status::Running
     );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while let Err(error) = lock_data_dir(&data) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "failed startup releases only its temporary instance lock: {error:#}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    test_support::wait::eventually(
+        "a failed startup to release its temporary instance lock",
+        test_support::wait::LIVENESS,
+        || async { lock_data_dir(&data).is_ok() },
+    )
+    .await;
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
     use std::os::unix::fs::PermissionsExt as _;
+    struct ReleaseOnDrop(PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            std::fs::write(&self.0, "").unwrap();
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("forge");
     let install = |engine: &str, script: &str| {
@@ -1072,24 +1074,45 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
         path.push(suffix);
         PathBuf::from(path)
     };
+    let release = ReleaseOnDrop(marker(&claude, ".release"));
     let server = start(ServeConfig {
         data_dir: data,
         listen: "127.0.0.1:0".parse().unwrap(),
     })
     .await
     .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if marker(&claude, ".started").exists() && marker(&codex, ".started").exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    test_support::wait::eventually(
+        "Codex's startup refresh to begin while slow Claude is still probing",
+        test_support::wait::LIVENESS,
+        || async { marker(&claude, ".started").exists() && marker(&codex, ".started").exists() },
+    )
     .await;
-    std::fs::write(marker(&claude, ".release"), "").unwrap();
+    drop(release);
     drop(server);
-    result.expect("Codex startup refresh must begin before slow Claude finishes");
+}
+
+async fn stored<T, F: Future<Output = Option<T>>>(
+    what: &str,
+    store: &Store,
+    mut found: impl FnMut() -> F,
+) -> T {
+    let mut changes = store.subscribe();
+    let waiting = async {
+        loop {
+            if let Some(value) = found().await {
+                return value;
+            }
+            match changes.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("the store closed while waiting for {what}")
+                }
+            }
+        }
+    };
+    tokio::time::timeout(test_support::wait::LIVENESS, waiting)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
 struct McpScripted;
@@ -1297,16 +1320,10 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
     let replied = |thread: ThreadId| {
         let store = store.clone();
         async move {
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    if let Some(reply) = store.last_reply(&thread).await.unwrap() {
-                        return reply;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
+            stored("the thread's reply", &store, || async {
+                store.last_reply(&thread).await.unwrap()
             })
             .await
-            .expect("the thread replies")
         }
     };
 
@@ -1383,40 +1400,35 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
     hub.send_message(&background.id, send("background"))
         .await
         .unwrap();
-    let report = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let items = store
-                .transcript_page(
-                    &background.id,
-                    None,
-                    artisan_api::ItemsQuery {
-                        before: None,
-                        after: None,
-                        limit: Some(50),
-                    },
-                )
-                .await
-                .unwrap()
-                .items;
-            if let Some(report) = items.into_iter().find_map(|item| {
-                if let artisan_api::ItemKind::UserMessage {
-                    text,
-                    from_agent: Some(agent),
-                    ..
-                } = item.kind
-                {
-                    Some((text, agent))
-                } else {
-                    None
-                }
-            }) {
-                return report;
+    let report = stored("the agent's result", &store, || async {
+        let items = store
+            .transcript_page(
+                &background.id,
+                None,
+                artisan_api::ItemsQuery {
+                    before: None,
+                    after: None,
+                    limit: Some(50),
+                },
+            )
+            .await
+            .unwrap()
+            .items;
+        items.into_iter().find_map(|item| {
+            if let artisan_api::ItemKind::UserMessage {
+                text,
+                from_agent: Some(agent),
+                ..
+            } = item.kind
+            {
+                Some((text, agent))
+            } else {
+                None
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        })
     })
-    .await
-    .expect("the agent's result arrives");
+    .await;
+
     assert!(
         report.0.inline().unwrap().contains("child heard: later"),
         "{:?}",
