@@ -14,20 +14,20 @@ use editor_ui::{
 use std::rc::Rc;
 
 pub fn project_menu(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     host: &editor_core::HostData,
     picker: &super::super::picker::PickerState,
     selected: Option<&artisan_api::ProjectId>,
     viewport: aqua_core::Size,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Element {
     let surface = Surface::Picker(Picker::List);
     let row = Row::MenuItem;
     let muted = theme.colors.text_muted.to_reference_paint();
     let item =
         |key: String, title: String, leading: Element, chosen: bool, action: ComposerAction| {
-            let dispatch = Rc::clone(&dispatch);
-            let mut item = RowItem::new(key, theme, row, surface, title)
+            let dispatch = Rc::clone(dispatch);
+            let mut item = RowItem::new(key, *theme, row, surface, title)
                 .leading(leading)
                 .on_activate(move || dispatch(action.clone()));
             if chosen {
@@ -66,7 +66,7 @@ pub fn project_menu(
                         Scroll::new()
                             .width(Length::Pct(100.0))
                             .height(
-                                (count.min(PROJECT_ROWS_SHOWN) as f32)
+                                super::rows(count.min(PROJECT_ROWS_SHOWN))
                                     * row.height().unwrap_or_default(),
                             )
                             .child(rows.build())
@@ -85,7 +85,7 @@ pub fn project_menu(
                     ))
                     .build(),
             )
-            .child(Divider::Rule.build(&theme, surface.padding_px()));
+            .child(Divider::Rule.build(theme, surface.padding_px()));
     }
     let scratch = artisan_api::ProjectId::scratch();
     if host
@@ -110,7 +110,7 @@ pub fn project_menu(
     ));
     let width = PROJECT_MENU_WIDTH.min((viewport.w - MENU_VIEWPORT_MARGIN).max(0.0));
     surface
-        .build(&theme, vec![list.build()])
+        .build(theme, vec![list.build()])
         .style(
             Style::new()
                 .width(Length::Px(width))
@@ -122,7 +122,7 @@ pub fn project_menu(
 }
 
 pub(crate) fn project_tab(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     controller: &super::super::controller::Composer,
     host: &editor_core::HostData,
     dispatch: Dispatch,
@@ -144,7 +144,7 @@ pub(crate) fn project_tab(
             Some(fitted(
                 RowItem::new(
                     "composer-project",
-                    theme,
+                    *theme,
                     Row::Heading,
                     Surface::Composer,
                     project.name.clone(),
@@ -176,7 +176,7 @@ pub(crate) fn project_tab(
                 });
             let open = controller.picker.menu == Some(super::super::picker::Menu::Project);
             Some(fitted(
-                Trigger::new("composer-project", theme, TriggerSize::Sm, name)
+                Trigger::new("composer-project", *theme, TriggerSize::Sm, name)
                     .lead(lead)
                     .muted()
                     .open(open)

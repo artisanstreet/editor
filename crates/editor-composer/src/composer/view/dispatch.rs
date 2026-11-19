@@ -5,7 +5,7 @@ use super::{
 
 impl ComposerOwner {
     pub fn dispatch_with_change(
-        &mut self,
+        &self,
         core: &mut editor_core::Core,
         action: ComposerAction,
         question: Option<&artisan_api::Question>,
@@ -30,17 +30,22 @@ impl ComposerOwner {
         );
         let effects = self.dispatch(core, action, question);
         let after = ComposerVisible::capture(&self.controller.borrow());
-        let changed = match typed {
-            true => !self.last_visible.borrow().same_chrome(&after) || !before.same_chrome(&after),
-            false => before != after || *self.last_visible.borrow() != after,
+        let changed = if typed {
+            !self.last_visible.borrow().same_chrome(&after) || !before.same_chrome(&after)
+        } else {
+            before != after || *self.last_visible.borrow() != after
         } || tooltip_before != self.tooltip.borrow().revision()
             || self.model_scroll.borrow().jumping();
         *self.last_visible.borrow_mut() = after;
         (effects, changed)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "ComposerAction is one flat enum and this is its single exhaustive handler; splitting it needs the enum nested by family"
+    )]
     fn dispatch(
-        &mut self,
+        &self,
         core: &mut editor_core::Core,
         action: ComposerAction,
         question: Option<&artisan_api::Question>,
@@ -99,9 +104,9 @@ impl ComposerOwner {
                         let editor = composer.editor.borrow();
                         let text = editor.text();
                         let at = editor.caret().unwrap_or(text.len());
-                        let spaced = text[..at]
-                            .chars()
-                            .next_back()
+                        let spaced = text
+                            .get(..at)
+                            .and_then(|before| before.chars().next_back())
                             .is_none_or(char::is_whitespace);
                         (at, if spaced { "" } else { " " })
                     };
@@ -120,7 +125,7 @@ impl ComposerOwner {
                 composer.sync_mentions();
             }
             ComposerAction::Editor(EditorEvent::SelectionChanged { .. }) => {
-                composer.sync_mentions()
+                composer.sync_mentions();
             }
             ComposerAction::Editor(EditorEvent::PresentationChanged) => {}
             ComposerAction::Editor(EditorEvent::List(key)) => {
@@ -241,33 +246,30 @@ impl ComposerOwner {
                 }
             }
             ComposerAction::AxisKey { axis, key } => {
-                if composer.picker.axis == Some(axis) {
-                    if let Some(options) = axis_options(&composer, host, axis) {
-                        let selected = options
-                            .iter()
-                            .position(|option| option.selected)
-                            .unwrap_or(0);
-                        match composer.picker.axis_key(key, selected, options.len()) {
-                            super::super::picker::AxisKeyResult::Choose(index) => {
-                                self.tooltip.borrow_mut().clear();
-                                if let Some(option) = options.into_iter().nth(index) {
-                                    if composer.metadata_ready(host) && composer.draft_editable() {
-                                        let host_id = host.id.clone();
-                                        choose_axis_config(
-                                            &mut composer,
-                                            core,
-                                            &host_id,
-                                            option.apply,
-                                        );
-                                    }
-                                }
+                if composer.picker.axis == Some(axis)
+                    && let Some(options) = axis_options(&composer, host, axis)
+                {
+                    let selected = options
+                        .iter()
+                        .position(|option| option.selected)
+                        .unwrap_or(0);
+                    match composer.picker.axis_key(key, selected, options.len()) {
+                        super::super::picker::AxisKeyResult::Choose(index) => {
+                            self.tooltip.borrow_mut().clear();
+                            if let Some(option) = options.into_iter().nth(index)
+                                && composer.metadata_ready(host)
+                                && composer.draft_editable()
+                            {
+                                let host_id = host.id.clone();
+                                choose_axis_config(&mut composer, core, &host_id, option.apply);
                             }
-                            super::super::picker::AxisKeyResult::Dismiss => {
-                                self.tooltip.borrow_mut().clear();
-                                composer.picker.axis = None;
-                            }
-                            _ => {}
                         }
+                        super::super::picker::AxisKeyResult::Dismiss => {
+                            self.tooltip.borrow_mut().clear();
+                            composer.picker.axis = None;
+                        }
+                        super::super::picker::AxisKeyResult::Moved
+                        | super::super::picker::AxisKeyResult::Ignored => {}
                     }
                 }
             }
@@ -333,7 +335,7 @@ impl ComposerOwner {
                 }
             }
             ComposerAction::RetryThreadSettings => {
-                effects.push(ComposerEffect::RetryThreadSettings)
+                effects.push(ComposerEffect::RetryThreadSettings);
             }
             ComposerAction::DismissNotice => {
                 composer.notice = None;
@@ -347,7 +349,7 @@ impl ComposerOwner {
                     .close_note(std::time::Instant::now(), self.reduced_motion);
             }
             ComposerAction::OpenQuestionSource(source) => {
-                effects.push(ComposerEffect::OpenQuestionSource(source))
+                effects.push(ComposerEffect::OpenQuestionSource(source));
             }
             ComposerAction::RetryQuestionPage => effects.push(ComposerEffect::RetryQuestionPage),
             ComposerAction::ActivateQuestionnaire(item) => {

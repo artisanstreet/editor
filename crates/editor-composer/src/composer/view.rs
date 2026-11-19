@@ -122,6 +122,10 @@ pub enum ComposerAction {
 
 pub type Dispatch = Rc<dyn Fn(ComposerAction)>;
 
+pub(crate) fn rows(count: usize) -> f32 {
+    f32::from(u16::try_from(count).unwrap_or(u16::MAX))
+}
+
 pub(crate) const PROMPT_NAME: &str = "Message";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,7 +144,7 @@ const fn primary_icon(face: Primary) -> AssetId {
 }
 
 pub(crate) fn primary(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     face: Primary,
     outgoing: Option<super::swap::SwapFrame>,
     disabled: bool,
@@ -170,7 +174,7 @@ pub(crate) fn primary(
         icon,
         outgoing.map(|frame| (primary_icon(frame.previous), frame)),
     );
-    Key::new(id, theme, label, KeySize::Md, KeyFace::Content(content))
+    Key::new(id, *theme, label, KeySize::Md, KeyFace::Content(content))
         .primary()
         .disabled(disabled)
         .on_activate(move |_| dispatch(action.clone()))
@@ -178,14 +182,14 @@ pub(crate) fn primary(
         .debug_selector(id)
 }
 
-fn frame(theme: ArtisanTheme, nested: bool, content: Element) -> Element {
-    editor_ui::glass::ComposerFrame::new(theme, content)
+fn frame(theme: &ArtisanTheme, nested: bool, content: Element) -> Element {
+    editor_ui::glass::ComposerFrame::new(*theme, content)
         .nested(nested)
         .build()
 }
 
 pub(crate) fn model_trigger(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     config: Option<&artisan_api::EngineConfig>,
     model: Option<&artisan_api::Model>,
     dispatch: Dispatch,
@@ -204,13 +208,13 @@ pub(crate) fn model_trigger(
     let details = config
         .map(|config| model_details(config, model))
         .unwrap_or_default();
-    let mut trigger = Trigger::new("composer-model", theme, TriggerSize::Sm, name)
+    let mut trigger = Trigger::new("composer-model", *theme, TriggerSize::Sm, name)
         .on_activate(move || dispatch(ComposerAction::ToggleModel));
     if !details.is_empty() {
         trigger = trigger.detail(details.join(" "));
     }
     if let Some(config) = config {
-        trigger = trigger.lead(Lead::Glyph(engine_icon(&theme, config.engine)));
+        trigger = trigger.lead(Lead::Glyph(engine_icon(theme, config.engine)));
     }
     UiBox::new()
         .style(
@@ -228,12 +232,13 @@ fn model_details(
 ) -> Vec<String> {
     let context = model
         .and_then(|model| config.context_window_override().or(model.context_window))
-        .map(
-            |context| match context >= 1_000_000 && context.is_multiple_of(1_000_000) {
-                true => format!("{}M", context / 1_000_000),
-                false => format!("{}K", context / 1_000),
-            },
-        );
+        .map(|context| {
+            if context >= 1_000_000 && context.is_multiple_of(1_000_000) {
+                format!("{}M", context / 1_000_000)
+            } else {
+                format!("{}K", context / 1_000)
+            }
+        });
     let compaction = config
         .compaction_window_override()
         .map(|compaction| format!("{}K compact", compaction / 1_000));
@@ -309,7 +314,7 @@ const PROMPT_GUTTER: f32 = TEXT_INSET - editor_ui::tab_card::TAB_CARD_PADDING_PX
     clippy::disallowed_methods,
     reason = "the extras inset only the sides and top, and the prompt gutter only the sides; the kit pads all four sides alike"
 )]
-pub(crate) fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
+pub(crate) fn composer_card(theme: &ArtisanTheme, nested: bool, parts: CardParts) -> Element {
     let extras: Vec<Element> = [
         parts.thread_error,
         parts.draft_error,
@@ -320,10 +325,7 @@ pub(crate) fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts)
     .flatten()
     .collect();
     let extras = (!extras.is_empty()).then(|| {
-        let inset = match nested {
-            true => Inset::Frame.px(),
-            false => 0.0,
-        };
+        let inset = if nested { Inset::Frame.px() } else { 0.0 };
         UiBox::new()
             .layout("column")
             .width(Length::Pct(100.0))
@@ -336,10 +338,7 @@ pub(crate) fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts)
             .children(extras)
             .build()
     });
-    let gutter = match nested {
-        true => PROMPT_GUTTER,
-        false => 0.0,
-    };
+    let gutter = if nested { PROMPT_GUTTER } else { 0.0 };
     let entry = UiBox::new()
         .width(Length::Pct(100.0))
         .style(
@@ -382,6 +381,7 @@ pub(crate) fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts)
     frame(theme, nested, card).with_key("composer")
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ComposerFailure<'a> {
     Draft { error: &'a str, conflict: bool },
     ModelChoice { error: &'a str },
@@ -389,14 +389,14 @@ pub(crate) enum ComposerFailure<'a> {
 }
 
 pub(crate) fn draft_error(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     failure: ComposerFailure<'_>,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Element {
     let surface = Surface::Composer;
     let choice = |key: &'static str, label: &'static str, action: ComposerAction| {
-        let dispatch = Rc::clone(&dispatch);
-        Button::text(key, theme, ButtonTone::Neutral, label)
+        let dispatch = Rc::clone(dispatch);
+        Button::text(key, *theme, ButtonTone::Neutral, label)
             .within(surface)
             .on_activate(move |_| dispatch(action.clone()))
             .build()
@@ -447,7 +447,7 @@ pub(crate) fn draft_error(
         .spaced(Space::S8)
         .child(
             TextRole::Label
-                .text(&theme, error.to_owned())
+                .text(theme, error.to_owned())
                 .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .wrap(true)
                 .build(),
@@ -456,8 +456,12 @@ pub(crate) fn draft_error(
         .build()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the goal label lays out its status glyph, ticker, budget and actions for every goal phase"
+)]
 pub(crate) fn goal_label(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     frame: &super::goal_strip::GoalStripFrame,
     ticker: Element,
     dispatch: Dispatch,
@@ -489,7 +493,9 @@ pub(crate) fn goal_label(
             AssetId::TABLER_BELL_EXCLAMATION,
             theme.colors.banner_warning.text,
         ),
-        _ => (AssetId::TABLER_TARGET_ARROW, theme.colors.text_muted),
+        State::Active | State::Paused | State::UsageLimited | State::BudgetLimited => {
+            (AssetId::TABLER_TARGET_ARROW, theme.colors.text_muted)
+        }
     };
     let muted = theme.colors.text_muted.to_reference_text_color();
     let mut style = Style::new()
@@ -514,16 +520,13 @@ pub(crate) fn goal_label(
                 .build(),
         );
     } else {
-        let headline = match safety {
-            true => tone,
-            false => theme.colors.text,
-        };
+        let headline = if safety { tone } else { theme.colors.text };
         row = row.child(
             UiBox::new()
                 .style(Style::new().min_width(Length::Pct(0.0)))
                 .child(
                     TextRole::Label
-                        .text(&theme, goal.objective.clone())
+                        .text(theme, goal.objective.clone())
                         .gpui_source_color(headline.to_reference_text_color())
                         .wrap(false)
                         .build(),
@@ -537,7 +540,7 @@ pub(crate) fn goal_label(
         {
             row = row.child(
                 TextRole::Label
-                    .text(&theme, detail.clone())
+                    .text(theme, detail.clone())
                     .gpui_source_color(muted)
                     .wrap(false)
                     .build(),
@@ -548,12 +551,18 @@ pub(crate) fn goal_label(
             State::Blocked => Some(("Blocked", theme.colors.banner_warning.text)),
             State::UsageLimited => Some(("Usage limit reached", theme.colors.banner_warning.text)),
             State::BudgetLimited => Some(("Budget spent", theme.colors.banner_warning.text)),
-            _ => None,
+            State::Active
+            | State::SafetyHolding
+            | State::SafetyRerouted
+            | State::SafetyRefused
+            | State::Note
+            | State::HeadsUp
+            | State::Parked => None,
         };
         if let Some((text, tone)) = status {
             row = row.child(
                 TextRole::Caption
-                    .text(&theme, text)
+                    .text(theme, text)
                     .gpui_source_color(tone.to_reference_text_color())
                     .wrap(false)
                     .build(),
@@ -584,7 +593,7 @@ pub(crate) fn goal_label(
         row = row.child(
             IconButton::new(
                 id,
-                theme,
+                *theme,
                 AssetId::TABLER_X,
                 label,
                 IconButtonSize::Sm,
@@ -598,6 +607,10 @@ pub(crate) fn goal_label(
     row.build()
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace borrows the controller and editor directly; popups, motion and caches stay private"
+)]
 pub struct ComposerOwner {
     pub controller: Rc<std::cell::RefCell<super::controller::Composer>>,
     pub editor: editor_ui::text::mount::EditorController,
@@ -619,6 +632,15 @@ pub struct ComposerOwner {
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
     last_visible: std::cell::RefCell<ComposerVisible>,
     tooltip: std::cell::RefCell<super::picker::PickerTooltip>,
+}
+
+impl std::fmt::Debug for ComposerOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComposerOwner")
+            .field("controller", &self.controller)
+            .field("reduced_motion", &self.reduced_motion)
+            .finish_non_exhaustive()
+    }
 }
 
 struct AnswerCompletion {
@@ -643,12 +665,14 @@ pub enum ComposerEffect {
     RetryThreadSettings,
 }
 
+#[derive(Debug)]
 pub struct ComposerDrain {
     pub events: Vec<super::persistence::SessionEvent>,
     pub effects: Vec<ComposerEffect>,
     pub changed: bool,
 }
 
+#[derive(Debug)]
 pub struct PickerTooltipPresentation {
     pub side: aqua_ui::overlay::Side,
     pub snap_to_window: bool,
@@ -659,33 +683,47 @@ pub struct PickerTooltipSurface {
     pub surface: Rc<dyn Fn(f32, bool) -> Element>,
 }
 
+impl std::fmt::Debug for PickerTooltipSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PickerTooltipSurface")
+            .field("placement", &self.placement)
+            .finish_non_exhaustive()
+    }
+}
+
+type QuestionMark = (
+    Option<artisan_api::ItemId>,
+    usize,
+    Vec<String>,
+    Option<artisan_api::ItemId>,
+    Option<String>,
+    Option<String>,
+);
+
+type AttachmentMark = (
+    u64,
+    super::attachment::State,
+    Option<String>,
+    bool,
+    bool,
+    Option<std::time::Instant>,
+);
+
+type AttachmentsMark = (
+    Vec<AttachmentMark>,
+    Option<(u64, std::time::Instant)>,
+    Option<String>,
+);
+
 #[derive(PartialEq)]
 struct ComposerRest {
     picker: super::picker::PickerState,
     mention: (Option<super::mentions::Trigger>, Vec<usize>, usize),
-    question: (
-        Option<artisan_api::ItemId>,
-        usize,
-        Vec<String>,
-        Option<artisan_api::ItemId>,
-        Option<String>,
-        Option<String>,
-    ),
+    question: QuestionMark,
     strip: super::goal_strip::StripState,
     config: Option<artisan_api::EngineConfig>,
     project: Option<artisan_api::ProjectId>,
-    attachments: Option<(
-        Vec<(
-            u64,
-            super::attachment::State,
-            Option<String>,
-            bool,
-            bool,
-            Option<std::time::Instant>,
-        )>,
-        Option<(u64, std::time::Instant)>,
-        Option<String>,
-    )>,
+    attachments: Option<AttachmentsMark>,
     files: Vec<(u64, std::path::PathBuf, bool)>,
     file_shake: Option<(u64, std::time::Instant)>,
     notice: Option<String>,
@@ -746,8 +784,8 @@ impl ComposerVisible {
     fn capture(composer: &super::controller::Composer) -> Self {
         let editor = composer.editor.borrow();
         Self {
-            editor: EditorVisible::capture(&editor),
             rest: ComposerRest::capture(composer),
+            editor: EditorVisible::capture(&editor),
         }
     }
 }
@@ -841,7 +879,10 @@ impl ComposerOwner {
             controller,
             editor,
             dispatch,
-            answers: editor_core::delivery::Delivery::new(std::num::NonZeroUsize::new(16).unwrap()),
+            answers: editor_core::delivery::Delivery::new(
+                std::num::NonZeroUsize::new(16)
+                    .expect("invariant: the answer delivery capacity is non-zero"),
+            ),
             reduced_motion: false,
             model_popup: None,
             mention_popup: None,
@@ -854,11 +895,11 @@ impl ComposerOwner {
                 editor_ui::tab_card::GeometryCache::default(),
             )),
             strip_moving: std::cell::Cell::new(false),
-            primary_swap: std::cell::Cell::new(super::swap::PrimarySwap::default()),
             note_ticker: std::cell::RefCell::new(editor_ui::marquee::Marquee::new(
                 "composer-note-ticker",
                 "",
             )),
+            primary_swap: std::cell::Cell::new(super::swap::PrimarySwap::default()),
             model_menu_serial: std::cell::Cell::new(0),
             prompt_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             model_scroll: std::cell::RefCell::default(),
@@ -914,11 +955,11 @@ impl ComposerOwner {
 }
 
 pub fn attachments(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     controller: &super::controller::Composer,
     now: std::time::Instant,
     reduced_motion: bool,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Option<Element> {
     use editor_ui::attachment_tile::AttachmentTile;
     if controller.questionnaire.writing_answer() {
@@ -941,11 +982,11 @@ pub fn attachments(
     if let Some(images) = images {
         for image in images.items.iter().filter(|image| image.shown) {
             let key = image.key;
-            let remove = Rc::clone(&dispatch);
-            let open = Rc::clone(&dispatch);
+            let remove = Rc::clone(dispatch);
+            let open = Rc::clone(dispatch);
             let mut tile = AttachmentTile::new(
                 format!("composer-attachment-{key}"),
-                theme,
+                *theme,
                 image.name.clone(),
             )
             .preview(
@@ -976,7 +1017,7 @@ pub fn attachments(
             .on_remove(move || remove(ComposerAction::RemoveImage(key)))
             .on_activate(move || open(ComposerAction::OpenImage(key)));
             if image.preview_error.is_some() {
-                let retry = Rc::clone(&dispatch);
+                let retry = Rc::clone(dispatch);
                 tile = tile.on_retry(move || retry(ComposerAction::RetryImage(key)));
             }
             row = row.child(tile.build());
@@ -994,9 +1035,9 @@ pub fn attachments(
         } else {
             AssetId::TABLER_FILE_TEXT
         };
-        let remove = Rc::clone(&dispatch);
+        let remove = Rc::clone(dispatch);
         row = row.child(
-            AttachmentTile::new(format!("composer-file-{key}"), theme, name)
+            AttachmentTile::new(format!("composer-file-{key}"), *theme, name)
                 .file(glyph)
                 .shaking(
                     controller
@@ -1049,9 +1090,10 @@ pub struct ModelMenuItem {
 
 impl ModelMenuItem {
     fn name(&self) -> String {
-        match self.value.is_empty() {
-            true => self.label.to_owned(),
-            false => format!("{}: {}", self.label, self.value),
+        if self.value.is_empty() {
+            self.label.to_owned()
+        } else {
+            format!("{}: {}", self.label, self.value)
         }
     }
 }

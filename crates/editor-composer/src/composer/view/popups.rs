@@ -75,7 +75,7 @@ impl ComposerOwner {
         self.tooltip.borrow().shown().cloned()
     }
 
-    pub fn tooltip_surface_factory(&self, theme: ArtisanTheme) -> Option<PickerTooltipSurface> {
+    pub fn tooltip_surface_factory(&self, theme: &ArtisanTheme) -> Option<PickerTooltipSurface> {
         use super::super::picker::TooltipPlacement;
         let tooltip = self.shown_tooltip()?;
         let placement = match tooltip.placement {
@@ -86,6 +86,7 @@ impl ComposerOwner {
                 editor_ui::hover_tooltip::TooltipPlacement::Beside { max_width: 320.0 }
             }
         };
+        let theme = *theme;
         Some(PickerTooltipSurface {
             placement,
             surface: Rc::new(move |width, fixed| {
@@ -170,8 +171,8 @@ impl ComposerOwner {
             move |_| {
                 action(match kind {
                     PopupKind::Mentions => ComposerAction::DismissMentions,
-                    _ => ComposerAction::ClosePicker,
-                })
+                    PopupKind::Model | PopupKind::Project => ComposerAction::ClosePicker,
+                });
             },
         )?;
         let slot = match kind {
@@ -276,10 +277,10 @@ impl ComposerOwner {
             &mut self.mention_popup,
             &mut self.project_popup,
         ] {
-            if let Some(popup) = popup {
-                if popup.is_open(app) {
-                    popup.advance(app, now)?;
-                }
+            if let Some(popup) = popup
+                && popup.is_open(app)
+            {
+                popup.advance(app, now)?;
             }
         }
         Ok(())
@@ -295,14 +296,13 @@ impl ComposerOwner {
             (&mut self.mention_popup, ComposerAction::DismissMentions),
             (&mut self.project_popup, ComposerAction::ClosePicker),
         ] {
-            if let Some(popup) = popup {
-                if popup.is_open(app)
-                    && !popup.is_closing()
-                    && popup.request_dismissal(app, event)?
-                {
-                    (self.dispatch)(close);
-                    return Ok(true);
-                }
+            if let Some(popup) = popup
+                && popup.is_open(app)
+                && !popup.is_closing()
+                && popup.request_dismissal(app, event)?
+            {
+                (self.dispatch)(close);
+                return Ok(true);
             }
         }
         Ok(false)

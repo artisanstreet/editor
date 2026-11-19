@@ -37,7 +37,10 @@ fn mention_heading(kind: super::super::mentions::Kind) -> &'static str {
 fn mention_metrics(viewport: aqua_core::Size) -> super::super::mentions::Metrics {
     let row = Row::MenuItem.height().unwrap_or_default();
     let heading = Row::Heading.height().unwrap_or_default();
-    let fits = viewport.h - 2.0 * MENU_VIEWPORT_MARGIN - 2.0 * MENTION_SURFACE.padding_px();
+    let fits = 2.0f32.mul_add(
+        -MENTION_SURFACE.padding_px(),
+        2.0f32.mul_add(-MENU_VIEWPORT_MARGIN, viewport.h),
+    );
     super::super::mentions::Metrics {
         divider: Divider::Rule.height(),
         heading,
@@ -62,12 +65,12 @@ fn inset_sides(style: Style, side: f32, ends: f32) -> Style {
 }
 
 fn mention_menu(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mentions: &super::super::mentions::Mentions,
     viewport: aqua_core::Size,
     width: f32,
     scroll: f32,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Option<Element> {
     use super::super::mentions::Kind;
     if mentions.rows.is_empty() {
@@ -84,12 +87,12 @@ fn mention_menu(
         let first = previous != Some(row.kind);
         if first {
             if previous.is_some() {
-                entries = entries.child(Divider::Rule.build(&theme, surface.padding_px()));
+                entries = entries.child(Divider::Rule.build(theme, surface.padding_px()));
             }
             entries = entries.child(
                 RowItem::new(
                     format!("composer-mention-heading-{index}"),
-                    theme,
+                    *theme,
                     Row::Heading,
                     surface,
                     mention_heading(row.kind),
@@ -98,19 +101,20 @@ fn mention_menu(
             );
             previous = Some(row.kind);
         }
-        let leading = match first {
-            true => IconSize::Md.glyph(mention_icon(row.kind), muted.to_reference_paint()),
-            false => UiBox::new()
+        let leading = if first {
+            IconSize::Md.glyph(mention_icon(row.kind), muted.to_reference_paint())
+        } else {
+            UiBox::new()
                 .width(IconSize::Md.px())
                 .height(IconSize::Md.px())
                 .style(Style::new().flex_shrink(0.0))
-                .build(),
+                .build()
         };
-        let action = Rc::clone(&dispatch);
-        let hover = Rc::clone(&dispatch);
+        let action = Rc::clone(dispatch);
+        let hover = Rc::clone(dispatch);
         let mut item = RowItem::new(
             format!("composer-mention-row-{index}"),
-            theme,
+            *theme,
             Row::MenuItem,
             surface,
             row.title.clone(),
@@ -129,7 +133,7 @@ fn mention_menu(
                     )
                     .child(
                         TextRole::Label
-                            .text(&theme, row.description.clone())
+                            .text(theme, row.description.clone())
                             .gpui_source_color(muted.to_reference_text_color())
                             .overflow(OverflowMode::EndEllipsis)
                             .style(Style::new().min_width(Length::Pct(0.0)).text_wrap(false))
@@ -148,10 +152,10 @@ fn mention_menu(
         .child(entries.style(inset_sides(Style::new(), inset, 0.0)).build())
         .build()
         .with_key(MENTION_SCROLL);
-    let width = width.min(viewport.w - 2.0 * MENU_VIEWPORT_MARGIN);
+    let width = width.min(2.0f32.mul_add(-MENU_VIEWPORT_MARGIN, viewport.w));
     Some(
         surface
-            .build(&theme, vec![list])
+            .build(theme, vec![list])
             .style(inset_sides(
                 Style::new()
                     .width(Length::Px(width))
@@ -166,7 +170,7 @@ fn mention_menu(
 impl ComposerOwner {
     pub fn mention_menu(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport: aqua_core::Size,
         width: f32,
         kept: f32,
@@ -174,14 +178,7 @@ impl ComposerOwner {
         let composer = self.controller.borrow();
         let mentions = &composer.mentions;
         let scroll = mentions.scroll(kept, mention_metrics(viewport));
-        mention_menu(
-            theme,
-            mentions,
-            viewport,
-            width,
-            scroll,
-            Rc::clone(&self.dispatch),
-        )
+        mention_menu(theme, mentions, viewport, width, scroll, &self.dispatch)
     }
 
     pub fn mention_revealed(&self) {

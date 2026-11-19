@@ -38,7 +38,7 @@ impl SlidingTab {
     }
 
     pub fn aim(&mut self, target: f32, now: Instant) {
-        if target != self.target {
+        if (target - self.target).abs() > f32::EPSILON {
             self.target = target;
             self.slide = Some(Slide {
                 from: self.top,

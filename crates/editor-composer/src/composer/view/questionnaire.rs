@@ -16,22 +16,22 @@ use editor_ui::{
 use std::rc::Rc;
 
 pub fn questionnaire(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     panel: &super::super::questionnaire::QuestionnairePanel,
     question: Option<&artisan_api::Question>,
     stored_options: Option<Element>,
     load_error: Option<&str>,
     source_view: Option<Element>,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Option<Element> {
     let active = panel.active()?;
     let muted = theme.colors.text_muted;
     let surface = Surface::Composer;
     let sending = panel.sending.is_some();
-    let action = Rc::clone(&dispatch);
+    let action = Rc::clone(dispatch);
     let dismiss = IconButton::new(
         "composer-question-dismiss",
-        theme,
+        *theme,
         AssetId::TABLER_X,
         "Dismiss questionnaire",
         IconButtonSize::Sm,
@@ -52,7 +52,7 @@ pub fn questionnaire(
                 .child(
                     TextRole::Caption
                         .text(
-                            &theme,
+                            theme,
                             question
                                 .and_then(|question| question.header.clone())
                                 .unwrap_or_else(|| "Question".into()),
@@ -65,8 +65,8 @@ pub fn questionnaire(
         )
         .child(dismiss)
         .build();
-    let card = match question {
-        Some(question) => question_card(
+    let card = if let Some(question) = question {
+        question_card(
             theme,
             panel,
             active,
@@ -74,35 +74,34 @@ pub fn questionnaire(
             stored_options,
             source_view,
             header,
-            &dispatch,
-        ),
-        None => {
-            let mut loading = UiBox::new()
-                .layout("column")
-                .spaced(Space::S8)
-                .child(header)
-                .child(
-                    TextRole::Label
-                        .text(&theme, load_error.unwrap_or("Loading question…").to_owned())
-                        .wrap(true)
-                        .build(),
-                );
-            if load_error.is_some() {
-                let action = Rc::clone(&dispatch);
-                loading = loading.child(
-                    Button::text(
-                        "question-page-retry",
-                        theme,
-                        ButtonTone::Neutral,
-                        "Try again",
-                    )
-                    .within(surface)
-                    .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
+            dispatch,
+        )
+    } else {
+        let mut loading = UiBox::new()
+            .layout("column")
+            .spaced(Space::S8)
+            .child(header)
+            .child(
+                TextRole::Label
+                    .text(theme, load_error.unwrap_or("Loading question…").to_owned())
+                    .wrap(true)
                     .build(),
-                );
-            }
-            loading.build()
+            );
+        if load_error.is_some() {
+            let action = Rc::clone(dispatch);
+            loading = loading.child(
+                Button::text(
+                    "question-page-retry",
+                    *theme,
+                    ButtonTone::Neutral,
+                    "Try again",
+                )
+                .within(surface)
+                .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
+                .build(),
+            );
         }
+        loading.build()
     };
     Some(
         Scroll::new()
@@ -116,7 +115,7 @@ pub fn questionnaire(
                     .spaced(Space::S8)
                     .child(card)
                     .child(other_questionnaires(
-                        theme, panel, active, sending, &dispatch,
+                        theme, panel, active, sending, dispatch,
                     ))
                     .build(),
             )
@@ -129,10 +128,11 @@ pub(super) const QUESTIONNAIRE_MAX_HEIGHT: f32 = 280.0;
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "a loaded question card needs the panel, its question and the parts mounted around it"
+    clippy::too_many_lines,
+    reason = "a loaded question card needs the panel, its question and the parts mounted around it, laid out as one card"
 )]
 fn question_card(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     panel: &super::super::questionnaire::QuestionnairePanel,
     active: &super::super::questionnaire::ComposerQuestionnaire,
     question: &artisan_api::Question,
@@ -145,16 +145,15 @@ fn question_card(
     let surface = Surface::Composer;
     let sending = panel.sending.is_some();
     let text = match &question.text {
-        artisan_api::TextContent::Inline(text) => TextRole::Label
-            .text(&theme, text.clone())
-            .wrap(true)
-            .build(),
+        artisan_api::TextContent::Inline(text) => {
+            TextRole::Label.text(theme, text.clone()).wrap(true).build()
+        }
         artisan_api::TextContent::Stored(source) => {
             let source = source.clone();
             let action = Rc::clone(dispatch);
             Button::text(
                 "question-source",
-                theme,
+                *theme,
                 ButtonTone::Quiet,
                 "Read full question",
             )
@@ -175,23 +174,24 @@ fn question_card(
     if let artisan_api::Collection::Inline(options) = &question.options {
         for (index, option) in options.iter().enumerate() {
             let selected = panel.ticked.contains(&option.id);
-            let marker = match question.multi_select && selected {
-                true => IconSize::Md.glyph(
+            let marker = if question.multi_select && selected {
+                IconSize::Md.glyph(
                     AssetId::TABLER_CHECK,
                     theme.colors.text.to_reference_paint(),
-                ),
-                false => TextRole::Label
-                    .text(&theme, (index + 1).to_string())
+                )
+            } else {
+                TextRole::Label
+                    .text(theme, (index + 1).to_string())
                     .gpui_source_color(muted.to_reference_text_color())
                     .wrap(false)
-                    .build(),
+                    .build()
             };
             let mut text = UiBox::new()
                 .layout("column")
                 .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                 .child(
                     TextRole::Label
-                        .text(&theme, option.label.clone())
+                        .text(theme, option.label.clone())
                         .wrap(true)
                         .build(),
                 );
@@ -204,7 +204,7 @@ fn question_card(
                 };
                 text = text.child(
                     TextRole::Caption
-                        .text(&theme, value)
+                        .text(theme, value)
                         .gpui_source_color(muted.to_reference_text_color())
                         .wrap(true)
                         .build(),
@@ -231,13 +231,13 @@ fn question_card(
                 .build();
             let mut row = HitArea::new(
                 format!("composer-question-option-{index}"),
-                &theme,
+                theme,
                 Role::Button,
                 option.label.clone(),
             )
             .child(live::layer(
                 Hover::Neutral,
-                &theme,
+                theme,
                 Radius::Field.px(),
                 selected && !sending,
             ))
@@ -250,7 +250,7 @@ fn question_card(
                         step,
                         id: id.clone(),
                         multi,
-                    })
+                    });
                 });
             }
             let row = choice(row.build(), selected, sending);
@@ -261,13 +261,13 @@ fn question_card(
                 rows = rows.child(
                     Button::text(
                         format!("question-description-{index}"),
-                        theme,
+                        *theme,
                         ButtonTone::Quiet,
                         "Read description",
                     )
                     .within(surface)
                     .on_activate(move |_| {
-                        action(ComposerAction::OpenQuestionSource(source.clone()))
+                        action(ComposerAction::OpenQuestionSource(source.clone()));
                     })
                     .build(),
                 );
@@ -287,7 +287,7 @@ fn question_card(
         rows = rows.child(
             Button::text(
                 "composer-question-continue",
-                theme,
+                *theme,
                 ButtonTone::Primary,
                 text,
             )
@@ -300,7 +300,7 @@ fn question_card(
     if panel.can_go_back() {
         let action = Rc::clone(dispatch);
         card = card.child(
-            Button::text("composer-question-back", theme, ButtonTone::Quiet, "Back")
+            Button::text("composer-question-back", *theme, ButtonTone::Quiet, "Back")
                 .within(surface)
                 .on_activate(move |_| action(ComposerAction::QuestionBack))
                 .build(),
@@ -309,7 +309,7 @@ fn question_card(
     if sending {
         card = card.child(
             TextRole::Caption
-                .text(&theme, "Sending your answer…")
+                .text(theme, "Sending your answer…")
                 .gpui_source_color(muted.to_reference_text_color())
                 .build(),
         );
@@ -318,7 +318,7 @@ fn question_card(
         card = card
             .child(
                 TextRole::Label
-                    .text(&theme, error.clone())
+                    .text(theme, error.clone())
                     .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                     .wrap(true)
                     .build(),
@@ -326,7 +326,7 @@ fn question_card(
             .child(
                 Button::text(
                     "composer-question-retry",
-                    theme,
+                    *theme,
                     ButtonTone::Neutral,
                     "Send the answer again",
                 )
@@ -339,7 +339,7 @@ fn question_card(
 }
 
 fn other_questionnaires(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     panel: &super::super::questionnaire::QuestionnairePanel,
     active: &super::super::questionnaire::ComposerQuestionnaire,
     sending: bool,
@@ -371,7 +371,7 @@ fn other_questionnaires(
         let action = Rc::clone(dispatch);
         let mut row = RowItem::new(
             format!("composer-questionnaire-{position}"),
-            theme,
+            *theme,
             Row::ListItem(Density::Dense),
             surface,
             title,
@@ -383,7 +383,7 @@ fn other_questionnaires(
             row = row.trailing(
                 TextRole::Caption
                     .text(
-                        &theme,
+                        theme,
                         editor_ui::locale::count(other.questions.len(), "question", "questions"),
                     )
                     .gpui_source_color(muted.to_reference_text_color())
@@ -403,8 +403,5 @@ fn choice(row: Element, selected: bool, sending: bool) -> Element {
         .aria_selected(selected)
         .disabled(sending)
         .focusable(!sending);
-    match sending {
-        true => row,
-        false => live::track(row),
-    }
+    if sending { row } else { live::track(row) }
 }

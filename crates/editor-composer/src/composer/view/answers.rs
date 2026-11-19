@@ -22,8 +22,8 @@ impl ComposerOwner {
             let result =
                 super::super::questionnaire::QuestionnairePanel::send(&client, &item, &answer)
                     .await;
-            let _ = sender
-                .send(AnswerCompletion {
+            sender
+                .offer(AnswerCompletion {
                     host: host_id,
                     instance,
                     generation,

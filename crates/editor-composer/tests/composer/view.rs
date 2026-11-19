@@ -49,7 +49,11 @@ impl Mounted {
             .into_iter()
             .filter_map(|node| match &self.app.tree().get(node)?.kind {
                 aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
-                _ => None,
+                aqua_ui::tree::NodeKind::Box(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
             })
             .collect()
     }
@@ -106,13 +110,13 @@ fn a_question_that_failed_to_load_can_still_be_dismissed_or_switched() {
     let panel = panel(vec![vec![question("a", 2)], vec![question("b", 2)]]);
     let mut mounted = Mounted::new(|dispatch| {
         questionnaire(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &panel,
             None,
             None,
             Some("Couldn't load the question."),
             None,
-            dispatch,
+            &dispatch,
         )
         .unwrap()
     });
@@ -147,13 +151,13 @@ fn back_returns_to_the_previous_question_with_its_choice_restored() {
     assert!(panel.answer(answer, true, &mut text).is_none());
     let mut mounted = Mounted::new(|dispatch| {
         questionnaire(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &panel,
             Some(&second),
             None,
             None,
             None,
-            dispatch,
+            &dispatch,
         )
         .unwrap()
     });
@@ -169,13 +173,13 @@ fn back_returns_to_the_previous_question_with_its_choice_restored() {
     );
     let first_shown = Mounted::new(|dispatch| {
         questionnaire(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &panel,
             Some(&first),
             None,
             None,
             None,
-            dispatch,
+            &dispatch,
         )
         .unwrap()
     });
@@ -190,13 +194,13 @@ fn a_long_questionnaire_scrolls_and_leaves_the_prompt_on_screen() {
     let panel = panel(vec![vec![long.clone()]]);
     let mounted = Mounted::new(|dispatch| {
         questionnaire(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &panel,
             Some(&long),
             None,
             None,
             None,
-            dispatch,
+            &dispatch,
         )
         .unwrap()
     });
@@ -223,11 +227,11 @@ fn a_long_questionnaire_scrolls_and_leaves_the_prompt_on_screen() {
 fn a_composer_notice_explains_itself_and_can_be_dismissed() {
     let mut mounted = Mounted::new(|dispatch| {
         draft_error(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             ComposerFailure::Notice {
                 message: "A message can contain at most 8 images.",
             },
-            dispatch,
+            &dispatch,
         )
     });
     assert!(
@@ -306,7 +310,7 @@ fn a_gated_engine_explains_itself_on_keyboard_focus_and_to_assistive_tech() {
     let sink = Rc::clone(&shown);
     let mut mounted = Mounted::new(|dispatch| {
         engine_tab(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             signed_out.engine,
             None,
             Some(reason.clone()),

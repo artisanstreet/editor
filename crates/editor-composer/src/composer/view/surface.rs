@@ -16,9 +16,13 @@ use editor_ui::{
 use std::rc::Rc;
 
 impl ComposerOwner {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the owner measures tabs, scroll position and the engine light before building the menu"
+    )]
     pub fn model_menu(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         host: &editor_core::HostData,
         viewport: aqua_core::Size,
         kept_scroll: f32,
@@ -72,10 +76,12 @@ impl ComposerOwner {
             .or_else(|| layout.spied(&picker.models, scroll, MODEL_LIST_HEIGHT))
             .filter(|engine| engines.iter().any(|status| status.engine == *engine));
         drop(scrolling);
-        let active = items
-            .iter()
-            .position(|item| item.pane == pane)
-            .unwrap_or_default() as f32;
+        let active = super::rows(
+            items
+                .iter()
+                .position(|item| item.pane == pane)
+                .unwrap_or_default(),
+        );
         let tab = {
             let mut tab = self.model_tab.borrow_mut();
             let height = model_item_height(items.len());
@@ -97,7 +103,7 @@ impl ComposerOwner {
             let mut light = self.engine_light.borrow_mut();
             light.measure(
                 engine,
-                index as f32 * (MODEL_BAR_HEIGHT + MODEL_BAR_GAP.px()),
+                super::rows(index) * (MODEL_BAR_HEIGHT + MODEL_BAR_GAP.px()),
                 MODEL_BAR_HEIGHT,
                 now,
                 self.reduced_motion,
@@ -106,7 +112,7 @@ impl ComposerOwner {
                 Some((left, _)) => Some(
                     self.engine_light_image
                         .borrow_mut()
-                        .element(&theme, assets, left)?,
+                        .element(theme, assets, left)?,
                 ),
                 None => None,
             }
@@ -117,7 +123,7 @@ impl ComposerOwner {
             theme,
             host,
             picker,
-            current,
+            current.as_ref(),
             viewport,
             ModelMenuFrame {
                 items,
@@ -128,13 +134,17 @@ impl ComposerOwner {
                 engine_light,
             },
             (host.instance(), controller.generation()),
-            Rc::clone(&self.dispatch),
+            &self.dispatch,
         ))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the composer surface is placed by the workspace with its theme, frame clock, viewport and live question state"
+    )]
     pub fn surface(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         host: &editor_core::HostData,
         placeholder: &str,
         questionnaires: Option<Element>,
@@ -153,7 +163,8 @@ impl ComposerOwner {
                 {
                     host.suggestion(thread).map(str::to_owned)
                 }
-                _ => None,
+                super::super::controller::ComposerTarget::Thread { .. }
+                | super::super::controller::ComposerTarget::NewThread { .. } => None,
             }
         };
         self.editor.set_suggestion(suggestion);
@@ -175,29 +186,26 @@ impl ComposerOwner {
                     .build(),
             );
             let strip = if tab.is_some() {
-                match controller.strip.motion.frame(now, self.reduced_motion) {
-                    Some(frame) => {
-                        self.strip_moving.set(frame.moving);
-                        let mut ticker = self.note_ticker.borrow_mut();
-                        ticker.set_text(frame.goal.objective.clone());
-                        let content = goal_label(
-                            theme,
-                            &frame,
-                            UiBox::new()
-                                .style(TextRole::Label.inherit(&theme))
-                                .child(ticker.build(TextRole::Label.spec().line))
-                                .build(),
-                            Rc::clone(&self.dispatch),
-                        );
-                        Some(editor_ui::tab_card::TabCardStrip {
-                            reveal: frame.reveal,
-                            content,
-                        })
-                    }
-                    None => {
-                        self.strip_moving.set(false);
-                        None
-                    }
+                if let Some(frame) = controller.strip.motion.frame(now, self.reduced_motion) {
+                    self.strip_moving.set(frame.moving);
+                    let mut ticker = self.note_ticker.borrow_mut();
+                    ticker.set_text(frame.goal.objective.clone());
+                    let content = goal_label(
+                        theme,
+                        &frame,
+                        UiBox::new()
+                            .style(TextRole::Label.inherit(theme))
+                            .child(ticker.build(TextRole::Label.spec().line))
+                            .build(),
+                        Rc::clone(&self.dispatch),
+                    );
+                    Some(editor_ui::tab_card::TabCardStrip {
+                        reveal: frame.reveal,
+                        content,
+                    })
+                } else {
+                    self.strip_moving.set(false);
+                    None
                 }
             } else {
                 self.strip_moving.set(false);
@@ -223,14 +231,14 @@ impl ComposerOwner {
                 body: card,
                 strip,
             }
-            .build(theme, Rc::clone(&self.tab_geometry)),
+            .build(*theme, Rc::clone(&self.tab_geometry)),
             None => card,
         }
     }
 
     fn model(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         controller: &super::super::controller::Composer,
         host: &editor_core::HostData,
     ) -> Element {
@@ -246,9 +254,14 @@ impl ComposerOwner {
         model_trigger(theme, config.as_ref(), model, Rc::clone(&self.dispatch))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the composer card is placed by the workspace with its theme, frame clock, viewport and live question state; the card assembles the strip, prompt, attachments, toolbar and failure callouts in order"
+    )]
     pub fn card(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         host: &editor_core::HostData,
         nested: bool,
         placeholder: &str,
@@ -281,7 +294,7 @@ impl ComposerOwner {
                         error: &error,
                         conflict,
                     },
-                    Rc::clone(&self.dispatch),
+                    &self.dispatch,
                 )
             })
             .or_else(|| {
@@ -289,7 +302,7 @@ impl ComposerOwner {
                     draft_error(
                         theme,
                         ComposerFailure::ModelChoice { error },
-                        Rc::clone(&self.dispatch),
+                        &self.dispatch,
                     )
                 })
             })
@@ -304,11 +317,7 @@ impl ComposerOwner {
                             .and_then(|attachments| attachments.notice.as_deref())
                     })
                     .map(|message| {
-                        draft_error(
-                            theme,
-                            ComposerFailure::Notice { message },
-                            Rc::clone(&self.dispatch),
-                        )
+                        draft_error(theme, ComposerFailure::Notice { message }, &self.dispatch)
                     })
             });
         composer_card(
@@ -317,10 +326,10 @@ impl ComposerOwner {
             CardParts {
                 prompt: self.editor.prompt_with_scroll_edges(
                     "composer-prompt",
-                    &theme,
+                    theme,
                     PROMPT_NAME,
                     placeholder,
-                    &self.prompt_edges(&theme),
+                    &self.prompt_edges(theme),
                 ),
                 primary: primary(theme, face, outgoing, disabled, Rc::clone(&self.dispatch)),
                 questionnaires,
@@ -334,7 +343,7 @@ impl ComposerOwner {
             aqua_ui::input::InputKind::DragOver,
             aqua_ui::input::EventPhase::Bubble,
             {
-                let host = host_id.clone();
+                let host = host_id;
                 move |event| {
                     use aqua_ui::input::{InputResponse, RoutedInput};
                     let acceptable = matches!(
@@ -369,7 +378,21 @@ impl ComposerOwner {
                                 None => InputResponse::default(),
                             }
                         }
-                        _ => InputResponse::default(),
+                        RoutedInput::ClipboardPaste(_)
+                        | RoutedInput::ClipboardCut
+                        | RoutedInput::TextVertical { .. }
+                        | RoutedInput::TextMotion { .. }
+                        | RoutedInput::Native(_)
+                        | RoutedInput::PointerEnter(_)
+                        | RoutedInput::PointerLeave(_)
+                        | RoutedInput::TextPointer { .. }
+                        | RoutedInput::TextContext { .. }
+                        | RoutedInput::TextRangeActivated { .. }
+                        | RoutedInput::FilesDropped { .. }
+                        | RoutedInput::DragEnter { .. }
+                        | RoutedInput::DragOver { .. }
+                        | RoutedInput::DragLeave { .. }
+                        | RoutedInput::DragEnd { .. } => InputResponse::default(),
                     }
                 }
             },
@@ -386,15 +409,15 @@ impl ComposerOwner {
                         at: Some(at),
                     },
                 ) = (instance, &event.input)
+                    && !paths.is_empty()
+                    && event.bounds.contains(*at)
                 {
-                    if !paths.is_empty() && event.bounds.contains(*at) {
-                        dispatch(ComposerAction::DroppedPaths {
-                            paths: paths.to_vec(),
-                            instance,
-                            generation,
-                        });
-                        return InputResponse::handled();
-                    }
+                    dispatch(ComposerAction::DroppedPaths {
+                        paths: paths.to_vec(),
+                        instance,
+                        generation,
+                    });
+                    return InputResponse::handled();
                 }
                 InputResponse::default()
             },

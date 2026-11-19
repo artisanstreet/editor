@@ -1,3 +1,8 @@
+#![expect(
+    clippy::float_cmp,
+    reason = "layout offsets and light levels are exact sums of fixed metrics, so equality is the contract"
+)]
+
 use super::*;
 
 #[test]

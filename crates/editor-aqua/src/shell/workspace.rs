@@ -449,7 +449,7 @@ impl Workspace {
         }
         if self.composer_tooltip.is_none() {
             if let (Some(content), Some(node), Some(factory)) =
-                (shown, node, owner.tooltip_surface_factory(theme))
+                (shown, node, owner.tooltip_surface_factory(&theme))
             {
                 let surface = factory.surface;
                 match crate::ui::hover_tooltip::TooltipHost::open(
@@ -604,7 +604,7 @@ impl Workspace {
             let content = match kind {
                 PopupKind::Model => {
                     match owner.model_menu(
-                        theme,
+                        &theme,
                         host,
                         viewport,
                         crate::shell::wheel::kept_offset(ui, crate::ui::scroll::MODEL_MENU).y,
@@ -621,12 +621,12 @@ impl Workspace {
                 PopupKind::Project => {
                     let composer = owner.controller.borrow();
                     Some(view::project_menu(
-                        theme,
+                        &theme,
                         host,
                         &composer.picker,
                         composer.project(host).as_ref(),
                         viewport,
-                        Rc::clone(&emit),
+                        &emit,
                     ))
                 }
                 PopupKind::Mentions => {
@@ -634,7 +634,7 @@ impl Workspace {
                         .and_then(|node| ui.tree().rect(node))
                         .map_or(viewport.w, |rect| rect.w);
                     owner.mention_menu(
-                        theme,
+                        &theme,
                         viewport,
                         width,
                         crate::shell::wheel::kept_offset(ui, view::MENTION_SCROLL).y,
@@ -1193,20 +1193,20 @@ impl Workspace {
             .question_pages
             .current_question(&composer.questionnaire);
         let questionnaires = crate::composer::view::questionnaire(
-            theme,
+            &theme,
             &composer.questionnaire,
             question,
             options,
             self.conversation.question_pages.question_error(),
             source_view,
-            Rc::clone(&emit),
+            &emit,
         );
         let attachments = crate::composer::view::attachments(
-            theme,
+            &theme,
             &composer,
             std::time::Instant::now(),
             reduced_motion,
-            emit,
+            &emit,
         );
         Ok((questionnaires, attachments))
     }

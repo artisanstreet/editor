@@ -3,7 +3,7 @@ use aqua_ui::element::{Box as UiBox, Key};
 use aqua_ui::style::Length;
 use artisan_api::{Answer, Collection, ItemId, Question, QuestionAnswer, QuestionOption};
 use editor_aqua::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
-use editor_aqua::composer::view::questionnaire;
+use editor_aqua::composer::view::{Dispatch, questionnaire};
 use editor_aqua::ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
@@ -37,14 +37,15 @@ fn a_long_option_description_wraps_inside_the_card() {
         }],
         &mut String::new(),
     );
+    let dispatch: Dispatch = Rc::new(|_| {});
     let card = questionnaire(
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &panel,
         Some(&asked),
         None,
         None,
         None,
-        Rc::new(|_| {}),
+        &dispatch,
     )
     .unwrap();
     let fonts = SharedFonts::new();

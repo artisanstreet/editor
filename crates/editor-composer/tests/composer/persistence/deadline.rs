@@ -8,10 +8,10 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
     let pin = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &pin, &identity).unwrap();
     let mut state = DraftSession::new("new".into());
-    assert!(matches!(state.next(), Some(Operation::Load)));
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
     state.loaded(Ok(DraftSnapshot::default()));
     state.queue(json!({"text": "pending"}));
-    let Some(Operation::Write { request, edited }) = state.next() else {
+    let Some(Operation::Write { request, edited }) = state.next_operation() else {
         panic!("expected a pending write");
     };
     let (changed, _) = watch::channel(0);
@@ -36,7 +36,7 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
 #[test]
 fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
     let (handle, request, edited) = pending_write();
-    assert!(handle.read(|state| state.pending()));
+    assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared.state.written(
             &request,
@@ -57,7 +57,7 @@ fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
 #[test]
 fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
     let (handle, request, edited) = pending_write();
-    assert!(handle.read(|state| state.pending()));
+    assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared.state.written(
             &request,
@@ -91,5 +91,5 @@ fn unacknowledged_write_at_deadline_is_cancelled_and_counted_once() {
         }
     );
     assert!(handle.0.cancelled.is_cancelled());
-    assert!(handle.read(|state| state.pending()));
+    assert!(handle.read(DraftSession::pending));
 }

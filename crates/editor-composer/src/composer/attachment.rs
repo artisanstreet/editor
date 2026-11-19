@@ -4,7 +4,7 @@ enum Input {
     Uploaded(BlobHash),
     Failed(String),
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Encoding,
     Uploading,
@@ -53,6 +53,7 @@ use std::{
     time::Instant,
 };
 
+#[derive(Debug)]
 pub enum Source {
     Bytes(Vec<u8>),
     Path(PathBuf),
@@ -144,6 +145,11 @@ impl Source {
     }
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace reads each attachment's key and preview; its upload state stays private to the attachment list"
+)]
+#[derive(Debug)]
 pub struct Attachment {
     pub key: u64,
     pub(crate) name: String,
@@ -159,6 +165,7 @@ pub struct Attachment {
     task: Option<tokio::task::AbortHandle>,
 }
 
+#[derive(Debug)]
 pub struct PendingUpload {
     origin: Arc<Source>,
     client: ForgeClient,
@@ -197,6 +204,11 @@ enum Completion {
     Restored(u64, Result<Vec<u8>, String>),
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace renders the attachment items directly; the client and delivery stay private"
+)]
+#[derive(Debug)]
 pub struct Attachments {
     pub items: Vec<Attachment>,
     pub(crate) shake: Option<(u64, Instant)>,
@@ -214,7 +226,10 @@ impl Attachments {
             notice: None,
             next: 0,
             client,
-            delivery: Delivery::new(NonZeroUsize::new(32).unwrap()),
+            delivery: Delivery::new(
+                NonZeroUsize::new(32)
+                    .expect("invariant: the attachment delivery capacity is non-zero"),
+            ),
         }
     }
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
@@ -256,14 +271,24 @@ impl Attachments {
         let task = runtime().spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 source.read().map(|bytes| {
-                    let placeholder = super::encode::placeholder(&bytes);
+                    let placeholder = match super::encode::placeholder(&bytes) {
+                        Ok(placeholder) => Some(placeholder),
+                        Err(error) => {
+                            tracing::debug!(
+                                key,
+                                error = %diagnostics::chain(&error),
+                                "no quick preview for the attachment; it shows once converted"
+                            );
+                            None
+                        }
+                    };
                     (bytes, placeholder)
                 })
             })
             .await
             .map_err(|error| error.to_string())
             .and_then(|result| result.map_err(|error| diagnostics::chain(&error)));
-            let _ = sender.send(Completion::Read(key, result)).await;
+            sender.offer(Completion::Read(key, result)).await;
         });
         if let Some(item) = self.items.last_mut() {
             item.task = Some(task.abort_handle());
@@ -301,7 +326,7 @@ impl Attachments {
                 .blob(&hash)
                 .await
                 .map_err(|error| diagnostics::chain(&error));
-            let _ = sender.send(Completion::Restored(key, result)).await;
+            sender.offer(Completion::Restored(key, result)).await;
         });
     }
     pub(crate) fn retry_preview(&mut self, key: u64) {
@@ -336,6 +361,10 @@ impl Attachments {
             })
             .collect()
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each attachment completion kind updates the same item list and notice in one drain pass"
+    )]
     pub(crate) fn drain(&mut self, assets: &ImageAssets) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {
@@ -377,20 +406,30 @@ impl Attachments {
                         item.source = Some(source);
                         item.preview = placeholder.and_then(|image| {
                             let (width, height) = image.dimensions();
-                            aqua::images::DecodedImage::from_rgba(width, height, image.into_raw())
-                                .ok()
-                                .and_then(|image| assets.insert(image).ok())
+                            let inserted =
+                                aqua::images::DecodedImage::from_rgba(width, height, image.into_raw())
+                                    .map_err(|error| error.to_string())
+                                    .and_then(|image| {
+                                        assets.insert(image).map_err(|error| error.to_string())
+                                    });
+                            match inserted {
+                                Ok(handle) => Some(handle),
+                                Err(error) => {
+                                    tracing::debug!(key, %error, "couldn't show the attachment's quick preview");
+                                    None
+                                }
+                            }
                         });
                         item.shown = true;
                         let sender = self.delivery.sender();
                         let task = runtime().spawn(async move {
                             static CONVERSION: OnceLock<Arc<tokio::sync::Semaphore>> =
                                 OnceLock::new();
-                            let permit = CONVERSION
-                                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
-                                .clone()
-                                .acquire_owned()
-                                .await;
+                            let permit = Arc::clone(
+                                CONVERSION.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))),
+                            )
+                            .acquire_owned()
+                            .await;
                             let result = match permit {
                                 Ok(permit) => tokio::task::spawn_blocking(move || {
                                     let _permit = permit;
@@ -403,7 +442,7 @@ impl Attachments {
                                 }),
                                 Err(error) => Err(error.to_string()),
                             };
-                            let _ = sender.send(Completion::Converted(key, result)).await;
+                            sender.offer(Completion::Converted(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());
                     }
@@ -476,7 +515,7 @@ impl Attachments {
                                 .await
                                 .map(|blob| blob.hash)
                                 .map_err(|error| diagnostics::chain(&error));
-                            let _ = sender.send(Completion::Uploaded(key, result)).await;
+                            sender.offer(Completion::Uploaded(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());
                     }

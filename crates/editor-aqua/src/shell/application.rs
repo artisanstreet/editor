@@ -935,7 +935,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             if let (Some(viewport), Some((host_id, Some(instance)))) = (viewport, identity) {
                 if let Some(host) = self.shell.core.host_if_instance(&host_id, instance) {
                     match owner.model_menu(
-                        theme,
+                        &theme,
                         host,
                         viewport,
                         crate::shell::wheel::kept_offset(

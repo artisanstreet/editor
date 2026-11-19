@@ -149,28 +149,21 @@ fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage, EncodeError>
     })
 }
 
-pub fn placeholder(bytes: &[u8]) -> Option<image::RgbaImage> {
-    let format = aqua_media::decode::still::sniff(bytes)?;
+pub fn placeholder(bytes: &[u8]) -> Result<image::RgbaImage, EncodeError> {
+    let format = aqua_media::decode::still::sniff(bytes).ok_or(EncodeError::Unsupported)?;
     if matches!(format, StillFormat::Avif | StillFormat::Heic) {
-        return Some(
-            transcoded(bytes, 256)
-                .ok()?
-                .thumbnail(144, 144)
-                .into_rgba8(),
-        );
+        return Ok(transcoded(bytes, 256)?.thumbnail(144, 144).into_rgba8());
     }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .ok()?;
+        .map_err(|error| EncodeError::Decode(image::ImageError::IoError(error)))?;
     reader.limits(decode_limits());
-    let decoder = reader.into_decoder().ok()?;
-    check_dimensions(decoder.dimensions()).ok()?;
-    Some(
-        DynamicImage::from_decoder(decoder)
-            .ok()?
-            .thumbnail(144, 144)
-            .into_rgba8(),
-    )
+    let decoder = reader.into_decoder().map_err(EncodeError::Decode)?;
+    check_dimensions(decoder.dimensions())?;
+    Ok(DynamicImage::from_decoder(decoder)
+        .map_err(EncodeError::Decode)?
+        .thumbnail(144, 144)
+        .into_rgba8())
 }
 
 fn decode_limits() -> image::Limits {
@@ -229,10 +222,18 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>, EncodeError> {
             height,
             failure,
         })?;
-    let lossless = encoder.encode_advanced(&config(true)?).ok();
-    Ok(match lossless {
-        Some(lossless) if lossless.len() < lossy.len() => lossless.to_vec(),
-        _ => lossy.to_vec(),
+    Ok(match encoder.encode_advanced(&config(true)?) {
+        Ok(lossless) if lossless.len() < lossy.len() => lossless.to_vec(),
+        Ok(_) => lossy.to_vec(),
+        Err(failure) => {
+            tracing::debug!(
+                width,
+                height,
+                ?failure,
+                "lossless WebP failed; keeping the lossy encoding"
+            );
+            lossy.to_vec()
+        }
     })
 }
 

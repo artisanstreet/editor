@@ -8,7 +8,7 @@ pub struct ComposerQuestionnaire {
     pub questions: Collection<Question>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct AnswerDraft {
     step: usize,
     recorded: BTreeMap<usize, QuestionAnswer>,
@@ -17,7 +17,11 @@ struct AnswerDraft {
     error: Option<String>,
 }
 
-#[derive(Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace and tests read the active step and ticked options; per-question drafts stay private"
+)]
+#[derive(Debug, Default)]
 pub struct QuestionnairePanel {
     questionnaires: Vec<ComposerQuestionnaire>,
     answered: Vec<ItemId>,

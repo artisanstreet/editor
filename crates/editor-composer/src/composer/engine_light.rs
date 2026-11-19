@@ -41,9 +41,10 @@ impl EngineLight {
         let glide = match self.lit.take() {
             Some(lit) if lit.engine == engine => {
                 let unchanged = lit.glide.target().to_bits() == target.to_bits();
-                let glide = match unchanged {
-                    true => lit.glide,
-                    false => Glide::Resting(target),
+                let glide = if unchanged {
+                    lit.glide
+                } else {
+                    Glide::Resting(target)
                 };
                 self.lit = Some(Lit { engine, glide });
                 return !unchanged;
@@ -71,7 +72,7 @@ fn light_left(left: f32, width: f32) -> f32 {
     left + ((width - LIGHT_WIDTH) / 2.0).max(0.0)
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct EngineLightImage {
     cached: Option<(ThemeMode, ImageHandle)>,
 }
@@ -117,7 +118,7 @@ fn bake(theme: &ArtisanTheme) -> aqua::images::DecodedImage {
         let inside = x >= padding && x < padding + 128 && y >= padding && y < padding + 96;
         let alpha = if inside {
             interpolate(
-                (y - padding) as f32 / 96.0,
+                pixel(y - padding) / 96.0,
                 &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)],
             )
         } else {
@@ -127,8 +128,8 @@ fn bake(theme: &ArtisanTheme) -> aqua::images::DecodedImage {
     });
     let blurred = image::imageops::blur(&gradient, 8.0);
     let buffer = image::ImageBuffer::from_fn(128, 96, |x, y| {
-        let nx = (x as f32 + 0.5) / 128.0;
-        let ny = (y as f32 + 0.5) / 96.0;
+        let nx = (pixel(x) + 0.5) / 128.0;
+        let ny = (pixel(y) + 0.5) / 96.0;
         let distance = ((nx - 0.5) / 0.48).hypot((ny - 0.35) / 0.70);
         let mask = interpolate(
             distance,
@@ -162,6 +163,15 @@ fn interpolate(value: f32, stops: &[(f32, f32)]) -> f32 {
     }
     stops.last().map_or(0.0, |(_, alpha)| *alpha)
 }
+fn pixel(coordinate: u32) -> f32 {
+    f32::from(u16::try_from(coordinate).unwrap_or(u16::MAX))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is clamped to 0..=1 and scaled to 0..=255 before rounding"
+)]
 fn byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }

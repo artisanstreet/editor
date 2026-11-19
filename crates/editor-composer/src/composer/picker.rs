@@ -15,7 +15,7 @@ pub struct TooltipContent {
     pub placement: TooltipPlacement,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PickerTooltip {
     pending: Option<(TooltipContent, std::time::Instant)>,
     visible: bool,
@@ -79,6 +79,7 @@ impl PickerTooltip {
     }
 }
 
+#[derive(Debug)]
 pub struct AxisOption {
     pub label: String,
     pub special: bool,
@@ -108,8 +109,10 @@ impl ModelRow {
     #[must_use]
     pub(crate) const fn engine(&self) -> EngineId {
         match self {
-            Self::Engine(engine) | Self::Gate(engine) => *engine,
-            Self::Group { engine, .. } | Self::Model { engine, .. } => *engine,
+            Self::Engine(engine)
+            | Self::Gate(engine)
+            | Self::Group { engine, .. }
+            | Self::Model { engine, .. } => *engine,
         }
     }
 }
@@ -234,6 +237,10 @@ impl AxisCursor {
     }
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace reads the open menu and tests seed picker options; the model rows and scroll edges stay crate-private"
+)]
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct PickerState {
     show_all_models: bool,
@@ -248,6 +255,18 @@ pub struct PickerState {
     pub(crate) project_edges: editor_ui::scroll_edge::ScrollEdges,
     pub(crate) model_edges: editor_ui::scroll_edge::ScrollEdges,
     groups: std::collections::HashMap<(EngineId, String), bool>,
+}
+
+impl std::fmt::Debug for PickerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PickerState")
+            .field("menu", &self.menu)
+            .field("open_serial", &self.open_serial)
+            .field("axis", &self.axis)
+            .field("models", &self.models.len())
+            .field("projects", &self.projects.len())
+            .finish_non_exhaustive()
+    }
 }
 impl PickerState {
     pub(crate) fn refresh_settings(
@@ -304,12 +323,13 @@ impl PickerState {
                     || matches!(choice.binding, artisan_api::ConfigBinding::Context(_))
             })
             .map(|choice| {
-                let description = match choice.hidden {
-                    true => Some(format!(
+                let description = if choice.hidden {
+                    Some(format!(
                         "Selected option hidden by preference. {}",
                         choice.description.as_deref().unwrap_or_default()
-                    )),
-                    false => choice.description.clone(),
+                    ))
+                } else {
+                    choice.description.clone()
                 };
                 AxisOption {
                     label: choice.label.clone(),
@@ -366,14 +386,17 @@ impl PickerState {
             .values()
             .filter(|project| !project.removed && !project.id.is_scratch())
             .collect();
-        let mut activity = std::collections::HashMap::new();
-        for thread in host.threads.values() {
-            let at = thread.activity_at.max(thread.created_at);
-            activity
-                .entry(&thread.project_id)
-                .and_modify(|latest: &mut i64| *latest = (*latest).max(at))
-                .or_insert(at);
-        }
+        let activity =
+            host.threads
+                .values()
+                .fold(std::collections::HashMap::new(), |mut activity, thread| {
+                    let at = thread.activity_at.max(thread.created_at);
+                    activity
+                        .entry(&thread.project_id)
+                        .and_modify(|latest: &mut i64| *latest = (*latest).max(at))
+                        .or_insert(at);
+                    activity
+                });
         projects.sort_by(|a, b| {
             let recent = |project: &artisan_api::Project| {
                 activity
@@ -449,7 +472,10 @@ impl PickerState {
                         id,
                         ..
                     } if *row_engine == engine => Some(id.clone()),
-                    _ => None,
+                    ModelRow::Engine(_)
+                    | ModelRow::Gate(_)
+                    | ModelRow::Group { .. }
+                    | ModelRow::Model { .. } => None,
                 })
             })?;
         Self::model_config(host, current, engine, &id)

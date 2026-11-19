@@ -10,31 +10,30 @@ pub struct Trigger {
 }
 
 fn trigger(text: &str, caret: usize) -> Option<Trigger> {
-    if caret > text.len() || !text.is_char_boundary(caret) {
-        return None;
-    }
-    let start = text[..caret]
+    let (before, after) = text.split_at_checked(caret)?;
+    let start = before
         .char_indices()
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(0, |(at, c)| at + c.len_utf8());
-    let sigil = text[start..]
+    let (lead, word) = before.split_at_checked(start)?;
+    let sigil = word
         .chars()
         .next()
         .filter(|sigil| matches!(sigil, '$' | '@' | '/'))?;
-    let query_start = start + sigil.len_utf8();
-    if caret < query_start || caret - query_start > MAX_SKILL_NAME_BYTES {
+    let query = word.get(sigil.len_utf8()..)?;
+    if query.len() > MAX_SKILL_NAME_BYTES {
         return None;
     }
-    let end = text[caret..]
+    let end = after
         .char_indices()
         .find(|(_, c)| c.is_whitespace())
         .map_or(text.len(), |(at, _)| caret + at);
     Some(Trigger {
         sigil,
         range: start..end,
-        query: text[query_start..caret].to_owned(),
-        at_start: text[..start].trim().is_empty(),
+        query: query.to_owned(),
+        at_start: lead.trim().is_empty(),
     })
 }
 
@@ -68,13 +67,15 @@ pub struct Row {
 impl Row {
     #[must_use]
     pub fn new(kind: Kind, name: String, title: String, description: String) -> Self {
+        let search_name = name.to_lowercase();
+        let search_title = title.to_lowercase();
         Self {
             kind,
-            search_name: name.to_lowercase(),
-            search_title: title.to_lowercase(),
             name,
             title,
             description,
+            search_name,
+            search_title,
         }
     }
 }
@@ -92,7 +93,11 @@ enum Steering {
     Keys,
 }
 
-#[derive(Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace and composer tests read the catalog, rows and highlight; reveal and scroll bookkeeping stay private"
+)]
+#[derive(Debug, Default)]
 pub struct Mentions {
     pub catalog: Vec<Row>,
     threads: Vec<String>,
@@ -556,9 +561,10 @@ fn scroll_offset(
         return kept.clamp(0.0, max);
     };
     let section_first = highlighted == 0 || kinds.get(highlighted - 1) != kinds.get(highlighted);
-    let top = match section_first {
-        true => span.section_top,
-        false => span.top,
+    let top = if section_first {
+        span.section_top
+    } else {
+        span.top
     };
     let offset = match reveal {
         Reveal::Section => top,

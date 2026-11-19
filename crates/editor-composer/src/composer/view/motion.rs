@@ -99,13 +99,13 @@ impl ComposerOwner {
         self.primary_swap.set(swap);
         let cleared = self.controller.borrow().cleared;
         if let Some(cleared) = cleared {
-            match super::super::swap::settle_progress(cleared, now).filter(|_| !self.reduced_motion)
+            if let Some(progress) =
+                super::super::swap::settle_progress(cleared, now).filter(|_| !self.reduced_motion)
             {
-                Some(progress) => super::super::swap::advance_prompt(app, progress),
-                None => {
-                    super::super::swap::advance_prompt(app, 1.0);
-                    self.controller.borrow_mut().cleared = None;
-                }
+                super::super::swap::advance_prompt(app, progress);
+            } else {
+                super::super::swap::advance_prompt(app, 1.0);
+                self.controller.borrow_mut().cleared = None;
             }
         }
     }

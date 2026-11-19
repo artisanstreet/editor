@@ -30,7 +30,7 @@ pub enum Posting {
 pub enum Operation {
     Load,
     Write { request: WriteDraft, edited: u64 },
-    Post(Submission),
+    Post(Box<Submission>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -138,7 +138,7 @@ struct Outgoing {
 #[derive(Debug)]
 enum Send {
     Idle,
-    Outgoing(Outgoing),
+    Outgoing(Box<Outgoing>),
     Accepted(ThreadId),
 }
 
@@ -182,7 +182,7 @@ struct Draft {
 
 #[derive(Debug)]
 enum State {
-    Open(Draft),
+    Open(Box<Draft>),
     Removed,
 }
 
@@ -236,10 +236,11 @@ impl Draft {
         }
         self.body = body;
         self.edits.edit();
-        if !self.sending() && self.request != Request::Posting {
-            if let Send::Outgoing(_) = self.send {
-                self.send = Send::Idle;
-            }
+        if !self.sending()
+            && self.request != Request::Posting
+            && let Send::Outgoing(_) = self.send
+        {
+            self.send = Send::Idle;
         }
         self.clear_failure();
         true
@@ -291,7 +292,7 @@ impl DraftSession {
     pub fn new(scope: String) -> Self {
         Self {
             scope,
-            state: State::Open(Draft {
+            state: State::Open(Box::new(Draft {
                 body: Value::Null,
                 remote: Remote::Unloaded,
                 edits: Edits {
@@ -302,7 +303,7 @@ impl DraftSession {
                 request: Request::Idle,
                 halt: Halt::Clear,
                 send: Send::Idle,
-            }),
+            })),
         }
     }
 
@@ -400,7 +401,11 @@ impl DraftSession {
         };
         let mut body = match &draft.body {
             Value::Null => DraftBody::default(),
-            body => match serde_json::from_value::<DraftBody>(body.clone()) {
+            body @ (Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Array(_)
+            | Value::Object(_)) => match serde_json::from_value::<DraftBody>(body.clone()) {
                 Ok(body) => body,
                 Err(source) => {
                     let failure = DraftFailure::AddImage {
@@ -465,11 +470,11 @@ impl DraftSession {
         match &mut draft.send {
             Send::Outgoing(outgoing) => outgoing.stage = Stage::Queued,
             Send::Idle | Send::Accepted(_) => {
-                draft.send = Send::Outgoing(Outgoing {
+                draft.send = Send::Outgoing(Box::new(Outgoing {
                     request: submission,
                     stage: Stage::Queued,
                     edited: draft.edits.latest,
-                });
+                }));
             }
         }
         draft.clear_failure();
@@ -511,7 +516,7 @@ impl DraftSession {
         self.state = State::Removed;
     }
 
-    pub fn next(&mut self) -> Option<Operation> {
+    pub fn next_operation(&mut self) -> Option<Operation> {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
@@ -547,7 +552,10 @@ impl DraftSession {
                     scope: self.scope.clone(),
                     revision,
                 });
-                (Request::Posting, Operation::Post(outgoing.request.clone()))
+                (
+                    Request::Posting,
+                    Operation::Post(Box::new(outgoing.request.clone())),
+                )
             }
         };
         draft.request = request;

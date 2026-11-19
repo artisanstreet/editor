@@ -13,7 +13,7 @@ fn card(owner: &ComposerOwner, core: &Core, host: &HostId) -> aqua_ui::element::
         .width(700.0)
         .height(500.0)
         .child(owner.card(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             core.host(host).unwrap(),
             false,
             "",

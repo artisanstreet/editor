@@ -78,16 +78,19 @@ pub(super) fn model_menu_items(
             if !axis.shown(options.len()) {
                 continue;
             }
-            let value = options
-                .iter()
-                .find(|option| option.selected)
-                .map(|option| option.label.clone())
-                .unwrap_or_else(|| match axis {
+            let value = options.iter().find(|option| option.selected).map_or_else(
+                || match axis {
                     super::super::picker::Axis::Special => "None".into(),
                     super::super::picker::Axis::Activation => "On".into(),
                     super::super::picker::Axis::Thinking => "Special mode".into(),
-                    _ => "Not set".into(),
-                });
+                    super::super::picker::Axis::Variant
+                    | super::super::picker::Axis::Speed
+                    | super::super::picker::Axis::Context
+                    | super::super::picker::Axis::Compaction
+                    | super::super::picker::Axis::Permission => "Not set".into(),
+                },
+                |option| option.label.clone(),
+            );
             items.push(ModelMenuItem {
                 pane: Some(axis),
                 label: axis.title(),
@@ -160,7 +163,7 @@ fn model_menu_tab(
 }
 
 fn model_engine_bar(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     engines: &[&artisan_api::EngineStatus],
     spied: Option<artisan_api::EngineId>,
     engine_light: Option<Element>,
@@ -225,7 +228,7 @@ pub(super) fn engine_reason(status: &artisan_api::EngineStatus) -> Option<String
 }
 
 pub(super) fn engine_tab(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     engine: artisan_api::EngineId,
     spied: Option<artisan_api::EngineId>,
     reason: Option<String>,
@@ -236,8 +239,8 @@ pub(super) fn engine_tab(
     let focus_explain = Rc::clone(&explain);
     let tab = IconButton::new(
         format!("composer-engine-{engine}"),
-        theme,
-        engine_icon(&theme, engine),
+        *theme,
+        engine_icon(theme, engine),
         engine.display_name(),
         MODEL_ENGINE_TAB,
         Finish::Plain,
@@ -301,8 +304,12 @@ pub(super) fn model_gate_row(
     body.build()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the model pane renders engine headers, gated engines, groups and model rows in one virtualized list"
+)]
 fn model_list_pane(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     host: &editor_core::HostData,
     picker: &super::super::picker::PickerState,
     current: Option<&artisan_api::EngineConfig>,
@@ -334,7 +341,7 @@ fn model_list_pane(
                 rows = rows.child(
                     RowItem::new(
                         format!("composer-model-engine-{engine}"),
-                        theme,
+                        *theme,
                         Row::Heading,
                         Surface::Menu,
                         engine.display_name(),
@@ -348,7 +355,7 @@ fn model_list_pane(
                     .get(&engine)
                     .and_then(super::super::picker::gate)
                 {
-                    rows = rows.child(model_gate_row(&theme, engine, gate, dispatch));
+                    rows = rows.child(model_gate_row(theme, engine, gate, dispatch));
                 }
             }
             ModelRow::Group { name, open, .. } => {
@@ -362,7 +369,7 @@ fn model_list_pane(
                 let action = Rc::clone(dispatch);
                 let heading = RowItem::new(
                     format!("composer-model-group-{engine}-{group_label}"),
-                    theme,
+                    *theme,
                     Row::Heading,
                     Surface::Menu,
                     group_label.clone(),
@@ -379,7 +386,7 @@ fn model_list_pane(
                 rows = rows.child(
                     HitArea::new(
                         format!("composer-model-group-toggle-{engine}-{group_label}"),
-                        &theme,
+                        theme,
                         Role::Button,
                         group_label,
                     )
@@ -389,7 +396,7 @@ fn model_list_pane(
                             engine,
                             name: name.clone(),
                             open: is_open,
-                        })
+                        });
                     })
                     .build()
                     .style(
@@ -416,7 +423,7 @@ fn model_list_pane(
                 let action = Rc::clone(dispatch);
                 let mut row = RowItem::new(
                     format!("composer-model-{engine}-{id}"),
-                    theme,
+                    *theme,
                     Row::MenuItem,
                     Surface::Menu,
                     model.name.clone(),
@@ -428,7 +435,7 @@ fn model_list_pane(
                             .lab
                             .as_deref()
                             .and_then(lab_icon)
-                            .unwrap_or_else(|| engine_icon(&theme, engine)),
+                            .unwrap_or_else(|| engine_icon(theme, engine)),
                         theme.colors.text.to_reference_paint(),
                     ),
                 )
@@ -436,7 +443,7 @@ fn model_list_pane(
                     action(ComposerAction::ChooseModel {
                         engine,
                         id: model_id.clone(),
-                    })
+                    });
                 });
                 if chosen {
                     row = row.trailing(
@@ -477,7 +484,7 @@ fn model_list_pane(
 }
 
 fn model_axis_pane(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     axis: super::super::picker::Axis,
     options: &[super::super::picker::AxisOption],
     keyboard_cursor: Option<usize>,
@@ -493,11 +500,11 @@ fn model_axis_pane(
         if option.special && !special && axis != super::super::picker::Axis::Special {
             special = true;
             rows = rows
-                .child(Divider::Rule.build(&theme, MODEL_PANE_INSET))
+                .child(Divider::Rule.build(theme, MODEL_PANE_INSET))
                 .child(
                     RowItem::new(
                         format!("composer-axis-{axis:?}-special"),
-                        theme,
+                        *theme,
                         Row::Heading,
                         Surface::Menu,
                         "Special efforts",
@@ -533,7 +540,7 @@ fn model_axis_pane(
         };
         let mut row = RowItem::new(
             format!("composer-axis-{axis:?}-{index}"),
-            theme,
+            *theme,
             shape,
             Surface::Menu,
             option.label.clone(),
@@ -571,15 +578,20 @@ fn model_axis_pane(
     clippy::disallowed_types,
     reason = "the model rail's 1 px item gap and the sheet's top-trimmed inset have no kit token"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the model menu needs the host, picker, current config, viewport, frame and tooltip target together; the menu lays out its engine tabs, sliding panes and axis rows as one popover"
+)]
 pub(crate) fn model_menu(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     host: &editor_core::HostData,
     picker: &super::super::picker::PickerState,
-    current: Option<artisan_api::EngineConfig>,
+    current: Option<&artisan_api::EngineConfig>,
     viewport: aqua_core::Size,
     frame: ModelMenuFrame,
     tooltip_target: (editor_core::HostInstance, u64),
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Element {
     let ModelMenuFrame {
         items,
@@ -592,7 +604,7 @@ pub(crate) fn model_menu(
     let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
     let engines = super::super::picker::offered_engines(host);
-    let model_icon = picker.pane_config(host, current.clone()).map(|config| {
+    let model_icon = picker.pane_config(host, current.cloned()).map(|config| {
         host.engines
             .get(&config.engine)
             .and_then(|status| {
@@ -603,7 +615,7 @@ pub(crate) fn model_menu(
             })
             .and_then(|model| model.lab.as_deref())
             .and_then(lab_icon)
-            .unwrap_or_else(|| engine_icon(&theme, config.engine))
+            .unwrap_or_else(|| engine_icon(theme, config.engine))
     });
     let item_height = model_item_height(items.len());
     let mut buttons = UiBox::new()
@@ -613,10 +625,10 @@ pub(crate) fn model_menu(
         .style(Style::new().flex_shrink(0.0));
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
-        let action = Rc::clone(&dispatch);
+        let action = Rc::clone(dispatch);
         let mut side = RowItem::new(
             format!("composer-pane-{position}"),
-            theme,
+            *theme,
             Row::ListItem(Density::Tall),
             sheet,
             item.value.clone(),
@@ -655,19 +667,14 @@ pub(crate) fn model_menu(
                     spied,
                     engine_light,
                     tooltip_target,
-                    &dispatch,
+                    dispatch,
                 ))
                 .child(model_list_pane(
-                    theme,
-                    host,
-                    picker,
-                    current.as_ref(),
-                    scroll,
-                    &dispatch,
+                    theme, host, picker, current, scroll, dispatch,
                 ));
         }
         Some(axis) => {
-            let config = picker.pane_config(host, current.clone());
+            let config = picker.pane_config(host, current.cloned());
             let model = config.as_ref().and_then(|config| {
                 host.engines
                     .get(&config.engine)?
@@ -683,11 +690,11 @@ pub(crate) fn model_menu(
                 axis,
                 &options,
                 picker.keyboard_axis_cursor(),
-                &dispatch,
+                dispatch,
             ));
         }
     }
-    let key_dispatch = Rc::clone(&dispatch);
+    let key_dispatch = Rc::clone(dispatch);
     let resolution_note = current.as_ref().and_then(|config| {
         let model = host
             .engines
@@ -708,7 +715,7 @@ pub(crate) fn model_menu(
         UiBox::new()
             .height(MODEL_PANE_HEIGHT)
             .child(model_menu_tab(
-                &theme,
+                theme,
                 tab,
                 pane_radius,
                 if pane.is_none() {
@@ -733,12 +740,12 @@ pub(crate) fn model_menu(
                 .layout("column")
                 .padded(MODEL_PANE_PADDING)
                 .style(Style::new().min_width(Length::Pct(0.0)))
-                .child(TextRole::Caption.text(&theme, note).wrap(true).build())
+                .child(TextRole::Caption.text(theme, note).wrap(true).build())
                 .build(),
         );
     }
     sheet
-        .build(&theme, children)
+        .build(theme, children)
         .style(
             Style::new()
                 .width(Length::Px(
@@ -768,9 +775,24 @@ pub(crate) fn model_menu(
                         Key::Named(NamedKey::Enter) | Key::Char(' ') => {
                             Some(super::super::picker::AxisKey::Accept)
                         }
-                        _ => None,
+                        Key::Char(_) | Key::Named(_) => None,
                     },
-                    _ => None,
+                    RoutedInput::ClipboardPaste(_)
+                    | RoutedInput::ClipboardCut
+                    | RoutedInput::TextVertical { .. }
+                    | RoutedInput::TextMotion { .. }
+                    | RoutedInput::Native(_)
+                    | RoutedInput::PointerEnter(_)
+                    | RoutedInput::PointerLeave(_)
+                    | RoutedInput::TextPointer { .. }
+                    | RoutedInput::TextContext { .. }
+                    | RoutedInput::TextRangeActivated { .. }
+                    | RoutedInput::FilesDropped { .. }
+                    | RoutedInput::DragEnter { .. }
+                    | RoutedInput::DragOver { .. }
+                    | RoutedInput::DragLeave { .. }
+                    | RoutedInput::Drop { .. }
+                    | RoutedInput::DragEnd { .. } => None,
                 };
                 if let Some(key) = key {
                     key_dispatch(ComposerAction::AxisKey { axis, key });
@@ -786,8 +808,8 @@ pub(crate) fn model_menu(
 }
 
 pub(super) fn model_item_height(count: usize) -> f32 {
-    let count = count.max(1) as f32;
-    MODEL_ITEM_HEIGHT.min((MODEL_PANE_HEIGHT - (count - 1.0) * MODEL_ITEM_GAP) / count)
+    let count = super::rows(count.max(1));
+    MODEL_ITEM_HEIGHT.min((count - 1.0).mul_add(-MODEL_ITEM_GAP, MODEL_PANE_HEIGHT) / count)
 }
 
 fn lab_icon(lab: &str) -> Option<AssetId> {

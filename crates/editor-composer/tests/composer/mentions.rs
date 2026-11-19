@@ -1,3 +1,8 @@
+#![expect(
+    clippy::float_cmp,
+    reason = "layout offsets and light levels are exact sums of fixed metrics, so equality is the contract"
+)]
+
 use super::{Kind, Mentions, Metrics, Reveal, Row, offered_threads, scroll_offset};
 
 fn row(kind: Kind, name: &str) -> Row {

@@ -73,6 +73,15 @@ impl Viewer {
 #[derive(Clone)]
 pub struct DraftHandle(Arc<Inner>);
 
+impl std::fmt::Debug for DraftHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DraftHandle")
+            .field("host", &self.0.host)
+            .field("scope", &self.0.scope)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Viewer {
     events: Mutex<VecDeque<SessionEvent>>,
     wake: aqua::mailbox::Sender<()>,
@@ -82,6 +91,14 @@ pub struct DraftLease {
     handle: DraftHandle,
     viewer: Arc<Viewer>,
     wake: aqua::mailbox::Mailbox<()>,
+}
+
+impl std::fmt::Debug for DraftLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DraftLease")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DraftLease {
@@ -110,14 +127,18 @@ impl DraftLease {
 }
 
 impl Shared {
-    fn emit(&mut self, event: SessionEvent) {
+    fn emit(&mut self, event: &SessionEvent) {
         self.viewers.retain(|viewer| {
             let Some(viewer) = viewer.upgrade() else {
                 return false;
             };
             viewer.events().push_back(event.clone());
-            let _ = viewer.wake.send(());
-            true
+            match viewer.wake.send(()) {
+                Ok(())
+                | Err(
+                    aqua::mailbox::SendError::Full(()) | aqua::mailbox::SendError::Closed(()),
+                ) => true,
+            }
         });
     }
 }
@@ -135,7 +156,7 @@ impl Drop for DraftLease {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
     spool: Option<DraftSpool>,
@@ -209,12 +230,16 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
 }
 
 impl Drop for DraftSessions {
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "each session flushes to its own file, so the order sessions are flushed in is irrelevant"
+    )]
     fn drop(&mut self) {
         let mut pending = pending_shutdown();
-        pending.retain(|session| session.read(|state| state.pending()));
+        pending.retain(|session| session.read(DraftSession::pending));
         for session in self.sessions.values() {
             session.flush();
-            if session.read(|state| state.pending()) {
+            if session.read(DraftSession::pending) {
                 pending.push(session.clone());
             }
         }
@@ -388,7 +413,7 @@ impl DraftHandle {
                 };
                 session.mutate(|shared| {
                     if let Some(hash) = shared.state.adopted(result) {
-                        shared.emit(SessionEvent::ImageAdopted(hash));
+                        shared.emit(&SessionEvent::ImageAdopted(hash));
                     }
                 });
                 session.flush();
@@ -404,7 +429,7 @@ impl DraftHandle {
             }
             shared.state.remove();
             self.0.cancelled.cancel();
-            shared.emit(SessionEvent::Reloaded);
+            shared.emit(&SessionEvent::Reloaded);
         });
     }
 
@@ -419,7 +444,7 @@ impl DraftHandle {
     fn mutate(&self, update: impl FnOnce(&mut Shared)) {
         let mut shared = self.0.shared();
         update(&mut shared);
-        shared.emit(SessionEvent::Changed);
+        shared.emit(&SessionEvent::Changed);
         shared.version = shared.version.wrapping_add(1);
         let version = shared.version;
         drop(shared);
@@ -440,7 +465,7 @@ impl DraftHandle {
             session.flush();
         });
         shared.timer = Some(task.abort_handle());
-        shared.emit(SessionEvent::Changed);
+        shared.emit(&SessionEvent::Changed);
         shared.version = shared.version.wrapping_add(1);
         let version = shared.version;
         drop(shared);
@@ -474,13 +499,13 @@ impl DraftHandle {
     pub(crate) fn use_remote(&self) {
         self.mutate(|shared| {
             shared.state.use_remote();
-            shared.emit(SessionEvent::Reloaded);
+            shared.emit(&SessionEvent::Reloaded);
             self.forget_recovered(shared);
         });
     }
 
     fn pump(&self) {
-        let operation = self.0.shared().state.next();
+        let operation = self.0.shared().state.next_operation();
         let Some(operation) = operation else {
             return;
         };
@@ -545,7 +570,7 @@ impl DraftHandle {
                 session.mutate(|shared| {
                     shared.state.posted(result, request.thread.clone());
                     if accepted && !shared.state.removed() {
-                        shared.emit(SessionEvent::Accepted {
+                        shared.emit(&SessionEvent::Accepted {
                             thread: request.thread,
                             item: request.message.id,
                         });

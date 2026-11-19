@@ -20,6 +20,25 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug)]
+enum TurnCall {
+    Stop,
+    Continue,
+    ClearGoal,
+    Unpark,
+}
+
+impl TurnCall {
+    const fn action(self) -> TurnAction {
+        match self {
+            Self::Stop => TurnAction::Stop,
+            Self::Continue => TurnAction::Continue,
+            Self::ClearGoal => TurnAction::ClearGoal,
+            Self::Unpark => TurnAction::Unpark,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum TurnAction {
     Stop,
     Continue,
@@ -62,9 +81,10 @@ impl ComposerTarget {
     }
 }
 
+#[derive(Debug)]
 enum Outbox {
     Idle,
-    InFlight(DraftBody),
+    InFlight(Box<DraftBody>),
     Restored,
 }
 
@@ -141,6 +161,10 @@ fn open_draft(
     }
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the workspace, conversation adapter and composer tests read and seed composer state directly; narrowing that is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,
@@ -169,6 +193,18 @@ pub struct Composer {
     turn_completions: Delivery<TurnCompletion>,
     edit_revision: u64,
     restore_revision: Option<u64>,
+}
+
+impl std::fmt::Debug for Composer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Composer")
+            .field("target", &self.target)
+            .field("host_instance", &self.host_instance)
+            .field("target_generation", &self.target_generation)
+            .field("outbox", &self.outbox)
+            .field("session", &self.session)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Composer {
@@ -202,6 +238,9 @@ impl Composer {
             placeholder_generation: 0,
             placeholder_was_visible: false,
             file_shake: None,
+            cleared: None,
+            outbox: Outbox::Idle,
+            parked: Vec::new(),
             notice,
             session,
             host_instance,
@@ -212,9 +251,6 @@ impl Composer {
             turn_completions: Delivery::new(NonZeroUsize::MIN),
             edit_revision: 0,
             restore_revision: Some(0),
-            cleared: None,
-            outbox: Outbox::Idle,
-            parked: Vec::new(),
         }
     }
 
@@ -315,7 +351,7 @@ impl Composer {
     }
 
     pub(crate) fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
-        self.turn_action(host, TurnAction::Stop)
+        self.turn_action(host, TurnCall::Stop)
     }
 
     pub(crate) fn take_failed_stops(&mut self) -> Vec<ThreadId> {
@@ -323,29 +359,29 @@ impl Composer {
     }
 
     pub(crate) fn clear_goal(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::ClearGoal);
+        self.turn_action(host, TurnCall::ClearGoal);
     }
     pub(crate) fn unpark(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::Unpark);
+        self.turn_action(host, TurnCall::Unpark);
     }
 
     pub(crate) fn continue_turn(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::Continue);
+        self.turn_action(host, TurnCall::Continue);
     }
 
-    fn turn_action(&mut self, host: &HostData, action: TurnAction) -> Option<ThreadId> {
+    fn turn_action(&mut self, host: &HostData, call: TurnCall) -> Option<ThreadId> {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
             return None;
         };
         if self.host_instance != Some(host.instance()) {
             return None;
         }
-        match action {
-            TurnAction::Stop if self.cancelling => return None,
-            TurnAction::Continue if self.continuing => return None,
-            TurnAction::Stop => self.cancelling = true,
-            TurnAction::Continue => self.continuing = true,
-            TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
+        match call {
+            TurnCall::Stop if self.cancelling => return None,
+            TurnCall::Continue if self.continuing => return None,
+            TurnCall::Stop => self.cancelling = true,
+            TurnCall::Continue => self.continuing = true,
+            TurnCall::ClearGoal | TurnCall::Unpark => {}
         }
         let thread = thread.clone();
         let client = host.client.clone();
@@ -354,25 +390,23 @@ impl Composer {
         let delivery = self.turn_completions.sender();
         let issued = thread.clone();
         runtime().spawn(async move {
-            let result = match action {
-                TurnAction::Stop => client.cancel(&thread).await,
-                TurnAction::Continue => client.continue_turn(&thread).await,
-                TurnAction::ClearGoal => client.clear_goal(&thread).await,
-                TurnAction::Unpark => client.cancel(&thread).await,
-                TurnAction::Permissions => unreachable!(),
+            let result = match call {
+                TurnCall::Stop | TurnCall::Unpark => client.cancel(&thread).await,
+                TurnCall::Continue => client.continue_turn(&thread).await,
+                TurnCall::ClearGoal => client.clear_goal(&thread).await,
             };
             let error = result.err();
-            let _ = delivery
-                .send(TurnCompletion {
+            delivery
+                .offer(TurnCompletion {
                     instance,
                     generation,
                     thread,
-                    action,
+                    action: call.action(),
                     error,
                 })
                 .await;
         });
-        matches!(action, TurnAction::Stop).then_some(issued)
+        matches!(call, TurnCall::Stop).then_some(issued)
     }
 
     pub(crate) fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
@@ -400,8 +434,8 @@ impl Composer {
                 ..Default::default()
             };
             let error = client.update_thread(&thread, &update).await.err();
-            let _ = delivery
-                .send(TurnCompletion {
+            delivery
+                .offer(TurnCompletion {
                     instance,
                     generation,
                     thread,
@@ -509,7 +543,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
         {
             return;
         }
@@ -525,7 +559,7 @@ impl Composer {
         let engine = self.effective_config(host).map(|config| config.engine);
         let own = match &self.target {
             ComposerTarget::Thread { thread, .. } => Some(thread),
-            _ => None,
+            ComposerTarget::NewThread { .. } => None,
         };
         self.mentions.refresh(host, engine, own);
         self.sync_mentions();
@@ -573,7 +607,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
         {
             return;
         }
@@ -634,7 +668,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
         {
             return;
         }
@@ -659,7 +693,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
         {
             return;
         }
@@ -701,8 +735,7 @@ impl Composer {
             text: self
                 .questionnaire
                 .aside_text()
-                .map(str::to_owned)
-                .unwrap_or_else(|| self.editor.borrow().text().to_owned()),
+                .map_or_else(|| self.editor.borrow().text().to_owned(), str::to_owned),
             images: self
                 .attachments
                 .as_ref()
@@ -791,7 +824,7 @@ impl Composer {
         if failed
             && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored)
         {
-            self.restore_sent(sent);
+            self.restore_sent(*sent);
         }
         let holding = sending && matches!(self.outbox, Outbox::Restored);
         self.editor
@@ -911,17 +944,11 @@ impl Composer {
                 .attachments
                 .as_ref()
                 .is_none_or(|items| items.items.is_empty());
-        let answer = if self.questionnaire.writing_answer() {
-            Some(match question {
-                None => "Loading question…",
-                Some(question) if question.options.is_empty() => {
-                    "Type your answer, then press Enter"
-                }
-                Some(_) => "Pick an answer above, or type your own",
-            })
-        } else {
-            None
-        };
+        let answer = self.questionnaire.writing_answer().then(|| match question {
+            None => "Loading question…",
+            Some(question) if question.options.is_empty() => "Type your answer, then press Enter",
+            Some(_) => "Pick an answer above, or type your own",
+        });
         if answer.is_none() && visible && !self.placeholder_was_visible {
             self.placeholder_generation = self.placeholder_generation.wrapping_add(1);
         }
@@ -937,7 +964,7 @@ impl Composer {
         let Some(session) = &self.session else {
             return Some("Draft unavailable");
         };
-        if session.read(|state| state.sending()) {
+        if session.read(super::draft_session::DraftSession::sending) {
             return Some("Sending…");
         }
         let items = self
@@ -975,7 +1002,7 @@ impl Composer {
     pub(crate) fn primary(&self, host: &HostData) -> (super::view::Primary, bool) {
         let working = match &self.target {
             ComposerTarget::Thread { thread, .. } => host.is_working(thread),
-            _ => false,
+            ComposerTarget::NewThread { .. } => false,
         };
         let ready = if self.questionnaire.writing_answer() {
             !self.editor.borrow().text().trim().is_empty()
@@ -985,7 +1012,7 @@ impl Composer {
         let sending = self
             .session
             .as_ref()
-            .is_some_and(|session| session.read(|state| state.sending()));
+            .is_some_and(|session| session.read(super::draft_session::DraftSession::sending));
         let can_continue = !sending
             && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
         if working && !ready {
@@ -1007,7 +1034,7 @@ impl Composer {
         {
             return false;
         }
-        if session.read(|state| state.sending())
+        if session.read(super::draft_session::DraftSession::sending)
             || (self.editor.borrow().text().trim().is_empty()
                 && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
                 && self.files.is_empty())
@@ -1066,7 +1093,7 @@ impl Composer {
                 thread,
             });
         }
-        self.outbox = Outbox::InFlight(self.draft_body());
+        self.outbox = Outbox::InFlight(Box::new(self.draft_body()));
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
         true

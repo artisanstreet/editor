@@ -105,6 +105,7 @@ pub struct GoalStrip {
     swap: Option<(Instant, ComposerGoal)>,
 }
 
+#[derive(Debug)]
 pub struct GoalStripFrame {
     pub reveal: f32,
     pub goal: ComposerGoal,
@@ -160,9 +161,10 @@ impl GoalStrip {
     }
 
     fn grow(from: Level, now: Instant, reduced: bool) -> Phase {
-        match reduced {
-            true => Phase::Shown,
-            false => Phase::Growing { started: now, from },
+        if reduced {
+            Phase::Shown
+        } else {
+            Phase::Growing { started: now, from }
         }
     }
 
@@ -235,6 +237,10 @@ pub struct ComposerNote {
     pub text: String,
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "composer tests drive the strip motion directly; the rest of the strip state stays private"
+)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StripState {
     pub motion: GoalStrip,

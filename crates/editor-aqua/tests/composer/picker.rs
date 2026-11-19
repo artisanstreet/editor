@@ -198,7 +198,7 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
         .open_picker(Menu::Model, core.host(&host).unwrap());
     let menu = owner
         .model_menu(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             core.host(&host).unwrap(),
             aqua_core::Size::new(900.0, 700.0),
             0.0,
