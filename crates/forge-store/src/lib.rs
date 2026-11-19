@@ -275,10 +275,6 @@ pub struct Store {
 }
 
 struct Inner {
-    #[cfg(feature = "qualification")]
-    writer: std::thread::JoinHandle<()>,
-    #[cfg(feature = "qualification")]
-    checkpointer: std::thread::JoinHandle<()>,
     jobs: mpsc::Sender<Job>,
     queued_write_bytes: Arc<Semaphore>,
     events: feed::Feed,
@@ -301,6 +297,39 @@ struct Inner {
     resource_dir: PathBuf,
     blob_lock: Arc<tokio::sync::Mutex<()>>,
     blob_uploads: Arc<Semaphore>,
+    _threads: Threads,
+}
+
+#[derive(Default)]
+struct Threads {
+    writer: Option<std::thread::JoinHandle<()>>,
+    checkpointer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Threads {
+    fn join(&mut self) -> Result<(), ShutdownError> {
+        let here = std::thread::current().id();
+        for (thread, panicked) in [
+            (self.writer.take(), ShutdownError::WriterPanicked),
+            (
+                self.checkpointer.take(),
+                ShutdownError::CheckpointerPanicked,
+            ),
+        ] {
+            if let Some(thread) = thread.filter(|thread| thread.thread().id() != here) {
+                thread.join().map_err(|_panic| panicked)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Threads {
+    fn drop(&mut self) {
+        if let Err(error) = self.join() {
+            tracing::error!(error = %error, "close the Forge store");
+        }
+    }
 }
 
 fn open_database(path: &Path) -> Result<Connection> {
@@ -406,7 +435,6 @@ pub enum OpenStoreError {
     },
 }
 
-#[cfg(feature = "qualification")]
 #[derive(Debug, thiserror::Error)]
 pub enum ShutdownError {
     #[error("the Forge store still has live handles")]
@@ -691,40 +719,37 @@ impl Store {
         .map_err(prepare)?;
         recover_after_opening(&mut writer, opening, &database)?;
 
+        let mut threads = Threads::default();
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
-        let writer_thread = std::thread::Builder::new()
-            .name("forge-store-writer".into())
-            .spawn(move || writer.run(queue))
-            .map_err(|source| OpenStoreError::Spawn {
-                thread: "writer",
-                source,
-            })?;
-        #[cfg(not(feature = "qualification"))]
-        drop(writer_thread);
+        threads.writer = Some(
+            std::thread::Builder::new()
+                .name("forge-store-writer".into())
+                .spawn(move || writer.run(queue))
+                .map_err(|source| OpenStoreError::Spawn {
+                    thread: "writer",
+                    source,
+                })?,
+        );
 
         let checkpoint_conn = open_database(&database).map_err(prepare)?;
-        let checkpointer_thread = std::thread::Builder::new()
-            .name("forge-store-checkpoint".into())
-            .spawn({
-                let commits = Arc::clone(&commits);
-                move || checkpoint_when_due(&checkpoint_conn, &commits, &wakes)
-            })
-            .map_err(|source| OpenStoreError::Spawn {
-                thread: "checkpointer",
-                source,
-            })?;
-        #[cfg(not(feature = "qualification"))]
-        drop(checkpointer_thread);
+        threads.checkpointer = Some(
+            std::thread::Builder::new()
+                .name("forge-store-checkpoint".into())
+                .spawn({
+                    let commits = Arc::clone(&commits);
+                    move || checkpoint_when_due(&checkpoint_conn, &commits, &wakes)
+                })
+                .map_err(|source| OpenStoreError::Spawn {
+                    thread: "checkpointer",
+                    source,
+                })?,
+        );
 
         let first_reader = open_database(&database).map_err(prepare)?;
         let revocations = broadcast::channel(64).0;
         let (authorizer, device_watch) = start_devices(&database, revocations.clone())?;
         Ok(Self {
             inner: Arc::new(Inner {
-                #[cfg(feature = "qualification")]
-                writer: writer_thread,
-                #[cfg(feature = "qualification")]
-                checkpointer: checkpointer_thread,
                 jobs,
                 queued_write_bytes: Arc::new(Semaphore::new(WRITE_QUEUE_BYTES)),
                 events,
@@ -747,6 +772,7 @@ impl Store {
                 resource_dir,
                 blob_lock: Arc::new(tokio::sync::Mutex::new(())),
                 blob_uploads: Arc::new(Semaphore::new(BLOB_UPLOADS)),
+                _threads: threads,
             }),
         })
     }
@@ -761,22 +787,15 @@ impl Store {
         let inner = Arc::try_unwrap(self.inner).map_err(|_shared| ShutdownError::Shared)?;
         let Inner {
             jobs,
-            writer,
-            checkpointer,
             readers,
             authorizer,
+            _threads: mut threads,
             ..
         } = inner;
         drop(readers);
         drop(authorizer);
         drop(jobs);
-        writer
-            .join()
-            .map_err(|_panic| ShutdownError::WriterPanicked)?;
-        checkpointer
-            .join()
-            .map_err(|_panic| ShutdownError::CheckpointerPanicked)?;
-        Ok(())
+        threads.join()
     }
 
     #[must_use]

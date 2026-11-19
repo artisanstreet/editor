@@ -3,13 +3,11 @@ use artisan_api::{ItemKind, ItemsQuery, RunStatus, TextSearchQuery, ThreadId, To
 use rusqlite::Connection;
 use std::io::Read as _;
 use std::path::Path;
-use std::time::Duration;
 
 const RELEASED_SCHEMA: usize = 26;
 const RELEASED: &[u8] = include_bytes!("../fixtures/released/schema-26.sqlite3.gz");
 const INTERRUPTED_SCHEMA: usize = 19;
 const INTERRUPTED: &[u8] = include_bytes!("../fixtures/released/schema-19-interrupted.sqlite3.gz");
-const CLOSED_WITHIN: Duration = Duration::from_secs(20);
 
 fn unpack(fixture: &[u8], database: &Path) {
     let mut bytes = Vec::new();
@@ -133,9 +131,6 @@ async fn the_last_released_database_opens_with_its_threads_and_can_go_back_to_th
     let thread_id: ThreadId = thread.id.clone();
     drop(store);
 
-    test_support::wait::wait_until("today's Forge to close the database", CLOSED_WITHIN, || {
-        !dir.path().join("forge.sqlite3-wal").exists()
-    });
     assert_eq!(version(&database), MIGRATIONS.len());
     let kept = dir
         .path()

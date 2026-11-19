@@ -2254,3 +2254,43 @@ async fn opening_repairs_a_readable_database_and_its_backups() {
 
 #[path = "store/native-agents.rs"]
 mod native_agents;
+
+fn take_alone(database: &Path) -> rusqlite::Result<()> {
+    let conn = rusqlite::Connection::open(database)?;
+    conn.busy_timeout(Duration::ZERO)?;
+    conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    conn.execute_batch(include_str!("store/take_alone.sql"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_store_closes_the_database_before_it_returns() {
+    let dir = TempDir::new();
+    let database = dir.0.join("forge.sqlite3");
+    for round in 0..3 {
+        let (store, thread) = test_store(&dir.0).await;
+        for item in 0..200 {
+            store
+                .upsert_item(reply(
+                    &thread,
+                    &format!("item-{round}-{item}"),
+                    None,
+                    &"words ".repeat(200),
+                    Status::Done,
+                ))
+                .await
+                .unwrap();
+        }
+        drop(store);
+        take_alone(&database).unwrap_or_else(|error| {
+            panic!("round {round}: the dropped store still holds the database: {error}")
+        });
+    }
+    let reopened = Store::open(&dir.0).expect("the next Forge opens at once");
+    assert!(
+        reopened
+            .item(&ItemId::from("item-2-199"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
