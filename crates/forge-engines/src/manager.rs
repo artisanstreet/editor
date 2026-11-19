@@ -261,7 +261,7 @@ impl Engines {
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .build()
-            .unwrap_or_default();
+            .expect("invariant: the engine catalog's HTTP client builds with the bundled TLS");
         Self {
             inner: Arc::new(Inner {
                 layout,
@@ -277,7 +277,7 @@ impl Engines {
         let index = EngineId::ALL
             .iter()
             .position(|candidate| *candidate == engine)
-            .unwrap_or_default();
+            .unwrap_or_else(|| unreachable!("invariant: EngineId::ALL lists {engine}"));
         &self.inner.slots[index]
     }
 
@@ -478,8 +478,17 @@ impl Engines {
     }
 
     pub fn lease(&self, engine: EngineId) -> Option<BinaryLease> {
-        let usage = install::usage_lock(&self.home(engine)).ok()?;
-        fs2::FileExt::lock_shared(&usage).ok()?;
+        let usage = match install::usage_lock(&self.home(engine)) {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(%engine, error = %diagnostics::chain(&error), "the engine's binary could not be leased");
+                return None;
+            }
+        };
+        if let Err(error) = fs2::FileExt::lock_shared(&usage) {
+            tracing::warn!(%engine, %error, "the engine's binary could not be locked for use");
+            return None;
+        }
         let path = self.binary(engine)?;
         Some(BinaryLease { path, usage })
     }

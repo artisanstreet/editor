@@ -843,7 +843,13 @@ async fn opencode(
         .map_err(ListModelsError::OpenCodeRun)?;
     let models: Value = serde_json::from_str(&models).map_err(ListModelsError::OpenCodeDecode)?;
     let gateways = match run(program, &["api", "--standalone", "integration.list"]).await {
-        Ok(text) => serde_json::from_str(&text).ok(),
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(gateways) => Some(gateways),
+            Err(error) => {
+                tracing::warn!(%error, "OpenCode listed its integrations in a shape Forge can't read");
+                None
+            }
+        },
         Err(error) => {
             tracing::debug!(
                 error = diagnostics::chain(&error),
@@ -1114,7 +1120,8 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
     .map(|catalog| models_dev_digest(&catalog));
     match fetched {
         Ok(digest) => {
-            let bytes = serde_json::to_vec(&digest).unwrap_or_default();
+            let bytes =
+                serde_json::to_vec(&digest).expect("invariant: a catalog digest serializes");
             tokio::task::spawn_blocking(move || {
                 let written = path
                     .parent()

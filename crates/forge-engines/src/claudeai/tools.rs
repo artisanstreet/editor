@@ -1715,8 +1715,20 @@ async fn bash(
         let answer = Answer::error(note);
         return (answer.clone(), finished(item, &answer, Some(-1)));
     };
-    let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+    let (code, unwaited) = match status {
+        Ok(status) => (status.code().unwrap_or(-1), None),
+        Err(error) => (
+            -1,
+            Some(format!("[the command's exit could not be read: {error}]")),
+        ),
+    };
     let mut text = out;
+    if let Some(unwaited) = unwaited {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&unwaited);
+    }
     if !err.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');

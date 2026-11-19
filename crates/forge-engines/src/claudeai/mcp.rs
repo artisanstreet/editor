@@ -592,7 +592,9 @@ fn fingerprint(servers: &[&McpServer], cwd: &Path, sandbox: &Sandbox) -> String 
     hash.update([u8::from(sandbox.confined())]);
     for server in servers {
         hash.update([0]);
-        hash.update(serde_json::to_vec(server).unwrap_or_default());
+        hash.update(
+            serde_json::to_vec(server).expect("invariant: an MCP server config serializes"),
+        );
     }
     hex::encode(hash.finalize())
 }
