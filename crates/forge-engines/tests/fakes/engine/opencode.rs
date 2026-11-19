@@ -194,7 +194,6 @@ async fn cancellation(
             reply(&json!({ "data": { "id": "prompt" } }))
         }
         ("POST", "/api/session/root/interrupt") => {
-            tokio::time::sleep(Duration::from_millis(30)).await;
             touch("interrupted");
             let stopped = server.stopped.clone();
             let then_stop = stream::once(async move {

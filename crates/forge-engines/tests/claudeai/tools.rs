@@ -335,19 +335,30 @@ async fn a_stop_ends_the_command_and_what_it_started() {
     let work = tempfile::tempdir().expect("a dir");
     let cancel = CancellationToken::new();
     let stopper = cancel.clone();
+    let started = work.path().join("started");
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        test_support::wait::eventually(
+            "the command to start",
+            test_support::wait::LIVENESS,
+            || std::future::ready(started.exists()),
+        )
+        .await;
         stopper.cancel();
     });
-    let started = std::time::Instant::now();
-    let (answer, _) = execute(
-        &call("Bash", json!({ "command": "sleep 30 & sleep 30" })),
-        work.path(),
-        &cancel,
-        &runtime(),
+    let (answer, _) = test_support::wait::within(
+        "the stopped command and what it started to end",
+        test_support::wait::LIVENESS,
+        execute(
+            &call(
+                "Bash",
+                json!({ "command": "sleep 600 & touch started; sleep 600" }),
+            ),
+            work.path(),
+            &cancel,
+            &runtime(),
+        ),
     )
     .await;
-    assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(answer.text, "The command was stopped.");
 }
 

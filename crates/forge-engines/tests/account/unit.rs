@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use test_support::wait::{LIVENESS, eventually, within};
 
 #[test]
 fn status_probes_classify_recorded_output() {
@@ -97,14 +99,15 @@ esac
             account: Some("OpenCode Console".to_owned())
         }
     );
+    let mut states = sign_in.subscribe();
     sign_in.logout(&binary);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while sign_in.state() != SignInState::SignedOut {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
+    within(
+        "signing out of every login",
+        LIVENESS,
+        states.wait_for(|state| *state == SignInState::SignedOut),
+    )
     .await
-    .expect("signed out of every login");
+    .unwrap();
     assert!(!home.join("console").exists());
 }
 
@@ -123,7 +126,7 @@ if [ "$2" = "logout" ]; then touch "$PWD/out"; exit 0; fi
 if [ -e "$PWD/out" ]; then
   echo '{"loggedIn":false}'
 else
-  if [ -e "$PWD/slow" ]; then touch "$PWD/check-started"; sleep 0.2; fi
+  if [ -e "$PWD/slow" ]; then touch "$PWD/check-started"; read -r _ < "$PWD/release"; fi
   echo '{"loggedIn":true,"email":"old"}'
 fi
 "#,
@@ -133,26 +136,43 @@ fi
     let sign_in = SignIn::new(EngineId::Claude, home.clone());
     sign_in.check(&binary).await;
     assert!(matches!(sign_in.state(), SignInState::SignedIn { .. }));
+    let release = home.join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
     std::fs::write(home.join("slow"), "").unwrap();
     let probe_owner = Arc::clone(&sign_in);
     let probe_binary = binary.clone();
     let old_probe = tokio::spawn(async move { probe_owner.check(&probe_binary).await });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !home.join("check-started").exists() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+    let started = home.join("check-started");
+    eventually("the old status probe to start", LIVENESS, || {
+        std::future::ready(started.exists())
     })
-    .await
-    .unwrap();
+    .await;
+    let mut states = sign_in.subscribe();
     sign_in.logout(&binary);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while sign_in.state() != SignInState::SignedOut {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
+    within(
+        "the sign-out",
+        LIVENESS,
+        states.wait_for(|state| *state == SignInState::SignedOut),
+    )
     .await
     .unwrap();
-    old_probe.await.unwrap();
+    within(
+        "the old probe to be released",
+        LIVENESS,
+        tokio::task::spawn_blocking(move || std::fs::write(release, "")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    within("the old probe to finish", LIVENESS, old_probe)
+        .await
+        .unwrap();
     assert_eq!(sign_in.state(), SignInState::SignedOut);
 }
 

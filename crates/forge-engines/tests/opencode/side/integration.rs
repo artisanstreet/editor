@@ -59,13 +59,13 @@ async fn native_compaction_forks_overrides_only_the_fork_and_cleans_it_up() {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task = tokio::spawn(async move { compact(hanging, task_cancel).await });
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while !dir.path().join("hanging").exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let hanging_marker = dir.path().join("hanging");
+    test_support::wait::eventually(
+        "the compaction to hang",
+        test_support::wait::LIVENESS,
+        || std::future::ready(hanging_marker.exists()),
+    )
+    .await;
     cancel.cancel();
     let error = tokio::time::timeout(test_support::wait::LIVENESS, task)
         .await

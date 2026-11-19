@@ -101,13 +101,13 @@ printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm
 
 #[cfg(unix)]
 async fn wait_for_usage_probe(home: &Path) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !home.join("started").exists() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let started = home.join("started");
+    test_support::wait::eventually(
+        "the usage probe to start",
+        test_support::wait::LIVENESS,
+        || std::future::ready(started.exists()),
+    )
+    .await;
 }
 
 #[cfg(unix)]
