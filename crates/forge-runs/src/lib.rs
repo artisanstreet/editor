@@ -915,9 +915,10 @@ impl Hub {
     }
 
     pub async fn cancel(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
-        let elsewhere = {
+        let (elsewhere, idle) = {
             let _admission = self.inner.admission.lock().await;
             let mut elsewhere = Vec::new();
+            let mut idle = Vec::new();
             for thread in self.agent_tree(thread_id).await? {
                 let route = self.route(&thread).map_err(|source| CancelError::Route {
                     thread: thread.clone(),
@@ -925,11 +926,18 @@ impl Hub {
                 })?;
                 match route {
                     Some(member) => elsewhere.push((thread, member)),
-                    None => self.cancel_owned(&thread).await?,
+                    None => {
+                        if !self.cancel_owned(&thread).await? {
+                            idle.push(thread);
+                        }
+                    }
                 }
             }
-            elsewhere
+            (elsewhere, idle)
         };
+        for thread in idle {
+            self.agent_run_ended(&thread).await;
+        }
         for (thread, member) in elsewhere {
             runtime::request(
                 &member,
@@ -947,25 +955,35 @@ impl Hub {
     }
 
     async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
-        let _admission = self.inner.admission.lock().await;
-        self.cancel_owned(thread_id).await
+        let stopped_live = {
+            let _admission = self.inner.admission.lock().await;
+            self.cancel_owned(thread_id).await?
+        };
+        if !stopped_live {
+            self.agent_run_ended(thread_id).await;
+        }
+        Ok(())
     }
 
-    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
+    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<bool, CancelError> {
         let cutoff = self.store().head();
-        if let Some(run) = self.lock().get_mut(thread_id) {
-            run.phase = Phase::Stopping {
-                through: cutoff,
-                then: AfterStop::Settle,
-            };
-            run.cancel.cancel();
-        }
+        let stopped_live = match self.lock().get_mut(thread_id) {
+            Some(run) => {
+                run.phase = Phase::Stopping {
+                    through: cutoff,
+                    then: AfterStop::Settle,
+                };
+                run.cancel.cancel();
+                true
+            }
+            None => false,
+        };
         self.store()
             .cancel_pending_inputs(thread_id.clone(), cutoff)
             .await?;
         self.store().unpark(thread_id.clone()).await?;
         self.resume_pending();
-        Ok(())
+        Ok(stopped_live)
     }
 
     pub fn shutdown_on_drop(&self) -> tokio_util::sync::DropGuard {

@@ -788,7 +788,7 @@ impl Hub {
         }
         let run = store.latest_run(child).await?;
         Ok(match run {
-            None => (AgentState::Working, None),
+            None => (AgentState::Cancelled, None),
             Some(run) => match run.status() {
                 RunStatus::Running => (AgentState::Working, None),
                 RunStatus::Done => (AgentState::Done, None),
