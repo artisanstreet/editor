@@ -225,9 +225,15 @@ fn launch_key(turn: &Turn) -> u64 {
     turn.home.hash(&mut hasher);
     turn.launch.args.hash(&mut hasher);
     turn.launch.env.hash(&mut hasher);
-    std::fs::read(super::codex_home(turn).join("config.toml"))
-        .map_err(|error| error.kind())
-        .hash(&mut hasher);
+    let config = super::codex_home(turn).join("config.toml");
+    match std::fs::read(&config) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".hash(&mut hasher),
+        Err(error) => {
+            tracing::warn!(path = %config.display(), %error, "read the Codex config for the launch key; the key counts it as unreadable");
+            error.kind().to_string().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -753,13 +759,8 @@ impl Actor {
         };
         if run == SERVER_RUN {
             if let Some(id) = id.and_then(Value::as_u64) {
-                let frame: Value = match serde_json::from_str(line) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        tracing::warn!(id, %error, "Codex answered Forge's own request with a line that isn't JSON");
-                        return;
-                    }
-                };
+                let frame: Value = serde_json::from_str(line)
+                    .expect("invariant: a Codex frame that parsed as a head parses as JSON");
                 if frame["result"]["status"] == "notLoaded" {
                     if let Some(release) = self.releasing.get(&id) {
                         let thread = release.thread.clone();
