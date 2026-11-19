@@ -319,6 +319,60 @@ fn native_replacement_beside_a_composition_survives_cancel() {
 }
 
 #[test]
+fn text_inserted_right_after_a_composition_survives_its_update_commit_and_cancel() {
+    use aqua_core::{ImeEvent, InputEvent};
+
+    let compose = |marked: &str| {
+        InputEvent::Ime(ImeEvent::Update {
+            marked: marked.into(),
+            cursor: Some((marked.len(), marked.len())),
+        })
+    };
+    let insert_after = InputEvent::ImeReplace {
+        start: 1,
+        end: 1,
+        text: "X".into(),
+    };
+
+    let (controller, mut runtime, _, _) = mounted("", Mode::Prompt, 400.0);
+    runtime.handle_input(&compose("候"));
+    runtime.handle_input(&insert_after);
+    assert_eq!(controller.state().borrow().text(), "候X");
+    runtime.handle_input(&compose("候補"));
+    assert_eq!(
+        controller.state().borrow().text(),
+        "候補X",
+        "updating the composition keeps the text typed after it"
+    );
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Commit {
+        text: "候補".into(),
+    }));
+    assert_eq!(controller.state().borrow().text(), "候補X");
+
+    let (controller, mut runtime, _, _) = mounted("", Mode::Prompt, 400.0);
+    runtime.handle_input(&compose("候"));
+    runtime.handle_input(&insert_after);
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Commit {
+        text: "候補".into(),
+    }));
+    assert_eq!(
+        controller.state().borrow().text(),
+        "候補X",
+        "committing the composition keeps the text typed after it"
+    );
+
+    let (controller, mut runtime, _, _) = mounted("", Mode::Prompt, 400.0);
+    runtime.handle_input(&compose("候"));
+    runtime.handle_input(&insert_after);
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Cancel));
+    assert_eq!(
+        controller.state().borrow().text(),
+        "X",
+        "cancelling the composition keeps the text typed after it"
+    );
+}
+
+#[test]
 fn mounted_accessibility_value_edits_the_editor() {
     use aqua::RuntimeInput;
     use aqua_protocol::{A11yAction, A11yActionData};

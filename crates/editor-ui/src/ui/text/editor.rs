@@ -80,6 +80,12 @@ struct Composition {
     before: Snapshot,
 }
 
+#[derive(Clone, Copy)]
+enum Side {
+    Before,
+    After,
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "reversed selection, disabled, the limit notice and an open list are independent editor states"
@@ -497,10 +503,16 @@ impl Editor {
             replaced,
             mut before,
         } = composition;
-        let before_range = if range.end <= marked.start {
-            range.clone()
+        let side = if range.end <= marked.start {
+            Side::Before
         } else {
-            range.start - marked.end + replaced.end..range.end - marked.end + replaced.end
+            Side::After
+        };
+        let before_range = match side {
+            Side::Before => range.clone(),
+            Side::After => {
+                range.start - marked.end + replaced.end..range.end - marked.end + replaced.end
+            }
         };
         let delta = |at: usize, edited: &Range<usize>| {
             if at >= edited.end {
@@ -509,15 +521,19 @@ impl Editor {
                 at
             }
         };
+        let shifted = |span: Range<usize>, edited: &Range<usize>| match side {
+            Side::Before => delta(span.start, edited)..delta(span.end, edited),
+            Side::After => span,
+        };
         before.text.replace_range(before_range.clone(), text);
         before.selection = delta(before.selection.start, &before_range)
             ..delta(before.selection.end, &before_range);
-        let replaced = delta(replaced.start, &before_range)..delta(replaced.end, &before_range);
+        let replaced = shifted(replaced, &before_range);
         let changed = self.text.get(range.clone()) != Some(text);
         self.text.replace_range(range.clone(), text);
         self.selection = delta(self.selection.start, &range)..delta(self.selection.end, &range);
         self.composition = Some(Composition {
-            marked: delta(marked.start, &range)..delta(marked.end, &range),
+            marked: shifted(marked, &range),
             replaced,
             before,
         });
