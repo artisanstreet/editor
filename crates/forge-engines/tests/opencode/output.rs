@@ -32,10 +32,13 @@ async fn an_unreadable_stdout_line_fails_the_run_with_its_cause_not_as_an_exit()
         },
     ));
     let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-    let outcome = tokio::time::timeout(Duration::from_secs(20), running)
-        .await
-        .expect("the run ends on the unreadable line")
-        .unwrap();
+    let outcome = test_support::wait::within(
+        "the run ends on the unreadable line",
+        READY_TIMEOUT.saturating_add(REQUEST_TIMEOUT),
+        running,
+    )
+    .await
+    .unwrap();
     drain.await.unwrap();
     assert_eq!(outcome.status(), RunStatus::Failed);
     let error = outcome.error().unwrap();

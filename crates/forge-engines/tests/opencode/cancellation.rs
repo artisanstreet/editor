@@ -1,7 +1,10 @@
 use super::*;
 use crate::{UserInput, fake_engine};
 use artisan_api::{EngineConfig, EngineId, RunStatus, ThreadId};
+use test_support::wait::{eventually, within};
 use tokio_util::sync::CancellationToken;
+
+const SESSION_OPENS: Duration = READY_TIMEOUT.saturating_add(REQUEST_TIMEOUT);
 
 #[tokio::test]
 async fn cancellation_interrupts_the_session_and_reaps_the_server_even_during_a_prompt() {
@@ -34,18 +37,25 @@ async fn cancellation_interrupts_the_session_and_reaps_the_server_even_during_a_
                 cancel: cancel.clone(),
             },
         ));
-        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dir.path().join("prompt").exists() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+        within("the run opens its OpenCode session", SESSION_OPENS, async {
+            loop {
+                match received.recv().await {
+                    Some(EngineEvent::Session { .. }) => break,
+                    Some(_) => {}
+                    None => panic!("the run ended before it opened a session"),
+                }
             }
         })
-        .await
-        .unwrap();
+        .await;
+        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
+        let prompt = dir.path().join("prompt");
+        eventually("the prompt reaches OpenCode", REQUEST_TIMEOUT, || {
+            std::future::ready(prompt.exists())
+        })
+        .await;
         cancel.cancel();
-        let outcome = tokio::time::timeout(Duration::from_secs(5), running)
+        let outcome = within("the cancelled run ends", REQUEST_TIMEOUT, running)
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(
             outcome.status(),
