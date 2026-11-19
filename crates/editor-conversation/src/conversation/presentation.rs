@@ -549,7 +549,7 @@ impl MarkdownOwners {
     pub(crate) fn prepare_projected_row_with_geometry(
         &mut self,
         scope: &PresentationScope,
-        request: MarkdownRender<'_>,
+        request: &MarkdownRender<'_>,
         row: usize,
         code: Option<&CodeServices>,
         reveal: Option<&Rc<editor_ui::markdown::reveal::PreparedReveal>>,

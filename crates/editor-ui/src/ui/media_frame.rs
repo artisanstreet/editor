@@ -163,7 +163,7 @@ impl MediaFrame {
         Self::thumb_content_style()
     }
 
-    pub fn placeholder(theme: ArtisanTheme) -> Element {
+    pub fn placeholder(theme: &ArtisanTheme) -> Element {
         UiBox::new()
             .width(Length::Pct(100.0))
             .height(Length::Pct(100.0))

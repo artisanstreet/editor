@@ -140,7 +140,7 @@ impl RowFactory {
                 }
                 column.child(text).child(retry).build()
             }
-            _ if attachment.is_none() => MediaFrame::placeholder(self.theme),
+            _ if attachment.is_none() => MediaFrame::placeholder(&self.theme),
             _ => UiBox::new()
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0))

@@ -53,6 +53,8 @@ impl RowFactory {
         ),
         RealizeRowError,
     > {
+        use aqua_ui::element::Text;
+        use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         let RowContext {
             row,
             owner: row_owner,
@@ -66,8 +68,6 @@ impl RowFactory {
             block,
             reference,
         } = target;
-        use aqua_ui::element::Text;
-        use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         let services = self
             .stored
             .as_ref()
@@ -289,6 +289,10 @@ impl RowFactory {
         section: fold::PlainSection,
         batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<aqua_ui::element::Element, RealizeRowError> {
+        use crate::conversation::view::resources::ResourceKey;
+        use aqua_ui::element::Text;
+        use editor_ui::markdown::literal::LiteralPreparation;
+        use editor_ui::markdown::stored::StoredPreparation;
         let RowContext {
             row,
             owner: row_owner,
@@ -300,10 +304,6 @@ impl RowFactory {
             block,
             reference,
         } = target;
-        use crate::conversation::view::resources::ResourceKey;
-        use aqua_ui::element::Text;
-        use editor_ui::markdown::literal::LiteralPreparation;
-        use editor_ui::markdown::stored::StoredPreparation;
         let services = self
             .stored
             .as_ref()

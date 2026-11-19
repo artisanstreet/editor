@@ -347,7 +347,7 @@ impl RowFactory {
         let projected_span = editor_core::diagnostics::rebuild_stats::span("f_md_project");
         let prepared = owners.prepare_projected_row_with_geometry(
             &self.scope,
-            MarkdownRender {
+            &MarkdownRender {
                 key: body_key,
                 id: &id,
                 source,
