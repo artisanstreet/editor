@@ -1,9 +1,9 @@
-use crate::core::{Core, EditorFiles, HostId, Screen, SettingsPage};
+use crate::core::{EditorFiles, HostId, SettingsPage};
 use crate::qualification::fixture::{
     Fixture, ForgeServer, InvalidFixture, PairingError, SeedError, StartForgeError,
 };
 use crate::qualification::sign_in::{JoinForgeError, join_forge};
-use artisan_api::{EngineId, ProjectId, ThreadId};
+use artisan_api::EngineId;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -111,32 +111,11 @@ fn settings_page(name: &str) -> Result<SettingsPage, RouteError> {
     })
 }
 
-pub(crate) struct Scenario {
-    pub(crate) host: HostId,
-    pub(crate) fixture: Fixture,
+pub(crate) struct Served {
     forge: Option<ForgeServer>,
-    _directory: Option<tempfile::TempDir>,
 }
 
-impl Scenario {
-    pub(crate) fn start(
-        fixture_path: &Path,
-        latency: Option<Duration>,
-    ) -> Result<(Self, Core), ScenarioError> {
-        let directory = tempfile::tempdir().map_err(ScenarioError::Directory)?;
-        let editor_dir = directory.path().join("editor");
-        let (scenario, files) = Self::launch(fixture_path, directory.path(), &editor_dir, latency)?;
-        let core =
-            crate::qualification::sign_in::open_signed_in(files).map_err(ScenarioError::Core)?;
-        Ok((
-            Self {
-                _directory: Some(directory),
-                ..scenario
-            },
-            core,
-        ))
-    }
-
+impl Served {
     pub(crate) fn serve(
         fixture_path: &Path,
         root: &Path,
@@ -155,7 +134,7 @@ impl Scenario {
                 path: editor_dir.to_owned(),
             });
         }
-        Self::launch(fixture_path, root, editor_dir, None).map(|(scenario, _)| scenario)
+        Self::launch(fixture_path, root, editor_dir, None).map(|launched| launched.0)
     }
 
     fn launch(
@@ -163,7 +142,7 @@ impl Scenario {
         root: &Path,
         editor_dir: &Path,
         latency: Option<Duration>,
-    ) -> Result<(Self, EditorFiles), ScenarioError> {
+    ) -> Result<(Self, EditorFiles, HostId, Fixture), ScenarioError> {
         let bytes = std::fs::read(fixture_path).map_err(|source| ScenarioError::ReadFixture {
             path: fixture_path.to_owned(),
             source,
@@ -204,16 +183,58 @@ impl Scenario {
         let host = join_forge(&files, &pairing).map_err(ScenarioError::Join)?;
         Ok((
             Self {
-                host,
-                fixture,
                 forge: Some(server),
-                _directory: None,
             },
             files,
+            host,
+            fixture,
         ))
     }
 
-    pub(crate) fn screen(&self, route: &Route) -> Result<Screen, NoThread> {
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(server) = self.forge.take()
+            && let Err(error) = crate::core::runtime::runtime().block_on(server.shutdown())
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not stop the capture Forge"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) struct Scenario {
+    pub(crate) host: HostId,
+    fixture: Fixture,
+    served: Served,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(windows)]
+impl Scenario {
+    pub(crate) fn start(
+        fixture_path: &Path,
+        latency: Option<Duration>,
+    ) -> Result<(Self, crate::core::Core), ScenarioError> {
+        let directory = tempfile::tempdir().map_err(ScenarioError::Directory)?;
+        let editor_dir = directory.path().join("editor");
+        let (served, files, host, fixture) =
+            Served::launch(fixture_path, directory.path(), &editor_dir, latency)?;
+        let core =
+            crate::qualification::sign_in::open_signed_in(files).map_err(ScenarioError::Core)?;
+        Ok((
+            Self {
+                host,
+                fixture,
+                served,
+                _directory: directory,
+            },
+            core,
+        ))
+    }
+
+    pub(crate) fn screen(&self, route: &Route) -> Result<crate::core::Screen, NoThread> {
         Ok(match route {
             Route::Thread(thread) => {
                 let thread = match thread {
@@ -227,29 +248,22 @@ impl Scenario {
                         .as_str()
                         .to_owned(),
                 };
-                Screen::Thread {
+                crate::core::Screen::Thread {
                     host: self.host.clone(),
-                    thread: ThreadId::from(thread),
+                    thread: artisan_api::ThreadId::from(thread),
                 }
             }
-            Route::NewThread(project) => Screen::NewThread {
+            Route::NewThread(project) => crate::core::Screen::NewThread {
                 host: self.host.clone(),
-                project: project.clone().map(ProjectId::from),
+                project: project.clone().map(artisan_api::ProjectId::from),
             },
-            Route::Settings(page) => Screen::Settings(*page),
-            Route::Marketplace => Screen::Marketplace,
-            Route::Usage => Screen::Usage,
+            Route::Settings(page) => crate::core::Screen::Settings(*page),
+            Route::Marketplace => crate::core::Screen::Marketplace,
+            Route::Usage => crate::core::Screen::Usage,
         })
     }
 
     pub(crate) fn shutdown(&mut self) {
-        if let Some(server) = self.forge.take()
-            && let Err(error) = crate::core::runtime::runtime().block_on(server.shutdown())
-        {
-            tracing::warn!(
-                error = %::diagnostics::chain(&error),
-                "could not stop the capture Forge"
-            );
-        }
+        self.served.shutdown();
     }
 }

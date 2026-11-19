@@ -1,4 +1,4 @@
-use super::scenario::{Scenario, ScenarioError};
+use super::scenario::{ScenarioError, Served};
 #[cfg(windows)]
 use super::{
     scenario::{Route, RouteError},
@@ -96,8 +96,7 @@ fn number(name: &'static str, default: f64) -> Result<f64, CliError> {
 fn serve(fixture: &Path, editor_dir: &Path) -> Result<(), CliError> {
     use std::io::{Read, Write};
     let root = tempfile::tempdir().map_err(CliError::ServeDirectory)?;
-    let mut scenario =
-        Scenario::serve(fixture, root.path(), editor_dir).map_err(CliError::Serve)?;
+    let mut served = Served::serve(fixture, root.path(), editor_dir).map_err(CliError::Serve)?;
     println!("serving {}", editor_dir.display());
     println!("host {}", crate::qualification::sign_in::MACHINE_ID);
     println!("account {}", crate::qualification::sign_in::ACCOUNT_ID);
@@ -106,7 +105,7 @@ fn serve(fixture: &Path, editor_dir: &Path) -> Result<(), CliError> {
     std::io::stdin()
         .read_to_end(&mut sink)
         .map_err(CliError::Stdin)?;
-    scenario.shutdown();
+    served.shutdown();
     Ok(())
 }
 

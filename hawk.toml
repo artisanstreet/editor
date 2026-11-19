@@ -551,15 +551,6 @@ target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
 
 [[override]]
-lint = "hawk::unnecessary_restricted_visibility"
-crate = "editor_aqua"
-item = "measure::saturate_pixels"
-kind = "function"
-level = "expect"
-target = "cfg(not(windows))"
-reason = "the Windows capture recorder and surface size frames with it; they are not compiled elsewhere"
-
-[[override]]
 lint = "hawk::unnecessary_public"
 crate = "editor_core"
 item = "core::diagnostics::rebuild_stats::take_tally"

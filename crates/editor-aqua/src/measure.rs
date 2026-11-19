@@ -74,7 +74,7 @@ pub(crate) const fn channel(value: f32) -> u8 {
     value as u8
 }
 
-#[cfg(feature = "capture")]
+#[cfg(all(feature = "capture", windows))]
 #[must_use]
 #[expect(
     clippy::cast_possible_truncation,
