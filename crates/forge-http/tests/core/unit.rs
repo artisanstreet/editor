@@ -169,3 +169,15 @@ async fn machine_journey_against_stub_core() {
         .unwrap();
     assert_eq!(grant.token, "grant.jwt.token");
 }
+
+#[test]
+fn a_logged_grant_never_shows_its_token() {
+    let grant: GrantToken = serde_json::from_value(serde_json::json!({
+        "token": "grant-secret-7f3a",
+        "expires_at": "2030-01-01T00:00:00Z",
+    }))
+    .unwrap();
+    let logged = format!("{grant:?}");
+    assert!(!logged.contains("grant-secret-7f3a"), "{logged}");
+    assert!(logged.contains("2030-01-01T00:00:00Z"), "{logged}");
+}

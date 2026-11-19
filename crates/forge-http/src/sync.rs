@@ -1088,11 +1088,21 @@ fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpSe
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MachineIdentity {
     pub machine_id: String,
     pub account_id: Option<String>,
     pub secret: [u8; 32],
+}
+
+impl std::fmt::Debug for MachineIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineIdentity")
+            .field("machine_id", &self.machine_id)
+            .field("account_id", &self.account_id)
+            .field("secret", &"redacted")
+            .finish()
+    }
 }
 
 pub fn load_machine_identity(

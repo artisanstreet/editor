@@ -134,3 +134,11 @@ fn grant_issue_body_matches_core_shape() {
     );
     assert!(body["cnf"].get("jwk").is_none(), "{body}");
 }
+
+#[test]
+fn a_logged_grant_never_shows_its_token() {
+    let grant: artisan_account::network::GrantToken =
+        serde_json::from_value(serde_json::json!({ "token": "grant-secret-7f3a" })).unwrap();
+    let logged = format!("{grant:?}");
+    assert!(!logged.contains("grant-secret-7f3a"), "{logged}");
+}

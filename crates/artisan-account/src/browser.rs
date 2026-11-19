@@ -94,11 +94,22 @@ pub enum Arrival {
     Unrelated,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Handoff {
     verifier: String,
     challenge: String,
     state: String,
+}
+
+impl std::fmt::Debug for Handoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Handoff")
+            .field("verifier", &"redacted")
+            .field("challenge", &self.challenge)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl Handoff {

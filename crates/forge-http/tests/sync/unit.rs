@@ -531,3 +531,21 @@ async fn synced_servers_keep_credentials_only_while_their_destination_is_unchang
         replaced.env
     );
 }
+
+#[test]
+fn a_logged_machine_identity_never_shows_its_key() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let key = [0x5a_u8; 32];
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+    std::fs::write(
+        dir.path().join("ast_account.json"),
+        serde_json::json!({ "secret_b64u": encoded, "machine_id": "machine-1" }).to_string(),
+    )
+    .unwrap();
+    let identity = load_machine_identity(dir.path()).unwrap().unwrap();
+    let logged = format!("{identity:?}");
+    assert!(logged.contains("machine-1"), "{logged}");
+    assert!(!logged.contains("90, 90"), "{logged}");
+    assert!(!logged.contains(&encoded), "{logged}");
+}

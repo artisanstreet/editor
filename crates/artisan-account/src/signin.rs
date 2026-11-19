@@ -53,11 +53,17 @@ pub struct MagicFinalizeRequest {
     pub recovery_code: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopRedeemRequest {
     pub code: String,
     pub verifier: String,
+}
+
+impl std::fmt::Debug for DesktopRedeemRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DesktopRedeemRequest(redacted)")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

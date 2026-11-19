@@ -59,7 +59,7 @@ pub enum AccountCommand {
     Sync,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct AccountFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secret_b64u: Option<String>,

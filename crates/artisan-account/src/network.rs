@@ -160,9 +160,15 @@ pub struct GrantIssueRequest {
     pub cnf: Option<Jwk>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GrantToken {
     pub token: String,
+}
+
+impl std::fmt::Debug for GrantToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GrantToken(redacted)")
+    }
 }
 
 #[derive(Clone, Debug)]

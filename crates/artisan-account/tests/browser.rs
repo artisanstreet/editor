@@ -126,3 +126,11 @@ async fn the_loopback_ignores_strays_and_answers_the_real_callback() {
         Arrival::Code("granted".to_owned())
     );
 }
+
+#[test]
+fn a_logged_handoff_never_shows_the_verifier() {
+    let handoff = handoff();
+    let logged = format!("{handoff:?}");
+    assert!(!logged.contains(handoff.verifier()), "{logged}");
+    assert!(logged.contains(handoff.challenge()), "{logged}");
+}

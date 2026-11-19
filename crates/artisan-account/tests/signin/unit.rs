@@ -28,3 +28,14 @@ fn secret_is_required_to_finalize() {
     let raw = serde_json::json!({"requestId": "logreq_1"});
     assert!(serde_json::from_value::<MagicFinalizeRequest>(raw).is_err());
 }
+
+#[test]
+fn a_logged_redeem_request_never_shows_the_code_or_verifier() {
+    let request = DesktopRedeemRequest {
+        code: "auth-code-7f3a".to_owned(),
+        verifier: "pkce-verifier-9c1d".to_owned(),
+    };
+    let logged = format!("{request:?}");
+    assert!(!logged.contains("auth-code-7f3a"), "{logged}");
+    assert!(!logged.contains("pkce-verifier-9c1d"), "{logged}");
+}
