@@ -2,8 +2,11 @@ use crate::Outcome;
 use rustix::fs::{Mode, OFlags};
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 const HIERARCHY: &str = "/sys/fs/cgroup";
 const FORGE: &str = "forge";
@@ -12,8 +15,12 @@ const GIB: u64 = 1 << 30;
 const FORGE_WEIGHT: &str = "1000";
 const ENGINE_OOM_SCORE: &[u8] = b"500";
 const OWN_OOM_SCORE: &CStr = c"/proc/self/oom_score_adj";
+const RUN_PREFIX: &str = "run-";
+const EMPTY_WITHIN: Duration = Duration::from_secs(10);
+const EVENTS_BYTES: usize = 256;
 
-static ENGINES_MEMBERSHIP: OnceLock<CString> = OnceLock::new();
+static ENGINES_FOLDER: OnceLock<PathBuf> = OnceLock::new();
+static RUNS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
@@ -73,13 +80,20 @@ pub fn delegated(cgroup_controllers: &str) -> Vec<Controller> {
         .collect()
 }
 
-pub fn total_memory(meminfo: &str) -> Option<u64> {
-    meminfo
+pub fn total_memory(meminfo: &str) -> Result<u64, String> {
+    let line = meminfo
         .lines()
         .find_map(|line| line.strip_prefix("MemTotal:"))
-        .and_then(|rest| rest.trim().strip_suffix("kB"))
-        .and_then(|kilobytes| kilobytes.trim().parse::<u64>().ok())
+        .ok_or_else(|| "/proc/meminfo names no MemTotal".to_owned())?;
+    let kilobytes = line
+        .trim()
+        .strip_suffix("kB")
+        .ok_or_else(|| format!("MemTotal `{}` isn't in kB", line.trim()))?;
+    kilobytes
+        .trim()
+        .parse::<u64>()
         .map(|kilobytes| kilobytes * 1024)
+        .map_err(|error| format!("MemTotal `{}`: {error}", line.trim()))
 }
 
 pub fn engine_memory_ceiling(total: u64) -> u64 {
@@ -101,9 +115,16 @@ fn locate() -> Result<(Layout, Standing), String> {
     let forge = Path::new(HIERARCHY).join(own.trim_start_matches('/'));
     let root = forge.parent().unwrap_or(&forge).to_path_buf();
     let engines = root.join(ENGINES);
-    let systemd_exec_pid = std::env::var("SYSTEMD_EXEC_PID")
-        .ok()
-        .and_then(|pid| pid.parse().ok());
+    let systemd_exec_pid = match std::env::var("SYSTEMD_EXEC_PID") {
+        Ok(pid) => Some(
+            pid.parse::<u32>()
+                .map_err(|error| format!("SYSTEMD_EXEC_PID `{pid}`: {error}"))?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(pid)) => {
+            return Err(format!("SYSTEMD_EXEC_PID `{}` isn't a pid", pid.display()));
+        }
+    };
     let standing = standing(
         &forge,
         systemd_exec_pid,
@@ -151,19 +172,54 @@ fn set(group: &Path, knob: &str, value: &str) -> Result<(), String> {
 }
 
 fn remember(layout: &Layout) -> Result<(), String> {
-    CString::new(layout.engines.join("cgroup.procs").as_os_str().as_bytes())
-        .map(|path| {
-            ENGINES_MEMBERSHIP.get_or_init(|| path);
+    CString::new(layout.engines.as_os_str().as_bytes())
+        .map(|_| {
+            ENGINES_FOLDER.get_or_init(|| layout.engines.clone());
         })
         .map_err(|error| error.to_string())
 }
 
+pub fn run_owner(folder_name: &str) -> Option<u32> {
+    folder_name
+        .strip_prefix(RUN_PREFIX)?
+        .split_once('-')
+        .and_then(|(pid, _)| pid.parse().ok())
+}
+
+fn sweep_leftover_runs(engines: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(engines)
+        .map_err(|error| format!("list {}: {error}", engines.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("list {}: {error}", engines.display()))?;
+        let name = entry.file_name();
+        let abandoned = name
+            .to_str()
+            .and_then(run_owner)
+            .is_some_and(|owner| !Path::new("/proc").join(owner.to_string()).exists());
+        if !abandoned {
+            continue;
+        }
+        match std::fs::remove_dir(entry.path()) {
+            Ok(()) => {}
+            Err(error)
+                if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::BUSY) =>
+            {
+                tracing::warn!(group = %entry.path().display(), "a run cgroup left by an earlier Forge still has processes");
+            }
+            Err(error) => return Err(format!("remove {}: {error}", entry.path().display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn protect_forge() -> Vec<Outcome> {
-    const SEPARATION: &str = "engines run in their own cgroup";
+    const SEPARATION: &str = "each engine run has its own cgroup, killed whole when the run ends";
     let unavailable = |reason: String| {
         vec![Outcome::Skipped {
             measure: SEPARATION.to_owned(),
-            reason,
+            reason: format!(
+                "{reason}; an engine run is killed by its process group instead, so a process it detaches with setsid outlives the run"
+            ),
         }]
     };
     let layout = match locate() {
@@ -180,12 +236,11 @@ pub fn protect_forge() -> Vec<Outcome> {
     if let Err(reason) = entered {
         return unavailable(reason);
     }
+    let swept = sweep_leftover_runs(&layout.engines);
     let memory = enable(&layout, Controller::Memory);
     let ceiling = std::fs::read_to_string("/proc/meminfo")
         .map_err(|error| format!("read /proc/meminfo: {error}"))
-        .and_then(|meminfo| {
-            total_memory(&meminfo).ok_or_else(|| "/proc/meminfo names no MemTotal".to_owned())
-        })
+        .and_then(|meminfo| total_memory(&meminfo))
         .map(engine_memory_ceiling);
     let capped = memory
         .clone()
@@ -203,6 +258,10 @@ pub fn protect_forge() -> Vec<Outcome> {
     });
     vec![
         Outcome::Applied(SEPARATION.to_owned()),
+        Outcome::of(
+            "empty run cgroups left by an earlier Forge are removed",
+            swept,
+        ),
         match capped {
             Ok(bytes) => Outcome::Applied(format!(
                 "engines reclaim their own memory above {} MiB",
@@ -271,17 +330,180 @@ pub fn attach(engines: Option<&Path>, proc_root: &Path, pid: u32) -> Result<(), 
     }
 }
 
-pub(crate) fn started(pid: u32) {
-    let engines =
-        engines_membership().map(|path| Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())));
-    if let Err(failure) = attach(engines, Path::new("/proc"), pid) {
-        let error: &dyn std::error::Error = &failure;
-        tracing::warn!(error, "engine isolation is incomplete");
+#[derive(Debug)]
+pub struct RunGroup {
+    folder: PathBuf,
+    procs: CString,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunGroupError {
+    #[error("create the cgroup {} for an engine run", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the stale cgroup {} before an engine run takes its name", path.display())]
+    Stale {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("name the cgroup {} for an engine run", path.display())]
+    Name {
+        path: PathBuf,
+        #[source]
+        source: std::ffi::NulError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EndRunError {
+    #[error("kill the processes of engine run cgroup {}", path.display())]
+    Kill {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("watch engine run cgroup {} until it is empty", path.display())]
+    Watch {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("engine run cgroup {} still had processes {}s after they were killed", path.display(), after.as_secs())]
+    StillPopulated { path: PathBuf, after: Duration },
+    #[error("remove engine run cgroup {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn populated(events: &str) -> Option<bool> {
+    events
+        .lines()
+        .find_map(|line| line.strip_prefix("populated "))
+        .and_then(|value| match value.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        })
+}
+
+impl RunGroup {
+    pub(crate) fn create() -> Result<Option<Self>, RunGroupError> {
+        match ENGINES_FOLDER.get() {
+            Some(engines) => Self::create_in(engines).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub fn create_in(engines: &Path) -> Result<Self, RunGroupError> {
+        let run = RUNS.fetch_add(1, Ordering::Relaxed);
+        let folder = engines.join(format!("{RUN_PREFIX}{}-{run}", std::process::id()));
+        let created = match std::fs::create_dir(&folder) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_dir(&folder).map_err(|source| RunGroupError::Stale {
+                    path: folder.clone(),
+                    source,
+                })?;
+                std::fs::create_dir(&folder)
+            }
+            other => other,
+        };
+        created.map_err(|source| RunGroupError::Create {
+            path: folder.clone(),
+            source,
+        })?;
+        let procs = folder.join("cgroup.procs");
+        let procs =
+            CString::new(procs.as_os_str().as_bytes()).map_err(|source| RunGroupError::Name {
+                path: procs.clone(),
+                source,
+            })?;
+        Ok(Self { folder, procs })
+    }
+
+    #[must_use]
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
+    pub(crate) fn kill_switch(&self) -> CString {
+        CString::new(self.folder.join("cgroup.kill").as_os_str().as_bytes()).expect(
+            "invariant: a cgroup folder named without NUL bytes has a kill file named without them",
+        )
+    }
+
+    pub(crate) fn membership(&self) -> CString {
+        self.procs.clone()
+    }
+
+    pub fn end(&self) -> Result<(), EndRunError> {
+        let kill = self.folder.join("cgroup.kill");
+        std::fs::write(&kill, b"1").map_err(|source| EndRunError::Kill { path: kill, source })?;
+        self.wait_empty(EMPTY_WITHIN)?;
+        match std::fs::remove_dir(&self.folder) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(EndRunError::Remove {
+                path: self.folder.clone(),
+                source,
+            }),
+        }
+    }
+
+    fn wait_empty(&self, within: Duration) -> Result<(), EndRunError> {
+        let path = self.folder.join("cgroup.events");
+        let watching = |source: std::io::Error| EndRunError::Watch {
+            path: path.clone(),
+            source,
+        };
+        let events = std::fs::File::open(&path).map_err(watching)?;
+        let deadline = Instant::now() + within;
+        loop {
+            let mut buffer = [0_u8; EVENTS_BYTES];
+            let read = events.read_at(&mut buffer, 0).map_err(watching)?;
+            let text = String::from_utf8_lossy(&buffer[..read]);
+            match populated(&text) {
+                Some(false) => return Ok(()),
+                Some(true) => {}
+                None => {
+                    return Err(watching(std::io::Error::other(format!(
+                        "{} names no populated state",
+                        path.display()
+                    ))));
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(EndRunError::StillPopulated {
+                    path: self.folder.clone(),
+                    after: within,
+                });
+            }
+            let timeout = rustix::time::Timespec::try_from(remaining)
+                .expect("invariant: a wait of at most ten seconds fits a timespec");
+            let mut watched = [rustix::event::PollFd::new(
+                &events,
+                rustix::event::PollFlags::PRI,
+            )];
+            rustix::event::poll(&mut watched, Some(&timeout))
+                .map_err(|source| watching(source.into()))?;
+        }
     }
 }
 
-pub(crate) fn engines_membership() -> Option<&'static CStr> {
-    ENGINES_MEMBERSHIP.get().map(CString::as_c_str)
+pub(crate) fn started(group: Option<&RunGroup>, pid: u32) {
+    let membership =
+        group.map(|group| Path::new(std::ffi::OsStr::from_bytes(group.procs.to_bytes())));
+    if let Err(failure) = attach(membership, Path::new("/proc"), pid) {
+        let error: &dyn std::error::Error = &failure;
+        tracing::warn!(error, "engine isolation is incomplete");
+    }
 }
 
 fn overwrite(path: &CStr, bytes: &[u8]) -> rustix::io::Result<()> {
@@ -290,8 +512,8 @@ fn overwrite(path: &CStr, bytes: &[u8]) -> rustix::io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn enter(engines: Option<&CStr>) -> rustix::io::Result<()> {
-    if let Some(membership) = engines {
+pub(crate) fn enter(group: Option<&CStr>) -> rustix::io::Result<()> {
+    if let Some(membership) = group {
         overwrite(membership, b"0")?;
     }
     overwrite(OWN_OOM_SCORE, ENGINE_OOM_SCORE)

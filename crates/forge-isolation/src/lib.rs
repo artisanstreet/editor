@@ -49,23 +49,79 @@ pub use sandbox::{
     Coverage, Landlock, Reach, Ruleset, RulesetError, Support, Unavailable, support,
 };
 
+#[cfg(target_os = "linux")]
+pub use linux::{EndRunError, RunGroupError};
+
+#[cfg(not(target_os = "linux"))]
+pub type RunGroupError = std::convert::Infallible;
+
+#[cfg(not(target_os = "linux"))]
+pub type EndRunError = std::convert::Infallible;
+
+#[derive(Debug)]
+pub struct EngineTree {
+    #[cfg(target_os = "linux")]
+    group: Option<linux::RunGroup>,
+}
+
+impl EngineTree {
+    #[cfg(target_os = "linux")]
+    pub fn new() -> Result<Self, RunGroupError> {
+        linux::RunGroup::create().map(|group| Self { group })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as Linux, where making the run's cgroup can fail"
+    )]
+    pub const fn new() -> Result<Self, RunGroupError> {
+        Ok(Self {})
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn group(&self) -> Option<&linux::RunGroup> {
+        self.group.as_ref()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn end(&self) -> Result<(), EndRunError> {
+        self.group.as_ref().map_or(Ok(()), linux::RunGroup::end)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        clippy::unused_self,
+        reason = "the same signature as Linux, where killing the run's cgroup can fail"
+    )]
+    pub const fn end(&self) -> Result<(), EndRunError> {
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
-pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>) {
-    unix::contain(command, sandbox.cloned());
+pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>, tree: &EngineTree) {
+    unix::contain(command, sandbox.cloned(), tree);
 }
 
 #[cfg(not(unix))]
-pub const fn contain(_command: &mut std::process::Command, _sandbox: Option<&Ruleset>) {}
+pub const fn contain(
+    _command: &mut std::process::Command,
+    _sandbox: Option<&Ruleset>,
+    _tree: &EngineTree,
+) {
+}
 
 #[cfg(windows)]
-pub fn started(process_id: u32) {
+pub fn started(_tree: &EngineTree, process_id: u32) {
     windows::demote(process_id);
 }
 
 #[cfg(target_os = "linux")]
-pub fn started(process_id: u32) {
-    linux::started(process_id);
+pub fn started(tree: &EngineTree, process_id: u32) {
+    linux::started(tree.group(), process_id);
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub const fn started(_process_id: u32) {}
+pub const fn started(_tree: &EngineTree, _process_id: u32) {}

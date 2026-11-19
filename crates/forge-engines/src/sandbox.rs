@@ -40,6 +40,14 @@ pub(crate) mod guard {
     #[derive(Debug)]
     pub(crate) struct Exposure;
 
+    impl Exposure {
+        #[expect(
+            clippy::unused_self,
+            reason = "the same signature as Linux, where an exposure can outlive its runs"
+        )]
+        pub(crate) const fn outlive_forge(&self) {}
+    }
+
     #[expect(
         clippy::unnecessary_wraps,
         reason = "the same signature as Linux, where guarding the engine's configuration can fail"
@@ -76,7 +84,7 @@ pub(crate) struct Confined {
     temporary: tempfile::TempDir,
     ruleset: Ruleset,
     redirects: Vec<(String, OsString)>,
-    _exposure: guard::Exposure,
+    exposure: guard::Exposure,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,7 +167,7 @@ impl Sandbox {
                     temporary,
                     ruleset,
                     redirects,
-                    _exposure: exposure,
+                    exposure,
                 })))
             }
         }
@@ -169,6 +177,12 @@ impl Sandbox {
         match self {
             Self::Open => None,
             Self::Confined(confined) => Some(&confined.ruleset),
+        }
+    }
+
+    pub(crate) fn outlived(&self) {
+        if let Self::Confined(confined) = self {
+            confined.exposure.outlive_forge();
         }
     }
 

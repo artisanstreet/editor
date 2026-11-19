@@ -2,7 +2,7 @@ use crate::Turn;
 use crate::sandbox::Sandbox;
 use crate::trace::{Kind, Secrets, Trace};
 use artisan_api::{EngineId, ThreadId};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +28,12 @@ pub enum SpawnError {
         thread: ThreadId,
         #[source]
         source: Box<crate::sandbox::SandboxError>,
+    },
+    #[error("make the process tree of {}", program.display())]
+    Tree {
+        program: PathBuf,
+        #[source]
+        source: forge_isolation::RunGroupError,
     },
     #[error("start {}", program.display())]
     Start {
@@ -251,7 +257,8 @@ pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError>
 pub(crate) struct OwnedChild {
     child: Box<dyn ChildWrapper>,
     armed: bool,
-    _sandbox: Sandbox,
+    tree: forge_isolation::EngineTree,
+    sandbox: Sandbox,
 }
 impl std::ops::Deref for OwnedChild {
     type Target = dyn ChildWrapper;
@@ -271,6 +278,7 @@ impl OwnedChild {
                 tracing::debug!(%error, "the engine process had already exited when it was dropped");
             }
             self.armed = false;
+            end_tree(&self.tree, &self.sandbox);
         }
     }
 }
@@ -280,25 +288,14 @@ impl Drop for OwnedChild {
     }
 }
 
-#[derive(Debug)]
-struct Isolated(Sandbox);
-
-impl CommandWrapper for Isolated {
-    fn pre_spawn(&mut self, command: &mut Command, _core: &CommandWrap) -> std::io::Result<()> {
-        forge_isolation::contain(command.as_std_mut(), self.0.ruleset());
-        Ok(())
-    }
-
-    fn post_spawn(
-        &mut self,
-        _command: &mut Command,
-        child: &mut tokio::process::Child,
-        _core: &CommandWrap,
-    ) -> std::io::Result<()> {
-        if let Some(process_id) = child.id() {
-            forge_isolation::started(process_id);
-        }
-        Ok(())
+fn end_tree(tree: &forge_isolation::EngineTree, sandbox: &Sandbox) {
+    if let Err(failure) = tree.end() {
+        let error: &dyn std::error::Error = &failure;
+        tracing::warn!(
+            error,
+            "an engine run's processes may outlive it; its engine's configuration stays guarded until Forge exits"
+        );
+        sandbox.outlived();
     }
 }
 
@@ -308,21 +305,34 @@ pub(crate) fn owned_command(
 ) -> Result<OwnedChild, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
     sandbox.prepare(&mut command);
+    let tree = forge_isolation::EngineTree::new().map_err(|source| SpawnError::Tree {
+        program: program.clone(),
+        source,
+    })?;
+    forge_isolation::contain(command.as_std_mut(), sandbox.ruleset(), &tree);
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);
-    command.wrap(Isolated(sandbox.clone()));
     #[cfg(unix)]
     command.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
-    command
-        .spawn()
-        .map(|child| OwnedChild {
-            child,
-            armed: true,
-            _sandbox: sandbox,
-        })
-        .map_err(|source| SpawnError::Start { program, source })
+    match command.spawn() {
+        Ok(child) => {
+            if let Some(process_id) = child.id() {
+                forge_isolation::started(&tree, process_id);
+            }
+            Ok(OwnedChild {
+                child,
+                armed: true,
+                tree,
+                sandbox,
+            })
+        }
+        Err(source) => {
+            end_tree(&tree, &sandbox);
+            Err(SpawnError::Start { program, source })
+        }
+    }
 }
 
 fn spawn_command(

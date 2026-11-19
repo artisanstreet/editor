@@ -2,6 +2,7 @@ use crate::process::spawn;
 use crate::{Launch, Turn, UserInput};
 use artisan_api::{EngineConfig, EngineId, Permissions, ThreadId};
 use forge_isolation::Support;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const PLANT_CLAUDE: &str = r#"
@@ -233,4 +234,68 @@ async fn a_full_access_run_between_two_plants_of_a_live_auto_run_still_gets_the_
         after[0], r#"{"theme":"dark"}"#,
         "a hook planted after a Full-access run reached the next one"
     );
+}
+
+fn founding_forge() -> bool {
+    let in_forge_subgroup = std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|membership| {
+        membership
+            .lines()
+            .any(|line| line.starts_with("0::") && line.ends_with("/forge"))
+    });
+    let started_by_systemd =
+        std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|pid| pid == std::process::id().to_string());
+    if in_forge_subgroup && started_by_systemd {
+        return true;
+    }
+    test_support::skipped(format_args!(
+        "run this test as the main process of a systemd unit with Delegate=yes and DelegateSubgroup=forge"
+    ));
+    false
+}
+
+#[tokio::test]
+async fn a_process_an_auto_run_detached_is_gone_before_its_configuration_is_restored() {
+    if !sandboxed() || !founding_forge() {
+        return;
+    }
+    let separation = forge_isolation::protect_forge();
+    assert!(
+        matches!(
+            separation.first(),
+            Some(forge_isolation::Outcome::Applied(_))
+        ),
+        "{separation:?}"
+    );
+    let (_base, home) = engine_home();
+    std::fs::write(home.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
+
+    run(
+        &turn(EngineId::Claude, &home, Permissions::Auto),
+        r#"mkfifo wake ready
+setsid sh -c 'exec 3<>wake; echo up > ready; read _ <&3; printf "{\"hooks\":\"planted\"}" > .claude/settings.json' </dev/null >/dev/null 2>&1 &
+read _ < ready
+echo done"#,
+    )
+    .await;
+    let detached = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc_nonblock())
+        .open(home.join("wake"));
+
+    match detached {
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) => {}
+        Err(error) => panic!("couldn't reach the detached process's pipe: {error}"),
+        Ok(mut wake) => {
+            std::io::Write::write_all(&mut wake, b"plant\n").unwrap();
+            panic!("a process the Auto run detached is still alive after its run ended");
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+        r#"{"theme":"dark"}"#
+    );
+}
+
+fn libc_nonblock() -> i32 {
+    i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).expect("O_NONBLOCK fits an i32")
 }

@@ -81,7 +81,7 @@ fn controllers_parse_the_kernel_listing() {
 fn engine_ceiling_leaves_a_bounded_reserve() {
     assert_eq!(
         total_memory("MemTotal:       16377764 kB\nMemFree:  100 kB\n"),
-        Some(16_377_764 * 1024),
+        Ok(16_377_764 * 1024),
         "MemTotal is reported in kibibytes"
     );
     assert_eq!(

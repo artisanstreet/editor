@@ -112,10 +112,34 @@ pub(crate) struct Exposure {
     engine: EngineId,
     home: PathBuf,
     marker: PathBuf,
+    ends: std::sync::Mutex<Ending>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    WithItsRuns,
+    WithForge,
+}
+
+impl Exposure {
+    pub(crate) fn outlive_forge(&self) {
+        *self
+            .ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Ending::WithForge;
+    }
 }
 
 impl Drop for Exposure {
     fn drop(&mut self) {
+        let ending = *self
+            .ends
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ending == Ending::WithForge {
+            tracing::warn!(marker = %self.marker.display(), "a sandboxed run's processes may still be alive; its engine's configuration stays guarded until Forge exits");
+            return;
+        }
         if let Err(error) = fs::remove_file(&self.marker) {
             tracing::warn!(marker = %self.marker.display(), %error, "couldn't record that a sandboxed run ended; its engine's configuration stays guarded");
         }
@@ -258,6 +282,7 @@ pub(crate) fn expose(engine: EngineId, home: &Path) -> Result<Exposure, GuardErr
         engine,
         home: home.to_path_buf(),
         marker,
+        ends: std::sync::Mutex::new(Ending::WithItsRuns),
     };
     let snapshot = snapshot_folder(home);
     if !snapshot.join(MANIFEST).is_file() {
