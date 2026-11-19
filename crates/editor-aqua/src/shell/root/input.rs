@@ -46,12 +46,14 @@ impl RootViews {
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not dismiss sidebar overlay"),
         }
-        if self
+        let intercepted = self
             .color_menu
             .as_mut()
-            .is_some_and(|menu| menu.intercept(ui, input))
-        {
-            return Some(true);
+            .map_or(Ok(false), |menu| menu.intercept(ui, input));
+        match intercepted {
+            Ok(true) => return Some(true),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "could not close color copy menu"),
         }
         if let InputEvent::KeyDown(event) = input
             && self.palette_dialog.is_none()

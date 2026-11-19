@@ -170,7 +170,9 @@ impl Default for LiteralOwner {
             generation: 0,
             epoch: Arc::new(AtomicU64::new(0)),
             capacity: Arc::new(Semaphore::new(MAX_BYTES)),
-            delivery: Delivery::new(NonZeroUsize::new(MAX_FETCHES).unwrap()),
+            delivery: Delivery::new(
+                const { NonZeroUsize::new(MAX_FETCHES).expect("MAX_FETCHES is not zero") },
+            ),
         }
     }
 }
@@ -239,7 +241,10 @@ impl LiteralOwner {
                 && self.entries[index].source.source_ref() == source.source_ref()
                 && self.entries[index].descriptor == descriptor;
             if same {
-                let entry = self.entries.remove(index).unwrap();
+                let entry = self
+                    .entries
+                    .remove(index)
+                    .unwrap_or_else(|| panic!("invariant: literal {key} was found at {index}"));
                 let result = match &entry.phase {
                     Phase::Ready(leaf) => LiteralPreparation::Ready(Arc::clone(leaf)),
                     Phase::Failed(error) => LiteralPreparation::Failed(error.clone()),
@@ -358,25 +363,33 @@ impl LiteralOwner {
                 runtime::runtime()
                     .spawn(async move {
                         let result = future.await;
-                        let _ = sender
-                            .send(Completion {
+                        crate::ui::deliver::deliver(
+                            &sender,
+                            Completion {
                                 key,
                                 generation,
                                 result,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                     })
                     .abort_handle(),
             );
         } else {
-            let text = match collector.take().unwrap().finish() {
+            let text = match collector
+                .take()
+                .unwrap_or_else(|| panic!("invariant: literal {key} is loading with its collector"))
+                .finish()
+            {
                 Ok(text) => text,
                 Err(error) => {
                     entry.phase = Phase::Failed(error);
                     return;
                 }
             };
-            let mut permit = capacity.take().unwrap();
+            let mut permit = capacity
+                .take()
+                .unwrap_or_else(|| panic!("invariant: literal {key} is loading with its capacity"));
             let retained = text.len().max(1);
             let release = permit.num_permits() - retained;
             drop(permit.split(release));

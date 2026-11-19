@@ -1,5 +1,6 @@
 use super::*;
 use aqua::images::ImageAssets;
+use std::sync::Arc;
 
 fn fetcher() -> MediaFetcher {
     MediaFetcher::new("test", |_| Box::pin(async { Err(MediaFailure::Missing) })).owned_by(&[1], 1)

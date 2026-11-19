@@ -105,7 +105,10 @@ pub(crate) struct ModelState(Rc<RefCell<State>>);
 impl Default for ModelState {
     fn default() -> Self {
         let mailbox = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
-        let delivery = Delivery::with_wake(NonZeroUsize::new(16).unwrap(), mailbox.sender());
+        let delivery = Delivery::with_wake(
+            const { NonZeroUsize::new(16).expect("16 is not zero") },
+            mailbox.sender(),
+        );
         Self(Rc::new(RefCell::new(State {
             entries: HashMap::new(),
             waiters: HashMap::new(),
@@ -209,12 +212,18 @@ impl ModelState {
         if changed {
             let generation = state.next_generation;
             state.next_generation = state.next_generation.wrapping_add(1);
-            let entry = state.entries.get_mut(id).unwrap();
+            let entry = state
+                .entries
+                .get_mut(id)
+                .unwrap_or_else(|| panic!("invariant: model {id} was ensured above"));
             entry.rendering = None;
             entry.shown = None;
             entry.generation = generation;
         }
-        let entry = state.entries.get_mut(id).unwrap();
+        let entry = state
+            .entries
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("invariant: model {id} was ensured above"));
         entry.owner = owner;
         entry.model = Some(model);
     }
@@ -262,14 +271,16 @@ impl ModelState {
                 Err(error) if error.is_cancelled() => return,
                 Err(error) => std::panic::resume_unwind(error.into_panic()),
             };
-            let _ = sender
-                .send(Completion {
+            crate::ui::deliver::deliver(
+                &sender,
+                Completion {
                     id,
                     generation,
                     key,
                     frame,
-                })
-                .await;
+                },
+            )
+            .await;
         });
         entry.rendering = Some(Rendering { key, stop });
     }
@@ -352,10 +363,7 @@ impl ModelBlock {
             self.pitch.unwrap_or(Camera::DEFAULT_PITCH),
         );
         let waiter = state.waiter(id);
-        let sender = state.0.borrow().mailbox.sender();
-        let wake: aqua::mailbox::Wake = Arc::new(move || {
-            let _ = sender.send(());
-        });
+        let wake = crate::ui::media::wake_on(&state.0.borrow().mailbox);
         let loaded = (services.capability)().and_then(|capability| {
             services.assets.request(
                 fetcher,

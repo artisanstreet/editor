@@ -62,10 +62,10 @@ fn navigation_copies_the_selected_original_payload_and_dismisses() {
     .unwrap()
     .unwrap();
     app.build_frame().unwrap();
-    assert!(host.handle_input(&mut app, &key(NamedKey::Down)));
-    assert!(host.handle_input(&mut app, &key(NamedKey::Down)));
-    host.handle_input(&mut app, &key(NamedKey::Enter));
-    host.sync(&mut app);
+    assert!(host.handle_input(&mut app, &key(NamedKey::Down)).unwrap());
+    assert!(host.handle_input(&mut app, &key(NamedKey::Down)).unwrap());
+    host.handle_input(&mut app, &key(NamedKey::Enter)).unwrap();
+    host.sync(&mut app).unwrap();
     assert!(!host.is_open(&app));
     assert_eq!(app.tree().focused(), Some(owner));
     let effects = effects.borrow();

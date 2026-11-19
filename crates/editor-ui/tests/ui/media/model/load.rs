@@ -28,9 +28,11 @@ impl Fixture {
         .owned_by(&[7], 1);
         let assets = ModelAssets::new();
         let (wake, incoming) = mpsc::channel();
-        assets.loads.set_test_waker(Arc::new(move || {
-            let _ = wake.send(());
-        }));
+        assets
+            .loads
+            .set_test_waker(Arc::new(move || match wake.send(()) {
+                Ok(()) | Err(mpsc::SendError(())) => {}
+            }));
         Self {
             assets,
             fetcher,
@@ -207,7 +209,9 @@ fn removing_owner_cancels_pending_fetch_and_recreation_loads_again() {
     let (cancelled, observed) = mpsc::channel();
     runtime::runtime().spawn(async move {
         abandoned.closed().await;
-        let _ = cancelled.send(());
+        match cancelled.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }
     });
     fixture.fetcher.retain_resources(&[]);
     observed.recv_timeout(LIMIT).unwrap();

@@ -249,7 +249,9 @@ pub(crate) fn view(
     };
     let geometry = {
         let mut entries = states.0.borrow_mut();
-        let entry = entries.get_mut(&id).unwrap();
+        let entry = entries
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("invariant: chart {id} is synced before its geometry"));
         if let Some((known, geometry)) = &entry.geometry
             && *known == key
         {

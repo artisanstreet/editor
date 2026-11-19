@@ -8,11 +8,11 @@ fn fixture() -> (
     aqua::images::ImageAssets,
     Preview,
 ) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temp dir");
     let mut core = Core::for_tests(EditorFiles {
         dir: directory.path().to_owned(),
     })
-    .unwrap();
+    .expect("core");
     let config = HostConfig {
         id: HostId("preview".into()),
         name: "preview".into(),
@@ -23,16 +23,18 @@ fn fixture() -> (
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity().unwrap(),
+        core.identity().expect("identity"),
     )
-    .unwrap();
+    .expect("client");
     core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
-    let instance = core.host(&config.id).unwrap().instance();
+    core.host_mut(&config.id)
+        .expect("host")
+        .test_stop_connection();
+    let instance = core.host(&config.id).expect("host").instance();
     let assets = aqua::images::ImageAssets::default();
     let image = assets
-        .insert(aqua_media::decode::DecodedImage::from_rgba(2, 1, vec![255; 8]).unwrap())
-        .unwrap();
+        .insert(aqua_media::decode::DecodedImage::from_rgba(2, 1, vec![255; 8]).expect("image"))
+        .expect("asset");
     let fetcher = MediaFetcher::new("preview", |_| {
         Box::pin(async { Err(super::super::source::MediaFailure::Missing) })
     })

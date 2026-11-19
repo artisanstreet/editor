@@ -84,9 +84,13 @@ fn camera_input_clamps_and_reset_restores_the_authored_view() {
 fn released_view_rejects_old_software_completion_for_reused_id() {
     let state = ModelState::default();
     let (wake, received) = mpsc::channel();
-    state.0.borrow().mailbox.set_waker(Arc::new(move || {
-        let _ = wake.send(());
-    }));
+    state
+        .0
+        .borrow()
+        .mailbox
+        .set_waker(Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
     let initial = Camera::default();
     state.ensure("model", initial, Shading::Shaded);
     let old_generation = state.0.borrow().entries["model"].generation;

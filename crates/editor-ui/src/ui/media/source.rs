@@ -386,13 +386,13 @@ pub async fn load_image_bytes(
         .clone()
         .acquire_owned()
         .await
-        .map_err(|_| MediaLoadError::Invalid)?;
+        .expect("invariant: the media work semaphore is never closed");
     let bytes = match &source.parsed() {
         Parsed::Url(url) => {
-            let response = http
-                .get(url, true)
-                .await
-                .map_err(|_| MediaLoadError::Fetch(MediaFailure::Unreachable))?;
+            let response = http.get(url, true).await.map_err(|error| {
+                tracing::warn!(%url, %error, "fetch image");
+                MediaLoadError::Fetch(MediaFailure::Unreachable)
+            })?;
             match response.status.as_u16() {
                 200..=299 => Ok(response.body.into()),
                 404 | 410 => Err(MediaLoadError::Fetch(MediaFailure::Missing)),

@@ -108,7 +108,10 @@ impl Images {
             state: Rc::new(RefCell::new(State {
                 next: 0,
                 jobs: HashMap::new(),
-                delivery: Delivery::with_wake(NonZeroUsize::new(16).unwrap(), mailbox.sender()),
+                delivery: Delivery::with_wake(
+                    const { NonZeroUsize::new(16).expect("16 is not zero") },
+                    mailbox.sender(),
+                ),
             })),
             mailbox,
         }
@@ -170,7 +173,7 @@ impl Images {
                     let result =
                         source::load_image_bytes(&source, Some(&transport), &media_http::client())
                             .await;
-                    let _ = sender.send(Completion { id, result }).await;
+                    crate::ui::deliver::deliver(&sender, Completion { id, result }).await;
                 });
                 let abort = task.abort_handle();
                 if ticket.attach(abort.clone()) {

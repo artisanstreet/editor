@@ -26,9 +26,11 @@ impl Fixture {
         .owned_by(&[7], 1);
         let assets = AudioAssets::new();
         let (wake, incoming) = mpsc::channel();
-        assets.loads.set_test_waker(Arc::new(move || {
-            let _ = wake.send(());
-        }));
+        assets
+            .loads
+            .set_test_waker(Arc::new(move || match wake.send(()) {
+                Ok(()) | Err(mpsc::SendError(())) => {}
+            }));
         Self {
             assets,
             fetcher,

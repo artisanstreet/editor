@@ -5,10 +5,7 @@ use std::{
     cell::Cell,
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use aqua::images::{ImageHandle, ImageStatus};
@@ -93,10 +90,7 @@ impl ImageState {
         self.wake.drain();
         let mut changed = false;
         for (index, source) in self.sources.iter().enumerate() {
-            let sender = self.wake.sender();
-            let wake: aqua::mailbox::Wake = Arc::new(move || {
-                let _ = sender.send(());
-            });
+            let wake = crate::ui::media::wake_on(&self.wake);
             let next = match self.loader.request(
                 &self.fetcher,
                 source,

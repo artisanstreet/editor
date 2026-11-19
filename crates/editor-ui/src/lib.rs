@@ -14,12 +14,9 @@
     clippy::iter_over_hash_type,
     clippy::large_enum_variant,
     clippy::large_types_passed_by_value,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
     clippy::manual_clamp,
     clippy::manual_let_else,
     clippy::many_single_char_names,
-    clippy::map_err_ignore,
     clippy::match_same_arms,
     clippy::match_wildcard_for_single_variants,
     clippy::needless_collect,
@@ -46,14 +43,16 @@
     clippy::type_complexity,
     clippy::unreadable_literal,
     clippy::unused_self,
-    clippy::unwrap_used,
     clippy::used_underscore_binding,
     clippy::useless_let_if_seq,
     clippy::wildcard_enum_match_arm,
-    let_underscore_drop,
     missing_debug_implementations,
     trivial_casts,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::unwrap_used,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
 )]
 #![expect(
     clippy::disallowed_methods,

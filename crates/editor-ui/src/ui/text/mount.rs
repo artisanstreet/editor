@@ -719,8 +719,15 @@ fn token_presentation(
 )> {
     let tokens = state.styled_tokens();
     let compiled =
-        super::tokens::compile_tokens(state.text(), style, theme.colors.text, &tokens, |_| 20.0)
-            .ok()?;
+        match super::tokens::compile_tokens(state.text(), style, theme.colors.text, &tokens, |_| {
+            20.0
+        }) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                tracing::warn!(?error, "style editor tokens; showing plain text");
+                return None;
+            }
+        };
     let glyphs = compiled
         .glyphs
         .into_iter()

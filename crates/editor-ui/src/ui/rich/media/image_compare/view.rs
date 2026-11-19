@@ -1,10 +1,7 @@
 use std::{
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use aqua::images::{ImageHandle, ImageStatus};
@@ -179,10 +176,7 @@ impl CompareState {
                 Side::Before => &self.before,
                 Side::After => &self.after,
             };
-            let sender = self.wake.sender();
-            let wake: aqua::mailbox::Wake = Arc::new(move || {
-                let _ = sender.send(());
-            });
+            let wake = crate::ui::media::wake_on(&self.wake);
             let part = Self::part(side);
             let result =
                 self.loader

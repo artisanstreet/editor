@@ -191,30 +191,31 @@ impl ColorCopyMenuHost {
         self.panel.alive.set(false);
     }
 
-    pub fn sync(&mut self, app: &mut aqua::UiApp) {
+    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
         if self.panel.pending_close.replace(false) && self.is_open(app) {
-            let _ = self.popup.begin_close(app, self.now);
+            self.popup.begin_close(app, self.now)?;
         }
+        Ok(())
     }
 
-    pub fn intercept(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> bool {
+    pub fn intercept(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> Result<bool, String> {
         if self.popup.is_closing() || app.host().service().topmost() != Some(self.overlay) {
-            return false;
+            return Ok(false);
         }
-        if self.popup.request_dismissal(app, event).unwrap_or(false) {
+        if self.popup.request_dismissal(app, event)? {
             (self.panel.effect)(ColorCopyEffect::RequestFrame);
-            return true;
+            return Ok(true);
         }
         let InputEvent::KeyDown(key) = event else {
-            return false;
+            return Ok(false);
         };
         let backwards = match key.key {
             InputKey::Named(NamedKey::Down) => false,
             InputKey::Named(NamedKey::Up) => true,
-            _ => return false,
+            _ => return Ok(false),
         };
         let Some(root) = self.root(app) else {
-            return false;
+            return Ok(false);
         };
         let entries = self.panel.menu.entries.len();
         let mut stack = vec![root];
@@ -239,24 +240,28 @@ impl ColorCopyMenuHost {
             (Some(index), false) => (index + 1) % entries,
             (None, false) => 0,
         };
-        nodes[next].is_some_and(|node| app.tree_mut().set_focused(Some(node)))
+        Ok(nodes[next].is_some_and(|node| app.tree_mut().set_focused(Some(node))))
     }
 
-    pub fn handle_input(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> bool {
-        if self.intercept(app, event) {
-            return true;
+    pub fn handle_input(
+        &mut self,
+        app: &mut aqua::UiApp,
+        event: &InputEvent,
+    ) -> Result<bool, String> {
+        if self.intercept(app, event)? {
+            return Ok(true);
         }
         if app.host().service().topmost() != Some(self.overlay) {
-            return false;
+            return Ok(false);
         }
         let handled = app.handle_input(event);
-        self.sync(app);
-        handled
+        self.sync(app)?;
+        Ok(handled)
     }
 
     pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, String> {
         self.now = now;
-        self.sync(app);
+        self.sync(app)?;
         if self.popup.is_open(app) {
             self.popup.advance(app, now)?;
         }

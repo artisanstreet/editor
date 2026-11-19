@@ -50,7 +50,10 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
             state: Rc::new(RefCell::new(State {
                 next: 0,
                 jobs: HashMap::new(),
-                delivery: Delivery::with_wake(NonZeroUsize::new(16).unwrap(), sender),
+                delivery: Delivery::with_wake(
+                    const { NonZeroUsize::new(16).expect("16 is not zero") },
+                    sender,
+                ),
             })),
             mailbox,
             fallback: ResourceCache::new(),
@@ -77,7 +80,7 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
         let sender = state.delivery.sender();
         let task = runtime::runtime().spawn(async move {
             let value = load.await;
-            let _ = sender.send(Completion { id, value }).await;
+            crate::ui::deliver::deliver(&sender, Completion { id, value }).await;
         });
         let abort = task.abort_handle();
         if ticket.attach(abort.clone()) {

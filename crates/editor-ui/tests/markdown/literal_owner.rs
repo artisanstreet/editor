@@ -34,8 +34,8 @@ fn retained_raw_permit_follows_last_lease_and_wakes_capacity_waiters() {
     let (wake, received) = mpsc::channel();
     let lease = Arc::new(Lease {
         permit: Some(permit),
-        wake: Arc::new(move || {
-            let _ = wake.send(());
+        wake: Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
         }),
     });
     let selection = Arc::clone(&lease);

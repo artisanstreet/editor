@@ -6,3 +6,6 @@ pub mod model;
 pub mod preview;
 pub mod resource_cache;
 pub mod source;
+mod wake;
+
+pub(crate) use wake::wake_on;

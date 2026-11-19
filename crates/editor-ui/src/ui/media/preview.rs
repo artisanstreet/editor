@@ -1,10 +1,7 @@
 use std::{
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -259,10 +256,7 @@ impl Preview {
         if !self.is_live(core) || self.closing.is_some() || self.image.is_some() {
             return false;
         }
-        let sender = self.wake.sender();
-        let wake: aqua::mailbox::Wake = Arc::new(move || {
-            let _ = sender.send(());
-        });
+        let wake = crate::ui::media::wake_on(&self.wake);
         let Content::Gallery {
             fetcher,
             loader,

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use std::{
     sync::atomic::AtomicBool,
     time::{Duration, Instant},

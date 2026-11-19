@@ -235,7 +235,7 @@ impl Stats {
                         .style(Style::new().flex_shrink(0.0))
                         .on_paint(move |bounds| {
                             let mut items = scene::source_scene(bounds, &shapes);
-                            let _ = items.pop();
+                            items.pop();
                             items.remove(0);
                             items
                         })

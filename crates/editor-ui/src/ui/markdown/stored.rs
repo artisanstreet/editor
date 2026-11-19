@@ -52,6 +52,11 @@ fn validate_page(
     Ok(())
 }
 
+fn platform_offset(offset: u64) -> Result<usize, String> {
+    usize::try_from(offset)
+        .map_err(|error| format!("Markdown source offset {offset} exceeds this platform: {error}"))
+}
+
 pub struct RangeCollector {
     reference: ContentRef,
     range: Range<usize>,
@@ -98,17 +103,14 @@ impl RangeCollector {
         {
             return Err("Markdown source response does not match its immutable range".to_owned());
         }
-        let start = usize::try_from(cursor - page.start)
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
-        let end = usize::try_from(page.end.min(self.range.end as u64) - page.start)
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
+        let start = platform_offset(cursor - page.start)?;
+        let end = platform_offset(page.end.min(self.range.end as u64) - page.start)?;
         let fragment = page
             .text
             .get(start..end)
             .ok_or("Markdown source response splits a UTF-8 boundary")?;
         self.text.push_str(fragment);
-        self.cursor = usize::try_from(page.end.min(self.range.end as u64))
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
+        self.cursor = platform_offset(page.end.min(self.range.end as u64))?;
         Ok(())
     }
 
@@ -344,7 +346,7 @@ pub enum StoredUpdate {
 
 type WorkerJob = Box<dyn FnOnce(&Result<MarkdownEngine, String>) + Send>;
 
-fn preparation_worker() -> Option<tokio::sync::mpsc::Sender<WorkerJob>> {
+fn preparation_worker() -> Result<tokio::sync::mpsc::Sender<WorkerJob>, String> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<WorkerJob>(QUEUE_DEPTH);
     std::thread::Builder::new()
         .name("artisan-markdown-stored".to_owned())
@@ -354,8 +356,8 @@ fn preparation_worker() -> Option<tokio::sync::mpsc::Sender<WorkerJob>> {
                 job(&engine);
             }
         })
-        .ok()?;
-    Some(sender)
+        .map_err(|error| format!("Couldn't start Markdown preparation: {error}"))?;
+    Ok(sender)
 }
 
 pub struct StoredOwner {
@@ -365,7 +367,7 @@ pub struct StoredOwner {
     generation: u64,
     capacity: Arc<Semaphore>,
     prepared_capacity: Arc<Semaphore>,
-    worker: Option<tokio::sync::mpsc::Sender<WorkerJob>>,
+    worker: Result<tokio::sync::mpsc::Sender<WorkerJob>, String>,
     delivery: Delivery<Completion>,
 }
 
@@ -379,7 +381,9 @@ impl Default for StoredOwner {
             capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
             prepared_capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
             worker: preparation_worker(),
-            delivery: Delivery::new(NonZeroUsize::new(MAX_PENDING_JOBS).unwrap()),
+            delivery: Delivery::new(
+                const { NonZeroUsize::new(MAX_PENDING_JOBS).expect("MAX_PENDING_JOBS is not zero") },
+            ),
         }
     }
 }
@@ -535,14 +539,16 @@ impl StoredOwner {
             runtime::runtime()
                 .spawn(async move {
                     let result = future.await.map_err(|error| error.to_string());
-                    let _ = sender
-                        .send(Completion::Index {
+                    crate::ui::deliver::deliver(
+                        &sender,
+                        Completion::Index {
                             owner,
                             revision,
                             offset,
                             result,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 })
                 .abort_handle(),
         )
@@ -713,7 +719,10 @@ impl StoredOwner {
                     && entry.descriptor == descriptor
             };
             if same {
-                let entry = self.leaves.remove(index).unwrap();
+                let entry = self
+                    .leaves
+                    .remove(index)
+                    .unwrap_or_else(|| panic!("invariant: leaf {key} was found at {index}"));
                 let result = match &entry.phase {
                     LeafPhase::Ready(leaf) => LeafPreparation::Ready(Arc::clone(leaf)),
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
@@ -831,19 +840,23 @@ impl StoredOwner {
             let generation = entry.generation;
             let key = key.to_owned();
             let sender = self.delivery.sender();
-            let capacity = Arc::clone(entry.capacity.as_ref().unwrap());
+            let capacity = Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
+                panic!("invariant: leaf {key} holds capacity while it collects")
+            }));
             entry.task = Some(
                 runtime::runtime()
                     .spawn(async move {
                         let _capacity = capacity;
                         let result = future.await.map_err(|error| error.to_string());
-                        let _ = sender
-                            .send(Completion::Range {
+                        crate::ui::deliver::deliver(
+                            &sender,
+                            Completion::Range {
                                 key,
                                 generation,
                                 result,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                     })
                     .abort_handle(),
             );
@@ -852,10 +865,13 @@ impl StoredOwner {
         let LeafPhase::WaitingWorker { .. } = &entry.phase else {
             return false;
         };
-        let Some(queue) = self.worker.clone() else {
-            entry.phase = LeafPhase::Failed("Couldn't start Markdown preparation".to_owned());
-            entry.capacity = None;
-            return true;
+        let queue = match &self.worker {
+            Ok(queue) => queue.clone(),
+            Err(error) => {
+                entry.phase = LeafPhase::Failed(error.clone());
+                entry.capacity = None;
+                return true;
+            }
         };
         let slot = match queue.try_reserve() {
             Ok(slot) => slot,
@@ -875,7 +891,9 @@ impl StoredOwner {
         let generation = entry.generation;
         let key = key.to_owned();
         let sender = self.delivery.sender();
-        let capacity = Arc::clone(entry.capacity.as_ref().unwrap());
+        let capacity = Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
+            panic!("invariant: leaf {key} holds capacity while it waits for the worker")
+        }));
         let (reply, receiver) = tokio::sync::oneshot::channel();
         let job: WorkerJob = Box::new(move |engine| {
             if reply.is_closed() {
@@ -884,10 +902,8 @@ impl StoredOwner {
             let result = (|| {
                 let record: artisan_markdown_index::LeafRecord =
                     serde_json::from_str(&metadata).map_err(|error| error.to_string())?;
-                let start = usize::try_from(descriptor.source_start)
-                    .map_err(|_| "Markdown source offset exceeds this platform")?;
-                let end = usize::try_from(descriptor.source_end)
-                    .map_err(|_| "Markdown source offset exceeds this platform")?;
+                let start = platform_offset(descriptor.source_start)?;
+                let end = platform_offset(descriptor.source_end)?;
                 if record.leaf.source_range() != (start..end) {
                     return Err("Markdown metadata does not match its descriptor".to_owned());
                 }
@@ -961,7 +977,9 @@ impl StoredOwner {
                     retained_bytes,
                 ))
             })();
-            let _ = reply.send((result, capacity));
+            match reply.send((result, capacity)) {
+                Ok(()) | Err((_, _)) => {}
+            }
         });
         slot.send(job);
         entry.task = Some(
@@ -971,15 +989,17 @@ impl StoredOwner {
                         Ok((result, capacity)) => (result, None, Some(capacity)),
                         Err(error) => (Err(error.to_string()), None, None),
                     };
-                    let _ = sender
-                        .send(Completion::Prepared {
+                    crate::ui::deliver::deliver(
+                        &sender,
+                        Completion::Prepared {
                             key,
                             generation,
                             result,
                             _worker: worker,
                             _capacity: capacity,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 })
                 .abort_handle(),
         );
@@ -1082,14 +1102,8 @@ impl StoredOwner {
                                     LeafPhase::Metadata(collector)
                                 }
                                 Ok(()) => match collector.finish().and_then(|metadata| {
-                                    let start = usize::try_from(entry.descriptor.source_start)
-                                        .map_err(
-                                            |_| "Markdown source offset exceeds this platform",
-                                        )?;
-                                    let end = usize::try_from(entry.descriptor.source_end)
-                                        .map_err(
-                                            |_| "Markdown source offset exceeds this platform",
-                                        )?;
+                                    let start = platform_offset(entry.descriptor.source_start)?;
+                                    let end = platform_offset(entry.descriptor.source_end)?;
                                     Ok((
                                         metadata,
                                         RangeCollector::new(

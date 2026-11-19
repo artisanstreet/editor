@@ -119,7 +119,9 @@ impl HierarchyState {
         width: f32,
     ) -> Arc<Geometry> {
         let mut states = self.0.borrow_mut();
-        let entry = states.get_mut(id).unwrap();
+        let entry = states
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("invariant: hierarchy {id} is synced before its geometry"));
         if let Some(geometry) = &entry.geometry
             && geometry.layout == layout
             && geometry.focus == entry.focus

@@ -421,10 +421,7 @@ impl AudioBlock {
                     Rc::clone(&invalidate),
                 )
             });
-            let sender = state.0.borrow().wake.sender();
-            let wake: aqua::mailbox::Wake = Arc::new(move || {
-                let _ = sender.send(());
-            });
+            let wake = crate::ui::media::wake_on(&state.0.borrow().wake);
             let name = track.shown_name();
             let result = match assets.request(fetcher, &track.src, &row_id, waiter, wake) {
                 None => Err(("Loading…".to_owned(), false)),

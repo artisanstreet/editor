@@ -102,7 +102,8 @@ fn text_head(bytes: &[u8]) -> &str {
     let head = &bytes[..bytes.len().min(1024)];
     match std::str::from_utf8(head) {
         Ok(text) => text,
-        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()]).unwrap_or_default(),
+        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()])
+            .expect("invariant: the prefix up to valid_up_to is valid UTF-8"),
     }
 }
 
