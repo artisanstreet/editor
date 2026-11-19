@@ -37,6 +37,12 @@ pub enum CallToolError {
     },
     #[error("read the saved MCP servers")]
     McpServers(#[source] serde_json::Error),
+    #[error("read the Editor's answer to {call}")]
+    EditorReply {
+        call: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl CallToolError {
@@ -44,9 +50,11 @@ impl CallToolError {
         match self {
             Self::Refused(refused) => Failure::Refused(refused.to_string()),
             Self::Forge { source, .. } => source.failure(),
-            Self::Vanished { .. } | Self::Render(_) | Self::Models { .. } | Self::McpServers(_) => {
-                Failure::Broken
-            }
+            Self::Vanished { .. }
+            | Self::Render(_)
+            | Self::Models { .. }
+            | Self::McpServers(_)
+            | Self::EditorReply { .. } => Failure::Broken,
         }
     }
 }
@@ -54,6 +62,30 @@ impl CallToolError {
 type Result<T, E = CallToolError> = std::result::Result<T, E>;
 
 const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
+
+fn editor_reply<T: DeserializeOwned>(call: &'static str, reply: Value) -> Result<T> {
+    serde_json::from_value(reply).map_err(|source| CallToolError::EditorReply { call, source })
+}
+
+#[derive(Deserialize)]
+struct EditorHost {
+    id: String,
+    name: String,
+    address: String,
+    connected: bool,
+    is_caller: bool,
+}
+
+#[derive(Deserialize)]
+struct PairedHost {
+    name: String,
+    address: String,
+}
+
+#[derive(Deserialize)]
+struct SignInStarted {
+    authorize_url: String,
+}
 
 fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CallToolError {
     move |source| CallToolError::Forge {
@@ -1454,30 +1486,27 @@ pub(crate) async fn call(
                 .call_editor(EditorCall::HostsList)
                 .await
                 .map_err(forge("list the hosts in the Editor"))?;
+            let hosts: Vec<EditorHost> = editor_reply("list_hosts", hosts)?;
             let lines: Vec<String> = hosts
-                .as_array()
                 .into_iter()
-                .flatten()
                 .map(|host| {
-                    let text =
-                        |key: &str| host.get(key).and_then(Value::as_str).unwrap_or_default();
-                    let mut states = Vec::new();
-                    if host.get("connected") == Some(&Value::Bool(true)) {
-                        states.push("connected");
-                    }
-                    if host.get("is_caller") == Some(&Value::Bool(true)) {
-                        states.push("this thread's host");
-                    }
+                    let states: Vec<&str> = [
+                        host.connected.then_some("connected"),
+                        host.is_caller.then_some("this thread's host"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                     format!(
                         "- **{}** · {}{} `{}`",
-                        text("name"),
-                        text("address"),
+                        host.name,
+                        host.address,
                         if states.is_empty() {
                             String::new()
                         } else {
                             format!(" · {}", states.join(", "))
                         },
-                        text("id"),
+                        host.id,
                     )
                 })
                 .collect();
@@ -1511,17 +1540,11 @@ pub(crate) async fn call(
                 .call_editor(call)
                 .await
                 .map_err(forge("pair the host in the Editor"))?;
+            let added: PairedHost = editor_reply("add_host", added)?;
             let note = navigate_if_asked(hub, navigate_user, "hosts").await;
             Ok(format!(
                 "Paired with **{}** ({}).{note}",
-                added
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("the host"),
-                added
-                    .get("address")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
+                added.name, added.address
             ))
         }
         "remove_host" => {
@@ -1768,10 +1791,7 @@ pub(crate) async fn call(
                 })
                 .await
                 .map_err(forge("start the MCP sign-in in the Editor"))?;
-            let url = started
-                .get("authorize_url")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let SignInStarted { authorize_url: url } = editor_reply("sign_in_mcp_server", started)?;
             Ok(if sign_in.navigate_user {
                 format!(
                     "Opened {}'s sign-in page in the user's browser and its card in Settings → Extensions. Once they approve, new threads get its tools. If the page didn't open, the link is {url}",

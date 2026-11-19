@@ -1,9 +1,12 @@
-use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId};
+use artisan_api::{
+    CreateProject, CreateThread, EditorReply, EngineConfig, EngineId, Event, ProjectId, ThreadId,
+};
 use forge_engines::Engines;
 use forge_mcp::{ArtisanMcp, server};
 use forge_runs::Hub;
 use forge_store::Store;
 use serde_json::json;
+use std::time::Duration;
 
 #[tokio::test]
 async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
@@ -100,4 +103,84 @@ async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
     ] {
         assert!(output.contains(shown), "{shown} missing: {output}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_the_editor_started_without_a_link_fails_instead_of_offering_an_empty_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("store")).unwrap();
+    let project = ProjectId::new();
+    store
+        .create_project(CreateProject {
+            id: project.clone(),
+            path: "/repo".into(),
+            name: Some("editor".into()),
+        })
+        .await
+        .unwrap();
+    let thread = ThreadId::new();
+    store
+        .create_thread(CreateThread {
+            id: thread.clone(),
+            project_id: project,
+            config: EngineConfig::new(EngineId::Claude),
+            title: Some("Sign in".into()),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let hub = Hub::new(
+        store,
+        Engines::new(directory.path()),
+        directory.path().to_path_buf(),
+    );
+    let mcp = ArtisanMcp::new(hub.clone());
+    let calling = tokio::spawn(async move {
+        server::handle(
+            &mcp,
+            &thread,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sign_in_mcp_server","arguments":{"name":"notion"}}}),
+        )
+        .await
+    });
+
+    let call = std::sync::Arc::new(std::sync::Mutex::new(None));
+    test_support::wait::eventually(
+        "the sign-in to reach the Editor",
+        Duration::from_secs(10),
+        || {
+            let hub = hub.clone();
+            let call = std::sync::Arc::clone(&call);
+            async move {
+                let found = hub
+                    .distributed_live_snapshot()
+                    .await
+                    .unwrap()
+                    .1
+                    .into_iter()
+                    .find_map(|event| {
+                        if let Event::EditorCall { id, .. } = event {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    });
+                let reached = found.is_some();
+                *call.lock().unwrap() = found;
+                reached
+            }
+        },
+    )
+    .await;
+    let call = call.lock().unwrap().take().unwrap();
+    hub.answer_distributed_editor_call(&call, EditorReply::Ok(json!({"state": "abc"})))
+        .await
+        .unwrap();
+
+    let reply = calling.await.unwrap().unwrap();
+    hub.shutdown();
+    let result = &reply["result"];
+    assert_eq!(result["isError"], json!(true), "{reply}");
+    assert!(!result.to_string().contains("the link is"), "{reply}");
 }
