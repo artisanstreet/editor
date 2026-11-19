@@ -1,8 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use std::{collections::HashSet, ops::Range};
 
 pub const MAX_SKILL_NAME_BYTES: usize = 255;
@@ -59,37 +54,34 @@ impl MentionNames {
             return Vec::new();
         }
         let mut mentions = Vec::new();
+        let mut previous = None;
         for (start, character) in text.char_indices() {
-            if character != sigil
-                || !text[..start]
-                    .chars()
-                    .next_back()
-                    .is_none_or(char::is_whitespace)
-            {
+            let after_space = previous.is_none_or(char::is_whitespace);
+            previous = Some(character);
+            if character != sigil || !after_space {
                 continue;
             }
-            let rest = &text[start + sigil.len_utf8()..];
+            let (_, rest) = text.split_at(start + sigil.len_utf8());
             let mut matched = None;
             for (index, next) in rest.char_indices() {
                 if index > longest {
                     break;
                 }
-                if (next.is_whitespace() || TERMINATORS.contains(&next))
-                    && known.contains(&rest[..index])
-                {
-                    matched = Some(index);
+                let (name, _) = rest.split_at(index);
+                if (next.is_whitespace() || TERMINATORS.contains(&next)) && known.contains(name) {
+                    matched = Some(name);
                 }
                 if next.is_whitespace() {
                     break;
                 }
             }
             if rest.len() <= longest && known.contains(rest) {
-                matched = Some(rest.len());
+                matched = Some(rest);
             }
-            if let Some(length) = matched {
+            if let Some(name) = matched {
                 mentions.push(Mention {
-                    name: rest[..length].to_owned(),
-                    range: start..start + sigil.len_utf8() + length,
+                    name: name.to_owned(),
+                    range: start..start + sigil.len_utf8() + name.len(),
                 });
             }
         }
@@ -138,9 +130,9 @@ impl ThreadTitles {
             }
             let shortest = &self.sorted[low];
             if shortest.len() == depth {
-                if rest[depth..]
-                    .chars()
-                    .next()
+                if rest
+                    .get(depth..)
+                    .and_then(|after| after.chars().next())
                     .is_none_or(|next| next.is_whitespace() || TERMINATORS.contains(&next))
                 {
                     matched = Some(shortest.as_str());
@@ -171,7 +163,8 @@ impl ThreadTitles {
             if character != '@' || !after_space {
                 continue;
             }
-            if let Some(title) = self.longest_at(&text[start + 1..]) {
+            let (_, rest) = text.split_at(start + 1);
+            if let Some(title) = self.longest_at(rest) {
                 mentions.push(Mention {
                     name: title.to_owned(),
                     range: start..start + 1 + title.len(),
@@ -184,21 +177,25 @@ impl ThreadTitles {
 
 #[must_use]
 fn leading_command(text: &str) -> Option<Range<usize>> {
-    let start = text.len() - text.trim_start().len();
-    let rest = text[start..].strip_prefix('/')?;
+    let trimmed = text.trim_start();
+    let start = text.len() - trimmed.len();
+    let rest = trimmed.strip_prefix('/')?;
     let name = rest
         .find(|c: char| !(c.is_alphanumeric() || matches!(c, ':' | '_' | '-')))
         .unwrap_or(rest.len());
-    let ends = rest[name..].chars().next().is_none_or(char::is_whitespace);
-    (name > 0 && ends).then(|| start..start + 1 + name)
+    let (command, after) = rest.split_at(name);
+    let ends = after.chars().next().is_none_or(char::is_whitespace);
+    (!command.is_empty() && ends).then(|| start..start + 1 + name)
 }
 
 const SPECIAL_COMMANDS: &[&str] = &["goal", "ultracode", "ultrathink"];
 
 #[must_use]
 pub fn special_command(text: &str) -> Option<Range<usize>> {
-    leading_command(text)
-        .filter(|range| SPECIAL_COMMANDS.contains(&&text[range.start + 1..range.end]))
+    leading_command(text).filter(|range| {
+        text.get(range.start + 1..range.end)
+            .is_some_and(|name| SPECIAL_COMMANDS.contains(&name))
+    })
 }
 
 #[cfg(test)]

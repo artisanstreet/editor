@@ -12,7 +12,7 @@ fn a_message_starting_with_a_command_names_it_and_a_path_does_not() {
         ("/goal, now", None),
     ] {
         assert_eq!(
-            leading_command(text).map(|range| &text[range]),
+            leading_command(text).and_then(|range| text.get(range)),
             command,
             "{text}"
         );
@@ -25,9 +25,9 @@ fn thread_titles_with_spaces_take_the_longest_match_at_a_word_end() {
     assert_eq!(
         mentions
             .iter()
-            .map(|mention| &text[mention.range.clone()])
+            .map(|mention| text.get(mention.range.clone()))
             .collect::<Vec<_>>(),
-        ["@Fix sidebar lag", "@Fix"]
+        [Some("@Fix sidebar lag"), Some("@Fix")]
     );
 }
 #[test]
@@ -38,9 +38,9 @@ fn titles_sharing_prefixes_match_the_longest_title_that_ends_at_a_word_end() {
         titles
             .mentions(text)
             .iter()
-            .map(|mention| &text[mention.range.clone()])
+            .map(|mention| text.get(mention.range.clone()))
             .collect::<Vec<_>>(),
-        ["@abc d", "@ab", "@abd", "@a"]
+        [Some("@abc d"), Some("@ab"), Some("@abd"), Some("@a")]
     );
 }
 #[test]
@@ -57,7 +57,8 @@ fn qualified_names_and_punctuation_share_one_longest_match() {
     assert!(
         mentions
             .iter()
-            .all(|mention| text[mention.range.clone()] == format!("${}", mention.name))
+            .all(|mention| text.get(mention.range.clone())
+                == Some(format!("${}", mention.name).as_str()))
     );
 }
 #[test]
