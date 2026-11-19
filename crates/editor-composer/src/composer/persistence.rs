@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak},
     time::Duration,
 };
 use tokio::sync::watch;
@@ -42,6 +42,23 @@ struct Inner {
     cancelled: CancellationToken,
 }
 
+impl Inner {
+    fn shared(&self) -> MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap_or_else(|poisoned| {
+            panic!(
+                "invariant: draft {} on Forge {} is not left half-updated by a panic: {poisoned}",
+                self.scope, self.host
+            )
+        })
+    }
+}
+
+impl Viewer {
+    fn events(&self) -> MutexGuard<'_, VecDeque<SessionEvent>> {
+        self.events.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[derive(Clone)]
 pub struct DraftHandle(Arc<Inner>);
 
@@ -63,13 +80,7 @@ impl DraftLease {
             events: Mutex::new(VecDeque::new()),
             wake: wake.sender(),
         });
-        handle
-            .0
-            .shared
-            .lock()
-            .unwrap()
-            .viewers
-            .push(Arc::downgrade(&viewer));
+        handle.0.shared().viewers.push(Arc::downgrade(&viewer));
         Self {
             handle,
             viewer,
@@ -83,7 +94,7 @@ impl DraftLease {
 
     pub fn drain_events(&mut self) -> Vec<SessionEvent> {
         self.wake.drain();
-        self.viewer.events.lock().unwrap().drain(..).collect()
+        self.viewer.events().drain(..).collect()
     }
 }
 
@@ -93,7 +104,7 @@ impl Shared {
             let Some(viewer) = viewer.upgrade() else {
                 return false;
             };
-            viewer.events.lock().unwrap().push_back(event.clone());
+            viewer.events().push_back(event.clone());
             let _ = viewer.wake.send(());
             true
         });
@@ -129,13 +140,16 @@ pub enum ShutdownOutcome {
     },
 }
 
-fn pending_shutdown() -> &'static Mutex<Vec<DraftHandle>> {
+fn pending_shutdown() -> MutexGuard<'static, Vec<DraftHandle>> {
     static PENDING: OnceLock<Mutex<Vec<DraftHandle>>> = OnceLock::new();
-    PENDING.get_or_init(Mutex::default)
+    PENDING
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
-    let sessions = std::mem::take(&mut *pending_shutdown().lock().unwrap());
+    let sessions = std::mem::take(&mut *pending_shutdown());
     let deadline = tokio::time::Instant::now() + timeout;
     let mut failed = 0;
     let mut timed_out = 0;
@@ -185,7 +199,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
 
 impl Drop for DraftSessions {
     fn drop(&mut self) {
-        let mut pending = pending_shutdown().lock().unwrap();
+        let mut pending = pending_shutdown();
         pending.retain(|session| session.read(|state| state.pending()));
         for session in self.sessions.values() {
             session.flush();
@@ -221,8 +235,7 @@ impl DraftSessions {
                 .sessions
                 .iter()
                 .find(|(_, session)| {
-                    Arc::strong_count(&session.0) == 1
-                        && session.0.shared.lock().unwrap().state.evictable()
+                    Arc::strong_count(&session.0) == 1 && session.0.shared().state.evictable()
                 })
                 .map(|(key, _)| key.clone());
             if let Some(key) = removable {
@@ -389,11 +402,11 @@ impl DraftHandle {
     }
 
     pub fn read<T>(&self, read: impl FnOnce(&DraftSession) -> T) -> T {
-        read(&self.0.shared.lock().unwrap().state)
+        read(&self.0.shared().state)
     }
 
     fn mutate(&self, update: impl FnOnce(&mut Shared)) {
-        let mut shared = self.0.shared.lock().unwrap();
+        let mut shared = self.0.shared();
         update(&mut shared);
         shared.emit(SessionEvent::Changed);
         shared.version = shared.version.wrapping_add(1);
@@ -403,7 +416,7 @@ impl DraftHandle {
     }
 
     pub fn queue(&self, body: Value) {
-        let mut shared = self.0.shared.lock().unwrap();
+        let mut shared = self.0.shared();
         if !shared.state.queue(body) {
             return;
         }
@@ -456,7 +469,7 @@ impl DraftHandle {
     }
 
     fn pump(&self) {
-        let operation = self.0.shared.lock().unwrap().state.next();
+        let operation = self.0.shared().state.next();
         let Some(operation) = operation else {
             return;
         };
