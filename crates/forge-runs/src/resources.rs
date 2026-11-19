@@ -1,5 +1,5 @@
 use crate::Hub;
-use crate::beneath::{self, Directory, OpenBeneathError, Placed, Relative};
+use crate::beneath::{self, Directory, OpenBeneathError, OpenRootError, Placed, Relative};
 use crate::scratch::ThreadFolderError;
 use artisan_api::{EngineId, ItemId, Thread, ThreadId};
 use forge_engines::claudeai::{ReadRefusal, Rules};
@@ -46,7 +46,7 @@ pub enum ResourceError {
     #[error("open the thread's folder to read resources beneath it")]
     Root {
         #[source]
-        source: Arc<std::io::Error>,
+        source: Arc<RootError>,
     },
     #[error("open resource {}", path.display())]
     Open {
@@ -73,6 +73,22 @@ pub enum ResourceError {
         thread: ThreadId,
         #[source]
         source: tokio::task::JoinError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RootError {
+    #[error("resolve the thread's folder {}", folder.display())]
+    Resolve {
+        folder: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open the thread's folder {} without following links", resolved.display())]
+    Open {
+        resolved: PathBuf,
+        #[source]
+        source: OpenRootError,
     },
 }
 
@@ -364,6 +380,26 @@ struct Root {
     resolved: PathBuf,
 }
 
+impl Root {
+    fn acquire(folder: &Path) -> Result<Self, RootError> {
+        let resolved = std::fs::canonicalize(folder)
+            .map(|resolved| without_verbatim_prefix(&resolved))
+            .map_err(|source| RootError::Resolve {
+                folder: folder.to_path_buf(),
+                source,
+            })?;
+        let directory = Directory::open(&resolved).map_err(|source| RootError::Open {
+            resolved: resolved.clone(),
+            source,
+        })?;
+        Ok(Self {
+            directory,
+            given: folder.to_path_buf(),
+            resolved,
+        })
+    }
+}
+
 pub(crate) struct Located<'a> {
     root: &'a Root,
     relative: Relative,
@@ -371,25 +407,15 @@ pub(crate) struct Located<'a> {
 }
 
 pub(crate) struct Access {
-    root: Result<Root, Arc<std::io::Error>>,
+    root: Result<Root, Arc<RootError>>,
     rules: Rules,
 }
 
 impl Access {
     #[must_use]
     pub(crate) fn load(engine_home: &Path, folder: &Path) -> Self {
-        let root = std::fs::canonicalize(folder)
-            .map(|resolved| without_verbatim_prefix(&resolved))
-            .and_then(|resolved| {
-                Directory::open(&resolved).map(|directory| Root {
-                    directory,
-                    given: folder.to_path_buf(),
-                    resolved,
-                })
-            })
-            .map_err(Arc::new);
         Self {
-            root,
+            root: Root::acquire(folder).map_err(Arc::new),
             rules: Rules::load(engine_home, folder),
         }
     }

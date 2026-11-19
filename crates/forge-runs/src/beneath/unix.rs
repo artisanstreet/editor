@@ -14,14 +14,56 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-pub(super) fn directory(path: &Path) -> std::io::Result<std::fs::File> {
-    rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+#[cfg(target_os = "linux")]
+pub(super) fn directory(canonical: &Path) -> Result<std::fs::File, OpenBeneathError> {
+    use rustix::fs::ResolveFlags;
+    match rustix::fs::openat2(
+        rustix::fs::CWD,
+        canonical,
+        DIRECTORY_FLAGS,
         Mode::empty(),
-    )
-    .map(std::fs::File::from)
-    .map_err(std::io::Error::from)
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    ) {
+        Ok(directory) => Ok(std::fs::File::from(directory)),
+        Err(Errno::NOSYS) => walk_directory(canonical),
+        Err(Errno::LOOP) => Err(OpenBeneathError::Linked {
+            at: canonical.to_path_buf(),
+        }),
+        Err(errno) => Err(refusal(
+            rustix::fs::CWD,
+            canonical.as_os_str(),
+            canonical.to_path_buf(),
+            errno,
+        )),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn directory(canonical: &Path) -> Result<std::fs::File, OpenBeneathError> {
+    walk_directory(canonical)
+}
+
+fn walk_directory(canonical: &Path) -> Result<std::fs::File, OpenBeneathError> {
+    let mut at = PathBuf::from("/");
+    let mut held = rustix::fs::open(&at, DIRECTORY_FLAGS, Mode::empty()).map_err(|errno| {
+        OpenBeneathError::Open {
+            at: at.clone(),
+            source: errno.into(),
+        }
+    })?;
+    for name in super::canonical_names(canonical) {
+        at.push(name);
+        let opened = rustix::fs::openat(&held, name, DIRECTORY_FLAGS, Mode::empty())
+            .map_err(|errno| refusal(held.as_fd(), name, at.clone(), errno))?;
+        held = opened;
+    }
+    Ok(std::fs::File::from(held))
+}
+
+pub(super) fn held_at(directory: &std::fs::File, canonical: &Path) -> std::io::Result<bool> {
+    let held = rustix::fs::fstat(directory)?;
+    let named = rustix::fs::statat(rustix::fs::CWD, canonical, AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(held.st_dev == named.st_dev && held.st_ino == named.st_ino)
 }
 
 #[cfg(target_os = "linux")]
@@ -70,10 +112,7 @@ fn refusal(parent: BorrowedFd<'_>, name: &OsStr, at: PathBuf, errno: Errno) -> O
     }
 }
 
-pub(super) fn walk(
-    root: &std::fs::File,
-    relative: &Relative,
-) -> Result<std::fs::File, OpenBeneathError> {
+fn walk(root: &std::fs::File, relative: &Relative) -> Result<std::fs::File, OpenBeneathError> {
     let mut at = PathBuf::new();
     let mut held: Option<OwnedFd> = None;
     for name in &relative.parents {

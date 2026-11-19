@@ -22,17 +22,68 @@ pub enum OpenBeneathError {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OpenRootError {
+    #[error(transparent)]
+    Walk(#[from] OpenBeneathError),
+    #[error("check which folder {} holds", at.display())]
+    Identify {
+        at: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} was replaced by another folder while it was opened", at.display())]
+    Replaced { at: PathBuf },
+}
+
 #[derive(Debug)]
 pub(crate) struct Directory(std::fs::File);
 
 impl Directory {
-    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open(canonical: &Path) -> Result<Self, OpenRootError> {
+        assert!(
+            canonical.is_absolute(),
+            "invariant: {} is canonical, so it is absolute",
+            canonical.display()
+        );
         #[cfg(unix)]
-        let opened = unix::directory(path);
+        let opened = unix::directory(canonical);
         #[cfg(windows)]
-        let opened = windows::directory(path);
-        opened.map(Self)
+        let opened = windows::directory(canonical);
+        let directory = Self(opened?);
+        directory.confirm(canonical)?;
+        Ok(directory)
     }
+
+    pub(crate) fn confirm(&self, canonical: &Path) -> Result<(), OpenRootError> {
+        #[cfg(unix)]
+        let held = unix::held_at(&self.0, canonical);
+        #[cfg(windows)]
+        let held = windows::held_at(&self.0, canonical);
+        match held {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(OpenRootError::Replaced {
+                at: canonical.to_path_buf(),
+            }),
+            Err(source) => Err(OpenRootError::Identify {
+                at: canonical.to_path_buf(),
+                source,
+            }),
+        }
+    }
+}
+
+fn canonical_names(canonical: &Path) -> impl Iterator<Item = &std::ffi::OsStr> {
+    canonical
+        .components()
+        .filter_map(move |component| match component {
+            Component::Normal(name) => Some(name),
+            Component::Prefix(_) | Component::RootDir => None,
+            Component::CurDir | Component::ParentDir => unreachable!(
+                "invariant: {} is canonical, so it holds no . or ..",
+                canonical.display()
+            ),
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +122,16 @@ fn lexical(path: &Path) -> Vec<Component<'_>> {
         }
     }
     kept
+}
+
+#[cfg(windows)]
+fn same_path(left: &Path, right: &Path) -> bool {
+    let (left, right) = (lexical(left), lexical(right));
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(&right)
+            .all(|(left, right)| same(*left, *right))
 }
 
 #[cfg(windows)]
@@ -129,14 +190,6 @@ pub(crate) fn open_file(
     #[cfg(windows)]
     let opened = windows::open_file(&root.0, relative);
     opened
-}
-
-#[cfg(all(unix, test))]
-pub(crate) fn walk(
-    root: &Directory,
-    relative: &Relative,
-) -> Result<std::fs::File, OpenBeneathError> {
-    unix::walk(&root.0, relative)
 }
 
 #[cfg(windows)]

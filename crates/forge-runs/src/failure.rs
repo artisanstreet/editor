@@ -1,3 +1,4 @@
+use crate::beneath::{OpenBeneathError, OpenRootError};
 use crate::extensions::{
     AdoptSkillError, DiscardSkillError, EnabledSkillsError, GlobalPromptError, InstallSkillError,
     MarketplaceInstallError, MarketplaceSearchError, PROMPT_MAX_BYTES, ReconcileSkillsError,
@@ -8,7 +9,7 @@ use crate::operation::{
     AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
     ContinueRefusal, SendError, UpdateError,
 };
-use crate::resources::ResourceError;
+use crate::resources::{ResourceError, RootError};
 use crate::runtime::{ControlError, EditorReplyError, PeerError};
 use crate::scratch::ThreadFolderError;
 use artisan_api::{
@@ -628,9 +629,24 @@ impl ResourceError {
                 Failure::Resource(ResourceFailure::Linked { path: path(file) })
             }
             Self::Folder(source) => source.wire(),
-            Self::Read { .. } | Self::Root { .. } | Self::Open { .. } | Self::Task { .. } => {
-                Failure::Internal
-            }
+            Self::Root { source } => match &**source {
+                RootError::Open {
+                    resolved,
+                    source:
+                        OpenRootError::Walk(OpenBeneathError::Linked { .. })
+                        | OpenRootError::Replaced { .. },
+                } => Failure::Resource(ResourceFailure::Linked {
+                    path: path(resolved),
+                }),
+                RootError::Open {
+                    source:
+                        OpenRootError::Walk(OpenBeneathError::Open { .. })
+                        | OpenRootError::Identify { .. },
+                    ..
+                }
+                | RootError::Resolve { .. } => Failure::Internal,
+            },
+            Self::Read { .. } | Self::Open { .. } | Self::Task { .. } => Failure::Internal,
         }
     }
 }

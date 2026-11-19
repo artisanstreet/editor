@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
     FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT,
@@ -25,11 +25,53 @@ use windows::core::PWSTR;
 
 const NAME_SURROGATE: u32 = 0x2000_0000;
 
-pub(super) fn directory(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::options()
+const DIRECTORY_ACCESS: FILE_ACCESS_RIGHTS =
+    FILE_ACCESS_RIGHTS(FILE_TRAVERSE.0 | FILE_READ_ATTRIBUTES.0);
+
+pub(super) fn directory(canonical: &Path) -> Result<std::fs::File, OpenBeneathError> {
+    let mut at: PathBuf = canonical
+        .components()
+        .take_while(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+        .collect();
+    let mut held = std::fs::File::options()
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
-        .open(path)
+        .open(&at)
+        .map_err(|source| OpenBeneathError::Open {
+            at: at.clone(),
+            source,
+        })?;
+    for name in super::canonical_names(canonical) {
+        at.push(name);
+        held = open_directory_at(&held, name, &at)?;
+    }
+    Ok(held)
+}
+
+pub(super) fn held_at(directory: &std::fs::File, canonical: &Path) -> std::io::Result<bool> {
+    let held = final_path(directory)?;
+    Ok(super::same_path(
+        &crate::resources::without_verbatim_prefix(&held),
+        canonical,
+    ))
+}
+
+fn open_directory_at(
+    parent: &std::fs::File,
+    name: &OsStr,
+    at: &Path,
+) -> Result<std::fs::File, OpenBeneathError> {
+    let opened = open_at(
+        parent,
+        name,
+        DIRECTORY_ACCESS,
+        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+    )
+    .map_err(|source| OpenBeneathError::Open {
+        at: at.to_path_buf(),
+        source,
+    })?;
+    followed(opened, DIRECTORY_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, at)
 }
 
 fn status_error(status: windows::Win32::Foundation::NTSTATUS) -> std::io::Error {
@@ -151,26 +193,10 @@ pub(super) fn open_file(
 ) -> Result<std::fs::File, OpenBeneathError> {
     let mut at = PathBuf::new();
     let mut held: Option<std::fs::File> = None;
-    let directory_access = FILE_TRAVERSE | FILE_READ_ATTRIBUTES;
     for name in &relative.parents {
         at.push(name);
         let parent = held.as_ref().unwrap_or(root);
-        let opened = open_at(
-            parent,
-            name,
-            directory_access,
-            FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
-        )
-        .map_err(|source| OpenBeneathError::Open {
-            at: at.clone(),
-            source,
-        })?;
-        held = Some(followed(
-            opened,
-            directory_access,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            &at,
-        )?);
+        held = Some(open_directory_at(parent, name, &at)?);
     }
     at.push(&relative.name);
     let parent = held.as_ref().unwrap_or(root);
