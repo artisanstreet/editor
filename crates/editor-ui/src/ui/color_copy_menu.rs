@@ -218,7 +218,7 @@ impl ColorCopyMenuHost {
         let backwards = match key.key {
             InputKey::Named(NamedKey::Down) => false,
             InputKey::Named(NamedKey::Up) => true,
-            _ => return Ok(false),
+            InputKey::Char(_) | InputKey::Named(_) => return Ok(false),
         };
         let Some(root) = self.root(app) else {
             return Ok(false);

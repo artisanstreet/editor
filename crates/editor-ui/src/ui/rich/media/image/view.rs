@@ -293,7 +293,22 @@ impl ImageState {
                                         ..InputResponse::capture()
                                     }
                                 }
-                                _ => InputResponse::default(),
+                                RoutedInput::ClipboardPaste(_)
+                                | RoutedInput::ClipboardCut
+                                | RoutedInput::TextVertical { .. }
+                                | RoutedInput::TextMotion { .. }
+                                | RoutedInput::Native(_)
+                                | RoutedInput::PointerEnter(_)
+                                | RoutedInput::PointerLeave(_)
+                                | RoutedInput::TextPointer { .. }
+                                | RoutedInput::TextContext { .. }
+                                | RoutedInput::TextRangeActivated { .. }
+                                | RoutedInput::FilesDropped { .. }
+                                | RoutedInput::DragEnter { .. }
+                                | RoutedInput::DragOver { .. }
+                                | RoutedInput::DragLeave { .. }
+                                | RoutedInput::Drop { .. }
+                                | RoutedInput::DragEnd { .. } => InputResponse::default(),
                             }
                         });
                 match loaded {

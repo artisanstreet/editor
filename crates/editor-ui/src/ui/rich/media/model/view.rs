@@ -313,7 +313,7 @@ impl Entry {
             Key::Char('=' | '+') => self.zoom(0.85),
             Key::Char('-') => self.zoom(1.0 / 0.85),
             Key::Char('0') => self.reset(),
-            _ => return false,
+            Key::Char(_) | Key::Named(_) => return false,
         }
         true
     }

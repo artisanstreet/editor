@@ -130,7 +130,7 @@ impl ModelAssets {
             Parsed::File { .. } if fetcher.is_none() => {
                 return Some(Err("the path is not valid".to_owned()));
             }
-            _ => {}
+            Parsed::Data(_) | Parsed::File { .. } => {}
         }
         let immutable = matches!(source.parsed(), Parsed::Data(_));
         let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
@@ -151,7 +151,7 @@ impl ModelAssets {
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
         let source_bytes = match source.parsed() {
             Parsed::Data(data) => data.bytes.len(),
-            _ => source.raw().len(),
+            Parsed::Url(_) | Parsed::File { .. } | Parsed::Invalid => source.raw().len(),
         } + key.owner.len();
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result),

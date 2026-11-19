@@ -102,7 +102,21 @@ impl SankeyState {
                 Some(current.map_or(0, |n| (n + 1).min(entries_list.len() - 1)))
             }
             NamedKey::Enter if !entries_list.is_empty() => Some(current.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::Left
+            | NamedKey::Right
+            | NamedKey::Up
+            | NamedKey::Down
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         state.hover = next.and_then(|index| entries_list.get(index).copied());
         true

@@ -103,7 +103,14 @@ impl SpansState {
                 Some(entry.hover.map_or(0, |n| (n + 1).min(count - 1)))
             }
             NamedKey::Enter => Some(entry.hover.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next;
         entry.reveal = next.map(|index| entry.model.spans[index].row);

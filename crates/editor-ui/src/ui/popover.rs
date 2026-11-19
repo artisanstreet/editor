@@ -297,7 +297,9 @@ impl AnimatedPickerHost {
         let origin = match options.placement.preferred {
             aqua_ui::overlay::Side::Above => aqua_core::Point::new(0.0, 1.0),
             aqua_ui::overlay::Side::Before => aqua_core::Point::new(1.0, 0.0),
-            _ => aqua_core::Point::new(0.0, 0.0),
+            aqua_ui::overlay::Side::Below | aqua_ui::overlay::Side::After => {
+                aqua_core::Point::new(0.0, 0.0)
+            }
         };
         options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
         let overlay = app
@@ -428,7 +430,11 @@ impl AnimatedPickerHost {
                 .ok_or_else(|| "picker popup is closed".to_owned())?;
             match &node.kind {
                 aqua_ui::tree::NodeKind::Box(content) => content.paint().clone(),
-                _ => node.paint().clone(),
+                aqua_ui::tree::NodeKind::Text(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => node.paint().clone(),
             }
         };
         let (opacity, transform) = self.frame_values(app);
@@ -472,7 +478,18 @@ impl AnimatedPickerHost {
             aqua_core::InputEvent::KeyDown(key) => {
                 key.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
             }
-            _ => false,
+            aqua_core::InputEvent::PointerMove(_)
+            | aqua_core::InputEvent::PointerDown(..)
+            | aqua_core::InputEvent::PointerUp(..)
+            | aqua_core::InputEvent::PointerCancel { .. }
+            | aqua_core::InputEvent::Scroll { .. }
+            | aqua_core::InputEvent::KeyUp(_)
+            | aqua_core::InputEvent::ModifiersChanged(_)
+            | aqua_core::InputEvent::TextInput { .. }
+            | aqua_core::InputEvent::Ime(_)
+            | aqua_core::InputEvent::ImeReplace { .. }
+            | aqua_core::InputEvent::ImeSelect { .. }
+            | aqua_core::InputEvent::Focused(_) => false,
         };
         if dismiss {
             self.begin_close(app, self.now)?;

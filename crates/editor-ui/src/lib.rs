@@ -4,7 +4,6 @@
     clippy::string_slice,
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    clippy::wildcard_enum_match_arm,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #![allow(

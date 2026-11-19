@@ -175,7 +175,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                     InputKey::Named(NamedKey::Right | NamedKey::Down) => (at + 1) % count,
                     InputKey::Named(NamedKey::Home) => 0,
                     InputKey::Named(NamedKey::End) => count - 1,
-                    _ => return InputResponse::default(),
+                    InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
                 };
                 current.set(next);
                 if let Some(change) = &change {

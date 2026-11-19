@@ -204,7 +204,7 @@ impl CompareState {
             };
             let status = match &next {
                 ImageState::Decoding(image) => Some(image.status()),
-                _ => None,
+                ImageState::Loading | ImageState::Failed(_) => None,
             };
             if !same || self.observed[index] != status {
                 changed = true;
@@ -504,9 +504,12 @@ fn frame_size(images: &[ImageState; 2], hint: super::super::SizeHint) -> (f32, f
                     (width as f32 / height as f32).clamp(0.05, 20.0),
                     width as f32,
                 )),
-                _ => None,
+                ImageStatus::Pending
+                | ImageStatus::Ready { .. }
+                | ImageStatus::Failed(_)
+                | ImageStatus::Cancelled => None,
             },
-            _ => None,
+            ImageState::Loading | ImageState::Failed(_) => None,
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
     let (aspect, natural) = widest.map_or_else(

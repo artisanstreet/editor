@@ -355,7 +355,7 @@ impl Slider {
                     InputKey::Named(NamedKey::End) => SliderCommand::End,
                     InputKey::Named(NamedKey::Left | NamedKey::Down) => SliderCommand::Previous,
                     InputKey::Named(NamedKey::Right | NamedKey::Up) => SliderCommand::Next,
-                    _ => return InputResponse::default(),
+                    InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
                 };
                 let mut state = state.borrow_mut();
                 let value = state.range.command(state.value, command);

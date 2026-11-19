@@ -126,7 +126,14 @@ impl DistributionState {
                 Some(selected.map_or(0, |n| n.saturating_add(1).min(count - 1)))
             }
             NamedKey::Enter => Some(selected.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next.map(|index| match mode {
             Mode::Box => (0.5, (f32_of_count(index) + 0.5) / f32_of_count(count)),

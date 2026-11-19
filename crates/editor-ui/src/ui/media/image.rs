@@ -143,7 +143,7 @@ impl Images {
         let key = cache_key(fetcher, source, part);
         let source_bytes = match source.parsed() {
             Parsed::Data(payload) => payload.bytes.len(),
-            _ => source.raw().len(),
+            Parsed::Url(_) | Parsed::File { .. } | Parsed::Invalid => source.raw().len(),
         };
         match fetcher.resources().load::<ImageLoader>(
             fetcher.owner(),

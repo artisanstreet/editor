@@ -52,7 +52,7 @@ impl Row {
     const fn title(self) -> TextRole {
         match self {
             Self::Heading | Self::ListHeading => TextRole::Caption,
-            _ => TextRole::Label,
+            Self::MenuItem | Self::ListItem(_) | Self::Form | Self::Key => TextRole::Label,
         }
     }
 
@@ -62,7 +62,12 @@ impl Row {
             Self::ListItem(Density::Tall) => {
                 TextRole::Label.spec().line + TextRole::Caption.spec().line
             }
-            _ => self.title().spec().line,
+            Self::MenuItem
+            | Self::ListItem(_)
+            | Self::Heading
+            | Self::ListHeading
+            | Self::Form
+            | Self::Key => self.title().spec().line,
         }
     }
 
@@ -83,7 +88,9 @@ impl Row {
     pub const fn gap(self) -> Space {
         match self {
             Self::Form => Space::S16,
-            _ => Space::S8,
+            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
+                Space::S8
+            }
         }
     }
 
@@ -91,7 +98,9 @@ impl Row {
     pub const fn height(self) -> Option<f32> {
         match self {
             Self::Form => None,
-            _ => Some(self.lines() + 2.0 * self.pad().y.px()),
+            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
+                Some(self.lines() + 2.0 * self.pad().y.px())
+            }
         }
     }
 
@@ -161,7 +170,9 @@ impl RowItem {
             disabled: false,
             role: match row {
                 Row::MenuItem => Role::MenuItem,
-                _ => Role::Button,
+                Row::ListItem(_) | Row::Heading | Row::ListHeading | Row::Form | Row::Key => {
+                    Role::Button
+                }
             },
             on_activate: None,
             on_hover: None,

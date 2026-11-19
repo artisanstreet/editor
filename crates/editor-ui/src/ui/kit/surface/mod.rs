@@ -148,7 +148,18 @@ impl Surface {
     pub fn radius_px(self) -> f32 {
         match self {
             Self::Pill(height) => Corner::Full.resolve(height),
-            _ => self.corner().resolve(0.0),
+            Self::Menu
+            | Self::Picker(_)
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Card
+            | Self::Inset
+            | Self::Code
+            | Self::Composer
+            | Self::Field
+            | Self::Media(_)
+            | Self::Callout(_)
+            | Self::Bubble => self.corner().resolve(0.0),
         }
     }
 
@@ -168,7 +179,18 @@ impl Surface {
         let padding = Style::new().padding(Length::Px(self.padding_px()));
         let sized = match self {
             Self::Pill(height) => padding.height(Length::Px(height)),
-            _ => padding,
+            Self::Menu
+            | Self::Picker(_)
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Card
+            | Self::Inset
+            | Self::Code
+            | Self::Composer
+            | Self::Field
+            | Self::Media(_)
+            | Self::Callout(_)
+            | Self::Bubble => padding,
         };
         let shell = || {
             UiBox::new()

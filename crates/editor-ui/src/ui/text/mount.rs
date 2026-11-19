@@ -156,7 +156,11 @@ impl EditorController {
         };
         let style = tree.get(node).and_then(|record| match &record.kind {
             aqua_ui::tree::NodeKind::Text(text) => Some(text.effective_text_style()),
-            _ => None,
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
         });
         let presentation = self
             .theme
@@ -364,7 +368,7 @@ impl EditorController {
                             EditOutcome::Unchanged
                         }))
                     }
-                    _ => None,
+                    Key::Char(_) | Key::Named(_) => None,
                 }
             }
             RoutedInput::TextVertical { up, extend, target } => {
@@ -400,7 +404,17 @@ impl EditorController {
                     Some(CommandOutcome::Ignored)
                 }
             },
-            _ => None,
+            RoutedInput::Native(_)
+            | RoutedInput::PointerEnter(_)
+            | RoutedInput::PointerLeave(_)
+            | RoutedInput::TextContext { .. }
+            | RoutedInput::TextRangeActivated { .. }
+            | RoutedInput::FilesDropped { .. }
+            | RoutedInput::DragEnter { .. }
+            | RoutedInput::DragOver { .. }
+            | RoutedInput::DragLeave { .. }
+            | RoutedInput::Drop { .. }
+            | RoutedInput::DragEnd { .. } => None,
         };
         let Some(outcome) = outcome else {
             return InputResponse::default();
@@ -427,7 +441,9 @@ impl EditorController {
                 CommandOutcome::Edit(EditOutcome::Changed) => Some(EditorEvent::Changed),
                 CommandOutcome::Submitted => Some(EditorEvent::Submitted),
                 CommandOutcome::List(key) => Some(EditorEvent::List(key)),
-                _ => None,
+                CommandOutcome::Edit(_) | CommandOutcome::Propagate | CommandOutcome::Ignored => {
+                    None
+                }
             };
         }
         let next_limit = state.limit_notice();

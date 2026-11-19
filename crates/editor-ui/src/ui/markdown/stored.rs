@@ -768,7 +768,10 @@ impl StoredOwner {
                 let result = match &entry.phase {
                     LeafPhase::Ready(leaf) => LeafPreparation::Ready(Rc::clone(leaf)),
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
-                    _ => LeafPreparation::Pending,
+                    LeafPhase::Metadata(_)
+                    | LeafPhase::Source { .. }
+                    | LeafPhase::WaitingWorker { .. }
+                    | LeafPhase::Working => LeafPreparation::Pending,
                 };
                 self.leaves.push_back(entry);
                 return result;
@@ -863,7 +866,10 @@ impl StoredOwner {
             LeafPhase::Metadata(collector) | LeafPhase::Source { collector, .. } => collector
                 .next_request()
                 .map(|(offset, limit)| (collector.reference.clone(), offset, limit)),
-            _ => None,
+            LeafPhase::WaitingWorker { .. }
+            | LeafPhase::Working
+            | LeafPhase::Ready(_)
+            | LeafPhase::Failed(_) => None,
         };
         if let Some((reference, offset, limit)) = request {
             let Some(future) = entry

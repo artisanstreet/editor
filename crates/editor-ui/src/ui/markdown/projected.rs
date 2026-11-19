@@ -239,7 +239,7 @@ impl ProjectedDocument {
             IndexedLeafContent::Block(Block::Code(code)) => {
                 crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
             }
-            _ => None,
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
         };
         let rich_without_source = matches!(
             &rich,
@@ -258,7 +258,7 @@ impl ProjectedDocument {
             {
                 Some(super::fence::Fence::new(code))
             }
-            _ => None,
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
         };
         let range = index.leaves()[ordinal].source_range();
         let signature = leaf_signature(
@@ -296,7 +296,7 @@ impl ProjectedDocument {
     pub(super) fn code_fences(&self) -> impl Iterator<Item = &CodeFence> {
         self.leaves.iter().filter_map(|leaf| match &leaf.content {
             IndexedLeafContent::Block(Block::Code(fence)) => Some(fence),
-            _ => None,
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
         })
     }
 

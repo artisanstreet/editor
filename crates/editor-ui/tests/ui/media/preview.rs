@@ -286,7 +286,50 @@ fn mounted_preview_emits_source_frame_with_supported_entrance_transform() {
         .iter()
         .filter_map(|(_, item)| match item {
             DisplayItem::PushTransform(transform) => Some(transform),
-            _ => None,
+            DisplayItem::SrgbaRect { .. }
+            | DisplayItem::Shader { .. }
+            | DisplayItem::Shape { .. }
+            | DisplayItem::PushGpuiQuadPulse(_)
+            | DisplayItem::PopGpuiQuadPulse
+            | DisplayItem::GpuiSvg { .. }
+            | DisplayItem::GpuiTransformedSvg { .. }
+            | DisplayItem::GpuiShadow { .. }
+            | DisplayItem::GpuiPath { .. }
+            | DisplayItem::GpuiMesh { .. }
+            | DisplayItem::GpuiBorder { .. }
+            | DisplayItem::GpuiBackground { .. }
+            | DisplayItem::Quad { .. }
+            | DisplayItem::PushRoundedClip { .. }
+            | DisplayItem::Shadow { .. }
+            | DisplayItem::PushTextColorMap(_)
+            | DisplayItem::PopTextColorMap
+            | DisplayItem::PushGpuiTextColorMap(_)
+            | DisplayItem::PushGpuiTextShimmer(_)
+            | DisplayItem::PopGpuiTextColorMap
+            | DisplayItem::PushGpuiTextColor(_)
+            | DisplayItem::PopGpuiTextColor
+            | DisplayItem::PushGpuiTextOpacity(_)
+            | DisplayItem::PopGpuiTextOpacity
+            | DisplayItem::PushGpuiTextSelection(_)
+            | DisplayItem::PopGpuiTextSelection
+            | DisplayItem::PushGpuiSourceTextColor(_)
+            | DisplayItem::PopGpuiSourceTextColor
+            | DisplayItem::PushContentBlur { .. }
+            | DisplayItem::PopContentBlur
+            | DisplayItem::PopTransform
+            | DisplayItem::Image { .. }
+            | DisplayItem::Vector { .. }
+            | DisplayItem::Rect { .. }
+            | DisplayItem::PushClip { .. }
+            | DisplayItem::PushGpuiContentMask { .. }
+            | DisplayItem::PopClip
+            | DisplayItem::PushOpacity(_)
+            | DisplayItem::PopOpacity
+            | DisplayItem::BackdropBlurRounded { .. }
+            | DisplayItem::BackdropBlurPath { .. }
+            | DisplayItem::BackdropBlur { .. }
+            | DisplayItem::Text { .. }
+            | DisplayItem::External { .. } => None,
         })
         .collect();
     assert!(transforms.iter().any(|transform| transform.a > 0.96
@@ -403,7 +446,11 @@ fn a_failed_preview_names_the_cause_and_retries_the_fetch() {
             .into_iter()
             .filter_map(|node| match &app.tree().get(node)?.kind {
                 aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
-                _ => None,
+                aqua_ui::tree::NodeKind::Box(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
             })
             .collect();
         (app, said)

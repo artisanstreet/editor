@@ -21,7 +21,38 @@ fn page_and_section_titles_are_headings() {
         .into_iter()
         .filter_map(|node| match node.role {
             Role::Heading(level) => Some((level, node.label)),
-            _ => None,
+            Role::Text
+            | Role::PasswordField
+            | Role::ComboBox
+            | Role::Option
+            | Role::Separator
+            | Role::Tooltip
+            | Role::Group
+            | Role::Button
+            | Role::Checkbox
+            | Role::Switch
+            | Role::RadioButton
+            | Role::TextField
+            | Role::List
+            | Role::ListBox
+            | Role::RadioGroup
+            | Role::ListItem
+            | Role::Tree
+            | Role::TreeItem
+            | Role::Table
+            | Role::Row
+            | Role::ColumnHeader
+            | Role::Cell
+            | Role::Slider
+            | Role::ProgressIndicator
+            | Role::TabList
+            | Role::Tab
+            | Role::Image
+            | Role::ScrollRegion
+            | Role::Dialog
+            | Role::Menu
+            | Role::MenuItem
+            | Role::Link => None,
         })
         .collect();
     assert_eq!(

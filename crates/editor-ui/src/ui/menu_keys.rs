@@ -67,7 +67,7 @@ pub fn cycle(ui: &mut UiApp, input: &InputEvent) -> bool {
     let direction = match key.key {
         Key::Named(NamedKey::Down) => Direction::Forward,
         Key::Named(NamedKey::Up) => Direction::Backward,
-        _ => return false,
+        Key::Char(_) | Key::Named(_) => return false,
     };
     let Some(focused) = ui.tree().focused() else {
         return false;

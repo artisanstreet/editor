@@ -255,7 +255,21 @@ impl HierarchyState {
                 entry.hover = Some(nodes[current.map_or(0, |n| (n + 1).min(nodes.len() - 1))]);
                 return true;
             }
-            _ => return false,
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::Left
+            | NamedKey::Right
+            | NamedKey::Up
+            | NamedKey::Down
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         if let Some(node) = target
             && entry.focus != node

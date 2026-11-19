@@ -774,7 +774,7 @@ impl Preview {
                     Key::Named(NamedKey::Tab) => Some(Action::CycleFocus(
                         key.modifiers.contains(aqua_core::Modifiers::SHIFT),
                     )),
-                    _ => None,
+                    Key::Char(_) | Key::Named(_) => None,
                 };
                 if let Some(action) = action {
                     keys(action);

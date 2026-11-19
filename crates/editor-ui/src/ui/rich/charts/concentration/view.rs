@@ -64,7 +64,14 @@ impl ConcentrationState {
                 Some(selected.map_or(0, |index| index.saturating_add(1).min(100)))
             }
             NamedKey::Enter => Some(selected.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next.map(|index| f64_of(index) / 100.0);
         true

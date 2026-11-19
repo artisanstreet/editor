@@ -174,7 +174,10 @@ fn validate_value_budget(root: &serde_json::Value) -> Result<(), String> {
         let count = match value {
             serde_json::Value::Array(values) => values.len(),
             serde_json::Value::Object(values) => values.len(),
-            _ => 0,
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => 0,
         };
         if pending.len().saturating_add(count) > VALUES - visited {
             return Err("rich preview exceeds 32768 JSON values".into());
@@ -186,7 +189,10 @@ fn validate_value_budget(root: &serde_json::Value) -> Result<(), String> {
             serde_json::Value::Object(values) => {
                 pending.extend(values.values().map(|value| (value, depth + 1)));
             }
-            _ => {}
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
     }
     Ok(())

@@ -130,7 +130,14 @@ impl HeatmapState {
                 Some(current.map_or(0, |index| index.saturating_add(1).min(count - 1)))
             }
             NamedKey::Enter => Some(current.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.selected = next.map(|index| (index / columns, index % columns));
         entry.reveal = next.map(|index| index / columns);

@@ -132,7 +132,9 @@ impl Stats {
             let color = match tone {
                 Tone::Success => theme.colors.banner_success.text,
                 Tone::Danger => theme.colors.banner_error.text,
-                _ => theme.colors.text_muted,
+                Tone::Neutral | Tone::Info | Tone::Warning | Tone::Accent => {
+                    theme.colors.text_muted
+                }
             };
             let edge = theme.colors.text.at(Opacity::Rule).to_reference_paint();
             let mut cell = ui::Canvas::new()

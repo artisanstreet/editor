@@ -295,7 +295,14 @@ impl Compare {
                         Some(selected.map_or(0, |index| (index + 1).min(count - 1)))
                     }
                     NamedKey::Enter => Some(selected.unwrap_or(0)),
-                    _ => return InputResponse::default(),
+                    NamedKey::Tab
+                    | NamedKey::Delete
+                    | NamedKey::Insert
+                    | NamedKey::ContextMenu
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+                    | NamedKey::Function(_)
+                    | NamedKey::Unidentified => return InputResponse::default(),
                 };
                 *selected = next;
                 drop(values);

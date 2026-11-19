@@ -137,7 +137,7 @@ impl ChatBubbleSegment {
                 .into_iter()
                 .map(aqua_ui::style::GpuiShadowLayer::from)
                 .collect(),
-            _ => Vec::new(),
+            SegmentPosition::Head | SegmentPosition::Body | SegmentPosition::Tail => Vec::new(),
         };
         if !shadows.is_empty() {
             style = style.gpui_shadows(shadows);

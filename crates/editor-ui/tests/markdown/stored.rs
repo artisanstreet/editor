@@ -624,7 +624,12 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
                     aqua_ui::tree::NodeKind::Text(text) if text.text() == "abc" => {
                         Some(Arc::clone(&text.gpui_text_opacity))
                     }
-                    _ => None,
+                    aqua_ui::tree::NodeKind::Box(_)
+                    | aqua_ui::tree::NodeKind::Text(_)
+                    | aqua_ui::tree::NodeKind::Media(_)
+                    | aqua_ui::tree::NodeKind::Scroll(_)
+                    | aqua_ui::tree::NodeKind::Canvas(_)
+                    | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
                 }
             })
             .unwrap()

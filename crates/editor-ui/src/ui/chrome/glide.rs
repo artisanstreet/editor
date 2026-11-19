@@ -150,7 +150,7 @@ impl Glide {
     pub fn settle(self, now: Instant) -> Self {
         match self {
             Self::Running(run) if run.progress(now) >= 1.0 => Self::Resting(run.to),
-            glide => glide,
+            glide @ (Self::Resting(_) | Self::Running(_)) => glide,
         }
     }
 

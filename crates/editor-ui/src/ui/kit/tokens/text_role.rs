@@ -74,7 +74,12 @@ impl TextRole {
             weight: spec.weight,
             letter_spacing_em: match self {
                 Self::Prose => Some(theme.typography.tracking_em),
-                _ => None,
+                Self::Caption
+                | Self::Label
+                | Self::LabelStrong
+                | Self::Title
+                | Self::Code
+                | Self::Heading => None,
             },
             ..TextStyle::default()
         }

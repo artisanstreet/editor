@@ -245,7 +245,9 @@ impl DialogHost {
             let resolved = match closed {
                 CloseReason::Escape => Some(DialogDismissReason::Escape),
                 CloseReason::Requested => reason.take(),
-                _ => None,
+                CloseReason::OutsidePress
+                | CloseReason::AncestorClosed
+                | CloseReason::OwnerRemoved => None,
             };
             if let (Some(reason), Some(callback)) = (resolved, &callback) {
                 callback(reason);

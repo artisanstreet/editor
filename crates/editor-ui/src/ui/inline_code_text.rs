@@ -113,7 +113,14 @@ pub fn inline_runs(raw: &str) -> InlineRuns {
             | Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
                 (" ".to_owned(), false)
             }
-            _ => continue,
+            Event::Start(_)
+            | Event::End(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::Html(_)
+            | Event::FootnoteReference(_)
+            | Event::Rule
+            | Event::TaskListMarker(_) => continue,
         };
         let style = InlineStyle {
             code,

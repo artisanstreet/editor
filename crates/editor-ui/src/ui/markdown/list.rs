@@ -77,7 +77,11 @@ fn visit<'a>(blocks: &'a [Block], indent: usize, rows: &mut Vec<Row<'a>>) {
                 items,
                 ..
             } => visit_items(*ordered, start.unwrap_or(1), items, indent, rows),
-            _ => rows.push(Row {
+            Block::Heading { .. }
+            | Block::Paragraph { .. }
+            | Block::Code(_)
+            | Block::Html { .. }
+            | Block::Table(_) => rows.push(Row {
                 block: Some(block),
                 indent,
                 markers: Vec::new(),

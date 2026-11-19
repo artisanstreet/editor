@@ -268,7 +268,7 @@ fn select_key_name(key: InputKey) -> Option<&'static str> {
         InputKey::Named(NamedKey::Up) => Some("up"),
         InputKey::Named(NamedKey::Home) => Some("home"),
         InputKey::Named(NamedKey::End) => Some("end"),
-        _ => None,
+        InputKey::Char(_) | InputKey::Named(_) => None,
     }
 }
 
@@ -461,7 +461,22 @@ impl<V: Clone + Eq + 'static> Select<V> {
                                 InputEvent::TextInput { text }
                                 | InputEvent::Ime(aqua_core::ImeEvent::Commit { text }),
                             ) => state.type_text(text, now, &entries),
-                            _ => return InputResponse::default(),
+                            RoutedInput::ClipboardPaste(_)
+                            | RoutedInput::ClipboardCut
+                            | RoutedInput::TextVertical { .. }
+                            | RoutedInput::TextMotion { .. }
+                            | RoutedInput::Native(_)
+                            | RoutedInput::PointerEnter(_)
+                            | RoutedInput::PointerLeave(_)
+                            | RoutedInput::TextPointer { .. }
+                            | RoutedInput::TextContext { .. }
+                            | RoutedInput::TextRangeActivated { .. }
+                            | RoutedInput::FilesDropped { .. }
+                            | RoutedInput::DragEnter { .. }
+                            | RoutedInput::DragOver { .. }
+                            | RoutedInput::DragLeave { .. }
+                            | RoutedInput::Drop { .. }
+                            | RoutedInput::DragEnd { .. } => return InputResponse::default(),
                         };
                         if let Some(index) = result.reveal {
                             state.reveal(index, menu_height(&theme, entries.len()));

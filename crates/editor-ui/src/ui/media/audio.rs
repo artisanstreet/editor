@@ -72,7 +72,7 @@ impl AudioAssets {
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
         let source_bytes = match source.parsed() {
             Parsed::Data(payload) => payload.bytes.len(),
-            _ => source.raw().len(),
+            Parsed::Url(_) | Parsed::File { .. } | Parsed::Invalid => source.raw().len(),
         };
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result.map_err(AudioLoadError::from)),

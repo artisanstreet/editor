@@ -149,7 +149,16 @@ impl ChartState {
             }
             NamedKey::Right | NamedKey::Down => current.map_or(first, |n| (n + 1).min(end - 1)),
             NamedKey::Enter => current.unwrap_or(first),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Backspace
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::Escape
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = Some(next);
         true

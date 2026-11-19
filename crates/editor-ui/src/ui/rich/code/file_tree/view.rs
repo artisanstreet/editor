@@ -442,7 +442,7 @@ fn row(
                 InputKey::Named(NamedKey::End) => Navigation::Last,
                 InputKey::Named(NamedKey::Left) => Navigation::Left,
                 InputKey::Named(NamedKey::Right) if expanded.is_some() => Navigation::Right,
-                _ => return InputResponse::default(),
+                InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
             };
             key_emit(Action::Navigate(index, command));
             InputResponse {

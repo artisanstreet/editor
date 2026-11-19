@@ -100,7 +100,7 @@ impl DiagramState {
             Key::Named(NamedKey::Right) => self.pan.x -= KEY_PAN_PX,
             Key::Named(NamedKey::Up) => self.pan.y += KEY_PAN_PX,
             Key::Named(NamedKey::Down) => self.pan.y -= KEY_PAN_PX,
-            _ => return false,
+            Key::Char(_) | Key::Named(_) => return false,
         }
         true
     }

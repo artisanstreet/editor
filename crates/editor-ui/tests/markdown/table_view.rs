@@ -28,7 +28,38 @@ fn text_of(nodes: &[SemanticNode], id: NodeId) -> String {
     };
     match node.role {
         Role::Text => node.label.clone(),
-        _ => node
+        Role::PasswordField
+        | Role::ComboBox
+        | Role::Option
+        | Role::Separator
+        | Role::Tooltip
+        | Role::Group
+        | Role::Button
+        | Role::Checkbox
+        | Role::Switch
+        | Role::RadioButton
+        | Role::TextField
+        | Role::Heading(_)
+        | Role::List
+        | Role::ListBox
+        | Role::RadioGroup
+        | Role::ListItem
+        | Role::Tree
+        | Role::TreeItem
+        | Role::Table
+        | Role::Row
+        | Role::ColumnHeader
+        | Role::Cell
+        | Role::Slider
+        | Role::ProgressIndicator
+        | Role::TabList
+        | Role::Tab
+        | Role::Image
+        | Role::ScrollRegion
+        | Role::Dialog
+        | Role::Menu
+        | Role::MenuItem
+        | Role::Link => node
             .children
             .iter()
             .map(|child| text_of(nodes, *child))

@@ -170,7 +170,7 @@ impl Shown {
             Self::Playing { duration, .. }
             | Self::Paused { duration, .. }
             | Self::Ended { duration } => Some(*duration),
-            _ => None,
+            Self::Idle | Self::Loading | Self::Failed(_) => None,
         }
     }
     fn position(&self) -> Duration {
@@ -188,7 +188,11 @@ impl Shown {
                 (position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
             }
             Self::Ended { .. } => 1.0,
-            _ => 0.0,
+            Self::Idle
+            | Self::Loading
+            | Self::Playing { .. }
+            | Self::Paused { .. }
+            | Self::Failed(_) => 0.0,
         }
     }
 }
@@ -238,7 +242,7 @@ fn track_path(source: &MediaSource, fetcher: Option<&MediaFetcher>, id: &str) ->
                 fetcher.scope()
             )))
         }
-        _ => None,
+        Parsed::Url(_) | Parsed::Invalid => None,
     }
 }
 type Seek = Rc<dyn Fn(Duration)>;
@@ -263,7 +267,7 @@ impl SeekCommand {
             Key::Named(NamedKey::Right | NamedKey::Up) => Some(Self::Forward),
             Key::Named(NamedKey::Home) => Some(Self::Start),
             Key::Named(NamedKey::End) => Some(Self::End),
-            _ => None,
+            Key::Char(_) | Key::Named(_) => None,
         }
     }
     fn of_request(request: AccessibilityRequest) -> Option<Self> {
@@ -551,7 +555,11 @@ impl AudioBlock {
                         false,
                     ))
                     .build(),
-                _ => progress_line(
+                Shown::Idle
+                | Shown::Loading
+                | Shown::Playing { .. }
+                | Shown::Paused { .. }
+                | Shown::Ended { .. } => progress_line(
                     &row_id,
                     &theme,
                     &shown,
@@ -774,7 +782,7 @@ impl AudioFixture {
             }
             Shown::Ended { duration } => Some(clock(*duration)),
             Shown::Loading => Some("Loading…".to_owned()),
-            _ => None,
+            Shown::Idle | Shown::Failed(_) => None,
         };
         (label.to_owned(), shown.progress(), time)
     }

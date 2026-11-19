@@ -25,7 +25,7 @@ pub(crate) fn opens_context_menu(key: &aqua_core::KeyEvent) -> bool {
         aqua_core::Key::Named(aqua_core::NamedKey::Function(10)) => {
             key.modifiers == aqua_core::Modifiers::SHIFT
         }
-        _ => false,
+        aqua_core::Key::Char(_) | aqua_core::Key::Named(_) => false,
     }
 }
 
