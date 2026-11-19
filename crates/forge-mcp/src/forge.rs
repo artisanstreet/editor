@@ -195,7 +195,7 @@ impl ForgeError {
     }
 }
 
-pub fn coordination<'a>(
+pub(crate) fn coordination<'a>(
     failure: &'a CoordinationFailure,
     whole: &dyn std::error::Error,
 ) -> Failure<'a> {

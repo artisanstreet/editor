@@ -99,7 +99,7 @@ fn read_properties() -> Value {
     })
 }
 
-pub fn tools() -> Vec<Tool> {
+pub(crate) fn tools() -> Vec<Tool> {
     [
         recall_tools(),
         thread_tools(),
@@ -860,7 +860,12 @@ async fn approve(hub: &Hub, caller: &ThreadId, tool: &str, description: String) 
     clippy::too_many_lines,
     reason = "one arm per MCP tool, in the order tools() lists them"
 )]
-pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) -> Result<String> {
+pub(crate) async fn call(
+    hub: &Hub,
+    caller: &ThreadId,
+    name: &str,
+    arguments: Value,
+) -> Result<String> {
     let store = hub.store();
     match name {
         "search_threads" => {

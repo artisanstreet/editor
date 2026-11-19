@@ -29,7 +29,7 @@ pub struct RenderError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SliceError {
+pub(crate) enum SliceError {
     #[error("offset {offset} is not a UTF-8 boundary of the rendered item")]
     Offset { offset: u64 },
     #[error(transparent)]
@@ -38,7 +38,7 @@ pub enum SliceError {
 
 type Result<T> = std::result::Result<T, ResolveError>;
 
-pub struct Options {
+pub(crate) struct Options {
     pub whole: bool,
     pub output: bool,
 }
@@ -144,14 +144,11 @@ fn clip(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
     }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{}", &text[..end], omission(text.len() - end))
+    let (kept, _) = text.split_at(text.floor_char_boundary(limit));
+    format!("{kept}{}", omission(text.len() - kept.len()))
 }
 
-pub async fn render(
+pub(crate) async fn render(
     store: &Store,
     items: &[Item],
     options: &Options,
@@ -181,18 +178,18 @@ pub async fn render(
         .collect())
 }
 
-pub struct Rendered<'a> {
+pub(crate) struct Rendered<'a> {
     store: &'a Store,
     item: ItemId,
     segments: Vec<Segment>,
 }
 
-pub struct Slice {
+pub(crate) struct Slice {
     pub text: String,
     pub end: u64,
 }
 
-pub async fn render_item<'a>(
+pub(crate) async fn render_item<'a>(
     store: &'a Store,
     item: &Item,
     output: bool,
@@ -223,11 +220,15 @@ const fn segment_len(segment: &Segment) -> u64 {
 }
 
 impl Rendered<'_> {
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.segments.iter().map(segment_len).sum()
     }
 
-    pub async fn slice(&self, start: u64, limit: u64) -> std::result::Result<Slice, SliceError> {
+    pub(crate) async fn slice(
+        &self,
+        start: u64,
+        limit: u64,
+    ) -> std::result::Result<Slice, SliceError> {
         let total = self.len();
         if start > total {
             return Err(SliceError::Offset { offset: start });
@@ -271,24 +272,18 @@ impl Rendered<'_> {
                 if !literal.is_char_boundary(from) {
                     return Ok(None);
                 }
-                let mut to = from
-                    .saturating_add(usize::try_from(room).unwrap_or(usize::MAX))
-                    .min(literal.len());
-                while !literal.is_char_boundary(to) {
-                    to -= 1;
+                let rest = literal
+                    .get(from..)
+                    .expect("invariant: from is a char boundary within the literal");
+                let mut to = rest.floor_char_boundary(usize::try_from(room).unwrap_or(usize::MAX));
+                if to == 0 {
+                    to = rest.chars().next().map_or(0, char::len_utf8);
                 }
-                if to == from && from < literal.len() {
-                    to = from
-                        + literal[from..]
-                            .chars()
-                            .next()
-                            .expect("invariant: a boundary before the end starts a character")
-                            .len_utf8();
-                }
+                let (text, _) = rest.split_at(to);
                 Ok(Some(Piece {
                     start: local,
-                    end: to as u64,
-                    text: literal[from..to].to_owned(),
+                    end: (from + to) as u64,
+                    text: text.to_owned(),
                 }))
             }
             Segment::Source(source) => {
@@ -348,7 +343,7 @@ struct Piece {
     text: String,
 }
 
-pub fn time(ms: i64) -> String {
+pub(crate) fn time(ms: i64) -> String {
     let seconds = ms.div_euclid(1000);
     let days = seconds.div_euclid(86_400);
     let rest = seconds.rem_euclid(86_400);

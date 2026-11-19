@@ -8,6 +8,7 @@ const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const STRUCTURED_LIMIT: usize = 256 * 1024;
 
+#[derive(Debug)]
 pub struct Tool {
     pub name: &'static str,
     pub description: &'static str,

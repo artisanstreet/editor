@@ -170,7 +170,7 @@ fn events_output() -> Value {
     )
 }
 
-pub fn resource_schema() -> Value {
+pub(crate) fn resource_schema() -> Value {
     json!({"type":"array","maxItems":64,"items":{"oneOf":[{"type":"object","properties":{"kind":{"const":"path"},"worktree":{"type":"string","description":"Absolute checkout root on this Forge host."},"path":{"type":"string","description":"Absolute path or path relative to that worktree."},"recursive":{"type":"boolean","default":false}},"required":["kind","worktree","path"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"named"},"namespace":{"type":"string","description":"For example build, deployment, browser, or port."},"key":{"type":"string","description":"Stable shared resource identity on this Forge."}},"required":["kind","namespace","key"],"additionalProperties":false}]}})
 }
 
@@ -185,7 +185,7 @@ fn list_properties() -> Value {
     clippy::too_many_lines,
     reason = "declarative coordination tool catalog"
 )]
-pub fn tools() -> Vec<Tool> {
+pub(crate) fn tools() -> Vec<Tool> {
     vec![
         awareness::tool(
             "publish_work",
@@ -323,7 +323,7 @@ pub fn tools() -> Vec<Tool> {
     ]
 }
 
-pub async fn all_records(hub: &Hub, mut query: Query) -> Result<Vec<Record>, ListRecordsError> {
+pub(crate) async fn all_records(hub: &Hub, mut query: Query) -> Result<Vec<Record>, ListRecordsError> {
     let mut records = Vec::new();
     loop {
         query.limit = 200;
@@ -388,7 +388,7 @@ async fn send(
         .map_err(forge("deliver the coordination message"))
 }
 
-pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Result<Option<Value>> {
+pub(crate) async fn call(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Result<Option<Value>> {
     let value = match name {
         "publish_work" => publish_work(hub, caller, name, args).await?,
         "get_work" => get_work(hub, caller, name, args).await?,

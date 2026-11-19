@@ -1,7 +1,3 @@
-#![expect(
-    clippy::inconsistent_struct_constructor,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId};
@@ -58,11 +54,12 @@ impl Fixture {
             Engines::new(directory.path()),
             directory.path().to_path_buf(),
         );
+        let mcp = ArtisanMcp::new(hub.clone());
         Self {
-            mcp: ArtisanMcp::new(hub.clone()),
-            hub,
-            threads,
             _directory: directory,
+            hub,
+            mcp,
+            threads,
         }
     }
 

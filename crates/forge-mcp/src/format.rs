@@ -4,7 +4,7 @@ use forge_runs::{AgentInfo, AgentState, Hub};
 use forge_store::{GrepPage, RecallKind, SearchPage, Touch};
 use std::fmt::Write as _;
 
-pub fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
+pub(crate) fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
     Ok(format!(
         "Use effort, speed and variant ids exactly as listed. OpenCode reasoning choices use variant. \
          Defaults are default_effort, default_variant and speeds[].default. \
@@ -41,12 +41,12 @@ fn title(title: Option<&str>) -> &str {
 
 fn group(out: &mut String, last: &mut Option<ThreadId>, thread: &ThreadId, name: Option<&str>) {
     if last.as_ref() != Some(thread) {
-        writeln!(out, "\n### {}\n", title(name)).ok();
+        writeln!(out, "\n### {}\n", title(name)).expect("invariant: writing to a String cannot fail");
         *last = Some(thread.clone());
     }
 }
 
-pub fn search(page: &SearchPage, continued: bool) -> String {
+pub(crate) fn search(page: &SearchPage, continued: bool) -> String {
     let mut out = String::new();
     let mut last = None;
     for hit in &page.hits {
@@ -64,10 +64,10 @@ pub fn search(page: &SearchPage, continued: bool) -> String {
             one_line(&hit.snippet),
             hit.item_id,
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     if let Some(next) = page.next {
-        writeln!(out, "\nMore hits: call again with cursor {next}.").ok();
+        writeln!(out, "\nMore hits: call again with cursor {next}.").expect("invariant: writing to a String cannot fail");
     } else if continued {
         out.push_str("\nNo more hits.\n");
     }
@@ -75,7 +75,7 @@ pub fn search(page: &SearchPage, continued: bool) -> String {
     out.trim_start().to_owned()
 }
 
-pub fn grep(page: &GrepPage) -> String {
+pub(crate) fn grep(page: &GrepPage) -> String {
     let mut out = String::new();
     let mut last = None;
     for found in &page.matches {
@@ -93,19 +93,19 @@ pub fn grep(page: &GrepPage) -> String {
             found.line,
             found.item_id,
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
         for line in found.before.iter().chain([&found.text]).chain(&found.after) {
-            writeln!(out, "> {line}").ok();
+            writeln!(out, "> {line}").expect("invariant: writing to a String cannot fail");
         }
         out.push('\n');
     }
     if let Some(next) = page.next {
-        writeln!(out, "More matches: call again with cursor {next}.").ok();
+        writeln!(out, "More matches: call again with cursor {next}.").expect("invariant: writing to a String cannot fail");
     }
     out.trim().to_owned()
 }
 
-pub fn touches(touches: &[Touch]) -> String {
+pub(crate) fn touches(touches: &[Touch]) -> String {
     let mut out = String::new();
     let mut last = None;
     for touch in touches {
@@ -128,12 +128,12 @@ pub fn touches(touches: &[Touch]) -> String {
             time(touch.created_at),
             touch.item_id
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     out.trim_start().to_owned()
 }
 
-pub fn thread(hub: &Hub, thread: &Thread) -> String {
+pub(crate) fn thread(hub: &Hub, thread: &Thread) -> String {
     let mut states = Vec::new();
     if hub.is_live(&thread.id) {
         states.push("working");
@@ -166,13 +166,13 @@ pub fn thread(hub: &Hub, thread: &Thread) -> String {
     )
 }
 
-pub fn warnings(out: &mut String, warnings: &[String]) {
+pub(crate) fn warnings(out: &mut String, warnings: &[String]) {
     for warning in warnings {
-        writeln!(out, "\nNote: {warning}").ok();
+        writeln!(out, "\nNote: {warning}").expect("invariant: writing to a String cannot fail");
     }
 }
 
-pub fn agent(info: &AgentInfo) -> String {
+pub(crate) fn agent(info: &AgentInfo) -> String {
     let state = match info.state {
         AgentState::Working => "working",
         AgentState::WaitingForUser => "waiting for the user",
@@ -201,16 +201,16 @@ pub fn agent(info: &AgentInfo) -> String {
         info.agent,
     );
     if let Some(error) = &info.error {
-        writeln!(out, "\nError: {error}").ok();
+        writeln!(out, "\nError: {error}").expect("invariant: writing to a String cannot fail");
     }
     if let Some(result) = &info.result {
-        writeln!(out, "\n{}", result.trim()).ok();
+        writeln!(out, "\n{}", result.trim()).expect("invariant: writing to a String cannot fail");
     }
     warnings(&mut out, &info.warnings);
     out
 }
 
-pub fn agents(infos: &[AgentInfo]) -> String {
+pub(crate) fn agents(infos: &[AgentInfo]) -> String {
     infos
         .iter()
         .map(agent)
@@ -218,7 +218,7 @@ pub fn agents(infos: &[AgentInfo]) -> String {
         .join("\n---\n\n")
 }
 
-pub fn cell(text: &str) -> String {
+pub(crate) fn cell(text: &str) -> String {
     one_line(text).replace('|', "\\|")
 }
 

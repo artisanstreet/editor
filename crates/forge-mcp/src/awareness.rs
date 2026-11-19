@@ -113,13 +113,13 @@ fn normalized(path: &str) -> Result<String, AwarenessError> {
 
 type Result<T, E = AwarenessError> = std::result::Result<T, E>;
 
-pub fn object(required: &[&str], properties: Value) -> Value {
+pub(crate) fn object(required: &[&str], properties: Value) -> Value {
     let mut schema = json!({"type":"object","required":required});
     schema["properties"] = properties;
     schema
 }
 
-pub fn nullable(kind: &str) -> Value {
+pub(crate) fn nullable(kind: &str) -> Value {
     json!({"type":[kind,"null"]})
 }
 
@@ -130,7 +130,7 @@ fn project_schema() -> Value {
     )
 }
 
-pub fn record_schema() -> Value {
+pub(crate) fn record_schema() -> Value {
     object(
         &[
             "id",
@@ -144,7 +144,7 @@ pub fn record_schema() -> Value {
     )
 }
 
-pub fn optional_record_schema() -> Value {
+pub(crate) fn optional_record_schema() -> Value {
     json!({"oneOf":[record_schema(),{"type":"null"}]})
 }
 
@@ -272,7 +272,7 @@ fn models_output() -> Value {
     )
 }
 
-pub fn tool(
+pub(crate) fn tool(
     name: &'static str,
     description: &'static str,
     properties: fn() -> Value,
@@ -306,7 +306,7 @@ fn list_properties() -> Value {
     })
 }
 
-pub fn tools() -> Vec<Tool> {
+pub(crate) fn tools() -> Vec<Tool> {
     vec![
         tool(
             "read_thread_item",
@@ -529,7 +529,7 @@ async fn relevant(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Resu
     )
 }
 
-pub async fn project_scope(
+pub(crate) async fn project_scope(
     hub: &Hub,
     caller: &ThreadId,
     scope: Option<&str>,
@@ -563,7 +563,7 @@ fn worker(hub: &Hub, worker: &discovery::Worker) -> Value {
     json!({"agent":worker.thread.spawned_by.as_ref().map_or_else(||worker.thread.id.to_string(),ToString::to_string),"thread":worker.thread.id,"title":worker.thread.title,"parent_thread":worker.thread.parent_thread_id,"harness":worker.thread.config.engine,"model":worker.thread.config.model,"execution_state":state,"latest_run":worker.latest_run,"last_activity_at":worker.thread.activity_at,"archived":worker.thread.archived,"unread":worker.thread.is_unread(),"project":worker.project,"work":worker.work,"follow_up":{"inspect":"get_agent","read":"read_thread","coordinate":"send_coordination_message"}})
 }
 
-pub async fn resolve_agent(hub: &Hub, target: &str) -> Result<ThreadId> {
+pub(crate) async fn resolve_agent(hub: &Hub, target: &str) -> Result<ThreadId> {
     let page = hub
         .store()
         .discover_workers(discovery::Query {
@@ -583,7 +583,7 @@ pub async fn resolve_agent(hub: &Hub, target: &str) -> Result<ThreadId> {
     }
 }
 
-pub async fn call(
+pub(crate) async fn call(
     hub: &Hub,
     caller: &ThreadId,
     raw_name: &str,
