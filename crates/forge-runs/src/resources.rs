@@ -389,7 +389,17 @@ fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
     .map_err(std::io::Error::from)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    std::fs::File::options()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_resource(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
