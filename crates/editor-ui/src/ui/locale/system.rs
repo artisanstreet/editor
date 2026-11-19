@@ -56,18 +56,24 @@ pub(super) fn detect() -> SystemLocales {
         .open(r"Control Panel\International")
         .and_then(|key| key.get_string("LocaleName"));
     SystemLocales::uniform(match read {
-        Ok(name) => match Locale::try_from_str(&name) {
-            Ok(locale) => locale,
-            Err(error) => {
-                tracing::warn!(name, %error, "parse the Windows user locale; formatting for en-US");
-                FALLBACK
-            }
-        },
+        Ok(name) => windows_locale(&name),
         Err(error) => {
             tracing::warn!(%error, "read the Windows user locale; formatting for en-US");
             FALLBACK
         }
     })
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_locale(name: &str) -> Locale {
+    let tag = name.split_once('_').map_or(name, |(tag, _sort_order)| tag);
+    match Locale::try_from_str(tag) {
+        Ok(locale) => locale,
+        Err(error) => {
+            tracing::warn!(name, %error, "parse the Windows user locale; formatting for en-US");
+            FALLBACK
+        }
+    }
 }
 
 #[cfg(not(windows))]

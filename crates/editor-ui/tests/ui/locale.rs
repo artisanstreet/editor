@@ -1,4 +1,4 @@
-use super::system::posix_locale;
+use super::system::{posix_locale, windows_locale};
 use super::{Formats, SystemLocales};
 use chrono::NaiveDate;
 use icu_locale_core::{Locale, locale};
@@ -98,4 +98,16 @@ fn a_negative_value_that_rounds_to_zero_is_plain_zero() {
     assert_eq!(english.decimal(-0.4, 0), "0");
     assert_eq!(english.trimmed(-0.0001, 2), "0");
     assert_eq!(english.decimal(-1.5, 2), "-1.50");
+}
+
+#[test]
+fn a_windows_locale_with_a_sort_order_formats_for_its_language() {
+    let spanish = formats(&windows_locale("es-ES_tradnl"));
+    assert_eq!(
+        spanish.count(1_234_567_u64, "archivo", "archivos"),
+        "1.234.567 archivos"
+    );
+    assert_eq!(spanish.decimal(12.5, 2), "12,50");
+    assert_eq!(windows_locale("de-DE_phoneb"), locale!("de-DE"));
+    assert_eq!(windows_locale("nb-NO"), locale!("nb-NO"));
 }
