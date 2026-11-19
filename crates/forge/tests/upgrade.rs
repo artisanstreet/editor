@@ -10,7 +10,7 @@ use std::{
 };
 
 struct Running {
-    child: Child,
+    child: Option<Child>,
     data: PathBuf,
 }
 impl Drop for Running {
@@ -31,16 +31,20 @@ impl Drop for Running {
         let pids: Vec<u32> = gateway
             .into_iter()
             .chain(backends)
-            .chain([self.child.id()])
+            .chain(self.child.as_ref().map(Child::id))
             .collect();
         signal("-TERM", &pids);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while pids.iter().any(|pid| alive(*pid)) && std::time::Instant::now() < deadline {
-            let _reaped = self.child.try_wait();
+            if let Some(child) = self.child.as_mut() {
+                let _reaped = child.try_wait();
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         signal("-KILL", &pids);
-        let _reaped = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            let _reaped = child.wait();
+        }
     }
 }
 
@@ -80,10 +84,13 @@ async fn start() -> (tempfile::TempDir, Running, upgrade::Gateway) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut running = Running { child, data };
+    let mut running = Running {
+        child: Some(child),
+        data,
+    };
     let gateway = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
-            if let Some(status) = running.child.try_wait().unwrap() {
+            if let Some(status) = running.child.as_mut().unwrap().try_wait().unwrap() {
                 panic!(
                     "Forge exited {status}: {}",
                     std::fs::read_to_string(directory.path().join("forge.log")).unwrap()
@@ -155,16 +162,24 @@ async fn replacement_preserves_the_listening_port_and_serves_requests_during_gat
     let url = format!("https://localhost:{}/state", original.address.port());
     assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
     let data = running.data.clone();
-    let replace = tokio::spawn(async move {
+    let mut replace = tokio::spawn(async move {
         upgrade::replace(&data, std::path::Path::new(env!("CARGO_BIN_EXE_forge"))).await
     });
     let mut observed = 0;
-    while !replace.is_finished() {
-        assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
-        observed += 1;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let replacement = replace.await.unwrap().unwrap_or_else(|error| {
+    let replaced = tokio::time::timeout(test_support::wait::LIVENESS, async {
+        loop {
+            tokio::select! {
+                replaced = &mut replace => break replaced,
+                served = client.get(&url).send() => {
+                    assert_eq!(served.unwrap().status(), 200);
+                    observed += 1;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the replacement finishes in time");
+    let replacement = replaced.unwrap().unwrap_or_else(|error| {
         panic!(
             "{}: {}",
             diagnostics::chain(&error),
@@ -177,14 +192,15 @@ async fn replacement_preserves_the_listening_port_and_serves_requests_during_gat
     assert!(observed > 0);
     for _ in 0..30 {
         assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while running.child.try_wait().unwrap().is_none() {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
+    let mut original_gateway = running.child.take().unwrap();
+    tokio::time::timeout(
+        test_support::wait::LIVENESS,
+        tokio::task::spawn_blocking(move || original_gateway.wait()),
+    )
     .await
+    .expect("the replaced gateway exits in time")
+    .unwrap()
     .unwrap();
     let final_gateway = upgrade::replace(
         &running.data,
@@ -315,7 +331,10 @@ fn a_start_that_upgrades_the_database_keeps_asking_systemd_for_more_time() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let _running = Running { child, data };
+    let _running = Running {
+        child: Some(child),
+        data,
+    };
 
     let mut message = [0_u8; 512];
     let received = manager.recv(&mut message).unwrap_or_else(|error| {
