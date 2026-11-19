@@ -9,7 +9,27 @@ use tokio::sync::{Mutex, Semaphore};
 const ENTRIES: usize = 64;
 const AVATAR_BYTES: usize = 512 * 1024;
 
-pub struct Repositories {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AvatarError {
+    #[error("took longer than {0:?}")]
+    Slow(Duration),
+    #[error("fetch {url}")]
+    Fetch {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("the response is larger than {limit} bytes")]
+    TooLarge { limit: usize },
+    #[error("read the {host} repository metadata")]
+    Metadata {
+        host: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+pub(crate) struct Repositories {
     entries: Mutex<HashMap<PathBuf, Arc<Mutex<Observation>>>>,
     slots: Semaphore,
     http: reqwest::Client,
@@ -31,6 +51,12 @@ impl Repositories {
                 .user_agent(concat!("Artisan-Forge/", env!("CARGO_PKG_VERSION")))
                 .build()?,
         })
+    }
+    async fn slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.slots
+            .acquire()
+            .await
+            .expect("invariant: the repository slots are never closed")
     }
     async fn entry(&self, path: &Path) -> Arc<Mutex<Observation>> {
         let mut entries = self.entries.lock().await;
@@ -67,14 +93,14 @@ impl Repositories {
         entry.repository = Some((Instant::now(), repository));
     }
     pub(crate) async fn read(&self, path: &Path) -> Option<ProjectRepository> {
-        let _permit = self.slots.acquire().await.ok()?;
+        let _permit = self.slot().await;
         let entry = self.entry(path).await;
         let mut entry = entry.lock().await;
         self.refresh(path, &mut entry).await;
         entry.repository.as_ref().and_then(|(_, repo)| repo.clone())
     }
     pub(crate) async fn avatar(&self, path: &Path) -> Option<Vec<u8>> {
-        let _permit = self.slots.acquire().await.ok()?;
+        let _permit = self.slot().await;
         let entry = self.entry(path).await;
         let mut entry = entry.lock().await;
         self.refresh(path, &mut entry).await;
@@ -94,10 +120,18 @@ impl Repositories {
             .and_then(|(_, repo)| repo.as_ref())
         {
             Some(repo) => {
-                tokio::time::timeout(Duration::from_secs(8), owner_avatar(&self.http, repo))
+                let limit = Duration::from_secs(8);
+                let fetched = tokio::time::timeout(limit, owner_avatar(&self.http, repo))
                     .await
-                    .ok()
-                    .flatten()
+                    .unwrap_or(Err(AvatarError::Slow(limit)));
+                fetched.unwrap_or_else(|error| {
+                    tracing::debug!(
+                        "owner avatar for {}: {}",
+                        path.display(),
+                        diagnostics::chain(&error)
+                    );
+                    None
+                })
             }
             None => None,
         };
@@ -107,12 +141,12 @@ impl Repositories {
 }
 
 #[derive(Default)]
-pub struct Icons {
+pub(crate) struct Icons {
     encoded: std::sync::Mutex<HashMap<IconSource, Icon>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub enum IconSource {
+pub(crate) enum IconSource {
     File {
         path: PathBuf,
         modified: SystemTime,
@@ -122,7 +156,7 @@ pub enum IconSource {
 }
 
 #[derive(Clone)]
-pub enum Icon {
+pub(crate) enum Icon {
     Blob(BlobRef),
     Unusable,
 }
@@ -159,6 +193,14 @@ async fn git(path: &Path, args: &[&str]) -> Option<String> {
         .env("GIT_TERMINAL_PROMPT", "0");
     let output = forge_engines::process::probe(command, Duration::from_secs(3), 64 * 1024)
         .await
+        .inspect_err(|error| {
+            tracing::debug!(
+                "git {} in {}: {}",
+                args.join(" "),
+                path.display(),
+                diagnostics::chain(error)
+            );
+        })
         .ok()?;
     if !output.status.success() {
         return None;
@@ -261,16 +303,27 @@ fn web_url(remote: &str) -> Option<String> {
     (!host.is_empty() && !path.is_empty()).then(|| format!("https://{host}/{path}"))
 }
 
-async fn owner_avatar(http: &reqwest::Client, repository: &ProjectRepository) -> Option<Vec<u8>> {
+async fn owner_avatar(
+    http: &reqwest::Client,
+    repository: &ProjectRepository,
+) -> Result<Option<Vec<u8>>, AvatarError> {
     const LIMIT: usize = AVATAR_BYTES;
-    let web_url = repository.web_url.as_deref()?;
-    let rest = web_url.strip_prefix("https://")?;
-    let (domain, path) = rest.split_once('/')?;
-    let owner = path.split('/').next()?;
-    let (metadata, fields): (String, &[&str]) = match repository.host.as_deref()? {
+    let Some((host, domain, path)) = repository
+        .web_url
+        .as_deref()
+        .and_then(|url| url.strip_prefix("https://"))
+        .and_then(|rest| rest.split_once('/'))
+        .zip(repository.host.as_deref())
+        .map(|((domain, path), host)| (host, domain, path))
+    else {
+        return Ok(None);
+    };
+    let owner = path.split('/').next().unwrap_or(path);
+    let (metadata, fields, host): (String, &[&str], &'static str) = match host {
         "github" if domain == "github.com" => (
             format!("https://api.github.com/users/{owner}"),
             &["/avatar_url"],
+            "github",
         ),
         "gitlab" => (
             format!(
@@ -278,32 +331,58 @@ async fn owner_avatar(http: &reqwest::Client, repository: &ProjectRepository) ->
                 path.replace('/', "%2F")
             ),
             &["/avatar_url", "/namespace/avatar_url", "/owner/avatar_url"],
+            "gitlab",
         ),
         "codeberg" | "gitea" => (
             format!("https://{domain}/api/v1/repos/{path}"),
             &["/avatar_url", "/owner/avatar_url"],
+            "gitea",
         ),
-        _ => return None,
+        _ => return Ok(None),
     };
-    let download = async |url: &str| -> Option<Vec<u8>> {
-        if !url.starts_with("https://") {
-            return None;
-        }
-        let response = http.get(url).send().await.ok()?.error_for_status().ok()?;
-        bounded_response(response, LIMIT).await
+    let download = async |url: &str| -> Result<Vec<u8>, AvatarError> {
+        let fetch = |source| AvatarError::Fetch {
+            url: url.to_owned(),
+            source,
+        };
+        let response = http
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(fetch)?;
+        bounded_response(response, LIMIT)
+            .await
+            .map_err(|failure| match failure {
+                Bounded::TooLarge => AvatarError::TooLarge { limit: LIMIT },
+                Bounded::Read(source) => fetch(source),
+            })
     };
-    let metadata: serde_json::Value = serde_json::from_slice(&download(&metadata).await?).ok()?;
-    for field in fields {
-        if let Some(url) = metadata.pointer(field).and_then(serde_json::Value::as_str)
-            && let Some(bytes) = download(url).await
-        {
-            return Some(bytes);
+    let metadata: serde_json::Value = serde_json::from_slice(&download(&metadata).await?)
+        .map_err(|source| AvatarError::Metadata { host, source })?;
+    let mut failed = None;
+    for url in fields
+        .iter()
+        .filter_map(|field| metadata.pointer(field).and_then(serde_json::Value::as_str))
+        .filter(|url| url.starts_with("https://"))
+    {
+        match download(url).await {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) => {
+                failed.get_or_insert(error);
+            }
         }
     }
-    None
+    failed.map_or(Ok(None), Err)
 }
 
-pub async fn icon_file(path: &Path) -> Option<Vec<u8>> {
+#[derive(Debug)]
+pub(crate) enum Bounded {
+    TooLarge,
+    Read(reqwest::Error),
+}
+
+pub(crate) async fn icon_file(path: &Path) -> Option<Vec<u8>> {
     use tokio::io::AsyncReadExt as _;
     let metadata = tokio::fs::metadata(path).await.ok()?;
     if !metadata.is_file() || metadata.len() > forge_store::MAX_BLOB_BYTES as u64 {
@@ -322,21 +401,21 @@ pub async fn icon_file(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() <= forge_store::MAX_BLOB_BYTES).then_some(bytes)
 }
 
-async fn bounded_response(response: reqwest::Response, limit: usize) -> Option<Vec<u8>> {
+async fn bounded_response(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Bounded> {
     use futures::StreamExt as _;
     if response.content_length().is_some_and(|n| n > limit as u64) {
-        return None;
+        return Err(Bounded::TooLarge);
     }
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
+        let chunk = chunk.map_err(Bounded::Read)?;
         if chunk.len() > limit.saturating_sub(bytes.len()) {
-            return None;
+            return Err(Bounded::TooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }
-    Some(bytes)
+    Ok(bytes)
 }
 
 fn host_kind(web_url: &str) -> &'static str {

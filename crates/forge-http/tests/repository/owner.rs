@@ -124,7 +124,11 @@ async fn unknown_length_chunked_avatar_is_rejected_before_buffering_the_tail() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0; 8192];
-        let _ = socket.read(&mut request).await.unwrap();
+        assert_ne!(
+            socket.read(&mut request).await.unwrap(),
+            0,
+            "the client sent its request"
+        );
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
@@ -147,7 +151,7 @@ async fn unknown_length_chunked_avatar_is_rejected_before_buffering_the_tail() {
                 break;
             }
         }
-        socket.write_all(b"0\r\n\r\n").await.ok();
+        let _client_hung_up = socket.write_all(b"0\r\n\r\n").await;
     });
     let response = reqwest::Client::new()
         .get(format!("http://{address}"))
@@ -155,6 +159,9 @@ async fn unknown_length_chunked_avatar_is_rejected_before_buffering_the_tail() {
         .await
         .unwrap();
     assert_eq!(response.content_length(), None);
-    assert!(bounded_response(response, AVATAR_BYTES).await.is_none());
+    assert!(matches!(
+        bounded_response(response, AVATAR_BYTES).await,
+        Err(Bounded::TooLarge)
+    ));
     server.await.unwrap();
 }
