@@ -3,7 +3,7 @@ pub mod view;
 
 use artisan_api::{Timestamp, UsageCadence, UsageLimits, UsageWindow};
 
-pub(crate) const METER_SEGMENTS: usize = 14;
+pub(crate) const METER_SEGMENTS: u8 = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Cadence {
@@ -105,16 +105,22 @@ pub(crate) fn checked_label(read_at: Timestamp, now: Timestamp) -> String {
         editor_ui::locale::integer(hours / 24)
     )
 }
-pub(crate) fn lit_of(used_percent: f64, segments: usize) -> usize {
+pub(crate) fn lit_of(used_percent: f64, segments: u8) -> u8 {
     if !used_percent.is_finite() || used_percent <= 0.0 {
         return 0;
     }
     if used_percent >= 100.0 {
         return segments;
     }
-    let nearest = (used_percent / 100.0 * segments as f64).round() as usize;
-    nearest.clamp(1, segments - 1)
+    let scaled = used_percent / 100.0 * f64::from(segments);
+    (2..segments)
+        .take_while(|&count| f64::from(count) - 0.5 <= scaled)
+        .last()
+        .unwrap_or(1)
 }
-pub(crate) fn remaining_percent(used_percent: f64) -> i64 {
-    (100.0 - used_percent.round()).clamp(0.0, 100.0) as i64
+pub(crate) fn remaining_percent(used_percent: f64) -> u8 {
+    (0..=100_u8)
+        .rev()
+        .find(|&left| f64::from(left) <= 100.0 - used_percent.round())
+        .unwrap_or(0)
 }

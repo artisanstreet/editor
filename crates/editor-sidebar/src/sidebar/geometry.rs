@@ -131,9 +131,10 @@ pub struct Listed {
 
 impl Listed {
     pub fn lead(self, spacer: f32) -> f32 {
-        match self.spaced {
-            true => self.gap + spacer,
-            false => self.gap,
+        if self.spaced {
+            self.gap + spacer
+        } else {
+            self.gap
         }
     }
 }
@@ -187,30 +188,26 @@ pub enum PageDirection {
     Older,
 }
 
-pub struct PagePosition {
-    pub viewport_height: f32,
-    pub above: f32,
-    pub below: f32,
-    pub loading: bool,
-    pub loaded: bool,
-    pub failed: bool,
-    pub scrolled: bool,
-    pub at_latest: bool,
-    pub has_older: bool,
-    pub history_open: bool,
-    pub history_empty: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageLoad {
+    Pending,
+    Ready,
+    Failed { scrolled: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryPane {
+    Empty,
+    Open,
+    Closed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageState {
-    pub loading: bool,
-    pub loaded: bool,
-    pub failed: bool,
-    pub scrolled: bool,
+    pub load: PageLoad,
     pub at_latest: bool,
     pub has_older: bool,
-    pub history_open: bool,
-    pub history_empty: bool,
+    pub history: HistoryPane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,36 +258,24 @@ impl PaneViewports {
         self.inbox
             .into_iter()
             .chain(self.history)
-            .find_map(|distances| {
-                page_direction(&PagePosition {
-                    viewport_height: distances.viewport_height,
-                    above: distances.above,
-                    below: distances.below,
-                    loading: state.loading,
-                    loaded: state.loaded,
-                    failed: state.failed,
-                    scrolled: state.scrolled,
-                    at_latest: state.at_latest,
-                    has_older: state.has_older,
-                    history_open: state.history_open,
-                    history_empty: state.history_empty,
-                })
-            })
+            .find_map(|distances| page_direction(distances, state))
     }
 }
 
-pub fn page_direction(page: &PagePosition) -> Option<PageDirection> {
-    if page.viewport_height <= 0.0
-        || page.loading
-        || !page.loaded
-        || (page.failed && !page.scrolled)
-    {
-        return None;
-    }
-    if !page.at_latest && page.above < READ_AHEAD {
+pub fn page_direction(distances: PaneDistances, state: PageState) -> Option<PageDirection> {
+    let settled = match state.load {
+        PageLoad::Ready | PageLoad::Failed { scrolled: true } => true,
+        PageLoad::Pending | PageLoad::Failed { scrolled: false } => false,
+    };
+    let older_shown = match state.history {
+        HistoryPane::Empty | HistoryPane::Open => true,
+        HistoryPane::Closed => false,
+    };
+    if distances.viewport_height <= 0.0 || !settled {
+        None
+    } else if !state.at_latest && distances.above < READ_AHEAD {
         Some(PageDirection::Newer)
-    } else if page.has_older && page.below < READ_AHEAD && (page.history_open || page.history_empty)
-    {
+    } else if state.has_older && distances.below < READ_AHEAD && older_shown {
         Some(PageDirection::Older)
     } else {
         None

@@ -16,6 +16,7 @@ struct Completion {
     result: Result<(), CallError>,
 }
 
+#[derive(Debug)]
 pub struct UsagePage {
     shown: bool,
     refreshing: HashSet<(HostId, HostInstance, EngineId)>,
@@ -29,7 +30,9 @@ impl Default for UsagePage {
             shown: false,
             refreshing: HashSet::new(),
             errors: HashMap::new(),
-            completions: Delivery::new(NonZeroUsize::new(64).unwrap()),
+            completions: Delivery::new(
+                NonZeroUsize::new(64).expect("invariant: the completion capacity is non-zero"),
+            ),
         }
     }
 }
@@ -74,8 +77,8 @@ impl UsagePage {
                     .engine_action(engine, &EngineCommand::Refresh {})
                     .await
                     .map(drop);
-                let _ = sender
-                    .send(Completion {
+                sender
+                    .offer(Completion {
                         host,
                         instance,
                         engine,

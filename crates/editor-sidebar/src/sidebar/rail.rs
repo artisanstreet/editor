@@ -32,7 +32,7 @@ impl Glyph {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RailMotion {
     started: [Option<Instant>; 3],
 }
@@ -166,9 +166,9 @@ fn layers(glyph: Glyph, progress: Option<f32>) -> Vec<Layer> {
             {
                 let angle = (TAU * beats).mul_add(p, phase);
                 let wave = 0.5_f32.mul_add((2.7 * angle).sin(), angle.sin()) / 1.5;
-                let level = (rest + 2.4 * envelope * wave).round().clamp(1.0, 5.0);
-                for (index, cell) in cells.iter().enumerate() {
-                    if (index + 1) as f32 <= level {
+                let level = (2.4 * envelope).mul_add(wave, rest).round().clamp(1.0, 5.0);
+                for (rank, cell) in (1_u8..).zip(cells.iter()) {
+                    if f32::from(rank) <= level {
                         result.push(Layer::new(*cell));
                     }
                 }
@@ -195,7 +195,7 @@ fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
                 .on_paint(move |bounds| {
                     vec![aqua_core::DisplayItem::GpuiTransformedSvg {
                         bounds,
-                        source: source.clone(),
+                        source: std::sync::Arc::clone(&source),
                         tint: color,
                         opacity: layer.opacity,
                         transform: aqua_core::scene::GpuiSvgTransform {
@@ -219,9 +219,9 @@ fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
 pub(crate) fn build(
     sidebar: &super::controller::Sidebar,
     core: &editor_core::Core,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     now: Instant,
-    emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
+    emit: &std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> Element {
     use super::view::ViewAction;
     use aqua_core::Role;
@@ -256,8 +256,8 @@ pub(crate) fn build(
         .spaced(Space::S4)
         .style(Style::new().align(AlignItems::CENTER));
     for (glyph, id, label, selected) in items {
-        let action = emit.clone();
-        let hover = emit.clone();
+        let action = std::rc::Rc::clone(emit);
+        let hover = std::rc::Rc::clone(emit);
         let color = if selected {
             theme.colors.text
         } else {
@@ -277,10 +277,10 @@ pub(crate) fn build(
                 color.to_reference_paint(),
             ))
             .build();
-        let button = HitArea::new(id, &theme, Role::Button, label)
+        let button = HitArea::new(id, theme, Role::Button, label)
             .child(live::layer(
                 Hover::Neutral,
-                &theme,
+                theme,
                 Radius::Field.px(),
                 false,
             ))

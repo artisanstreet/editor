@@ -7,7 +7,9 @@ use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
 use editor_core::{CompletionKey, CompletionSlot, Core, HostId, HostInstance, Screen};
 
-use super::geometry::{PageDirection, PageState, PaneDistances, PaneViewports, ThreadPane};
+use super::geometry::{
+    HistoryPane, PageDirection, PageLoad, PageState, PaneDistances, PaneViewports, ThreadPane,
+};
 use super::list::{Lists, lists};
 use super::picker::FolderPicker;
 use super::row::rename_value;
@@ -87,6 +89,10 @@ pub enum TextSearchStatus<'a> {
     Failed(&'a str),
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the Editor shell and other crates' tests read and seed the sidebar's lists, search and motion state directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,
@@ -164,10 +170,11 @@ impl Sidebar {
     }
     pub fn thread_visual_factory(
         &self,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         reduced_motion: bool,
     ) -> super::view::ThreadVisualFactory {
-        let pulses = self.working_pulses.clone();
+        let pulses = std::rc::Rc::clone(&self.working_pulses);
+        let theme = *theme;
         let truncate: super::row::TruncatedText = std::rc::Rc::new(
             move |text, role: editor_ui::kit::TextRole, color, selector| {
                 role.text(&theme, text)
@@ -184,7 +191,7 @@ impl Sidebar {
         );
         std::rc::Rc::new(move |row, image, host| {
             let id = row.id.clone();
-            let pulses = pulses.clone();
+            let pulses = std::rc::Rc::clone(&pulses);
             let pulse: super::row::WorkingPulse = std::rc::Rc::new(move |child| {
                 pulses
                     .borrow_mut()
@@ -192,32 +199,37 @@ impl Sidebar {
                     .or_default()
                     .wrap(child, false)
             });
-            super::row::visual_factory(theme, reduced_motion, truncate.clone(), pulse)(
+            super::row::visual_factory(&theme, reduced_motion, std::rc::Rc::clone(&truncate), pulse)(
                 row, image, host,
             )
         })
     }
 
     #[cfg(feature = "test-support")]
-    pub async fn test_action_failure(&self, host: HostId, instance: HostInstance) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Action {
-                host,
-                instance,
-                result: Err(ThreadActionError::Rename {
-                    thread: ThreadId("thread".into()),
-                    source: CallError {
-                        method: "PATCH".parse().expect("PATCH is an HTTP method"),
-                        path: "/threads/thread".into(),
-                        failure: Box::new(editor_core::client::CallFailure::Inconsistent {
-                            check: "test failure",
-                        }),
-                    },
-                }),
-            })
-            .await;
+    pub fn test_action_failure(
+        &self,
+        host: HostId,
+        instance: HostInstance,
+    ) -> impl Future<Output = ()> + use<> {
+        let sender = self.completions.sender();
+        async move {
+            sender
+                .offer(Completion::Action {
+                    host,
+                    instance,
+                    result: Err(ThreadActionError::Rename {
+                        thread: ThreadId("thread".into()),
+                        source: CallError {
+                            method: "PATCH".parse().expect("PATCH is an HTTP method"),
+                            path: "/threads/thread".into(),
+                            failure: Box::new(editor_core::client::CallFailure::Inconsistent {
+                                check: "test failure",
+                            }),
+                        },
+                    }),
+                })
+                .await;
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -231,43 +243,45 @@ impl Sidebar {
     }
 
     #[cfg(feature = "test-support")]
-    pub async fn test_browse_completion(
+    pub fn test_browse_completion(
         &self,
         host: HostId,
         instance: HostInstance,
         generation: u64,
         listing: DirListing,
-    ) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Browse {
-                host,
-                instance,
-                generation,
-                result: Ok(listing),
-            })
-            .await;
+    ) -> impl Future<Output = ()> + use<> {
+        let sender = self.completions.sender();
+        async move {
+            sender
+                .offer(Completion::Browse {
+                    host,
+                    instance,
+                    generation,
+                    result: Ok(listing),
+                })
+                .await;
+        }
     }
 
     #[cfg(feature = "test-support")]
-    pub async fn test_create_completion(
+    pub fn test_create_completion(
         &self,
         host: HostId,
         instance: HostInstance,
         generation: u64,
         project: Project,
-    ) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Create {
-                host,
-                instance,
-                generation,
-                result: Ok(project),
-            })
-            .await;
+    ) -> impl Future<Output = ()> + use<> {
+        let sender = self.completions.sender();
+        async move {
+            sender
+                .offer(Completion::Create {
+                    host,
+                    instance,
+                    generation,
+                    result: Ok(project),
+                })
+                .await;
+        }
     }
 
     pub fn new(workspace_background: bool) -> Self {
@@ -304,7 +318,9 @@ impl Sidebar {
             browse_task: None,
             text_search: CompletionSlot::default(),
             text_results: TextResults::Idle,
-            completions: Delivery::new(NonZeroUsize::new(64).unwrap()),
+            completions: Delivery::new(
+                NonZeroUsize::new(64).expect("invariant: the completion capacity is non-zero"),
+            ),
             workspace_background,
         }
     }
@@ -329,7 +345,7 @@ impl Sidebar {
     pub(crate) fn visible_picker(&self, core: &Core) -> Option<&FolderPicker> {
         let (id, instance) = self.picker_host.as_ref().zip(self.picker_instance)?;
         let host = core.host_if_instance(id, instance)?;
-        if core.active_host().map(|active| active.instance()) != Some(host.instance()) {
+        if core.active_host().map(editor_core::HostData::instance) != Some(host.instance()) {
             return None;
         }
         self.picker.as_ref()
@@ -360,7 +376,7 @@ impl Sidebar {
 
     pub fn sync(&mut self, core: &Core, now: Timestamp) {
         let host = core.active_host().map(|host| host.id.clone());
-        let instance = core.active_host().map(|host| host.instance());
+        let instance = core.active_host().map(editor_core::HostData::instance);
         let screen = if self.workspace_background {
             core.workspace_screen()
         } else {
@@ -368,7 +384,11 @@ impl Sidebar {
         };
         let open = match screen {
             Screen::Thread { thread, .. } => Some(thread.clone()),
-            _ => None,
+            Screen::Home
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => None,
         };
         if let Screen::Settings(page) = screen {
             let motion_now = std::time::Instant::now();
@@ -456,7 +476,6 @@ impl Sidebar {
                     tracing::error!(%host, "couldn't {error}");
                     self.error = Some(format!("Couldn't {error}"));
                 }
-                Completion::Action { .. } => {}
                 Completion::Browse {
                     host,
                     instance,
@@ -473,7 +492,6 @@ impl Sidebar {
                         picker.finish_browse(result.map_err(|error| diagnostics::chain(&error)));
                     }
                 }
-                Completion::Browse { .. } => {}
                 Completion::Search { key, query, result }
                     if self.text_search.finish(core, &key) =>
                 {
@@ -498,7 +516,6 @@ impl Sidebar {
                         }
                     }
                 }
-                Completion::Search { .. } => {}
                 Completion::Create {
                     host,
                     instance,
@@ -530,7 +547,10 @@ impl Sidebar {
                         }
                     }
                 }
-                Completion::Create { .. } => {}
+                Completion::Action { .. }
+                | Completion::Browse { .. }
+                | Completion::Search { .. }
+                | Completion::Create { .. } => {}
             }
         }
         if accepted {
@@ -572,7 +592,7 @@ impl Sidebar {
     fn call<F, Fut>(&self, core: &Core, operation: F)
     where
         F: FnOnce(editor_core::ForgeClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), ThreadActionError>> + Send + 'static,
+        Fut: Future<Output = Result<(), ThreadActionError>> + Send + 'static,
     {
         let Some(host) = self
             .host
@@ -588,8 +608,8 @@ impl Sidebar {
         let sender = self.completions.sender();
         editor_core::runtime::runtime().spawn(async move {
             let result = operation(client).await;
-            let _ = sender
-                .send(Completion::Action {
+            sender
+                .offer(Completion::Action {
                     host: id,
                     instance,
                     result,
@@ -716,15 +736,21 @@ impl Sidebar {
             return;
         };
         let page = host.thread_page(false);
+        let load = match (page.is_loading() || !page.is_loaded(), page.error()) {
+            (true, _) => PageLoad::Pending,
+            (false, Some(_)) => PageLoad::Failed { scrolled },
+            (false, None) => PageLoad::Ready,
+        };
+        let history = match (self.lists.history.is_empty(), self.history_open) {
+            (true, _) => HistoryPane::Empty,
+            (false, true) => HistoryPane::Open,
+            (false, false) => HistoryPane::Closed,
+        };
         let direction = self.thread_viewports.direction(PageState {
-            loading: page.is_loading(),
-            loaded: page.is_loaded(),
-            failed: page.error().is_some(),
-            scrolled,
+            load,
             at_latest: page.at_latest(),
             has_older: page.has_older(),
-            history_open: self.history_open,
-            history_empty: self.lists.history.is_empty(),
+            history,
         });
         if let Some(direction) = direction {
             self.slide_threads(core, direction);
@@ -882,8 +908,8 @@ impl Sidebar {
         let sender = self.completions.sender();
         self.browse_task = Some(editor_core::runtime::runtime().spawn(async move {
             let result = client.list_dir(path.as_deref()).await;
-            let _ = sender
-                .send(Completion::Browse {
+            sender
+                .offer(Completion::Browse {
                     host: host_id,
                     instance,
                     generation,
@@ -915,7 +941,9 @@ impl Sidebar {
                         limit: None,
                     })
                     .await;
-                let _ = sender.send(Completion::Search { key, query, result }).await;
+                sender
+                    .offer(Completion::Search { key, query, result })
+                    .await;
             });
     }
 
@@ -1008,8 +1036,8 @@ impl Sidebar {
         let generation = self.picker_generation;
         editor_core::runtime::runtime().spawn(async move {
             let result = client.create_project(&request).await;
-            let _ = sender
-                .send(Completion::Create {
+            sender
+                .offer(Completion::Create {
                     host: host_id,
                     instance,
                     generation,
@@ -1017,5 +1045,14 @@ impl Sidebar {
                 })
                 .await;
         });
+    }
+}
+
+impl std::fmt::Debug for Sidebar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sidebar")
+            .field("host", &self.host)
+            .field("open", &self.open)
+            .finish_non_exhaustive()
     }
 }

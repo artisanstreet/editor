@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 const CELLS: u8 = 16;
 const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 const HUES: [(u32, u32); 17] = [
@@ -41,13 +39,11 @@ pub fn svg(seed: &str) -> String {
     let mut svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 16 16"><rect width="16" height="16" fill="#{base:06x}"/><g fill="#{light:06x}">"##
     );
-    for y in 0..CELLS {
-        for x in 0..CELLS {
-            if lit(x, y) {
-                write!(svg, r#"<rect x="{x}" y="{y}" width="1" height="1"/>"#).ok();
-            }
-        }
-    }
+    svg.extend((0..CELLS).flat_map(|y| {
+        (0..CELLS)
+            .filter(move |&x| lit(x, y))
+            .map(move |x| format!(r#"<rect x="{x}" y="{y}" width="1" height="1"/>"#))
+    }));
     svg.push_str("</g></svg>");
     svg
 }

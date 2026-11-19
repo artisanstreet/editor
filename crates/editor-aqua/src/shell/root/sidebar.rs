@@ -75,7 +75,7 @@ impl RootViews {
                             owner,
                             instance,
                             snapshot,
-                            shell.preferences.theme(),
+                            &shell.preferences.theme(),
                         ) {
                             Ok(preview) => self.sidebar_drag = preview,
                             Err(error) => tracing::warn!(%error, "could not open drag preview"),
@@ -121,9 +121,9 @@ impl RootViews {
             owner,
             &workspace.sidebar,
             &shell.core,
-            shell.preferences.theme(),
+            &shell.preferences.theme(),
             now,
-            workspace.sidebar_emit(false),
+            &workspace.sidebar_emit(false),
         ) {
             tracing::warn!(%error, "could not synchronize sidebar overlays");
         }

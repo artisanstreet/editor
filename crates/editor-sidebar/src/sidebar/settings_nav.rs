@@ -101,7 +101,7 @@ fn groups(host: Option<&HostData>, current: SettingsPage) -> Vec<Group> {
     groups
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NavMotion {
     parent: Option<SettingsPage>,
     opened: Option<std::time::Instant>,
@@ -137,8 +137,8 @@ const LIST: Surface = Surface::Inset;
 const ROW_GAP: Space = Space::S2;
 const GROUP_GAP: Space = Space::S12;
 
-pub fn children_height(count: usize) -> f32 {
-    let rows = count as f32;
+pub fn children_height(count: u16) -> f32 {
+    let rows = f32::from(count);
     let gaps = rows.max(1.0) - 1.0;
     rows.mul_add(ROW.height().unwrap_or_default(), gaps * ROW_GAP.px())
 }
@@ -146,21 +146,32 @@ pub fn children_height(count: usize) -> f32 {
 fn section_id(page: SettingsPage) -> String {
     match page {
         SettingsPage::Engine(engine) => format!("sidebar-settings-engine-{engine}"),
-        _ => format!(
+        SettingsPage::General
+        | SettingsPage::Section(_)
+        | SettingsPage::Hosts
+        | SettingsPage::About
+        | SettingsPage::Threads
+        | SettingsPage::GlobalPrompt
+        | SettingsPage::Extensions
+        | SettingsPage::Account => format!(
             "sidebar-settings-{}",
             page.label().to_lowercase().replace(' ', "-")
         ),
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the settings navigation is one list whose expandable groups animate their children inline"
+)]
 pub fn build(
     host: Option<&HostData>,
     current: SettingsPage,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     motion: &NavMotion,
     now: std::time::Instant,
     reduced: bool,
-    emit: std::rc::Rc<dyn Fn(SettingsPage)>,
+    emit: &std::rc::Rc<dyn Fn(SettingsPage)>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems,
@@ -174,7 +185,7 @@ pub fn build(
         let mut column = UiBox::new().layout("column").spaced(ROW_GAP).child(
             RowItem::new(
                 format!("sidebar-settings-heading-{}", group.heading),
-                theme,
+                *theme,
                 Row::ListHeading,
                 LIST,
                 group.heading.clone(),
@@ -184,12 +195,19 @@ pub fn build(
         for entry in group.entries {
             let page = entry.page;
             let icon = entry.icon.unwrap_or_else(|| match page {
-                SettingsPage::Engine(engine) => engine_icon(&theme, engine),
-                _ => AssetId::TABLER_SETTINGS,
+                SettingsPage::Engine(engine) => engine_icon(theme, engine),
+                SettingsPage::General
+                | SettingsPage::Section(_)
+                | SettingsPage::Hosts
+                | SettingsPage::About
+                | SettingsPage::Threads
+                | SettingsPage::GlobalPrompt
+                | SettingsPage::Extensions
+                | SettingsPage::Account => AssetId::TABLER_SETTINGS,
             });
             let has_children = !children(page).is_empty();
-            let emit_parent = emit.clone();
-            let mut row = RowItem::new(section_id(page), theme, ROW, LIST, page.label())
+            let emit_parent = std::rc::Rc::clone(emit);
+            let mut row = RowItem::new(section_id(page), *theme, ROW, LIST, page.label())
                 .leading(IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint()))
                 .selected(entry.expanded && !has_children)
                 .on_activate(move || emit_parent(page));
@@ -205,7 +223,7 @@ pub fn build(
                 if let Some(need) = entry.need {
                     trailing = trailing.child(
                         TextRole::Caption
-                            .text(&theme, need)
+                            .text(theme, need)
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
@@ -222,23 +240,31 @@ pub fn build(
             column = column.child(row.build().aria_selected(page == current));
             if entry.expanded && !entry.children.is_empty() {
                 let progress = motion.progress(now, reduced);
-                let total_height = children_height(entry.children.len());
+                let total_height =
+                    children_height(u16::try_from(entry.children.len()).unwrap_or(u16::MAX));
                 let mut children = UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
                     .spaced(ROW_GAP);
                 for child in entry.children {
-                    let click = emit.clone();
+                    let click = std::rc::Rc::clone(emit);
                     let id = format!(
                         "sidebar-settings-section-{:?}-{}",
                         page,
                         match child {
                             SettingsPage::Section(section) => section.name(),
-                            _ => "global-prompt",
+                            SettingsPage::General
+                            | SettingsPage::Hosts
+                            | SettingsPage::About
+                            | SettingsPage::Threads
+                            | SettingsPage::GlobalPrompt
+                            | SettingsPage::Extensions
+                            | SettingsPage::Account
+                            | SettingsPage::Engine(_) => "global-prompt",
                         }
                     );
                     children = children.child(
-                        RowItem::new(id, theme, ROW, LIST, child.label())
+                        RowItem::new(id, *theme, ROW, LIST, child.label())
                             .leading(UiBox::new().build())
                             .selected(child == current)
                             .on_activate(move || click(child))

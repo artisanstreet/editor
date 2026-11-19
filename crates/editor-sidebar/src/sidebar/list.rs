@@ -332,6 +332,6 @@ impl HostSnapshot for editor_core::HostData {
     }
 
     fn run_status(&self, id: &ThreadId) -> Option<RunStatus> {
-        self.runs.get(id).map(|run| run.status())
+        self.runs.get(id).map(artisan_api::Run::status)
     }
 }

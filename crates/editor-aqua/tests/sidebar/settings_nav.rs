@@ -21,15 +21,16 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
     sidebar.sync(&core, artisan_api::now());
     let terminal = Instant::now() + Duration::from_secs(1);
     let theme = ArtisanTheme::resolved();
+    let emit: Rc<dyn Fn(SettingsPage)> = Rc::new(|_| {});
     let build = |sidebar: &Sidebar, now| {
         settings_nav::build(
             sidebar.host_data(&core),
             SettingsPage::General,
-            theme,
+            &theme,
             &sidebar.settings_motion,
             now,
             false,
-            Rc::new(|_| {}),
+            &emit,
         )
     };
     let mut resources = ShellResources::new(1.25).unwrap();

@@ -1,7 +1,9 @@
 use artisan_api::{
     DirListing, EngineConfig, EngineId, Project, ProjectId, RunStatus, Thread, ThreadId,
 };
-use editor_aqua::sidebar::geometry::{PageDirection, PagePosition, page_direction};
+use editor_aqua::sidebar::geometry::{
+    HistoryPane, PageDirection, PageLoad, PageState, PaneDistances, page_direction,
+};
 use editor_aqua::sidebar::list::{AgeGroup, HostSnapshot, RowState, lists};
 use editor_aqua::sidebar::picker::FolderPicker;
 
@@ -31,7 +33,7 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
         settleable: false,
         matched: Vec::new(),
     };
-    let factory = sidebar.thread_visual_factory(ArtisanTheme::resolved(), false);
+    let factory = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), false);
     let visuals = factory(&row, None, None);
     let runs = SharedRuns::new();
     let fonts = SharedFonts::new();
@@ -76,7 +78,7 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
             .any(|(_, item)| matches!(item, DisplayItem::PopGpuiQuadPulse))
     );
 
-    let reduced = sidebar.thread_visual_factory(ArtisanTheme::resolved(), true)(&row, None, None);
+    let reduced = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), true)(&row, None, None);
     let mut reduced_app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     reduced_app
         .mount(|_| UiBox::new().child(reduced.dot.unwrap()).build())
@@ -249,27 +251,25 @@ fn picker_retries_same_identity_until_successful_browse() {
 
 #[test]
 fn paging_retries_only_after_scroll_and_closed_history_stops_older_loading() {
-    let mut page = PagePosition {
+    let mut distances = PaneDistances {
         viewport_height: 400.0,
         above: 700.0,
         below: 0.0,
-        loading: false,
-        loaded: true,
-        failed: true,
-        scrolled: false,
+    };
+    let mut state = PageState {
+        load: PageLoad::Failed { scrolled: false },
         at_latest: true,
         has_older: true,
-        history_open: true,
-        history_empty: false,
+        history: HistoryPane::Open,
     };
-    assert_eq!(page_direction(&page), None);
-    page.scrolled = true;
-    assert_eq!(page_direction(&page), Some(PageDirection::Older));
-    page.history_open = false;
-    assert_eq!(page_direction(&page), None);
-    page.at_latest = false;
-    page.above = 0.0;
-    assert_eq!(page_direction(&page), Some(PageDirection::Newer));
+    assert_eq!(page_direction(distances, state), None);
+    state.load = PageLoad::Failed { scrolled: true };
+    assert_eq!(page_direction(distances, state), Some(PageDirection::Older));
+    state.history = HistoryPane::Closed;
+    assert_eq!(page_direction(distances, state), None);
+    state.at_latest = false;
+    distances.above = 0.0;
+    assert_eq!(page_direction(distances, state), Some(PageDirection::Newer));
 }
 
 #[test]
@@ -601,17 +601,13 @@ fn settlement_moves_to_history_and_new_activity_returns_to_inbox() {
 
 #[test]
 fn scrolling_history_to_its_end_loads_older_threads_after_the_inbox_reports_its_own_position() {
-    use editor_aqua::sidebar::geometry::{PageState, PaneDistances, PaneViewports, ThreadPane};
+    use editor_aqua::sidebar::geometry::{PaneViewports, ThreadPane};
 
     let state = PageState {
-        loading: false,
-        loaded: true,
-        failed: false,
-        scrolled: true,
+        load: PageLoad::Ready,
         at_latest: true,
         has_older: true,
-        history_open: true,
-        history_empty: false,
+        history: HistoryPane::Open,
     };
     let mut viewports = PaneViewports::default();
     viewports.report(

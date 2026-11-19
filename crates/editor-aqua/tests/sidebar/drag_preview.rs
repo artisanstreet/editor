@@ -77,7 +77,7 @@ fn preview_tracks_offset_without_blocking_hit_testing_and_closes_on_drag_end() {
         owner,
         instance,
         &snapshot,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
     )
     .unwrap()
     .unwrap();

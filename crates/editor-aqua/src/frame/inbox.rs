@@ -51,11 +51,11 @@ pub(crate) fn view(
         history_content,
         sidebar.history_fraction,
     );
-    let visuals = sidebar.thread_visual_factory(theme, reduced);
+    let visuals = sidebar.thread_visual_factory(&theme, reduced);
     let list = view::thread_entries_view(
         sidebar,
         core,
-        theme,
+        &theme,
         height,
         inbox_entries,
         ThreadPane::Inbox,
@@ -93,9 +93,9 @@ pub(crate) fn view(
                 .height(crate::sidebar::geometry::history_height())
                 .styles([Aqua::Style().flex_shrink(0.0)])
                 .child(view::history_toggle(
-                    theme,
+                    &theme,
                     sidebar.history_fraction,
-                    Rc::clone(&emit),
+                    &emit,
                 ))
                 .build(),
         );
@@ -104,7 +104,7 @@ pub(crate) fn view(
         let history = view::thread_entries_view(
             sidebar,
             core,
-            theme,
+            &theme,
             history_height,
             history_entries,
             ThreadPane::History,

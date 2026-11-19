@@ -77,7 +77,7 @@ impl RootViews {
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
             Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
-            Screen::Usage => workspace.usage_view(&shell.core, theme, size),
+            Screen::Usage => workspace.usage_view(&shell.core, &theme),
             Screen::Thread { .. } => {
                 workspace.conversation.sync_screen(&mut shell.core);
                 if reduced {

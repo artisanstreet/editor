@@ -1334,29 +1334,27 @@ impl Workspace {
         crate::sidebar::view::build(
             sidebar,
             core,
-            theme,
+            &theme,
             viewport,
             visible,
             reduced_motion,
             now,
-            sidebar.thread_visual_factory(theme, reduced_motion),
-            self.sidebar_emit(settings),
+            sidebar.thread_visual_factory(&theme, reduced_motion),
+            &self.sidebar_emit(settings),
         )
     }
 
     pub(crate) fn usage_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
-        viewport: aqua_core::Size,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
         crate::sidebar::usage::view::build(
             &self.usage,
             core,
             theme,
             artisan_api::now(),
-            viewport,
-            self.usage_emit(),
+            &self.usage_emit(),
         )
     }
 

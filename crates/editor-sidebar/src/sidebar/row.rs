@@ -36,7 +36,7 @@ pub fn opens_aqua_keyboard_menu(event: &aqua_core::KeyEvent) -> bool {
         aqua_core::Key::Named(aqua_core::NamedKey::Function(10)) => {
             event.modifiers.contains(aqua_core::Modifiers::SHIFT)
         }
-        _ => false,
+        aqua_core::Key::Char(_) | aqua_core::Key::Named(_) => false,
     }
 }
 
@@ -68,6 +68,7 @@ pub(crate) fn rename_value(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+#[derive(Debug)]
 pub struct RowVisuals {
     pub title: aqua_ui::element::Element,
     pub subtitle: aqua_ui::element::Element,
@@ -125,8 +126,11 @@ fn marked_text(
         let Some(marked) = text.get(range.clone()).filter(|_| range.start >= at) else {
             continue;
         };
-        if range.start > at {
-            spans.push(plain(&text[at..range.start]));
+        if let Some(before) = text
+            .get(at..range.start)
+            .filter(|before| !before.is_empty())
+        {
+            spans.push(plain(before));
         }
         spans.push(
             aqua_text::StyledSpan::new(marked, style.clone())
@@ -135,8 +139,8 @@ fn marked_text(
         );
         at = range.end;
     }
-    if at < text.len() {
-        spans.push(plain(&text[at..]));
+    if let Some(rest) = text.get(at..).filter(|rest| !rest.is_empty()) {
+        spans.push(plain(rest));
     }
     role.text(theme, text.to_owned())
         .spans(spans)
@@ -151,7 +155,7 @@ fn marked_text(
 }
 
 pub(crate) fn hit(
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     data: &super::list::HitRow,
     activate: impl Fn() + 'static,
 ) -> aqua_ui::element::Element {
@@ -163,7 +167,7 @@ pub(crate) fn hit(
         .layout("column")
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(marked_text(
-            &theme,
+            theme,
             &data.snippet,
             std::slice::from_ref(&data.matched),
             TextRole::Label,
@@ -172,7 +176,7 @@ pub(crate) fn hit(
         ))
         .child(
             TextRole::Caption
-                .text(&theme, data.title.clone())
+                .text(theme, data.title.clone())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                 .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
@@ -181,7 +185,7 @@ pub(crate) fn hit(
         .build();
     RowItem::new(
         selector,
-        theme,
+        *theme,
         super::geometry::ThreadLayout::Standalone.row(),
         super::geometry::LIST,
         format!("{} in {}", data.snippet, data.title),
@@ -192,34 +196,36 @@ pub(crate) fn hit(
 }
 
 pub(crate) fn visual_factory(
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     reduced_motion: bool,
     truncate: TruncatedText,
     pulse: WorkingPulse,
 ) -> super::view::ThreadVisualFactory {
     use aqua_ui::element::Box as UiBox;
-    std::rc::Rc::new(move |data, image, repository_host| {
+    let theme = *theme;
+    std::rc::Rc::new(move |data, image, repository| {
         let title_color = if data.selected {
             theme.colors.thread_title_active
         } else {
             theme.colors.text
         };
         let selector = format!("sidebar-thread-{}", data.id);
-        let title = match data.matched.is_empty() {
-            true => truncate(
+        let title = if data.matched.is_empty() {
+            truncate(
                 data.title.clone(),
                 TextRole::Label,
                 title_color.to_reference_text_color(),
                 format!("{selector}-title"),
-            ),
-            false => marked_text(
+            )
+        } else {
+            marked_text(
                 &theme,
                 &data.title,
                 &data.matched,
                 TextRole::Label,
                 title_color,
                 format!("{selector}-title"),
-            ),
+            )
         };
         let subtitle = truncate(
             data.subtitle.clone(),
@@ -229,7 +235,9 @@ pub(crate) fn visual_factory(
         );
         let project_mark = editor_ui::project_mark::project_mark(
             image,
-            repository_host.as_ref().map(|host| host.as_deref()),
+            repository
+                .as_ref()
+                .map(|repository| repository.host.as_deref()),
             IconSize::Sm,
             theme.colors.text_muted.to_reference_paint(),
         );
@@ -268,6 +276,11 @@ pub(crate) fn visual_factory(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "a thread row is built from its data, owning host instance, drag payload, visuals, layout, theme and emitter; the row wires pointer, drag, keyboard menu and context menu input on one element"
+)]
 pub(crate) fn build(
     data: &RowData,
     host: HostId,
@@ -275,8 +288,8 @@ pub(crate) fn build(
     drag: Option<DraggedThread>,
     visuals: RowVisuals,
     layout: super::geometry::ThreadLayout,
-    theme: editor_ui::theme::ArtisanTheme,
-    emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
+    theme: &editor_ui::theme::ArtisanTheme,
+    emit: &std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> aqua_ui::element::Element {
     use super::view::ViewAction;
     use aqua_core::{InputEvent, PointerButton};
@@ -293,7 +306,7 @@ pub(crate) fn build(
 
     let open_host = host.clone();
     let open_thread = data.id.clone();
-    let open = emit.clone();
+    let open = std::rc::Rc::clone(emit);
     let body = UiBox::new()
         .layout("column")
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
@@ -316,39 +329,33 @@ pub(crate) fn build(
         });
     let key = format!("sidebar-thread-{}", data.id);
     let row = layout.row();
-    let mut item = RowItem::new(
-        key.clone(),
-        theme,
-        row,
-        super::geometry::LIST,
-        data.title.clone(),
-    )
-    .body(body.build())
-    .on_activate(move || {
-        open(ViewAction::OpenThread {
-            host: open_host.clone(),
-            instance,
-            thread: open_thread.clone(),
-        })
-    });
+    let mut item = RowItem::new(key, *theme, row, super::geometry::LIST, data.title.clone())
+        .body(body.build())
+        .on_activate(move || {
+            open(ViewAction::OpenThread {
+                host: open_host.clone(),
+                instance,
+                thread: open_thread.clone(),
+            });
+        });
     if let Some(dot) = visuals.dot {
         item = item.trailing(dot);
     }
     let pointer_host = host.clone();
     let pointer_thread = data.id.clone();
-    let pointer_emit = emit.clone();
+    let pointer_emit = std::rc::Rc::clone(emit);
     let key_host = host.clone();
     let key_thread = data.id.clone();
-    let key_emit = emit.clone();
+    let key_emit = std::rc::Rc::clone(emit);
     let pending = std::rc::Rc::new(std::cell::Cell::new(None::<(u64, aqua_core::Point)>));
-    let down_pending = pending.clone();
-    let move_pending = pending.clone();
-    let up_pending = pending.clone();
+    let down_pending = std::rc::Rc::clone(&pending);
+    let move_pending = std::rc::Rc::clone(&pending);
+    let up_pending = std::rc::Rc::clone(&pending);
     let cancel_pending = pending;
     let draggable = drag.is_some();
-    let drag_emit = emit.clone();
-    let drag_end = emit.clone();
-    let drag_end_host = host.clone();
+    let drag_emit = std::rc::Rc::clone(emit);
+    let drag_end = std::rc::Rc::clone(emit);
+    let drag_end_host = host;
     let drag_end_thread = data.id.clone();
     let mut element = item
         .build()
@@ -402,7 +409,22 @@ pub(crate) fn build(
                         ..InputResponse::default()
                     }
                 }
-                _ => InputResponse::default(),
+                RoutedInput::ClipboardPaste(_)
+                | RoutedInput::ClipboardCut
+                | RoutedInput::TextVertical { .. }
+                | RoutedInput::TextMotion { .. }
+                | RoutedInput::Native(_)
+                | RoutedInput::PointerEnter(_)
+                | RoutedInput::PointerLeave(_)
+                | RoutedInput::TextPointer { .. }
+                | RoutedInput::TextContext { .. }
+                | RoutedInput::TextRangeActivated { .. }
+                | RoutedInput::FilesDropped { .. }
+                | RoutedInput::DragEnter { .. }
+                | RoutedInput::DragOver { .. }
+                | RoutedInput::DragLeave { .. }
+                | RoutedInput::Drop { .. }
+                | RoutedInput::DragEnd { .. } => InputResponse::default(),
             },
         )
         .on_input(InputKind::PointerUp, EventPhase::Bubble, move |_| {
@@ -434,7 +456,7 @@ pub(crate) fn build(
             }
             let dx = pointer.position.x - origin.x;
             let dy = pointer.position.y - origin.y;
-            if (dx * dx + dy * dy).sqrt() <= 2.0 {
+            if dx.hypot(dy) <= 2.0 {
                 return InputResponse::default();
             }
             move_pending.set(None);
@@ -454,7 +476,7 @@ pub(crate) fn build(
 
 pub(crate) fn drag_preview(
     title: &str,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems,
@@ -481,14 +503,14 @@ pub(crate) fn drag_preview(
         )
         .child(
             TextRole::Label
-                .text(&theme, title.to_owned())
+                .text(theme, title.to_owned())
                 .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                 .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                 .build(),
         )
         .build();
     Surface::Tooltip(Tooltip::Brief)
-        .build(&theme, vec![content])
+        .build(theme, vec![content])
         .style(Style::new().max_width(Length::Px(DRAG_PREVIEW_WIDTH)))
         .with_key("sidebar-thread-drag")
 }

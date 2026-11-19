@@ -2,7 +2,6 @@ use super::{
     METER_SEGMENTS, checked_label, controller::UsagePage, groups, lit_of, remaining_percent,
     reset_duration,
 };
-use aqua_core::Size;
 use aqua_ui::{
     AlignItems, JustifyContent,
     element::{Box as UiBox, Element, Scroll},
@@ -37,24 +36,24 @@ pub fn dispatch(page: &mut UsagePage, core: &Core, action: Action) -> bool {
         Action::Refresh { host, instance } if core.host_if_instance(&host, instance).is_some() => {
             page.refresh_host(core, &host)
         }
-        _ => false,
+        Action::Refresh { .. } => false,
     }
 }
 
-fn text(theme: ArtisanTheme, value: impl Into<String>, color: aqua::GpuiTextColor) -> Element {
+fn text(theme: &ArtisanTheme, value: impl Into<String>, color: aqua::GpuiTextColor) -> Element {
     TextRole::Caption
-        .text(&theme, value.into())
+        .text(theme, value.into())
         .gpui_source_color(color)
         .build()
 }
 
 fn truncated(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     role: TextRole,
     value: impl Into<String>,
     color: aqua::GpuiTextColor,
 ) -> Element {
-    role.text(&theme, value.into())
+    role.text(theme, value.into())
         .gpui_source_color(color)
         .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
         .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
@@ -77,9 +76,9 @@ fn segment(paint: aqua::GpuiHsla) -> Element {
         .build()
 }
 
-fn meter_bar(theme: ArtisanTheme, engine: EngineId, used_percent: f64) -> Element {
+fn meter_bar(theme: &ArtisanTheme, engine: EngineId, used_percent: f64) -> Element {
     let lit = lit_of(used_percent, METER_SEGMENTS);
-    let accent = engine_accent(&theme, engine);
+    let accent = engine_accent(theme, engine);
     let track = theme
         .colors
         .text
@@ -118,7 +117,7 @@ fn line(label: Element, rest: Vec<Element>) -> Element {
         .build()
 }
 
-fn group(theme: ArtisanTheme, title: impl Into<String>) -> UiBox {
+fn group(theme: &ArtisanTheme, title: impl Into<String>) -> UiBox {
     UiBox::new().layout("column").spaced(Space::S6).child(text(
         theme,
         title,
@@ -127,7 +126,7 @@ fn group(theme: ArtisanTheme, title: impl Into<String>) -> UiBox {
 }
 
 fn meters(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     engine: EngineId,
     usage: &UsageLimits,
     now: Timestamp,
@@ -171,21 +170,19 @@ fn meters(
 }
 
 fn token_count(tokens: u64) -> String {
+    let scaled = |unit: u64| f64::from(u32::try_from(tokens / unit).unwrap_or(u32::MAX));
     match tokens {
         0..1_000 => editor_ui::locale::count(tokens, "token", "tokens"),
-        1_000..1_000_000 => format!(
-            "{}K tokens",
-            editor_ui::locale::decimal(tokens as f64 / 1e3, 1)
-        ),
+        1_000..1_000_000 => format!("{}K tokens", editor_ui::locale::decimal(scaled(1) / 1e3, 1)),
         _ => format!(
             "{}M tokens",
-            editor_ui::locale::decimal(tokens as f64 / 1e6, 1)
+            editor_ui::locale::decimal(scaled(1_000) / 1e3, 1)
         ),
     }
 }
 
 fn spend_group(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     title: String,
     lines: &[SpendLine],
     explanation: bool,
@@ -215,7 +212,7 @@ fn spend_group(
     column.build()
 }
 
-fn spend(theme: ArtisanTheme, value: &UsageSpend) -> Vec<Element> {
+fn spend(theme: &ArtisanTheme, value: &UsageSpend) -> Vec<Element> {
     let mut result = Vec::new();
     if !value.periods.is_empty() {
         result.push(spend_group(theme, "Spend".into(), &value.periods, true));
@@ -234,13 +231,17 @@ fn spend(theme: ArtisanTheme, value: &UsageSpend) -> Vec<Element> {
     result
 }
 
-fn band(theme: ArtisanTheme, status: &EngineStatus, now: Timestamp) -> Element {
+fn band(theme: &ArtisanTheme, status: &EngineStatus, now: Timestamp) -> Element {
     let engine = status.engine;
     let account = match &status.sign_in {
         SignInState::SignedIn {
             account: Some(account),
         } => Some(account.clone()),
-        _ => None,
+        SignInState::Unknown
+        | SignInState::SignedOut
+        | SignInState::LoggingIn { .. }
+        | SignInState::SignedIn { .. }
+        | SignInState::Failed { .. } => None,
     };
     let reading = status.usage.as_ref().map_or_else(
         || "No limits reported".to_owned(),
@@ -261,7 +262,7 @@ fn band(theme: ArtisanTheme, status: &EngineStatus, now: Timestamp) -> Element {
                 .min_width(Length::Pct(0.0)),
         )
         .child(IconSize::Md.glyph(
-            engine_icon(&theme, engine),
+            engine_icon(theme, engine),
             theme.colors.text.to_reference_paint(),
         ))
         .child(
@@ -312,21 +313,21 @@ fn band(theme: ArtisanTheme, status: &EngineStatus, now: Timestamp) -> Element {
     body.build().with_key(format!("usage-engine-{engine}"))
 }
 
-fn note(theme: ArtisanTheme, words: &'static str) -> Element {
+fn note(theme: &ArtisanTheme, words: &'static str) -> Element {
     TextRole::Label
-        .text(&theme, words)
+        .text(theme, words)
         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
         .build()
 }
 
-fn bands(theme: ArtisanTheme, blocks: Vec<Element>) -> Element {
+fn bands(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
     let last = blocks.len().saturating_sub(1);
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
         .children(
             blocks.into_iter().enumerate().map(|(index, block)| {
-                Band::of(index == 0, index == last).build(&theme, false, block)
+                Band::of(index == 0, index == last).build(theme, false, block)
             }),
         )
         .build()
@@ -335,10 +336,9 @@ fn bands(theme: ArtisanTheme, blocks: Vec<Element>) -> Element {
 pub fn build(
     controller: &UsagePage,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     now: Timestamp,
-    _viewport: Size,
-    emit: Rc<dyn Fn(Action)>,
+    emit: &Rc<dyn Fn(Action)>,
 ) -> Element {
     let mut content = UiBox::new()
         .layout("column")
@@ -347,7 +347,7 @@ pub fn build(
         .style(Style::new().max_width(Length::Px(page::CONTENT_MAX_WIDTH)))
         .child(
             page::header(
-                &theme,
+                theme,
                 "Usage",
                 "The limits and spend of every engine account on your Forges.",
             )
@@ -367,13 +367,13 @@ pub fn build(
         let refresh = if accounts.is_empty() {
             None
         } else {
-            let callback = emit.clone();
+            let callback = Rc::clone(emit);
             let id = host.id.clone();
             let instance = host.instance();
             Some(
                 Button::text(
                     format!("usage-refresh-{}", host.id.0),
-                    theme,
+                    *theme,
                     ButtonTone::Neutral,
                     if refreshing {
                         "Refreshing…"
@@ -386,7 +386,7 @@ pub fn build(
                     callback(Action::Refresh {
                         host: id.clone(),
                         instance,
-                    })
+                    });
                 })
                 .build(),
             )
@@ -401,7 +401,7 @@ pub fn build(
         };
         content = content.child(
             page::section_shell(
-                &theme,
+                theme,
                 &host.name,
                 host.status_line(),
                 refresh,
@@ -411,7 +411,7 @@ pub fn build(
             .with_key(format!("usage-host-{}", host.id.0)),
         );
         if let Some(error) = controller.error(&host.id, host.instance()) {
-            content = content.child(page::error_text(&theme, error).build());
+            content = content.child(page::error_text(theme, error).build());
         }
     }
     if count == 0 {
