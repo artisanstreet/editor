@@ -1,4 +1,4 @@
-use super::replaying;
+use super::{on_this_host, replaying};
 use artisan_api::{Answer, Decision, EngineId, ItemKind, Permissions, RunStatus, Status};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -40,13 +40,13 @@ async fn a_codex_command_approval_answered_by_the_user_reaches_codex_and_the_tur
     assert_eq!(screen.runs(&thread), [(RunStatus::Done, None)]);
     assert_eq!(
         screen.transcript(&thread),
-        [
+        on_this_host(&[
             "you: Touch a.txt twice (Done)",
             "assistant: I’ll run the two requested shell calls separately, requesting escalation for each. (Done)",
             "shell: touch a.txt (Done)",
             "shell: touch a.txt (Done)",
             "assistant: done (Done)",
-        ]
+        ])
     );
 }
 
@@ -69,24 +69,22 @@ async fn a_codex_session_held_by_another_process_fails_the_follow_up_and_says_wh
         "the follow-up fails and names the other Codex process: {runs:?}"
     );
     let shown = screen.transcript(&thread);
+    let refused = on_this_host(&[
+        "you: Take notes (Done)",
+        "assistant: Noted. (Done)",
+        "you: Add the follow-up (Failed)",
+    ]);
     assert_eq!(
-        shown.get(..3),
-        Some(
-            [
-                "you: Take notes (Done)".to_owned(),
-                "assistant: Noted. (Done)".to_owned(),
-                "you: Add the follow-up (Failed)".to_owned(),
-            ]
-            .as_slice()
-        ),
+        shown.get(..refused.len()),
+        Some(refused.as_slice()),
         "the refused message shows as failed, not running: {shown:?}"
     );
     assert!(
         shown
-            .get(3)
+            .get(refused.len())
             .is_some_and(|error| error.starts_with("error: ")
                 && error.contains("open in another Codex process")),
         "the thread says why: {shown:?}"
     );
-    assert_eq!(shown.len(), 4, "{shown:?}");
+    assert_eq!(shown.len(), refused.len() + 1, "{shown:?}");
 }

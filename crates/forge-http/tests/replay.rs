@@ -293,6 +293,18 @@ fn text(content: &TextContent) -> &str {
     content.inline().unwrap_or("[stored]")
 }
 
+pub(crate) fn on_this_host(lines: &[&str]) -> Vec<String> {
+    let notice =
+        forge_runs::auto_notice_on_this_host().map(|text| format!("notice: {text} (Done)"));
+    lines
+        .iter()
+        .flat_map(|line| {
+            let turn_opens = line.starts_with("you: ");
+            std::iter::once((*line).to_owned()).chain(notice.clone().filter(|_| turn_opens))
+        })
+        .collect()
+}
+
 fn line(item: &Item) -> String {
     let what = match &item.kind {
         ItemKind::UserMessage { text: body, .. } => format!("you: {}", text(body)),

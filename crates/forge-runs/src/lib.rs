@@ -56,6 +56,7 @@ pub use operation::{
 };
 pub use retention::RemoveInactiveThreadsError;
 pub use run::PrepareError;
+pub use sandbox::auto_notice_on_this_host;
 pub use scratch::{EnsureScratchProjectError, ThreadFolderError};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 

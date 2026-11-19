@@ -1,4 +1,4 @@
-use super::replaying;
+use super::{on_this_host, replaying};
 use artisan_api::{EngineId, Event, Permissions, RunStatus};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9,10 +9,10 @@ async fn a_claude_reply_reaches_the_client_and_a_resumed_stream_shows_the_same_t
     replay.send(&thread, "Say hello").await;
     let screen = replay.settled(since, &thread, 1).await;
     assert_eq!(screen.runs(&thread), [(RunStatus::Done, None)]);
-    let shown = [
+    let shown = on_this_host(&[
         "you: Say hello (Done)",
         "assistant: Hello from the replay. (Done)",
-    ];
+    ]);
     assert_eq!(screen.transcript(&thread), shown);
     let seqs: Vec<_> = screen
         .envelopes()
@@ -60,11 +60,11 @@ async fn a_malformed_claude_permission_request_is_refused_and_the_turn_finishes(
     assert_eq!(screen.runs(&thread), [(RunStatus::Done, None)]);
     assert_eq!(
         screen.transcript(&thread),
-        [
+        on_this_host(&[
             "you: Create a file (Done)",
             "error: Claude Bash omitted a valid command (Done)",
             "assistant: The command was refused, so nothing was created. (Done)",
-        ]
+        ])
     );
 }
 
@@ -92,10 +92,11 @@ async fn continuing_a_stopped_claude_turn_does_not_send_its_delivered_message_ag
     );
     assert_eq!(
         screen.transcript(&thread),
-        [
+        on_this_host(&[
             "you: Refactor the parser (Done)",
             "assistant: Picked the parser refactor back up. (Done)",
-        ]
+        ]),
+        "the continued turn says once that it isn't sandboxed"
     );
     assert_eq!(replay.launches(), 2);
 }

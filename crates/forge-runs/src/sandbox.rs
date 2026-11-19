@@ -45,15 +45,27 @@ impl Coverage {
 const fn gap(support: Host, launched: Permissions, now: Permissions) -> Option<UnsandboxedReason> {
     match (now, support, launched) {
         (Permissions::Full, _, _) | (Permissions::Auto, Host::Enforced, Permissions::Auto) => None,
-        (Permissions::Auto, Host::Unavailable(unavailable), _) => Some(match unavailable {
-            Unavailable::KernelWithoutLandlock => UnsandboxedReason::KernelWithoutLandlock,
-            Unavailable::Windows => UnsandboxedReason::Windows,
-            Unavailable::MacOs => UnsandboxedReason::MacOs,
-            Unavailable::OtherOs => UnsandboxedReason::OtherOs,
-        }),
+        (Permissions::Auto, Host::Unavailable(unavailable), _) => Some(missing(unavailable)),
         (Permissions::Auto, Host::Enforced, Permissions::Full) => {
             Some(UnsandboxedReason::StartedWithFullAccess)
         }
+    }
+}
+
+const fn missing(unavailable: Unavailable) -> UnsandboxedReason {
+    match unavailable {
+        Unavailable::KernelWithoutLandlock => UnsandboxedReason::KernelWithoutLandlock,
+        Unavailable::Windows => UnsandboxedReason::Windows,
+        Unavailable::MacOs => UnsandboxedReason::MacOs,
+        Unavailable::OtherOs => UnsandboxedReason::OtherOs,
+    }
+}
+
+#[must_use]
+pub fn auto_notice_on_this_host() -> Option<&'static str> {
+    match forge_isolation::support() {
+        Support::Enforced(_) => None,
+        Support::Unavailable(unavailable) => Some(notice(missing(unavailable))),
     }
 }
 
