@@ -257,7 +257,7 @@ fn is_public(address: IpAddr) -> bool {
         IpAddr::V6(address) => match V6Route::of(address) {
             V6Route::Native => is_public_v6(address),
             V6Route::Embedded(embedded) => is_public_v4(embedded),
-            V6Route::LocalTranslation => false,
+            V6Route::Opaque => false,
         },
     }
 }
@@ -265,7 +265,7 @@ fn is_public(address: IpAddr) -> bool {
 enum V6Route {
     Native,
     Embedded(Ipv4Addr),
-    LocalTranslation,
+    Opaque,
 }
 
 impl V6Route {
@@ -276,11 +276,11 @@ impl V6Route {
             Ipv4Addr::new(a, b, c, d)
         };
         match address.segments() {
-            [0, 0, 0, 0, 0, 0xffff, high, last] | [0x0064, 0xff9b, 0, 0, 0, 0, high, last] => {
-                Self::Embedded(v4(high, last))
-            }
-            [0x0064, 0xff9b, 0x0001, ..] => Self::LocalTranslation,
-            [0x2002, high, last, ..] => Self::Embedded(v4(high, last)),
+            [0, 0, 0, 0, 0, 0xffff | 0, high, last]
+            | [0, 0, 0, 0, 0xffff, 0, high, last]
+            | [0x0064, 0xff9b, 0, 0, 0, 0, high, last]
+            | [0x2002, high, last, ..] => Self::Embedded(v4(high, last)),
+            [0x0064, 0xff9b, 0x0001, ..] | [0x2001, 0, ..] => Self::Opaque,
             _ => Self::Native,
         }
     }

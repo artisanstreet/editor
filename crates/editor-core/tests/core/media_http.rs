@@ -83,6 +83,12 @@ fn a_reply_image_never_reaches_this_machine_or_its_network() {
         "http://[64:ff9b:1::a00:1]/status.png".to_owned(),
         "http://[2002:c0a8:101::1]/reboot.png".to_owned(),
         format!("http://[2002:7f00:1::]:{port}/admin.png"),
+        format!("http://[::127.0.0.1]:{port}/admin.png"),
+        "http://[::c0a8:101]/reboot.png".to_owned(),
+        format!("http://[::ffff:0:127.0.0.1]:{port}/admin.png"),
+        "http://[::ffff:0:a00:1]/status.png".to_owned(),
+        "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/reboot.png".to_owned(),
+        "http://[2001:0:c0a8:101:0:f227:3f57:fefe]/reboot.png".to_owned(),
     ] {
         let result = runtime().block_on(within(
             "the refusal",
