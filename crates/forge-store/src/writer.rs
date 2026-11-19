@@ -37,8 +37,6 @@ pub enum WriteFailure {
     NotAnInput { item: ItemId },
     #[error("saving setting {key} would make the settings {bytes} bytes; the limit is 8 MiB")]
     SettingsFull { key: String, bytes: u64 },
-    #[error("setting {key} holds {found} where a JSON object belongs")]
-    SettingNotAnObject { key: String, found: &'static str },
     #[error(transparent)]
     RunMoved(#[from] RunMoved),
     #[error(transparent)]
@@ -678,14 +676,18 @@ impl Tx<'_> {
     pub(crate) fn object_setting(
         &self,
         key: &str,
-    ) -> Result<serde_json::Map<String, serde_json::Value>, WriteFailure> {
+    ) -> Result<serde_json::Map<String, serde_json::Value>, StorageError> {
         match read::setting(self, key)? {
             None | Some(serde_json::Value::Null) => Ok(serde_json::Map::new()),
             Some(serde_json::Value::Object(object)) => Ok(object),
-            Some(other) => Err(WriteFailure::SettingNotAnObject {
-                key: key.to_owned(),
-                found: json_kind(&other),
-            }),
+            Some(other) => {
+                tracing::warn!(
+                    key,
+                    found = json_kind(&other),
+                    "replacing a damaged setting that should hold an object"
+                );
+                Ok(serde_json::Map::new())
+            }
         }
     }
 

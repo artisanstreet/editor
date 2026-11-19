@@ -227,16 +227,22 @@ impl Store {
         let name = group.name.clone();
         self.write_acknowledged(move |tx| {
             let mut groups = tx.object_setting(artisan_api::MODEL_GROUPS_KEY)?;
-            let engine_groups = groups
+            let entry = groups
                 .entry(engine.to_string())
                 .or_insert_with(|| serde_json::json!({}));
-            let Some(engine_groups) = engine_groups.as_object_mut() else {
-                return Err(WriteFailure::SettingNotAnObject {
-                    key: format!("{}.{engine}", artisan_api::MODEL_GROUPS_KEY),
-                    found: crate::writer::json_kind(engine_groups),
-                });
-            };
-            engine_groups.insert(group.name.clone(), serde_json::Value::Bool(group.open));
+            if !entry.is_object() {
+                tracing::warn!(
+                    key = artisan_api::MODEL_GROUPS_KEY,
+                    %engine,
+                    found = crate::writer::json_kind(entry),
+                    "replacing a damaged model group entry that should hold an object"
+                );
+                *entry = serde_json::json!({});
+            }
+            entry
+                .as_object_mut()
+                .expect("invariant: the model group entry was just made an object")
+                .insert(group.name.clone(), serde_json::Value::Bool(group.open));
             tx.save_setting(
                 artisan_api::MODEL_GROUPS_KEY.into(),
                 serde_json::Value::Object(groups),
