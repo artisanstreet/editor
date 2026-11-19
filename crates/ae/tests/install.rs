@@ -229,6 +229,56 @@ mod tests {
         assert!(sandbox.listening(), "the released Forge serves again");
     }
 
+    #[test]
+    fn an_update_that_cannot_read_the_database_version_leaves_the_released_forge_running() {
+        use std::io::Read as _;
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let database = App::Forge
+            .dir_under(&artisan_street(sandbox.root.path()))
+            .join("data")
+            .join("forge.sqlite3");
+        let mut released = Vec::new();
+        flate2::read::GzDecoder::new(RELEASED_DATABASE)
+            .read_to_end(&mut released)
+            .expect("unpack the released database");
+        std::fs::write(&database, released).expect("give the released Forge its database");
+        let started = sandbox.ae(&["forge", "start"]);
+        assert!(
+            started.status.success(),
+            "the released Forge starts: {}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        std::fs::write(&database, "not a database").expect("damage the database file");
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        test_support::executable::install(&forge_binary(), &stage.join(App::Forge.binary_name()));
+
+        let update = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "here",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&update.stdout),
+            String::from_utf8_lossy(&update.stderr)
+        );
+        assert!(!update.status.success(), "the update fails: {said}");
+        assert!(said.contains("storage version"), "{said}");
+        assert!(
+            sandbox.listening(),
+            "the released Forge still serves: {said}"
+        );
+    }
+
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");

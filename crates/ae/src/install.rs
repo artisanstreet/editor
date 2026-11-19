@@ -202,7 +202,7 @@ pub(crate) enum InstallHereError {
 pub(crate) enum InstallAppError {
     #[error(transparent)]
     Locate(#[from] LocateError),
-    #[error("read the storage version of the stopped Forge's database in {}", data.display())]
+    #[error("read the storage version of Forge's database in {} before stopping it", data.display())]
     DatabaseVersion {
         data: PathBuf,
         #[source]
@@ -1390,9 +1390,6 @@ fn put_in_place(
     write_beside(incoming, "version", &format!("{version}\n"))?;
     let stopped = match app {
         App::Forge if !upgraded => {
-            progress.message("Stopping Forge");
-            service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
-            service::stop()?;
             let data = paths::data(App::Forge)?;
             let database = forge_store::admin::storage_version(&data).map_err(|source| {
                 InstallAppError::DatabaseVersion {
@@ -1400,6 +1397,9 @@ fn put_in_place(
                     source,
                 }
             })?;
+            progress.message("Stopping Forge");
+            service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
+            service::stop()?;
             Stopped::Forge { database }
         }
         App::Editor => {
