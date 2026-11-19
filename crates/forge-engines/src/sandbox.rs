@@ -95,10 +95,12 @@ pub(crate) mod guard {
         _mode: u32,
     ) -> Result<(), GuardError> {
         let path = home.join(relative);
-        if std::fs::read(&path).is_ok_and(|current| current == bytes) {
-            return Ok(());
-        }
-        artisan_paths::private::write_file(&path, bytes).map_err(|source| GuardError::Write {
+        let written = if std::fs::read(&path).is_ok_and(|current| current == bytes) {
+            artisan_paths::private::restrict_file(&path)
+        } else {
+            artisan_paths::private::write_file(&path, bytes)
+        };
+        written.map_err(|source| GuardError::Write {
             engine,
             path,
             source: Box::new(source),
