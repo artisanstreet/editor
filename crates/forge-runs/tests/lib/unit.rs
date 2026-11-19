@@ -52,7 +52,7 @@ use artisan_api::{
 use forge_engines::{EngineEvent, Outcome, RunIo, Turn};
 use futures::future::BoxFuture;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 type Script = Arc<dyn Fn(Turn, RunIo) -> BoxFuture<'static, Outcome> + Send + Sync>;
@@ -115,6 +115,23 @@ struct Fixture {
     thread_id: ThreadId,
     dir: tempfile::TempDir,
     resident: usize,
+    clock: Clock,
+}
+
+#[derive(Clone, Default)]
+struct Clock(Arc<AtomicI64>);
+
+impl Clock {
+    fn wall(&self) -> artisan_api::WallClock {
+        let ahead = Arc::clone(&self.0);
+        artisan_api::WallClock::new(move || {
+            artisan_api::now().saturating_add(ahead.load(Ordering::SeqCst))
+        })
+    }
+
+    fn advance(&self, by: artisan_api::Timestamp) {
+        self.0.fetch_add(by, Ordering::SeqCst);
+    }
 }
 
 async fn fixture(script: Script) -> Fixture {
@@ -186,7 +203,15 @@ async fn fixture_in(
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
     install_fake(&data, engine);
-    let store = Store::open(&data.join("forge")).unwrap();
+    let clock = Clock::default();
+    let store = Store::open_in(
+        &data.join("forge"),
+        forge_store::Environment {
+            connections: forge_store::Connections::system(),
+            clock: clock.wall(),
+        },
+    )
+    .unwrap();
     let engines = Engines::new(&data);
     let generation = managed.then(|| {
         let registry = runtime::Registry::open(&data).unwrap();
@@ -241,6 +266,7 @@ async fn fixture_in(
         thread_id: thread.id,
         dir,
         resident,
+        clock,
     }
 }
 
@@ -5291,6 +5317,32 @@ impl Fixture {
         .await
     }
 
+    async fn parked_after(
+        &self,
+        previous: Option<artisan_api::Timestamp>,
+    ) -> artisan_api::Timestamp {
+        test_support::wait::while_progressing(
+            "the turn to park for its retry",
+            test_support::wait::LIVENESS,
+            || self.hub.store().head(),
+            || async {
+                self.thread()
+                    .await
+                    .parked_until
+                    .filter(|due| Some(*due) != previous)
+            },
+        )
+        .await
+    }
+
+    fn skip_to(&self, due: artisan_api::Timestamp) {
+        let now = self.hub.store().now();
+        if due > now {
+            self.clock.advance(due - now);
+        }
+        self.hub.resume_pending();
+    }
+
     async fn thread(&self) -> artisan_api::Thread {
         self.hub
             .store()
@@ -5338,6 +5390,10 @@ async fn a_turn_failed_at_capacity_is_retried_until_it_goes_through() {
         .send_message(&fixture.thread_id, message("refactor the parser"))
         .await
         .unwrap();
+    let first = fixture.parked_after(None).await;
+    fixture.skip_to(first);
+    let second = fixture.parked_after(Some(first)).await;
+    fixture.skip_to(second);
     fixture.latest_run_once(RunStatus::Done).await;
 
     let continuations: Vec<_> = fixture
@@ -5393,6 +5449,7 @@ async fn a_turn_the_usage_limit_stopped_waits_parked_until_the_limit_resets() {
     fixture.latest_run_once(RunStatus::Failed).await;
     let parked = fixture.thread().await.parked_until.expect("parked");
     assert!(parked > resets_at, "it waits past the reset");
+    fixture.skip_to(parked);
 
     let continued = fixture.latest_run_once(RunStatus::Done).await;
     assert!(continued.started_at >= parked);

@@ -4,10 +4,7 @@ use forge_engines::{Outcome, Retry};
 use forge_store::{CONTINUE_AFTER_USAGE_LIMIT_KEY, Park, RETRY_WHEN_OVERLOADED_KEY};
 use std::time::Duration;
 
-#[cfg(not(test))]
 const FIRST_RETRY: Duration = Duration::from_secs(15);
-#[cfg(test)]
-const FIRST_RETRY: Duration = Duration::from_millis(40);
 const LONGEST_RETRY: Duration = FIRST_RETRY.saturating_mul(20);
 const UNKNOWN_RESET: Duration = FIRST_RETRY.saturating_mul(60);
 const RESET_SLACK: Duration = FIRST_RETRY.saturating_mul(2);
@@ -19,17 +16,20 @@ pub(crate) async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park
             if !hub.enabled(RETRY_WHEN_OVERLOADED_KEY).await {
                 return None;
             }
-            let tries = hub
+            let delay = match hub
                 .store()
                 .continuation_chain(run.thread_id.clone(), Continuation::Overloaded, 16)
                 .await
-                .inspect_err(|error| {
-                    tracing::warn!(thread = %run.thread_id, "count overload retries: {}", diagnostics::chain(&error));
-                })
-                .unwrap_or(0);
+            {
+                Ok(tries) => retry_delay(tries),
+                Err(error) => {
+                    tracing::warn!(thread = %run.thread_id, run = %run.id, "count the overload retries; retrying after the longest wait: {}", diagnostics::chain(&error));
+                    LONGEST_RETRY
+                }
+            };
             Some(Park {
                 continuation: Continuation::Overloaded,
-                due_at: now + millis(retry_delay(tries)),
+                due_at: now + millis(delay),
             })
         }
         Retry::UsageLimit { resets_at } => {
@@ -53,7 +53,8 @@ pub(crate) async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park
 }
 
 fn retry_delay(tries: usize) -> Duration {
-    let doublings = u32::try_from(tries.min(8)).unwrap_or(8);
+    let doublings =
+        u32::try_from(tries.min(8)).expect("invariant: at most eight doublings fit in u32");
     (FIRST_RETRY * 2_u32.pow(doublings)).min(LONGEST_RETRY)
 }
 

@@ -582,13 +582,17 @@ impl Store {
     }
 
     pub fn open(dir: &Path) -> Result<Self, OpenStoreError> {
+        Self::open_in(dir, Environment::system())
+    }
+
+    pub fn open_in(dir: &Path, environment: Environment) -> Result<Self, OpenStoreError> {
         let (database, blob_dir) = Self::prepare(dir)?;
         Self::start(
             database,
             blob_dir,
             dir.join("resources"),
             Opening::Upgrade(None),
-            Environment::system(),
+            environment,
         )
     }
 
