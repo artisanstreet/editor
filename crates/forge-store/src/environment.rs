@@ -13,7 +13,7 @@ pub struct Connections(Arc<Open>);
 
 impl Connections {
     #[must_use]
-    pub fn system() -> Self {
+    pub(crate) fn system() -> Self {
         Self::new(|path| Connection::open(path))
     }
 

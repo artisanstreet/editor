@@ -74,9 +74,9 @@ pub use pairing::{
 };
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    BuildIndexError, GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery,
-    PrepareIndexError, RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError,
-    RecallTouchingError, SearchCursor, SearchHit, SearchPage, Touch,
+    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
+    RecallIndex, RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor,
+    SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,

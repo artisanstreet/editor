@@ -32,7 +32,7 @@ pub struct Frames(Vec<Frame>);
 
 impl Frames {
     #[must_use]
-    pub fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         let mut ips = Vec::new();
         backtrace::trace(|frame| {
             ips.push(frame.ip() as usize);

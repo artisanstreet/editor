@@ -127,7 +127,7 @@ fn folder(database: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-pub(crate) fn list(database: &Path) -> Result<Vec<Retained>, RetainedError> {
+fn list(database: &Path) -> Result<Vec<Retained>, RetainedError> {
     let listed = |source| RetainedError::List {
         database: database.to_owned(),
         source,
@@ -188,7 +188,7 @@ pub(crate) fn discard(path: &Path) -> Result<(), RetainedError> {
 }
 
 #[cfg(unix)]
-pub(crate) fn sync_folder(database: &Path) -> Result<(), RetainedError> {
+fn sync_folder(database: &Path) -> Result<(), RetainedError> {
     let folder = folder(database);
     std::fs::File::open(folder)
         .and_then(|folder| folder.sync_all())
@@ -203,7 +203,7 @@ pub(crate) fn sync_folder(database: &Path) -> Result<(), RetainedError> {
     clippy::unnecessary_wraps,
     reason = "Windows has no folder fsync and NTFS journals renames; callers handle one signature"
 )]
-pub(crate) fn sync_folder(_database: &Path) -> Result<(), RetainedError> {
+fn sync_folder(_database: &Path) -> Result<(), RetainedError> {
     Ok(())
 }
 
