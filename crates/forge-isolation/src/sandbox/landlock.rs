@@ -84,8 +84,6 @@ pub enum RulesetError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{} isn't a socket", path.display())]
-    NotASocket { path: PathBuf },
 }
 
 pub(super) fn detect() -> Option<Landlock> {
@@ -189,9 +187,8 @@ impl Landlock {
                     source: source.into(),
                 })?;
             if kind != FileType::Socket {
-                return Err(RulesetError::NotASocket {
-                    path: socket.requested.clone(),
-                });
+                tracing::warn!(path = %socket.requested.display(), "a socket the sandbox would reach isn't a socket; Auto runs can't use it");
+                return Ok(created);
             }
             created
                 .add_rule(PathBeneath::new(file, AccessFs::ResolveUnix))

@@ -365,3 +365,19 @@ fn a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_
         "a sandboxed tool couldn't connect to the socket it made in its run's own folder"
     );
 }
+
+#[test]
+fn an_ssh_agent_path_that_is_not_a_socket_does_not_refuse_the_run() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    let own = tempfile::tempdir().unwrap();
+    let allowed = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let stale = elsewhere.path().join("agent.sock");
+    std::fs::write(&stale, "left behind").unwrap();
+
+    let ruleset = landlock.writes_only_to(&[allowed.path().to_path_buf()], own.path(), &[stale]);
+
+    assert!(ruleset.is_ok(), "{ruleset:?}");
+}
