@@ -132,14 +132,6 @@ impl MountedReveals {
             .map(|row| row.borrow().ready.get())
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn retained_for_tests(&self, key: &RowKey) -> Option<Rc<PreparedReveal>> {
-        self.rows
-            .get(key)?
-            .upgrade()
-            .map(|row| Rc::clone(&row.borrow().reveal))
-    }
-
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
         if self.scope != scope {
             for row in self.rows.values().filter_map(Weak::upgrade) {

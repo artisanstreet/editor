@@ -33,29 +33,37 @@ fn answer_state(conversation: &Conversation, id: &ItemId) -> Option<AnswerState>
     conversation.view.as_ref()?.answers.get(id).cloned()
 }
 
+fn in_flight(conversation: &Conversation, id: &ItemId) -> Option<AnswerRequest> {
+    conversation
+        .answer_tasks
+        .get(id)
+        .map(|(request, _)| *request)
+}
+
 #[test]
 fn an_answer_in_flight_keeps_its_controls_disabled_after_the_item_leaves_the_window() {
     let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
     let id = ItemId("asked".into());
     approve(&mut conversation, &core, &id);
-    let Some(AnswerState::Sending(request)) = answer_state(&conversation, &id) else {
-        panic!("submitting an answer starts sending it");
-    };
+    assert_eq!(
+        answer_state(&conversation, &id),
+        Some(AnswerState::Sending),
+        "submitting an answer starts sending it"
+    );
+    let request = in_flight(&conversation, &id).expect("the answer is in flight");
 
     finish_tail(&mut conversation, &mut core);
     assert!(conversation.view.as_ref().unwrap().item(&id).is_none());
     assert_eq!(
         answer_state(&conversation, &id),
-        Some(AnswerState::Sending(request)),
+        Some(AnswerState::Sending),
         "evicting the item must not re-enable its answer controls"
     );
 
     approve(&mut conversation, &core, &id);
-    assert_eq!(
-        answer_state(&conversation, &id),
-        Some(AnswerState::Sending(request))
-    );
+    assert_eq!(answer_state(&conversation, &id), Some(AnswerState::Sending));
     assert_eq!(conversation.answer_tasks.len(), 1);
+    assert_eq!(in_flight(&conversation, &id), Some(request));
 
     enqueue(
         &conversation,
@@ -64,10 +72,10 @@ fn an_answer_in_flight_keeps_its_controls_disabled_after_the_item_leaves_the_win
     conversation.drain(&mut core);
     assert_eq!(
         answer_state(&conversation, &id),
-        Some(AnswerState::Sending(request)),
+        Some(AnswerState::Sending),
         "a completion for another request must not settle this one"
     );
-    assert!(conversation.answer_tasks.contains_key(&request));
+    assert_eq!(in_flight(&conversation, &id), Some(request));
 
     enqueue(&conversation, refused(&conversation, &id, request));
     conversation.drain(&mut core);
@@ -85,9 +93,12 @@ fn an_answer_forge_refuses_shows_forge_reason_on_the_card() {
     let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
     let id = ItemId("asked".into());
     approve(&mut conversation, &core, &id);
-    let Some(AnswerState::Sending(request)) = answer_state(&conversation, &id) else {
-        panic!("submitting an answer starts sending it");
-    };
+    assert_eq!(
+        answer_state(&conversation, &id),
+        Some(AnswerState::Sending),
+        "submitting an answer starts sending it"
+    );
+    let request = in_flight(&conversation, &id).expect("the answer is in flight");
     let failure = artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
         item: Some(id.clone()),
         reason: artisan_api::AnswerRefusal::AnsweredDifferently,

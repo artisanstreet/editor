@@ -22,33 +22,22 @@ pub struct ItemUi {
     pub chain_open: Option<bool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct AnswerRequest(pub(crate) u64);
-
-impl AnswerRequest {
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub const fn for_tests(request: u64) -> Self {
-        Self(request)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AnswerState {
-    Sending(AnswerRequest),
+    Sending,
     Failed(String),
 }
 
 impl AnswerState {
     #[must_use]
     pub(crate) const fn sending(&self) -> bool {
-        matches!(self, Self::Sending(_))
+        matches!(self, Self::Sending)
     }
 
     #[must_use]
     pub(crate) fn error(&self) -> Option<&str> {
         match self {
-            Self::Sending(_) => None,
+            Self::Sending => None,
             Self::Failed(error) => Some(error),
         }
     }

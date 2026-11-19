@@ -317,7 +317,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         "an unchanged admission frontier must not request a rebuild"
     );
     assert_eq!(owners.borrow().ready(&row_key), Some(false));
-    let original = owners.borrow().retained_for_tests(&row_key).unwrap();
+    let original = row_cache.borrow().get(&row_key).unwrap();
     let replacement = row_factory(
         vec![realized(row_model(&conversation, index, None).unwrap())],
         scope.clone(),
@@ -331,7 +331,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     replacement.realize(0, &row_key).unwrap();
     assert!(Rc::ptr_eq(
         &original,
-        &owners.borrow().retained_for_tests(&row_key).unwrap()
+        &row_cache.borrow().get(&row_key).unwrap()
     ));
     let painted = observations.drain().painted;
     let clip = aqua_core::Rect {
@@ -411,11 +411,10 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     );
     assert!(Rc::ptr_eq(
         &original,
-        &owners.borrow().retained_for_tests(&row_key).unwrap()
+        &row_cache.borrow().get(&row_key).unwrap()
     ));
-    let mounted_owner = row_cache.borrow().get(&row_key).unwrap();
-    let mounted_weak = Rc::downgrade(&mounted_owner);
-    drop(mounted_owner);
+    let mounted_weak = Rc::downgrade(&original);
+    drop(original);
     for index in 0..128 {
         let key = RowKey::Item(ItemId(format!("cache-eviction-{index}")));
         let owner = row_cache.borrow().candidate(&key);
@@ -428,8 +427,12 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     complete_factory.sync_reveals(&mut complete_app, &mut conversation, &core);
     assert_eq!(owners.borrow().ready(&row_key), Some(false));
     complete_factory.realize(complete_index, &row_key).unwrap();
-    let remounted = owners.borrow().retained_for_tests(&row_key).unwrap();
-    assert!(!Rc::ptr_eq(&original, &remounted));
+    let remounted = row_cache.borrow().get(&row_key).unwrap();
+    assert!(
+        mounted_weak
+            .upgrade()
+            .is_none_or(|evicted| !Rc::ptr_eq(&evicted, &remounted))
+    );
     assert_eq!(complete_factory.revision(complete_index, &row_key), None);
     core.remove_host(&config.id).unwrap();
     assert!(!complete.current(&conversation, &core));

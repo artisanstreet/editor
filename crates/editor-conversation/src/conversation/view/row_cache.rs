@@ -48,12 +48,6 @@ impl Drop for RowOwner {
 }
 
 impl RowOwner {
-    #[cfg(feature = "test-support")]
-    pub fn question_browser_for_tests(
-        &self,
-    ) -> Option<Rc<RefCell<editor_sources::CollectionBrowser<artisan_api::Question>>>> {
-        self.questions.borrow().browser()
-    }
     pub fn identity(&self) -> Option<(&RowKey, &PresentationScope)> {
         self.identity.as_ref().map(|(key, scope)| (key, scope))
     }

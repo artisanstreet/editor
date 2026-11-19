@@ -7,7 +7,7 @@ use editor_aqua::conversation::adapter::{Action, ActionScope, RowModel};
 use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
 use editor_aqua::conversation::stored::StoredConversation;
-use editor_aqua::conversation::thread::{AnswerRequest, AnswerState};
+use editor_aqua::conversation::thread::AnswerState;
 use editor_aqua::conversation::view::row_cache::RowCache;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -82,7 +82,7 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
             answers: HashMap::from([(
                 item.id.clone(),
                 if sending {
-                    AnswerState::Sending(AnswerRequest::for_tests(0))
+                    AnswerState::Sending
                 } else {
                     AnswerState::Failed("Previous failure".into())
                 },
