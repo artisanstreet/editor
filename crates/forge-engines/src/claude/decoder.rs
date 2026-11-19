@@ -51,10 +51,22 @@ enum MainTurn {
 }
 
 #[derive(Debug, Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent facts about the session, not one state in disguise"
-)]
+enum Title {
+    #[default]
+    None,
+    Requested,
+    Given,
+}
+
+#[derive(Debug, Default)]
+enum TurnResult {
+    #[default]
+    Awaited,
+    Arrived(Outcome),
+    Seen(Outcome),
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct ClaudeDecoder {
     reasoning_summary: crate::reasoning::Summary,
     session: Option<String>,
@@ -67,18 +79,15 @@ pub(crate) struct ClaudeDecoder {
     pending: HashMap<String, Pending>,
     replies: Vec<Value>,
     replays: VecDeque<Option<ItemId>>,
-    title_pending: bool,
-    titled: bool,
+    title: Title,
     usage: Usage,
     limit_reached: Option<LimitReached>,
-    result_seen: bool,
+    result: TurnResult,
     turn: MainTurn,
     background: usize,
     waiting_agents: HashSet<String>,
-    waiting_on_background: bool,
     agent_tasks: HashMap<String, String>,
     task_tools: HashMap<String, String>,
-    outcome: Option<Outcome>,
     compacting: Option<String>,
     counter: u32,
     said_since_work: Vec<Said>,
@@ -198,12 +207,13 @@ impl ClaudeDecoder {
         {
             return Err(DecodeError::NoMessageId);
         }
+        let waited = self.waiting_on_background();
         let events = self.feed_raw(&frame)?;
         let events = self.reasoning_summary.normalize(events, true);
         let mut events = crate::retained::settle(self, events);
         self.retire_settled();
-        let waiting = !self.in_turn() && self.background > 0;
-        if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
+        let waiting = self.waiting_on_background();
+        if waited != waiting {
             events.push(EngineEvent::background_wait(
                 artisan_api::EngineId::Claude,
                 waiting,
@@ -382,7 +392,7 @@ impl ClaudeDecoder {
     }
 
     pub(crate) fn title_request(&mut self, text: &str) -> Value {
-        self.title_pending = true;
+        self.title = Title::Requested;
         json!({
             "type": "control_request",
             "request_id": TITLE_REQUEST_ID,
@@ -392,7 +402,7 @@ impl ClaudeDecoder {
 
     #[must_use]
     pub(crate) fn awaiting_input(&self) -> bool {
-        !self.replays.is_empty() || self.title_pending
+        !self.replays.is_empty() || matches!(self.title, Title::Requested)
     }
 
     #[must_use]
@@ -413,8 +423,21 @@ impl ClaudeDecoder {
         matches!(self.turn, MainTurn::Active { .. })
     }
 
+    const fn waiting_on_background(&self) -> bool {
+        !self.in_turn() && self.background > 0
+    }
+
     pub(crate) fn take_result_seen(&mut self) -> bool {
-        std::mem::take(&mut self.result_seen)
+        match std::mem::take(&mut self.result) {
+            TurnResult::Arrived(outcome) => {
+                self.result = TurnResult::Seen(outcome);
+                true
+            }
+            kept @ (TurnResult::Awaited | TurnResult::Seen(_)) => {
+                self.result = kept;
+                false
+            }
+        }
     }
 
     #[must_use]
@@ -423,16 +446,21 @@ impl ClaudeDecoder {
     }
 
     pub(crate) const fn finish_title(&mut self) {
-        self.title_pending = false;
+        if matches!(self.title, Title::Requested) {
+            self.title = Title::None;
+        }
     }
 
     #[must_use]
     pub(crate) const fn titled(&self) -> bool {
-        self.titled
+        matches!(self.title, Title::Given)
     }
 
-    pub(crate) const fn take_outcome(&mut self) -> Option<Outcome> {
-        self.outcome.take()
+    pub(crate) fn take_outcome(&mut self) -> Option<Outcome> {
+        match std::mem::take(&mut self.result) {
+            TurnResult::Arrived(outcome) | TurnResult::Seen(outcome) => Some(outcome),
+            TurnResult::Awaited => None,
+        }
     }
 
     pub(crate) fn finish(&mut self) -> Vec<EngineEvent> {
@@ -459,7 +487,7 @@ impl ClaudeDecoder {
         }
         self.pending.clear();
         self.replays.clear();
-        self.title_pending = false;
+        self.finish_title();
         self.current = None;
         out
     }
@@ -1079,7 +1107,6 @@ impl ClaudeDecoder {
     }
 
     fn result(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
-        self.result_seen = true;
         let refused = matches!(
             std::mem::take(&mut self.turn),
             MainTurn::Active { refused: true }
@@ -1164,7 +1191,7 @@ impl ClaudeDecoder {
             Outcome::done()
         };
         self.limit_reached = None;
-        self.outcome = Some(outcome);
+        self.result = TurnResult::Arrived(outcome);
     }
 
     fn rate_limit(&mut self, info: &Value) {
@@ -1312,15 +1339,17 @@ impl ClaudeDecoder {
 
     fn control_response(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         let response = &frame["response"];
-        if !self.title_pending || str_at(response, "request_id") != Some(TITLE_REQUEST_ID) {
+        if !matches!(self.title, Title::Requested)
+            || str_at(response, "request_id") != Some(TITLE_REQUEST_ID)
+        {
             return;
         }
-        self.title_pending = false;
+        self.title = Title::None;
         if let Some(title) = str_at(&response["response"], "title")
             .map(str::trim)
             .filter(|title| !title.is_empty())
         {
-            self.titled = true;
+            self.title = Title::Given;
             out.push(EngineEvent::Title {
                 title: title.to_owned(),
             });
