@@ -189,7 +189,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     let old_starts = Arc::new(AtomicUsize::new(0));
     let new_starts = Arc::new(AtomicUsize::new(0));
     let (old, _) = generation(data, &registry, "old", Arc::clone(&old_starts)).await;
-    let old_member = old.generation().unwrap().member.clone();
+    let old_member = old.generation().unwrap().member().clone();
     runtime::request(&old_member, &Command::Activate)
         .await
         .unwrap();
@@ -200,7 +200,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     wait(&store, &threads[0], RunStatus::Running).await;
     let original = store.latest_run(&threads[0]).await.unwrap().unwrap();
     let (replacement, _) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
-    let new_member = replacement.generation().unwrap().member.clone();
+    let new_member = replacement.generation().unwrap().member().clone();
     let mut events = replacement.store().subscribe();
     assert_eq!(
         store.latest_run(&threads[0]).await.unwrap().unwrap().id,
@@ -335,7 +335,7 @@ async fn overlap(held: &[&str]) -> Overlap {
     }
     let registry = Registry::open(data).unwrap();
     let (old, _) = generation(data, &registry, "old", Arc::new(AtomicUsize::new(0))).await;
-    let old_member = old.generation().unwrap().member.clone();
+    let old_member = old.generation().unwrap().member().clone();
     runtime::request(&old_member, &Command::Activate)
         .await
         .unwrap();
@@ -346,7 +346,7 @@ async fn overlap(held: &[&str]) -> Overlap {
     }
     let new_starts = Arc::new(AtomicUsize::new(0));
     let (new, new_address) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
-    let new_member = new.generation().unwrap().member.clone();
+    let new_member = new.generation().unwrap().member().clone();
     runtime::request(&new_member, &Command::Activate)
         .await
         .unwrap();
@@ -441,7 +441,7 @@ async fn an_editor_reply_that_cannot_reach_the_other_generation_fails_instead_of
         .await
         .unwrap();
     assert_eq!(unknown.status(), 410);
-    let old = overlap.old.generation().unwrap().member.id.clone();
+    let old = overlap.old.generation().unwrap().member().id.clone();
     std::fs::write(
         overlap
             .directory

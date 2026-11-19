@@ -15,17 +15,18 @@ use std::time::{Duration, Instant};
 
 const FLOW_LASTS: Duration = Duration::from_mins(10);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Flows {
     by_state: HashMap<String, Flow>,
     lifetimes: HashMap<String, Arc<tokio::sync::Mutex<Lifetime>>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Lifetime {
     signed_out: u64,
 }
 
+#[derive(Debug)]
 struct Flow {
     server: String,
     url: String,
@@ -274,6 +275,7 @@ fn chain(error: &(dyn std::error::Error + 'static)) -> String {
         .join(": ")
 }
 
+#[derive(Debug)]
 pub struct Mcp {
     store: Store,
     flows: Mutex<Flows>,

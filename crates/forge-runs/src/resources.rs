@@ -303,8 +303,11 @@ fn inside_wsl(
 ) -> Result<Option<PathBuf>, ResourceError> {
     let forward = |rest: &str| rest.replace('\\', "/");
     if is_drive(path) {
-        let letter = path[..1].to_ascii_lowercase();
-        return Ok(Some(drives.join(letter).join(forward(&path[3..]))));
+        let (letter, rest) = path.split_at(1);
+        let (_, rest) = rest.split_at(2);
+        return Ok(Some(
+            drives.join(letter.to_ascii_lowercase()).join(forward(rest)),
+        ));
     }
     match wsl_share(path) {
         None => Ok(None),

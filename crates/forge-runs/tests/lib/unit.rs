@@ -2287,7 +2287,7 @@ printf '%s\n' '{"type":"assistant","message":{"id":"reply-message","stop_reason"
 printf '%s\n' '{"type":"result","subtype":"success","result":"Native reply","usage":{}}'
 "#).unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut events = fixture.hub.store().subscribe();
+    let events = fixture.hub.store().subscribe();
     fixture
         .hub
         .send_message(&fixture.thread_id, message("go"))
@@ -2446,7 +2446,7 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
         released.recv().unwrap();
     });
     acquired.await.unwrap();
-    let mut events = fixture.hub.store().subscribe();
+    let events = fixture.hub.store().subscribe();
     let earlier = fixture
         .hub
         .send_message(&fixture.thread_id, message("first"))
@@ -5771,7 +5771,7 @@ async fn background_titles_replace_the_prompt_and_reach_the_adapter_before_the_t
                 named: Arc::new(Notify::new()),
                 names: Arc::new(Mutex::new(Vec::new())),
             });
-            let adapter = Arc::clone(&harness) as Arc<dyn Harness>;
+            let adapter: Arc<dyn Harness> = Arc::<BackgroundTitle>::clone(&harness);
             let fixture =
                 fixture_with_engine_harness(engine, Arc::new(move |_| Arc::clone(&adapter))).await;
             if engine == EngineId::Claude {
@@ -5853,7 +5853,7 @@ async fn a_late_background_title_preserves_a_manual_rename() {
         named: Arc::new(Notify::new()),
         names: Arc::new(Mutex::new(Vec::new())),
     });
-    let adapter = Arc::clone(&harness) as Arc<dyn Harness>;
+    let adapter: Arc<dyn Harness> = Arc::<BackgroundTitle>::clone(&harness);
     let fixture =
         fixture_with_engine_harness(EngineId::Codex, Arc::new(move |_| Arc::clone(&adapter))).await;
     fixture

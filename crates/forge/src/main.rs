@@ -249,7 +249,7 @@ fn run(cli: &Cli, data_dir: PathBuf) -> Result<(), RunError> {
                         .hub()
                         .generation()
                         .expect("invariant: a backend Forge runs as a generation")
-                        .member,
+                        .member(),
                 )
                 .map_err(|source| PlatformError::Ready {
                     path: ready.to_owned(),

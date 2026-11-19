@@ -17,6 +17,14 @@ pub(crate) struct Probe {
     pub(crate) every: Duration,
 }
 
+impl std::fmt::Debug for Probe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probe")
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Probe {
     pub(crate) fn system() -> Self {
         Self {

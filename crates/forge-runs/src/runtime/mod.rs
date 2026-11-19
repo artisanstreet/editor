@@ -353,7 +353,7 @@ impl crate::Hub {
         let name = command.name();
         match command {
             Command::Health => Ok(
-                serde_json::json!({"protocol":PROTOCOL,"schema":forge_store::Store::schema_version(),"active":self.generation().is_some_and(Generation::accepting),"runs":self.local_active_count(),"generation":self.generation().map(|generation|&generation.member)}),
+                serde_json::json!({"protocol":PROTOCOL,"schema":forge_store::Store::schema_version(),"active":self.generation().is_some_and(Generation::accepting),"runs":self.local_active_count(),"generation":self.generation().map(|generation| generation.member().clone())}),
             ),
             Command::Activate => {
                 self.activate().await?;
@@ -408,8 +408,12 @@ impl crate::Hub {
             return Ok(());
         }
         let mut peers = Vec::new();
-        for member in generation.registry.peers().map_err(ActivateError::Peers)? {
-            if member.id == generation.member.id {
+        for member in generation
+            .registry()
+            .peers()
+            .map_err(ActivateError::Peers)?
+        {
+            if member.id == generation.member().id {
                 continue;
             }
             let holds = match drain_peer(&member).await {
@@ -481,7 +485,7 @@ impl crate::Hub {
             return Ok(());
         }
         let alive = generation
-            .registry
+            .registry()
             .list_peers()
             .await
             .map_err(FollowPeersError::Peers)?;
@@ -523,7 +527,7 @@ impl crate::Hub {
             return Ok(EditorCall::NotWaiting);
         };
         let peers = generation
-            .registry
+            .registry()
             .peers()
             .map_err(|source| EditorReplyError::Peers {
                 call: id.to_owned(),
@@ -531,7 +535,7 @@ impl crate::Hub {
             })?;
         let mut unreachable = None;
         for member in peers {
-            if member.id == generation.member.id {
+            if member.id == generation.member().id {
                 continue;
             }
             let command = Command::EditorReply {
@@ -568,8 +572,12 @@ impl crate::Hub {
             .generation()
             .filter(|generation| generation.overlapping())
         {
-            for member in generation.registry.peers().map_err(SnapshotError::Peers)? {
-                if member.id == generation.member.id {
+            for member in generation
+                .registry()
+                .peers()
+                .map_err(SnapshotError::Peers)?
+            {
+                if member.id == generation.member().id {
                     continue;
                 }
                 match request_as::<Vec<artisan_api::Event>>(&member, &Command::Snapshot).await {

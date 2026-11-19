@@ -101,8 +101,8 @@ impl Overlap {
 
 #[derive(Clone, Debug)]
 pub struct Generation {
-    pub registry: Registry,
-    pub member: Member,
+    registry: Registry,
+    member: Member,
     _registration: Arc<Registration>,
     overlap: Arc<watch::Sender<Overlap>>,
 }
@@ -403,6 +403,16 @@ impl Registry {
 }
 
 impl Generation {
+    #[must_use]
+    pub const fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub const fn member(&self) -> &Member {
+        &self.member
+    }
+
     #[must_use]
     fn phase(&self) -> Phase {
         self.overlap.borrow().phase

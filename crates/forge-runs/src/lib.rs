@@ -1,17 +1,3 @@
-#![expect(
-    missing_debug_implementations,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::assertions_on_result_states,
-    clippy::inconsistent_struct_constructor,
-    clippy::iter_over_hash_type,
-    clippy::partial_pub_fields,
-    clippy::string_slice,
-    trivial_casts,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
-
 mod agents;
 mod approvals;
 mod coordination;
@@ -82,6 +68,15 @@ pub struct Hub {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for Hub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hub")
+            .field("data_dir", &self.inner.data_dir)
+            .field("store", &self.inner.store)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     generation: Option<runtime::Generation>,
     store: Store,
@@ -128,25 +123,26 @@ enum Continuing {
     Owed,
 }
 
+#[derive(Debug)]
 struct LiveRun {
     id: RunId,
     inbox: mpsc::Sender<Input>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
     launched: Option<artisan_api::Permissions>,
-    live: HashMap<LiveTarget, LivePreview>,
+    live: std::collections::BTreeMap<LiveTarget, LivePreview>,
     foreground_bytes: usize,
     terminal_bytes: usize,
     phase: Phase,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Phase {
     Working,
     Stopping { through: u64, then: AfterStop },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AfterStop {
     Settle,
     Continue,
@@ -207,13 +203,14 @@ impl LiveRun {
     }
 }
 
+#[derive(Debug)]
 struct Suggested {
     run: RunId,
     cancel: CancellationToken,
     text: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct LivePreview {
     text: String,
     coverage: artisan_api::LiveCoverage,
@@ -1035,9 +1032,9 @@ impl Hub {
             return Ok(None);
         }
         Ok(generation
-            .registry
+            .registry()
             .active()?
-            .filter(|active| active.id != generation.member.id))
+            .filter(|active| active.id != generation.member().id))
     }
 
     pub fn local_active_count(&self) -> usize {
@@ -1292,7 +1289,7 @@ impl Hub {
                 cancel: cancel.clone(),
                 engine: None,
                 launched: None,
-                live: HashMap::new(),
+                live: std::collections::BTreeMap::new(),
                 foreground_bytes: 0,
                 terminal_bytes: 0,
                 phase: Phase::Working,

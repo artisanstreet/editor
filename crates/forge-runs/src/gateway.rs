@@ -47,6 +47,7 @@ impl CallEditorError {
     }
 }
 
+#[derive(Debug)]
 struct PendingCall {
     call: EditorCall,
     answer: oneshot::Sender<EditorReply>,
@@ -63,7 +64,7 @@ impl Drop for CallGuard {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Gateway {
     base: Option<String>,
     computer: bool,

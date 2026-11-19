@@ -61,7 +61,7 @@ async fn a_thread_keeps_the_folder_it_was_given_before_folders_named_whole_ids()
     let earlier = fixture.hub.scratch_root().join(format!(
         "{}-plan-the-trip-{}",
         scratch::date(thread.created_at),
-        &id[id.len() - 12..]
+        id.split_at(id.len() - 12).1
     ));
     std::fs::create_dir_all(&earlier).unwrap();
 

@@ -32,18 +32,18 @@ fn a_draining_peer_owns_the_threads_it_reports_until_it_exits() {
     let held = ThreadId::new();
     let finished = ThreadId::new();
     new.track(vec![Peer {
-        member: old.member.clone(),
+        member: old.member().clone(),
         holds: Holds::Reported(BTreeSet::from([held.clone(), finished.clone()])),
     }]);
     new.set_phase(Phase::Active);
-    assert_eq!(new.owner(&held).unwrap().id, old.member.id);
-    new.reported(&old.member.id, BTreeSet::from([held.clone()]));
+    assert_eq!(new.owner(&held).unwrap().id, old.member().id);
+    new.reported(&old.member().id, BTreeSet::from([held.clone()]));
     assert!(new.owner(&finished).is_none());
     assert_eq!(new.foreign_threads(), BTreeSet::from([held.clone()]));
-    new.reported(&old.member.id, BTreeSet::new());
+    new.reported(&old.member().id, BTreeSet::new());
     assert!(new.owner(&held).is_none());
     assert!(new.overlapping());
-    assert!(new.forget(&old.member.id).is_empty());
+    assert!(new.forget(&old.member().id).is_empty());
     assert!(!new.overlapping());
 }
 
@@ -53,7 +53,7 @@ fn an_exited_generation_leaves_no_registry_files() {
     let registry = Registry::open(directory.path()).unwrap();
     let generations = registry.root().join("generations");
     let generation = registry.register(member()).unwrap();
-    assert_eq!(registry.peers().unwrap(), vec![generation.member.clone()]);
+    assert_eq!(registry.peers().unwrap(), vec![generation.member().clone()]);
     drop(generation);
     assert!(entries(&generations).is_empty());
 }
@@ -81,8 +81,8 @@ fn a_crashed_generation_and_retired_lease_folders_are_cleared() {
     assert_eq!(
         entries(&generations),
         vec![
-            format!("{}.json", live.member.id),
-            format!("{}.lock", live.member.id)
+            format!("{}.json", live.member().id),
+            format!("{}.lock", live.member().id)
         ]
     );
 }

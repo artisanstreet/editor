@@ -490,7 +490,7 @@ impl ResolveGlobalPromptError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Extensions {
     store: Store,
     engines: Engines,

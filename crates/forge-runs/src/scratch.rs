@@ -180,13 +180,13 @@ impl FolderKey {
         match uuid::Uuid::try_parse(id) {
             Ok(parsed) if parsed.hyphenated().to_string() == id => {
                 let key = parsed.simple().to_string();
-                let legacy = key[key.len() - LEGACY_KEY..].to_owned();
+                let legacy = key.split_at(key.len() - LEGACY_KEY).1.to_owned();
                 Self::Canonical { key, legacy }
             }
             Ok(_) | Err(_) => {
                 use sha2::Digest as _;
                 let digest = hex::encode(sha2::Sha256::digest(id.as_bytes()));
-                Self::Hashed(format!("x{}", &digest[..32]))
+                Self::Hashed(format!("x{}", digest.split_at(32).0))
             }
         }
     }

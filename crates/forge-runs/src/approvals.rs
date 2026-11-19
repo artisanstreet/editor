@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 const ANSWER_WITHIN: Duration = Duration::from_mins(9);
 
+#[derive(Debug)]
 pub(crate) struct OwnApproval {
     thread: ThreadId,
     permission: bool,

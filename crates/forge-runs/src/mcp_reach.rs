@@ -21,7 +21,7 @@ enum Reach {
     Silent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Entry {
     Probing,
     Probed { reach: Reach, at: Instant },
@@ -49,7 +49,7 @@ enum Refresh {
     All,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Reachability {
     entries: Mutex<HashMap<Endpoint, Entry>>,
 }

@@ -69,7 +69,7 @@ struct Service {
 fn authorized(service: &Service, headers: &HeaderMap) -> bool {
     service.hub.generation().is_some_and(|generation| {
         headers.get("authorization").is_some_and(|header| {
-            header.as_bytes() == format!("Bearer {}", generation.member.token).as_bytes()
+            header.as_bytes() == format!("Bearer {}", generation.member().token).as_bytes()
         })
     })
 }
@@ -216,14 +216,14 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
         let before = cursor;
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
             tracing::warn!(
-                generation = %generation.member.id,
+                generation = %generation.member().id,
                 error = diagnostics::chain(&error),
                 "synchronize generation store"
             );
         }
         if let Err(error) = hub.follow_peers().await {
             tracing::warn!(
-                generation = %generation.member.id,
+                generation = %generation.member().id,
                 error = diagnostics::chain(&error),
                 "follow the other generations"
             );
@@ -234,11 +234,11 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
             0
         };
         hub.runtime_changed();
-        let members = match generation.registry.list_peers().await {
+        let members = match generation.registry().list_peers().await {
             Ok(members) => members,
             Err(error) => {
                 tracing::debug!(
-                    generation = %generation.member.id,
+                    generation = %generation.member().id,
                     error = diagnostics::chain(&error),
                     "list the generations to relay"
                 );
@@ -247,7 +247,7 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
         };
         peers.retain(|id| members.iter().any(|member| member.id == *id));
         for member in members {
-            if member.id == generation.member.id || !peers.insert(member.id.clone()) {
+            if member.id == generation.member().id || !peers.insert(member.id.clone()) {
                 continue;
             }
             tasks.spawn(relay_peer(
@@ -285,7 +285,7 @@ async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, active: A
             break;
         };
         if generation
-            .registry
+            .registry()
             .list_peers()
             .await
             .is_ok_and(|members| !members.iter().any(|candidate| candidate.id == member.id))

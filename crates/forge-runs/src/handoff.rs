@@ -275,18 +275,19 @@ async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>, ContextError> {
             source,
         })
     };
+    let inline = |text: &artisan_api::TextContent| -> String {
+        text.inline()
+            .unwrap_or_else(|| {
+                unreachable!("invariant: item {id}'s texts were resolved inline above")
+            })
+            .to_owned()
+    };
     let (user, label, text) = match &mut kind {
-        ItemKind::UserMessage { text, .. } => {
-            (true, "User", text.inline().unwrap_or_default().to_owned())
-        }
-        ItemKind::AssistantMessage { text, .. } => (
-            false,
-            "Assistant",
-            text.inline().unwrap_or_default().to_owned(),
-        ),
+        ItemKind::UserMessage { text, .. } => (true, "User", inline(text)),
+        ItemKind::AssistantMessage { text, .. } => (false, "Assistant", inline(text)),
         ItemKind::Tool { output, .. } => {
             if let Some(output) = output {
-                let text = output.text.inline().unwrap_or_default();
+                let text = inline(&output.text);
                 let shortened: String = text.chars().take(1250).collect();
                 output.text = if shortened.len() < text.len() {
                     format!("{shortened}\n[tool output truncated]").into()
@@ -302,16 +303,8 @@ async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>, ContextError> {
         ItemKind::Compaction {
             summary: Some(summary),
             ..
-        } => (
-            false,
-            "Previous checkpoint",
-            summary.inline().unwrap_or_default().to_owned(),
-        ),
-        ItemKind::Error { message, .. } => (
-            false,
-            "Error",
-            message.inline().unwrap_or_default().to_owned(),
-        ),
+        } => (false, "Previous checkpoint", inline(summary)),
+        ItemKind::Error { message, .. } => (false, "Error", inline(message)),
         ItemKind::Image { .. } => (false, "Image", encode(&kind)?),
         ItemKind::Notice { .. } | ItemKind::Compaction { summary: None, .. } => return Ok(None),
     };
@@ -568,11 +561,8 @@ fn bounded(text: &str, budget: usize) -> String {
     if text.len() <= budget {
         return text.to_owned();
     }
-    let mut end = budget.saturating_sub(SUFFIX.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{SUFFIX}", &text[..end])
+    let (kept, _) = text.split_at(text.floor_char_boundary(budget.saturating_sub(SUFFIX.len())));
+    format!("{kept}{SUFFIX}")
 }
 
 impl crate::run::Compaction<'_> {
