@@ -467,24 +467,22 @@ async fn continue_is_accepted_while_a_stop_winds_down_before_the_stop_is_saved()
         .expect("Continue after Stop is not refused as busy while the stop is still unsaved");
     disk.clear();
     winding.release.notify_one();
-    test_support::wait::eventually(
-        "the stopped run to be saved",
-        test_support::wait::LIVENESS,
-        || async {
-            fixture
-                .hub
-                .store()
-                .state()
-                .await
-                .unwrap()
-                .runs
-                .iter()
-                .any(|run| {
-                    run.thread_id == fixture.thread_id && run.status() == RunStatus::Cancelled
-                })
-        },
-    )
-    .await;
+    fixture.settled().await;
+    let history = fixture.runs().await;
+    let runs: Vec<_> = history
+        .iter()
+        .map(|run| (run.status(), run.continuation))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (RunStatus::Cancelled, None),
+            (RunStatus::Done, Some(artisan_api::Continuation::Requested)),
+        ],
+        "the stop is saved once the disk recovers and the continue carries the turn on: {history:#?} {:#?}",
+        fixture.items().await
+    );
+    assert_eq!(winding.turns(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
