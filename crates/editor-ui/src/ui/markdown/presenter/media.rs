@@ -55,7 +55,7 @@ impl MarkdownPresenter {
             media.width,
             media.scale,
             Some(&media.fetcher),
-            self.models.clone(),
+            &self.models.clone(),
             &services,
         );
         Ok(enveloped(theme, envelope, content))

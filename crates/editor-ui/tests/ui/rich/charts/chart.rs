@@ -58,7 +58,7 @@ fn the_keyboard_explorable_plot_is_a_named_focusable_group_for_assistive_tech() 
         &ArtisanTheme::resolved(),
         &Arc::new(spec),
         &Arc::new(model),
-        ChartState::default(),
+        &ChartState::default(),
         &services,
         &invalidate,
     );

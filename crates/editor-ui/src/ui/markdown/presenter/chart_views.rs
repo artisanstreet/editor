@@ -719,7 +719,7 @@ impl MarkdownPresenter {
             theme,
             style,
             model,
-            self.charts.clone(),
+            &self.charts.clone(),
             &services,
             invalidate,
         );

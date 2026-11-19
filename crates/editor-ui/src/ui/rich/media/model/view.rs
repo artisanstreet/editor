@@ -340,6 +340,160 @@ impl Entry {
     }
 }
 
+enum Loaded {
+    Ready(Arc<LoadedModel>),
+    Placeholder(Element),
+}
+
+struct EntryView {
+    camera: Camera,
+    shading: Shading,
+    dragging: bool,
+    moved: bool,
+    bounds: Rc<Cell<Option<Rect>>>,
+    shown: Option<ImageHandle>,
+}
+
+#[derive(Clone, Copy)]
+struct CanvasSize {
+    width: f32,
+    height: f32,
+    scale: f32,
+}
+
+fn on_entry<A: 'static>(
+    state: &ModelState,
+    id: &str,
+    invalidate: &Rc<dyn Fn()>,
+    change: impl Fn(&mut Entry, A) -> bool + 'static,
+) -> impl Fn(A) -> bool + 'static {
+    let state = state.clone();
+    let id = id.to_owned();
+    let invalidate = Rc::clone(invalidate);
+    move |argument| {
+        let changed = state
+            .0
+            .borrow_mut()
+            .entries
+            .get_mut(&id)
+            .is_some_and(|entry| change(entry, argument));
+        if changed {
+            invalidate();
+        }
+        changed
+    }
+}
+
+fn entry_view(state: &ModelState, id: &str) -> EntryView {
+    let state = state.0.borrow();
+    let entry = &state.entries[id];
+    EntryView {
+        camera: entry.camera,
+        shading: entry.shading,
+        dragging: entry.drag.is_some(),
+        moved: entry.camera != entry.initial,
+        bounds: Rc::clone(&entry.bounds),
+        shown: entry.shown.as_ref().map(|(image, _)| image.clone()),
+    }
+}
+
+fn mesh_canvas(
+    mesh: &Arc<aqua_core::gpui_mesh::GpuiMesh>,
+    entry: &EntryView,
+    look: Look,
+    size: CanvasSize,
+) -> Element {
+    let mesh = Arc::clone(mesh);
+    let measured = Rc::clone(&entry.bounds);
+    let camera = entry.camera;
+    ui::Canvas::new()
+        .style(
+            Style::new()
+                .width(Length::Px(size.width))
+                .height(Length::Px(size.height)),
+        )
+        .on_paint(move |bounds| {
+            measured.set(Some(bounds));
+            vec![DisplayItem::GpuiMesh {
+                bounds,
+                corners: CornerRadii::uniform(
+                    (crate::ui::theme::RadiusTokens::value(crate::ui::theme::RadiusStep::Lg) - 1.0)
+                        .max(0.0),
+                ),
+                mesh: Arc::clone(&mesh),
+                style: GpuiMeshStyle {
+                    view: camera.view_matrix(),
+                    projection: Camera::projection_matrix(bounds.w.max(1.0), bounds.h.max(1.0)),
+                    base_color: look.base.to_array(),
+                    edge_color: look.edges.map_or([0.0; 4], |(color, alpha)| {
+                        [color.x, color.y, color.z, alpha]
+                    }),
+                },
+            }]
+        })
+        .build()
+}
+
+fn software_canvas(
+    id: &str,
+    state: &ModelState,
+    model: &Arc<LoadedModel>,
+    entry: &EntryView,
+    look: Look,
+    size: CanvasSize,
+) -> Element {
+    let CanvasSize {
+        width,
+        height,
+        scale,
+    } = size;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the side is clamped to 1..=2400 pixels first"
+    )]
+    let pixels = |value: f32| (value * scale).round().clamp(1.0, 2400.0) as u32;
+    let (pixel_width, pixel_height) = (pixels(width), pixels(height));
+    let samples = if entry.dragging || pixel_width * pixel_height * 4 > 3_000_000 {
+        1
+    } else {
+        2
+    };
+    let key = FrameKey {
+        model: Arc::as_ptr(model).addr(),
+        camera: entry.camera,
+        look,
+        width: pixel_width,
+        height: pixel_height,
+        samples,
+    };
+    state.render_software(id, key, Arc::clone(model));
+    let measured = Rc::clone(&entry.bounds);
+    let probe = ui::Canvas::new()
+        .style(
+            Style::new()
+                .width(Length::Px(width))
+                .height(Length::Px(height)),
+        )
+        .on_paint(move |bounds| {
+            measured.set(Some(bounds));
+            Vec::new()
+        })
+        .build();
+    let mut layer = ui::Box::new().width(width).height(height).child(probe);
+    if let Some(image) = entry.shown.clone() {
+        layer = layer.child(
+            Media::new(image)
+                .width(width)
+                .height(height)
+                .fit(aqua_core::image::ImageFit::Contain)
+                .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
+                .build(),
+        );
+    }
+    layer.build()
+}
+
 impl ModelBlock {
     pub(crate) fn view(
         &self,
@@ -347,7 +501,7 @@ impl ModelBlock {
         width: f32,
         scale: f32,
         fetcher: Option<&MediaFetcher>,
-        state: ModelState,
+        state: &ModelState,
         services: &ModelServices,
     ) -> Element {
         let aspect = match (self.hint.width, self.hint.height) {
@@ -355,11 +509,83 @@ impl ModelBlock {
             _ => 1.6,
         };
         let width = width.max(0.0).min(480.0 * aspect);
-        let height = width / aspect;
+        let size = CanvasSize {
+            width,
+            height: width / aspect,
+            scale,
+        };
+        let model = match self.load(id, fetcher, state, services) {
+            Loaded::Ready(model) => model,
+            Loaded::Placeholder(placeholder) => {
+                state.suspend(id);
+                return (services.frame)(placeholder, width, aspect, &self.display_name(), None);
+            }
+        };
         let initial = Camera::new(
             self.yaw.unwrap_or(Camera::DEFAULT_YAW),
             self.pitch.unwrap_or(Camera::DEFAULT_PITCH),
         );
+        let owner =
+            fetcher.map(|fetcher| (fetcher.scope().to_owned(), Arc::clone(fetcher.owner())));
+        state.ready(id, initial, self.shading, owner, Arc::as_ptr(&model).addr());
+        let entry = entry_view(state, id);
+        let look = Look {
+            base: self.color.unwrap_or(glam::Vec3::new(0.52, 0.5, 0.48)),
+            edges: (entry.shading == Shading::Wireframe)
+                .then_some((glam::Vec3::new(0.01, 0.01, 0.012), 0.6)),
+        };
+        let drawing = match &model.geometry {
+            Geometry::Mesh(mesh) => mesh_canvas(mesh, &entry, look, size),
+            Geometry::Software(_) => software_canvas(id, state, &model, &entry, look, size),
+        };
+        let canvas = self.interactive(drawing, id, state, services, &entry);
+        let change_shading: Rc<dyn Fn(Shading)> = {
+            let shade = on_entry(state, id, &services.invalidate, |entry, chosen| {
+                entry.shading = chosen;
+                true
+            });
+            Rc::new(move |chosen| {
+                shade(chosen);
+            })
+        };
+        let reset: Rc<dyn Fn()> = {
+            let reset = on_entry(state, id, &services.invalidate, |entry, ()| {
+                entry.reset();
+                true
+            });
+            Rc::new(move || {
+                reset(());
+            })
+        };
+        let facts = format!(
+            "{} · {}",
+            model.format.label(),
+            crate::ui::locale::count(model.triangles, "triangle", "triangles")
+        );
+        let frame = (services.frame)(
+            canvas,
+            width,
+            aspect,
+            &self.display_name(),
+            Some(entry.dragging),
+        );
+        let toolbar = (services.toolbar)(entry.shading, entry.moved, &facts, change_shading, reset);
+        ui::Box::new()
+            .layout("column")
+            .width(width)
+            .gap(8.0)
+            .child(frame)
+            .child(toolbar)
+            .build()
+    }
+
+    fn load(
+        &self,
+        id: &str,
+        fetcher: Option<&MediaFetcher>,
+        state: &ModelState,
+        services: &ModelServices,
+    ) -> Loaded {
         let waiter = state.waiter(id);
         let wake = crate::ui::media::wake_on(&state.0.borrow().mailbox);
         let loaded = (services.capability)().and_then(|capability| {
@@ -374,241 +600,132 @@ impl ModelBlock {
                 wake,
             )
         });
-        let model = match loaded {
-            None => {
-                state.suspend(id);
-                return (services.frame)(
-                    (services.placeholder)("Loading model…", false),
-                    width,
-                    aspect,
-                    &self.display_name(),
-                    None,
-                );
-            }
-            Some(Err(reason)) => {
-                state.suspend(id);
-                return (services.frame)(
-                    (services.placeholder)(&reason, true),
-                    width,
-                    aspect,
-                    &self.display_name(),
-                    None,
-                );
-            }
-            Some(Ok(model)) => model,
-        };
-        let owner =
-            fetcher.map(|fetcher| (fetcher.scope().to_owned(), Arc::clone(fetcher.owner())));
-        state.ready(id, initial, self.shading, owner, Arc::as_ptr(&model).addr());
-        let (camera, shading, dragging, moved, bounds, shown) = {
-            let state = state.0.borrow();
-            let entry = &state.entries[id];
-            (
-                entry.camera,
-                entry.shading,
-                entry.drag.is_some(),
-                entry.camera != entry.initial,
-                Rc::clone(&entry.bounds),
-                entry.shown.as_ref().map(|(image, _)| image.clone()),
-            )
-        };
-        let base = self.color.unwrap_or(glam::Vec3::new(0.52, 0.5, 0.48));
-        let edges =
-            (shading == Shading::Wireframe).then_some((glam::Vec3::new(0.01, 0.01, 0.012), 0.6));
-        let look = Look { base, edges };
-        let drawing = match &model.geometry {
-            Geometry::Mesh(mesh) => {
-                let mesh = Arc::clone(mesh);
-                let measured = Rc::clone(&bounds);
-                ui::Canvas::new()
-                    .style(
-                        Style::new()
-                            .width(Length::Px(width))
-                            .height(Length::Px(height)),
-                    )
-                    .on_paint(move |bounds| {
-                        measured.set(Some(bounds));
-                        vec![DisplayItem::GpuiMesh {
-                            bounds,
-                            corners: CornerRadii::uniform(
-                                (crate::ui::theme::RadiusTokens::value(
-                                    crate::ui::theme::RadiusStep::Lg,
-                                ) - 1.0)
-                                    .max(0.0),
-                            ),
-                            mesh: Arc::clone(&mesh),
-                            style: GpuiMeshStyle {
-                                view: camera.view_matrix(),
-                                projection: Camera::projection_matrix(
-                                    bounds.w.max(1.0),
-                                    bounds.h.max(1.0),
-                                ),
-                                base_color: base.to_array(),
-                                edge_color: edges.map_or([0.0; 4], |(color, alpha)| {
-                                    [color.x, color.y, color.z, alpha]
-                                }),
-                            },
-                        }]
-                    })
-                    .build()
-            }
-            Geometry::Software(_) => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "the side is clamped to 1..=2400 pixels first"
-                )]
-                let side = |value: f32| (value * scale).round().clamp(1.0, 2400.0) as u32;
-                let (pixel_width, pixel_height) = (side(width), side(height));
-                let samples = if dragging || pixel_width * pixel_height * 4 > 3_000_000 {
-                    1
-                } else {
-                    2
-                };
-                let key = FrameKey {
-                    model: Arc::as_ptr(&model).addr(),
-                    camera,
-                    look,
-                    width: pixel_width,
-                    height: pixel_height,
-                    samples,
-                };
-                state.render_software(id, key, Arc::clone(&model));
-                let measured = Rc::clone(&bounds);
-                let probe = ui::Canvas::new()
-                    .style(
-                        Style::new()
-                            .width(Length::Px(width))
-                            .height(Length::Px(height)),
-                    )
-                    .on_paint(move |bounds| {
-                        measured.set(Some(bounds));
-                        Vec::new()
-                    })
-                    .build();
-                let mut layer = ui::Box::new().width(width).height(height).child(probe);
-                if let Some(image) = shown {
-                    layer = layer.child(
-                        Media::new(image)
-                            .width(width)
-                            .height(height)
-                            .fit(aqua_core::image::ImageFit::Contain)
-                            .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .build(),
-                    );
-                }
-                layer.build()
-            }
-        };
-        let down_state = state.clone();
-        let down_id = id.to_owned();
-        let down_invalidate = Rc::clone(&services.invalidate);
-        let copy = Rc::clone(&services.copy);
-        let source = self.src.raw().to_owned();
-        let move_state = state.clone();
-        let move_id = id.to_owned();
-        let move_invalidate = Rc::clone(&services.invalidate);
-        let up_state = state.clone();
-        let up_id = id.to_owned();
-        let up_invalidate = Rc::clone(&services.invalidate);
-        let cancel_state = state.clone();
-        let cancel_id = id.to_owned();
-        let cancel_invalidate = Rc::clone(&services.invalidate);
-        let wheel_state = state.clone();
-        let wheel_id = id.to_owned();
-        let wheel_invalidate = Rc::clone(&services.invalidate);
-        let key_state = state.clone();
-        let key_id = id.to_owned();
-        let key_invalidate = Rc::clone(&services.invalidate);
-        let key_copy = Rc::clone(&services.copy);
-        let key_source = self.src.raw().to_owned();
-        let request_copy = Rc::clone(&services.copy);
-        let request_source = self.src.raw().to_owned();
-        let request_bounds = bounds;
-        let canvas = drawing
+        match loaded {
+            None => Loaded::Placeholder((services.placeholder)("Loading model…", false)),
+            Some(Err(reason)) => Loaded::Placeholder((services.placeholder)(&reason, true)),
+            Some(Ok(model)) => Loaded::Ready(model),
+        }
+    }
+
+    fn interactive(
+        &self,
+        drawing: Element,
+        id: &str,
+        state: &ModelState,
+        services: &ModelServices,
+        entry: &EntryView,
+    ) -> Element {
+        let element = drawing
             .with_key(format!("{id}-frame"))
             .focusable(true)
             .focus_visible_style(services.focus_ring.clone())
             .aria_label(self.display_name())
-            .cursor(if dragging {
+            .cursor(if entry.dragging {
                 aqua_core::CursorIcon::Grabbing
             } else {
                 aqua_core::CursorIcon::Grab
-            })
-            .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::PointerDown(pointer, button)) = &event.input
-                else {
-                    return InputResponse::default();
-                };
-                if *button == PointerButton::Secondary {
-                    copy(pointer.position, &source);
-                    return InputResponse {
-                        stop_propagation: true,
-                        ..InputResponse::handled()
-                    };
-                }
-                if !matches!(button, PointerButton::Primary | PointerButton::Middle) {
-                    return InputResponse::default();
-                }
-                if let Some(entry) = down_state.0.borrow_mut().entries.get_mut(&down_id) {
-                    if *button == PointerButton::Primary && event.click_count.unwrap_or(1) >= 2 {
+            });
+        let element = self.pointer_input(element, id, state, services);
+        self.menu_and_keys(element, id, state, services, &entry.bounds)
+    }
+
+    fn press_input(
+        &self,
+        element: Element,
+        id: &str,
+        state: &ModelState,
+        services: &ModelServices,
+    ) -> Element {
+        let copy = Rc::clone(&services.copy);
+        let source = self.src.raw().to_owned();
+        let press =
+            on_entry(
+                state,
+                id,
+                &services.invalidate,
+                |entry,
+                 (position, button, double, shift): (
+                    aqua_core::Point,
+                    PointerButton,
+                    bool,
+                    bool,
+                )| {
+                    if button == PointerButton::Primary && double {
                         entry.reset();
                     } else {
                         entry.drag = Some(Drag {
-                            last: pointer.position,
-                            pan: *button == PointerButton::Middle
-                                || event.modifiers.contains(Modifiers::SHIFT),
+                            last: position,
+                            pan: button == PointerButton::Middle || shift,
                         });
                     }
-                }
-                down_invalidate();
-                InputResponse {
+                    true
+                },
+            );
+        element.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
+            let RoutedInput::Native(InputEvent::PointerDown(pointer, button)) = &event.input else {
+                return InputResponse::default();
+            };
+            if *button == PointerButton::Secondary {
+                copy(pointer.position, &source);
+                return InputResponse {
                     stop_propagation: true,
-                    focus: FocusRequest::Focus,
-                    pointer_capture: CaptureRequest::Capture,
-                    ..InputResponse::default()
-                }
-            })
-            .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::PointerMove(pointer)) = &event.input else {
-                    return InputResponse::default();
+                    ..InputResponse::handled()
                 };
-                if move_state
-                    .0
-                    .borrow_mut()
-                    .entries
-                    .get_mut(&move_id)
-                    .is_some_and(|entry| entry.move_to(pointer.position))
-                {
-                    move_invalidate();
+            }
+            if !matches!(button, PointerButton::Primary | PointerButton::Middle) {
+                return InputResponse::default();
+            }
+            press((
+                pointer.position,
+                *button,
+                event.click_count.unwrap_or(1) >= 2,
+                event.modifiers.contains(Modifiers::SHIFT),
+            ));
+            InputResponse {
+                stop_propagation: true,
+                focus: FocusRequest::Focus,
+                pointer_capture: CaptureRequest::Capture,
+                ..InputResponse::default()
+            }
+        })
+    }
+
+    fn pointer_input(
+        &self,
+        element: Element,
+        id: &str,
+        state: &ModelState,
+        services: &ModelServices,
+    ) -> Element {
+        let drag = on_entry(state, id, &services.invalidate, |entry, position| {
+            entry.move_to(position)
+        });
+        let release = on_entry(state, id, &services.invalidate, |entry, ()| {
+            entry.drag.take().is_some()
+        });
+        let cancel = on_entry(state, id, &services.invalidate, |entry, ()| {
+            entry.drag.take().is_some()
+        });
+        let zoom = on_entry(state, id, &services.invalidate, |entry, factor: f32| {
+            entry.zoom(factor);
+            true
+        });
+        self.press_input(element, id, state, services)
+            .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
+                if let RoutedInput::Native(InputEvent::PointerMove(pointer)) = &event.input {
+                    drag(pointer.position);
                 }
                 InputResponse::default()
             })
             .on_input(InputKind::PointerUp, EventPhase::Bubble, move |_| {
-                if up_state
-                    .0
-                    .borrow_mut()
-                    .entries
-                    .get_mut(&up_id)
-                    .is_some_and(|entry| entry.drag.take().is_some())
-                {
-                    up_invalidate();
-                }
+                release(());
                 InputResponse {
                     pointer_capture: CaptureRequest::Release,
                     ..InputResponse::default()
                 }
             })
             .on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
-                if cancel_state
-                    .0
-                    .borrow_mut()
-                    .entries
-                    .get_mut(&cancel_id)
-                    .is_some_and(|entry| entry.drag.take().is_some())
-                {
-                    cancel_invalidate();
-                }
+                cancel(());
                 InputResponse {
                     pointer_capture: CaptureRequest::Release,
                     ..InputResponse::default()
@@ -623,15 +740,34 @@ impl ModelBlock {
                 {
                     return InputResponse::default();
                 }
-                if let Some(entry) = wheel_state.0.borrow_mut().entries.get_mut(&wheel_id) {
-                    entry.zoom((-delta.y * 0.0025).exp());
-                }
-                wheel_invalidate();
+                zoom((-delta.y * 0.0025).exp());
                 InputResponse {
                     stop_propagation: true,
                     ..InputResponse::handled()
                 }
             })
+    }
+
+    fn menu_and_keys(
+        &self,
+        element: Element,
+        id: &str,
+        state: &ModelState,
+        services: &ModelServices,
+        bounds: &Rc<Cell<Option<Rect>>>,
+    ) -> Element {
+        let key_copy = Rc::clone(&services.copy);
+        let key_source = self.src.raw().to_owned();
+        let request_copy = Rc::clone(&services.copy);
+        let request_source = self.src.raw().to_owned();
+        let request_bounds = Rc::clone(bounds);
+        let steer = on_entry(
+            state,
+            id,
+            &services.invalidate,
+            |entry, (key, modifiers): (Key, Modifiers)| entry.key(key, modifiers),
+        );
+        element
             .on_accessibility_request(move |request| {
                 if request == AccessibilityRequest::ShowContextMenu {
                     let anchor = request_bounds
@@ -651,53 +787,14 @@ impl ModelBlock {
                         ..InputResponse::handled()
                     };
                 }
-                if !key_state
-                    .0
-                    .borrow_mut()
-                    .entries
-                    .get_mut(&key_id)
-                    .is_some_and(|entry| entry.key(key.key, key.modifiers))
-                {
+                if !steer((key.key, key.modifiers)) {
                     return InputResponse::default();
                 }
-                key_invalidate();
                 InputResponse {
                     stop_propagation: true,
                     ..InputResponse::handled()
                 }
-            });
-        let shade_state = state.clone();
-        let shade_id = id.to_owned();
-        let shade_invalidate = Rc::clone(&services.invalidate);
-        let change_shading: Rc<dyn Fn(Shading)> = Rc::new(move |chosen| {
-            if let Some(entry) = shade_state.0.borrow_mut().entries.get_mut(&shade_id) {
-                entry.shading = chosen;
-            }
-            shade_invalidate();
-        });
-        let reset_state = state;
-        let reset_id = id.to_owned();
-        let reset_invalidate = Rc::clone(&services.invalidate);
-        let reset: Rc<dyn Fn()> = Rc::new(move || {
-            if let Some(entry) = reset_state.0.borrow_mut().entries.get_mut(&reset_id) {
-                entry.reset();
-            }
-            reset_invalidate();
-        });
-        let facts = format!(
-            "{} · {}",
-            model.format.label(),
-            crate::ui::locale::count(model.triangles, "triangle", "triangles")
-        );
-        let frame = (services.frame)(canvas, width, aspect, &self.display_name(), Some(dragging));
-        let toolbar = (services.toolbar)(shading, moved, &facts, change_shading, reset);
-        ui::Box::new()
-            .layout("column")
-            .width(width)
-            .gap(8.0)
-            .child(frame)
-            .child(toolbar)
-            .build()
+            })
     }
 }
 

@@ -193,12 +193,42 @@ fn canvas(shapes: Rc<[Shape]>, probe: Probe) -> Element {
         .build()
 }
 
+struct EntrySnapshot {
+    hidden: Vec<bool>,
+    hover: Option<usize>,
+    zoom: Option<Domain>,
+    drag: Option<(f64, f64)>,
+    probe: Probe,
+    sliders: Vec<(String, Rc<RefCell<SliderState>>)>,
+}
+
+#[derive(Clone, Copy)]
+struct ChartScope<'a> {
+    id: &'a str,
+    states: &'a ChartState,
+    invalidate: &'a Rc<dyn Fn()>,
+}
+
+impl ChartScope<'_> {
+    fn update(&self, change: impl Fn(&mut Entry) -> bool + 'static) -> impl Fn() + 'static {
+        let states = self.states.clone();
+        let id = self.id.to_owned();
+        let invalidate = Rc::clone(self.invalidate);
+        move || {
+            let changed = states.0.borrow_mut().get_mut(&id).is_some_and(&change);
+            if changed {
+                invalidate();
+            }
+        }
+    }
+}
+
 pub(crate) fn view(
     id: &str,
     theme: &ArtisanTheme,
     spec: &Arc<ChartStyle>,
     model: &Arc<Model>,
-    states: ChartState,
+    states: &ChartState,
     services: &Services,
     invalidate: &Rc<dyn Fn()>,
 ) -> Element {
@@ -206,83 +236,31 @@ pub(crate) fn view(
         return (services.empty)("No data to chart");
     }
     states.sync(id, spec, model);
-    let theme = *theme;
-    let (hidden, hover, zoom, drag, probe, sliders) = {
-        let entries = states.0.borrow();
-        let entry = &entries[id];
-        let sliders = spec
-            .thresholds()
-            .map(|(index, param)| {
-                let label = if param.label.trim().is_empty() {
-                    "Threshold"
-                } else {
-                    param.label.trim()
-                }
-                .to_owned();
-                let key = if param.id.trim().is_empty() {
-                    index.to_string()
-                } else {
-                    param.id.trim().to_owned()
-                };
-                (label, Rc::clone(&entry.sliders[&key]))
-            })
-            .collect::<Vec<_>>();
-        (
-            entry.hidden.clone(),
-            entry.hover,
-            entry.zoom,
-            entry.drag,
-            Rc::clone(&entry.probe),
-            sliders,
-        )
+    let scope = ChartScope {
+        id,
+        states,
+        invalidate,
     };
-    let thresholds = sliders
+    let theme = *theme;
+    let entry = entry_snapshot(states, id, spec);
+    let thresholds = entry
+        .sliders
         .iter()
         .map(|(label, slider)| (label.clone(), slider.borrow().value()))
         .collect::<Vec<_>>();
-    let width = probe.get().map_or(480.0, |rect| rect.w);
+    let width = entry.probe.get().map_or(480.0, |rect| rect.w);
     let snapshot = Snapshot {
-        hidden: &hidden,
-        hover,
-        zoom,
-        drag,
-        thresholds: thresholds.clone(),
+        hidden: &entry.hidden,
+        hover: entry.hover,
+        zoom: entry.zoom,
+        drag: entry.drag,
+        thresholds,
         width,
     };
-    let key = GeometryKey {
-        mode: theme.colors.mode,
-        hidden: hidden.clone(),
-        zoom,
-        thresholds: thresholds.clone(),
-        width,
-    };
-    let geometry = {
-        let mut entries = states.0.borrow_mut();
-        let entry = entries
-            .get_mut(id)
-            .unwrap_or_else(|| panic!("invariant: chart {id} is synced before its geometry"));
-        if let Some((known, geometry)) = &entry.geometry
-            && *known == key
-        {
-            Rc::clone(geometry)
-        } else {
-            let stable = Snapshot {
-                hidden: &hidden,
-                hover: None,
-                zoom,
-                drag: None,
-                thresholds,
-                width,
-            };
-            let geometry = Rc::new(plot::layout(&theme, spec, model, &stable));
-            entry.geometry = Some((key, Rc::clone(&geometry)));
-            geometry
-        }
-    };
+    let geometry = cached_geometry(states, id, &theme, spec, model, &snapshot);
     let interaction: Rc<[Shape]> =
         plot::interaction(&theme, spec, model, &geometry, &snapshot).into();
     let visible = snapshot.visible(model.series.len());
-    let mut selection = None;
     let mut plot = ui::Box::new()
         .style(
             Style::new()
@@ -290,88 +268,188 @@ pub(crate) fn view(
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0)),
         )
-        .child(canvas(Rc::clone(&geometry.shapes), Rc::clone(&probe)))
-        .child(canvas(interaction, Rc::clone(&probe)));
+        .child(canvas(Rc::clone(&geometry.shapes), Rc::clone(&entry.probe)))
+        .child(canvas(interaction, Rc::clone(&entry.probe)));
     for label in &geometry.labels {
         plot = plot.child((services.label)(label.clone()));
     }
-    if let Some(hover) = hover {
-        let x = model.xs.get(hover).copied().unwrap_or_default();
-        let values: Vec<(usize, f64)> = (0..model.series.len())
-            .filter(|i| visible[*i])
-            .filter_map(|i| model.value_at(i, x).map(|value| (i, value)))
-            .collect();
-        let scale = values
-            .iter()
-            .map(|(_, value)| value.abs())
-            .fold(0.0, f64::max);
-        let total = if scale > 0.0 {
-            values
-                .iter()
-                .map(|(_, value)| value.abs() / scale)
-                .sum::<f64>()
-        } else {
-            0.0
-        };
-        let mut rows = values
-            .iter()
-            .map(|(index, value)| {
-                let mut text = reading(*value, spec.y.unit.as_deref());
-                if spec.normalize && total > 0.0 {
-                    text = format!("{text} · {}", percent((value.abs() / scale) / total));
-                }
-                (
-                    Some(theme.colors.palette[index % 8].to_reference_paint()),
-                    model.series[*index].name.clone(),
-                    text,
-                )
-            })
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            rows.push((None, "No values".to_owned(), String::new()));
-        } else if spec.stacked && !spec.normalize && values.len() > 1 {
-            let sum = values.iter().map(|(_, value)| value).sum::<f64>();
-            rows.push((
-                None,
-                "Total".to_owned(),
-                if sum.is_finite() {
-                    reading(sum, spec.y.unit.as_deref())
-                } else {
-                    "Outside numeric range".to_owned()
-                },
-            ));
+    let selection = match entry.hover {
+        Some(hover) => {
+            let (selection, readout) =
+                hover_readout(&theme, spec, model, &geometry, &visible, hover, services);
+            plot = plot.child(readout);
+            Some(selection)
         }
-        let heading = if model.is_categorical() {
-            model.x_label(x)
-        } else {
-            reading(x, spec.x.unit.as_deref())
-        };
-        let mut pieces = vec![heading.clone()];
-        pieces.extend(
-            rows.iter()
-                .map(|(_, label, value)| format!("{label}: {value}")),
-        );
-        selection = Some(pieces.join("; "));
-        plot = plot.child((services.readout)(
-            geometry.view.fraction(x),
-            &heading,
-            rows,
+        None => None,
+    };
+    let plot = pointer_input(plot.build(), scope, geometry.view, &entry.probe);
+    let plot = pressable(plot, scope, geometry.view, &entry.probe, services);
+    let nav = keyboard_navigation(plot, scope, model, &geometry, selection);
+    let nav = (services.navigation)(nav, theme.colors.ring.to_reference_paint());
+    let framed = (services.frame)(
+        nav,
+        geometry.y_ticks.clone(),
+        geometry.x_ticks.clone(),
+        geometry.end_labels.clone(),
+        axis_title(spec.y.label.as_deref(), spec.y.unit.as_deref()),
+        axis_title(spec.x.label.as_deref(), spec.x.unit.as_deref()),
+    );
+    let mut root = ui::Box::new()
+        .layout("column")
+        .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
+        .child(chart_header(&theme, model, &entry, scope, services))
+        .child(framed);
+    for (index, threshold) in entry.sliders.into_iter().enumerate() {
+        root = root.child(threshold_slider(
+            &theme, spec, model, &visible, scope, index, threshold,
         ));
     }
-    let view = geometry.view;
-    let moving = states.clone();
-    let moving_id = id.to_owned();
-    let moving_probe = Rc::clone(&probe);
-    let moving_invalidate = Rc::clone(invalidate);
-    let releasing = states.clone();
-    let releasing_id = id.to_owned();
-    let releasing_invalidate = Rc::clone(invalidate);
-    let leaving = states.clone();
-    let leaving_id = id.to_owned();
-    let leaving_invalidate = Rc::clone(invalidate);
-    let plot = plot
-        .build()
-        .with_key(format!("{id}-plot"))
+    root.build()
+}
+
+fn entry_snapshot(states: &ChartState, id: &str, spec: &ChartStyle) -> EntrySnapshot {
+    let entries = states.0.borrow();
+    let entry = &entries[id];
+    let sliders = spec
+        .thresholds()
+        .map(|(index, param)| {
+            let label = if param.label.trim().is_empty() {
+                "Threshold"
+            } else {
+                param.label.trim()
+            }
+            .to_owned();
+            let key = if param.id.trim().is_empty() {
+                index.to_string()
+            } else {
+                param.id.trim().to_owned()
+            };
+            (label, Rc::clone(&entry.sliders[&key]))
+        })
+        .collect::<Vec<_>>();
+    EntrySnapshot {
+        hidden: entry.hidden.clone(),
+        hover: entry.hover,
+        zoom: entry.zoom,
+        drag: entry.drag,
+        probe: Rc::clone(&entry.probe),
+        sliders,
+    }
+}
+
+fn cached_geometry(
+    states: &ChartState,
+    id: &str,
+    theme: &ArtisanTheme,
+    spec: &Arc<ChartStyle>,
+    model: &Arc<Model>,
+    snapshot: &Snapshot<'_>,
+) -> Rc<Geometry> {
+    let key = GeometryKey {
+        mode: theme.colors.mode,
+        hidden: snapshot.hidden.to_vec(),
+        zoom: snapshot.zoom,
+        thresholds: snapshot.thresholds.clone(),
+        width: snapshot.width,
+    };
+    let mut entries = states.0.borrow_mut();
+    let entry = entries
+        .get_mut(id)
+        .unwrap_or_else(|| panic!("invariant: chart {id} is synced before its geometry"));
+    if let Some((known, geometry)) = &entry.geometry
+        && *known == key
+    {
+        return Rc::clone(geometry);
+    }
+    let stable = Snapshot {
+        hidden: snapshot.hidden,
+        hover: None,
+        zoom: snapshot.zoom,
+        drag: None,
+        thresholds: snapshot.thresholds.clone(),
+        width: snapshot.width,
+    };
+    let geometry = Rc::new(plot::layout(theme, spec, model, &stable));
+    entry.geometry = Some((key, Rc::clone(&geometry)));
+    geometry
+}
+
+fn hover_readout(
+    theme: &ArtisanTheme,
+    spec: &ChartStyle,
+    model: &Model,
+    geometry: &Geometry,
+    visible: &[bool],
+    hover: usize,
+    services: &Services,
+) -> (String, Element) {
+    let x = model.xs.get(hover).copied().unwrap_or_default();
+    let values: Vec<(usize, f64)> = (0..model.series.len())
+        .filter(|i| visible[*i])
+        .filter_map(|i| model.value_at(i, x).map(|value| (i, value)))
+        .collect();
+    let scale = values
+        .iter()
+        .map(|(_, value)| value.abs())
+        .fold(0.0, f64::max);
+    let total = if scale > 0.0 {
+        values
+            .iter()
+            .map(|(_, value)| value.abs() / scale)
+            .sum::<f64>()
+    } else {
+        0.0
+    };
+    let mut rows = values
+        .iter()
+        .map(|(index, value)| {
+            let mut text = reading(*value, spec.y.unit.as_deref());
+            if spec.normalize && total > 0.0 {
+                text = format!("{text} · {}", percent((value.abs() / scale) / total));
+            }
+            (
+                Some(theme.colors.palette[index % 8].to_reference_paint()),
+                model.series[*index].name.clone(),
+                text,
+            )
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        rows.push((None, "No values".to_owned(), String::new()));
+    } else if spec.stacked && !spec.normalize && values.len() > 1 {
+        let sum = values.iter().map(|(_, value)| value).sum::<f64>();
+        rows.push((
+            None,
+            "Total".to_owned(),
+            if sum.is_finite() {
+                reading(sum, spec.y.unit.as_deref())
+            } else {
+                "Outside numeric range".to_owned()
+            },
+        ));
+    }
+    let heading = if model.is_categorical() {
+        model.x_label(x)
+    } else {
+        reading(x, spec.x.unit.as_deref())
+    };
+    let mut pieces = vec![heading.clone()];
+    pieces.extend(
+        rows.iter()
+            .map(|(_, label, value)| format!("{label}: {value}")),
+    );
+    let readout = (services.readout)(geometry.view.fraction(x), &heading, rows);
+    (pieces.join("; "), readout)
+}
+
+fn pointer_input(plot: Element, scope: ChartScope<'_>, view: Domain, probe: &Probe) -> Element {
+    let moving = scope.states.clone();
+    let moving_id = scope.id.to_owned();
+    let moving_probe = Rc::clone(probe);
+    let moving_invalidate = Rc::clone(scope.invalidate);
+    let release = scope.update(move |entry| ChartState::finish(entry, view));
+    let leave = scope.update(|entry| entry.hover.take().is_some());
+    plot.with_key(format!("{}-plot", scope.id))
         .cursor(CursorIcon::Crosshair)
         .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
             let RoutedInput::Native(InputEvent::PointerMove(pointer)) = &event.input else {
@@ -403,14 +481,7 @@ pub(crate) fn view(
             InputResponse::default()
         })
         .on_input(InputKind::PointerUp, EventPhase::Bubble, move |_| {
-            let mut entries = releasing.0.borrow_mut();
-            let changed = entries
-                .get_mut(&releasing_id)
-                .is_some_and(|entry| ChartState::finish(entry, view));
-            drop(entries);
-            if changed {
-                releasing_invalidate();
-            }
+            release();
             InputResponse {
                 pointer_capture: CaptureRequest::Release,
                 ..InputResponse::default()
@@ -418,21 +489,23 @@ pub(crate) fn view(
         })
         .on_hover_change(move |over| {
             if !over {
-                let mut entries = leaving.0.borrow_mut();
-                let changed = entries
-                    .get_mut(&leaving_id)
-                    .is_some_and(|entry| entry.hover.take().is_some());
-                drop(entries);
-                if changed {
-                    leaving_invalidate();
-                }
+                leave();
             }
-        });
-    let pressing = states.clone();
-    let pressing_id = id.to_owned();
-    let pressing_probe = probe;
-    let pressing_invalidate = Rc::clone(invalidate);
-    let plot = (services.press)(
+        })
+}
+
+fn pressable(
+    plot: Element,
+    scope: ChartScope<'_>,
+    view: Domain,
+    probe: &Probe,
+    services: &Services,
+) -> Element {
+    let pressing = scope.states.clone();
+    let pressing_id = scope.id.to_owned();
+    let pressing_probe = Rc::clone(probe);
+    let pressing_invalidate = Rc::clone(scope.invalidate);
+    (services.press)(
         plot,
         Rc::new(move |position, click_count| {
             let Some((fx, _)) = scene::fractions(&pressing_probe, position) else {
@@ -451,7 +524,16 @@ pub(crate) fn view(
             drop(entries);
             pressing_invalidate();
         }),
-    );
+    )
+}
+
+fn keyboard_navigation(
+    plot: Element,
+    scope: ChartScope<'_>,
+    model: &Model,
+    geometry: &Geometry,
+    selection: Option<String>,
+) -> Element {
     let first = model.xs.partition_point(|x| *x < geometry.view.lo);
     let end = model.xs.partition_point(|x| *x <= geometry.view.hi);
     let mut label =
@@ -461,10 +543,10 @@ pub(crate) fn view(
         label.push(' ');
         label.push_str(value);
     }
-    let keyboard = states.clone();
-    let keyboard_id = id.to_owned();
-    let keyboard_invalidate = Rc::clone(invalidate);
-    let nav = navigation_group(
+    let keyboard = scope.states.clone();
+    let keyboard_id = scope.id.to_owned();
+    let keyboard_invalidate = Rc::clone(scope.invalidate);
+    navigation_group(
         ui::Box::new()
             .style(
                 Style::new()
@@ -473,7 +555,7 @@ pub(crate) fn view(
             )
             .child(plot)
             .build(),
-        id,
+        scope.id,
         label,
         selection,
         move |code, alt| {
@@ -483,19 +565,19 @@ pub(crate) fn view(
             }
             handled
         },
-    );
-    let nav = (services.navigation)(nav, theme.colors.ring.to_reference_paint());
-    let framed = (services.frame)(
-        nav,
-        geometry.y_ticks.clone(),
-        geometry.x_ticks.clone(),
-        geometry.end_labels.clone(),
-        axis_title(spec.y.label.as_deref(), spec.y.unit.as_deref()),
-        axis_title(spec.x.label.as_deref(), spec.x.unit.as_deref()),
-    );
-    let toggling = states.clone();
-    let toggle_id = id.to_owned();
-    let toggle_invalidate = Rc::clone(invalidate);
+    )
+}
+
+fn chart_header(
+    theme: &ArtisanTheme,
+    model: &Model,
+    entry: &EntrySnapshot,
+    scope: ChartScope<'_>,
+    services: &Services,
+) -> Element {
+    let toggling = scope.states.clone();
+    let toggle_id = scope.id.to_owned();
+    let toggle_invalidate = Rc::clone(scope.invalidate);
     let toggle = Rc::new(move |index: usize| {
         let mut entries = toggling.0.borrow_mut();
         if let Some(value) = entries
@@ -507,7 +589,7 @@ pub(crate) fn view(
         drop(entries);
         toggle_invalidate();
     });
-    let entries = model
+    let legend = model
         .series
         .iter()
         .enumerate()
@@ -515,7 +597,7 @@ pub(crate) fn view(
             (
                 series.name.clone(),
                 theme.colors.palette[i % 8].to_reference_paint(),
-                hidden.get(i).copied().unwrap_or(false),
+                entry.hidden.get(i).copied().unwrap_or(false),
             )
         })
         .collect();
@@ -527,51 +609,49 @@ pub(crate) fn view(
                 .align(aqua_ui::AlignItems::CENTER)
                 .gap(Space::S12.px()),
         )
-        .child((services.legend)(entries, toggle))
+        .child((services.legend)(legend, toggle))
         .child(ui::Box::new().style(Style::new().flex_grow(1.0)).build());
-    if zoom.is_some() {
-        let resetting = states;
-        let reset_id = id.to_owned();
-        let reset_invalidate = Rc::clone(invalidate);
-        header = header.child((services.reset)(Rc::new(move || {
-            if let Some(entry) = resetting.0.borrow_mut().get_mut(&reset_id) {
-                entry.zoom = None;
-            }
-            reset_invalidate();
-        })));
+    if entry.zoom.is_some() {
+        let reset = scope.update(|entry| {
+            entry.zoom = None;
+            true
+        });
+        header = header.child((services.reset)(Rc::new(reset)));
     }
-    let mut root = ui::Box::new()
-        .layout("column")
-        .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
-        .child(header.build())
-        .child(framed);
-    for (index, (label, slider)) in sliders.into_iter().enumerate() {
-        let value = slider.borrow().value();
-        let (above, all) = model.at_or_above(&visible, value);
-        let share = if all == 0 {
-            "–".to_owned()
-        } else {
-            percent(f64_of(above) / f64_of(all))
-        };
-        let unit = plot::effective_axis(spec).unit;
-        let readout = format!(
-            "{} · {share} of points at or above ({above} of {all})",
-            reading(value, unit.as_deref())
-        );
-        let refresh = Rc::clone(invalidate);
-        root = root.child(
-            Slider::new(
-                format!("{id}-slider-{index}"),
-                theme,
-                label,
-                readout,
-                slider,
-            )
-            .on_change(move |_| refresh())
-            .build(),
-        );
-    }
-    root.build()
+    header.build()
+}
+
+fn threshold_slider(
+    theme: &ArtisanTheme,
+    spec: &ChartStyle,
+    model: &Model,
+    visible: &[bool],
+    scope: ChartScope<'_>,
+    index: usize,
+    (label, slider): (String, Rc<RefCell<SliderState>>),
+) -> Element {
+    let value = slider.borrow().value();
+    let (above, all) = model.at_or_above(visible, value);
+    let share = if all == 0 {
+        "–".to_owned()
+    } else {
+        percent(f64_of(above) / f64_of(all))
+    };
+    let unit = plot::effective_axis(spec).unit;
+    let readout = format!(
+        "{} · {share} of points at or above ({above} of {all})",
+        reading(value, unit.as_deref())
+    );
+    let refresh = Rc::clone(scope.invalidate);
+    Slider::new(
+        format!("{}-slider-{index}", scope.id),
+        *theme,
+        label,
+        readout,
+        slider,
+    )
+    .on_change(move |_| refresh())
+    .build()
 }
 
 #[cfg(feature = "test-support")]

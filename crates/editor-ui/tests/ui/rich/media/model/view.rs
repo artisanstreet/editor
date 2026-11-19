@@ -221,7 +221,7 @@ fn the_model_viewport_shows_a_focus_ring_when_tab_reaches_it() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut app = loop {
         assets.drain();
-        let element = block.view("model", 400.0, 1.0, None, state.clone(), &services);
+        let element = block.view("model", 400.0, 1.0, None, &state.clone(), &services);
         let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
         app.mount(move |_| element).unwrap();
         app.set_viewport(600.0, 600.0, 1.0);
