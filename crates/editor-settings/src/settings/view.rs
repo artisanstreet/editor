@@ -584,7 +584,9 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
         .map(|(config, host)| {
             let (state, ink) = match &host.status {
                 ConnectionStatus::Live => ("Connected".to_owned(), Ink::Success),
-                ConnectionStatus::Connecting => ("Connecting…".to_owned(), Ink::Muted),
+                ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => {
+                    ("Connecting…".to_owned(), Ink::Muted)
+                }
                 ConnectionStatus::Offline { reason, .. } => {
                     (format!("Offline: {reason}"), Ink::Danger)
                 }

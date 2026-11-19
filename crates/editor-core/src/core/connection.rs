@@ -30,6 +30,9 @@ pub enum Update {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
     Connecting,
+    Reconnecting {
+        attempt: u32,
+    },
     Live,
     Offline {
         attempt: u32,
@@ -164,11 +167,11 @@ pub async fn run(
     let mut since = None;
     let mut attempt = 0_u32;
     loop {
-        if (since.is_none() || attempt > 0)
-            && !updates
-                .deliver(Update::Status(ConnectionStatus::Connecting))
-                .await
-        {
+        let connecting = match attempt {
+            0 => ConnectionStatus::Connecting,
+            attempt => ConnectionStatus::Reconnecting { attempt },
+        };
+        if (since.is_none() || attempt > 0) && !updates.deliver(Update::Status(connecting)).await {
             return;
         }
         let mut live_since = None;

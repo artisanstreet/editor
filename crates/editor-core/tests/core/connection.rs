@@ -198,3 +198,23 @@ fn an_event_larger_than_the_frame_limit_is_refused_instead_of_waiting_forever() 
     ));
     assert!(matches!(connection::admission_bytes(1024), Ok(1024)));
 }
+
+#[test]
+fn only_a_connection_that_was_lost_reports_reconnecting() {
+    current_thread(Duration::from_secs(20), async {
+        let mut follower = Follower::start(
+            axum::Router::new().route("/events", axum::routing::get(hello_then_close)),
+            Deadlines::FORGE,
+        )
+        .await;
+        assert_eq!(follower.status().await, ConnectionStatus::Connecting);
+        assert_eq!(follower.status().await, ConnectionStatus::Live);
+        assert_eq!(follower.offline().await.0, 1);
+        follower.retry.notify_one();
+        assert_eq!(
+            follower.status().await,
+            ConnectionStatus::Reconnecting { attempt: 1 },
+            "a dropped stream reconnects as a reconnection"
+        );
+    });
+}

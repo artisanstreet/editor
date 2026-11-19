@@ -131,7 +131,8 @@ impl HostData {
     pub fn status_line(&self) -> Option<&'static str> {
         match &self.status {
             crate::core::ConnectionStatus::Live => None,
-            crate::core::ConnectionStatus::Connecting => Some("Connecting…"),
+            crate::core::ConnectionStatus::Connecting
+            | crate::core::ConnectionStatus::Reconnecting { .. } => Some("Connecting…"),
             crate::core::ConnectionStatus::Offline { .. } => Some(match &self.wsl {
                 Some(wsl) if !wsl.running => "WSL stopped",
                 Some(_) => "Forge stopped",

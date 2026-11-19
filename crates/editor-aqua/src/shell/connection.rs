@@ -113,10 +113,10 @@ impl WordmarkLoader {
 }
 
 #[must_use]
-pub(crate) fn lost(status: &ConnectionStatus) -> Option<Element> {
+pub fn lost(status: &ConnectionStatus) -> Option<Element> {
     match status {
-        ConnectionStatus::Live => None,
-        ConnectionStatus::Connecting | ConnectionStatus::Offline { .. } => Some(
+        ConnectionStatus::Live | ConnectionStatus::Connecting => None,
+        ConnectionStatus::Reconnecting { .. } | ConnectionStatus::Offline { .. } => Some(
             UiBox::new()
                 .width(0.0)
                 .height(0.0)
@@ -244,7 +244,7 @@ impl ConnectionPresenter {
                 self.last_failure = None;
                 return None;
             }
-            ConnectionStatus::Connecting => None,
+            ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => None,
             ConnectionStatus::Offline { code, reason, .. } => {
                 self.last_failure = Some(reason.clone());
                 *code

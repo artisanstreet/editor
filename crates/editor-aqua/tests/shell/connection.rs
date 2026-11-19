@@ -48,3 +48,26 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     presenter.dispatch(&mut core);
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::Hosts));
 }
+
+#[test]
+fn screen_readers_hear_a_lost_connection_only_after_one_was_lost() {
+    use editor_aqua::shell::connection::lost;
+    assert!(
+        lost(&ConnectionStatus::Connecting).is_none(),
+        "opening the Editor is not announced as a lost connection"
+    );
+    assert!(lost(&ConnectionStatus::Live).is_none());
+    for interrupted in [
+        ConnectionStatus::Offline {
+            attempt: 1,
+            reason: "Forge's event stream closed".into(),
+            code: None,
+        },
+        ConnectionStatus::Reconnecting { attempt: 1 },
+    ] {
+        assert!(
+            lost(&interrupted).is_some(),
+            "{interrupted:?} is announced as a lost connection"
+        );
+    }
+}
