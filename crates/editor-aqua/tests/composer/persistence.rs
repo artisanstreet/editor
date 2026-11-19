@@ -847,3 +847,66 @@ fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
         );
     });
 }
+
+#[test]
+fn a_full_set_of_open_drafts_refuses_a_new_one_until_one_settles_and_closes() {
+    use editor_aqua::composer::persistence::MAX_OPEN_DRAFTS;
+
+    let (_directory, core, config, _client) = fixture();
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let forge = tokio::spawn(async move {
+            loop {
+                let (mut socket, _, _) = request(&listener, &acceptor).await;
+                respond(&mut socket, json!({"revision": 0, "body": null})).await;
+            }
+        });
+        let mut sessions = DraftSessions::default();
+        let mut leases: Vec<DraftLease> = (0..MAX_OPEN_DRAFTS)
+            .map(|draft| {
+                sessions
+                    .open(
+                        config.id.clone(),
+                        instance,
+                        format!("thread:{draft}"),
+                        client.clone(),
+                    )
+                    .expect("a slot is free")
+            })
+            .collect();
+        let full = sessions
+            .open(
+                config.id.clone(),
+                instance,
+                "thread:new".into(),
+                client.clone(),
+            )
+            .err()
+            .expect("every slot holds an open draft");
+        assert_eq!(full.host, config.id);
+        assert_eq!(full.scope, "thread:new");
+
+        let first = leases.remove(0);
+        let mut changed = first.subscribe();
+        while !first.read(|state| state.is_loaded()) {
+            changed.changed().await.unwrap();
+        }
+        drop(first);
+        test_support::wait::wait_until(
+            "a closed draft with nothing left to save to free its slot",
+            Duration::from_secs(5),
+            || {
+                sessions
+                    .open(
+                        config.id.clone(),
+                        instance,
+                        "thread:new".into(),
+                        client.clone(),
+                    )
+                    .is_ok()
+            },
+        );
+        forge.abort();
+    });
+}

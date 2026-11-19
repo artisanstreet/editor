@@ -119,6 +119,28 @@ impl TryFrom<PathBuf> for DraftPath {
     }
 }
 
+fn open_draft(
+    core: &Core,
+    sessions: &mut DraftSessions,
+    target: &ComposerTarget,
+) -> (Option<DraftLease>, Option<String>) {
+    let Some(host) = core.host(target.host()) else {
+        return (None, None);
+    };
+    match sessions.open(
+        host.id.clone(),
+        host.instance(),
+        target.scope(),
+        host.client.clone(),
+    ) {
+        Ok(lease) => (Some(lease), None),
+        Err(full) => {
+            tracing::warn!(host = %full.host, scope = %full.scope, "draft capacity reached; composer disabled");
+            (None, Some(full.to_string()))
+        }
+    }
+}
+
 pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,
@@ -157,17 +179,9 @@ impl Drop for Composer {
 
 impl Composer {
     pub fn new(core: &Core, sessions: &mut DraftSessions, target: ComposerTarget) -> Self {
-        let session = core.host(target.host()).and_then(|host| {
-            sessions.open(
-                host.id.clone(),
-                host.instance(),
-                target.scope(),
-                host.client.clone(),
-            )
-        });
+        let (session, notice) = open_draft(core, sessions, &target);
         let mut editor = Editor::new("", Mode::Prompt);
         editor.set_disabled(session.is_none());
-        let notice = (session.is_none() && core.host(target.host()).is_some()).then(|| "There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".to_owned());
         let host_instance = core.host(target.host()).map(HostData::instance);
         let attachments = core
             .host(target.host())
@@ -249,25 +263,30 @@ impl Composer {
         self.attachments = core
             .host(self.target.host())
             .map(|host| Attachments::new(host.client.clone()));
-        self.session = core.host(self.target.host()).and_then(|host| {
-            sessions.open(
-                host.id.clone(),
-                host.instance(),
-                self.target.scope(),
-                host.client.clone(),
-            )
-        });
-        if self.session.is_none() && self.host_instance.is_some() {
-            self.notice = Some("There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".into());
+        let (session, notice) = open_draft(core, sessions, &self.target);
+        if notice.is_some() {
             self.editor.borrow_mut().set_disabled(true);
         }
+        self.session = session;
+        self.notice = notice;
     }
 
     fn hand_off_attachments(&mut self) {
-        let (Some(session), Some(attachments)) = (&self.session, &mut self.attachments) else {
+        let uploads = self
+            .attachments
+            .as_mut()
+            .map_or_else(Vec::new, Attachments::take_unfinished);
+        if uploads.is_empty() {
             return;
-        };
-        for upload in attachments.take_unfinished() {
+        }
+        let session = self.session.as_ref().unwrap_or_else(|| {
+            panic!(
+                "invariant: composer for {} on Forge {} only accepts images while it has a draft session",
+                self.target.scope(),
+                self.target.host()
+            )
+        });
+        for upload in uploads {
             session.adopt_image(upload);
         }
     }

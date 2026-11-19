@@ -42,6 +42,17 @@ struct Inner {
     cancelled: CancellationToken,
 }
 
+pub const MAX_OPEN_DRAFTS: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "There are {MAX_OPEN_DRAFTS} open or unsaved drafts. Finish saving a draft, then reopen this thread."
+)]
+pub struct DraftsFull {
+    pub host: HostId,
+    pub scope: String,
+}
+
 impl Inner {
     fn shared(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(|poisoned| {
@@ -225,12 +236,12 @@ impl DraftSessions {
         instance: HostInstance,
         scope: String,
         client: ForgeClient,
-    ) -> Option<DraftLease> {
+    ) -> Result<DraftLease, DraftsFull> {
         let key = (host.clone(), instance, scope.clone());
         if let Some(session) = self.sessions.get(&key) {
-            return Some(DraftLease::new(session.clone()));
+            return Ok(DraftLease::new(session.clone()));
         }
-        if self.sessions.len() >= 64 {
+        if self.sessions.len() >= MAX_OPEN_DRAFTS {
             let removable = self
                 .sessions
                 .iter()
@@ -242,8 +253,8 @@ impl DraftSessions {
                 self.sessions.remove(&key);
             }
         }
-        if self.sessions.len() >= 64 {
-            return None;
+        if self.sessions.len() >= MAX_OPEN_DRAFTS {
+            return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
         let recovered = match self.spool.as_ref().map(|spool| spool.take(&host, &scope)) {
@@ -282,7 +293,7 @@ impl DraftSessions {
         self.sessions.insert(key, session.clone());
         let lease = DraftLease::new(session.clone());
         session.pump();
-        Some(lease)
+        Ok(lease)
     }
 
     pub fn retain_hosts(&mut self, core: &Core) {
