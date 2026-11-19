@@ -78,8 +78,6 @@ fn millis(duration: Duration) -> Timestamp {
     Timestamp::try_from(duration.as_millis()).unwrap_or(Timestamp::MAX)
 }
 
-const RECHECK: Duration = Duration::from_secs(1);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Parked {
     Due(Timestamp),
@@ -95,16 +93,18 @@ pub(crate) enum Wake {
 
 fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
     match parked {
-        Parked::Nothing => Wake::Never,
-        Parked::Unreadable => Wake::After(RECHECK),
-        Parked::Due(due_at) => {
-            let wait = Duration::from_millis(u64::try_from(due_at - now).unwrap_or(0));
-            Wake::After(if stalled { wait.max(RECHECK) } else { wait })
-        }
+        Parked::Nothing | Parked::Unreadable => Wake::Never,
+        Parked::Due(due_at) if stalled && due_at <= now => Wake::Never,
+        Parked::Due(due_at) => Wake::After(Duration::from_millis(
+            u64::try_from(due_at - now).unwrap_or(0),
+        )),
     }
 }
 
-pub(crate) async fn until_next(hub: &Hub, stalled: bool) -> impl Future<Output = ()> + use<> {
+pub(crate) async fn until_next(
+    hub: &Hub,
+    stalled: bool,
+) -> (impl Future<Output = ()> + use<>, bool) {
     let parked = match hub.store().next_parked().await {
         Ok(Some(due_at)) => Parked::Due(due_at),
         Ok(None) => Parked::Nothing,
@@ -114,12 +114,13 @@ pub(crate) async fn until_next(hub: &Hub, stalled: bool) -> impl Future<Output =
         }
     };
     let wake = wake(parked, artisan_api::now(), stalled);
-    async move {
+    let waiting = async move {
         match wake {
             Wake::After(wait) => tokio::time::sleep(wait).await,
             Wake::Never => std::future::pending().await,
         }
-    }
+    };
+    (waiting, parked != Parked::Unreadable)
 }
 
 #[cfg(test)]

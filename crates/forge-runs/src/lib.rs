@@ -108,7 +108,14 @@ struct Inner {
 
 const RUN_CAPACITY: usize = 8;
 
-const UNSETTLED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+const FIRST_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+const LONGEST_RETRY: std::time::Duration = std::time::Duration::from_mins(1);
+
+fn retry_delay(failures: u32) -> std::time::Duration {
+    FIRST_RETRY
+        .saturating_mul(2_u32.saturating_pow(failures.saturating_sub(1).min(6)))
+        .min(LONGEST_RETRY)
+}
 
 struct LiveRun {
     id: RunId,
@@ -1072,9 +1079,10 @@ impl Hub {
         self.resume_pending();
     }
 
-    async fn settle_unsettled(&self) {
+    async fn settle_unsettled(&self) -> bool {
         let waiting: Vec<forge_store::Settlement> =
             self.unsettled_lock().values().cloned().collect();
+        let mut settled = true;
         for settlement in waiting {
             let thread = settlement.run.thread_id.clone();
             let run = settlement.run.id.clone();
@@ -1086,10 +1094,12 @@ impl Hub {
                     self.resume_pending();
                 }
                 Err(error) => {
+                    settled = false;
                     tracing::warn!(%thread, %run, "saving the run's end failed again: {}", diagnostics::chain(&error));
                 }
             }
         }
+        settled
     }
 
     fn untitled_lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<ThreadId>> {
@@ -1107,23 +1117,39 @@ impl Hub {
         self.inner.tasks.spawn_on(
             async move {
                 let mut stalled = false;
+                let mut failures = 0_u32;
                 loop {
-                    let parked = park::until_next(&hub, stalled).await;
+                    let (parked, readable) = park::until_next(&hub, stalled).await;
+                    let retry = async {
+                        if failures == 0 && readable {
+                            std::future::pending::<()>().await;
+                        } else {
+                            tokio::time::sleep(retry_delay(failures)).await;
+                        }
+                    };
                     tokio::select! {
                         biased;
                         () = hub.inner.shutdown.cancelled() => break,
                         () = hub.inner.dispatch.notified() => {},
                         () = parked => {},
-                        () = async { if hub.unsettled_lock().is_empty() { std::future::pending().await } else { tokio::time::sleep(UNSETTLED_RETRY).await } } => {},
+                        () = retry => {},
                     }
-                    hub.settle_unsettled().await;
+                    let mut failed = !readable;
+                    failed |= !hub.settle_unsettled().await;
                     stalled = true;
                     loop {
                         let _admission = hub.inner.admission.lock().await;
                         if hub.inner.shutdown.is_cancelled() {
                             return;
                         }
-                        if hub.inner.generation.as_ref().is_some_and(|generation| !generation.accepting()) { break; }
+                        if hub
+                            .inner
+                            .generation
+                            .as_ref()
+                            .is_some_and(|generation| !generation.accepting())
+                        {
+                            break;
+                        }
                         let excluded = hub.active_thread_ids();
                         let foreign = excluded.len().saturating_sub(hub.local_active_count());
                         if hub.inner.harness_slots.available_permits() <= foreign {
@@ -1136,7 +1162,11 @@ impl Hub {
                         let next = match hub.store().pending_threads(1, excluded).await {
                             Ok(threads) => threads.into_iter().next(),
                             Err(error) => {
-                                tracing::error!("read pending run candidates: {}", diagnostics::chain(&error));
+                                tracing::error!(
+                                    "read pending run candidates: {}",
+                                    diagnostics::chain(&error)
+                                );
+                                failed = true;
                                 break;
                             }
                         };
@@ -1146,6 +1176,11 @@ impl Hub {
                         stalled = false;
                         hub.claim(thread, permit);
                     }
+                    failures = if failed {
+                        failures.saturating_add(1)
+                    } else {
+                        0
+                    };
                 }
             },
             &runtime,

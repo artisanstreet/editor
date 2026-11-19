@@ -13,17 +13,17 @@ fn overload_retries_back_off_to_five_minutes_and_keep_going() {
 }
 
 #[test]
-fn the_dispatcher_rechecks_a_parked_turn_it_could_not_start_instead_of_spinning() {
+fn a_parked_turn_the_dispatcher_could_not_start_waits_for_the_next_change_instead_of_polling() {
     assert_eq!(
         wake(Parked::Due(900), 1_000, false),
         Wake::After(Duration::ZERO)
     );
-    assert_eq!(wake(Parked::Due(900), 1_000, true), Wake::After(RECHECK));
+    assert_eq!(wake(Parked::Due(900), 1_000, true), Wake::Never);
     assert_eq!(
         wake(Parked::Due(1_000 + 60_000), 1_000, true),
         Wake::After(Duration::from_mins(1))
     );
-    assert_eq!(wake(Parked::Unreadable, 1_000, false), Wake::After(RECHECK));
+    assert_eq!(wake(Parked::Unreadable, 1_000, false), Wake::Never);
     assert_eq!(wake(Parked::Nothing, 1_000, true), Wake::Never);
 }
 
