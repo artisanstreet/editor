@@ -459,7 +459,7 @@ pub(crate) fn readout_rows_at(
                     .build(),
             );
     }
-    wrapper.build()
+    wrapper.build().exclude_from_hit_testing()
 }
 
 pub(crate) fn tick_strip(theme: &ArtisanTheme, ticks: Vec<super::distribution::Tick>) -> Element {

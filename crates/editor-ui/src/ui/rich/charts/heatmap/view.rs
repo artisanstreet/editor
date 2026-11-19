@@ -108,6 +108,18 @@ impl HeatmapState {
         changed
     }
 
+    fn leave(&self, id: &str, row: usize) -> bool {
+        let mut entries = self.0.borrow_mut();
+        let Some(entry) = entries.get_mut(id) else {
+            return false;
+        };
+        if entry.selected.is_none_or(|(selected, _)| selected != row) {
+            return false;
+        }
+        entry.selected = None;
+        true
+    }
+
     fn key(&self, id: &str, rows: usize, columns: usize, code: NamedKey, alt: bool) -> bool {
         let mut entries = self.0.borrow_mut();
         let Some(entry) = entries.get_mut(id) else {
@@ -210,6 +222,9 @@ impl Heatmap {
                 let state = row_states.clone();
                 let key = row_id.clone();
                 let invalidate = Rc::clone(&row_invalidate);
+                let leaving = row_states.clone();
+                let leave_key = row_id.clone();
+                let leave_invalidate = Rc::clone(&row_invalidate);
                 let content = row_canvas(&model, &theme, row, selected, probe);
                 let plot = ui::Box::new()
                     .style(
@@ -232,6 +247,11 @@ impl Heatmap {
                             invalidate();
                         }
                         InputResponse::default()
+                    })
+                    .on_hover_change(move |hovered| {
+                        if !hovered && leaving.leave(&leave_key, row) {
+                            leave_invalidate();
+                        }
                     });
                 ui::Box::new()
                     .layout("row")
