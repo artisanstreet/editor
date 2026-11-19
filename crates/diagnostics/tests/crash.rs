@@ -25,6 +25,22 @@ fn crash(data: &Path, recent: diagnostics::RecentLines) -> ! {
     abandon_turn()
 }
 
+fn has_frame_at(frames: &str, function: &str, line: u32) -> bool {
+    let lines: Vec<&str> = frames.lines().map(str::trim).collect();
+    lines.windows(2).any(|pair| {
+        let named = pair[0]
+            .split_once(": ")
+            .is_some_and(|(_, name)| name.rsplit("::").next() == Some(function));
+        let located = pair[1]
+            .strip_prefix("at ")
+            .and_then(|location| location.split_once("crash.rs:"))
+            .is_some_and(|(_, position)| {
+                position.split(':').next() == Some(line.to_string().as_str())
+            });
+        named && located
+    })
+}
+
 #[test]
 fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
     if let Some(data) = std::env::var_os(CRASH_DATA) {
@@ -60,7 +76,7 @@ fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
     assert!(spans.contains("turn"), "{spans}");
     assert!(spans.contains("thread=\"t-42\""), "{spans}");
     assert!(spans.contains("run=\"r-7\""), "{spans}");
-    assert!(frames.contains("crash::abandon_turn"), "{frames}");
+    assert!(has_frame_at(frames, "abandon_turn", PANIC_LINE), "{frames}");
     assert!(frames.contains("a_panic_writes_a_report"), "{frames}");
     assert!(log.contains("turn started"), "{log}");
     assert!(log.contains("host=\"h-3\""), "{log}");
