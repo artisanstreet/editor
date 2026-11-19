@@ -724,6 +724,7 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
+        let lost = session.take_lost_images();
         let (presentable, sending, failed, body, unreadable) = session.read(|state| {
             (
                 state.presentable(),
@@ -763,6 +764,12 @@ impl Composer {
                 }
                 SessionEvent::Changed => {}
             }
+        }
+        for lost in lost {
+            self.attachments
+                .as_mut()
+                .expect("invariant: a composer with a draft session has its Forge's attachments")
+                .add_failed(lost.name, diagnostics::chain(&lost.failure));
         }
         if failed
             && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored)

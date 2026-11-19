@@ -1,11 +1,11 @@
-use super::attachment::{PendingUpload, UploadImageError};
+use super::attachment::{PendingUpload, ReadImageError, UploadImageError};
 use super::draft_body::{DraftBody, EMPTY_BODY, RemoteBody};
 use artisan_api::{
-    BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ItemId, SendMessage,
-    ThreadId,
+    BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, Failure, ItemId,
+    ResourceFailure, SendMessage, ThreadId,
 };
 use editor_core::client::CallError;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(400);
 
@@ -57,8 +57,30 @@ pub enum PostMessageError {
 pub enum AdoptImageError {
     #[error("the draft closed before the image finished uploading")]
     Closed,
+    #[error("read the image")]
+    Read(#[source] ReadImageError),
+    #[error("the image reading task stopped")]
+    ReadTask(#[source] tokio::task::JoinError),
     #[error(transparent)]
     Upload(#[from] UploadImageError),
+}
+
+impl AdoptImageError {
+    fn permanent(&self) -> bool {
+        match self {
+            Self::Closed => false,
+            Self::ReadTask(error) | Self::Upload(UploadImageError::Task(error)) => error.is_panic(),
+            Self::Read(_) | Self::Upload(UploadImageError::Encode(_)) => true,
+            Self::Upload(UploadImageError::Put(error)) => matches!(
+                error.refused(),
+                Some(Failure::Resource(
+                    ResourceFailure::TooLarge { .. }
+                        | ResourceFailure::NotWebp
+                        | ResourceFailure::TooManyPixels { .. }
+                ))
+            ),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -155,18 +177,38 @@ enum Send {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AdoptionKey(u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub(crate) enum AdoptedImage {
+    Unread(PendingUpload),
+    Read(Arc<[u8]>),
+}
+
+#[derive(Debug)]
 enum Upload {
     Queued,
     Running,
-    Failed,
+    Waiting(DraftFailure),
 }
 
 #[derive(Debug)]
 struct Adoption {
     key: AdoptionKey,
-    image: PendingUpload,
+    name: String,
+    image: AdoptedImage,
     upload: Upload,
+}
+
+#[derive(Debug)]
+pub struct LostImage {
+    pub name: String,
+    pub failure: DraftFailure,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Planned {
+    Load,
+    Write,
+    Post,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,6 +244,7 @@ struct Draft {
     remote: Remote,
     edits: Edits,
     adopting: Vec<Adoption>,
+    lost: Vec<LostImage>,
     next_adoption: u64,
     request: Request,
     halt: Halt,
@@ -315,9 +358,76 @@ impl Draft {
             .expect("invariant: a draft adopts fewer than u64::MAX images");
         self.adopting.push(Adoption {
             key,
-            image,
+            name: image.name().to_owned(),
+            image: AdoptedImage::Unread(image),
             upload: Upload::Queued,
         });
+    }
+
+    fn requeue_waiting(&mut self) {
+        for adoption in &mut self.adopting {
+            if let Upload::Waiting(_) = adoption.upload {
+                adoption.upload = Upload::Queued;
+            }
+        }
+    }
+
+    fn merge_image(&mut self, hash: BlobHash) {
+        let mut body = self.body.clone();
+        body.add_image(hash);
+        if body != self.body {
+            self.body = body;
+            self.edits.edit();
+        }
+    }
+
+    fn fail_adoption(&mut self, scope: &str, index: usize, source: AdoptImageError) {
+        let permanent = source.permanent();
+        let failure = DraftFailure::Upload {
+            scope: scope.to_owned(),
+            source,
+        };
+        tracing::warn!(
+            %scope,
+            permanent,
+            error = %diagnostics::chain(&failure),
+            "an image pasted before leaving the draft failed to upload"
+        );
+        if permanent {
+            let adoption = self.adopting.remove(index);
+            self.lost.push(LostImage {
+                name: adoption.name,
+                failure,
+            });
+        } else {
+            self.adopting[index].upload = Upload::Waiting(failure);
+        }
+    }
+
+    fn adoption(&self, scope: &str, key: AdoptionKey) -> Option<usize> {
+        let index = self
+            .adopting
+            .iter()
+            .position(|adoption| adoption.key == key);
+        if index.is_none() {
+            tracing::info!(%scope, "an image upload finished after its draft version was discarded");
+        }
+        index
+    }
+
+    fn plan(&self) -> Option<Planned> {
+        if self.request != Request::Idle || self.halted() {
+            return None;
+        }
+        let saved = self.edits.saved;
+        let posting = self
+            .outgoing()
+            .is_some_and(|outgoing| outgoing.stage == Stage::Queued && saved >= outgoing.edited);
+        match &self.remote {
+            Remote::Unloaded | Remote::Ambiguous { .. } => Some(Planned::Load),
+            Remote::Loaded(_) if self.edits.unsaved() && !posting => Some(Planned::Write),
+            Remote::Loaded(_) => posting.then_some(Planned::Post),
+        }
     }
 
     fn finish(&mut self, scope: &str, expected: Request) {
@@ -341,6 +451,7 @@ impl DraftSession {
                     saved: 0,
                 },
                 adopting: Vec::new(),
+                lost: Vec::new(),
                 next_adoption: 0,
                 request: Request::Idle,
                 halt: Halt::Clear,
@@ -395,7 +506,13 @@ impl DraftSession {
         match &self.state {
             State::Removed => Some(REMOVED.to_owned()),
             State::Open(draft) => match &draft.halt {
-                Halt::Clear => None,
+                Halt::Clear => draft
+                    .adopting
+                    .iter()
+                    .find_map(|adoption| match &adoption.upload {
+                        Upload::Waiting(failure) => Some(diagnostics::chain(failure)),
+                        Upload::Queued | Upload::Running => None,
+                    }),
                 Halt::Failed(failure) => Some(diagnostics::chain(failure)),
                 Halt::Conflict { .. } => Some(CONFLICT.to_owned()),
             },
@@ -408,6 +525,19 @@ impl DraftSession {
                 && !draft.edits.unsaved()
                 && draft.outgoing().is_none()
                 && draft.adopting.is_empty()
+                && draft.lost.is_empty()
+        })
+    }
+
+    pub fn stuck(&self) -> bool {
+        self.draft().is_none_or(|draft| {
+            draft.halted()
+                || (draft.request == Request::Idle
+                    && draft.plan().is_none()
+                    && draft
+                        .adopting
+                        .iter()
+                        .all(|adoption| matches!(adoption.upload, Upload::Waiting(_))))
         })
     }
 
@@ -439,18 +569,16 @@ impl DraftSession {
         }
     }
 
-    pub(crate) fn next_uploads(&mut self) -> Vec<(AdoptionKey, PendingUpload)> {
+    pub(crate) fn next_uploads(&mut self) -> Vec<(AdoptionKey, AdoptedImage)> {
         let State::Open(draft) = &mut self.state else {
             return Vec::new();
         };
-        let halted = draft.halted();
         draft
             .adopting
             .iter_mut()
             .filter(|adoption| match adoption.upload {
                 Upload::Queued => true,
-                Upload::Failed => !halted,
-                Upload::Running => false,
+                Upload::Running | Upload::Waiting(_) => false,
             })
             .map(|adoption| {
                 adoption.upload = Upload::Running;
@@ -459,7 +587,23 @@ impl DraftSession {
             .collect()
     }
 
-    pub(crate) fn unacknowledged_images(&self) -> Vec<PendingUpload> {
+    pub(crate) fn image_read(&mut self, key: AdoptionKey, bytes: Arc<[u8]>) {
+        let State::Open(draft) = &mut self.state else {
+            return;
+        };
+        if let Some(index) = draft.adoption(&self.scope, key) {
+            draft.adopting[index].image = AdoptedImage::Read(bytes);
+        }
+    }
+
+    pub fn take_lost_images(&mut self) -> Vec<LostImage> {
+        match &mut self.state {
+            State::Open(draft) => std::mem::take(&mut draft.lost),
+            State::Removed => Vec::new(),
+        }
+    }
+
+    pub(crate) fn unacknowledged_images(&self) -> Vec<AdoptedImage> {
         self.draft().map_or_else(Vec::new, |draft| {
             draft
                 .adopting
@@ -477,39 +621,23 @@ impl DraftSession {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
-        let Some(index) = draft
-            .adopting
-            .iter()
-            .position(|adoption| adoption.key == key)
-        else {
-            tracing::info!(scope = %self.scope, "an image upload finished after its draft version was discarded");
-            return None;
-        };
-        assert_eq!(
-            draft.adopting[index].upload,
-            Upload::Running,
+        let index = draft.adoption(&self.scope, key)?;
+        assert!(
+            matches!(draft.adopting[index].upload, Upload::Running),
             "invariant: draft {} finished an image upload it started",
             self.scope
         );
-        let hash = match result {
+        match result {
             Ok(hash) => {
                 draft.adopting.remove(index);
-                hash
+                draft.merge_image(hash.clone());
+                Some(hash)
             }
             Err(source) => {
-                draft.adopting[index].upload = Upload::Failed;
-                let failure = DraftFailure::Upload {
-                    scope: self.scope.clone(),
-                    source,
-                };
-                draft.fail(&self.scope, failure);
-                return None;
+                draft.fail_adoption(&self.scope, index, source);
+                None
             }
-        };
-        let mut body = draft.body.clone();
-        body.add_image(hash.clone());
-        draft.queue(body);
-        Some(hash)
+        }
     }
 
     pub const fn removed(&self) -> bool {
@@ -572,6 +700,7 @@ impl DraftSession {
         if let State::Open(draft) = &mut self.state {
             draft.clear_failure();
             draft.requeue();
+            draft.requeue_waiting();
         }
     }
 
@@ -609,16 +738,10 @@ impl DraftSession {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
-        if draft.request != Request::Idle || draft.halted() {
-            return None;
-        }
-        let saved = draft.edits.saved;
-        let posting = draft
-            .outgoing()
-            .is_some_and(|outgoing| outgoing.stage == Stage::Queued && saved >= outgoing.edited);
-        let (request, operation) = match &draft.remote {
-            Remote::Unloaded | Remote::Ambiguous { .. } => (Request::Loading, Operation::Load),
-            Remote::Loaded(snapshot) if draft.edits.unsaved() && !posting => (
+        let planned = draft.plan()?;
+        let (request, operation) = match (planned, &mut draft.remote, &mut draft.send) {
+            (Planned::Load, _, _) => (Request::Loading, Operation::Load),
+            (Planned::Write, Remote::Loaded(snapshot), _) => (
                 Request::Writing,
                 Operation::Write {
                     expected_revision: snapshot.revision,
@@ -626,22 +749,22 @@ impl DraftSession {
                     edited: draft.edits.latest,
                 },
             ),
-            Remote::Loaded(snapshot) => {
-                let revision = snapshot.revision;
-                let Send::Outgoing(outgoing) = &mut draft.send else {
-                    return None;
-                };
-                if outgoing.stage != Stage::Queued {
-                    return None;
-                }
+            (Planned::Post, Remote::Loaded(snapshot), Send::Outgoing(outgoing)) => {
                 outgoing.stage = Stage::Running;
                 outgoing.request.message.draft = Some(DraftRevision {
                     scope: self.scope.clone(),
-                    revision,
+                    revision: snapshot.revision,
                 });
                 (
                     Request::Posting,
                     Operation::Post(Box::new(outgoing.request.clone())),
+                )
+            }
+            (Planned::Write | Planned::Post, Remote::Unloaded | Remote::Ambiguous { .. }, _)
+            | (Planned::Post, Remote::Loaded(_), Send::Idle | Send::Accepted(_)) => {
+                unreachable!(
+                    "invariant: draft {} plans writes and posts only against a loaded draft, and posts only an outgoing message",
+                    self.scope
                 )
             }
         };
@@ -678,6 +801,7 @@ impl DraftSession {
                     draft.body = snapshot.body.shown();
                 }
                 draft.remote = Remote::Loaded(snapshot);
+                draft.requeue_waiting();
                 if unseen {
                     draft.halt_on_conflict(&self.scope);
                 }
@@ -707,6 +831,7 @@ impl DraftSession {
                 let current = Snapshot::from(result.current);
                 let matched = result.saved || current.body.matches(written);
                 draft.remote = Remote::Loaded(current);
+                draft.requeue_waiting();
                 if matched {
                     draft.edits.saved_through(edited);
                 } else {
@@ -749,6 +874,7 @@ impl DraftSession {
                     );
                 };
                 draft.remote = Remote::Unloaded;
+                draft.requeue_waiting();
                 if outgoing.edited == draft.edits.latest {
                     draft.body = DraftBody::default();
                     draft.edits.settle();

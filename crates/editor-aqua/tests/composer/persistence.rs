@@ -901,6 +901,168 @@ fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text(
 }
 
 #[test]
+fn a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft() {
+    use editor_aqua::composer::attachment::{Attachments, Source};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft",
+    ) {
+        return;
+    }
+    let (directory, core, config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        lease.queue(typed("text beside a dropped image"));
+        let dropped = directory.path().join("dropped.png");
+        std::fs::write(&dropped, pasted_png()).unwrap();
+        let mut attachments = Attachments::new(client.clone());
+        assert!(attachments.add(Source::Path(dropped.clone()), "dropped.png".into()));
+        let uploads = attachments.take_unfinished();
+        drop(attachments);
+        for upload in uploads {
+            lease.adopt_image(upload);
+        }
+        let mut held = Vec::new();
+        let mut routes = Vec::new();
+        for _ in 0..2 {
+            let (socket, route, _) = draft_or_blob_request(&listener, &acceptor).await;
+            routes.push(route);
+            held.push(socket);
+        }
+        routes.sort();
+        assert_eq!(routes, ["PUT /blobs HTTP/1.1", "PUT /drafts/new HTTP/1.1"]);
+        std::fs::remove_file(&dropped).unwrap();
+        drop(lease);
+        drop(sessions);
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            },
+            "the draft is kept although the dropped file is gone"
+        );
+        drop(held);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client)
+            .unwrap();
+        let mut changed = lease.subscribe();
+        let hash = "f".repeat(64);
+        let mut revision = 0;
+        loop {
+            let (mut socket, route, body) = draft_or_blob_request(&listener, &acceptor).await;
+            match route.as_str() {
+                "GET /drafts/new HTTP/1.1" => {
+                    respond(&mut socket, json!({"revision": revision, "body": null})).await;
+                }
+                "PUT /blobs HTTP/1.1" => {
+                    assert_eq!(&body[8..12], b"WEBP", "the dropped image is uploaded again");
+                    respond(&mut socket, json!({"hash": hash, "bytes": body.len()})).await;
+                }
+                "PUT /drafts/new HTTP/1.1" => {
+                    let draft: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(draft["body"]["text"], "text beside a dropped image");
+                    revision += 1;
+                    respond(
+                        &mut socket,
+                        json!({"saved": true, "current": {"revision": revision, "body": draft["body"]}}),
+                    )
+                    .await;
+                    if draft["body"]["images"] == json!([hash]) {
+                        break;
+                    }
+                }
+                route => panic!("unexpected request {route}"),
+            }
+        }
+        while lease.read(DraftSession::pending) {
+            changed.changed().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn an_image_forge_refuses_comes_back_as_a_failed_image_and_the_draft_keeps_saving() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+
+    let (_directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "refusing");
+        let client = core.host(&host).unwrap().client.clone();
+        let target = ComposerTarget::NewThread {
+            host,
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let mut sessions = DraftSessions::default();
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), DraftSession::is_loaded).await;
+        composer.sync(&core);
+
+        hand_over_pasted_image(composer.session.as_ref().unwrap(), client);
+        let (mut socket, route, _) = draft_or_blob_request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        let failure = artisan_api::Failure::Resource(artisan_api::ResourceFailure::TooManyPixels {
+            width: 40_000,
+            height: 40_000,
+            limit: 100_000_000,
+        });
+        let message = failure.to_string();
+        respond_status(
+            &mut socket,
+            "400 Bad Request",
+            serde_json::to_value(artisan_api::ApiError::new(failure, message)).unwrap(),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), |state| !state.pending()).await;
+        let session = composer.session.as_ref().unwrap();
+        assert!(!session.read(DraftSession::halted));
+        assert_eq!(
+            session.read(DraftSession::error),
+            None,
+            "an image Forge will never take is not retried behind a draft error"
+        );
+        composer.sync(&core);
+        assert_eq!(
+            composer.attachments.as_ref().unwrap().items.len(),
+            1,
+            "the refused image is shown in the composer so it can be removed"
+        );
+
+        composer.editor.borrow_mut().set_text("still saved");
+        composer.edited();
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("PUT /drafts/"), "{route}");
+        assert_eq!(body["body"]["text"], "still saved");
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+    });
+}
+
+#[test]
 fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
     use editor_aqua::composer::draft_session::DraftSession;
 
@@ -924,12 +1086,16 @@ fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
         )
         .await;
         drop(socket);
-        while !lease.read(DraftSession::halted) {
+        while lease.read(DraftSession::error).is_none() {
             changed.changed().await.unwrap();
         }
         assert!(
             lease.read(DraftSession::pending),
             "the image is still waiting for Forge after its upload failed"
+        );
+        assert!(
+            !lease.read(DraftSession::halted),
+            "the failed image does not hold up the draft's own saves"
         );
 
         lease.retry();

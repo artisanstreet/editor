@@ -128,7 +128,7 @@ impl DraftSpool {
         host: &HostId,
         scope: &str,
         body: &DraftBody,
-        images: &[Vec<u8>],
+        images: &[std::sync::Arc<[u8]>],
     ) -> Result<(), KeepSpooledDraftError> {
         std::fs::create_dir_all(&self.dir).map_err(|source| {
             KeepSpooledDraftError::CreateDirectory {

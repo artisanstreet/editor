@@ -1,7 +1,8 @@
-use super::attachment::{PendingUpload, ReadImageError};
+use super::attachment::{PendingUpload, ReadImageError, upload_image};
 use super::draft_body::DraftBody;
 use super::draft_session::{
-    AdoptImageError, DraftSession, Operation, PostMessageError, SAVE_DELAY, Submission,
+    AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, LostImage, Operation,
+    PostMessageError, SAVE_DELAY, Submission,
 };
 use super::spool::{DraftSpool, KeepSpooledDraftError};
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
@@ -197,11 +198,11 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
     for session in sessions {
         let mut changed = session.subscribe();
         loop {
-            let (pending, error) = session.read(|state| (state.pending(), state.halted()));
+            let (pending, stuck) = session.read(|state| (state.pending(), state.stuck()));
             if !pending {
                 break;
             }
-            if error {
+            if stuck {
                 failed += 1;
                 break;
             }
@@ -354,7 +355,7 @@ impl DraftSessions {
 
 impl DraftHandle {
     fn deadline_outcome(&self) -> ShutdownOutcome {
-        self.read(|state| match (state.pending(), state.halted()) {
+        self.read(|state| match (state.pending(), state.stuck()) {
             (false, _) => ShutdownOutcome::Saved,
             (true, true) => ShutdownOutcome::Incomplete {
                 failed: 1,
@@ -384,16 +385,28 @@ impl DraftHandle {
         let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
             return false;
         };
-        let kept = images
-            .iter()
-            .map(PendingUpload::bytes)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(KeepLocallyError::Image)
-            .and_then(|images| {
-                spool
-                    .keep(&self.0.host, &scope, &body, &images)
-                    .map_err(KeepLocallyError::Spool)
-            });
+        let images = images
+            .into_iter()
+            .filter_map(|image| match image {
+                AdoptedImage::Read(bytes) => Some(bytes),
+                AdoptedImage::Unread(upload) => match upload.read() {
+                    Ok(bytes) => Some(Arc::from(bytes)),
+                    Err(source) => {
+                        tracing::error!(
+                            host = %self.0.host,
+                            %scope,
+                            image = upload.name(),
+                            error = %::diagnostics::chain(&KeepLocallyError::Image(source)),
+                            "couldn't keep a pasted image on this device; keeping the rest of the draft"
+                        );
+                        None
+                    }
+                },
+            })
+            .collect::<Vec<_>>();
+        let kept = spool
+            .keep(&self.0.host, &scope, &body, &images)
+            .map_err(KeepLocallyError::Spool);
         match kept {
             Ok(()) => {
                 tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
@@ -435,19 +448,44 @@ impl DraftHandle {
         self.start_uploads();
     }
 
+    pub(crate) fn take_lost_images(&self) -> Vec<LostImage> {
+        self.0.shared().state.take_lost_images()
+    }
+
+    async fn read_and_upload(
+        &self,
+        key: AdoptionKey,
+        image: AdoptedImage,
+    ) -> Result<BlobHash, AdoptImageError> {
+        let bytes = match image {
+            AdoptedImage::Read(bytes) => bytes,
+            AdoptedImage::Unread(upload) => {
+                let bytes: Arc<[u8]> = tokio::task::spawn_blocking(move || upload.read())
+                    .await
+                    .map_err(AdoptImageError::ReadTask)?
+                    .map_err(AdoptImageError::Read)?
+                    .into();
+                self.mutate(|shared| shared.state.image_read(key, Arc::clone(&bytes)));
+                bytes
+            }
+        };
+        upload_image(bytes, self.0.client.clone())
+            .await
+            .map_err(AdoptImageError::from)
+    }
+
     fn start_uploads(&self) {
         let uploads = self.0.shared().state.next_uploads();
-        for (key, upload) in uploads {
+        for (key, image) in uploads {
             let session = self.clone();
             let span = tracing::info_span!("adopt_image", host = %session.0.host);
             runtime().spawn(
                 async move {
                     let cancelled = session.0.cancelled.clone();
-                    let client = session.0.client.clone();
                     let result = tokio::select! {
                         biased;
                         () = cancelled.cancelled() => Err(AdoptImageError::Closed),
-                        result = upload.upload(client) => result.map_err(AdoptImageError::from),
+                        result = session.read_and_upload(key, image) => result,
                     };
                     session.mutate(|shared| {
                         if let Some(hash) = shared.state.adopted(key, result) {

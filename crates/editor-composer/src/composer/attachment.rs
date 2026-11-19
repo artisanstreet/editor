@@ -87,19 +87,11 @@ pub enum ReadImageError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PrepareImageError {
-    #[error(transparent)]
-    Read(#[from] ReadImageError),
-    #[error(transparent)]
-    Encode(#[from] super::encode::EncodeError),
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum UploadImageError {
-    #[error("the image preparation task stopped")]
+    #[error("the image conversion task stopped")]
     Task(#[source] tokio::task::JoinError),
-    #[error("prepare the image")]
-    Prepare(#[source] PrepareImageError),
+    #[error("convert the image")]
+    Encode(#[source] super::encode::EncodeError),
     #[error("upload the image to Forge")]
     Put(#[source] editor_core::client::CallError),
 }
@@ -169,34 +161,41 @@ pub struct Attachment {
 #[derive(Clone, Debug)]
 pub struct PendingUpload {
     origin: Arc<Source>,
+    name: String,
 }
+
+const KEPT_IMAGE_NAME: &str = "Pasted image";
 
 impl PendingUpload {
     pub(crate) fn kept(bytes: Vec<u8>) -> Self {
         Self {
             origin: Arc::new(Source::Bytes(bytes)),
+            name: KEPT_IMAGE_NAME.to_owned(),
         }
     }
 
-    pub(crate) fn bytes(&self) -> Result<Vec<u8>, ReadImageError> {
-        self.origin.read()
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
-    pub(crate) async fn upload(self, client: ForgeClient) -> Result<BlobHash, UploadImageError> {
-        let origin = self.origin;
-        let webp = tokio::task::spawn_blocking(move || {
-            let bytes = origin.read()?;
-            Ok::<_, PrepareImageError>(super::encode::to_webp(&bytes)?)
-        })
+    pub(crate) fn read(&self) -> Result<Vec<u8>, ReadImageError> {
+        self.origin.read()
+    }
+}
+
+pub(crate) async fn upload_image(
+    bytes: Arc<[u8]>,
+    client: ForgeClient,
+) -> Result<BlobHash, UploadImageError> {
+    let webp = tokio::task::spawn_blocking(move || super::encode::to_webp(&bytes))
         .await
         .map_err(UploadImageError::Task)?
-        .map_err(UploadImageError::Prepare)?;
-        client
-            .put_blob(webp)
-            .await
-            .map(|blob| blob.hash)
-            .map_err(UploadImageError::Put)
-    }
+        .map_err(UploadImageError::Encode)?;
+    client
+        .put_blob(webp)
+        .await
+        .map(|blob| blob.hash)
+        .map_err(UploadImageError::Put)
 }
 
 impl Drop for Attachment {
@@ -360,9 +359,33 @@ impl Attachments {
         self.items
             .iter_mut()
             .filter(|item| matches!(item.state, State::Encoding | State::Uploading))
-            .filter_map(|item| item.origin.take())
-            .map(|origin| PendingUpload { origin })
+            .filter_map(|item| {
+                item.origin.take().map(|origin| PendingUpload {
+                    origin,
+                    name: item.name.clone(),
+                })
+            })
             .collect()
+    }
+
+    pub(crate) fn add_failed(&mut self, name: String, reason: String) {
+        let key = self.next;
+        self.next += 1;
+        tracing::warn!(key, %name, %reason, "an image pasted before leaving the draft can't be added");
+        self.items.push(Attachment {
+            key,
+            name,
+            state: State::Failed(reason),
+            preview: None,
+            pending_preview: None,
+            preview_error: None,
+            revealed: None,
+            shown: true,
+            source: None,
+            origin: None,
+            encoded: None,
+            task: None,
+        });
     }
     #[expect(
         clippy::too_many_lines,
