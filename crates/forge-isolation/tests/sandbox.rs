@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use forge_isolation::{Landlock, Support, contain, support};
+use forge_isolation::{Coverage, Landlock, Reach, Support, contain, support};
 use std::path::Path;
 use std::process::Command;
 
@@ -49,7 +49,7 @@ fn a_sandboxed_child_writes_inside_its_folders_and_nowhere_else() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("existing"), "kept").unwrap();
     let ruleset = landlock
-        .writes_only_to(&[allowed.path().to_path_buf()])
+        .writes_only_to(&[allowed.path().to_path_buf()], &[])
         .unwrap();
     let stderr = run(allowed.path(), outside.path(), Some(&ruleset));
     assert_eq!(
@@ -77,5 +77,117 @@ fn a_sandboxed_child_writes_inside_its_folders_and_nowhere_else() {
     assert!(
         stderr.contains("Permission denied"),
         "the kernel refused the writes outside: {stderr}"
+    );
+}
+
+#[test]
+fn each_landlock_abi_reports_what_it_leaves_open() {
+    let open = Reach::Open;
+    let blocked = Reach::Blocked;
+    let expected = [
+        (1, [open, open, open, open]),
+        (2, [open, open, open, open]),
+        (3, [blocked, open, open, open]),
+        (4, [blocked, open, open, open]),
+        (5, [blocked, open, open, open]),
+        (6, [blocked, open, blocked, blocked]),
+        (7, [blocked, open, blocked, blocked]),
+        (8, [blocked, open, blocked, blocked]),
+        (9, [blocked, blocked, blocked, blocked]),
+        (10, [blocked, blocked, blocked, blocked]),
+    ];
+    for (abi, [truncation, socket_files, abstract_sockets, signals]) in expected {
+        assert_eq!(
+            Coverage::of(abi),
+            Coverage {
+                truncation,
+                socket_files,
+                abstract_sockets,
+                signals,
+            },
+            "Landlock ABI {abi}"
+        );
+    }
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a check the kernel can't make says so instead of passing silently"
+)]
+#[test]
+fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    if landlock.coverage().truncation == Reach::Open {
+        eprintln!(
+            "SKIPPED: Landlock ABI {} can't block truncation, and Forge reports that",
+            landlock.abi()
+        );
+        return;
+    }
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("kept");
+    std::fs::write(&file, "kept").unwrap();
+    let ruleset = landlock
+        .writes_only_to(&[allowed.path().to_path_buf()], &[])
+        .unwrap();
+    let mut command = Command::new("truncate");
+    command.args(["-s", "0"]).arg(&file);
+    contain(&mut command, Some(&ruleset));
+    let output = command.output().expect("truncate runs");
+    assert!(
+        !output.status.success(),
+        "truncate succeeded outside the sandbox"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "kept",
+        "a sandboxed child emptied a file outside its folders"
+    );
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a check the kernel can't make says so instead of passing silently"
+)]
+#[test]
+fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    if landlock.coverage().signals == Reach::Open {
+        eprintln!(
+            "SKIPPED: Landlock ABI {} can't scope signals, and Forge reports that",
+            landlock.abi()
+        );
+        return;
+    }
+    let mut bystander = Command::new("sleep").arg("600").spawn().unwrap();
+    let allowed = tempfile::tempdir().unwrap();
+    let ruleset = landlock
+        .writes_only_to(&[allowed.path().to_path_buf()], &[])
+        .unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        r#"sleep 600 & own=$!; kill "$own" && echo "own child signalled"; kill "$1" || echo "bystander refused""#,
+        "sh",
+        &bystander.id().to_string(),
+    ]);
+    contain(&mut command, Some(&ruleset));
+    let output = command.output().expect("the shell runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let still_running = bystander.try_wait().unwrap().is_none();
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    assert!(
+        stdout.contains("own child signalled"),
+        "a sandboxed shell couldn't stop its own background job: {stdout}"
+    );
+    assert!(
+        still_running && stdout.contains("bystander refused"),
+        "a sandboxed child killed a process outside its sandbox: {stdout}"
     );
 }

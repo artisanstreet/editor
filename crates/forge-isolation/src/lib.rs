@@ -52,7 +52,9 @@ pub const fn protect_forge() -> Vec<Outcome> {
     Vec::new()
 }
 
-pub use sandbox::{Landlock, Ruleset, RulesetError, Support, Unavailable, support};
+pub use sandbox::{
+    Coverage, Landlock, Reach, Ruleset, RulesetError, Support, Unavailable, support,
+};
 
 #[cfg(unix)]
 pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>) {

@@ -69,14 +69,13 @@ impl Sandbox {
                     })?;
                 let mut roots = writable_roots(turn);
                 roots.push(temporary.path().to_path_buf());
-                let ruleset =
-                    landlock
-                        .writes_only_to(&roots)
-                        .map_err(|source| SandboxError::Ruleset {
-                            engine: turn.engine,
-                            thread: turn.thread_id.clone(),
-                            source,
-                        })?;
+                let ruleset = landlock
+                    .writes_only_to(&roots, &reachable_sockets(turn))
+                    .map_err(|source| SandboxError::Ruleset {
+                        engine: turn.engine,
+                        thread: turn.thread_id.clone(),
+                        source,
+                    })?;
                 Ok(Self::Confined(Arc::new(Confined { temporary, ruleset })))
             }
         }
@@ -109,17 +108,23 @@ pub(crate) const fn forge_confines(permissions: Permissions, support: Support) -
     )
 }
 
+fn launch_variable(turn: &Turn, name: &str) -> Option<PathBuf> {
+    turn.launch
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| PathBuf::from(value))
+        .or_else(|| std::env::var_os(name).map(PathBuf::from))
+        .filter(|path| path.is_absolute())
+}
+
+fn reachable_sockets(turn: &Turn) -> Vec<PathBuf> {
+    launch_variable(turn, "SSH_AUTH_SOCK").into_iter().collect()
+}
+
 fn writable_roots(turn: &Turn) -> Vec<PathBuf> {
-    let variable = |name: &str| {
-        turn.launch
-            .env
-            .iter()
-            .rev()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| PathBuf::from(value))
-            .or_else(|| std::env::var_os(name).map(PathBuf::from))
-            .filter(|path| path.is_absolute())
-    };
+    let variable = |name: &str| launch_variable(turn, name);
     let codex_home = turn
         .launch
         .env

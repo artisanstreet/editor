@@ -9,6 +9,20 @@ mod landlock;
 pub use landlock::{Landlock, Ruleset, RulesetError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    Blocked,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coverage {
+    pub truncation: Reach,
+    pub socket_files: Reach,
+    pub abstract_sockets: Reach,
+    pub signals: Reach,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Support {
     Enforced(Landlock),
     Unavailable(Unavailable),
@@ -25,11 +39,12 @@ pub enum Unavailable {
 #[cfg(target_os = "linux")]
 pub fn support() -> Support {
     static SUPPORT: std::sync::OnceLock<Support> = std::sync::OnceLock::new();
-    *SUPPORT.get_or_init(|| {
-        landlock::detect().map_or(
-            Support::Unavailable(Unavailable::KernelWithoutLandlock),
-            Support::Enforced,
-        )
+    *SUPPORT.get_or_init(|| match landlock::detect() {
+        Some(landlock) => {
+            tracing::info!(abi = landlock.abi(), coverage = ?landlock.coverage(), "engines in Auto run under Landlock");
+            Support::Enforced(landlock)
+        }
+        None => Support::Unavailable(Unavailable::KernelWithoutLandlock),
     })
 }
 
@@ -58,9 +73,14 @@ pub struct Landlock(Never);
 
 #[cfg(not(target_os = "linux"))]
 impl Landlock {
+    pub const fn coverage(self) -> Coverage {
+        match self.0 {}
+    }
+
     pub const fn writes_only_to(
         self,
         _roots: &[std::path::PathBuf],
+        _sockets: &[std::path::PathBuf],
     ) -> Result<Ruleset, RulesetError> {
         match self.0 {}
     }

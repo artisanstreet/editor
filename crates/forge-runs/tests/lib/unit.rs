@@ -130,8 +130,22 @@ async fn fixture_with_parts(
     harness_for: HarnessFor,
     disk: disk::Probe,
 ) -> Fixture {
-    fixture_in(engine, harness_for, disk, sandbox::Host::Enforced, false).await
+    fixture_in(
+        engine,
+        harness_for,
+        disk,
+        sandbox::Host::Enforced(FULL_COVERAGE),
+        false,
+    )
+    .await
 }
+
+pub(crate) const FULL_COVERAGE: forge_isolation::Coverage = forge_isolation::Coverage {
+    truncation: forge_isolation::Reach::Blocked,
+    socket_files: forge_isolation::Reach::Blocked,
+    abstract_sockets: forge_isolation::Reach::Blocked,
+    signals: forge_isolation::Reach::Blocked,
+};
 
 async fn fixture_on_host(script: Script, host: sandbox::Host) -> Fixture {
     let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
@@ -151,7 +165,7 @@ async fn fixture_in_generation(script: Script) -> Fixture {
         EngineId::Claude,
         Arc::new(move |_| Arc::clone(&harness)),
         disk::Probe::system(),
-        sandbox::Host::Enforced,
+        sandbox::Host::Enforced(FULL_COVERAGE),
         true,
     )
     .await

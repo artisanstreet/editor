@@ -93,7 +93,7 @@ async fn a_run_switched_from_full_access_to_auto_says_it_finishes_outside_the_sa
                 Outcome::done()
             })
         }),
-        sandbox::Host::Enforced,
+        sandbox::Host::Enforced(FULL_COVERAGE),
     )
     .await;
     set_permissions(&fixture, Permissions::Full).await;
@@ -128,6 +128,42 @@ async fn a_run_switched_from_full_access_to_auto_says_it_finishes_outside_the_sa
         unsandboxed(&fixture.items().await).len(),
         1,
         "a sandboxed Auto run has nothing to say"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_run_on_a_kernel_that_cannot_block_truncation_says_it_is_partly_sandboxed() {
+    let fixture = fixture_on_host(
+        Arc::new(|_turn, io| {
+            Box::pin(async move {
+                io.emit(reply("m1", "done")).await;
+                Outcome::done()
+            })
+        }),
+        sandbox::Host::Enforced(forge_isolation::Coverage {
+            truncation: forge_isolation::Reach::Open,
+            ..FULL_COVERAGE
+        }),
+    )
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("work"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let notices = unsandboxed(&fixture.items().await);
+    assert_eq!(
+        notices
+            .iter()
+            .map(|(reason, _)| *reason)
+            .collect::<Vec<_>>(),
+        [UnsandboxedReason::KernelWithoutTruncationRule],
+        "{notices:?}"
+    );
+    assert!(
+        notices[0].1.contains("only partly sandboxed"),
+        "{notices:?}"
     );
 }
 

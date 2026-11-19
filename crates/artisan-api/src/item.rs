@@ -463,6 +463,7 @@ pub enum NoticeKind {
 #[serde(rename_all = "snake_case")]
 pub enum UnsandboxedReason {
     KernelWithoutLandlock,
+    KernelWithoutTruncationRule,
     Windows,
     MacOs,
     OtherOs,

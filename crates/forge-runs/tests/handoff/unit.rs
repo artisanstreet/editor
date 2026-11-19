@@ -78,7 +78,7 @@ async fn summarized_against(
         data.clone(),
         Arc::new(move |_| Arc::clone(&harness)),
         crate::disk::Probe::system(),
-        crate::sandbox::Host::Enforced,
+        crate::sandbox::Host::Enforced(crate::tests::FULL_COVERAGE),
         None,
     );
     let project = hub
