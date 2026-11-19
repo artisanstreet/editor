@@ -144,12 +144,14 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+    let forge = test_support::net::SilentListener::bind();
+    let address = forge.address().to_string();
+    let client = ForgeClient::new(&address, &fingerprint, &identity).unwrap();
     let id = HostId("same-host".into());
     let config = HostConfig {
         id: id.clone(),
         name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
+        address,
         fingerprint,
         kind: HostKind::Local,
     };

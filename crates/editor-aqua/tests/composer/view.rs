@@ -31,14 +31,16 @@ fn a_sent_message_leaves_the_prompt_on_screen_at_once() {
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-view").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let forge = test_support::net::SilentListener::bind();
+    let address = forge.address().to_string();
+    let client = ForgeClient::new(&address, &print, &identity).unwrap();
     let host = HostId("composer-view".into());
     test_support::editor::core::connect_client(
         &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
+            address,
             fingerprint: print,
             kind: HostKind::Local,
         },
@@ -81,14 +83,16 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-mentions").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let forge = test_support::net::SilentListener::bind();
+    let address = forge.address().to_string();
+    let client = ForgeClient::new(&address, &print, &identity).unwrap();
     let host = HostId("composer-mentions".into());
     test_support::editor::core::connect_client(
         &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
+            address,
             fingerprint: print,
             kind: HostKind::Local,
         },
@@ -134,14 +138,16 @@ fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-notice").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let forge = test_support::net::SilentListener::bind();
+    let address = forge.address().to_string();
+    let client = ForgeClient::new(&address, &print, &identity).unwrap();
     let host = HostId("composer-notice".into());
     test_support::editor::core::connect_client(
         &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
+            address,
             fingerprint: print,
             kind: HostKind::Local,
         },

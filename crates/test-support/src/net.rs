@@ -52,6 +52,29 @@ impl Drop for ClosingListener {
     }
 }
 
+#[derive(Debug)]
+pub struct SilentListener {
+    _listener: TcpListener,
+    address: SocketAddr,
+}
+
+impl SilentListener {
+    pub fn bind() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+        let address = listener
+            .local_addr()
+            .expect("read the loopback listener's address");
+        Self {
+            _listener: listener,
+            address,
+        }
+    }
+
+    pub const fn address(&self) -> SocketAddr {
+        self.address
+    }
+}
+
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct PortReservation {
