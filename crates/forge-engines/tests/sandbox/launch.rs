@@ -401,7 +401,7 @@ async fn pnpm_installs_inside_auto_with_its_store_in_the_sandbox() {
 }
 
 #[tokio::test]
-async fn a_codex_home_the_engine_replaced_with_a_link_does_not_make_its_target_writable() {
+async fn a_writable_folder_the_engine_replaced_with_a_link_does_not_make_its_target_writable() {
     if !sandboxed() {
         return;
     }
@@ -409,6 +409,9 @@ async fn a_codex_home_the_engine_replaced_with_a_link_does_not_make_its_target_w
     let codex_home = folders.engine_home.join(".codex");
     std::os::unix::fs::symlink(&folders.user_home, &codex_home).unwrap();
     let mut turn = turn(Permissions::Auto, &folders);
+    turn.engine = EngineId::Claude;
+    turn.config = EngineConfig::new(EngineId::Claude);
+    turn.config.permissions = Permissions::Auto;
     turn.launch
         .env
         .push(("CODEX_HOME".to_owned(), codex_home.display().to_string()));

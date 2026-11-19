@@ -33,9 +33,32 @@ pub(crate) mod guard;
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod guard {
     use artisan_api::EngineId;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    pub(crate) type GuardError = std::convert::Infallible;
+    #[derive(Debug, thiserror::Error)]
+    pub enum GuardError {
+        #[error("write {engine}'s configuration {}", path.display())]
+        Write {
+            engine: EngineId,
+            path: PathBuf,
+            #[source]
+            source: Box<artisan_paths::private::PrivateFileError>,
+        },
+        #[error("read {engine}'s configuration {}", path.display())]
+        Read {
+            engine: EngineId,
+            path: PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+        #[error("remove {engine}'s configuration {}", path.display())]
+        Remove {
+            engine: EngineId,
+            path: PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+    }
 
     #[derive(Debug)]
     pub(crate) struct Exposure;
@@ -64,16 +87,52 @@ pub(crate) mod guard {
         Ok(())
     }
 
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the same signature as Linux, where guarding the engine's configuration can fail"
-    )]
-    pub(crate) const fn adopt(
-        _engine: EngineId,
-        _home: &Path,
-        _relative: &str,
+    pub(crate) fn write(
+        engine: EngineId,
+        home: &Path,
+        relative: &str,
+        bytes: &[u8],
+        _mode: u32,
     ) -> Result<(), GuardError> {
-        Ok(())
+        let path = home.join(relative);
+        if std::fs::read(&path).is_ok_and(|current| current == bytes) {
+            return Ok(());
+        }
+        artisan_paths::private::write_file(&path, bytes).map_err(|source| GuardError::Write {
+            engine,
+            path,
+            source: Box::new(source),
+        })
+    }
+
+    pub(crate) fn read(
+        engine: EngineId,
+        home: &Path,
+        relative: &str,
+    ) -> Result<Option<Vec<u8>>, GuardError> {
+        let path = home.join(relative);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(GuardError::Read {
+                engine,
+                path,
+                source,
+            }),
+        }
+    }
+
+    pub(crate) fn remove(engine: EngineId, home: &Path, relative: &str) -> Result<(), GuardError> {
+        let path = home.join(relative);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(GuardError::Remove {
+                engine,
+                path,
+                source,
+            }),
+        }
     }
 }
 

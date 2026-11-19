@@ -174,16 +174,6 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temp, path)
 }
 
-fn write_private_if_changed(
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(), artisan_paths::private::PrivateFileError> {
-    if fs::read(path).is_ok_and(|current| current == bytes) {
-        return artisan_paths::private::restrict_file(path);
-    }
-    artisan_paths::private::write_file(path, bytes)
-}
-
 pub(crate) struct GatewayConfig {
     inline: String,
     env: Vec<(String, String)>,
@@ -502,13 +492,11 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
-    #[error("record Forge's own change to the guarded engine configuration")]
-    Guard(#[source] crate::sandbox::GuardError),
-    #[error("remove {}", path.display())]
-    Remove {
-        path: PathBuf,
+    #[error("write Forge's {engine} launch configuration")]
+    Guard {
+        engine: EngineId,
         #[source]
-        source: io::Error,
+        source: crate::sandbox::GuardError,
     },
     #[error("encode {}", path.display())]
     EncodeJson {
@@ -522,27 +510,25 @@ pub enum LaunchError {
         #[source]
         source: toml::ser::Error,
     },
-    #[error("write {}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: artisan_paths::private::PrivateFileError,
-    },
-    #[error("read {}", path.display())]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
     #[error("reading {}", path.display())]
     Parse {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
     },
+    #[error("{} isn't UTF-8", path.display())]
+    NotText {
+        path: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
     #[error("MCP server names must be nonempty and unique: {name:?}")]
     ServerName { name: String },
 }
+
+const CLAUDE_MCP_CONFIG: &str = ".artisan/claude-mcp.json";
+const CODEX_CONFIG: &str = ".codex/config.toml";
+const PRIVATE_FILE: u32 = 0o600;
 
 fn codex_server(server: &McpServer) -> toml::Table {
     let mut entry = toml::Table::new();
@@ -594,12 +580,10 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
     };
     match engine {
         EngineId::Claude => {
-            let path = home.join(".artisan/claude-mcp.json");
+            let path = home.join(CLAUDE_MCP_CONFIG);
+            let guarding = |source| LaunchError::Guard { engine, source };
             if servers.is_empty() {
-                remove_file_if_present(&path).map_err(|source| LaunchError::Remove {
-                    path: path.clone(),
-                    source,
-                })?;
+                crate::sandbox::guard::remove(engine, home, CLAUDE_MCP_CONFIG).map_err(guarding)?;
             } else {
                 let config = json!({ "mcpServers": claude_servers(servers) });
                 let text = serde_json::to_string_pretty(&config).map_err(|source| {
@@ -608,12 +592,14 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                         source,
                     }
                 })?;
-                write_private_if_changed(&path, text.as_bytes()).map_err(|source| {
-                    LaunchError::Write {
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
+                crate::sandbox::guard::write(
+                    engine,
+                    home,
+                    CLAUDE_MCP_CONFIG,
+                    text.as_bytes(),
+                    PRIVATE_FILE,
+                )
+                .map_err(guarding)?;
                 launch.args = vec![
                     "--mcp-config".to_owned(),
                     path.to_string_lossy().into_owned(),
@@ -621,15 +607,23 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
             }
         }
         EngineId::Codex => {
-            let path = home.join(".codex/config.toml");
-            let mut config: toml::Table = match fs::read_to_string(&path) {
-                Ok(text) => toml::from_str(&text).map_err(|source| LaunchError::Parse {
-                    path: path.clone(),
-                    source,
-                })?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => toml::Table::new(),
-                Err(source) => return Err(LaunchError::Read { path, source }),
-            };
+            let path = home.join(CODEX_CONFIG);
+            let guarding = |source| LaunchError::Guard { engine, source };
+            let mut config: toml::Table =
+                match crate::sandbox::guard::read(engine, home, CODEX_CONFIG).map_err(guarding)? {
+                    Some(bytes) => {
+                        let text =
+                            String::from_utf8(bytes).map_err(|source| LaunchError::NotText {
+                                path: path.clone(),
+                                source,
+                            })?;
+                        toml::from_str(&text).map_err(|source| LaunchError::Parse {
+                            path: path.clone(),
+                            source,
+                        })?
+                    }
+                    None => toml::Table::new(),
+                };
             let mut entries = toml::Table::new();
             for server in servers {
                 if server.name.is_empty() || entries.contains_key(&server.name) {
@@ -645,10 +639,8 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                     path: path.clone(),
                     source,
                 })?;
-            write_private_if_changed(&path, text.as_bytes())
-                .map_err(|source| LaunchError::Write { path, source })?;
-            crate::sandbox::guard::adopt(engine, home, ".codex/config.toml")
-                .map_err(LaunchError::Guard)?;
+            crate::sandbox::guard::write(engine, home, CODEX_CONFIG, text.as_bytes(), PRIVATE_FILE)
+                .map_err(guarding)?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -731,9 +723,14 @@ fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
         .env
         .iter()
         .position(|(key, _)| key == "OPENCODE_CONFIG_CONTENT");
-    let mut config = index
-        .and_then(|index| serde_json::from_str::<Value>(&launch.env[index].1).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut config = index.map_or_else(
+        || json!({}),
+        |index| {
+            serde_json::from_str::<Value>(&launch.env[index].1).unwrap_or_else(|error| {
+                unreachable!("invariant: Forge writes OPENCODE_CONFIG_CONTENT as JSON: {error}")
+            })
+        },
+    );
     if let (Some(config), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
             match (config.get_mut(key), value) {

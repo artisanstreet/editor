@@ -1,4 +1,4 @@
-use super::{paths, remove_file_if_present, write_if_changed};
+use super::{paths, write_if_changed};
 use artisan_api::EngineId;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -26,6 +26,19 @@ pub fn normalize_prompt(text: &str) -> String {
 #[must_use]
 pub fn prompt_digest(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+const PROMPT_MODE: u32 = 0o644;
+
+fn relative(home: &Path, path: &Path) -> String {
+    match path.strip_prefix(home).map(Path::to_str) {
+        Ok(Some(relative)) => relative.to_owned(),
+        Ok(None) | Err(_) => unreachable!(
+            "invariant: the global prompt {} lies in the engine home {} and is named in UTF-8",
+            path.display(),
+            home.display()
+        ),
+    }
 }
 
 fn record_path(home: &Path) -> PathBuf {
@@ -109,6 +122,13 @@ pub enum ApplyPromptError {
         #[source]
         source: io::Error,
     },
+    #[error("writing the {engine} global prompt {}", path.display())]
+    Guard {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: crate::sandbox::GuardError,
+    },
 }
 
 impl ApplyPromptError {
@@ -119,6 +139,13 @@ impl ApplyPromptError {
             }
             Self::Write { path, source, .. } => {
                 format!("Couldn't write {}: {source}.", display(home, path))
+            }
+            Self::Guard { path, source, .. } => {
+                format!(
+                    "Couldn't write {}: {}.",
+                    display(home, path),
+                    diagnostics::chain(source)
+                )
             }
         }
     }
@@ -183,28 +210,53 @@ pub(super) fn reconcile(
         }
         let backups = home.join(".artisan").join("backups");
         let stamp = artisan_api::now();
-        (|| -> io::Result<()> {
-            if (first_takeover || force) && !normalize_prompt(&on_disk).is_empty() {
-                back_up(&read, &backups, stamp)?;
+        if (first_takeover || force) && !normalize_prompt(&on_disk).is_empty() {
+            back_up(&read, &backups, stamp).map_err(|source| ApplyPromptError::Write {
+                engine,
+                path: read.clone(),
+                source,
+            })?;
+        }
+        let guarding = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| ApplyPromptError::Guard {
+                engine,
+                path,
+                source,
             }
-            for path in &overrides {
-                if path != &read {
-                    back_up(path, &backups, stamp)?;
-                }
-                remove_file_if_present(path)?;
+        };
+        for path in &overrides {
+            if path != &read {
+                back_up(path, &backups, stamp).map_err(|source| ApplyPromptError::Write {
+                    engine,
+                    path: path.clone(),
+                    source,
+                })?;
             }
-            if normalize_prompt(canonical).is_empty() {
-                remove_file_if_present(&prompt)?;
-                write_if_changed(&record_file, prompt_digest("").as_bytes())
-            } else {
-                write_if_changed(&prompt, canonical.as_bytes())?;
-                write_if_changed(&record_file, prompt_digest(canonical).as_bytes())
+            crate::sandbox::guard::remove(engine, home, &relative(home, path))
+                .map_err(guarding(path))?;
+        }
+        let recorded = if normalize_prompt(canonical).is_empty() {
+            crate::sandbox::guard::remove(engine, home, &relative(home, &prompt))
+                .map_err(guarding(&prompt))?;
+            prompt_digest("")
+        } else {
+            crate::sandbox::guard::write(
+                engine,
+                home,
+                &relative(home, &prompt),
+                canonical.as_bytes(),
+                PROMPT_MODE,
+            )
+            .map_err(guarding(&prompt))?;
+            prompt_digest(canonical)
+        };
+        write_if_changed(&record_file, recorded.as_bytes()).map_err(|source| {
+            ApplyPromptError::Write {
+                engine,
+                path: record_file.clone(),
+                source,
             }
-        })()
-        .map_err(|source| ApplyPromptError::Write {
-            engine,
-            path: prompt.clone(),
-            source,
         })?;
         Ok((Reconciled::Synced, on_disk))
     })())
