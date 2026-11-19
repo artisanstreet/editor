@@ -236,6 +236,8 @@ enum AeError {
 enum ForgeServiceError {
     #[error(transparent)]
     Locate(#[from] paths::LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] service::RunningError),
     #[error("Forge isn't installed here; run `ae install`")]
     NotInstalled,
     #[error(transparent)]
@@ -316,7 +318,9 @@ fn forge_service(command: &ForgeCommand) -> Result<(), ForgeServiceError> {
     };
     match command {
         ForgeCommand::Start => {
-            if service::is_running() && service::listening(address) {
+            if service::is_running().map_err(ForgeServiceError::Running)?
+                && service::listening(address)
+            {
                 ui::success(format!("Forge is already running on {address}"));
                 return Ok(());
             }

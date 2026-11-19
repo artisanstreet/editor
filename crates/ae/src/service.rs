@@ -71,8 +71,54 @@ pub(crate) enum OperationLockError {
 pub(crate) enum NotReadyError {
     #[error("Forge (pid {pid}) exited while starting{log}")]
     Exited { pid: u32, log: String },
+    #[error("check whether Forge (pid {pid}) recorded itself as ready")]
+    Recorded {
+        pid: u32,
+        #[source]
+        source: PidError,
+    },
+    #[error("measure how far Forge's log {} has grown", path.display())]
+    Log {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Forge (pid {pid}) made no progress starting for {}{log}", crate::ui::count(STALL_DEADLINE.as_secs(), "second", "seconds"))]
     Stalled { pid: u32, log: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PidError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("read Forge's pid file {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Forge's pid file {} holds {text:?}, not a process id", path.display())]
+    Parse {
+        path: PathBuf,
+        text: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RunningError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    Pid(#[from] PidError),
+    #[error("ask systemd whether Forge's service is active")]
+    Systemd(#[source] RunError),
+    #[error("find Forge's program")]
+    Program(#[source] artisan_paths::RootError),
+    #[cfg(unix)]
+    #[error("read which Forge serves the upgrade gateway")]
+    Gateway(#[source] forge_http::upgrade::GatewayRecordError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +133,8 @@ pub(crate) enum StartError {
     Inactive { log: String },
     #[error("Forge is already running (pid {pid})")]
     AlreadyRunning { pid: u32 },
+    #[error("check whether Forge is already running")]
+    Running(#[source] RunningError),
     #[error("Forge isn't installed here; run `ae install`")]
     NotInstalled,
     #[error(transparent)]
@@ -123,6 +171,8 @@ pub(crate) enum StartError {
 pub(crate) enum StopError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
+    #[error("check whether Forge is running")]
+    Running(#[source] RunningError),
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("stop Forge's service")]
@@ -384,12 +434,12 @@ pub(crate) fn start() -> Result<Option<u32>, StartError> {
 fn start_unlocked() -> Result<Option<u32>, StartError> {
     if uses_systemd() {
         sys::run("systemctl", &["--user", "start", UNIT]).map_err(StartError::Systemctl)?;
-        if !systemd_active() {
+        if !systemd_active().map_err(StartError::Systemctl)? {
             return Err(StartError::Inactive { log: recent_log() });
         }
         return Ok(None);
     }
-    if let Some(pid) = running_pid() {
+    if let Some(pid) = running_pid().map_err(StartError::Running)? {
         return Err(StartError::AlreadyRunning { pid });
     }
     let forge = paths::binary(App::Forge)?;
@@ -490,8 +540,8 @@ impl StartWatch {
     }
 }
 
-fn startup(pid: u32, address: SocketAddr) -> Startup {
-    if pid_file().ok().and_then(|path| recorded_pid(&path)) == Some(pid) {
+fn startup(pid: u32, address: SocketAddr) -> Result<Startup, PidError> {
+    Ok(if recorded_pid()? == Some(pid) {
         Startup::Ready
     } else if !process_exists(pid) {
         Startup::Exited
@@ -499,18 +549,26 @@ fn startup(pid: u32, address: SocketAddr) -> Startup {
         Startup::Serving
     } else {
         Startup::Starting
+    })
+}
+
+fn log_length(log: &Path) -> Result<u64, NotReadyError> {
+    match std::fs::metadata(log) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(source) => Err(NotReadyError::Log {
+            path: log.to_owned(),
+            source,
+        }),
     }
 }
 
-fn log_length(log: &Path) -> u64 {
-    std::fs::metadata(log).map_or(0, |metadata| metadata.len())
-}
-
 fn wait_ready(pid: u32, address: SocketAddr, log: &Path) -> Result<Ready, NotReadyError> {
-    let mut watch = StartWatch::new(log_length(log), Instant::now());
+    let mut watch = StartWatch::new(log_length(log)?, Instant::now());
     loop {
-        let now = startup(pid, address);
-        match watch.observe(now, log_length(log), Instant::now()) {
+        let now =
+            startup(pid, address).map_err(|source| NotReadyError::Recorded { pid, source })?;
+        match watch.observe(now, log_length(log)?, Instant::now()) {
             Verdict::Ready if now == Startup::Serving => return Ok(Ready::Serving),
             Verdict::Ready => return Ok(Ready::Recorded),
             Verdict::Exited => {
@@ -530,8 +588,12 @@ fn wait_ready(pid: u32, address: SocketAddr, log: &Path) -> Result<Ready, NotRea
     }
 }
 
-fn systemd_active() -> bool {
-    sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]).is_ok()
+fn systemd_active() -> Result<bool, RunError> {
+    match sys::output("systemctl", &["--user", "is-active", "--quiet", UNIT]) {
+        Ok(_active) => Ok(true),
+        Err(RunError::Failed { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn recent_log() -> String {
@@ -566,11 +628,11 @@ pub(crate) fn stop() -> Result<bool, StopError> {
 
 fn stop_unlocked() -> Result<bool, StopError> {
     if uses_systemd() {
-        let was = is_running();
+        let was = is_running().map_err(StopError::Running)?;
         sys::run("systemctl", &["--user", "stop", UNIT]).map_err(StopError::Systemctl)?;
         return Ok(was);
     }
-    let Some(pid) = running_pid() else {
+    let Some(pid) = running_pid().map_err(StopError::Running)? else {
         return Ok(false);
     };
     stop_process(pid, &data()?)?;
@@ -627,7 +689,7 @@ pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
     let _operation = operation_lock()?;
     if uses_systemd() {
         sys::run("systemctl", &["--user", "restart", UNIT]).map_err(RestartError::Systemctl)?;
-        if !systemd_active() {
+        if !systemd_active().map_err(RestartError::Systemctl)? {
             return Err(RestartError::Inactive { log: recent_log() });
         }
         return Ok(None);
@@ -636,11 +698,11 @@ pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
     Ok(start_unlocked()?)
 }
 
-pub(crate) fn is_running() -> bool {
+pub(crate) fn is_running() -> Result<bool, RunningError> {
     if uses_systemd() {
-        systemd_active()
+        systemd_active().map_err(RunningError::Systemd)
     } else {
-        running_pid().is_some()
+        Ok(running_pid()?.is_some())
     }
 }
 
@@ -648,21 +710,43 @@ fn pid_file() -> Result<PathBuf, LocateError> {
     Ok(data()?.join("forge.pid"))
 }
 
-fn recorded_pid(path: &Path) -> Option<u32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+fn recorded_pid() -> Result<Option<u32>, PidError> {
+    let path = pid_file()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(PidError::Read { path, source }),
+    };
+    let recorded = text.trim();
+    if recorded.is_empty() {
+        return Ok(None);
+    }
+    recorded
+        .parse()
+        .map(Some)
+        .map_err(|source| PidError::Parse {
+            path,
+            text: recorded.to_owned(),
+            source,
+        })
 }
 
-pub(crate) fn running_pid() -> Option<u32> {
-    let pid = recorded_pid(&pid_file().ok()?)?;
-    let process = crate::platform::running(pid)?;
+pub(crate) fn running_pid() -> Result<Option<u32>, RunningError> {
+    let Some(pid) = recorded_pid()? else {
+        return Ok(None);
+    };
+    let Some(process) = crate::platform::running(pid) else {
+        return Ok(None);
+    };
     #[cfg(unix)]
-    if let Some(gateway) = forge_http::upgrade::gateway(&data().ok()?).ok().flatten()
+    if let Some(gateway) = forge_http::upgrade::gateway(&data()?).map_err(RunningError::Gateway)?
         && gateway.pid == pid
         && same_path(&process.executable, &gateway.binary)
     {
-        return Some(pid);
+        return Ok(Some(pid));
     }
-    same_path(&process.executable, &App::Forge.binary().ok()?).then_some(pid)
+    let forge = App::Forge.binary().map_err(RunningError::Program)?;
+    Ok(same_path(&process.executable, &forge).then_some(pid))
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

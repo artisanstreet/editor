@@ -323,6 +323,8 @@ impl std::fmt::Display for PutBack {
 pub(crate) enum UpgradeOnlineError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] service::RunningError),
     #[error("check whether Forge hands over to a new version")]
     Gateway(#[source] forge_http::upgrade::GatewayRecordError),
     #[error("read the storage version of Forge's database in {}", data.display())]
@@ -1280,7 +1282,7 @@ fn upgrade_forge_online(
     let hands_over = forge_http::upgrade::gateway(&data)
         .map_err(UpgradeOnlineError::Gateway)?
         .is_some()
-        && service::is_running();
+        && service::is_running().map_err(UpgradeOnlineError::Running)?;
     if !hands_over {
         return Ok(false);
     }

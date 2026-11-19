@@ -136,3 +136,31 @@ async fn status_reports_a_healthy_forge_without_problems() {
     assert_eq!(report["forge"]["healthy"], true);
     assert!(health_problems(&report).is_empty(), "{report}");
 }
+
+#[test]
+fn status_reports_a_pid_file_it_cannot_read_instead_of_a_stopped_forge() {
+    let dir = tempfile::tempdir().expect("create the isolated home");
+    let forge = dir.path().join("data/artisan-street/forge");
+    let data = forge.join("data");
+    std::fs::create_dir_all(&data).expect("create Forge's data folder");
+    std::fs::write(forge.join("forge"), b"").expect("write the Forge binary");
+    std::fs::write(forge.join("version"), "1.0.0\n").expect("write the Forge version");
+    std::fs::write(data.join("forge.pid"), "forge\n").expect("write a damaged pid file");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ae"))
+        .args(["status", "--json"])
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .output()
+        .expect("run ae status");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("ae status prints JSON");
+
+    let problems = report["problems"].as_array().expect("problems is a list");
+    assert!(
+        problems.iter().any(|problem| problem
+            .as_str()
+            .is_some_and(|problem| problem.contains("\"forge\", not a process id"))),
+        "{report}"
+    );
+}

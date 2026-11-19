@@ -223,6 +223,8 @@ pub(crate) enum AccountError {
 pub(crate) enum EnrollError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
     #[error(transparent)]
     File(#[from] AccountFileError),
     #[error("this Forge is already enrolled; see `ae account status`")]
@@ -269,6 +271,8 @@ pub(crate) enum StatusError {
 pub(crate) enum ConfirmError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
     #[error(transparent)]
     File(#[from] AccountFileError),
     #[error(transparent)]
@@ -318,6 +322,8 @@ pub(crate) enum AccountMismatch {
 pub(crate) enum SyncError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
     #[error("read this machine's identity")]
     Identity(#[source] forge_http::sync::MachineIdentityError),
     #[error("this Forge is not enrolled; run `ae account enroll` first")]
@@ -489,7 +495,8 @@ fn enroll(
     if enrolled && !replace {
         return Err(EnrollError::AlreadyEnrolled);
     }
-    let restart = replace && enrolled && crate::service::is_running();
+    let restart =
+        replace && enrolled && crate::service::is_running().map_err(EnrollError::Running)?;
     let key = if replace {
         MachineKeypair::generate().map_err(EnrollError::Key)?
     } else {
@@ -667,7 +674,7 @@ fn confirm(
             account_id: confirmed.account_id,
         },
     )?;
-    if crate::service::is_running() {
+    if crate::service::is_running().map_err(ConfirmError::Running)? {
         crate::service::restart().map_err(ConfirmError::Restart)?;
     }
     crate::ui::success(format!("Enrolled this Forge as {machine_id}."));
@@ -746,7 +753,7 @@ fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
     if identity.account_id.is_none() {
         return Err(SyncError::NoAccount);
     }
-    if crate::service::is_running() {
+    if crate::service::is_running().map_err(SyncError::Running)? {
         crate::service::restart().map_err(SyncError::Restart)?;
         crate::ui::success("Restarted Forge; it syncs the account config on startup.");
         return Ok(());

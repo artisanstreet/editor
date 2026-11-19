@@ -206,7 +206,16 @@ fn local() -> Report {
 }
 
 fn forge(problems: &mut Vec<String>) -> ForgeReport {
-    let running = service::is_running();
+    let running = match service::is_running() {
+        Ok(running) => running,
+        Err(error) => {
+            problems.push(format!(
+                "Couldn't tell whether Forge is running: {}",
+                diagnostics::chain(&error)
+            ));
+            false
+        }
+    };
     let address = match service::address() {
         Ok(address) => Some(address),
         Err(error) => {
@@ -238,6 +247,16 @@ fn forge(problems: &mut Vec<String>) -> ForgeReport {
         ));
     }
     let devices = paired_devices(problems);
+    let pid = match service::running_pid() {
+        Ok(pid) => pid,
+        Err(error) => {
+            problems.push(format!(
+                "Couldn't read which process Forge runs as: {}",
+                diagnostics::chain(&error)
+            ));
+            None
+        }
+    };
     let engines: Vec<EngineReport> = match App::Forge.data() {
         Ok(data) => {
             let engines = forge_engines::Engines::new(&data);
@@ -268,7 +287,7 @@ fn forge(problems: &mut Vec<String>) -> ForgeReport {
     };
     ForgeReport {
         running,
-        pid: service::running_pid(),
+        pid,
         address: address.map(|address| address.to_string()),
         listening,
         healthy,
