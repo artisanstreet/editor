@@ -743,16 +743,15 @@ impl Store {
         )
     }
 
-    pub fn open_restoring(dir: &Path, data_lock: &DataLock) -> Result<Self, OpenStoreError> {
-        Self::open_restoring_in(dir, data_lock, Environment::system())
+    pub fn open_restoring(data_lock: &DataLock) -> Result<Self, OpenStoreError> {
+        Self::open_restoring_in(data_lock, Environment::system())
     }
 
     pub fn open_restoring_in(
-        dir: &Path,
         data_lock: &DataLock,
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
-        data_lock.guards(dir);
+        let dir = data_lock.dir();
         let (database, blob_dir) = Self::prepare(dir)?;
         match schema::roll_back(&database, environment.clock.now(), &environment.progress).map_err(
             |source| OpenStoreError::RollBack {

@@ -21,7 +21,6 @@ fn store_whose_recall_batches_fail(dir: &std::path::Path) -> (Store, DataLock) {
     });
     let lock = DataLock::acquire(dir).expect("hold the data folder");
     let store = Store::open_restoring_in(
-        dir,
         &lock,
         Environment {
             connections,

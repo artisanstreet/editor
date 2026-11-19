@@ -1611,7 +1611,7 @@ fn restore_database(
     service::stop().map_err(RestoreDatabaseError::Stop)?;
     let data = paths::data(App::Forge)?;
     let lock = forge_store::DataLock::acquire(&data).map_err(RestoreDatabaseError::Lock)?;
-    match forge_store::admin::roll_back_for(&data, &lock, database.schema).map_err(|source| {
+    match forge_store::admin::roll_back_for(&lock, database.schema).map_err(|source| {
         RestoreDatabaseError::RollBack {
             data: data.clone(),
             schema: database.schema,

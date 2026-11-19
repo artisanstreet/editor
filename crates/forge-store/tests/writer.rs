@@ -93,7 +93,6 @@ fn refusing_store(
     });
     let lock = forge_store::DataLock::acquire(dir).expect("hold the data folder");
     let store = forge_store::Store::open_restoring_in(
-        dir,
         &lock,
         forge_store::Environment {
             connections,

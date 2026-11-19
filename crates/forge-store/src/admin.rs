@@ -270,11 +270,10 @@ pub fn storage_version(dir: &Path) -> Result<Option<StorageVersion>, StorageVers
 }
 
 pub fn roll_back_for(
-    dir: &Path,
     data_lock: &DataLock,
     supported: usize,
 ) -> Result<RolledBack, schema::RollbackError> {
-    data_lock.guards(dir);
+    let dir = data_lock.dir();
     let environment = Environment::system();
     Ok(
         match schema::roll_back_to(

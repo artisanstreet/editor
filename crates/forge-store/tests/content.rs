@@ -416,7 +416,6 @@ async fn text_a_message_no_longer_uses_is_collected_a_day_later_on_forges_clock(
     let reading = Arc::clone(&now);
     let lock = forge_store::DataLock::acquire(dir.path()).unwrap();
     let store = Store::open_restoring_in(
-        dir.path(),
         &lock,
         forge_store::Environment {
             clock: artisan_api::WallClock::new(move || reading.load(Ordering::SeqCst)),

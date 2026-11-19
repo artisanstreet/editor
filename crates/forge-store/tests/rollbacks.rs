@@ -104,7 +104,7 @@ async fn forge_rolls_back_a_newer_database_and_reports_it_until_dismissed() {
     upgraded_by_a_newer_forge(dir.path()).await;
     let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
 
-    let store = Store::open_restoring(dir.path(), &lock).expect("Forge rolls back");
+    let store = Store::open_restoring(&lock).expect("Forge rolls back");
     assert_eq!(titles(&store).await, ["Before the upgrade"]);
     let rollback = store
         .state()
@@ -126,7 +126,7 @@ async fn forge_rolls_back_a_newer_database_and_reports_it_until_dismissed() {
     );
     drop(store);
 
-    let store = Store::open_restoring(dir.path(), &lock).expect("Forge starts again");
+    let store = Store::open_restoring(&lock).expect("Forge starts again");
     assert!(
         store
             .state()
@@ -192,7 +192,7 @@ async fn an_image_only_the_set_aside_database_uses_survives_blob_collection() {
         .expect("the newer Forge stamps its schema");
 
     let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
-    let store = Store::open_restoring(dir.path(), &lock).expect("Forge rolls back");
+    let store = Store::open_restoring(&lock).expect("Forge rolls back");
     std::fs::File::options()
         .write(true)
         .open(store.blob_path(&hash).expect("the image is still on disk"))
@@ -213,7 +213,7 @@ async fn a_rollback_done_for_an_older_forge_is_reported_by_the_next_forge() {
     upgraded_by_a_newer_forge(dir.path()).await;
     let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
 
-    let rolled_back = forge_store::admin::roll_back_for(dir.path(), &lock, Store::schema_version())
+    let rolled_back = forge_store::admin::roll_back_for(&lock, Store::schema_version())
         .expect("ae rolls back for the older Forge");
     assert!(
         matches!(
@@ -224,7 +224,7 @@ async fn a_rollback_done_for_an_older_forge_is_reported_by_the_next_forge() {
     );
     assert_eq!(version(dir.path()), Store::schema_version());
 
-    let store = Store::open_restoring(dir.path(), &lock).expect("the next Forge starts");
+    let store = Store::open_restoring(&lock).expect("the next Forge starts");
     assert!(
         store
             .state()
@@ -261,12 +261,12 @@ async fn a_rollback_whose_swap_failed_is_not_reported_by_the_forge_that_keeps_th
     std::fs::create_dir(&blocker).expect("plant what stops the swap");
     let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
 
-    let failed = forge_store::admin::roll_back_for(dir.path(), &lock, older)
+    let failed = forge_store::admin::roll_back_for(&lock, older)
         .expect_err("the swap to the older database fails");
     std::fs::remove_dir(&blocker).expect("clear the blocker");
     assert_eq!(version(dir.path()), Store::schema_version(), "{failed:?}");
 
-    let store = Store::open_restoring(dir.path(), &lock).expect("this Forge starts again");
+    let store = Store::open_restoring(&lock).expect("this Forge starts again");
     let state = store.state().await.expect("read the state");
     assert_eq!(
         state.database_rollback, None,

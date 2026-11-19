@@ -377,11 +377,12 @@ fn binding(
             ..system
         };
         drop(
-            forge_store::Store::open_restoring_in(&config.data_dir, &exclusive, environment)
-                .map_err(|source| BindingError::Store {
+            forge_store::Store::open_restoring_in(&exclusive, environment).map_err(|source| {
+                BindingError::Store {
                     dir: config.data_dir.clone(),
                     source: Box::new(source),
-                })?,
+                }
+            })?,
         );
     }
     let address = config.listen;

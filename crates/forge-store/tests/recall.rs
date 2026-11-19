@@ -492,7 +492,6 @@ fn store_counting_advances(
     });
     let lock = forge_store::DataLock::acquire(dir).expect("hold the data folder");
     let store = Store::open_restoring_in(
-        dir,
         &lock,
         forge_store::Environment {
             connections,

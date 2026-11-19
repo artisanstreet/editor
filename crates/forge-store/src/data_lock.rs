@@ -60,12 +60,8 @@ impl DataLock {
         })
     }
 
-    pub(crate) fn guards(&self, dir: &Path) {
-        assert!(
-            self.dir == dir,
-            "invariant: the data lock on {} cannot guard {}",
-            self.dir.display(),
-            dir.display()
-        );
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }

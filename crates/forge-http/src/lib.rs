@@ -243,7 +243,7 @@ async fn start_mode(
         )
     } else {
         let lock = lock_data_dir(&config.data_dir)?;
-        let store = Store::open_restoring_in(&config.data_dir, &lock, environment);
+        let store = Store::open_restoring_in(&lock, environment);
         (HeldLock::Data { _exclusive: lock }, store)
     };
     let store = store.map_err(|source| StartError::Store {
