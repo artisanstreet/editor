@@ -249,3 +249,109 @@ fn a_folder_reached_through_a_link_the_sandbox_could_plant_is_refused() {
         ),
     }
 }
+
+const CONNECT_TO: &str = "FORGE_ISOLATION_CONNECT_TO";
+const BIND_FIRST: &str = "FORGE_ISOLATION_BIND_FIRST";
+const EXPECT: &str = "FORGE_ISOLATION_EXPECT";
+const SOCKET_TEST: &str = "a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_scopes_socket_files";
+
+enum Reaching {
+    Existing,
+    OwnNew,
+}
+
+fn connects_from_the_sandbox(
+    ruleset: &forge_isolation::Ruleset,
+    socket: &Path,
+    reaching: &Reaching,
+    expected: &str,
+) -> bool {
+    let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+    command
+        .args([SOCKET_TEST, "--exact", "--test-threads=1"])
+        .env(CONNECT_TO, socket)
+        .env(EXPECT, expected);
+    if matches!(reaching, Reaching::OwnNew) {
+        command.env(BIND_FIRST, "1");
+    }
+    contain(
+        &mut command,
+        Some(ruleset),
+        &EngineTree::new().expect("an engine tree"),
+    );
+    command.output().expect("the child runs").status.success()
+}
+
+fn connect_as_the_sandboxed_child(socket: &std::ffi::OsStr) {
+    let bound = std::env::var_os(BIND_FIRST).map(|_| {
+        std::os::unix::net::UnixListener::bind(socket).expect("the child binds its socket")
+    });
+    let outcome = match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => "reached".to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => "refused".to_owned(),
+        Err(error) => error.to_string(),
+    };
+    drop(bound);
+    let expected = std::env::var(EXPECT).expect("the parent says what to expect");
+    assert_eq!(
+        outcome,
+        expected,
+        "the sandboxed child's connection to {}",
+        Path::new(socket).display()
+    );
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a check the kernel can't make says so instead of passing silently"
+)]
+#[test]
+fn a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_scopes_socket_files()
+ {
+    if let Some(socket) = std::env::var_os(CONNECT_TO) {
+        connect_as_the_sandboxed_child(&socket);
+        return;
+    }
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    if landlock.coverage().socket_files == Reach::Open {
+        eprintln!(
+            "SKIPPED: Landlock ABI {} can't scope socket files, and Forge reports that",
+            landlock.abi()
+        );
+        return;
+    }
+    let writable = tempfile::tempdir().unwrap();
+    let own = tempfile::tempdir().unwrap();
+    let agent = tempfile::tempdir().unwrap();
+    let foreign = writable.path().join("tmux.sock");
+    let ssh_agent = agent.path().join("agent.sock");
+    let _foreign = std::os::unix::net::UnixListener::bind(&foreign).unwrap();
+    let _ssh_agent = std::os::unix::net::UnixListener::bind(&ssh_agent).unwrap();
+    let ruleset = landlock
+        .writes_only_to(
+            &[writable.path().to_path_buf()],
+            own.path(),
+            std::slice::from_ref(&ssh_agent),
+        )
+        .unwrap();
+
+    assert!(
+        connects_from_the_sandbox(&ruleset, &foreign, &Reaching::Existing, "refused"),
+        "a sandboxed child reached a socket in a shared folder it may write"
+    );
+    assert!(
+        connects_from_the_sandbox(&ruleset, &ssh_agent, &Reaching::Existing, "reached"),
+        "a sandboxed child couldn't reach the agent socket"
+    );
+    assert!(
+        connects_from_the_sandbox(
+            &ruleset,
+            &own.path().join("daemon.sock"),
+            &Reaching::OwnNew,
+            "reached"
+        ),
+        "a sandboxed tool couldn't connect to the socket it made in its run's own folder"
+    );
+}
