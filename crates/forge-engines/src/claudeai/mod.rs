@@ -13,7 +13,7 @@ mod transport;
 
 pub use capabilities::{Capabilities, CapabilitiesError, UsageError, capabilities, usage};
 pub use decoder::{ClaudeAiDecoder, ProtocolError, Stop};
-pub use rules::Rules;
+pub use rules::{ReadRefusal, Rules};
 pub use session::{
     CookieChange, LoadSessionError, RemoveSessionError, SaveSessionError, Session,
     UpdateSessionError, cookie_change,

@@ -978,6 +978,7 @@ async fn resource(
             | ResourceError::NoHome
             | ResourceError::NotRegular { .. }
             | ResourceError::Outside { .. }
+            | ResourceError::Refused { .. }
             | ResourceError::Read { .. }
             | ResourceError::Folder(_)
             | ResourceError::Task { .. }) => Failure::from(error),

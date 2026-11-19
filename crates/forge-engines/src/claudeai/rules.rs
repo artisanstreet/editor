@@ -46,6 +46,14 @@ pub enum LoadSettingsError {
     Malformed { file: PathBuf, field: &'static str },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ReadRefusal {
+    #[error("the Claude Code permission rule {rule} withholds it")]
+    Rule { rule: String },
+    #[error("a Claude Code settings file failed to load, so no file is read on the agent's behalf")]
+    Unsettled(#[source] Arc<LoadSettingsError>),
+}
+
 #[derive(Clone, Default)]
 pub struct Rules {
     grammar: Grammar,
@@ -304,6 +312,29 @@ impl Rules {
             host: None,
         };
         rules.any(|rule| rule.touches(&facts))
+    }
+
+    pub fn may_read(&self, path: &Path) -> Result<(), ReadRefusal> {
+        if let Some(broken) = self.broken.first() {
+            return Err(ReadRefusal::Unsettled(Arc::clone(broken)));
+        }
+        let facts = Facts {
+            tool: "Read",
+            shell: None,
+            paths: forms(path),
+            host: None,
+        };
+        match self
+            .deny
+            .iter()
+            .chain(&self.ask)
+            .find(|rule| rule.touches(&facts))
+        {
+            Some(rule) => Err(ReadRefusal::Rule {
+                rule: rule.written.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn facts<'a>(&self, call: &'a Call) -> Facts<'a> {

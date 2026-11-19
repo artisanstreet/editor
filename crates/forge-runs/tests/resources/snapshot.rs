@@ -182,9 +182,89 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
     let item = fixture.by_native("reply").await.id;
 
     assert!(kept_at(&fixture, &item, "ok.png").is_file());
+    let thread = fixture
+        .hub
+        .store()
+        .thread(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
     for path in [absolute.as_str(), "linked.png", "secrets/env.png"] {
         assert!(!kept_at(&fixture, &item, path).exists(), "{path} was kept");
+        let written = Written {
+            path: path.to_owned(),
+            from_home: false,
+        };
+        let shown = fixture
+            .hub
+            .read_resource(&thread, Some(&item), &written)
+            .await;
+        assert!(
+            matches!(
+                shown,
+                Err(ResourceError::Outside { .. } | ResourceError::Refused { .. })
+            ),
+            "{path} reached the Editor: {shown:?}"
+        );
     }
+}
+
+async fn shown_under(settings: &str) -> (Result<Vec<u8>, ResourceError>, bool) {
+    let fixture = fixture(Arc::new(|_, io| {
+        Box::pin(async move {
+            io.emit(reply("reply", "![plot](plot.png)")).await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    let project = fixture.dir.path();
+    std::fs::write(project.join("plot.png"), b"plot").unwrap();
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::write(project.join(".claude/settings.json"), settings).unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("plot"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let item = fixture.by_native("reply").await.id;
+    let kept = kept_at(&fixture, &item, "plot.png").is_file();
+    let thread = fixture
+        .hub
+        .store()
+        .thread(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let written = Written {
+        path: "plot.png".to_owned(),
+        from_home: false,
+    };
+    let shown = fixture
+        .hub
+        .read_resource(&thread, Some(&item), &written)
+        .await;
+    (shown, kept)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_that_denies_reading_or_has_broken_settings_shows_and_keeps_no_file() {
+    for settings in [
+        r#"{ "permissions": { "deny": ["Read"] } }"#,
+        r#"{ "permissions": { "ask": ["Read"] } }"#,
+        r#"{ "permissions": { "deny": "Read" } }"#,
+        "{ not json",
+    ] {
+        let (shown, kept) = shown_under(settings).await;
+        assert!(!kept, "kept under {settings}");
+        assert!(
+            matches!(shown, Err(ResourceError::Refused { .. })),
+            "shown under {settings}: {shown:?}"
+        );
+    }
+    let (shown, kept) = shown_under(r#"{ "permissions": { "deny": ["Bash"] } }"#).await;
+    assert!(kept);
+    assert_eq!(shown.unwrap(), b"plot");
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ use crate::Hub;
 use crate::error::ErrorClass;
 use crate::scratch::ThreadFolderError;
 use artisan_api::{EngineId, ItemId, Thread, ThreadId};
-use forge_engines::claudeai::Rules;
+use forge_engines::claudeai::{ReadRefusal, Rules};
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,6 @@ const WSL_CONFIG: &str = "/etc/wsl.conf";
 const WSL_DRIVES: &str = "/mnt";
 const BLOCK_PREFIX: &str = "artisan-";
 const WSL_DISTRIBUTION: &str = "WSL_DISTRO_NAME";
-const READ_TOOL: &str = "Read";
 
 static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 
@@ -36,8 +35,14 @@ pub enum ResourceError {
     NoHome,
     #[error("resource must be a regular file no larger than 128 MiB")]
     NotRegular { path: PathBuf },
-    #[error("outside the thread's folder or covered by a permission rule")]
+    #[error("{} is outside the thread's folder", path.display())]
     Outside { path: PathBuf },
+    #[error("{} is not readable on the agent's behalf", path.display())]
+    Refused {
+        path: PathBuf,
+        #[source]
+        source: ReadRefusal,
+    },
     #[error("read resource {}", path.display())]
     Read {
         path: PathBuf,
@@ -63,7 +68,8 @@ impl ResourceError {
             | Self::OtherDistribution { .. }
             | Self::NoHome
             | Self::NotRegular { .. }
-            | Self::Outside { .. } => ErrorClass::BadRequest,
+            | Self::Outside { .. }
+            | Self::Refused { .. } => ErrorClass::BadRequest,
             Self::Read { .. } | Self::Task { .. } => ErrorClass::Internal,
             Self::Folder(source) => source.class(),
         }
@@ -357,12 +363,22 @@ impl Access {
         }
     }
 
-    #[must_use]
-    fn permits(&self, resolved: &Path) -> bool {
-        self.root
+    fn authorize(&self, resolved: &Path) -> Result<(), ResourceError> {
+        if !self
+            .root
             .as_deref()
             .is_some_and(|root| resolved.starts_with(root))
-            && !self.rules.hides(READ_TOOL, resolved)
+        {
+            return Err(ResourceError::Outside {
+                path: resolved.to_path_buf(),
+            });
+        }
+        self.rules
+            .may_read(resolved)
+            .map_err(|source| ResourceError::Refused {
+                path: resolved.to_path_buf(),
+                source,
+            })
     }
 }
 
@@ -449,9 +465,7 @@ fn keep(target: &Path, bytes: &[u8]) {
 
 fn snapshot(live: &Path, access: &Access, target: &Path) -> Result<(), ResourceError> {
     let resolved = resolved(live)?;
-    if !access.permits(&resolved) {
-        return Err(ResourceError::Outside { path: resolved });
-    }
+    access.authorize(&resolved)?;
     let bytes = read_regular(&resolved)?;
     keep(target, &bytes);
     Ok(())
@@ -487,10 +501,9 @@ impl Hub {
                 return read_regular(kept);
             }
             let resolved = resolved(&live?)?;
+            hub.resource_access(&folder).authorize(&resolved)?;
             let bytes = read_regular(&resolved)?;
-            if let Some(target) = &snapshot
-                && hub.resource_access(&folder).permits(&resolved)
-            {
+            if let Some(target) = &snapshot {
                 keep(target, &bytes);
             }
             Ok(bytes)
