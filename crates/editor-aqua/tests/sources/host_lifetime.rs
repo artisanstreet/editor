@@ -16,12 +16,17 @@ fn config() -> HostConfig {
 }
 
 fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
+    ForgeClient::new(
+        "127.0.0.1:1",
+        &"0".repeat(64),
+        core.identity().expect("the test Core has an identity"),
+    )
+    .expect("the test Forge client builds")
 }
 
 fn pending_copy(core: &Core, config: &HostConfig) -> ContentText {
     let mut view = ContentText::new(
-        core.host(&config.id).unwrap(),
+        core.host(&config.id).expect("the test host is configured"),
         ContentRef::from_text("stored content"),
     );
     view.copy(core);

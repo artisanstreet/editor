@@ -18,8 +18,10 @@ impl Refresh {
             (Self::Sidebar, Self::Sidebar) => Self::Sidebar,
             (Self::SidebarFrame, Self::Sidebar | Self::SidebarFrame)
             | (Self::Sidebar, Self::SidebarFrame) => Self::SidebarFrame,
-            (Self::FrameSections, _) | (_, Self::FrameSections) => Self::FrameSections,
-            (Self::SidebarFrame, _) | (_, Self::SidebarFrame) => Self::FrameSections,
+            (Self::FrameSections, _)
+            | (_, Self::FrameSections)
+            | (Self::SidebarFrame, _)
+            | (_, Self::SidebarFrame) => Self::FrameSections,
             (Self::Transcript, Self::Transcript) => Self::Transcript,
             _ => Self::Sections,
         }
@@ -266,12 +268,12 @@ impl Invalidation {
             refresh.merge(cause.refresh())
         }) {
             Refresh::None => Refresh::Workspace,
-            refresh @ Refresh::Sidebar
-            | refresh @ Refresh::SidebarFrame
-            | refresh @ Refresh::Transcript
-            | refresh @ Refresh::Sections
-            | refresh @ Refresh::FrameSections
-            | refresh @ Refresh::Workspace => refresh,
+            refresh @ (Refresh::Sidebar
+            | Refresh::SidebarFrame
+            | Refresh::Transcript
+            | Refresh::Sections
+            | Refresh::FrameSections
+            | Refresh::Workspace) => refresh,
         }
     }
 

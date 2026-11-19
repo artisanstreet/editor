@@ -12,10 +12,10 @@ fn words(arguments: &[&str]) -> Vec<String> {
 fn choices(setup: &Setup) -> &Choices {
     match setup.state() {
         State::Choosing(choices) => choices,
-        state @ State::Installing { .. }
-        | state @ State::Cancelling { .. }
-        | state @ State::Failed { .. }
-        | state @ State::Done { .. } => panic!("setup is not choosing: {state:?}"),
+        state @ (State::Installing { .. }
+        | State::Cancelling { .. }
+        | State::Failed { .. }
+        | State::Done { .. }) => panic!("setup is not choosing: {state:?}"),
     }
 }
 

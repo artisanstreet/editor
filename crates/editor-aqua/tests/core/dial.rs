@@ -26,8 +26,10 @@ fn write_files(files: &EditorFiles) {
         "session_token": "dial-session",
         "profile": profile,
     });
-    std::fs::write(files.dir.join("account.json"), account.to_string()).unwrap();
-    save_onboarding_for_tests(files, CORE_URL, ACCOUNT, MACHINE).unwrap();
+    std::fs::write(files.dir.join("account.json"), account.to_string())
+        .expect("the fixture file is written");
+    save_onboarding_for_tests(files, CORE_URL, ACCOUNT, MACHINE)
+        .expect("the onboarding fixture is saved");
     let hosts = serde_json::json!({
         "hosts": [HostConfig {
             id: HostId(MACHINE.into()),
@@ -38,7 +40,8 @@ fn write_files(files: &EditorFiles) {
         }],
         "last": MACHINE,
     });
-    std::fs::write(files.dir.join("hosts.json"), hosts.to_string()).unwrap();
+    std::fs::write(files.dir.join("hosts.json"), hosts.to_string())
+        .expect("the fixture file is written");
 }
 
 #[test]
@@ -84,29 +87,46 @@ async fn pair_server() -> (String, String, Arc<std::sync::atomic::AtomicUsize>) 
     use artisan_api::tls::Identity;
     use base64::Engine as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let identity = Identity::generate("pairing-forge").unwrap();
-    let certificate = identity.certificate_der().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the test listener binds");
+    let address = listener
+        .local_addr()
+        .expect("the test listener has an address")
+        .to_string();
+    let identity = Identity::generate("pairing-forge").expect("a test identity generates");
+    let certificate = identity
+        .certificate_der()
+        .expect("the test identity encodes its certificate");
     let encoded = base64::engine::general_purpose::STANDARD.encode(certificate.as_ref());
     let config = rustls::ServerConfig::builder_with_provider(artisan_api::tls::provider())
         .with_safe_default_protocol_versions()
-        .unwrap()
+        .expect("the test TLS config accepts the default protocol versions")
         .with_no_client_auth()
-        .with_single_cert(vec![certificate], identity.key_der().unwrap())
-        .unwrap();
+        .with_single_cert(
+            vec![certificate],
+            identity
+                .key_der()
+                .expect("the test identity encodes its key"),
+        )
+        .expect("the test TLS config accepts the identity");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let pairings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = Arc::clone(&pairings);
     tokio::spawn(async move {
         loop {
-            let (socket, _) = listener.accept().await.unwrap();
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("the test listener accepts a connection");
             let Ok(mut socket) = acceptor.accept(socket).await else {
                 continue;
             };
             let mut request = Vec::new();
             let mut byte = [0; 1];
-            while !request.ends_with(b"\r\n\r\n") && socket.read(&mut byte).await.unwrap() == 1 {
+            while !request.ends_with(b"\r\n\r\n")
+                && socket.read(&mut byte).await.expect("the test socket reads") == 1
+            {
                 request.push(byte[0]);
             }
             if request.starts_with(b"POST /pair ") {

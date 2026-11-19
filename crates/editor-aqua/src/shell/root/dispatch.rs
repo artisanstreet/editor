@@ -137,12 +137,12 @@ impl RootViews {
                         }
                     }
                 }
-                action @ ConversationAction::Link(..)
-                | action @ ConversationAction::Color(..)
-                | action @ ConversationAction::Copy(..)
-                | action @ ConversationAction::RetryControls(_)
-                | action @ ConversationAction::RetryThread(_)
-                | action @ ConversationAction::Blob(..) => action,
+                action @ (ConversationAction::Link(..)
+                | ConversationAction::Color(..)
+                | ConversationAction::Copy(..)
+                | ConversationAction::RetryControls(_)
+                | ConversationAction::RetryThread(_)
+                | ConversationAction::Blob(..)) => action,
             };
             match action {
                 ConversationAction::Media(_, _, _, _) | ConversationAction::Source(_) => continue,

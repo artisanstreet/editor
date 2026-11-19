@@ -1025,10 +1025,10 @@ impl Workspace {
                         }
                     }
                 }
-                effect @ ComposerEffect::OpenImage(_)
-                | effect @ ComposerEffect::CloseNote
-                | effect @ ComposerEffect::RetryThreadSettings => {
-                    self.composer_effects.push(effect)
+                effect @ (ComposerEffect::OpenImage(_)
+                | ComposerEffect::CloseNote
+                | ComposerEffect::RetryThreadSettings) => {
+                    self.composer_effects.push(effect);
                 }
             }
         }

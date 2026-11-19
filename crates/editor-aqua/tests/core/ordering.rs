@@ -19,20 +19,22 @@ fn host(core: &mut Core, id: &str) -> HostId {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity().unwrap(),
+        core.identity().expect("the test Core has an identity"),
     )
-    .unwrap();
+    .expect("the test Forge client builds");
     core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    core.host_mut(&config.id)
+        .expect("the test host is configured")
+        .test_stop_connection();
     config.id
 }
 
 fn core() -> (tempfile::TempDir, Core) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("a temporary directory is created");
     let core = Core::for_tests(EditorFiles {
         dir: directory.path().to_owned(),
     })
-    .unwrap();
+    .expect("the test Core starts");
     (directory, core)
 }
 

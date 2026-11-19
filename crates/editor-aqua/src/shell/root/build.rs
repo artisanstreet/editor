@@ -51,11 +51,11 @@ impl RootViews {
         }
         let screen = match shell.core.workspace_screen() {
             Screen::Settings(_) => Screen::Home,
-            screen @ Screen::Home
-            | screen @ Screen::Thread { .. }
-            | screen @ Screen::NewThread { .. }
-            | screen @ Screen::Marketplace
-            | screen @ Screen::Usage => screen.clone(),
+            screen @ (Screen::Home
+            | Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Marketplace
+            | Screen::Usage) => screen.clone(),
         };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let size = aqua_core::Size::new(viewport.width, viewport.height);

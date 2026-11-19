@@ -336,14 +336,13 @@ impl SectionViews for RootViews {
             (crate::frame::search::OVERLAY, overlay),
         ]
         .into_iter()
-        .map(|(key, element)| match ui.refresh_subtree(key, element) {
+        .all(|(key, element)| match ui.refresh_subtree(key, element) {
             Ok(refreshed) => refreshed,
             Err(error) => {
                 tracing::warn!(%error, key, "could not refresh sidebar frame");
                 false
             }
         })
-        .all(|refreshed| refreshed)
     }
 
     fn refresh_sidebar(&self, shell: &Shell, ui: &mut UiApp, window: &ObservedWindowState) -> bool {

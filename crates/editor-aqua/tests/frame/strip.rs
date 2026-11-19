@@ -43,9 +43,9 @@ fn layout(outline: Option<f32>) -> Placed {
             ))
             .build()
     })
-    .unwrap();
+    .expect("the test view lays out");
     app.set_viewport(1200.0, 200.0, 1.0);
-    app.build_frame().unwrap();
+    app.build_frame().expect("the test frame builds");
     let tree = app.tree();
     let labels = tree
         .traverse()

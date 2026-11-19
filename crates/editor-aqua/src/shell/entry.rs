@@ -103,7 +103,6 @@ impl Entry {
                         ));
                     }
                 }
-                Event::SubmitEmail | Event::SubmitCode | Event::Provider(_) => {}
                 Event::Edited => {
                     self.sign_in.problem = None;
                     match core.account().phase() {
@@ -133,7 +132,7 @@ impl Entry {
                         .borrow_mut()
                         .set_text("");
                 }
-                Event::Cancel => {}
+                Event::SubmitEmail | Event::SubmitCode | Event::Provider(_) | Event::Cancel => {}
             }
             changed = true;
         }

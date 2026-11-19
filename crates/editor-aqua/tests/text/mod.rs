@@ -1099,7 +1099,7 @@ fn native_text_service_queries_live_selection_and_invalidates_after_edit() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let output = Rc::clone(&events);
     let controller = EditorController::from_shared(Rc::clone(&model), move |event| {
-        output.borrow_mut().push(event)
+        output.borrow_mut().push(event);
     });
     let theme = ArtisanTheme::resolved();
     let fonts = SharedFonts::new();

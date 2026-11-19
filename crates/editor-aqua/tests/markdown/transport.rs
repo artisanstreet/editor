@@ -284,7 +284,10 @@ fn stored_conversation_transaction(
     });
     let mut conversation = Conversation::new(core);
     conversation.open_thread(core, config.id.clone(), item.thread_id.clone());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
+    let sender = core
+        .host(&config.id)
+        .expect("the test host is configured")
+        .test_transition_sender();
     runtime().block_on(sender.event(Event::Item { item: item.clone() }));
     while conversation
         .view
@@ -298,15 +301,18 @@ fn stored_conversation_transaction(
         assert!(Instant::now() < deadline, "stored item delivery deadline");
         std::thread::yield_now();
     }
-    let scope = PresentationScope::capture(&conversation, core).unwrap();
-    let provider = core.source_provider(&scope.host, scope.instance).unwrap();
+    let scope = PresentationScope::capture(&conversation, core)
+        .expect("the open thread has a presentation scope");
+    let provider = core
+        .source_provider(&scope.host, scope.instance)
+        .expect("the scope's host provides sources");
     let stored = Rc::new(RefCell::new(StoredConversation::default()));
     stored.borrow_mut().rebind(Some(scope.clone()));
     let (wake, received) = mpsc::channel();
     stored
         .borrow()
         .wake_mailbox()
-        .unwrap()
+        .expect("the stored conversation has a wake mailbox")
         .set_waker(Arc::new(move || {
             let _ = wake.send(());
         }));
@@ -314,7 +320,9 @@ fn stored_conversation_transaction(
         item: item.id.clone(),
         slot: Slot::Prose,
     };
-    let version = conversation.body_version(&key).unwrap();
+    let version = conversation
+        .body_version(&key)
+        .expect("the stored body is loaded");
     let ItemKind::AssistantMessage {
         text: TextContent::Stored(reference),
         ..
@@ -326,7 +334,7 @@ fn stored_conversation_transaction(
         stored
             .borrow_mut()
             .ensure(&scope, &provider, key.clone(), reference.clone(), version)
-            .unwrap(),
+            .expect("the stored body is requested"),
         StoredPreparation::Pending
     ));
     loop {
@@ -340,12 +348,16 @@ fn stored_conversation_transaction(
         }
         wait_wake(&received, deadline);
     }
-    let ordinal = stored.borrow().block_count(&key).unwrap() - 1;
+    let ordinal = stored
+        .borrow()
+        .block_count(&key)
+        .expect("the stored body is loaded")
+        - 1;
     let source = loop {
         let state = stored
             .borrow_mut()
             .ensure(&scope, &provider, key.clone(), reference.clone(), version)
-            .unwrap();
+            .expect("the stored body is requested");
         match state {
             StoredPreparation::Ready(source) => break source,
             StoredPreparation::Failed(error) => panic!("stored index failed: {error}"),
@@ -368,8 +380,8 @@ fn stored_conversation_transaction(
             }
         }
     }
-    let index = conversation.rows.iter().position(|(row, _)| matches!(row, Row::Text { id, slot: Slot::Prose, block, .. } if *id == item.id && *block == ordinal)).unwrap();
-    let model = row_model(&conversation, index, None).unwrap();
+    let index = conversation.rows.iter().position(|(row, _)| matches!(row, Row::Text { id, slot: Slot::Prose, block, .. } if *id == item.id && *block == ordinal)).expect("the prose row is present");
+    let model = row_model(&conversation, index, None).expect("the row has a model");
     let row_key = model.row.key();
     let document = SelectionDocumentId(555);
     let markdown = Rc::new(RefCell::new(
@@ -409,12 +421,12 @@ fn stored_conversation_transaction(
             },
         )
         .with_sources(provider.clone(), document, Rc::new(|_| {}))
-        .unwrap()
+        .expect("the test Forge client builds")
         .with_stored(Rc::clone(&stored), provider)
-        .unwrap()
+        .expect("the test Forge client builds")
         .with_observations(observations.clone()),
     );
-    let realized = factory.realize(0, &row_key).unwrap();
+    let realized = factory.realize(0, &row_key).expect("the row realizes");
     let source_id = realized.batches[0].sources()[0].id;
     let callback = factory.callback();
     let list_key = row_key.clone();
@@ -432,9 +444,9 @@ fn stored_conversation_transaction(
         .build();
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.set_viewport(800.0, 600.0, 1.0);
-    app.mount(|_| list).unwrap();
-    app.layout().unwrap();
-    app.build_frame().unwrap();
+    app.mount(|_| list).expect("the test view mounts");
+    app.layout().expect("the test view lays out");
+    app.build_frame().expect("the test frame builds");
     let clip = aqua_core::Rect {
         x: 0.0,
         y: 0.0,
@@ -446,13 +458,13 @@ fn stored_conversation_transaction(
         .painted
         .into_iter()
         .find(|paint| paint.snapshot.stored.is_some())
-        .unwrap();
+        .expect("a stored row was painted");
     let candidate = painted
         .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
-        .unwrap();
+        .expect("the open thread has a presentation scope");
     let stale_host = painted
         .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
-        .unwrap();
+        .expect("the open thread has a presentation scope");
     assert!(app.unregister_selection_source_in(document, source_id));
     let mut changed = item.clone();
     changed.seq += 1;

@@ -342,11 +342,12 @@ fn page_texts(element: aqua_ui::element::Element) -> Vec<String> {
     use aqua_ui::tree::NodeKind;
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     let mut element = Some(element);
-    app.mount(move |_| element.take().unwrap()).unwrap();
+    app.mount(move |_| element.take().expect("the element mounts once"))
+        .expect("the test view mounts");
     app.set_viewport(900.0, 700.0, 1.0);
-    app.build_frame().unwrap();
+    app.build_frame().expect("the test frame builds");
     let tree = app.tree();
-    let mut pending = vec![tree.root().unwrap()];
+    let mut pending = vec![tree.root().expect("the mounted tree has a root")];
     let mut texts = Vec::new();
     while let Some(id) = pending.pop() {
         let Some(node) = tree.get(id) else { continue };
@@ -435,12 +436,13 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
     use aqua_ui::tree::NodeKind;
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     let mut element = Some(element);
-    app.mount(move |_| element.take().unwrap()).unwrap();
+    app.mount(move |_| element.take().expect("the element mounts once"))
+        .expect("the test view mounts");
     app.tree_mut().set_gpui_layout_scale(Some(scale));
     app.set_viewport(900.0, 700.0, scale);
-    app.build_frame().unwrap();
+    app.build_frame().expect("the test frame builds");
     let tree = app.tree();
-    let mut pending = vec![tree.root().unwrap()];
+    let mut pending = vec![tree.root().expect("the mounted tree has a root")];
     let mut rects = Vec::new();
     while let Some(id) = pending.pop() {
         let Some(node) = tree.get(id) else { continue };
@@ -510,8 +512,13 @@ fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
 fn add_host(core: &mut editor_aqua::core::Core, id: &str) -> editor_aqua::core::HostId {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
-    let identity = Identity::generate("settings-host").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let identity = Identity::generate("settings-host").expect("a test identity generates");
+    let fingerprint = fingerprint(
+        identity
+            .certificate_der()
+            .expect("the test identity encodes its certificate")
+            .as_ref(),
+    );
     let config = HostConfig {
         id: HostId(id.into()),
         name: id.into(),
@@ -519,7 +526,8 @@ fn add_host(core: &mut editor_aqua::core::Core, id: &str) -> editor_aqua::core::
         fingerprint: fingerprint.clone(),
         kind: HostKind::Local,
     };
-    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity)
+        .expect("the test Forge client builds");
     core.add_test_host(&config, client);
     config.id
 }
@@ -529,7 +537,10 @@ fn retention_target(
 ) -> editor_aqua::settings::preferences::SettingKey {
     let id = add_host(core, "writes-host");
     editor_aqua::settings::preferences::SettingKey {
-        instance: core.host(&id).unwrap().instance(),
+        instance: core
+            .host(&id)
+            .expect("the test host is configured")
+            .instance(),
         host: id,
         key: artisan_api::THREAD_RETENTION_DAYS_KEY,
     }
@@ -756,17 +767,26 @@ fn silent_host(
 ) -> (std::net::TcpListener, editor_aqua::core::HostId) {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
-    let silent = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let identity = Identity::generate("settings-silent-host").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let silent = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("the test listener binds");
+    let identity = Identity::generate("settings-silent-host").expect("a test identity generates");
+    let fingerprint = fingerprint(
+        identity
+            .certificate_der()
+            .expect("the test identity encodes its certificate")
+            .as_ref(),
+    );
     let config = HostConfig {
         id: HostId(id.into()),
         name: id.into(),
-        address: silent.local_addr().unwrap().to_string(),
+        address: silent
+            .local_addr()
+            .expect("the test listener has an address")
+            .to_string(),
         fingerprint: fingerprint.clone(),
         kind: HostKind::Local,
     };
-    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity)
+        .expect("the test Forge client builds");
     core.add_test_host(&config, client);
     (silent, config.id)
 }
@@ -789,9 +809,9 @@ fn render_settings(
         emit,
     );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.mount(|_| view).unwrap();
+    app.mount(|_| view).expect("the test view mounts");
     app.set_viewport(900.0, 2400.0, 1.0);
-    app.build_frame().unwrap();
+    app.build_frame().expect("the test frame builds");
     app
 }
 
