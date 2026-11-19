@@ -33,7 +33,7 @@ Group "Artisan Editor"
     ListItem
       Group "Claude Code"
         Label "Picked the parser refactor back up."
-  Label "Reply finished"
+  Label "Picked the parser refactor back up.\n\nReply finished"
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView

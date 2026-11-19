@@ -34,7 +34,7 @@ Group "Artisan Editor"
     ListItem
       Group "OpenCode"
         Label "It printed hello."
-  Label "Reply finished"
+  Label "It printed hello.\n\nReply finished"
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView

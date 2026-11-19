@@ -44,7 +44,9 @@ fn streaming_text_is_announced_a_whole_paragraph_at_a_time() {
 #[test]
 fn completion_and_stopping_are_announced_and_end_the_busy_state() {
     assert_eq!(
-        announcement(&Turn::Finished),
+        announcement(&Turn::Finished {
+            text: String::new()
+        }),
         Announcement {
             text: "Reply finished".to_owned(),
             busy: false,
@@ -113,7 +115,9 @@ fn the_tree_carries_a_polite_announcement_and_a_busy_transcript_while_streaming(
         .unwrap();
     assert!(transcript.busy);
 
-    let nodes = semantics(&Turn::Finished);
+    let nodes = semantics(&Turn::Finished {
+        text: "First point.\n\n".to_owned(),
+    });
     let live: Vec<_> = nodes
         .iter()
         .filter(|node| node.live == Some(LiveRegion::Polite))
@@ -136,5 +140,37 @@ fn nothing_is_read_out_while_no_turn_is_running() {
             .iter()
             .all(|node| node.live.is_none() && !(node.role == Role::Text && node.label.is_empty())),
         "{nodes:#?}"
+    );
+}
+
+#[test]
+fn the_last_paragraph_is_read_out_when_the_reply_finishes() {
+    let reply = "The bug is in the parser.\n\nThe fix keeps the last line.";
+    assert_eq!(
+        announcement(&replying(reply)).text,
+        "The bug is in the parser."
+    );
+    assert_eq!(
+        announcement(&Turn::Finished {
+            text: reply.to_owned()
+        })
+        .text,
+        "The fix keeps the last line.\n\nReply finished",
+        "the paragraph streaming never completed is read with the end of the reply"
+    );
+    assert_eq!(
+        announcement(&Turn::Finished {
+            text: "A single paragraph".to_owned()
+        })
+        .text,
+        "A single paragraph\n\nReply finished"
+    );
+    assert_eq!(
+        announcement(&Turn::Finished {
+            text: "Already read.\n\n".to_owned()
+        })
+        .text,
+        "Reply finished",
+        "a paragraph already read while streaming is not read again"
     );
 }

@@ -16,7 +16,7 @@ pub enum Turn {
     Working { engine: &'static str },
     WaitingOnYou { engine: &'static str },
     Replying { engine: &'static str, text: String },
-    Finished,
+    Finished { text: String },
     Stopped,
     Failed { error: Option<String> },
 }
@@ -36,7 +36,10 @@ fn announcement(turn: &Turn) -> Announcement {
         Turn::Replying { engine, text } => {
             latest_paragraph(text).map_or_else(|| format!("{engine} is replying"), str::to_owned)
         }
-        Turn::Finished => "Reply finished".to_owned(),
+        Turn::Finished { text } => unread_paragraph(text).map_or_else(
+            || "Reply finished".to_owned(),
+            |paragraph| format!("{paragraph}\n\nReply finished"),
+        ),
         Turn::Stopped => "Reply stopped".to_owned(),
         Turn::Failed { error } => error
             .as_deref()
@@ -51,6 +54,11 @@ fn announcement(turn: &Turn) -> Announcement {
         text,
         busy: matches!(turn, Turn::Working { .. } | Turn::Replying { .. }),
     }
+}
+
+fn unread_paragraph(text: &str) -> Option<&str> {
+    let start = text.rfind("\n\n").map_or(0, |at| at + 2);
+    Some(text[start..].trim()).filter(|paragraph| !paragraph.is_empty())
 }
 
 fn latest_paragraph(text: &str) -> Option<&str> {
@@ -77,7 +85,9 @@ fn turn(conversation: &Conversation, now: Timestamp) -> Turn {
         RunState::Finished {
             outcome: RunOutcome::Done,
             ..
-        } => Turn::Finished,
+        } => Turn::Finished {
+            text: reply_tail(view, run),
+        },
         RunState::Finished {
             outcome: RunOutcome::Cancelled | RunOutcome::Interrupted,
             ..
