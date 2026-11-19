@@ -28,7 +28,11 @@ impl ThreadShell {
     }
 
     pub fn open_at(host: &str, thread: &str, motion: Motion, clock: Clock) -> Self {
-        Self::open_with_clock(host, thread, motion, clock, |_, _| {})
+        Self::open_with_clock(remote_host(host), thread, motion, clock, |_, _| {})
+    }
+
+    pub fn open_on(host: HostConfig, thread: &str, motion: Motion) -> Self {
+        Self::open_with_clock(host, thread, motion, Clock::system(), |_, _| {})
     }
 
     fn open_with(
@@ -37,7 +41,7 @@ impl ThreadShell {
         motion: Motion,
         prepare: impl FnOnce(&mut Core, &HostConfig),
     ) -> Self {
-        Self::open_with_clock(host, thread, motion, Clock::system(), prepare)
+        Self::open_with_clock(remote_host(host), thread, motion, Clock::system(), prepare)
     }
 
     pub fn open_stubbed(forge: &StubForge, host: &str, thread: &str, motion: Motion) -> Self {
@@ -89,7 +93,7 @@ impl ThreadShell {
     }
 
     fn open_with_clock(
-        host: &str,
+        host: HostConfig,
         thread: &str,
         motion: Motion,
         clock: Clock,
@@ -110,7 +114,6 @@ impl ThreadShell {
         let (mut shell, _) = Shell::new(files, resources.images.clone());
         shell.core = test_core_with_clock(directory.path(), clock);
         shell.core.set_image_assets(resources.images.clone());
-        let host = remote_host(host);
         connect(&mut shell.core, &host);
         prepare(&mut shell.core, &host);
         let thread = ThreadId::from(thread);

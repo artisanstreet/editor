@@ -114,7 +114,7 @@ impl WordmarkLoader {
 }
 
 #[must_use]
-pub fn lost(status: &ConnectionStatus) -> Option<Element> {
+pub(crate) fn lost(status: &ConnectionStatus) -> Option<Element> {
     match status {
         ConnectionStatus::Live | ConnectionStatus::Connecting => None,
         ConnectionStatus::Reconnecting { .. } | ConnectionStatus::Offline { .. } => Some(
