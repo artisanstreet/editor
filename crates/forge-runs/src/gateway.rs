@@ -73,7 +73,7 @@ pub(crate) struct Gateway {
 }
 
 #[derive(Debug)]
-pub struct GatewayPass {
+pub(crate) struct GatewayPass {
     hub: Hub,
     token: Option<Secret>,
     servers: Vec<(String, String)>,
@@ -81,7 +81,7 @@ pub struct GatewayPass {
 
 impl GatewayPass {
     #[must_use]
-    pub fn servers(&self) -> &[(String, String)] {
+    pub(crate) fn servers(&self) -> &[(String, String)] {
         &self.servers
     }
 }
@@ -117,7 +117,7 @@ impl Hub {
             .retain(|_, holder| holder != thread);
     }
 
-    pub async fn gateway_pass(&self, thread: &ThreadId) -> GatewayPass {
+    pub(crate) async fn gateway_pass(&self, thread: &ThreadId) -> GatewayPass {
         let computer = self.gateway_lock().computer && self.computer_use_on().await;
         let issued = self.issue_gateway_token(thread);
         let servers = issued.as_ref().map_or_else(Vec::new, |(base, token)| {
