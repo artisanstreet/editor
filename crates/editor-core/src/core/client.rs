@@ -958,12 +958,13 @@ fn relay_parts(
         path.push('?');
         path.push_str(query);
     }
-    let content_type = built
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
+    let content_type = match built.headers().get("content-type") {
+        None => String::new(),
+        Some(value) => value
+            .to_str()
+            .expect("invariant: the Editor's requests carry ASCII content types")
+            .to_owned(),
+    };
     let raw = built
         .body()
         .map(|body| body.as_bytes().ok_or(CallFailure::StreamingBody))

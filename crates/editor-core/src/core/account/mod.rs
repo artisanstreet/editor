@@ -214,6 +214,17 @@ pub struct Account {
     events: crate::core::store::Effects,
 }
 
+fn core_url_override() -> Option<String> {
+    match std::env::var(CORE_URL_OVERRIDE) {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(%error, "read {CORE_URL_OVERRIDE}; using the saved or default Core URL");
+            None
+        }
+    }
+}
+
 impl Account {
     pub(crate) fn new(
         files: EditorFiles,
@@ -231,14 +242,7 @@ impl Account {
             .core_url
             .clone()
             .or(stored.base_url)
-            .or_else(|| match std::env::var(CORE_URL_OVERRIDE) {
-                Ok(url) => Some(url),
-                Err(std::env::VarError::NotPresent) => None,
-                Err(error @ std::env::VarError::NotUnicode(_)) => {
-                    tracing::warn!(%error, "{CORE_URL_OVERRIDE} is ignored");
-                    None
-                }
-            })
+            .or_else(core_url_override)
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| "https://api.artisan.st".to_owned());
         let http = CoreSessionClient::new(&base_url).expect("Core HTTP client builds");

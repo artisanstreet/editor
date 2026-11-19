@@ -1001,16 +1001,33 @@ impl Core {
     }
 }
 fn device_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|name| name.trim().to_owned())
-        })
-        .filter(|name| !name.is_empty())
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .find_map(device_name_variable)
+        .or_else(device_name_file)
         .unwrap_or_else(|| "Artisan Editor".to_owned())
+}
+
+fn device_name_variable(key: &'static str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(name) => Some(name).filter(|name| !name.trim().is_empty()),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(key, %error, "read the device name from the environment");
+            None
+        }
+    }
+}
+
+fn device_name_file() -> Option<String> {
+    match std::fs::read_to_string("/etc/hostname") {
+        Ok(name) => Some(name.trim().to_owned()).filter(|name| !name.is_empty()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(%error, "read the device name from /etc/hostname");
+            None
+        }
+    }
 }
 
 enum Source {

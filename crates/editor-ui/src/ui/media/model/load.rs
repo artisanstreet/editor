@@ -180,7 +180,7 @@ impl ModelAssets {
                                 .map(|model| Arc::new(LoadedModel::from_model(model, renderer)))
                         })
                         .await
-                        .unwrap_or_else(|_| Err("the file could not be read".to_owned())),
+                        .unwrap_or_else(|error| Err(format!("the model reader stopped: {error}"))),
                     }
                 });
                 None

@@ -162,12 +162,10 @@ impl RootViews {
         ) {
             tracing::warn!(%error, "could not open the account menu");
         }
-        if self
-            .account_popup
-            .advance(ui, ctx.now().as_secs_f64())
-            .unwrap_or(false)
-        {
-            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        match self.account_popup.advance(ui, ctx.now().as_secs_f64()) {
+            Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "could not animate the account menu"),
         }
     }
 }
