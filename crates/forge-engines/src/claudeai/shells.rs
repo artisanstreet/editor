@@ -20,6 +20,7 @@ static LAST_ID: AtomicUsize = AtomicUsize::new(0);
 #[derive(Default)]
 pub struct Shells {
     shells: Mutex<HashMap<String, Arc<Shell>>>,
+    turn: CancellationToken,
 }
 
 struct Shell {
@@ -31,7 +32,15 @@ struct Shell {
 #[derive(Default)]
 struct ShellState {
     unread: Unread,
-    ended: Option<Ended>,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy, Default)]
+enum Phase {
+    #[default]
+    Running,
+    Exited(Ended),
+    Released(Ended),
 }
 
 #[derive(Default)]
@@ -87,19 +96,19 @@ impl Shells {
             .shells
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let running = shells.values().filter(|shell| shell.running()).count();
+        let running = shells.values().filter(|shell| shell.holds_group()).count();
         if running >= MAX_RUNNING_SHELLS {
             return Err(format!(
                 "This turn already runs {MAX_RUNNING_SHELLS} background shells, the most it may. Stop one with KillShell, or wait for one to finish, before starting another."
             ));
         }
-        let mut finished: Vec<(usize, String)> = shells
+        let mut released: Vec<(usize, String)> = shells
             .iter()
-            .filter(|(_, shell)| !shell.running())
+            .filter(|(_, shell)| !shell.holds_group())
             .map(|(id, shell)| (shell.number, id.clone()))
             .collect();
-        finished.sort_unstable();
-        for (_, id) in finished
+        released.sort_unstable();
+        for (_, id) in released
             .into_iter()
             .take((shells.len() + 1).saturating_sub(MAX_KEPT_SHELLS))
         {
@@ -120,7 +129,7 @@ impl Shells {
         let shell = Arc::new(Shell {
             number,
             state: Mutex::new(ShellState::default()),
-            cancel: CancellationToken::new(),
+            cancel: self.turn.child_token(),
         });
         shells.insert(id.clone(), Arc::clone(&shell));
         drop(shells);
@@ -136,14 +145,16 @@ impl Shells {
                         Ended::Stopped
                     }
                 };
-                shell.lock().ended = Some(ended);
+                shell.lock().phase = Phase::Exited(ended);
+                ended
             };
-            tokio::join!(
+            let (ended, (), ()) = tokio::join!(
                 watch,
                 pump(stdout, &shell, legacy),
                 pump(stderr, &shell, legacy)
             );
             drop(child);
+            shell.lock().phase = Phase::Released(ended);
         });
         Ok(id)
     }
@@ -164,13 +175,15 @@ impl Shells {
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
-        match state.ended {
-            Some(Ended::Code(code)) => {
-                write!(out, "[exit code {code}]").ok();
-            }
-            Some(Ended::Stopped) => out.push_str("[stopped]"),
-            Some(Ended::WithoutCode) => out.push_str("[ended without an exit code]"),
-            None => out.push_str("[still running]"),
+        match state.phase {
+            Phase::Running => out.push_str("[still running]"),
+            Phase::Exited(ended) | Phase::Released(ended) => match ended {
+                Ended::Code(code) => {
+                    write!(out, "[exit code {code}]").ok();
+                }
+                Ended::Stopped => out.push_str("[stopped]"),
+                Ended::WithoutCode => out.push_str("[ended without an exit code]"),
+            },
         }
         drop(state);
         Ok(out)
@@ -201,13 +214,7 @@ impl Shells {
 
 impl Drop for Shells {
     fn drop(&mut self) {
-        let shells = self
-            .shells
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for shell in shells.values() {
-            shell.cancel.cancel();
-        }
+        self.turn.cancel();
     }
 }
 
@@ -255,8 +262,8 @@ impl Shell {
         self.lock().unread.push(text);
     }
 
-    fn running(&self) -> bool {
-        !self.cancel.is_cancelled() && self.lock().ended.is_none()
+    fn holds_group(&self) -> bool {
+        !self.cancel.is_cancelled() && !matches!(self.lock().phase, Phase::Released(_))
     }
 }
 

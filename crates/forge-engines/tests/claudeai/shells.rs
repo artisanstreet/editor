@@ -31,7 +31,48 @@ fn printed(state: &ShellState, text: &str) -> bool {
 
 #[cfg(unix)]
 fn exited(state: &ShellState) -> bool {
-    state.ended.is_some()
+    !matches!(state.phase, Phase::Running)
+}
+
+#[cfg(unix)]
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+async fn gone(pid: &str, what: &str) {
+    eventually(what, PATIENCE, || std::future::ready(!alive(pid))).await;
+}
+
+#[cfg(unix)]
+async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
+    let id = shells
+        .start("sleep 30 & echo $!", work, &crate::sandbox::Sandbox::Open)
+        .unwrap();
+    settled(shells, &id, "the launcher to exit", |state| {
+        exited(state) && printed(state, "\n")
+    })
+    .await;
+    let read = shells.read(&id).unwrap();
+    let pid = read.lines().next().unwrap().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "the grandchild's pid: {read:?}");
+    assert!(read.ends_with("[exit code 0]"), "{read}");
+    assert!(alive(&pid), "the grandchild {pid} runs on");
+    (id, pid)
+}
+
+#[cfg(unix)]
+fn start_and_kill_past_the_retention_bound(shells: &Shells, work: &Path) {
+    for _ in 0..MAX_KEPT_SHELLS {
+        let id = shells
+            .start("sleep 30", work, &crate::sandbox::Sandbox::Open)
+            .unwrap();
+        shells.kill(&id).unwrap();
+    }
 }
 
 #[cfg(unix)]
@@ -220,19 +261,49 @@ async fn stopping_the_run_ends_what_a_shell_started() {
         .trim()
         .to_owned();
     assert!(pid.parse::<u32>().is_ok(), "the grandchild's pid: {pid:?}");
-    let alive = |pid: &str| {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    };
     assert!(alive(&pid));
     drop(shells);
-    eventually("the grandchild to end with the run", PATIENCE, || {
-        std::future::ready(!alive(&pid))
-    })
-    .await;
+    gone(&pid, "the grandchild to end with the run").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_a_finished_shell_left_running_count_toward_the_limit() {
+    let work = tempfile::tempdir().unwrap();
+    let shells = Shells::default();
+    for _ in 0..MAX_RUNNING_SHELLS {
+        leave_running(&shells, work.path()).await;
+    }
+    let refused = shells
+        .start(
+            "sleep 30 & echo started",
+            work.path(),
+            &crate::sandbox::Sandbox::Open,
+        )
+        .unwrap_err();
+    assert!(refused.contains("KillShell"), "{refused}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shell_whose_commands_still_run_stays_stoppable_past_the_retention_bound() {
+    let work = tempfile::tempdir().unwrap();
+    let shells = Shells::default();
+    let (id, pid) = leave_running(&shells, work.path()).await;
+    start_and_kill_past_the_retention_bound(&shells, work.path());
+    assert!(shells.kill(&id).unwrap().contains("stopped"));
+    gone(&pid, "the grandchild to end with its shell").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ending_the_turn_ends_what_its_finished_shells_left_running() {
+    let work = tempfile::tempdir().unwrap();
+    let shells = Shells::default();
+    let (_, pid) = leave_running(&shells, work.path()).await;
+    start_and_kill_past_the_retention_bound(&shells, work.path());
+    drop(shells);
+    gone(&pid, "the grandchild to end with the turn").await;
 }
 
 #[test]
