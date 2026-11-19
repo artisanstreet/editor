@@ -267,9 +267,11 @@ fn a_long_backup_keeps_writing_to_the_log_so_ae_sees_forge_working() {
     let previous = MIGRATIONS.len() - 1;
     let mut conn = open(&database);
     migrate_to(&mut conn, previous, upgrade()).expect("previous Forge creates its database");
+    let settings = conn.transaction().expect("begin writing settings");
     for key in 0..5000 {
-        remember(&conn, &format!("setting {key}"));
+        remember(&settings, &format!("setting {key}"));
     }
+    settings.commit().expect("commit the settings");
 
     let (logged, _capturing) = test_support::logs::capture();
     before_migrating(&mut conn, previous, Duration::ZERO).expect("back up before upgrading");
