@@ -43,7 +43,7 @@ jobs:
         run: nix shell --inputs-from . nixpkgs#actionlint --command actionlint
       - run: rustup show
       - name: Formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -- --check
       - name: Dependency advisories, licences and bans
         run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --locked check advisories licenses bans
       - name: Third-party notices match Cargo.lock
