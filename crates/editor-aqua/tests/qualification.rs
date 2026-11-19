@@ -101,8 +101,9 @@ fn real_forge_seed_snapshot_restores_identical_tree_at_pinned_path() {
         .build()
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let forge = directory.path().join("forge");
-    let snapshot_dir = directory.path().join("snapshot");
+    let root = editor_aqua::qualification::fixture::canonical_path(directory.path()).unwrap();
+    let forge = root.join("forge");
+    let snapshot_dir = root.join("snapshot");
     for dir in [&forge, &snapshot_dir] {
         std::fs::create_dir(dir).unwrap();
         std::fs::write(
@@ -426,8 +427,9 @@ fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder
         .build()
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let forge = directory.path().join("forge");
-    let snapshot_dir = directory.path().join("snapshot");
+    let root = editor_aqua::qualification::fixture::canonical_path(directory.path()).unwrap();
+    let forge = root.join("forge");
+    let snapshot_dir = root.join("snapshot");
     for dir in [&forge, &snapshot_dir] {
         std::fs::create_dir(dir).unwrap();
         std::fs::write(
@@ -453,7 +455,7 @@ fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder
         let after = TreeManifest::capture_stable(&forge).unwrap();
         for leftover in [
             forge.join("zz-locked"),
-            directory.path().join("forge.previous/zz-locked"),
+            root.join("forge.previous/zz-locked"),
         ] {
             if leftover.exists() {
                 std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
@@ -468,7 +470,7 @@ fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder
             .restore_after_all_forge_handles_closed(&snapshot_dir, &forge)
             .unwrap();
         assert_eq!(TreeManifest::capture_stable(&forge).unwrap(), snapshot.tree);
-        assert!(!directory.path().join("forge.previous").exists());
-        assert!(!directory.path().join("forge.restoring").exists());
+        assert!(!root.join("forge.previous").exists());
+        assert!(!root.join("forge.restoring").exists());
     });
 }
