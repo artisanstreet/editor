@@ -191,32 +191,13 @@ fn symbolized(recorded: &str) -> Vec<(String, Option<u32>)> {
     reason = "an executable without readable DWARF fails the test"
 )]
 fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
-    use object::{Object as _, ObjectSection as _};
-    let bytes = std::fs::read(module).unwrap();
-    let file = object::File::parse(&*bytes).unwrap();
-    let endian = if file.is_little_endian() {
-        gimli::RunTimeEndian::Little
-    } else {
-        gimli::RunTimeEndian::Big
-    };
-    let sections = gimli::DwarfSections::load(|id| {
-        file.section_by_name(id.name()).map_or_else(
-            || Ok(std::borrow::Cow::Borrowed(&[][..])),
-            |section| section.uncompressed_data(),
-        )
-    })
-    .unwrap();
-    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
-    let context = addr2line::Context::from_dwarf(dwarf).unwrap();
-    let symbols = file.symbol_map();
+    let loader = addr2line::Loader::new(module).unwrap();
+    let header = header_address(module);
     let mut resolved = Vec::new();
     for offset in offsets {
-        let address = file.relative_address_base() + offset - 1;
-        let symbol = symbols
-            .get(address)
-            .map(|symbol| symbol.name().to_owned())
-            .unwrap_or_default();
-        let mut frames = context.find_frames(address).skip_all_loads().unwrap();
+        let address = header + offset - 1;
+        let symbol = loader.find_symbol(address).unwrap_or_default().to_owned();
+        let mut frames = loader.find_frames(address).unwrap();
         while let Some(frame) = frames.next().unwrap() {
             let function = frame
                 .function
@@ -228,6 +209,25 @@ fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
         }
     }
     resolved
+}
+
+#[cfg(not(target_env = "msvc"))]
+#[expect(
+    clippy::unwrap_used,
+    reason = "an unreadable executable fails the test"
+)]
+fn header_address(module: &Path) -> u64 {
+    use object::{Object as _, ObjectSegment as _};
+    let bytes = std::fs::read(module).unwrap();
+    let file = object::File::parse(&*bytes).unwrap();
+    if file.format() == object::BinaryFormat::MachO {
+        file.segments()
+            .find(|segment| segment.name() == Ok(Some("__TEXT")))
+            .unwrap()
+            .address()
+    } else {
+        file.relative_address_base()
+    }
 }
 
 #[cfg(target_env = "msvc")]

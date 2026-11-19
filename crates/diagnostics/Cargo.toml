@@ -24,8 +24,7 @@ windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 tempfile.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
-addr2line.workspace = true
-gimli.workspace = true
+addr2line = { workspace = true, features = ["loader"] }
 object.workspace = true
 
 [target.'cfg(target_env = "msvc")'.dev-dependencies]

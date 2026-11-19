@@ -88,7 +88,6 @@ landlock = "=0.4.7"
 windows = "=0.62.2"
 addr2line = { version = "=0.25.1", default-features = false, features = ["std"] }
 backtrace = "=0.3.76"
-gimli = { version = "=0.32.3", default-features = false, features = ["read", "std"] }
 libc = "=0.2.189"
 object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
 aqua = { git = "https://github.com/artisanstreet/aqua", rev = "5c800070b303a62885dfc53917194838a58b4601" }
