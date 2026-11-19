@@ -267,7 +267,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     assert!(!provider.is_available());
     owner.drain();
     assert!(!owner.leaf_is_current(leaf.proof()));
-    assert!(render(&presenter, &owner).is_err());
+    render(&presenter, &owner).unwrap_err();
     assert!(matches!(
         owner.ensure("row", provider, reference, SourceIndexFormat::Markdown),
         StoredPreparation::Failed(_)

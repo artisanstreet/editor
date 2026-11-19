@@ -172,16 +172,14 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
         ]
     );
     state.release(&mut app);
-    assert!(
-        preview_dialog(
-            &state,
-            &preview,
-            &ArtisanTheme::resolved(),
-            900.0,
-            Rc::new(|_| {})
-        )
-        .is_err()
-    );
+    preview_dialog(
+        &state,
+        &preview,
+        &ArtisanTheme::resolved(),
+        900.0,
+        Rc::new(|_| {}),
+    )
+    .unwrap_err();
 }
 
 #[test]

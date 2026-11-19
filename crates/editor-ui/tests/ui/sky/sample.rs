@@ -12,15 +12,15 @@ fn parameters(width: f32, height: f32, scale: f32, time: f32) -> [f32; 36] {
         17.0 / 255.0,
         1.0,
         0.163_456_72,
-        0.001828275,
-        -0.052028373,
+        0.001_828_275,
+        -0.052_028_373,
         1.0,
         0.243_426_04,
-        -0.000731804,
-        -0.089916567,
+        -0.000_731_804,
+        -0.089_916_567,
         1.0,
         0.366_245_7,
-        -0.011359377,
+        -0.011_359_377,
         -0.113_559,
         1.0,
         0.571_379_2,
@@ -28,8 +28,8 @@ fn parameters(width: f32, height: f32, scale: f32, time: f32) -> [f32; 36] {
         -0.093_552_39,
         1.0,
         0.805_291_95,
-        -0.018475078,
-        -0.042172065,
+        -0.018_475_078,
+        -0.042_172_065,
         1.0,
         0.94,
         0.97,
@@ -46,8 +46,8 @@ fn parameters(width: f32, height: f32, scale: f32, time: f32) -> [f32; 36] {
 fn the_gradient_brightens_upwards_without_banding() {
     let p = parameters(1600.0, 1000.0, 1.0, 0.0);
     let mut previous = sample::sky_color(&p, 0.0);
-    for row in 1..1000 {
-        let color = sample::sky_color(&p, row as f32 / 1000.0);
+    for row in 1_u16..1000 {
+        let color = sample::sky_color(&p, f32::from(row) / 1000.0);
         assert!((0..3).all(|c| color[c] >= previous[c] - 0.00001));
         assert!((0..3).all(|c| (color[c] - previous[c]).abs() < 0.006));
         previous = color;
@@ -63,9 +63,9 @@ fn the_curved_rim_leaves_the_composer_foreground_dark_at_every_scale() {
             for u in [0.2, 0.35, 0.5, 0.65, 0.8] {
                 let x = (u - 0.5) * p[0] / unit;
                 let rim_y = p[32] + 0.16 * x * x * unit / p[1];
-                let rim_light = (-3..=3)
+                let rim_light = (-3_i16..=3)
                     .map(|offset| {
-                        sample::shade(&p, [u, rim_y + offset as f32 * 0.0005 * unit / p[1]])[0]
+                        sample::shade(&p, [u, rim_y + f32::from(offset) * 0.0005 * unit / p[1]])[0]
                     })
                     .fold(0.0_f32, f32::max);
                 let below = sample::shade(&p, [u, rim_y + 0.05]);
@@ -85,16 +85,19 @@ fn the_sky_blends_to_grey_and_preserves_the_rounded_frame() {
             let p = parameters(1200.0 * scale, 800.0 * scale, scale, time);
             for uv in [[0.0, 0.5], [1.0, 0.5], [0.5, 0.0], [0.5, 1.0]] {
                 let color = sample::shade(&p, uv);
-                assert!((0..3).all(|c| (color[c] - p[4 + c] * color[3]).abs() < 0.00001));
+                assert!((0..3).all(|c| p[4 + c].mul_add(-color[3], color[c]).abs() < 0.00001));
             }
             for uv in [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]] {
-                assert_eq!(sample::shade(&p, uv), [0.0; 4]);
+                assert!(sample::shade(&p, uv).iter().all(|v| v.abs() < f32::EPSILON));
             }
-            for row in 0..30 {
-                for column in 0..30 {
+            for row in 0_u16..30 {
+                for column in 0_u16..30 {
                     let color = sample::shade(
                         &p,
-                        [(column as f32 + 0.5) / 30.0, (row as f32 + 0.5) / 30.0],
+                        [
+                            (f32::from(column) + 0.5) / 30.0,
+                            (f32::from(row) + 0.5) / 30.0,
+                        ],
                     );
                     assert!(
                         color
@@ -113,10 +116,10 @@ fn the_small_burn_is_alive_while_the_sky_and_foreground_stay_quiet() {
         let a = parameters(1600.0, 1000.0, 1.0, time);
         let b = parameters(1600.0, 1000.0, 1.0, time + delta);
         let mut change = 0.0;
-        for column in 0..100 {
-            let u = 0.15 + column as f32 * 0.007;
+        for column in 0_u16..100 {
+            let u = f32::from(column).mul_add(0.007, 0.15);
             let x = (u - 0.5) * 1600.0 / 1400.0;
-            let uv = [u, 0.4 + (0.16 * x * x + offset) * 1.4];
+            let uv = [u, (0.16 * x).mul_add(x, offset).mul_add(1.4, 0.4)];
             let first = sample::shade(&a, uv);
             let later = sample::shade(&b, uv);
             change += (0..3).map(|c| (first[c] - later[c]).abs()).sum::<f32>();
@@ -170,9 +173,9 @@ fn per_channel_dithering_preserves_sub_byte_color_after_eight_bit_quantization()
     let mut quantized_sum = [0.0; 3];
     let mut decorrelated = 0;
     let target = 0.1013;
-    for y in 0..64 {
-        for x in 0..64 {
-            let noise = sample::dither([x as f32, y as f32]);
+    for y in 0_u16..64 {
+        for x in 0_u16..64 {
+            let noise = sample::dither([f32::from(x), f32::from(y)]);
             for channel in 0..3 {
                 assert!(noise[channel].abs() <= 0.5 / 255.0);
                 noise_sum[channel] += noise[channel];

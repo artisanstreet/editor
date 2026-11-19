@@ -118,8 +118,8 @@ fn fetcher_clones_share_thread_cache_and_preserve_semantic_identity() {
         first.asset_owner("left", true),
         new_thread.asset_owner("left", true)
     );
-    assert!(first.provider() == other.provider());
-    assert!(first.provider() != new_thread.provider());
+    assert_eq!(first.provider(), other.provider());
+    assert_ne!(first.provider(), new_thread.provider());
 
     let Parsed::Data(left) = MediaSource::from("data:text/plain;base64,YQ==".to_owned())
         .parsed()

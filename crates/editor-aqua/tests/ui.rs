@@ -49,9 +49,5 @@ mod chat_bubble;
 #[path = "ui/media_frame.rs"]
 mod media_frame;
 
-#[expect(
-    unreachable_pub,
-    reason = "the included editor-ui sky sampler keeps the pub items its own crate exports"
-)]
 #[path = "../../editor-ui/tests/ui/sky/sample.rs"]
 mod sky_sample;
