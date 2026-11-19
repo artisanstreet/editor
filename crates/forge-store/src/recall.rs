@@ -42,7 +42,7 @@ const PREVIEW_CHARS: usize = 400;
 const PREVIEW_LEAD: usize = 100;
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Searchable {
+pub(crate) struct Searchable {
     text: String,
     output: String,
     paths: String,
@@ -70,11 +70,8 @@ fn push(field: &mut String, text: &str) {
     if !field.is_empty() {
         field.push('\n');
     }
-    let mut end = text.len().min(FIELD_BYTES - field.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    field.push_str(&text[..end]);
+    let (kept, _) = text.split_at(text.floor_char_boundary(FIELD_BYTES - field.len()));
+    field.push_str(kept);
 }
 
 fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
@@ -93,7 +90,7 @@ fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
     }
 }
 
-pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
+pub(crate) fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
     let mut found = Searchable::default();
     if artisan_call(item) {
         return Ok(found);
@@ -239,7 +236,7 @@ fn artisan_call(item: &Item) -> bool {
     matches!(&item.kind, ItemKind::Tool { tool: ToolKind::Mcp { server, .. }, .. } if server == "artisan")
 }
 
-pub fn index(conn: &Connection, item: &Item) -> Result<()> {
+pub(crate) fn index(conn: &Connection, item: &Item) -> Result<()> {
     let rowid: i64 = conn
         .prepare_cached(include_str!("sql/recall/rowid.sql"))?
         .query_row([item.id.as_str()], |row| row.get(0))?;
@@ -411,7 +408,7 @@ fn index_version(conn: &Connection) -> rusqlite::Result<Option<i64>> {
     .optional()
 }
 
-pub fn refresh_index(conn: &mut Connection) -> Result<(), RefreshIndexError> {
+pub(crate) fn refresh_index(conn: &mut Connection) -> Result<(), RefreshIndexError> {
     let built = index_version(conn).map_err(RefreshIndexError::Version)?;
     if built == Some(INDEX_VERSION) {
         return Ok(());
@@ -784,22 +781,20 @@ pub struct Touch {
 
 fn preview(line: &str, found: Option<Range<usize>>) -> String {
     let start = found.map_or(0, |found| {
-        line[..found.start]
+        let (before, _) = line.split_at(line.floor_char_boundary(found.start));
+        before
             .char_indices()
             .rev()
             .take(PREVIEW_LEAD)
             .last()
-            .map_or(found.start, |(at, _)| at)
+            .map_or(before.len(), |(at, _)| at)
     });
-    let end = line[start..]
-        .char_indices()
-        .nth(PREVIEW_CHARS)
-        .map_or(line.len(), |(at, _)| start + at);
+    let (_, shown) = line.split_at(start);
+    let body: String = shown.chars().take(PREVIEW_CHARS).collect();
     format!(
-        "{}{}{}",
+        "{}{body}{}",
         if start > 0 { "…" } else { "" },
-        &line[start..end],
-        if end < line.len() { "…" } else { "" }
+        if body.len() < shown.len() { "…" } else { "" }
     )
 }
 

@@ -1,35 +1,9 @@
-#![expect(
-    clippy::unused_result_ok,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use artisan_api::{
     Collection, CreateProject, CreateThread, EngineConfig, EngineId, FileChange, FileOp, ItemId,
     ItemKind, Output, Phase, ProjectId, Run, RunId, RunState, Status, ThreadId, ToolKind,
     UpdateThread, Usage, now,
 };
 use forge_store::{GrepFailure, GrepField, GrepQuery, NewItem, RecallScope, Store};
-use std::path::PathBuf;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    #[expect(
-        clippy::unwrap_used,
-        reason = "test helper; a failure fails the calling test"
-    )]
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("forge-recall-test-{}", ItemId::new()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
 
 #[expect(
     clippy::unwrap_used,
@@ -84,8 +58,8 @@ fn said(thread: &ThreadId, text: &str) -> NewItem {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn an_agent_finds_what_another_thread_said_and_where() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let fixed = thread(&store, EngineId::Claude, "Scene bound fix").await;
     let other = thread(&store, EngineId::Codex, "Sidebar polish").await;
     store
@@ -212,8 +186,8 @@ async fn an_agent_finds_what_another_thread_said_and_where() {
 
 #[tokio::test]
 async fn an_edited_item_is_found_by_its_new_text_only() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store, EngineId::Claude, "Drafts").await;
     let mut draft = said(&thread, "first wording about pelicans");
     store.upsert_item(draft.clone()).await.unwrap();
@@ -230,8 +204,8 @@ async fn an_edited_item_is_found_by_its_new_text_only() {
 
 #[tokio::test]
 async fn a_pattern_that_does_not_compile_says_so() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let error = store
         .recall_grep(
             RecallScope::default(),
@@ -281,8 +255,8 @@ fn shell(thread: &ThreadId, output: &str) -> NewItem {
 
 #[tokio::test]
 async fn grep_pages_through_every_match_inside_one_item() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store, EngineId::Claude, "Warnings").await;
     store
         .upsert_item(said(
@@ -334,8 +308,8 @@ async fn grep_pages_through_every_match_inside_one_item() {
 
 #[tokio::test]
 async fn grep_shows_a_match_late_in_a_long_line() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store, EngineId::Claude, "Minified").await;
     let line = format!("{}needle{}", "x".repeat(2_000), "y".repeat(2_000));
     store.upsert_item(said(&thread, &line)).await.unwrap();
@@ -350,8 +324,8 @@ async fn grep_shows_a_match_late_in_a_long_line() {
 
 #[tokio::test]
 async fn output_search_continues_past_its_first_page() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store, EngineId::Claude, "Builds").await;
     for build in 0..5 {
         store
@@ -386,8 +360,8 @@ async fn output_search_continues_past_its_first_page() {
 
 #[tokio::test]
 async fn search_filters_items_by_the_engine_that_wrote_them() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store, EngineId::Claude, "Switched").await;
     let run = store
         .begin_run(Run {

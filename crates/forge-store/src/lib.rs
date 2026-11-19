@@ -1,20 +1,3 @@
-#![expect(
-    clippy::iter_over_hash_type,
-    clippy::needless_pass_by_ref_mut,
-    clippy::renamed_function_params,
-    clippy::string_slice,
-    clippy::unused_result_ok,
-    missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::assertions_on_result_states,
-    clippy::rest_pat_in_fully_bound_structs,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
-
 pub mod admin;
 mod blobs;
 mod collection;
@@ -135,7 +118,7 @@ const WAL_BACKSTOP_PAGES: i64 = 16 * 1024;
 const CHECKPOINT_AFTER_COMMITS: u64 = 512;
 const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
 const CHECKPOINT_RETRY: Duration = Duration::from_secs(1);
-const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
+const SLOW_READ: Duration = Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const SMALL_WRITE_BYTES: usize = 4 * 1024;
@@ -149,7 +132,7 @@ pub const CONTINUE_AFTER_USAGE_LIMIT_KEY: &str = "continue_after_usage_limit";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Park {
     pub continuation: artisan_api::Continuation,
-    pub due_at: artisan_api::Timestamp,
+    pub due_at: Timestamp,
 }
 
 #[must_use]
@@ -274,6 +257,15 @@ pub struct Store {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("database", &self.inner.database)
+            .field("head", &self.inner.head)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     jobs: mpsc::Sender<Job>,
     queued_write_bytes: Arc<Semaphore>,
@@ -374,7 +366,7 @@ pub enum OpenStoreError {
     NameBlobs {
         path: PathBuf,
         #[source]
-        source: blobs::BlobFileError,
+        source: BlobFileError,
     },
     #[error("roll {} back to a schema this Forge supports", database.display())]
     RollBack {
@@ -409,7 +401,7 @@ pub enum OpenStoreError {
     RecallIndex {
         database: PathBuf,
         #[source]
-        source: recall::RefreshIndexError,
+        source: RefreshIndexError,
     },
     #[error(
         "online upgrade requires database schema {expected}, the running store uses {found}; the current Forge was left running"
@@ -560,6 +552,7 @@ fn upgrade(conn: &mut Connection, database: &Path) -> Result<(), OpenStoreError>
     })
 }
 
+#[derive(Debug)]
 pub struct PendingInputs {
     pub items: Vec<Item>,
     pub cutoff: Seq,
@@ -985,7 +978,7 @@ impl Store {
             .send(Box::new(move |writer: &mut Writer| {
                 let outcome = writer.transact(durability, job);
                 drop(permit);
-                reply.send(outcome).ok();
+                let _requester_gone = reply.send(outcome);
             }))
             .await
             .map_err(|_unsent_job| StorageError::WriterStopped)?;

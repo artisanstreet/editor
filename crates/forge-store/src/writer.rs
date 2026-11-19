@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
-pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
+pub(crate) type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
 pub const SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_MESSAGE_TEXT_BYTES: u64 = 32 * 1024 * 1024;
@@ -37,6 +37,8 @@ pub enum WriteFailure {
     NotAnInput { item: ItemId },
     #[error("saving setting {key} would make the settings {bytes} bytes; the limit is 8 MiB")]
     SettingsFull { key: String, bytes: u64 },
+    #[error("setting {key} holds {found} where a JSON object belongs")]
+    SettingNotAnObject { key: String, found: &'static str },
     #[error(transparent)]
     RunMoved(#[from] RunMoved),
     #[error(transparent)]
@@ -103,7 +105,7 @@ impl From<rusqlite::Error> for UpdateThreadFailure {
     }
 }
 
-pub fn valid_config(config: &artisan_api::EngineConfig) -> bool {
+pub(crate) fn valid_config(config: &artisan_api::EngineConfig) -> bool {
     !config.options.contains_key("context_window")
         || (matches!(
             config.engine,
@@ -112,7 +114,7 @@ pub fn valid_config(config: &artisan_api::EngineConfig) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Durability {
+pub(crate) enum Durability {
     Acknowledged,
     Background,
 }
@@ -143,7 +145,7 @@ impl Commits {
     }
 }
 
-pub struct Writer {
+pub(crate) struct Writer {
     conn: Connection,
     durability: Durability,
     head: Arc<AtomicU64>,
@@ -204,12 +206,7 @@ impl Writer {
             stamp: None,
         };
         let result = job(&mut tx)?;
-        let Tx {
-            sql,
-            seq,
-            mut events,
-            ..
-        } = tx;
+        let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
         events.sort_by_key(|envelope| envelope.seq);
         #[cfg(feature = "test-support")]
         crate::faults::before_commit(sql.path()).map_err(StorageError::from)?;
@@ -226,7 +223,7 @@ impl Writer {
     }
 }
 
-pub struct Tx<'c> {
+pub(crate) struct Tx<'c> {
     pub(crate) sql: Transaction<'c>,
     seq: Seq,
     events: Vec<Envelope>,
@@ -558,19 +555,19 @@ impl Tx<'_> {
             item.position = item.seq;
         }
         let edits = match &item.kind {
-            artisan_api::ItemKind::Tool { tool, .. } if item.status == Status::Done => {
+            ItemKind::Tool { tool, .. } if item.status == Status::Done => {
                 crate::content::edit_totals(self, tool)?
             }
-            artisan_api::ItemKind::UserMessage { .. }
-            | artisan_api::ItemKind::AssistantMessage { .. }
-            | artisan_api::ItemKind::Tool { .. }
-            | artisan_api::ItemKind::Agent { .. }
-            | artisan_api::ItemKind::Question { .. }
-            | artisan_api::ItemKind::Plan { .. }
-            | artisan_api::ItemKind::Image { .. }
-            | artisan_api::ItemKind::Compaction { .. }
-            | artisan_api::ItemKind::Notice { .. }
-            | artisan_api::ItemKind::Error { .. } => None,
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         };
         let outline = read::outline_entry(self, &item)?;
         self.sql
@@ -585,7 +582,7 @@ impl Tx<'_> {
                 to_body(&item)?,
                 edits.as_ref().map(|stats| stats.added),
                 edits.as_ref().map(|stats| stats.removed),
-                item.parent_id.as_ref().map(artisan_api::ItemId::as_str),
+                item.parent_id.as_ref().map(ItemId::as_str),
                 item.folds_into_work(),
                 outline,
             ])?;
@@ -606,14 +603,14 @@ impl Tx<'_> {
         if let Some(existing) = read::item(self, &new.id)? {
             let same = existing.thread_id == new.thread_id
                 && matches!((&existing.kind, &new.kind),
-                (artisan_api::ItemKind::UserMessage { text: a, images: ai, .. },
-                 artisan_api::ItemKind::UserMessage { text: b, images: bi, .. }) if a == b && ai == bi);
+                (ItemKind::UserMessage { text: a, images: ai, .. },
+                 ItemKind::UserMessage { text: b, images: bi, .. }) if a == b && ai == bi);
             if !same {
                 return Err(SendRejected::IdConflict(new.id).into());
             }
             return Ok((existing, false));
         }
-        if let artisan_api::ItemKind::UserMessage { text, images, .. } = &new.kind {
+        if let ItemKind::UserMessage { text, images, .. } = &new.kind {
             if text.byte_len() > MAX_MESSAGE_TEXT_BYTES {
                 return Err(SendRejected::TextTooLarge {
                     bytes: text.byte_len(),
@@ -648,11 +645,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    pub(crate) fn mark_activity(
-        &mut self,
-        id: &artisan_api::ThreadId,
-        seq: Seq,
-    ) -> Result<(), WriteFailure> {
+    pub(crate) fn mark_activity(&mut self, id: &ThreadId, seq: Seq) -> Result<(), WriteFailure> {
         let mut thread = read::thread(self, id)?
             .ok_or_else(|| WriteFailure::ThreadNotFound { thread: id.clone() })?;
         thread.activity_seq = thread.activity_seq.max(seq);
@@ -689,14 +682,25 @@ impl Tx<'_> {
         Ok(run)
     }
 
+    pub(crate) fn object_setting(
+        &self,
+        key: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, WriteFailure> {
+        match read::setting(self, key)? {
+            None | Some(serde_json::Value::Null) => Ok(serde_json::Map::new()),
+            Some(serde_json::Value::Object(object)) => Ok(object),
+            Some(other) => Err(WriteFailure::SettingNotAnObject {
+                key: key.to_owned(),
+                found: json_kind(&other),
+            }),
+        }
+    }
+
     pub(crate) fn remember_model_config(
         &mut self,
         config: &artisan_api::EngineConfig,
     ) -> Result<(), WriteFailure> {
-        let mut harnesses = match read::setting(self, artisan_api::HARNESS_CONFIGS_KEY)? {
-            Some(serde_json::Value::Object(configs)) => configs,
-            _ => serde_json::Map::new(),
-        };
+        let mut harnesses = self.object_setting(artisan_api::HARNESS_CONFIGS_KEY)?;
         harnesses.insert(config.engine.to_string(), to_value(config)?);
         self.save_setting(
             artisan_api::HARNESS_CONFIGS_KEY.into(),
@@ -705,10 +709,7 @@ impl Tx<'_> {
         let Some(model) = &config.model else {
             return Ok(());
         };
-        let mut configs = match read::setting(self, artisan_api::MODEL_CONFIGS_KEY)? {
-            Some(serde_json::Value::Object(configs)) => configs,
-            _ => serde_json::Map::new(),
-        };
+        let mut configs = self.object_setting(artisan_api::MODEL_CONFIGS_KEY)?;
         configs.retain(|_, value| {
             serde_json::from_value::<artisan_api::EngineConfig>(value.clone())
                 .map_or(true, |saved| {
@@ -785,7 +786,7 @@ impl Tx<'_> {
         for mut item in items {
             if matches!(
                 item.kind,
-                artisan_api::ItemKind::Question {
+                ItemKind::Question {
                     blocking: false,
                     ..
                 }
@@ -795,7 +796,7 @@ impl Tx<'_> {
             }
             if matches!(
                 item.kind,
-                artisan_api::ItemKind::Agent {
+                ItemKind::Agent {
                     thread: Some(_),
                     ..
                 }
@@ -860,7 +861,7 @@ impl Tx<'_> {
 
     pub(crate) fn request_continue(
         &self,
-        thread: &artisan_api::ThreadId,
+        thread: &ThreadId,
         continuation: Continuation,
     ) -> Result<()> {
         self.sql
@@ -885,7 +886,7 @@ impl Tx<'_> {
         Ok(true)
     }
 
-    pub(crate) fn unpark(&mut self, thread: &artisan_api::ThreadId) -> Result<bool> {
+    pub(crate) fn unpark(&mut self, thread: &ThreadId) -> Result<bool> {
         let dropped = self
             .sql
             .prepare_cached(include_str!("sql/continues/unpark.sql"))?
@@ -901,16 +902,12 @@ impl Tx<'_> {
             .query_map([tag(&continuation)], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for thread in threads {
-            self.unpark(&artisan_api::ThreadId(thread))?;
+            self.unpark(&ThreadId(thread))?;
         }
         Ok(())
     }
 
-    fn set_parked(
-        &mut self,
-        thread: &artisan_api::ThreadId,
-        until: Option<artisan_api::Timestamp>,
-    ) -> Result<()> {
+    fn set_parked(&mut self, thread: &ThreadId, until: Option<Timestamp>) -> Result<()> {
         if let Some(mut saved) = read::thread(self, thread)?
             && saved.parked_until != until
         {
@@ -922,7 +919,7 @@ impl Tx<'_> {
 
     pub(crate) fn continuation_chain(
         &self,
-        thread: &artisan_api::ThreadId,
+        thread: &ThreadId,
         continuation: Continuation,
         limit: usize,
     ) -> Result<usize> {
@@ -937,10 +934,7 @@ impl Tx<'_> {
             .count())
     }
 
-    pub(crate) fn take_continue(
-        &mut self,
-        thread: &artisan_api::ThreadId,
-    ) -> Result<Option<Continuation>> {
+    pub(crate) fn take_continue(&mut self, thread: &ThreadId) -> Result<Option<Continuation>> {
         let reason: Option<String> = self
             .sql
             .prepare_cached(include_str!("sql/continues/take.sql"))?
@@ -948,5 +942,16 @@ impl Tx<'_> {
             .optional()?;
         self.set_parked(thread, None)?;
         reason.map(read::untag).transpose()
+    }
+}
+
+pub(crate) const fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
     }
 }

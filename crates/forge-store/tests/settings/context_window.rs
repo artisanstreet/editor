@@ -143,6 +143,6 @@ async fn invalid_context_config_is_rejected_before_thread_is_saved() {
                 spawned_by: None,
             })
             .await;
-        assert!(result.is_err());
+        result.expect_err("an out-of-range context window is refused");
     }
 }

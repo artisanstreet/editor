@@ -41,7 +41,7 @@ fn file_safe(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-pub fn snapshot_path(
+pub(crate) fn snapshot_path(
     dir: &Path,
     thread: &ThreadId,
     item: &ItemId,
@@ -54,7 +54,7 @@ pub fn snapshot_path(
         hasher.update(written.as_bytes());
         dir.join(thread.as_str())
             .join(item.as_str())
-            .join(&hex::encode(hasher.finalize())[..32])
+            .join(hex::encode(&hasher.finalize()[..16]))
     })
 }
 
@@ -78,7 +78,7 @@ pub fn keep(target: &Path, bytes: &[u8]) -> Result<bool> {
     }
 }
 
-pub fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
+pub(crate) fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),

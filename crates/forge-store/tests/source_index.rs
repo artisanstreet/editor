@@ -1,8 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_api::{
     ContentQuery, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase,
     ProjectId, SourceIndexQuery, Status, TextContent, ThreadId,
@@ -89,8 +84,13 @@ async fn twenty_mib_source_latest_leaf_reads_only_bounded_ranges() {
         .unwrap()
         .unwrap();
     let record: LeafRecord = serde_json::from_str(
-        &metadata.text[usize::try_from(leaf.metadata_start - metadata.start).unwrap()
-            ..usize::try_from(leaf.metadata_end - metadata.start).unwrap()],
+        metadata
+            .text
+            .get(
+                usize::try_from(leaf.metadata_start - metadata.start).unwrap()
+                    ..usize::try_from(leaf.metadata_end - metadata.start).unwrap(),
+            )
+            .expect("the leaf's metadata lies on character boundaries"),
     )
     .unwrap();
     let raw = store
@@ -168,32 +168,28 @@ async fn twenty_mib_source_latest_leaf_reads_only_bounded_ranges() {
             .unwrap()
             .is_some()
     );
-    assert!(
-        store
-            .source_index(
-                &source.id,
-                SourceIndexQuery {
-                    format: artisan_api::SourceIndexFormat::Markdown,
-                    offset: Some(page.index.leaves + 1),
-                    limit: Some(1)
-                }
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .source_index(
-                &source.id,
-                SourceIndexQuery {
-                    format: artisan_api::SourceIndexFormat::Markdown,
-                    offset: None,
-                    limit: Some(65)
-                }
-            )
-            .await
-            .is_err()
-    );
+    store
+        .source_index(
+            &source.id,
+            SourceIndexQuery {
+                format: artisan_api::SourceIndexFormat::Markdown,
+                offset: Some(page.index.leaves + 1),
+                limit: Some(1),
+            },
+        )
+        .await
+        .expect_err("an offset past the last leaf is refused");
+    store
+        .source_index(
+            &source.id,
+            SourceIndexQuery {
+                format: artisan_api::SourceIndexFormat::Markdown,
+                offset: None,
+                limit: Some(65),
+            },
+        )
+        .await
+        .expect_err("a limit over the page cap is refused");
     conn.execute(include_str!("source_index/delete_items.sql"), [])
         .unwrap();
     conn.execute(
@@ -357,9 +353,11 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
             panic!("raw literal event")
         };
         assert_eq!(
-            value.as_ref(),
-            &text[usize::try_from(leaf.source_start).unwrap()
-                ..usize::try_from(leaf.source_end).unwrap()]
+            Some(value.as_ref()),
+            text.get(
+                usize::try_from(leaf.source_start).unwrap()
+                    ..usize::try_from(leaf.source_end).unwrap()
+            )
         );
     }
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();

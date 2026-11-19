@@ -58,32 +58,28 @@ fn ranges_reconstruct_multimegabyte_unicode_without_item_reads() {
         .unwrap();
         assert!(part.start <= offset && offset - part.start <= 3);
         assert_eq!(
-            part.text,
-            text[usize::try_from(part.start).unwrap()..usize::try_from(part.end).unwrap()]
+            Some(part.text.as_str()),
+            text.get(usize::try_from(part.start).unwrap()..usize::try_from(part.end).unwrap())
         );
     }
-    assert!(
-        range(
-            &conn,
-            &source.id,
-            &ContentQuery {
-                offset: source.bytes + 1,
-                limit: None
-            }
-        )
-        .is_err()
-    );
-    assert!(
-        range(
-            &conn,
-            &source.id,
-            &ContentQuery {
-                offset: 0,
-                limit: Some(65537)
-            }
-        )
-        .is_err()
-    );
+    range(
+        &conn,
+        &source.id,
+        &ContentQuery {
+            offset: source.bytes + 1,
+            limit: None,
+        },
+    )
+    .expect_err("an offset past the end is refused");
+    range(
+        &conn,
+        &source.id,
+        &ContentQuery {
+            offset: 0,
+            limit: Some(65537),
+        },
+    )
+    .expect_err("a limit over the range cap is refused");
 }
 #[test]
 fn transaction_rollback_does_not_leave_chunks_and_gc_keeps_owned_sources() {
@@ -143,23 +139,23 @@ fn unknown_and_inconsistent_references_are_rejected_and_chunk_gaps_are_errors() 
     normalize_text(&conn, &mut known).unwrap();
     let mut wrong_length = source.clone();
     wrong_length.bytes += 1;
-    assert!(normalize_text(&conn, &mut TextContent::Stored(wrong_length)).is_err());
+    normalize_text(&conn, &mut TextContent::Stored(wrong_length))
+        .expect_err("a reference with the wrong length is refused");
     let mut unknown = source.clone();
     unknown.id = ContentId("f".repeat(64));
-    assert!(normalize_text(&conn, &mut TextContent::Stored(unknown)).is_err());
+    normalize_text(&conn, &mut TextContent::Stored(unknown))
+        .expect_err("a reference to unknown content is refused");
     conn.execute(include_str!("drop_second_chunk.sql"), [source.id.as_str()])
         .unwrap();
-    assert!(
-        range(
-            &conn,
-            &source.id,
-            &ContentQuery {
-                offset: 0,
-                limit: None
-            }
-        )
-        .is_err()
-    );
+    range(
+        &conn,
+        &source.id,
+        &ContentQuery {
+            offset: 0,
+            limit: None,
+        },
+    )
+    .expect_err("a range over a missing chunk is refused");
 }
 #[test]
 fn collection_batches_are_bounded_and_make_progress_on_a_large_source() {

@@ -159,7 +159,9 @@ fn plan(conn: &Connection, cutoff: Timestamp) -> Result<Plan> {
 fn families(candidates: &HashMap<ThreadId, Candidate>) -> Vec<Vec<ThreadId>> {
     let mut roots: HashMap<&ThreadId, &ThreadId> = HashMap::with_capacity(candidates.len());
     let mut members: HashMap<&ThreadId, Vec<ThreadId>> = HashMap::new();
-    for id in candidates.keys() {
+    let mut ids: Vec<&ThreadId> = candidates.keys().collect();
+    ids.sort_unstable();
+    for id in ids {
         let root = family_root(candidates, &mut roots, id);
         members.entry(root).or_default().push(id.clone());
     }

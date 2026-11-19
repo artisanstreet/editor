@@ -1,8 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 use artisan_api::{
@@ -95,16 +90,15 @@ fn paths_normalize_idempotently_and_overlap_only_within_the_declared_checkout() 
     assert!(!path("/repo", "src", true).overlaps(&path("/repo", "src-other/a.rs", false)));
     assert!(!path("/repo", "src/a.rs", false).overlaps(&path("/other", "src/a.rs", false)));
     assert!(path("C:\\Repo", "src\\A.rs", false).overlaps(&path("c:/repo", "SRC/a.rs", false)));
-    assert!(
-        Resource::Path {
-            worktree: "/repo".into(),
-            path: "../other/a.rs".into(),
-            recursive: false
-        }
-        .normalize()
-        .is_err()
-    );
-    assert!(normalize_path("//server/share/../outside").is_err());
+    Resource::Path {
+        worktree: "/repo".into(),
+        path: "../other/a.rs".into(),
+        recursive: false,
+    }
+    .normalize()
+    .expect_err("a path escaping the worktree is refused");
+    normalize_path("//server/share/../outside")
+        .expect_err("a UNC path escaping its share is refused");
 }
 
 #[tokio::test]
@@ -118,17 +112,15 @@ async fn overlapping_claims_are_advisory_and_updates_preserve_ownership_and_revi
     let b = b.unwrap();
     assert_ne!(a.id, b.id);
     assert!(a.active_claim(now()) && b.active_claim(now()));
-    assert!(
-        store
-            .coordination_update(
-                threads[1].clone(),
-                a.id.clone(),
-                a.revision,
-                Update::ReleaseClaim
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[1].clone(),
+            a.id.clone(),
+            a.revision,
+            Update::ReleaseClaim,
+        )
+        .await
+        .expect_err("only the claim's owner releases it");
     let renewed = store
         .coordination_update(
             threads[0].clone(),
@@ -190,27 +182,23 @@ async fn work_dependencies_reject_cycles_without_overwriting_the_last_valid_grap
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_put(
-                threads[1].clone(),
-                None,
-                work(vec![threads[0].clone()]),
-                Some(b.revision)
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_put(
+            threads[1].clone(),
+            None,
+            work(vec![threads[0].clone()]),
+            Some(b.revision),
+        )
+        .await
+        .expect_err("a dependency cycle is refused");
     assert_eq!(
         store.coordination_get(b.id.clone()).await.unwrap().unwrap(),
         b
     );
-    assert!(
-        store
-            .coordination_put(threads[2].clone(), None, work(vec![ThreadId::new()]), None)
-            .await
-            .is_err()
-    );
+    store
+        .coordination_put(threads[2].clone(), None, work(vec![ThreadId::new()]), None)
+        .await
+        .expect_err("a dependency on an unknown thread is refused");
 }
 
 #[tokio::test]
@@ -233,20 +221,18 @@ async fn requests_require_recipient_acknowledgment_and_terminal_decisions_do_not
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_update(
-                threads[2].clone(),
-                message.id.clone(),
-                message.revision,
-                Update::Acknowledge {
-                    state: MessageState::Acknowledged,
-                    reply: None
-                }
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[2].clone(),
+            message.id.clone(),
+            message.revision,
+            Update::Acknowledge {
+                state: MessageState::Acknowledged,
+                reply: None,
+            },
+        )
+        .await
+        .expect_err("only the recipient acknowledges a request");
     let accepted = store
         .coordination_update(
             threads[1].clone(),
@@ -278,20 +264,18 @@ async fn requests_require_recipient_acknowledgment_and_terminal_decisions_do_not
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_update(
-                threads[1].clone(),
-                resolved.id,
-                resolved.revision,
-                Update::Acknowledge {
-                    state: MessageState::Acknowledged,
-                    reply: None
-                }
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[1].clone(),
+            resolved.id,
+            resolved.revision,
+            Update::Acknowledge {
+                state: MessageState::Acknowledged,
+                reply: None,
+            },
+        )
+        .await
+        .expect_err("a resolved request does not reopen");
 }
 
 #[tokio::test]
@@ -352,16 +336,16 @@ async fn discovery_filters_before_pagination_and_can_find_other_parents_children
     assert_eq!(page.workers.len(), 1);
     assert_eq!(page.workers[0].thread.id, threads[0]);
     let child = ThreadId::new();
-    let agent = artisan_api::ItemId::new();
+    let agent = ItemId::new();
     store
-        .upsert_item(forge_store::NewItem {
+        .upsert_item(NewItem {
             id: agent.clone(),
             thread_id: threads[1].clone(),
             run_id: None,
             parent_id: None,
             native_id: None,
-            status: artisan_api::Status::Running,
-            kind: artisan_api::ItemKind::Agent {
+            status: Status::Running,
+            kind: ItemKind::Agent {
                 name: None,
                 description: "review".into(),
                 prompt: None,
@@ -411,14 +395,14 @@ async fn file_discovery_matches_exact_paths_before_pagination_and_resumes_withou
         "C:\\Repo\\B.rs",
     ] {
         store
-            .upsert_item(forge_store::NewItem {
-                id: artisan_api::ItemId::new(),
+            .upsert_item(NewItem {
+                id: ItemId::new(),
                 thread_id: threads[0].clone(),
                 run_id: None,
                 parent_id: None,
                 native_id: None,
-                status: artisan_api::Status::Done,
-                kind: artisan_api::ItemKind::Tool {
+                status: Status::Done,
+                kind: ItemKind::Tool {
                     tool: artisan_api::ToolKind::Read {
                         path: path.into(),
                         range: None,

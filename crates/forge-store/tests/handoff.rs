@@ -1,7 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 use artisan_api::{
@@ -123,7 +119,9 @@ async fn joined_generations_replay_external_and_local_commits_in_sequence_order(
     assert_eq!(changes.recv().await.unwrap().seq, Some(b.seq));
     assert_eq!(cursor, b.seq);
     second.synchronize(&mut cursor).await.unwrap();
-    assert!(changes.try_recv().is_err());
+    changes
+        .try_recv()
+        .expect_err("a caught-up synchronize emits nothing more");
 }
 
 #[tokio::test]
@@ -161,7 +159,7 @@ async fn incompatible_candidate_cannot_migrate_or_recover_the_active_store() {
     connection
         .pragma_update(None, "user_version", 9000)
         .unwrap();
-    assert!(Store::join(directory.path()).is_err());
+    Store::join(directory.path()).expect_err("a database from a newer Forge is refused");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u64>(0))

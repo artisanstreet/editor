@@ -65,28 +65,24 @@ fn five_thousand_records_use_indexed_bounded_ranges_and_keep_order() {
     .unwrap()
     .unwrap();
     assert_eq!(last.records, original[4999..]);
-    assert!(
-        range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 5001,
-                limit: None
-            }
-        )
-        .is_err()
-    );
-    assert!(
-        range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 0,
-                limit: Some(65)
-            }
-        )
-        .is_err()
-    );
+    range::<PlanStep>(
+        &conn,
+        &reference.source.id,
+        CollectionQuery {
+            offset: 5001,
+            limit: None,
+        },
+    )
+    .expect_err("an offset past the end is refused");
+    range::<PlanStep>(
+        &conn,
+        &reference.source.id,
+        CollectionQuery {
+            offset: 0,
+            limit: Some(65),
+        },
+    )
+    .expect_err("a limit over the range cap is refused");
 }
 #[test]
 fn byte_budget_bounds_a_page_even_when_count_limit_is_not_reached() {
@@ -181,17 +177,15 @@ fn rollback_and_missing_index_cannot_publish_partial_collections() {
         [reference.source.id.as_str()],
     )
     .unwrap();
-    assert!(
-        range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 3999,
-                limit: Some(4)
-            }
-        )
-        .is_err()
-    );
+    range::<PlanStep>(
+        &conn,
+        &reference.source.id,
+        CollectionQuery {
+            offset: 3999,
+            limit: Some(4),
+        },
+    )
+    .expect_err("a range over a missing record is refused");
 }
 #[test]
 fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
@@ -219,26 +213,22 @@ fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
         answer_text(&conn, &question, &answer).unwrap(),
         "Same (option 5000 of 5000)"
     );
-    assert!(
-        validate_answer(
-            &conn,
-            &question,
-            Some(&artisan_api::QuestionAnswer::Choices {
-                ids: vec!["Same".into()].into()
-            })
-        )
-        .is_err()
-    );
-    assert!(
-        validate_answer(
-            &conn,
-            &question,
-            Some(&artisan_api::QuestionAnswer::Choices {
-                ids: vec!["opaque-1".into(), "opaque-1".into()].into()
-            })
-        )
-        .is_err()
-    );
+    validate_answer(
+        &conn,
+        &question,
+        Some(&artisan_api::QuestionAnswer::Choices {
+            ids: vec!["Same".into()].into(),
+        }),
+    )
+    .expect_err("a choice label is not a choice id");
+    validate_answer(
+        &conn,
+        &question,
+        Some(&artisan_api::QuestionAnswer::Choices {
+            ids: vec!["opaque-1".into(), "opaque-1".into()].into(),
+        }),
+    )
+    .expect_err("the same choice twice is refused");
 }
 #[test]
 fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
@@ -290,7 +280,7 @@ fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
     let page = range::<String>(
         &conn,
         &ids.source.id,
-        artisan_api::CollectionQuery {
+        CollectionQuery {
             offset: ordinal,
             limit: Some(1),
         },
@@ -334,17 +324,15 @@ fn missing_final_index_record_cannot_return_a_short_successful_page() {
         [reference.source.id.as_str()],
     )
     .unwrap();
-    assert!(
-        range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 4990,
-                limit: Some(64)
-            }
-        )
-        .is_err()
-    );
+    range::<PlanStep>(
+        &conn,
+        &reference.source.id,
+        CollectionQuery {
+            offset: 4990,
+            limit: Some(64),
+        },
+    )
+    .expect_err("a range ending on a missing record is refused");
 }
 #[test]
 fn canonical_answer_display_is_derived_once_and_free_text_stays_literal() {
@@ -376,7 +364,7 @@ fn canonical_answer_display_is_derived_once_and_free_text_stays_literal() {
         answer_text: None,
     };
     derive_answer_text(&conn, &mut kind, None).unwrap();
-    let expected = artisan_api::TextContent::from("Same (option 5000 of 5000)");
+    let expected = TextContent::from("Same (option 5000 of 5000)");
     assert!(
         matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
     );
@@ -428,7 +416,8 @@ fn duplicate_opaque_record_keys_roll_back_with_the_item_transaction() {
             label: "Choice".into(),
             description: None,
         };
-        assert!(store(&tx, &[duplicate.clone(), duplicate], &BTreeSet::new(), 0, 0).is_err());
+        store(&tx, &[duplicate.clone(), duplicate], &BTreeSet::new(), 0, 0)
+            .expect_err("duplicate option ids are refused");
     }
     assert_eq!(
         conn.query_row(include_str!("content_rows.sql"), [], |row| row

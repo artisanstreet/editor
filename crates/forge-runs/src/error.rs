@@ -51,6 +51,7 @@ pub const fn write(failure: &WriteFailure) -> ErrorClass {
         WriteFailure::Content(content) => self::content(content),
         WriteFailure::ItemMoved { .. }
         | WriteFailure::NotAnInput { .. }
+        | WriteFailure::SettingNotAnObject { .. }
         | WriteFailure::RunMoved(_)
         | WriteFailure::Storage(_) => ErrorClass::Internal,
     }

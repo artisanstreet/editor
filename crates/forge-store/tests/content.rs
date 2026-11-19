@@ -1,7 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_api::{
     ContentQuery, CreateProject, CreateThread, EngineConfig, EngineId, Event, ItemId, ItemKind,
     ItemsQuery, Phase, ProjectId, Status, TextContent, ThreadId,
@@ -34,7 +30,7 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
         .unwrap();
     let text = "α🙂\n".repeat(3_000_000);
     assert!(text.len() > 20 * 1024 * 1024);
-    let mut events = store.subscribe();
+    let events = store.subscribe();
     let input = NewItem {
         id: ItemId::new(),
         thread_id: thread.id.clone(),
@@ -59,15 +55,13 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
     let event = events.try_recv().unwrap();
     assert!(matches!(&event.event, Event::Item { .. }));
     assert!(serde_json::to_vec(&event).unwrap().len() < 2048);
-    assert!(
-        events.try_recv().is_err(),
-        "one Item write must emit one Item event"
-    );
+    events
+        .try_recv()
+        .expect_err("one Item write must emit one Item event");
     assert_eq!(store.upsert_item(input.clone()).await.unwrap(), first);
-    assert!(
-        events.try_recv().is_err(),
-        "normalized replay must not save again"
-    );
+    events
+        .try_recv()
+        .expect_err("normalized replay must not save again");
     let mut settled = input;
     settled.status = Status::Done;
     let last = store.upsert_item(settled).await.unwrap();
@@ -179,7 +173,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
         .unwrap();
     let expected = "παλιό🙂\n".repeat(3000) + "exact tail";
     let mut legacy = serde_json::to_value(&item).unwrap();
-    legacy["kind"]["output"] = serde_json::json!({ "head": &expected[..expected.len()-10], "tail": "exact tail", "truncated_bytes": 0 });
+    legacy["kind"]["output"] = serde_json::json!({ "head": expected.strip_suffix("exact tail").expect("the expected text ends with its tail"), "tail": "exact tail", "truncated_bytes": 0 });
     drop(store);
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute(
@@ -290,10 +284,10 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
         objective.chars().take(160).collect::<String>() + "…"
     );
     assert!(goal.summary.chars().count() <= 161);
-    assert!(
-        store.resolve_text(&goal.objective).await.is_err(),
-        "fixture must prevent accidental full-source reads"
-    );
+    store
+        .resolve_text(&goal.objective)
+        .await
+        .expect_err("fixture must prevent accidental full-source reads");
 }
 
 #[tokio::test]

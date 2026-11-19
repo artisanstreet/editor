@@ -34,6 +34,7 @@ const fn is_tail(query: &ItemsQuery) -> bool {
     query.before.is_none() && query.after.is_none()
 }
 
+#[derive(Debug)]
 pub enum Lookup {
     Hit(Arc<ItemsPage>),
     Miss(Version),
@@ -45,6 +46,7 @@ pub struct Version {
     revision: u64,
 }
 
+#[derive(Debug)]
 struct Held {
     tail: Tail,
     page: Arc<ItemsPage>,
@@ -52,13 +54,13 @@ struct Held {
     used: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Thread {
     changed_at: u64,
     held: Vec<Held>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Window {
     threads: HashMap<ThreadId, Thread>,
     bytes: usize,
@@ -68,7 +70,7 @@ struct Window {
     forgotten: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HotPages {
     window: Mutex<Window>,
 }

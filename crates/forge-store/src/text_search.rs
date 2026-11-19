@@ -21,15 +21,19 @@ const SNIPPET_BEFORE: usize = 24;
 const SNIPPET_CHARS: usize = 120;
 
 fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
-    let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
-    let line_end = text[end..].find('\n').map_or(text.len(), |at| end + at);
-    let from = text[line_start..start]
+    let (before, _) = text.split_at(start);
+    let (_, after) = text.split_at(end);
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let line_end = after.find('\n').map_or(text.len(), |at| end + at);
+    let (_, lead_in) = before.split_at(line_start);
+    let from = lead_in
         .char_indices()
         .rev()
         .nth(SNIPPET_BEFORE - 1)
         .map_or(line_start, |(at, _)| line_start + at);
     let lead = if from > line_start { "…" } else { "" };
-    let body: String = text[from..line_end].chars().take(SNIPPET_CHARS).collect();
+    let (_, shown) = text.split_at(line_end).0.split_at(from);
+    let body: String = shown.chars().take(SNIPPET_CHARS).collect();
     let tail = if from + body.len() < line_end {
         "…"
     } else {

@@ -71,14 +71,12 @@ async fn ae_and_other_openers_refuse_a_newer_database_and_leave_it_alone() {
     let dir = tempfile::tempdir().expect("create the data folder");
     upgraded_by_a_newer_forge(dir.path()).await;
 
-    let refused = Store::open(dir.path()).err().expect("a plain open refuses");
+    let refused = Store::open(dir.path()).expect_err("a plain open refuses");
     assert!(
         matches!(refused, OpenStoreError::Migrate { .. }),
         "{refused:?}"
     );
-    let refused = Store::open_current(dir.path())
-        .err()
-        .expect("ae's open refuses");
+    let refused = Store::open_current(dir.path()).expect_err("ae's open refuses");
     assert!(
         matches!(refused, OpenStoreError::Mismatch { found: NEWER, .. }),
         "{refused:?}"

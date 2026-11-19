@@ -1,7 +1,3 @@
-#![expect(
-    clippy::unused_result_ok,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 use artisan_api::{
@@ -10,24 +6,7 @@ use artisan_api::{
 };
 use forge_store::{NewItem, Store};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("forge-retention-test-{}", ItemId::new()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
 
 async fn add_thread(store: &Store, project: &ProjectId, parent: Option<&ThreadId>) -> ThreadId {
     store
@@ -86,9 +65,9 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
     }
 }
 
-async fn open() -> (TempDir, Store, ProjectId) {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+async fn open() -> (tempfile::TempDir, Store, ProjectId) {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let project = store
         .create_project(CreateProject {
             id: ProjectId::new(),
@@ -186,8 +165,8 @@ async fn idle_threads_go_with_their_images_and_busy_families_stay() {
 
 #[tokio::test]
 async fn recent_threads_stay_and_a_removal_survives_a_restart() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let project = store
         .create_project(CreateProject {
             id: ProjectId::new(),
@@ -212,7 +191,7 @@ async fn recent_threads_stay_and_a_removal_survives_a_restart() {
     let before = store.changes_since(0, 10_000).await.unwrap().unwrap();
     drop(store);
 
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let after = store.changes_since(0, 10_000).await.unwrap().unwrap();
     assert_eq!(before, after);
     let next = add_thread(&store, &project, None).await;

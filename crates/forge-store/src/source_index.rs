@@ -54,7 +54,7 @@ impl From<rusqlite::Error> for SourceIndexError {
     }
 }
 
-pub fn header(
+pub(crate) fn header(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
@@ -92,20 +92,24 @@ pub fn header(
     .optional()
     .map_err(Into::into)
 }
-pub struct PreparedIndex {
+pub(crate) struct PreparedIndex {
     source: ContentRef,
     format: SourceIndexFormat,
     metadata: String,
     leaves: Vec<SourceLeafDescriptor>,
 }
 
-pub enum Prepared {
+pub(crate) enum Prepared {
     Missing,
     Indexed,
     Built(PreparedIndex),
 }
 
-pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> Result<Prepared> {
+pub(crate) fn prepare(
+    conn: &Connection,
+    id: &ContentId,
+    format: SourceIndexFormat,
+) -> Result<Prepared> {
     if header(conn, id, format)?.is_some() {
         return Ok(Prepared::Indexed);
     }
@@ -141,7 +145,8 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
     let mut literal_start = Some(0);
     let literal_ranges = std::iter::from_fn(|| {
         let start = literal_start?;
-        if let Some(relative_end) = text[start..].find('\n') {
+        let (_, rest) = text.split_at(start);
+        if let Some(relative_end) = rest.find('\n') {
             let end = start + relative_end + 1;
             literal_start = Some(end);
             Some(start..end)
@@ -195,9 +200,9 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
         leaves,
     }))
 }
-pub const LEAVES_PER_WRITE: usize = 2048;
+pub(crate) const LEAVES_PER_WRITE: usize = 2048;
 
-pub enum Staging {
+pub(crate) enum Staging {
     Published,
     Gone,
     Staged,
@@ -211,7 +216,7 @@ fn source_present(conn: &Connection, source: &ContentRef) -> Result<bool> {
     )?)
 }
 
-pub fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Result<Staging> {
+pub(crate) fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Result<Staging> {
     if header(conn, &prepared.source.id, prepared.format)?.is_some() {
         return Ok(Staging::Published);
     }
@@ -241,12 +246,15 @@ pub fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Resul
 
 impl PreparedIndex {
     #[must_use]
-    pub fn batches(&self) -> usize {
+    pub(crate) fn batches(&self) -> usize {
         self.leaves.len().div_ceil(LEAVES_PER_WRITE)
     }
 }
 
-pub fn publish(conn: &Connection, prepared: &PreparedIndex) -> Result<Option<SourceIndexHeader>> {
+pub(crate) fn publish(
+    conn: &Connection,
+    prepared: &PreparedIndex,
+) -> Result<Option<SourceIndexHeader>> {
     if let Some(existing) = header(conn, &prepared.source.id, prepared.format)? {
         return Ok(Some(existing));
     }
@@ -275,7 +283,7 @@ pub fn publish(conn: &Connection, prepared: &PreparedIndex) -> Result<Option<Sou
     )?;
     header(conn, &prepared.source.id, prepared.format)
 }
-pub fn range(
+pub(crate) fn range(
     conn: &Connection,
     id: &ContentId,
     query: &SourceIndexQuery,

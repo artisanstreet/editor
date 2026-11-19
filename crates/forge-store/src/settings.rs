@@ -226,17 +226,17 @@ impl Store {
     ) -> Result<(), SetModelGroupError> {
         let name = group.name.clone();
         self.write_acknowledged(move |tx| {
-            let mut groups = match read::setting(tx, artisan_api::MODEL_GROUPS_KEY)? {
-                Some(serde_json::Value::Object(groups)) => groups,
-                _ => serde_json::Map::new(),
-            };
+            let mut groups = tx.object_setting(artisan_api::MODEL_GROUPS_KEY)?;
             let engine_groups = groups
                 .entry(engine.to_string())
                 .or_insert_with(|| serde_json::json!({}));
-            if !engine_groups.is_object() {
-                *engine_groups = serde_json::json!({});
-            }
-            engine_groups[group.name.as_str()] = serde_json::Value::Bool(group.open);
+            let Some(engine_groups) = engine_groups.as_object_mut() else {
+                return Err(WriteFailure::SettingNotAnObject {
+                    key: format!("{}.{engine}", artisan_api::MODEL_GROUPS_KEY),
+                    found: crate::writer::json_kind(engine_groups),
+                });
+            };
+            engine_groups.insert(group.name.clone(), serde_json::Value::Bool(group.open));
             tx.save_setting(
                 artisan_api::MODEL_GROUPS_KEY.into(),
                 serde_json::Value::Object(groups),

@@ -86,6 +86,7 @@ pub fn write(failure: &WriteFailure) -> Failure {
         WriteFailure::Content(content) => self::content(content),
         WriteFailure::ItemMoved { .. }
         | WriteFailure::NotAnInput { .. }
+        | WriteFailure::SettingNotAnObject { .. }
         | WriteFailure::RunMoved(_)
         | WriteFailure::Storage(_) => Failure::Internal,
     }
@@ -274,6 +275,7 @@ pub fn draft(scope: &str, failure: &SettingFailure) -> Failure {
             WriteFailure::ThreadNotFound { .. }
             | WriteFailure::ItemMoved { .. }
             | WriteFailure::NotAnInput { .. }
+            | WriteFailure::SettingNotAnObject { .. }
             | WriteFailure::RunMoved(_)
             | WriteFailure::Content(_)
             | WriteFailure::Storage(_),

@@ -207,7 +207,7 @@ impl Store {
     pub async fn settle_thread(
         &self,
         id: &ThreadId,
-        observed_seq: artisan_api::Seq,
+        observed_seq: Seq,
     ) -> Result<Option<Thread>, SettleThreadError> {
         let thread = id.clone();
         let id = id.clone();

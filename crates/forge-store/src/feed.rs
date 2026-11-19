@@ -6,16 +6,18 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Budget {
+pub(crate) struct Budget {
     pub bytes: usize,
     pub envelopes: usize,
 }
 
+#[derive(Debug)]
 struct Held {
     envelope: Envelope,
     bytes: usize,
 }
 
+#[derive(Debug)]
 struct Ring {
     budget: Budget,
     first: u64,
@@ -55,6 +57,7 @@ impl Ring {
     }
 }
 
+#[derive(Debug)]
 struct Shared {
     ring: Mutex<Ring>,
 }
@@ -66,13 +69,13 @@ impl Shared {
 }
 
 #[derive(Clone)]
-pub struct Feed {
+pub(crate) struct Feed {
     shared: Arc<Shared>,
     sent: Arc<watch::Sender<u64>>,
 }
 
 impl Feed {
-    pub fn new(budget: Budget) -> Self {
+    pub(crate) fn new(budget: Budget) -> Self {
         Self {
             shared: Arc::new(Shared {
                 ring: Mutex::new(Ring {
@@ -87,7 +90,7 @@ impl Feed {
         }
     }
 
-    pub fn send(&self, envelope: Envelope) {
+    pub(crate) fn send(&self, envelope: Envelope) {
         let next = {
             let mut ring = self.shared.ring();
             let bytes = crate::encoded::len(&envelope).min(ring.budget.bytes);
@@ -99,7 +102,7 @@ impl Feed {
         self.sent.send_replace(next);
     }
 
-    pub fn subscribe(&self) -> Subscription {
+    pub(crate) fn subscribe(&self) -> Subscription {
         let mut ring = self.shared.ring();
         let cursor = Arc::new(AtomicU64::new(ring.next()));
         ring.readers.push(Arc::downgrade(&cursor));
@@ -111,15 +114,16 @@ impl Feed {
         }
     }
 
-    pub fn retained_bytes(&self) -> usize {
+    pub(crate) fn retained_bytes(&self) -> usize {
         self.shared.ring().bytes
     }
 
-    pub fn retained_envelopes(&self) -> usize {
+    pub(crate) fn retained_envelopes(&self) -> usize {
         self.shared.ring().held.len()
     }
 }
 
+#[derive(Debug)]
 pub struct Subscription {
     shared: Arc<Shared>,
     cursor: Arc<AtomicU64>,
@@ -169,7 +173,7 @@ impl Subscription {
         }
     }
 
-    pub fn try_recv(&mut self) -> Result<Envelope, TryRecvError> {
+    pub fn try_recv(&self) -> Result<Envelope, TryRecvError> {
         match self.take() {
             Taken::Envelope(envelope) => Ok(*envelope),
             Taken::Lagged(missed) => Err(TryRecvError::Lagged(missed)),

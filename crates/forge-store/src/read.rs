@@ -14,23 +14,23 @@ const MAX_PAGE: usize = 500;
 pub const WAITING_ITEMS: usize = 1000;
 pub const MAX_SEARCH_BYTES: usize = 256;
 
-pub fn to_body<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+pub(crate) fn to_body<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(StorageError::encode::<T>)
 }
 
-pub fn from_body<T: DeserializeOwned>(body: &str) -> Result<T> {
+pub(crate) fn from_body<T: DeserializeOwned>(body: &str) -> Result<T> {
     serde_json::from_str(body).map_err(StorageError::decode::<T>)
 }
 
-pub fn from_value<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
+pub(crate) fn from_value<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(StorageError::decode::<T>)
 }
 
-pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<serde_json::Value> {
+pub(crate) fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<serde_json::Value> {
     serde_json::to_value(value).map_err(StorageError::encode::<T>)
 }
 
-pub fn tag<T: Serialize>(value: &T) -> String {
+pub(crate) fn tag<T: Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(tag)) => tag,
         Ok(other) => unreachable!("invariant: stored statuses are unit variants, not {other}"),
@@ -38,7 +38,7 @@ pub fn tag<T: Serialize>(value: &T) -> String {
     }
 }
 
-pub fn untag<T: DeserializeOwned>(tag: String) -> Result<T> {
+pub(crate) fn untag<T: DeserializeOwned>(tag: String) -> Result<T> {
     from_value(serde_json::Value::String(tag))
 }
 
@@ -54,7 +54,7 @@ fn one<T: DeserializeOwned>(
         .transpose()
 }
 
-pub fn many<T: DeserializeOwned>(
+pub(crate) fn many<T: DeserializeOwned>(
     conn: &Connection,
     sql: &str,
     params: impl Params,
@@ -64,16 +64,16 @@ pub fn many<T: DeserializeOwned>(
     rows.map(|body| from_body(&body?)).collect()
 }
 
-pub fn max_seq(conn: &Connection) -> Result<Seq> {
+pub(crate) fn max_seq(conn: &Connection) -> Result<Seq> {
     conn.query_row(include_str!("sql/state/max_seq.sql"), [], |row| row.get(0))
         .map_err(Into::into)
 }
 
-pub fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
+pub(crate) fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
     one(conn, include_str!("sql/state/project.sql"), [id.as_str()])
 }
 
-pub fn thread(conn: &Connection, id: &ThreadId) -> Result<Option<Thread>> {
+pub(crate) fn thread(conn: &Connection, id: &ThreadId) -> Result<Option<Thread>> {
     one(conn, include_str!("sql/state/thread.sql"), [id.as_str()])
 }
 
@@ -83,19 +83,19 @@ fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })
 }
-pub fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<Item>> {
+pub(crate) fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<Item>> {
     conn.prepare_cached(sql)?
         .query_map(params, item_row)?
         .collect::<rusqlite::Result<_>>()
         .map_err(Into::into)
 }
-pub fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
+pub(crate) fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
     conn.prepare_cached(include_str!("sql/items/by_id.sql"))?
         .query_row([id.as_str()], item_row)
         .optional()
         .map_err(Into::into)
 }
-pub fn item_by_native(
+pub(crate) fn item_by_native(
     conn: &Connection,
     thread_id: &ThreadId,
     run_id: Option<&RunId>,
@@ -110,7 +110,7 @@ pub fn item_by_native(
         .map_err(Into::into)
 }
 
-pub fn agent_by_address(
+pub(crate) fn agent_by_address(
     conn: &Connection,
     thread_id: &ThreadId,
     address: &str,
@@ -124,7 +124,7 @@ pub fn agent_by_address(
         .map_err(Into::into)
 }
 
-pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
+pub(crate) fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
     let mut statement = conn.prepare_cached(include_str!("sql/items/agent_labels.sql"))?;
     let labels = statement
         .query_map([thread_id.as_str()], |row| row.get::<_, String>(0))?
@@ -132,7 +132,7 @@ pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<Strin
     Ok(labels)
 }
 
-pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
+pub(crate) fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
     let mut statement = conn.prepare_cached(include_str!("sql/pending/awaiting_user.sql"))?;
     statement
         .query_map([WAITING_ITEMS], |row| {
@@ -145,7 +145,7 @@ pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::Pending
         .map_err(Into::into)
 }
 
-pub fn pending_threads(
+pub(crate) fn pending_threads(
     conn: &Connection,
     limit: usize,
     excluded: &[ThreadId],
@@ -163,7 +163,7 @@ pub fn pending_threads(
         .collect::<rusqlite::Result<_>>()?)
 }
 
-pub fn continue_request(
+pub(crate) fn continue_request(
     conn: &Connection,
     thread: &ThreadId,
 ) -> Result<Option<artisan_api::Continuation>> {
@@ -174,7 +174,7 @@ pub fn continue_request(
     reason.map(untag).transpose()
 }
 
-pub fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<bool> {
+pub(crate) fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<bool> {
     Ok(conn
         .prepare_cached(concat!(
             include_str!("sql/pending/runnable_inputs.sql"),
@@ -183,7 +183,7 @@ pub fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<boo
         .query_row([thread_id.as_str()], |row| row.get(0))?)
 }
 
-pub fn pending_inputs(
+pub(crate) fn pending_inputs(
     conn: &Connection,
     thread_id: &ThreadId,
     blob_dir: &std::path::Path,
@@ -232,11 +232,11 @@ pub fn pending_inputs(
     Ok(crate::PendingInputs { items, cutoff })
 }
 
-pub fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
+pub(crate) fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
     one(conn, include_str!("sql/runs/by_id.sql"), [id.as_str()])
 }
 
-pub fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>> {
+pub(crate) fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>> {
     one(
         conn,
         include_str!("sql/runs/latest.sql"),
@@ -244,11 +244,11 @@ pub fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>
     )
 }
 
-pub fn setting(conn: &Connection, key: &str) -> Result<Option<serde_json::Value>> {
+pub(crate) fn setting(conn: &Connection, key: &str) -> Result<Option<serde_json::Value>> {
     one(conn, include_str!("sql/settings/value.sql"), [key])
 }
 
-pub fn prompt_version(conn: &Connection) -> Result<u64> {
+pub(crate) fn prompt_version(conn: &Connection) -> Result<u64> {
     let version: i64 =
         conn.query_row(include_str!("sql/settings/prompt_version.sql"), [], |row| {
             row.get(0)
@@ -256,7 +256,7 @@ pub fn prompt_version(conn: &Connection) -> Result<u64> {
     Ok(u64::try_from(version).unwrap_or(0))
 }
 
-pub fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::DraftSnapshot> {
+pub(crate) fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::DraftSnapshot> {
     let row: Option<(u64, String)> = conn
         .query_row(include_str!("sql/settings/draft.sql"), [scope], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -271,7 +271,7 @@ pub fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::DraftSnapsho
     }
 }
 
-pub fn items_page(
+pub(crate) fn items_page(
     conn: &Connection,
     thread_id: &ThreadId,
     query: &ItemsQuery,
@@ -283,7 +283,7 @@ pub fn items_page(
     clippy::option_option,
     reason = "None is every item, Some(None) the root transcript, Some(Some) one agent's work"
 )]
-pub fn scoped_items_page(
+pub(crate) fn scoped_items_page(
     conn: &Connection,
     thread_id: &ThreadId,
     query: &ItemsQuery,
@@ -478,7 +478,7 @@ fn work_spans(
     Ok(spans)
 }
 
-pub fn transcript_page(
+pub(crate) fn transcript_page(
     conn: &Connection,
     thread_id: &ThreadId,
     query: &ItemsQuery,
@@ -552,7 +552,11 @@ pub fn transcript_page(
     })
 }
 
-pub fn work_page(conn: &Connection, thread_id: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
+pub(crate) fn work_page(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    query: &ItemsQuery,
+) -> Result<ItemsPage> {
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     let limit = page_limit(query);
@@ -573,7 +577,7 @@ pub fn work_page(conn: &Connection, thread_id: &ThreadId, query: &ItemsQuery) ->
     })
 }
 
-pub fn changes_since(
+pub(crate) fn changes_since(
     conn: &Connection,
     since: Seq,
     limit: usize,
@@ -638,10 +642,15 @@ pub fn changes_since(
             "run" => Event::Run {
                 run: from_body(&body)?,
             },
-            _ => Event::Setting {
-                key: key.unwrap_or_default(),
+            "setting" => Event::Setting {
+                key: key.unwrap_or_else(|| {
+                    panic!("invariant: the setting change at seq {seq} carries its key")
+                }),
                 value: from_body(&body)?,
             },
+            other => {
+                unreachable!("invariant: changes_since.sql names no {other} change (seq {seq})")
+            }
         };
         envelopes.push(Envelope {
             seq: Some(seq),
@@ -655,7 +664,7 @@ pub fn changes_since(
     Ok(Some(envelopes))
 }
 
-pub fn inspector(
+pub(crate) fn inspector(
     conn: &Connection,
     thread: &ThreadId,
 ) -> Result<artisan_api::InspectorSummary, ContentError> {
@@ -902,7 +911,7 @@ impl From<rusqlite::Error> for ThreadsPageFailure {
     }
 }
 
-pub fn threads_page(
+pub(crate) fn threads_page(
     conn: &Connection,
     query: &artisan_api::ThreadsQuery,
 ) -> Result<artisan_api::ThreadsPage, ThreadsPageFailure> {

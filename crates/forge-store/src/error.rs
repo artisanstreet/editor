@@ -78,8 +78,8 @@ macro_rules! operation_error {
         }
 
         impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(formatter, $message $(, $field = self.$field)*)
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, $message $(, $field = self.$field)*)
             }
         }
 

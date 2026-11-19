@@ -60,6 +60,7 @@ crate::error::operation_error!(SaveSecretError(StorageError), "save secret {key}
 crate::error::operation_error!(PairCodeError(StorageError), "look up or save a pair code");
 crate::error::operation_error!(DevicesError(StorageError), "list the paired devices");
 
+#[derive(Debug)]
 pub struct Admin {
     conn: Connection,
     database: PathBuf,
@@ -118,7 +119,7 @@ impl Admin {
         })
     }
 
-    pub fn secret_or_insert(&mut self, key: &str, value: &str) -> Result<String, SaveSecretError> {
+    pub fn secret_or_insert(&self, key: &str, value: &str) -> Result<String, SaveSecretError> {
         crate::secrets::secret_or_insert(&self.conn, key, value).map_err(|source| SaveSecretError {
             key: key.to_owned(),
             cause: Box::new(source.into()),

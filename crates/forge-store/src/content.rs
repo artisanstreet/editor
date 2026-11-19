@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
 
 pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-pub const CHUNK_BYTES: usize = 32 * 1024;
+pub(crate) const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_ITEM_BYTES: usize = 512 * 1024;
 pub const MAX_FIELD_BYTES: usize = 4096;
 pub const MAX_FIELD_ENTRIES: usize = 256;
@@ -104,7 +104,7 @@ pub enum Damage {
     StalledPage,
 }
 
-pub fn to_usize(value: u64) -> usize {
+pub(crate) fn to_usize(value: u64) -> usize {
     usize::try_from(value).expect("invariant: Forge runs on 64-bit targets")
 }
 
@@ -115,7 +115,7 @@ fn damaged(content: &ContentId, damage: Damage) -> ContentError {
     }
 }
 
-pub fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) -> Result<()> {
+pub(crate) fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) -> Result<()> {
     let mut bytes = 0u64;
     item.kind.try_visit_texts_mut(|text| {
         bytes = bytes.saturating_add(text.byte_len());
@@ -176,9 +176,9 @@ pub fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) ->
 fn json_len(value: &serde_json::Value) -> u64 {
     struct Count(u64);
     impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len() as u64;
-            Ok(bytes.len())
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -190,7 +190,7 @@ fn json_len(value: &serde_json::Value) -> u64 {
     count.0
 }
 
-pub fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
+pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
     use serde_json::Value;
     match value {
         Value::String(text)
@@ -238,7 +238,7 @@ pub fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
+pub(crate) fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
     match text {
         TextContent::Inline(value) if value.len() > artisan_api::INLINE_TEXT_BYTES => {
             let source = store_source(conn, value)?;
@@ -266,7 +266,7 @@ pub fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
     Ok(())
 }
 
-pub fn own(conn: &Connection, item: &Item) -> Result<()> {
+pub(crate) fn own(conn: &Connection, item: &Item) -> Result<()> {
     let mut next = BTreeSet::new();
     item.kind.try_visit_texts(|text| {
         if let TextContent::Stored(source) = text {
@@ -297,7 +297,7 @@ pub fn own(conn: &Connection, item: &Item) -> Result<()> {
     Ok(())
 }
 
-pub fn range(
+pub(crate) fn range(
     conn: &Connection,
     id: &ContentId,
     query: &ContentQuery,
@@ -355,10 +355,7 @@ pub fn range(
         let value = row.get_ref(1)?;
         let chunk = std::str::from_utf8(value.as_blob().map_err(rusqlite::Error::from)?)
             .map_err(|_not_utf8| damaged(id, Damage::NotUtf8))?;
-        let mut from = to_usize(query.offset.saturating_sub(chunk_start)).min(chunk.len());
-        while !chunk.is_char_boundary(from) {
-            from -= 1;
-        }
+        let from = chunk.floor_char_boundary(to_usize(query.offset.saturating_sub(chunk_start)));
         if text.is_empty() {
             actual_start = chunk_start + from as u64;
         }
@@ -366,11 +363,12 @@ pub fn range(
             return Err(damaged(id, Damage::ChunkGap));
         }
         let room = limit as usize - text.len();
-        let mut to = (from + room).min(chunk.len());
-        while !chunk.is_char_boundary(to) {
-            to -= 1;
-        }
-        text.push_str(&chunk[from..to]);
+        let to = chunk.floor_char_boundary(from + room);
+        text.push_str(
+            chunk
+                .get(from..to)
+                .expect("invariant: both ends are floored to character boundaries"),
+        );
         if to < chunk.len() || text.len() == limit as usize {
             break;
         }
@@ -398,7 +396,7 @@ pub fn range(
     }))
 }
 
-pub fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
+pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
     let source = match text {
         TextContent::Inline(text) => return Ok(text.clone()),
         TextContent::Stored(source) => source,
@@ -431,7 +429,7 @@ pub fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
     Ok(text)
 }
 
-pub fn diff_totals(diff: &str) -> EditTotals {
+pub(crate) fn diff_totals(diff: &str) -> EditTotals {
     let mut totals = EditTotals::default();
     let mut in_hunk = false;
     for line in diff.lines() {
@@ -455,7 +453,7 @@ pub fn diff_totals(diff: &str) -> EditTotals {
     totals
 }
 
-pub fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
+pub(crate) fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
     let ToolKind::Edit { changes } = tool else {
         return None;
     };
@@ -471,7 +469,7 @@ pub fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
     Some(totals)
 }
 
-pub fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
+pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
     let ToolKind::Edit { changes } = tool else {
         return Ok(None);
     };
@@ -530,7 +528,7 @@ pub fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTota
     Ok(Some(total))
 }
 
-pub fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
+pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
     const BATCH_BYTES: u64 = 16 * 1024 * 1024;
     let mut query = conn.prepare_cached(include_str!("sql/content/unreferenced.sql"))?;
     let mut rows = query.query([now.saturating_sub(GRACE_MILLIS)])?;
@@ -555,7 +553,7 @@ pub fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
     Ok(removed)
 }
 
-pub fn migrate(conn: &Connection, collections: bool) -> Result<()> {
+pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
     let mut select = conn.prepare(include_str!("sql/migrations/items_by_rowid.sql"))?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
@@ -609,7 +607,7 @@ pub fn migrate(conn: &Connection, collections: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
+pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
     if value.len() as u64 > MAX_SOURCE_BYTES {
         return Err(ContentError::TextTooLarge {
             bytes: value.len() as u64,

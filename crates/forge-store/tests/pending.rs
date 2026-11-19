@@ -1,7 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, RunId,
     SendMessage, ThreadId,
@@ -165,7 +161,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         let path = dir
             .path()
             .join("blobs")
-            .join(&hash.as_str()[..2])
+            .join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -201,7 +197,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         let path = dir
             .path()
             .join("blobs")
-            .join(&hash.as_str()[..2])
+            .join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

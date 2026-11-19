@@ -35,15 +35,13 @@ async fn custom_compaction_survives_persistence_and_invalid_customizations_are_r
         .await
         .unwrap();
     assert_eq!(saved, requested);
-    assert!(
-        store
-            .set_setting(
-                MODEL_CUSTOMIZATIONS_KEY.into(),
-                json!({"version":99,"rules":[]})
-            )
-            .await
-            .is_err()
-    );
+    store
+        .set_setting(
+            MODEL_CUSTOMIZATIONS_KEY.into(),
+            json!({"version":99,"rules":[]}),
+        )
+        .await
+        .expect_err("an unknown customization version is refused");
     assert_eq!(
         store.setting(MODEL_CUSTOMIZATIONS_KEY).await.unwrap(),
         Some(rules)

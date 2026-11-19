@@ -10,10 +10,7 @@ crate::error::operation_error!(
 );
 
 impl Tx<'_> {
-    pub(crate) fn record_rollback(
-        &mut self,
-        rollback: &DatabaseRollback,
-    ) -> Result<(), StorageError> {
+    pub(crate) fn record_rollback(&self, rollback: &DatabaseRollback) -> Result<(), StorageError> {
         self.execute(
             include_str!("sql/rollbacks/record.sql"),
             params![

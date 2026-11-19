@@ -5,7 +5,8 @@ use std::path::Path;
 
 mod backup;
 
-pub use backup::{BackupError, Rollback, RollbackError};
+pub(crate) use backup::Rollback;
+pub use backup::{BackupError, RollbackError};
 
 type Result<T, E = MigrationFailure> = std::result::Result<T, E>;
 
@@ -121,7 +122,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(include_str!("sql/migrations/v31.sql"))],
 ];
 
-pub const fn version() -> usize {
+pub(crate) const fn version() -> usize {
     MIGRATIONS.len()
 }
 
@@ -186,7 +187,7 @@ fn backfill_work(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn legacy_approval(item: &mut serde_json::Value) {
+pub(crate) fn legacy_approval(item: &mut serde_json::Value) {
     let Some(kind) = item.get_mut("kind") else {
         return;
     };
@@ -256,11 +257,11 @@ const COLLECTIONS: &str = include_str!("sql/migrations/v14.sql");
 
 const SOURCE_INDEXES: &str = include_str!("sql/migrations/v15.sql");
 
-pub fn migrate(conn: &mut Connection) -> Result<(), SchemaError> {
+pub(crate) fn migrate(conn: &mut Connection) -> Result<(), SchemaError> {
     migrate_to(conn, MIGRATIONS.len())
 }
 
-pub fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
+pub(crate) fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
     backup::roll_back(database, MIGRATIONS.len())
 }
 

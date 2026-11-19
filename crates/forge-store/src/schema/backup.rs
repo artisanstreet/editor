@@ -79,7 +79,7 @@ pub enum RollbackError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Rollback {
+pub(crate) enum Rollback {
     Current,
     Restored {
         found: usize,
@@ -136,7 +136,7 @@ fn disk_full(error: &rusqlite::Error) -> bool {
     error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
 }
 
-pub fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupError> {
+pub(super) fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupError> {
     match conn.path() {
         Some(database) if !database.is_empty() && version > 0 => {
             let backup = backup_name(database, version);
@@ -193,7 +193,7 @@ pub fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupE
     }
 }
 
-pub fn roll_back(database: &Path, supported: usize) -> Result<Rollback, RollbackError> {
+pub(super) fn roll_back(database: &Path, supported: usize) -> Result<Rollback, RollbackError> {
     if !database.is_file() {
         return Ok(Rollback::Current);
     }

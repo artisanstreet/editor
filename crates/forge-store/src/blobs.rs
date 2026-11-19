@@ -24,13 +24,12 @@ pub enum BlobRejected {
 }
 
 impl fmt::Display for BlobRejected {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotWebp => formatter.write_str("blob is not a WebP image"),
-            Self::TooLarge { bytes } => write!(
-                formatter,
-                "blob is {bytes} bytes; the limit is {MAX_BLOB_BYTES}"
-            ),
+            Self::NotWebp => f.write_str("blob is not a WebP image"),
+            Self::TooLarge { bytes } => {
+                write!(f, "blob is {bytes} bytes; the limit is {MAX_BLOB_BYTES}")
+            }
         }
     }
 }
@@ -102,15 +101,15 @@ const WEBP_QUALITY: f32 = 85.0;
 
 const EXTENSION: &str = "webp";
 
-pub fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
+pub(crate) fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
     hash.is_valid().then(|| {
-        dir.join(&hash.as_str()[..2])
+        dir.join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension(EXTENSION)
     })
 }
 
-pub fn name_files(dir: &Path) -> Result<usize, BlobFileError> {
+pub(crate) fn name_files(dir: &Path) -> Result<usize, BlobFileError> {
     let list = |path: &Path| {
         let path = path.to_path_buf();
         move |source| BlobFileError::List { path, source }
@@ -141,7 +140,10 @@ pub fn name_files(dir: &Path) -> Result<usize, BlobFileError> {
     Ok(renamed)
 }
 
-pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64), InputFailure> {
+pub(crate) fn input_images(
+    dir: &Path,
+    hashes: &[BlobHash],
+) -> Result<(Vec<PathBuf>, u64), InputFailure> {
     if hashes.len() > MAX_MESSAGE_IMAGES {
         return Err(SendRejected::TooManyImages {
             count: hashes.len(),
@@ -181,7 +183,7 @@ pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u6
     Ok((paths, bytes))
 }
 
-pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
+pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
@@ -235,6 +237,7 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     Ok(blob_ref)
 }
 
+#[derive(Debug)]
 pub struct BlobUpload {
     store: Store,
     _slot: tokio::sync::OwnedSemaphorePermit,
@@ -364,10 +367,10 @@ impl Store {
 }
 
 impl Inner {
-    fn lock_blobs(&self) -> Result<std::fs::File> {
+    fn lock_blobs(&self) -> Result<fs::File> {
         use fs2::FileExt as _;
         let lock = self.blob_dir.with_extension("lock");
-        let file = std::fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
@@ -455,11 +458,11 @@ fn remove_unreferenced(candidates: Vec<Candidate>, referenced: &HashSet<String>)
     removed
 }
 
-pub fn is_webp(bytes: &[u8]) -> bool {
+pub(crate) fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
-pub fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+pub(crate) fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());

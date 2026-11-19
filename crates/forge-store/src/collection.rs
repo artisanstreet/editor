@@ -110,7 +110,7 @@ fn check_dependencies(
     Ok(())
 }
 
-pub fn store<T: Serialize>(
+pub(crate) fn store<T: Serialize>(
     conn: &Connection,
     records: &[T],
     dependencies: &BTreeSet<ContentId>,
@@ -210,7 +210,7 @@ pub fn store<T: Serialize>(
     })
 }
 
-pub fn range<T: DeserializeOwned>(
+pub(crate) fn range<T: DeserializeOwned>(
     conn: &Connection,
     id: &ContentId,
     query: CollectionQuery,
@@ -312,7 +312,7 @@ pub fn range<T: DeserializeOwned>(
     }))
 }
 
-pub fn validate_answer(
+pub(crate) fn validate_answer(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: Option<&artisan_api::QuestionAnswer>,
@@ -344,7 +344,7 @@ pub fn validate_answer(
     }
     Ok(())
 }
-pub fn answer_text(
+pub(crate) fn answer_text(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: &artisan_api::QuestionAnswer,
@@ -407,7 +407,7 @@ pub fn answer_text(
     Ok(labels)
 }
 
-pub fn derive_answer_text(
+pub(crate) fn derive_answer_text(
     conn: &Connection,
     kind: &mut artisan_api::ItemKind,
     old: Option<&artisan_api::ItemKind>,
@@ -491,11 +491,11 @@ pub fn derive_answer_text(
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     pub authored: u64,
     pub structural: u64,
 }
-pub fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
+pub(crate) fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
     if !reference.source.id.is_valid() {
         return Err(ContentError::InvalidIdentity {
             content: reference.source.id.clone(),
@@ -592,7 +592,7 @@ fn normalize_options(
         })
     })
 }
-pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub(crate) fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
     use artisan_api::{ItemKind, ToolKind};
     match kind {
         ItemKind::Plan { steps, .. } => {
@@ -661,7 +661,7 @@ pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Re
     }
     Ok(())
 }
-pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
+pub(crate) fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
     let Some(count) = conn
         .query_row(
             include_str!("sql/collection/count.sql"),
@@ -681,7 +681,7 @@ pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics>
     )
 }
 
-pub fn resolve<T: DeserializeOwned>(
+pub(crate) fn resolve<T: DeserializeOwned>(
     conn: &Connection,
     collection: &artisan_api::Collection<T>,
 ) -> Result<Vec<T>> {
@@ -710,7 +710,7 @@ pub fn resolve<T: DeserializeOwned>(
     Ok(records)
 }
 
-pub fn visit_until<T: DeserializeOwned>(
+pub(crate) fn visit_until<T: DeserializeOwned>(
     conn: &Connection,
     collection: &artisan_api::Collection<T>,
     mut visit: impl FnMut(&T) -> Result<ControlFlow<()>>,
@@ -751,7 +751,7 @@ pub fn visit_until<T: DeserializeOwned>(
     Ok(())
 }
 
-pub fn visit_questions(
+pub(crate) fn visit_questions(
     conn: &Connection,
     questions: &artisan_api::Collection<artisan_api::Question>,
     mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
@@ -763,7 +763,7 @@ pub fn visit_questions(
         Ok(ControlFlow::Continue(()))
     })
 }
-pub fn validate_answers(
+pub(crate) fn validate_answers(
     conn: &Connection,
     questions: &artisan_api::Collection<artisan_api::Question>,
     answers: &[Option<artisan_api::QuestionAnswer>],
@@ -775,7 +775,7 @@ pub fn validate_answers(
         validate_answer(conn, question, answers[index].as_ref())
     })
 }
-pub fn answers_equal(
+pub(crate) fn answers_equal(
     conn: &Connection,
     saved: Option<&artisan_api::Collection<Option<artisan_api::QuestionAnswer>>>,
     answers: &[Option<artisan_api::QuestionAnswer>],
@@ -798,7 +798,7 @@ pub fn answers_equal(
     Ok(decoded == answers)
 }
 
-pub fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub(crate) fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
     use artisan_api::{Collection, ItemKind, ToolKind};
     fn hydrate<T: DeserializeOwned>(conn: &Connection, value: &mut Collection<T>) -> Result<()> {
         if let Collection::Stored(_) = value {

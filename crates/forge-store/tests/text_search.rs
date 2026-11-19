@@ -1,34 +1,8 @@
-#![expect(
-    clippy::string_slice,
-    clippy::unused_result_ok,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId,
     Status, TextSearchQuery, ThreadId, UpdateThread,
 };
 use forge_store::{NewItem, Store};
-use std::path::PathBuf;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    #[expect(
-        clippy::unwrap_used,
-        reason = "test helper; a failure fails the calling test"
-    )]
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("forge-text-search-test-{}", ItemId::new()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
 
 #[expect(
     clippy::unwrap_used,
@@ -74,8 +48,8 @@ fn said(thread: &ThreadId, text: &str, phase: Phase) -> NewItem {
 
 #[tokio::test]
 async fn a_search_finds_the_message_the_line_and_the_exact_match() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let fixed = thread(&store, "Scene bound fix", None).await;
     let child = thread(&store, "Worker", Some(fixed.clone())).await;
     let reply =
@@ -111,9 +85,9 @@ async fn a_search_finds_the_message_the_line_and_the_exact_match() {
     assert_eq!(hit.thread_title.as_deref(), Some("Scene bound fix"));
     assert_eq!(hit.position, answer.position);
     let (start, end) = (hit.offset.0 as usize, hit.offset.1 as usize);
-    assert_eq!(&reply[start..end], "Scene Bound");
+    assert_eq!(reply.get(start..end), Some("Scene Bound"));
     let (from, to) = (hit.matched.0 as usize, hit.matched.1 as usize);
-    assert_eq!(&hit.snippet[from..to], "Scene Bound");
+    assert_eq!(hit.snippet.get(from..to), Some("Scene Bound"));
     assert_eq!(
         hit.snippet,
         "Raising the Scene Bound to 2048 items fixed the freeze for good."
@@ -132,8 +106,8 @@ async fn a_search_finds_the_message_the_line_and_the_exact_match() {
 
 #[tokio::test]
 async fn a_long_line_is_cut_around_the_match() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let home = thread(&store, "Long lines", None).await;
     let line = format!(
         "{} the needle sits here {}",
@@ -157,15 +131,16 @@ async fn a_long_line_is_cut_around_the_match() {
     assert!(hit.snippet.starts_with('…') && hit.snippet.ends_with('…'));
     assert!(hit.snippet.chars().count() <= 122);
     assert_eq!(
-        &hit.snippet[hit.matched.0 as usize..hit.matched.1 as usize],
-        "needle"
+        hit.snippet
+            .get(hit.matched.0 as usize..hit.matched.1 as usize),
+        Some("needle")
     );
 }
 
 #[tokio::test]
 async fn archived_threads_never_crowd_out_listed_ones() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let listed = thread(&store, "Listed", None).await;
     store
         .upsert_item(said(&listed, "the pelican flew north", Phase::Final))
@@ -209,8 +184,8 @@ async fn archived_threads_never_crowd_out_listed_ones() {
     reason = "test helper; a failure fails the calling test"
 )]
 async fn matches(messages: &[&str], query: &str) -> Vec<(usize, String)> {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     for (index, text) in messages.iter().enumerate() {
         let home = thread(&store, &index.to_string(), None).await;
         store
@@ -231,7 +206,9 @@ async fn matches(messages: &[&str], query: &str) -> Vec<(usize, String)> {
             let text = messages[index];
             (
                 index,
-                text[hit.offset.0 as usize..hit.offset.1 as usize].to_owned(),
+                text.get(hit.offset.0 as usize..hit.offset.1 as usize)
+                    .expect("a hit's offsets lie on character boundaries")
+                    .to_owned(),
             )
         })
         .collect();
@@ -307,9 +284,9 @@ async fn composed_and_decomposed_accents_match_each_other() {
 
 #[tokio::test]
 async fn a_failed_search_keeps_the_query_out_of_its_error() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).expect("open the store");
-    rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
         .expect("open the database beside the store")
         .execute_batch(include_str!("text_search/drop_message_search.sql"))
         .expect("drop the message index");

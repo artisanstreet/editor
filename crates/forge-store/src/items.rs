@@ -465,10 +465,7 @@ impl Store {
         })
     }
 
-    pub async fn cancelled_items(
-        &self,
-        run: &artisan_api::RunId,
-    ) -> Result<Vec<Item>, CancelledItemsError> {
+    pub async fn cancelled_items(&self, run: &RunId) -> Result<Vec<Item>, CancelledItemsError> {
         let stopped = run.clone();
         let run = run.clone();
         self.read(move |conn| {

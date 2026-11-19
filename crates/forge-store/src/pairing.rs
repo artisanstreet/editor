@@ -73,7 +73,7 @@ pub struct Device {
     pub last_seen: Option<Timestamp>,
 }
 
-pub struct Devices {
+pub(crate) struct Devices {
     conn: Connection,
     seen: Option<Seen>,
     keys: HashMap<String, DeviceId>,
@@ -274,15 +274,14 @@ fn answer_checks(
             } else {
                 devices.refresh().map(|gone| {
                     for revoked in gone {
-                        revocations.send(revoked).ok();
+                        let _no_subscribers = revocations.send(revoked);
                     }
                 })
             };
             fresh = answer.is_ok();
-            check
+            let _requester_gone = check
                 .reply
-                .send(answer.map(|()| devices.keys.get(check.certificate.as_str()).cloned()))
-                .ok();
+                .send(answer.map(|()| devices.keys.get(check.certificate.as_str()).cloned()));
         }
     }
 }
@@ -365,7 +364,7 @@ impl Store {
                 cause: Box::new(cause),
             })?;
         if revoked {
-            self.inner.revocations.send(id.clone()).ok();
+            let _no_subscribers = self.inner.revocations.send(id.clone());
             let database = self.inner.database.clone();
             tokio::task::spawn_blocking(move || announce_device_change(&database))
                 .await

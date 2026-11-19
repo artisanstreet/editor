@@ -1,8 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use artisan_api::BlobHash;
 use forge_store::Store;
 use sha2::{Digest, Sha256};
@@ -14,7 +9,7 @@ async fn images_saved_before_extensions_are_found_by_agents_as_webp_files() {
         .encode_lossless()
         .to_vec();
     let hash = BlobHash(hex::encode(Sha256::digest(&image)));
-    let shard = dir.path().join("blobs").join(&hash.as_str()[..2]);
+    let shard = dir.path().join("blobs").join(hash.as_str().split_at(2).0);
     std::fs::create_dir_all(&shard).unwrap();
     let old = shard.join(hash.as_str());
     std::fs::write(&old, &image).unwrap();
