@@ -70,12 +70,12 @@ async fn a_call_whose_caller_went_away_is_no_longer_offered() {
     fixture.hub.shutdown();
 }
 
-type ActingDuringTheRun = (String, Option<GatewayCaller>);
+type ActingDuringTheRun = (String, Result<GatewayCaller, GatewayRefusal>);
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() {
+async fn a_threads_gateway_address_acts_only_while_one_of_its_runs_is_live() {
     let hub_slot: Arc<std::sync::OnceLock<Hub>> = Arc::new(std::sync::OnceLock::new());
-    let during: Arc<Mutex<Option<ActingDuringTheRun>>> = Arc::new(Mutex::new(None));
+    let during: Arc<Mutex<Vec<ActingDuringTheRun>>> = Arc::new(Mutex::new(Vec::new()));
     let fixture = fixture(Arc::new({
         let hub_slot = Arc::clone(&hub_slot);
         let during = Arc::clone(&during);
@@ -91,7 +91,7 @@ async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() 
                 .get()
                 .expect("the hub is set before the run")
                 .gateway_caller(&token);
-            *during.lock().unwrap() = Some((token, acting));
+            during.lock().unwrap().push((token, acting));
             Box::pin(async { Outcome::done() })
         }
     }))
@@ -107,18 +107,35 @@ async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() 
         .await
         .unwrap();
     fixture.settled().await;
+    let (token, first) = during.lock().unwrap()[0].clone();
+    let first = first.expect("the address acts for its thread while the run is live");
+    assert_eq!(first.thread, fixture.thread_id);
+    assert!(
+        first.ended.is_cancelled(),
+        "calls admitted during the run stop acting once it ended"
+    );
+    assert!(
+        matches!(
+            fixture.hub.gateway_caller(&token),
+            Err(GatewayRefusal::Idle { thread }) if thread == fixture.thread_id
+        ),
+        "the address refuses calls between runs"
+    );
 
-    let (token, acting) = during.lock().unwrap().clone().expect("the run started");
-    let acting = acting.expect("the run's address acts for its thread while it runs");
-    assert_eq!(acting.thread, fixture.thread_id);
-    assert!(
-        fixture.hub.gateway_caller(&token).is_none(),
-        "a finished run's gateway address still acts for its thread"
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("look again"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let (again, second) = during.lock().unwrap()[1].clone();
+    assert_eq!(
+        again, token,
+        "the next run keeps the address an engine may have cached"
     );
-    assert!(
-        acting.ended.is_cancelled(),
-        "calls admitted during the run keep acting for its thread after it ended"
-    );
+    let second = second.expect("the address acts for the next run");
+    assert_eq!(second.thread, fixture.thread_id);
+    assert!(second.ended.is_cancelled());
     fixture.hub.shutdown();
 }
 

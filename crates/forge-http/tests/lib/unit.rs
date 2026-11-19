@@ -1265,6 +1265,171 @@ impl forge_engines::Harness for McpScripted {
     }
 }
 
+#[derive(Default)]
+struct CachedCodexServer {
+    addresses: Arc<std::sync::Mutex<std::collections::HashMap<ThreadId, String>>>,
+}
+
+async fn raw_mcp_call(url: &str, name: &str) -> serde_json::Value {
+    let answer = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": { "query": "anything" } },
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = answer.status().as_u16();
+    let body = answer.text().await.unwrap();
+    serde_json::from_str(&body)
+        .unwrap_or_else(|_| serde_json::json!({ "status": status, "body": body }))
+}
+
+impl forge_engines::Harness for CachedCodexServer {
+    fn run(
+        &self,
+        turn: forge_engines::Turn,
+        io: forge_engines::RunIo,
+    ) -> futures::future::BoxFuture<'static, forge_engines::Outcome> {
+        let launched = turn
+            .launch
+            .gateway_mcp
+            .iter()
+            .find(|(name, _)| name == "artisan")
+            .map(|(_, url)| url.clone())
+            .expect("a Codex thread is launched with the Artisan MCP");
+        let url = self
+            .addresses
+            .lock()
+            .unwrap()
+            .entry(turn.thread_id.clone())
+            .or_insert(launched)
+            .clone();
+        Box::pin(async move {
+            use forge_engines::EngineEvent;
+            io.emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
+            io.emit(EngineEvent::Session {
+                id: format!("codex-{}", turn.thread_id),
+            })
+            .await;
+            let reply = raw_mcp_call(&url, "threads_search").await;
+            io.emit(EngineEvent::Item {
+                key: "reply".to_owned(),
+                parent: None,
+                status: artisan_api::Status::Done,
+                kind: artisan_api::ItemKind::AssistantMessage {
+                    text: serde_json::json!({ "turn": turn.input.text, "reply": reply })
+                        .to_string()
+                        .into(),
+                    phase: artisan_api::Phase::Final,
+                },
+            })
+            .await;
+            forge_engines::Outcome::done()
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_codex_server_that_keeps_its_first_gateway_address_reaches_artisan_on_every_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    let root = data.join("engines").join(EngineId::Codex.to_string());
+    let binary = root
+        .join("versions/1.0.0")
+        .join(forge_engines::host_entry(EngineId::Codex).unwrap());
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, "").unwrap();
+    std::fs::write(root.join("current"), "1.0.0").unwrap();
+    let codex = Arc::new(CachedCodexServer::default());
+    let addresses = Arc::clone(&codex.addresses);
+    let harness: Arc<dyn forge_engines::Harness> = codex;
+    let server = start_with_harness(
+        ServeConfig {
+            data_dir: data.clone(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+        },
+        Arc::new(move |_| Arc::clone(&harness)),
+        forge_store::Environment::system(),
+    )
+    .await
+    .unwrap();
+    let hub = server.hub.clone();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: data.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id.clone(),
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let turn = |text: &str| {
+        let (hub, store, thread) = (hub.clone(), store.clone(), thread.id.clone());
+        let message = SendMessage {
+            draft: None,
+            id: ItemId::new(),
+            text: text.to_owned(),
+            images: Vec::new(),
+            config: None,
+        };
+        async move {
+            let before = store.last_reply(&thread).await.unwrap();
+            hub.send_message(&thread, message).await.unwrap();
+            let reply = stored("the turn's reply", &store, || async {
+                store
+                    .last_reply(&thread)
+                    .await
+                    .unwrap()
+                    .filter(|reply| Some(reply) != before.as_ref())
+            })
+            .await;
+            test_support::wait::eventually("the turn to end", test_support::wait::LIVENESS, || {
+                std::future::ready(!hub.is_live(&thread))
+            })
+            .await;
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()["reply"].clone()
+        }
+    };
+
+    let first = turn("first").await;
+    assert!(first["result"].is_object(), "{first}");
+    let cached = addresses.lock().unwrap()[&thread.id].clone();
+    let between = raw_mcp_call(&cached, "threads_search").await;
+    assert_eq!(between["error"]["code"], -32001, "{between}");
+    assert!(
+        between["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no live run")),
+        "{between}"
+    );
+    let second = turn("second").await;
+
+    assert!(
+        second["result"].is_object(),
+        "the second turn's call on the cached address reaches Artisan: {second}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway() {

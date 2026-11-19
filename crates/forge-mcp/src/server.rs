@@ -1,5 +1,5 @@
 use artisan_api::ThreadId;
-use forge_runs::{ErrorClass, GatewayCaller};
+use forge_runs::{ErrorClass, GatewayCaller, GatewayRefusal};
 use forge_store::coordination::Conflict;
 use serde_json::{Map, Number, Value, json};
 use std::future::Future;
@@ -265,6 +265,37 @@ pub async fn handle<T: ToolSet>(set: &T, caller: &GatewayCaller, body: Value) ->
         | Value::Number(_)
         | Value::String(_)
         | Value::Object(_)) => one(set, caller, &message).await,
+    }
+}
+
+#[must_use]
+pub fn refuse(refusal: &GatewayRefusal, body: &Value) -> Option<Value> {
+    let answer = |message: &Value| match Envelope::parse(message) {
+        Envelope::Request { id, .. } => Some(error_reply(
+            Some(&id),
+            ENDED_CODE,
+            &format!("Artisan refused this call: {refusal}."),
+        )),
+        Envelope::Notification | Envelope::Response => None,
+        Envelope::Invalid { id, reason } => {
+            Some(error_reply(id.as_ref(), -32600, reason.message()))
+        }
+    };
+    match body {
+        Value::Array(messages) if messages.is_empty() => Some(error_reply(
+            None,
+            -32600,
+            "A JSON-RPC batch holds at least one message.",
+        )),
+        Value::Array(messages) => {
+            let replies: Vec<Value> = messages.iter().filter_map(answer).collect();
+            (!replies.is_empty()).then_some(Value::Array(replies))
+        }
+        message @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Object(_)) => answer(message),
     }
 }
 

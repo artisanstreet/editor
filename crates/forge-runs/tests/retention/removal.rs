@@ -29,7 +29,10 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
         fixture.hub.forget_removed_thread(thread).await;
     }
 
-    assert!(fixture.hub.gateway_caller(&token).is_none());
+    assert!(matches!(
+        fixture.hub.gateway_caller(&token),
+        Err(GatewayRefusal::Unknown)
+    ));
     assert!(
         admitted.ended.is_cancelled(),
         "calls admitted before the thread was removed keep acting for it"

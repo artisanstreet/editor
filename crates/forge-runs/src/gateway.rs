@@ -59,7 +59,7 @@ pub enum GatewayError {
         "the {COMPUTER_USE_KEY} setting is neither true nor false for the run of thread {thread}"
     )]
     NotOnOrOff { thread: ThreadId },
-    #[error("make the gateway credential of the run of thread {thread}")]
+    #[error("make the gateway credential of thread {thread}")]
     Token {
         thread: ThreadId,
         #[source]
@@ -90,18 +90,36 @@ pub struct GatewayCaller {
     pub ended: CancellationToken,
 }
 
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum GatewayRefusal {
+    #[error("this MCP address is not valid")]
+    Unknown,
+    #[error(
+        "thread {thread} has no live run, so its Artisan tools are unavailable until its next turn"
+    )]
+    Idle { thread: ThreadId },
+}
+
+#[derive(Debug)]
+struct Credential {
+    token: String,
+    live: std::collections::BTreeMap<u64, CancellationToken>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Gateway {
     base: Option<String>,
     computer: bool,
-    passes: HashMap<String, GatewayCaller>,
+    holders: HashMap<String, ThreadId>,
+    credentials: HashMap<ThreadId, Credential>,
+    next_pass: u64,
     calls: HashMap<String, PendingCall>,
 }
 
 #[derive(Debug)]
 pub(crate) struct GatewayPass {
     hub: Hub,
-    token: Option<Secret>,
+    held: Option<(ThreadId, u64)>,
     ended: CancellationToken,
     servers: Vec<(String, String)>,
 }
@@ -115,8 +133,10 @@ impl GatewayPass {
 
 impl Drop for GatewayPass {
     fn drop(&mut self) {
-        if let Some(token) = &self.token {
-            self.hub.gateway_lock().passes.remove(token.expose());
+        if let Some((thread, pass)) = &self.held
+            && let Some(credential) = self.hub.gateway_lock().credentials.get_mut(thread)
+        {
+            credential.live.remove(pass);
         }
         self.ended.cancel();
     }
@@ -129,9 +149,27 @@ impl Hub {
         gateway.computer = computer;
     }
 
-    #[must_use]
-    pub fn gateway_caller(&self, token: &str) -> Option<GatewayCaller> {
-        self.gateway_lock().passes.get(token).cloned()
+    pub fn gateway_caller(&self, token: &str) -> Result<GatewayCaller, GatewayRefusal> {
+        let gateway = self.gateway_lock();
+        let thread = gateway.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
+        let ended = gateway
+            .credentials
+            .get(thread)
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "invariant: thread {thread} holds a gateway address it has no credential for"
+                )
+            })
+            .live
+            .values()
+            .next_back()
+            .ok_or_else(|| GatewayRefusal::Idle {
+                thread: thread.clone(),
+            })?;
+        Ok(GatewayCaller {
+            thread: thread.clone(),
+            ended: ended.clone(),
+        })
     }
 
     #[must_use]
@@ -140,13 +178,13 @@ impl Hub {
     }
 
     pub(crate) fn revoke_gateway_credential(&self, thread: &ThreadId) {
-        self.gateway_lock().passes.retain(|_, holder| {
-            let kept = holder.thread != *thread;
-            if !kept {
-                holder.ended.cancel();
+        let mut gateway = self.gateway_lock();
+        if let Some(credential) = gateway.credentials.remove(thread) {
+            gateway.holders.remove(&credential.token);
+            for ended in credential.live.values() {
+                ended.cancel();
             }
-            kept
-        });
+        }
     }
 
     pub(crate) async fn gateway_pass(
@@ -161,16 +199,13 @@ impl Hub {
         let Some(base) = base else {
             return Ok(GatewayPass {
                 hub: self.clone(),
-                token: None,
+                held: None,
                 ended,
                 servers: Vec::new(),
             });
         };
         let computer = computer && self.computer_use_on(thread).await?;
-        let token = self.issue_gateway_token(GatewayCaller {
-            thread: thread.clone(),
-            ended: ended.clone(),
-        })?;
+        let (token, pass) = self.admit_pass(thread, &ended)?;
         let mut servers = vec![(
             forge_engines::ARTISAN_MCP.to_owned(),
             format!("{base}{}/{}", forge_engines::ARTISAN_MCP, token.expose()),
@@ -183,7 +218,7 @@ impl Hub {
         }
         Ok(GatewayPass {
             hub: self.clone(),
-            token: Some(token),
+            held: Some((thread.clone(), pass)),
             ended,
             servers,
         })
@@ -207,15 +242,33 @@ impl Hub {
         }
     }
 
-    fn issue_gateway_token(&self, caller: GatewayCaller) -> Result<Secret, GatewayError> {
-        let mut bytes = [0_u8; 24];
-        getrandom::fill(&mut bytes).map_err(|source| GatewayError::Token {
-            thread: caller.thread.clone(),
-            source,
-        })?;
-        let token = hex::encode(bytes);
-        self.gateway_lock().passes.insert(token.clone(), caller);
-        Ok(Secret::from(token.as_str()))
+    fn admit_pass(
+        &self,
+        thread: &ThreadId,
+        ended: &CancellationToken,
+    ) -> Result<(Secret, u64), GatewayError> {
+        let mut gateway = self.gateway_lock();
+        let gateway = &mut *gateway;
+        let credential = match gateway.credentials.entry(thread.clone()) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(free) => {
+                let mut bytes = [0_u8; 24];
+                getrandom::fill(&mut bytes).map_err(|source| GatewayError::Token {
+                    thread: thread.clone(),
+                    source,
+                })?;
+                let token = hex::encode(bytes);
+                gateway.holders.insert(token.clone(), thread.clone());
+                free.insert(Credential {
+                    token,
+                    live: std::collections::BTreeMap::new(),
+                })
+            }
+        };
+        let pass = gateway.next_pass;
+        gateway.next_pass += 1;
+        credential.live.insert(pass, ended.clone());
+        Ok((Secret::from(credential.token.as_str()), pass))
     }
 
     pub async fn call_editor(

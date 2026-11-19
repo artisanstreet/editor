@@ -77,13 +77,10 @@ async fn serve<T: ToolSet + Clone + 'static>(
     Path(token): Path<String>,
     body: Bytes,
 ) -> Response {
-    let Some(caller) = served.hub.gateway_caller(&token) else {
-        return (
-            StatusCode::NOT_FOUND,
-            "This MCP address is no longer valid.",
-        )
-            .into_response();
-    };
+    let admitted = served.hub.gateway_caller(&token);
+    if matches!(admitted, Err(forge_runs::GatewayRefusal::Unknown)) {
+        return (StatusCode::NOT_FOUND, "This MCP address is not valid.").into_response();
+    }
     let body: Value = match serde_json::from_slice(&body) {
         Ok(body) => body,
         Err(error) => {
@@ -95,12 +92,14 @@ async fn serve<T: ToolSet + Clone + 'static>(
             return (StatusCode::BAD_REQUEST, axum::Json(reply)).into_response();
         }
     };
-    forge_mcp::server::handle(&served.set, &caller, body)
-        .await
-        .map_or_else(
-            || StatusCode::ACCEPTED.into_response(),
-            |reply| axum::Json(reply).into_response(),
-        )
+    let reply = match admitted {
+        Ok(caller) => forge_mcp::server::handle(&served.set, &caller, body).await,
+        Err(refusal) => forge_mcp::server::refuse(&refusal, &body),
+    };
+    reply.map_or_else(
+        || StatusCode::ACCEPTED.into_response(),
+        |reply| axum::Json(reply).into_response(),
+    )
 }
 
 async fn no_stream() -> StatusCode {
