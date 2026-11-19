@@ -8,13 +8,14 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NotificationEffects {
     pub withdraw: Vec<String>,
     pub show: Vec<Notification>,
     pub badge: Option<Attention>,
 }
 
+#[derive(Debug)]
 pub enum SettingsPlatformEffect {
     OpenUrl(String),
     OpenNotices,
@@ -122,6 +123,12 @@ pub struct Workspace {
     repository: crate::shell::repository::RepositoryContext,
     start_pending: bool,
     repository_pending: bool,
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Workspace").finish_non_exhaustive()
+    }
 }
 
 impl Workspace {

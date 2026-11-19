@@ -42,6 +42,12 @@ pub struct Tab {
     pub outline: Option<f32>,
 }
 
+impl std::fmt::Debug for Tab {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Tab").finish_non_exhaustive()
+    }
+}
+
 #[must_use]
 pub fn strip(
     theme: &ArtisanTheme,

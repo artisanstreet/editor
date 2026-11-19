@@ -51,6 +51,7 @@ pub enum Command {
     New,
 }
 
+#[derive(Debug)]
 pub struct Sidebar {
     open: bool,
     forced: bool,

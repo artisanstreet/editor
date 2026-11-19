@@ -14,6 +14,12 @@ pub struct Entry {
     pub sign_in: crate::frame::sign_in::SignIn,
 }
 
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Entry").finish_non_exhaustive()
+    }
+}
+
 impl Entry {
     pub fn new(
         failure: Option<String>,

@@ -38,7 +38,13 @@ pub struct Subagent {
     pub card: AgentCard,
 }
 
-#[derive(Clone)]
+impl std::fmt::Debug for Subagent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Subagent").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Overview {
     pub project: Option<String>,
     pub machine: Option<String>,

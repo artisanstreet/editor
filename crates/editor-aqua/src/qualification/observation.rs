@@ -111,7 +111,7 @@ pub struct Paint {
     pub rows: Vec<PaintedRow>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PaintCollector {
     armed: Option<(PresentationScope, u64, Paint)>,
 }

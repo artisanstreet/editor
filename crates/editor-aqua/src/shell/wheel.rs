@@ -41,7 +41,7 @@ impl Advance {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WheelGlides {
     transcript: WheelGlide,
     threads: WheelGlide,

@@ -1,7 +1,7 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use std::{cell::Cell, rc::Rc};
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SelectionAllocator(Rc<Cell<u64>>);
 
 impl SelectionAllocator {

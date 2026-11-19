@@ -756,6 +756,7 @@ pub struct VerifiedBootstrap {
     fixture: ImmutableFixture,
     snapshot: StoreSnapshot,
     server: ForgeServer,
+#[derive(Debug)]
     editor_dir: PathBuf,
 }
 
@@ -1279,6 +1280,7 @@ impl ImmutableFixture {
         Self::parse(input)
     }
 
+#[derive(Debug)]
     pub fn parse(input: Vec<u8>) -> Result<Self, FixtureError> {
         let fixture: Fixture = serde_json::from_slice(&input).map_err(FixtureError::Decode)?;
         fixture.validate().map_err(FixtureError::Invalid)?;

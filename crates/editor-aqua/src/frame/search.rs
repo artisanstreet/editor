@@ -146,6 +146,12 @@ pub struct Overlay {
     pub emit: Rc<dyn Fn(Event)>,
 }
 
+impl std::fmt::Debug for Overlay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Overlay").finish_non_exhaustive()
+    }
+}
+
 #[must_use]
 #[expect(
     clippy::disallowed_methods,

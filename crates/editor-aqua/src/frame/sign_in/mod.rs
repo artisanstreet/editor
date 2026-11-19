@@ -61,6 +61,7 @@ pub enum Slot {
     Code,
 }
 
+#[derive(Debug)]
 pub struct Motion {
     page: Glide,
     height: Option<Glide>,
@@ -77,6 +78,7 @@ pub struct Sizes {
     pub(crate) code_feedback: f32,
 }
 
+#[derive(Debug)]
 pub struct SignIn {
     pub(crate) problem: Option<EmailProblem>,
     pub reduced: bool,

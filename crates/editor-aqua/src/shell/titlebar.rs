@@ -23,7 +23,7 @@ const MIN: &str = "artisan-desktop-titlebar-minimize";
 const MAX: &str = "artisan-desktop-titlebar-maximize";
 const CLOSE: &str = "artisan-desktop-titlebar-close";
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Titlebar {
     regions: Rc<RefCell<Option<DragRegions>>>,
     actions: Rc<RefCell<VecDeque<CaptionControl>>>,

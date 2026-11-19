@@ -26,6 +26,7 @@ pub struct Entry {
     screen: Screen,
 }
 
+#[derive(Debug)]
 pub struct HostSnapshot<'a> {
     pub(crate) id: &'a HostId,
     pub(crate) name: &'a str,
@@ -66,6 +67,12 @@ pub struct Palette {
     generation: u64,
     request: Option<AbortOnDropHandle<()>>,
     delivery: crate::core::delivery::Delivery<SearchUpdate>,
+}
+
+impl std::fmt::Debug for Palette {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Palette").finish_non_exhaustive()
+    }
 }
 
 fn insert_thread(

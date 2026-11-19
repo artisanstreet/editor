@@ -21,7 +21,7 @@ const REASSURANCE_DELAY: Duration = Duration::from_secs(5);
 const REASSURANCE_FADE: Duration = Duration::from_millis(500);
 const TEXT_WIDTH: f32 = 440.0;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WordmarkLoader {
     mounted: Option<Instant>,
 }
@@ -147,7 +147,7 @@ pub enum Owner {
     Thread(HostId, artisan_api::ThreadId),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ConnectionPresenter {
     owner: Option<Owner>,
     host: Option<(HostId, HostInstance)>,

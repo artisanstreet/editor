@@ -65,6 +65,12 @@ pub struct Avatar {
     delivery: Delivery<Fetched>,
 }
 
+impl std::fmt::Debug for Avatar {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Avatar").finish_non_exhaustive()
+    }
+}
+
 impl Default for Avatar {
     fn default() -> Self {
         Self {

@@ -183,6 +183,7 @@ pub struct NotificationChanges {
 impl Notifications {
     pub fn thread_changed(
         &mut self,
+#[derive(Debug)]
         host: &impl NotificationHost,
         thread: &ThreadId,
         watching: Option<&ThreadId>,

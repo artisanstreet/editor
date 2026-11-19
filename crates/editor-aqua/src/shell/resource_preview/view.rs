@@ -49,6 +49,12 @@ pub struct ViewState {
     jump: Option<usize>,
 }
 
+impl std::fmt::Debug for ViewState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ViewState").finish_non_exhaustive()
+    }
+}
+
 impl ViewState {
     pub(crate) fn new(
         generation: u64,

@@ -28,6 +28,13 @@ pub struct Shell {
     images: ImageAssets,
 }
 
+impl std::fmt::Debug for Shell {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Shell").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct ShellUpdates {
     pub(crate) notifications: Vec<NotificationEffects>,
     pub(crate) preferences_changed: bool,

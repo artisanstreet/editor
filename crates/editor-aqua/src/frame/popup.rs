@@ -12,6 +12,12 @@ pub struct Popup {
     host: Option<AnimatedPickerHost>,
 }
 
+impl std::fmt::Debug for Popup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Popup").finish_non_exhaustive()
+    }
+}
+
 impl Popup {
     pub(crate) fn sync(
         &mut self,

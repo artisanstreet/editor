@@ -52,6 +52,12 @@ pub struct Props<'a> {
     pub emit: Rc<dyn Fn(Event)>,
 }
 
+impl std::fmt::Debug for Props<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Props").finish_non_exhaustive()
+    }
+}
+
 #[must_use]
 pub fn card(theme: &ArtisanTheme, props: Props<'_>) -> Element {
     let header = header(
