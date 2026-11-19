@@ -1184,92 +1184,86 @@ impl Hub {
     }
 
     fn start_dispatcher(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let hub = self.clone();
-        self.inner.tasks.spawn_on(
-            async move {
-                let mut unclaimed_at = None;
-                let mut failures = 0_u32;
-                loop {
-                    let (parked, readable) = park::until_next(&hub, unclaimed_at).await;
-                    let retry = async {
-                        if failures == 0 && readable {
-                            std::future::pending::<()>().await;
-                        } else {
-                            tokio::time::sleep(retry_delay(failures)).await;
-                        }
-                    };
-                    let next_due = hub.lock().next_due();
-                    let undeferred = async {
-                        match next_due {
-                            Some(until) => tokio::time::sleep_until(until).await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    };
-                    tokio::select! {
-                        biased;
-                        () = hub.inner.shutdown.cancelled() => break,
-                        () = hub.inner.dispatch.notified() => {},
-                        () = parked => {},
-                        () = retry => {},
-                        () = undeferred => {},
-                    }
-                    hub.lock().release_due(tokio::time::Instant::now());
-                    let mut failed = !readable;
-                    failed |= !hub.settle_unsettled().await;
-                    failed |= !hub.continue_owed().await;
-                    unclaimed_at = Some(hub.store().now());
-                    loop {
-                        let _admission = hub.inner.admission.lock().await;
-                        if hub.inner.shutdown.is_cancelled() {
-                            return;
-                        }
-                        if hub
-                            .inner
-                            .generation
-                            .as_ref()
-                            .is_some_and(|generation| !generation.accepting())
-                        {
-                            break;
-                        }
-                        let mut excluded = hub.active_thread_ids();
-                        let foreign = excluded.len().saturating_sub(hub.local_active_count());
-                        if hub.inner.harness_slots.available_permits() <= foreign {
-                            break;
-                        }
-                        excluded.extend(hub.lock().waiting(tokio::time::Instant::now()).cloned());
-                        let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
-                        else {
-                            break;
-                        };
-                        let next = match hub.store().pending_threads(1, excluded).await {
-                            Ok(threads) => threads.into_iter().next(),
-                            Err(error) => {
-                                tracing::error!(
-                                    "read pending run candidates: {}",
-                                    diagnostics::chain(&error)
-                                );
-                                failed = true;
-                                break;
-                            }
-                        };
-                        let Some(thread) = next else {
-                            break;
-                        };
-                        unclaimed_at = None;
-                        hub.claim(thread, permit);
-                    }
-                    failures = if failed {
-                        failures.saturating_add(1)
+        self.inner.tasks.spawn(async move {
+            let mut unclaimed_at = None;
+            let mut failures = 0_u32;
+            loop {
+                let (parked, readable) = park::until_next(&hub, unclaimed_at).await;
+                let retry = async {
+                    if failures == 0 && readable {
+                        std::future::pending::<()>().await;
                     } else {
-                        0
-                    };
+                        tokio::time::sleep(retry_delay(failures)).await;
+                    }
+                };
+                let next_due = hub.lock().next_due();
+                let undeferred = async {
+                    match next_due {
+                        Some(until) => tokio::time::sleep_until(until).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    () = hub.inner.shutdown.cancelled() => break,
+                    () = hub.inner.dispatch.notified() => {},
+                    () = parked => {},
+                    () = retry => {},
+                    () = undeferred => {},
                 }
-            },
-            &runtime,
-        );
+                hub.lock().release_due(tokio::time::Instant::now());
+                let mut failed = !readable;
+                failed |= !hub.settle_unsettled().await;
+                failed |= !hub.continue_owed().await;
+                unclaimed_at = Some(hub.store().now());
+                loop {
+                    let _admission = hub.inner.admission.lock().await;
+                    if hub.inner.shutdown.is_cancelled() {
+                        return;
+                    }
+                    if hub
+                        .inner
+                        .generation
+                        .as_ref()
+                        .is_some_and(|generation| !generation.accepting())
+                    {
+                        break;
+                    }
+                    let mut excluded = hub.active_thread_ids();
+                    let foreign = excluded.len().saturating_sub(hub.local_active_count());
+                    if hub.inner.harness_slots.available_permits() <= foreign {
+                        break;
+                    }
+                    excluded.extend(hub.lock().waiting(tokio::time::Instant::now()).cloned());
+                    let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
+                    else {
+                        break;
+                    };
+                    let next = match hub.store().pending_threads(1, excluded).await {
+                        Ok(threads) => threads.into_iter().next(),
+                        Err(error) => {
+                            tracing::error!(
+                                "read pending run candidates: {}",
+                                diagnostics::chain(&error)
+                            );
+                            failed = true;
+                            break;
+                        }
+                    };
+                    let Some(thread) = next else {
+                        break;
+                    };
+                    unclaimed_at = None;
+                    hub.claim(thread, permit);
+                }
+                failures = if failed {
+                    failures.saturating_add(1)
+                } else {
+                    0
+                };
+            }
+        });
     }
 
     fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
@@ -1550,44 +1544,38 @@ impl Hub {
     }
 
     fn forward_engine_status(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let mut statuses = self.inner.engines.subscribe();
         let engines = self.inner.engines.clone();
         let store = self.inner.store.clone();
         let stop = self.inner.shutdown.clone();
-        self.inner.tasks.spawn_on(
-            async move {
-                loop {
-                    let received = tokio::select! {
-                        () = stop.cancelled() => break,
-                        received = statuses.recv() => received,
-                    };
-                    match received {
-                        Ok(forge_engines::EngineChange::Full(status)) => {
-                            store.publish_live(Event::Engine { status });
-                        }
-                        Ok(forge_engines::EngineChange::Install { engine, install }) => {
-                            store.publish_live(Event::EngineInstall { engine, install });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                            tracing::debug!(
-                                missed,
-                                "engine statuses lagged; publishing every engine's current one"
-                            );
-                            for engine in EngineId::ALL {
-                                store.publish_live(Event::Engine {
-                                    status: engines.status(engine),
-                                });
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        self.inner.tasks.spawn(async move {
+            loop {
+                let received = tokio::select! {
+                    () = stop.cancelled() => break,
+                    received = statuses.recv() => received,
+                };
+                match received {
+                    Ok(forge_engines::EngineChange::Full(status)) => {
+                        store.publish_live(Event::Engine { status });
                     }
+                    Ok(forge_engines::EngineChange::Install { engine, install }) => {
+                        store.publish_live(Event::EngineInstall { engine, install });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(
+                            missed,
+                            "engine statuses lagged; publishing every engine's current one"
+                        );
+                        for engine in EngineId::ALL {
+                            store.publish_live(Event::Engine {
+                                status: engines.status(engine),
+                            });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-            },
-            &runtime,
-        );
+            }
+        });
     }
 }
 
