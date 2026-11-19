@@ -52,3 +52,21 @@ fn only_a_context_terminal_reason_reports_a_context_limit() {
         );
     }
 }
+
+#[test]
+fn a_project_folder_is_named_as_claude_code_names_it() {
+    let long = format!("/home/user/{}project", "a-very-long-folder-name/".repeat(9));
+    assert_eq!(
+        project_name(Path::new(&long)),
+        format!(
+            "-home-user-{}a-very-long-folder-na-9blfhp",
+            "a-very-long-folder-name-".repeat(7)
+        ),
+        "a long path is cut and keeps Claude's hash of the whole path"
+    );
+    assert_eq!(
+        project_name(Path::new("/home/user/caf\u{e9} \u{1f680}/x")),
+        "-home-user-caf-----x",
+        "each UTF-16 unit becomes one dash"
+    );
+}

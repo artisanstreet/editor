@@ -141,17 +141,23 @@ async fn a_side_query_answers_from_a_fork_and_leaves_the_thread_alone() {
     use crate::Harness as _;
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
-    let cwd = dir.path().join("project");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let project: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let projects = home.join(".claude").join("projects").join(project);
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    #[cfg(unix)]
+    let cwd = {
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&project, &linked).unwrap();
+        linked
+    };
+    #[cfg(not(unix))]
+    let cwd = project;
+    let mut turn = super::scenario::turn(&cwd, "claude-side-fork", &[]);
+    let projects = home
+        .join(".claude")
+        .join("projects")
+        .join(super::side::project_dir(&turn));
     std::fs::create_dir_all(&projects).unwrap();
     std::fs::write(projects.join("s1.jsonl"), "{}\n").unwrap();
-    let mut turn = super::scenario::turn(&cwd, "claude-side-fork", &[]);
     turn.home = home;
     turn.config.permissions = artisan_api::Permissions::Full;
     turn.input.text = "What next?".into();

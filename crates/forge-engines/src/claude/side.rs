@@ -3,7 +3,7 @@ use crate::process::{self, ReadError, SendError, SpawnError};
 use crate::{SideReply, SideUsage, Turn};
 use artisan_api::EngineConfig;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -259,11 +259,66 @@ fn discard(turn: &Turn, fork: Option<&str>) {
     }
 }
 
+const MAX_PROJECT_NAME: usize = 200;
+
 pub(super) fn project_dir(turn: &Turn) -> String {
-    turn.cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    project_name(&engine_cwd(&turn.cwd))
+}
+
+#[cfg(unix)]
+fn engine_cwd(cwd: &Path) -> PathBuf {
+    match std::fs::canonicalize(cwd) {
+        Ok(physical) => physical,
+        Err(error) => {
+            tracing::debug!(cwd = %cwd.display(), "Claude would start in a folder that can't be resolved: {error}");
+            cwd.to_owned()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn engine_cwd(cwd: &Path) -> PathBuf {
+    cwd.to_owned()
+}
+
+fn project_name(cwd: &Path) -> String {
+    let units: Vec<u16> = cwd.to_string_lossy().encode_utf16().collect();
+    let name: String = units
+        .iter()
+        .map(|unit| match u8::try_from(*unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            Ok(_) | Err(_) => '-',
+        })
+        .collect();
+    if name.len() <= MAX_PROJECT_NAME {
+        return name;
+    }
+    let hash = units.iter().fold(0_i32, |hash, unit| {
+        hash.wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(*unit))
+    });
+    format!(
+        "{}-{}",
+        &name[..MAX_PROJECT_NAME],
+        base36(hash.unsigned_abs())
+    )
+}
+
+fn base36(mut value: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut digits = Vec::new();
+    loop {
+        digits.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits
+        .iter()
+        .rev()
+        .map(|digit| char::from(*digit))
         .collect()
 }
 
