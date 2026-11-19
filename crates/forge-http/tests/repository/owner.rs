@@ -102,6 +102,7 @@ async fn a_fifo_icon_is_rejected_without_waiting_for_a_writer() {
         tokio::time::timeout(Duration::from_secs(1), icon_file(&path))
             .await
             .unwrap()
+            .unwrap()
             .is_none()
     );
 }
@@ -112,9 +113,12 @@ async fn oversized_sparse_local_icon_is_rejected_before_reading() {
     let file = std::fs::File::create(&path).unwrap();
     file.set_len(forge_store::MAX_BLOB_BYTES as u64 + 1)
         .unwrap();
-    assert!(icon_file(&path).await.is_none());
+    assert!(icon_file(&path).await.unwrap().is_none());
     std::fs::write(&path, b"small native file").unwrap();
-    assert_eq!(icon_file(&path).await.unwrap(), b"small native file");
+    assert_eq!(
+        icon_file(&path).await.unwrap().unwrap(),
+        b"small native file"
+    );
 }
 #[tokio::test]
 async fn unknown_length_chunked_avatar_is_rejected_before_buffering_the_tail() {

@@ -782,8 +782,13 @@ async fn project_icon(
     let store = app.hub.store();
     for candidate in CANDIDATES {
         let path = std::path::Path::new(&project.path).join(candidate);
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
-            continue;
+        let metadata = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::info!(project = %id, path = %path.display(), %error, "unreadable project icon");
+                continue;
+            }
         };
         let source = metadata.modified().ok().map(|modified| IconSource::File {
             path: path.clone(),
@@ -798,8 +803,13 @@ async fn project_icon(
             Some(Icon::Unusable) => continue,
             None => {}
         }
-        let Some(bytes) = crate::repository::icon_file(&path).await else {
-            continue;
+        let bytes = match crate::repository::icon_file(&path).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::info!(project = %id, error = diagnostics::chain(&error), "unreadable project icon");
+                continue;
+            }
         };
         let icon = match store.put_image(bytes).await {
             Ok(blob) => Icon::Blob(blob),

@@ -184,7 +184,35 @@ impl Icons {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum GitError {
+    #[error("run git {args} in {path}")]
+    Run {
+        args: String,
+        path: PathBuf,
+        #[source]
+        source: Box<forge_engines::process::ProbeError>,
+    },
+    #[error("git {args} in {path} printed text that is not UTF-8")]
+    Output {
+        args: String,
+        path: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+}
+
 async fn git(path: &Path, args: &[&str]) -> Option<String> {
+    match run_git(path, args).await {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::debug!("{}", diagnostics::chain(&error));
+            None
+        }
+    }
+}
+
+async fn run_git(path: &Path, args: &[&str]) -> Result<Option<String>, GitError> {
     let mut command = tokio::process::Command::new("git");
     command
         .arg("-C")
@@ -193,24 +221,22 @@ async fn git(path: &Path, args: &[&str]) -> Option<String> {
         .env("GIT_TERMINAL_PROMPT", "0");
     let output = forge_engines::process::probe(command, Duration::from_secs(3), 64 * 1024)
         .await
-        .inspect_err(|error| {
-            tracing::debug!(
-                "git {} in {}: {}",
-                args.join(" "),
-                path.display(),
-                diagnostics::chain(error)
-            );
-        })
-        .ok()?;
+        .map_err(|source| GitError::Run {
+            args: args.join(" "),
+            path: path.to_owned(),
+            source: Box::new(source),
+        })?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|s| s.trim().to_owned())
+    let text = String::from_utf8(output.stdout).map_err(|source| GitError::Output {
+        args: args.join(" "),
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(Some(text.trim().to_owned()))
 }
 async fn read(path: &Path) -> Option<ProjectRepository> {
-    use tokio::io::AsyncReadExt as _;
     let observation = git(
         path,
         &[
@@ -226,26 +252,13 @@ async fn read(path: &Path) -> Option<ProjectRepository> {
     let [git_dir, common, top] = fields.as_slice() else {
         return None;
     };
-    let mut head = Vec::new();
-    let branch = match tokio::fs::File::open(Path::new(git_dir).join("HEAD")).await {
-        Ok(file) => {
-            if file
-                .take(64 * 1024 + 1)
-                .read_to_end(&mut head)
-                .await
-                .is_ok()
-                && head.len() <= 64 * 1024
-            {
-                std::str::from_utf8(&head)
-                    .ok()
-                    .and_then(|head| head.trim().strip_prefix("ref: refs/heads/"))
-                    .filter(|head| !head.is_empty())
-                    .map(str::to_owned)
-            } else {
-                None
-            }
+    let head = Path::new(git_dir).join("HEAD");
+    let branch = match head_branch(&head).await {
+        Ok(branch) => branch,
+        Err(error) => {
+            tracing::debug!(path = %head.display(), %error, "read the repository HEAD");
+            None
         }
-        Err(_) => None,
     };
     let remotes = git(path, &["remote"]).await.unwrap_or_default();
     let name = remotes
@@ -271,6 +284,26 @@ async fn read(path: &Path) -> Option<ProjectRepository> {
         web_url,
         worktree,
     })
+}
+
+async fn head_branch(head: &Path) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt as _;
+    const LIMIT: u64 = 64 * 1024;
+    let file = match tokio::fs::File::open(head).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > LIMIT {
+        return Ok(None);
+    }
+    Ok(std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|head| head.trim().strip_prefix("ref: refs/heads/"))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned))
 }
 
 fn web_url(remote: &str) -> Option<String> {
@@ -382,23 +415,75 @@ pub(crate) enum Bounded {
     Read(reqwest::Error),
 }
 
-pub(crate) async fn icon_file(path: &Path) -> Option<Vec<u8>> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IconFileError {
+    #[error("inspect the icon file {path}")]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open the icon file {path}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read the icon file {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub(crate) async fn icon_file(path: &Path) -> Result<Option<Vec<u8>>, IconFileError> {
     use tokio::io::AsyncReadExt as _;
-    let metadata = tokio::fs::metadata(path).await.ok()?;
-    if !metadata.is_file() || metadata.len() > forge_store::MAX_BLOB_BYTES as u64 {
-        return None;
+    let usable = |metadata: &std::fs::Metadata| {
+        metadata.is_file() && metadata.len() <= forge_store::MAX_BLOB_BYTES as u64
+    };
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(IconFileError::Inspect {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if !usable(&metadata) {
+        return Ok(None);
     }
-    let file = tokio::fs::File::open(path).await.ok()?;
-    let metadata = file.metadata().await.ok()?;
-    if !metadata.is_file() || metadata.len() > forge_store::MAX_BLOB_BYTES as u64 {
-        return None;
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(IconFileError::Open {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|source| IconFileError::Inspect {
+            path: path.to_owned(),
+            source,
+        })?;
+    if !usable(&metadata) {
+        return Ok(None);
     }
     let mut bytes = Vec::new();
     file.take(forge_store::MAX_BLOB_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .await
-        .ok()?;
-    (bytes.len() <= forge_store::MAX_BLOB_BYTES).then_some(bytes)
+        .map_err(|source| IconFileError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok((bytes.len() <= forge_store::MAX_BLOB_BYTES).then_some(bytes))
 }
 
 async fn bounded_response(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Bounded> {
