@@ -9,7 +9,7 @@ publish = false
 [features]
 tokio = ["dep:tokio"]
 sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:serde_json"]
-http = ["tokio", "dep:axum"]
+http = ["tokio", "dep:axum", "dep:serde_json"]
 net = ["dep:socket2"]
 items = ["dep:artisan-api"]
 clock = ["dep:artisan-api", "dep:editor-core"]

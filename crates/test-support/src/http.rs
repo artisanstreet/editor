@@ -25,6 +25,14 @@ impl StubServer {
         }
     }
 
+    pub async fn json(path: &str, body: serde_json::Value) -> Self {
+        let router = axum::Router::new().route(
+            path,
+            axum::routing::get(move || std::future::ready(axum::Json(body))),
+        );
+        Self::serve(router).await
+    }
+
     pub fn url(&self) -> &str {
         &self.url
     }
