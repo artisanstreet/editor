@@ -1,19 +1,37 @@
 use super::*;
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
+use test_support::wait::eventually;
 
 #[cfg(unix)]
-async fn read_to_end(shells: &Shells, id: &str) -> String {
-    let mut seen = String::new();
-    for _ in 0..250 {
-        let read = shells.read(id).unwrap();
-        let Some(running) = read.strip_suffix("[still running]") else {
-            seen.push_str(&read);
-            return seen;
-        };
-        seen.push_str(running);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    seen
+const PATIENCE: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+async fn settled(
+    shells: &Shells,
+    id: &str,
+    what: &str,
+    until: impl Fn(&ShellState) -> bool + Sync,
+) {
+    let shell = shells.find(id).unwrap();
+    eventually(what, PATIENCE, || std::future::ready(until(&shell.lock()))).await;
+}
+
+#[cfg(unix)]
+fn printed(state: &ShellState, text: &str) -> bool {
+    state
+        .unread
+        .chunks
+        .iter()
+        .map(String::as_str)
+        .collect::<String>()
+        .contains(text)
+}
+
+#[cfg(unix)]
+fn exited(state: &ShellState) -> bool {
+    state.ended.is_some()
 }
 
 #[cfg(unix)]
@@ -28,16 +46,16 @@ async fn a_background_command_runs_and_reports_its_output_and_exit() {
             &crate::sandbox::Sandbox::Open,
         )
         .unwrap();
-    let mut first = String::new();
-    for _ in 0..100 {
-        first = shells.read(&id).unwrap();
-        if first.contains("hello") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    settled(&shells, &id, "the first line", |state| {
+        printed(state, "hello")
+    })
+    .await;
+    let first = shells.read(&id).unwrap();
     assert!(first.contains("hello"), "{first}");
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    settled(&shells, &id, "the exit", |state| {
+        exited(state) && printed(state, "done")
+    })
+    .await;
     let rest = shells.read(&id).unwrap();
     assert!(rest.contains("done"), "{rest}");
     assert!(rest.contains("[exit code 3]"), "{rest}");
@@ -56,9 +74,12 @@ async fn killing_a_shell_stops_it_and_says_so() {
             &crate::sandbox::Sandbox::Open,
         )
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    settled(&shells, &id, "the shell to start", |state| {
+        printed(state, "up")
+    })
+    .await;
     assert!(shells.kill(&id).unwrap().contains("stopped"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    settled(&shells, &id, "the shell to stop", exited).await;
     let read = shells.read(&id).unwrap();
     assert!(read.contains("[stopped]"), "{read}");
 }
@@ -93,7 +114,11 @@ async fn a_shell_that_leaves_a_command_running_still_reports_its_exit() {
             &crate::sandbox::Sandbox::Open,
         )
         .unwrap();
-    let read = read_to_end(&shells, &id).await;
+    settled(&shells, &id, "the launcher to exit", |state| {
+        exited(state) && printed(state, "started")
+    })
+    .await;
+    let read = shells.read(&id).unwrap();
     assert!(read.contains("started"), "{read}");
     assert!(read.ends_with("[exit code 0]"), "{read}");
 }
@@ -110,8 +135,11 @@ async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
             &crate::sandbox::Sandbox::Open,
         )
         .unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let read = read_to_end(&shells, &id).await;
+    settled(&shells, &id, "the whole output", |state| {
+        exited(state) && printed(state, "tail-marker")
+    })
+    .await;
+    let read = shells.read(&id).unwrap();
     assert!(
         read.contains("tail-marker\n[exit code 0]"),
         "{}",
@@ -181,20 +209,16 @@ async fn stopping_the_run_ends_what_a_shell_started() {
             &crate::sandbox::Sandbox::Open,
         )
         .unwrap();
-    let mut pid = String::new();
-    for _ in 0..100 {
-        pid.push_str(
-            shells
-                .read(&id)
-                .unwrap()
-                .trim_end_matches("[still running]"),
-        );
-        if pid.ends_with('\n') {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let pid = pid.trim().to_owned();
+    settled(&shells, &id, "the grandchild's pid", |state| {
+        printed(state, "\n")
+    })
+    .await;
+    let pid = shells
+        .read(&id)
+        .unwrap()
+        .trim_end_matches("[still running]")
+        .trim()
+        .to_owned();
     assert!(pid.parse::<u32>().is_ok(), "the grandchild's pid: {pid:?}");
     let alive = |pid: &str| {
         std::process::Command::new("kill")
@@ -205,15 +229,10 @@ async fn stopping_the_run_ends_what_a_shell_started() {
     };
     assert!(alive(&pid));
     drop(shells);
-    let mut gone = false;
-    for _ in 0..100 {
-        if !alive(&pid) {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(gone, "the grandchild {pid} outlived the run");
+    eventually("the grandchild to end with the run", PATIENCE, || {
+        std::future::ready(!alive(&pid))
+    })
+    .await;
 }
 
 #[test]
