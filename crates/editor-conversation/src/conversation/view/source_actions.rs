@@ -34,7 +34,7 @@ impl CopySource {
 
 fn copy_action(
     key: String,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     source: CopySource,
     copy: Rc<dyn Fn(CopySource)>,
 ) -> Element {
@@ -43,7 +43,7 @@ fn copy_action(
         CopySource::Text(_) => "Copy full content",
         CopySource::Live(_) => "Copy live preview",
     };
-    let button = Button::text(key, theme, ButtonTone::Quiet, label)
+    let button = Button::text(key, *theme, ButtonTone::Quiet, label)
         .disabled(!admitted)
         .on_activate(move |_| {
             if admitted {
@@ -62,7 +62,7 @@ fn copy_action(
 }
 
 pub(crate) fn failed_body(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     error: String,
     key: String,
     source: CopySource,

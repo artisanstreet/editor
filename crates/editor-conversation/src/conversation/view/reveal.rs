@@ -8,13 +8,15 @@ use editor_ui::markdown::presenter::{ProjectedGeometry, ProjectedRevealText};
 use editor_ui::markdown::reveal::PreparedReveal;
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
+
+pub(crate) type RevealHandle = (Rc<PreparedReveal>, bool, Rc<Cell<bool>>);
 
 #[derive(Debug, Default)]
 pub struct MountedReveals {
     scope: Option<PresentationScope>,
-    rows: HashMap<RowKey, Weak<RefCell<MountedReveal>>>,
+    rows: BTreeMap<RowKey, Weak<RefCell<MountedReveal>>>,
     proofs: HashMap<RowKey, ProjectedProof>,
 }
 
@@ -28,8 +30,8 @@ pub(crate) struct MountedReveal {
 
 enum RevealGeometry {
     Static,
-    Inline(OwnedGeometry),
-    Stored(StoredGeometry),
+    Inline(Box<OwnedGeometry>),
+    Stored(Box<StoredGeometry>),
 }
 
 struct StoredGeometry {
@@ -47,6 +49,79 @@ struct OwnedGeometry {
     geometry: ProjectedGeometry,
     text: Vec<ProjectedRevealText>,
     live: Option<crate::conversation::live::LiveBinding>,
+}
+
+impl MountedReveal {
+    pub(crate) fn acquire(
+        owner: &super::row_cache::RowOwner,
+        fresh: impl FnOnce() -> bool,
+    ) -> RevealHandle {
+        let mut slot = owner.reveal.borrow_mut();
+        let row = slot.get_or_insert_with(|| {
+            Rc::new(RefCell::new(Self {
+                reveal: Rc::new(PreparedReveal::default()),
+                fresh: fresh(),
+                ready: Rc::new(Cell::new(false)),
+                geometry: RevealGeometry::Static,
+                settled_at: Cell::new(None),
+            }))
+        });
+        let row = row.borrow();
+        (Rc::clone(&row.reveal), row.fresh, Rc::clone(&row.ready))
+    }
+
+    pub(crate) fn record(
+        owner: &super::row_cache::RowOwner,
+        version: u64,
+        block: usize,
+        prepared: crate::conversation::presentation::PreparedProjectedRow,
+        live: Option<crate::conversation::live::LiveBinding>,
+    ) -> aqua_ui::collection::BatchedCollectionRow {
+        let slot = owner.reveal.borrow();
+        let row = slot
+            .as_ref()
+            .expect("invariant: the reveal row is acquired before it renders");
+        let mut row = row.borrow_mut();
+        row.ready.set(false);
+        row.settled_at.set(None);
+        row.geometry = RevealGeometry::Inline(Box::new(OwnedGeometry {
+            version,
+            block,
+            proof: prepared.proof,
+            geometry: prepared.geometry,
+            text: prepared.text,
+            live,
+        }));
+        prepared.row
+    }
+
+    pub(crate) fn record_stored(
+        owner: &super::row_cache::RowOwner,
+        version: u64,
+        block: usize,
+        proof: crate::conversation::stored::StoredProof,
+        prepared: editor_ui::markdown::presenter::StoredProjectedMarkdown,
+    ) -> aqua_ui::collection::BatchedCollectionRow {
+        let slot = owner.reveal.borrow();
+        let row = slot
+            .as_ref()
+            .expect("invariant: the reveal row is acquired before it renders");
+        let mut row = row.borrow_mut();
+        row.ready.set(false);
+        row.settled_at.set(None);
+        let text = prepared.reveal_text(&row.reveal);
+        row.geometry = RevealGeometry::Stored(Box::new(StoredGeometry {
+            version,
+            block,
+            proof,
+            geometry: prepared.geometry,
+            text,
+        }));
+        aqua_ui::collection::BatchedCollectionRow {
+            element: prepared.element,
+            batches: vec![prepared.selection_batch],
+        }
+    }
 }
 
 impl MountedReveals {
@@ -76,76 +151,6 @@ impl MountedReveals {
         }
     }
 
-    pub(crate) fn acquire(
-        &self,
-        owner: &super::row_cache::RowOwner,
-        fresh: impl FnOnce() -> bool,
-    ) -> (Rc<PreparedReveal>, bool, Rc<Cell<bool>>) {
-        let mut slot = owner.reveal.borrow_mut();
-        let row = slot.get_or_insert_with(|| {
-            Rc::new(RefCell::new(MountedReveal {
-                reveal: Rc::new(PreparedReveal::default()),
-                fresh: fresh(),
-                ready: Rc::new(Cell::new(false)),
-                geometry: RevealGeometry::Static,
-                settled_at: Cell::new(None),
-            }))
-        });
-        let row = row.borrow();
-        (Rc::clone(&row.reveal), row.fresh, Rc::clone(&row.ready))
-    }
-
-    pub(crate) fn record(
-        &self,
-        owner: &super::row_cache::RowOwner,
-        version: u64,
-        block: usize,
-        prepared: crate::conversation::presentation::PreparedProjectedRow,
-        live: Option<crate::conversation::live::LiveBinding>,
-    ) -> aqua_ui::collection::BatchedCollectionRow {
-        let slot = owner.reveal.borrow();
-        let row = slot.as_ref().expect("reveal row acquired before rendering");
-        let mut row = row.borrow_mut();
-        row.ready.set(false);
-        row.settled_at.set(None);
-        row.geometry = RevealGeometry::Inline(OwnedGeometry {
-            version,
-            block,
-            proof: prepared.proof,
-            geometry: prepared.geometry,
-            text: prepared.text,
-            live,
-        });
-        prepared.row
-    }
-
-    pub(crate) fn record_stored(
-        &self,
-        owner: &super::row_cache::RowOwner,
-        version: u64,
-        block: usize,
-        proof: crate::conversation::stored::StoredProof,
-        prepared: editor_ui::markdown::presenter::StoredProjectedMarkdown,
-    ) -> aqua_ui::collection::BatchedCollectionRow {
-        let slot = owner.reveal.borrow();
-        let row = slot.as_ref().expect("reveal row acquired before rendering");
-        let mut row = row.borrow_mut();
-        row.ready.set(false);
-        row.settled_at.set(None);
-        let text = prepared.reveal_text(&row.reveal);
-        row.geometry = RevealGeometry::Stored(StoredGeometry {
-            version,
-            block,
-            proof,
-            geometry: prepared.geometry,
-            text,
-        });
-        aqua_ui::collection::BatchedCollectionRow {
-            element: prepared.element,
-            batches: vec![prepared.selection_batch],
-        }
-    }
-
     pub(crate) fn activate(&mut self, key: RowKey, owner: &super::row_cache::RowOwner) {
         let slot = owner.reveal.borrow();
         if let Some(row) = slot.as_ref() {
@@ -161,7 +166,7 @@ impl MountedReveals {
         app: &mut aqua::UiApp,
         conversation: &Conversation,
         core: &Core,
-        markdown: &mut MarkdownOwners,
+        markdown: &MarkdownOwners,
         stored: Option<&crate::conversation::stored::StoredConversation>,
     ) -> RevealSync {
         let Some(scope) = self.scope.as_ref() else {
@@ -299,6 +304,10 @@ impl MountedReveals {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent observation of one sync pass that the frame loop reads separately"
+)]
 pub struct RevealSync {
     pub reason: &'static str,
     pub frontier_changed: bool,
@@ -335,6 +344,7 @@ fn is_within(tree: &UiTree, node: NodeId, root: NodeId) -> bool {
     false
 }
 
+#[derive(Clone, Copy)]
 struct GeometryFrame<'a> {
     scope: &'a PresentationScope,
     row: &'a RowKey,

@@ -257,7 +257,7 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
             .view(
                 &item.id,
                 &SourceField::Notice,
-                *ArtisanTheme::for_mode(ThemeMode::Dark),
+                ArtisanTheme::for_mode(ThemeMode::Dark),
                 SelectionDocumentId(416),
                 SelectionSourceId(1),
                 Rc::new(move |action| actions.borrow_mut().push(action)),

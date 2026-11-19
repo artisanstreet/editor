@@ -1,5 +1,5 @@
 use super::fold::{Row, RowKey, Slot, TextSection};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 pub(crate) fn immediate(row: &Row) -> bool {
@@ -20,7 +20,7 @@ pub(crate) fn behind_reveal(index: usize, row: &Row, frontier: Option<usize>) ->
 
 #[derive(Default)]
 pub struct RevealQueue {
-    rows: HashMap<RowKey, RevealGate>,
+    rows: BTreeMap<RowKey, RevealGate>,
     rushed_before: u64,
 }
 

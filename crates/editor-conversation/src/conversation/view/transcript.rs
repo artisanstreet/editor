@@ -12,6 +12,10 @@ use artisan_api::Seq;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub type BoundsCallback = Rc<dyn Fn(aqua_core::Rect)>;
+
+pub type InitialHeight = Rc<dyn Fn(usize, &RowKey) -> f32>;
+
 #[derive(Debug, Clone)]
 pub struct RowSnapshot {
     pub row: Row,
@@ -151,7 +155,7 @@ impl TranscriptObservations {
         &self,
         snapshot: RowSnapshot,
         markdown: Rc<RefCell<MarkdownOwners>>,
-    ) -> (Rc<dyn Fn(aqua_core::Rect)>, Rc<dyn Fn(aqua_core::Rect)>) {
+    ) -> (BoundsCallback, BoundsCallback) {
         let snapshot = Rc::new(snapshot);
         let height_events = self.clone();
         let height_key = snapshot.row.key();
@@ -431,7 +435,7 @@ enum ReadProof {
     Inline(ProjectedProof),
     Stored(
         std::rc::Weak<RefCell<crate::conversation::stored::StoredConversation>>,
-        crate::conversation::stored::StoredProof,
+        Box<crate::conversation::stored::StoredProof>,
     ),
 }
 
@@ -500,8 +504,10 @@ impl PaintedRow {
         {
             return None;
         }
-        let proof = match (self.snapshot.stored.clone(), self.proof.clone()) {
-            (Some((owner, proof)), _) => ReadProof::Stored(owner, proof),
+        let stored = self.snapshot.stored.clone();
+        let inline = self.proof.clone();
+        let proof = match (stored, inline) {
+            (Some((owner, proof)), _) => ReadProof::Stored(owner, Box::new(proof)),
             (None, Some(proof)) => ReadProof::Inline(proof),
             (None, None) => return None,
         };
@@ -663,7 +669,7 @@ pub fn layout_batched_list(
     row: LayoutBatchedRowFactory,
     revision: RowRevision,
     viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
+    initial_height: InitialHeight,
 ) -> Element {
     let rows: Vec<_> = conversation
         .rows

@@ -4,7 +4,7 @@ use super::thread::{AnswerState, ItemUi};
 use super::viewport::Input;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
 use editor_core::Core;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -186,7 +186,7 @@ pub struct RowModel {
 pub struct RowSnapshots {
     view: super::thread::ThreadView,
     rows: Vec<(Row, u64)>,
-    runs: HashMap<RunId, RunSummary>,
+    runs: BTreeMap<RunId, RunSummary>,
     agent: bool,
     composer_height: Option<f32>,
 }
@@ -237,7 +237,7 @@ pub fn row_model(
 fn row_model_from(
     view: &super::thread::ThreadView,
     rows: &[(Row, u64)],
-    runs: &HashMap<RunId, RunSummary>,
+    runs: &BTreeMap<RunId, RunSummary>,
     agent: bool,
     composer_height: Option<f32>,
     index: usize,

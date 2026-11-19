@@ -135,7 +135,7 @@ impl RootViews {
         let events = self.observations.drain();
         let painted_count = events.painted.len();
         #[cfg(feature = "qualification")]
-        self.qualification_paint.begin_frame(&rows.scope, frame);
+        self.qualification_paint.begin_frame(rows.scope(), frame);
         if let Some(clip) = crate::shell::wheel::keyed_node(ui, "conversation-transcript")
             .and_then(|node| ui.tree().visual_rect(node))
         {
@@ -163,7 +163,7 @@ impl RootViews {
                         &workspace.conversation,
                         &shell.core,
                         &markdown,
-                        &rows.scope,
+                        rows.scope(),
                         clip,
                         active,
                     );
@@ -230,7 +230,7 @@ impl RootViews {
                         &workspace.conversation,
                         &shell.core,
                         &markdown,
-                        &rows.scope,
+                        rows.scope(),
                         clip,
                         active,
                     ) {
@@ -270,7 +270,7 @@ impl RootViews {
                         &shell.core,
                         ui,
                         &markdown,
-                        &rows.scope,
+                        rows.scope(),
                         event.viewport,
                         clip,
                     ) {

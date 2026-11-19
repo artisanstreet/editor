@@ -112,7 +112,7 @@ pub fn row_factory_with(
         scope,
         markdown,
         Rc::new(RefCell::new(StatusShimmers::default())),
-        *ArtisanTheme::for_mode(ThemeMode::Dark),
+        ArtisanTheme::for_mode(ThemeMode::Dark),
         reduced_motion,
         now,
         allocate,

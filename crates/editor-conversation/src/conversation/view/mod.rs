@@ -80,7 +80,7 @@ pub fn scoped_dispatch(
     Some(Rc::new(move |action| emit(scope.bind(action))))
 }
 
-fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
+fn load_row(row: &Row, theme: &ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
     let (key, label, action) = match row {
         Row::EarlierWork { first, .. } => (
             format!("earlier-work-{first}"),
@@ -105,7 +105,7 @@ fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Elemen
         | Row::AgentResult(_)
         | Row::AgentStatus(..) => return None,
     };
-    let button = Button::text(key, theme, ButtonTone::Neutral, label)
+    let button = Button::text(key, *theme, ButtonTone::Neutral, label)
         .on_activate(move |_| {
             dispatch(action.clone());
         })
@@ -125,7 +125,7 @@ pub(crate) fn row_frame(
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> Element {
     row_frame_with_body_observer(model, disclosure, held, content, theme, None)
 }
@@ -135,7 +135,7 @@ fn row_frame_with_body_observer(
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     body_observer: Option<Rc<dyn Fn(aqua_core::Rect)>>,
 ) -> Element {
     let gap = disclosure.gap.unwrap_or(model.gap);
@@ -165,7 +165,7 @@ fn row_frame_with_body_observer(
         }
         let rule = UiBox::new()
             .width(CHAIN_RULE)
-            .style(Divider::guide(&theme))
+            .style(Divider::guide(theme))
             .style(Style::new().absolute_at(
                 Some((IconSize::Md.px() - CHAIN_RULE) / 2.0),
                 Some(-gap),
@@ -241,7 +241,7 @@ fn measured_row_frame(
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     body_observer: Rc<dyn Fn(aqua_core::Rect)>,
     painted: Rc<dyn Fn(aqua_core::Rect)>,
 ) -> Element {
@@ -346,7 +346,7 @@ pub fn layout_batched_thread_element(
     row: transcript::LayoutBatchedRowFactory,
     revision: transcript::RowRevision,
     viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
+    initial_height: transcript::InitialHeight,
     mut overlays: Vec<Element>,
     composer: Option<Element>,
     drawer: Option<Element>,

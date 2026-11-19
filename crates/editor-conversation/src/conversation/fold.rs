@@ -5,7 +5,8 @@ use artisan_api::{
     Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunOutcome,
     RunStatus, Seq, Status, Timestamp,
 };
-use std::collections::{HashMap, HashSet};
+use editor_ui::text::slice::slice;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -140,7 +141,7 @@ impl WorkMembers {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
     Prose,
     Plain(PlainSection),
@@ -210,7 +211,7 @@ impl std::fmt::Display for Slot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlainSection {
     Error,
     ImageCaption,
@@ -261,7 +262,7 @@ pub(crate) fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     while start < text.len() {
         let mut end = text.floor_char_boundary((start + ROW_BYTES).min(text.len()));
         if end < text.len() {
-            let prefix = &text[start..end];
+            let prefix = slice(text, start..end);
             if let Some((index, space)) = prefix
                 .char_indices()
                 .rev()
@@ -280,7 +281,7 @@ pub(crate) fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TextSection {
     Proposal,
     AgentResult,
@@ -375,7 +376,7 @@ impl TextSection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RowKey {
     Projected(Box<Self>, usize),
     Item(ItemId),
@@ -517,7 +518,11 @@ impl Row {
                     | Slot::Plain(PlainSection::Error),
                 block: 0,
                 ..
-            } => RowKey::Item(id.clone()),
+            }
+            | Self::WorkEntry { id, .. }
+            | Self::Prompt(id)
+            | Self::Compaction(id)
+            | Self::Image(id) => RowKey::Item(id.clone()),
             Self::Text {
                 id, slot, block, ..
             } => RowKey::Text(id.clone(), *slot, *block),
@@ -535,10 +540,6 @@ impl Row {
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
             Self::AgentStatus(id, _) => RowKey::AgentStatus(id.clone()),
-            Self::WorkEntry { id, .. }
-            | Self::Prompt(id)
-            | Self::Compaction(id)
-            | Self::Image(id) => RowKey::Item(id.clone()),
         }
     }
 
@@ -597,7 +598,7 @@ impl RunSummary {
 #[derive(Debug)]
 pub struct Folded {
     pub rows: Vec<Row>,
-    pub runs: HashMap<RunId, RunSummary>,
+    pub runs: BTreeMap<RunId, RunSummary>,
 }
 
 pub(crate) const fn in_composer_strip(item: &Item) -> bool {
@@ -716,7 +717,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
     let mut rows: Vec<Row> = Vec::new();
     let mut work: Option<(Option<RunId>, WorkMembers)> = None;
     let mut segments: HashMap<Option<RunId>, usize> = HashMap::new();
-    let mut run_starts: HashMap<RunId, Seq> = HashMap::new();
+    let mut run_starts: BTreeMap<RunId, Seq> = BTreeMap::new();
     for item in &shown {
         if let (Some(run), ItemKind::UserMessage { steer: false, .. }) =
             (turn(&item.run_id), &item.kind)
@@ -877,7 +878,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
 fn head_every_run(
     rows: Vec<Row>,
     shown: &[&Item],
-    run_starts: &HashMap<RunId, Seq>,
+    run_starts: &BTreeMap<RunId, Seq>,
     latest: Option<&Run>,
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
 ) -> Vec<Row> {
@@ -914,7 +915,7 @@ fn head_every_run(
             heads.entry(message).or_default().push(run);
         }
     }
-    let mut last: HashMap<&ItemId, usize> = HashMap::new();
+    let mut last: BTreeMap<&ItemId, usize> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
         if let Some(anchor) = row.anchor()
             && heads.contains_key(anchor)
@@ -956,7 +957,7 @@ pub(crate) fn span_member(first: Seq) -> ItemId {
 fn fold_span(
     span: &artisan_api::WorkSpan,
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
-    run_starts: &HashMap<RunId, Seq>,
+    run_starts: &BTreeMap<RunId, Seq>,
     context: &mut Option<RunId>,
     work: &mut Option<(Option<RunId>, WorkMembers)>,
     rows: &mut Vec<Row>,
@@ -983,7 +984,7 @@ fn fold_span(
 pub fn expanded(
     view: &ThreadView,
     rows: Vec<Row>,
-    runs: &HashMap<RunId, RunSummary>,
+    runs: &BTreeMap<RunId, RunSummary>,
 ) -> Vec<(Row, u64)> {
     let children = children(&view.shown().collect::<Vec<_>>());
     let mut expanded = Vec::new();
@@ -1244,7 +1245,7 @@ fn summaries(
     unloaded: &[&artisan_api::WorkSpan],
     latest: Option<&Run>,
     roots: &Turns,
-) -> HashMap<RunId, RunSummary> {
+) -> BTreeMap<RunId, RunSummary> {
     let mut by_run: HashMap<&RunId, Vec<&Item>> = HashMap::new();
     for item in shown {
         if let Some(run) = &item.run_id {
@@ -1263,7 +1264,7 @@ fn summaries(
     if let Some(run) = latest {
         by_run.entry(&run.id).or_default();
     }
-    let mut summaries: HashMap<RunId, RunSummary> = by_run
+    let mut summaries: BTreeMap<RunId, RunSummary> = by_run
         .into_iter()
         .map(|(run_id, items)| {
             let latest = latest
@@ -1316,7 +1317,7 @@ fn summaries(
             )
         })
         .collect();
-    let mut turns: HashMap<RunId, Vec<RunId>> = HashMap::new();
+    let mut turns: BTreeMap<RunId, Vec<RunId>> = BTreeMap::new();
     for run in summaries.keys() {
         turns.entry(roots.of(run)).or_default().push(run.clone());
     }
@@ -1489,7 +1490,7 @@ fn version(
     view: &ThreadView,
     row: &Row,
     children: &HashMap<ItemId, Vec<&Item>>,
-    runs: &HashMap<RunId, RunSummary>,
+    runs: &BTreeMap<RunId, RunSummary>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     row.hash(&mut hasher);

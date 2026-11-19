@@ -1,3 +1,4 @@
+use super::reveal::MountedReveal;
 use super::{row_frame, status, work};
 use crate::conversation::adapter::RowModel;
 use crate::conversation::disclosure::RowDisclosure;
@@ -56,7 +57,7 @@ struct RevealResources {
 enum RowSource {
     Realized(Vec<RealizedRow>),
     Snapshots {
-        snapshots: crate::conversation::adapter::RowSnapshots,
+        snapshots: Box<crate::conversation::adapter::RowSnapshots>,
         rows: Vec<SnapshotRow>,
     },
 }
@@ -191,9 +192,14 @@ pub struct AfterLayout {
     pub rebuild: bool,
 }
 
+pub type MediaLookup =
+    Rc<dyn Fn(&BodyKey, f32) -> Option<editor_ui::markdown::presenter::MediaServices>>;
+
+type LiveText = (Arc<ropey::Rope>, Rc<str>);
+
 pub struct RowFactory {
     rows: RowSource,
-    pub scope: PresentationScope,
+    scope: PresentationScope,
     markdown: Rc<RefCell<MarkdownOwners>>,
     statuses: Rc<RefCell<status::StatusShimmers>>,
     theme: ArtisanTheme,
@@ -215,8 +221,7 @@ pub struct RowFactory {
     observations: Option<super::transcript::TranscriptObservations>,
     admission: Option<Rc<RefCell<crate::conversation::admission::RevealQueue>>>,
     reveals: Option<RevealResources>,
-    media:
-        Option<Rc<dyn Fn(&BodyKey, f32) -> Option<editor_ui::markdown::presenter::MediaServices>>>,
+    media: Option<MediaLookup>,
     blob_images: Option<BlobResources>,
     source_resources: Option<SourceResources>,
     stored: Option<StoredResources>,
@@ -227,7 +232,7 @@ pub struct RowFactory {
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
     style_epoch: u64,
     fingerprints: RefCell<HashMap<usize, (RowKey, Option<u64>)>>,
-    live_texts: RefCell<HashMap<usize, (Arc<ropey::Rope>, Rc<str>)>>,
+    live_texts: RefCell<HashMap<usize, LiveText>>,
     inline_texts: RefCell<HashMap<(artisan_api::ItemId, artisan_api::Seq), Rc<str>>>,
     unsettled: Cell<bool>,
     content_keyed: Cell<bool>,
@@ -296,6 +301,10 @@ pub fn row_settles_statically(model: &RowModel, now: Instant) -> bool {
 }
 
 impl RowFactory {
+    pub const fn scope(&self) -> &PresentationScope {
+        &self.scope
+    }
+
     fn realize_inner(
         &self,
         index: usize,
@@ -362,7 +371,7 @@ impl RowFactory {
                 },
             ) => {
                 let initial = row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
-                Some(resources.owners.borrow_mut().acquire(&row_owner, || {
+                Some(MountedReveal::acquire(&row_owner, || {
                     resources
                         .arrivals
                         .borrow_mut()
@@ -424,7 +433,7 @@ impl RowFactory {
                     row.disclosure,
                     row.held || queue_held,
                     None,
-                    self.theme,
+                    &self.theme,
                 ),
                 batches: Vec::new(),
             });
@@ -434,7 +443,7 @@ impl RowFactory {
         let content = match &row.model.row {
             Row::Gap | Row::EarlierWork { .. } => {
                 let dispatch = &self.dispatch;
-                super::load_row(&row.model.row, self.theme, Rc::clone(dispatch))
+                super::load_row(&row.model.row, &self.theme, Rc::clone(dispatch))
             }
             header @ (Row::Work { .. } | Row::WorkHeader(_)) => {
                 let (run, segment, has_members) = match header {
@@ -478,7 +487,7 @@ impl RowFactory {
                         &format!("{key}-label"),
                         work::section_title(summary, work.timestamp),
                         self.theme.colors.text_muted.to_reference_text_color(),
-                        self.theme,
+                        &self.theme,
                         work.seconds,
                         self.reduced_motion,
                     );
@@ -518,13 +527,13 @@ impl RowFactory {
                     ids.as_slice(),
                     &row.model.items,
                     open,
-                    self.theme,
+                    &self.theme,
                     |text, color| {
                         row_owner.motion.borrow_mut().phrase(
                             &format!("{key}-clause"),
                             text,
                             color,
-                            self.theme,
+                            &self.theme,
                             work.seconds,
                             self.reduced_motion,
                         )
@@ -560,8 +569,8 @@ impl RowFactory {
                 match &item.kind {
                     ItemKind::Agent { .. } => work::agent(
                         item,
-                        self.theme,
-                        |text, color| truncate(text, color, false, self.theme),
+                        &self.theme,
+                        |text, color| truncate(text, color, false, &self.theme),
                         Rc::clone(dispatch),
                     ),
                     ItemKind::Tool { .. }
@@ -576,7 +585,7 @@ impl RowFactory {
                         Rc::clone(dispatch),
                         &mut batches,
                     )?,
-                    ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
+                    ItemKind::Plan { .. } => work::plan_entry(item, &self.theme),
                     ItemKind::Notice { .. } => self.notice_row(&row_owner, item, &mut batches)?,
                     ItemKind::Question { .. } => {
                         self.question_card(&row_owner, item, &mut batches)?
@@ -676,7 +685,7 @@ impl RowFactory {
                         },
                         bubble_sender(item, row.model.author),
                         sticker,
-                        self.theme,
+                        &self.theme,
                     )
                 } else {
                     element
@@ -819,7 +828,7 @@ impl RowFactory {
                                 Arc::from(source),
                             );
                             break 'prose Some(super::source_actions::failed_body(
-                                self.theme,
+                                &self.theme,
                                 error.to_string(),
                                 format!("copy-full-{id}"),
                                 copy_source,
@@ -858,7 +867,7 @@ impl RowFactory {
                         return Err(RealizeRowError::Unmeasured);
                     }
                     if let Some(services) = media(&body_key, width) {
-                        if services.width != width {
+                        if services.width.to_bits() != width.to_bits() {
                             return Err(RealizeRowError::MediaWidth);
                         }
                         owners.set_realization_media(
@@ -872,7 +881,7 @@ impl RowFactory {
                 let code = owners.code_services(
                     &self.scope,
                     &body_key,
-                    self.theme,
+                    &self.theme,
                     self.reduced_motion,
                     true,
                     Rc::clone(&self.on_code),
@@ -902,7 +911,7 @@ impl RowFactory {
                     },
                     *block,
                     Some(&code),
-                    reveal.as_ref().map(|(owner, _, _)| Rc::clone(owner)),
+                    reveal.as_ref().map(|(owner, _, _)| owner),
                     || (self.allocate)(),
                 )?;
                 drop(projected_span);
@@ -936,10 +945,8 @@ impl RowFactory {
                         },
                     ));
                 }
-                let prepared = if let Some(resources) = &self.reveals
-                    && reveal.is_some()
-                {
-                    resources.owners.borrow_mut().record(
+                let prepared = if self.reveals.is_some() && reveal.is_some() {
+                    MountedReveal::record(
                         &row_owner,
                         row.model.version,
                         *block,
@@ -1017,7 +1024,7 @@ impl RowFactory {
                         },
                         bubble_sender(item, row.model.author),
                         self.bubble_sticker(&row_owner, key, fresh),
-                        self.theme,
+                        &self.theme,
                     )
                 } else if let Some(notice) = preview_notice {
                     aqua_ui::element::Box::new()
@@ -1044,7 +1051,7 @@ impl RowFactory {
                         &row_owner,
                         item,
                         row.model.answers.get(id),
-                        Rc::clone(dispatch),
+                        dispatch,
                         &mut batches,
                     )?;
                     if approval.is_some() {
@@ -1070,11 +1077,11 @@ impl RowFactory {
                             )?,
                             ItemKind::Agent { .. } => work::agent(
                                 item,
-                                self.theme,
-                                |text, color| truncate(text, color, false, self.theme),
+                                &self.theme,
+                                |text, color| truncate(text, color, false, &self.theme),
                                 Rc::clone(dispatch),
                             ),
-                            ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
+                            ItemKind::Plan { .. } => work::plan_entry(item, &self.theme),
                             ItemKind::Notice { .. } => {
                                 self.notice_row(&row_owner, item, &mut batches)?
                             }
@@ -1138,23 +1145,20 @@ impl RowFactory {
                 );
                 let shimmer_key = (!self.reduced_motion)
                     .then(|| aqua_ui::tree::hash_key(("compaction-shimmer", format!("{key:?}"))));
-                super::compaction::row(item, frame, self.theme, |phase, switch, frame, theme| {
-                    super::compaction::label(phase, switch, frame, theme, shimmer_key)
+                super::compaction::row(item, frame, &self.theme, |phase, switch, frame, theme| {
+                    super::compaction::label(phase, switch, frame, &theme, shimmer_key)
                 })
             }
             Row::AgentResult(_) => None,
-            Row::Status(run) => status::run(&row.model, run, self.theme, |text, live, theme| {
+            Row::Status(run) => status::run(&row.model, run, &self.theme, |text, live, theme| {
                 let label = match &text {
                     status::StatusText::Status(label) => Some(label.clone()),
                     status::StatusText::Reasoning(_) => None,
                 };
-                let element = self.statuses.borrow_mut().render(
-                    key.clone(),
-                    text,
-                    live,
-                    self.reduced_motion,
-                    theme,
-                );
+                let element =
+                    self.statuses
+                        .borrow_mut()
+                        .render(key, text, live, self.reduced_motion, &theme);
                 let now = self.now;
                 let swap = row_owner.motion.borrow_mut().swap(
                     format!("status-{key:?}"),
@@ -1168,10 +1172,10 @@ impl RowFactory {
                 }
             }),
             Row::AgentStatus(_, doing) => {
-                status::agent(doing.as_deref(), self.theme, |text, theme| {
+                status::agent(doing.as_deref(), &self.theme, |text, theme| {
                     self.statuses
                         .borrow_mut()
-                        .agent(key.clone(), text, self.reduced_motion, theme)
+                        .agent(key, text, self.reduced_motion, &theme)
                 })
             }
             Row::Text {
@@ -1192,7 +1196,7 @@ impl RowFactory {
                     return Err(RealizeRowError::Changed(Part::PlainText));
                 };
                 Some(match section {
-                    fold::PlainSection::ImageCaption => image_caption(text, self.theme),
+                    fold::PlainSection::ImageCaption => image_caption(text, &self.theme),
                     fold::PlainSection::Error => {
                         aqua_ui::element::Text::new(text.to_owned()).build()
                     }
@@ -1250,7 +1254,7 @@ impl RowFactory {
                     if row.disclosure.clip.is_some() {
                         Some(element)
                     } else if let Some(entrance) = entrance {
-                        work_settling = entrance.settling;
+                        work_settling = entrance.settling();
                         Some(entrance.wrap(
                             element,
                             row.disclosure.gap.unwrap_or(row.model.gap),
@@ -1394,12 +1398,12 @@ impl RowFactory {
                 row.disclosure,
                 row.held,
                 content,
-                self.theme,
+                &self.theme,
                 height,
                 painted,
             )
         } else {
-            row_frame(&row.model, row.disclosure, row.held, content, self.theme)
+            row_frame(&row.model, row.disclosure, row.held, content, &self.theme)
         };
         if let Some(resources) = &self.reveals {
             resources

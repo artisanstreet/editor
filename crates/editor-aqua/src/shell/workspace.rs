@@ -1317,7 +1317,7 @@ impl Workspace {
         let options = crate::conversation::questions::stored_options(
             &self.conversation.question_pages,
             &composer.questionnaire,
-            *theme,
+            theme,
             options_document,
             options_source,
             stored_detail,

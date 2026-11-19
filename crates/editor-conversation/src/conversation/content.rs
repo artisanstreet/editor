@@ -2,7 +2,7 @@ use super::fold::{PlainSection, TextSection};
 use artisan_api::{ApprovalRequest, Item, ItemKind, TextContent};
 use editor_sources::SourceProviderExt;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceField {
     Plain(PlainSection),
     Text(TextSection),
@@ -129,7 +129,7 @@ use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use artisan_api::{ContentRef, ItemId};
 use editor_core::{Core, HostId, HostInstance};
 use editor_sources::{ContentAction, ContentEffect, ContentText, ContentView};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -141,7 +141,7 @@ struct Owner {
 
 #[derive(Default)]
 pub struct SourceOwners {
-    owners: HashMap<(ItemId, SourceField), Owner>,
+    owners: BTreeMap<(ItemId, SourceField), Owner>,
 }
 
 impl std::fmt::Debug for SourceOwners {
@@ -348,7 +348,7 @@ impl SourceOwners {
         &self,
         id: &ItemId,
         field: &SourceField,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         document: SelectionDocumentId,
         source_id: SelectionSourceId,
         emit: Rc<dyn Fn(SourceAction)>,
@@ -371,7 +371,7 @@ impl SourceOwners {
         });
         Some(editor_sources::content_view(
             &owner.text,
-            &theme,
+            theme,
             document,
             source_id,
             &callback,
@@ -391,7 +391,8 @@ impl SourceOwners {
         {
             return None;
         }
-        match editor_sources::dispatch_content(&mut owner.text, core, action.action)? {
+        let effect = editor_sources::dispatch_content(&mut owner.text, core, action.action)?;
+        match effect {
             ContentEffect::SavePath(generation) => Some(SourceEffect::SavePath(SourceExport {
                 host: action.host,
                 instance: action.instance,

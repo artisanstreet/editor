@@ -62,6 +62,10 @@ impl ItemUi {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the shell reads the loaded items and viewport directly; positions and resident bytes are indexes that only the insertion methods keep consistent"
+)]
 pub struct ThreadView {
     pub(crate) thread: ThreadId,
     pub context: HashMap<ItemId, Arc<Item>>,

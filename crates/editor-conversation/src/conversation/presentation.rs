@@ -5,7 +5,7 @@ use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceI
 use aqua_ui::element::Element;
 use artisan_api::{ItemId, ThreadId};
 use editor_core::{Core, HostId, HostInstance};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ pub enum BodyError {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BodyKey {
     pub item: ItemId,
     pub slot: Slot,
@@ -129,7 +129,7 @@ impl ProjectedProof {
 pub struct SelectionOwners {
     document: SelectionDocumentId,
     scope: Option<PresentationScope>,
-    bodies: HashMap<BodyKey, HashSet<SelectionSourceId>>,
+    bodies: BTreeMap<BodyKey, BTreeSet<SelectionSourceId>>,
 }
 
 impl SelectionOwners {
@@ -137,7 +137,7 @@ impl SelectionOwners {
         Self {
             document,
             scope: None,
-            bodies: HashMap::new(),
+            bodies: BTreeMap::new(),
         }
     }
 
@@ -163,7 +163,7 @@ impl SelectionOwners {
         if self.scope.as_ref() != Some(scope) {
             return Err(BodyError::StaleScope);
         }
-        let ids: HashSet<_> = prepared.sources.iter().map(|source| source.id).collect();
+        let ids: BTreeSet<_> = prepared.sources.iter().map(|source| source.id).collect();
         if ids.len() != prepared.sources.len() {
             return Err(BodyError::DuplicateSources { key });
         }
@@ -200,7 +200,7 @@ impl SelectionOwners {
     }
 
     pub fn clear(&mut self, app: &mut UiApp) {
-        for sources in self.bodies.drain().map(|(_, sources)| sources) {
+        for sources in std::mem::take(&mut self.bodies).into_values() {
             for source in sources {
                 app.unregister_selection_source_in(self.document, source);
             }
@@ -225,7 +225,7 @@ struct MarkdownBody {
 pub struct MarkdownOwners {
     scope: Option<PresentationScope>,
     selection: SelectionOwners,
-    bodies: HashMap<BodyKey, MarkdownBody>,
+    bodies: BTreeMap<BodyKey, MarkdownBody>,
     media: HashMap<BodyKey, (String, MediaServices)>,
 }
 
@@ -323,7 +323,7 @@ impl MarkdownOwners {
         Self {
             scope: None,
             selection: SelectionOwners::new(document),
-            bodies: HashMap::new(),
+            bodies: BTreeMap::new(),
             media: HashMap::new(),
         }
     }
@@ -542,7 +542,7 @@ impl MarkdownOwners {
         request: MarkdownRender<'_>,
         row: usize,
         code: Option<&CodeServices>,
-        reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
+        reveal: Option<&Rc<editor_ui::markdown::reveal::PreparedReveal>>,
         mut allocate: impl FnMut() -> SelectionSourceId,
     ) -> Result<PreparedProjectedRow, BodyError> {
         if self.scope.as_ref() != Some(scope) {
@@ -560,7 +560,7 @@ impl MarkdownOwners {
             });
         }
         body.presenter
-            .set_projected_reveal(request.id, row, reveal.clone());
+            .set_projected_reveal(request.id, row, reveal.cloned());
         body.projected.remove(&row);
         let rendered = body
             .presenter
@@ -594,7 +594,7 @@ impl MarkdownOwners {
             .as_ref()
             .is_none_or(|batch| batch.identity() != rendered.selection_batch.identity())
         {
-            let ids: HashSet<_> = rendered
+            let ids: BTreeSet<_> = rendered
                 .selection_batch
                 .sources()
                 .iter()
@@ -618,9 +618,7 @@ impl MarkdownOwners {
             self.selection.bodies.insert(request.key.clone(), ids);
             body.batch = Some(Arc::clone(&rendered.selection_batch));
         }
-        let text = reveal
-            .as_deref()
-            .map_or_else(Vec::new, |reveal| rendered.reveal_text(reveal));
+        let text = reveal.map_or_else(Vec::new, |reveal| rendered.reveal_text(reveal));
         let proof = ProjectedProof {
             key: request.key.clone(),
             source: Rc::clone(&body.source),
@@ -647,7 +645,7 @@ impl MarkdownOwners {
         &self,
         scope: &PresentationScope,
         key: &BodyKey,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         reduced_motion: bool,
         copy_enabled: bool,
         emit: Rc<dyn Fn(ScopedCodeAction)>,
@@ -680,7 +678,7 @@ impl MarkdownOwners {
         let scope_instance = scope.instance;
         Ok(body.presenter.code_services(
             &body.id,
-            theme,
+            *theme,
             reduced_motion,
             Rc::new(move |effect| copy(CodeAction::Copy(effect))),
             copy_enabled,

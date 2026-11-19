@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 pub(crate) fn image_caption(
     text: &str,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use aqua_ui::style::Length;
     aqua_ui::element::Box::new()
@@ -13,7 +13,7 @@ pub(crate) fn image_caption(
         .width(Length::Pct(100.0))
         .child(
             TextRole::Label
-                .text(&theme, text.to_owned())
+                .text(theme, text.to_owned())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .wrap(true)
                 .build(),
@@ -153,6 +153,10 @@ impl RowFactory {
         let aspect = image
             .as_ref()
             .and_then(|image| match image.status() {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "image dimensions are bounded by the decoder"
+                )]
                 aqua::images::ImageStatus::Ready { width, height } => {
                     Some(width as f32 / height.max(1) as f32)
                 }

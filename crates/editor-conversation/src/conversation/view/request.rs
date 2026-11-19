@@ -21,29 +21,29 @@ pub(crate) const fn field_role(mono: bool) -> TextRole {
     }
 }
 
-fn body(text: impl Into<String>, theme: ArtisanTheme, muted: bool, mono: bool) -> Element {
+fn body(text: impl Into<String>, theme: &ArtisanTheme, muted: bool, mono: bool) -> Element {
     let ink = if muted {
         theme.colors.text_muted
     } else {
         theme.colors.text
     };
     field_role(mono)
-        .text(&theme, text.into())
+        .text(theme, text.into())
         .gpui_source_color(ink.to_reference_text_color())
         .build()
 }
 
-fn card(theme: ArtisanTheme, title: &str, details: Element) -> Element {
+fn card(theme: &ArtisanTheme, title: &str, details: Element) -> Element {
     let block = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
         .padded(Row::Form.pad().y)
         .spaced(Space::S8)
-        .style(TextRole::Label.inherit(&theme))
-        .child(TextRole::LabelStrong.text(&theme, title.to_owned()).build())
+        .style(TextRole::Label.inherit(theme))
+        .child(TextRole::LabelStrong.text(theme, title.to_owned()).build())
         .child(details)
         .build();
-    CARD.build(&theme, vec![block])
+    CARD.build(theme, vec![block])
         .style(Style::new().width(Length::Pct(100.0)))
 }
 
@@ -61,9 +61,9 @@ pub(crate) fn approval<E>(
     item: &Item,
     sending: bool,
     error: Option<&str>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Result<Option<Element>, E> {
     let (approval, files) = match &item.kind {
         ItemKind::Tool { approval, tool, .. } => {
@@ -142,7 +142,7 @@ pub(crate) fn approval<E>(
             .style(Style::new().wrap(true));
         for (index, decision) in approval.options.iter().copied().enumerate() {
             let id = item.id.clone();
-            let dispatch = Rc::clone(&dispatch);
+            let dispatch = Rc::clone(dispatch);
             let tone = match index {
                 0 => ButtonTone::Primary,
                 _ => ButtonTone::Neutral,
@@ -150,7 +150,7 @@ pub(crate) fn approval<E>(
             actions = actions.child(
                 Button::text(
                     format!("approve-{}-{index}", item.id),
-                    theme,
+                    *theme,
                     tone,
                     decision_label(decision),
                 )
@@ -197,7 +197,7 @@ pub(crate) fn approval<E>(
 
 pub(crate) fn question<E>(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
     stored_questions: impl FnOnce(&artisan_api::CollectionRef) -> Result<Element, E>,
     answered: impl FnOnce(&Item, &Collection<artisan_api::Question>) -> Result<Element, E>,
@@ -244,7 +244,7 @@ pub(crate) fn question<E>(
 
 pub(crate) fn answered<E>(
     questions: &Collection<artisan_api::Question>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
     stored: impl FnOnce(&artisan_api::CollectionRef) -> Result<Element, E>,
     answer: impl FnOnce() -> Result<Element, E>,
@@ -275,7 +275,7 @@ pub(crate) fn answered<E>(
         .child(answer()?)
         .build();
     let bubble = editor_ui::chat_bubble::ChatBubbleSegment::new(
-        theme,
+        *theme,
         editor_ui::chat_bubble::SegmentPosition::Single,
         content,
     )

@@ -57,14 +57,17 @@ fn announcement(turn: &Turn) -> Announcement {
 }
 
 fn unread_paragraph(text: &str) -> Option<&str> {
-    let start = text.rfind("\n\n").map_or(0, |at| at + 2);
-    Some(text[start..].trim()).filter(|paragraph| !paragraph.is_empty())
+    let paragraph = text.rsplit_once("\n\n").map_or(text, |(_, tail)| tail);
+    Some(paragraph.trim()).filter(|paragraph| !paragraph.is_empty())
 }
 
 fn latest_paragraph(text: &str) -> Option<&str> {
-    let complete = text[..text.rfind("\n\n")?].trim_end();
-    let start = complete.rfind("\n\n").map_or(0, |at| at + 2);
-    Some(complete[start..].trim()).filter(|paragraph| !paragraph.is_empty())
+    let (complete, _) = text.rsplit_once("\n\n")?;
+    let complete = complete.trim_end();
+    let paragraph = complete
+        .rsplit_once("\n\n")
+        .map_or(complete, |(_, tail)| tail);
+    Some(paragraph.trim()).filter(|paragraph| !paragraph.is_empty())
 }
 
 #[must_use]
@@ -136,12 +139,8 @@ fn reply_tail(view: &ThreadView, run: &Run) -> String {
         }
         (None, ItemKind::AssistantMessage { text, .. }) => {
             let text = text.inline().unwrap_or_default();
-            let start = text
-                .char_indices()
-                .rev()
-                .nth(REPLY_TAIL_CHARS)
-                .map_or(0, |(at, _)| at);
-            text[start..].to_owned()
+            let skipped = text.chars().count().saturating_sub(REPLY_TAIL_CHARS + 1);
+            text.chars().skip(skipped).collect()
         }
         (None, _) => String::new(),
     }

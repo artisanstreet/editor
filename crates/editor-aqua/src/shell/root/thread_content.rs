@@ -44,7 +44,7 @@ impl RootViews {
         } = pass;
         let scope = PresentationScope::capture(&workspace.conversation, core)
             .ok_or(BuildError::ConversationGone)?;
-        if self.rows.as_ref().is_none_or(|rows| rows.scope != scope) {
+        if self.rows.as_ref().is_none_or(|rows| rows.scope() != &scope) {
             if let Some(token) = self.row_token.take() {
                 token.set(false);
             }
@@ -230,7 +230,7 @@ impl RootViews {
                 scope.clone(),
                 Rc::clone(&workspace.markdown),
                 Rc::clone(&workspace.status_shimmers),
-                *theme,
+                theme,
                 reduced_motion,
                 now,
                 workspace.selections.source_allocator(),

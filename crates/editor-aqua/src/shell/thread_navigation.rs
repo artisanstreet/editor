@@ -493,7 +493,7 @@ impl ThreadNavigation {
             markers,
             Some(markers[active].position),
             state.cursor,
-            *theme,
+            theme,
             progress,
             dispatch,
         );

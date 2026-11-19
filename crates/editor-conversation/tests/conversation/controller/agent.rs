@@ -124,7 +124,7 @@ fn scrolling_up_into_a_subagent_task_stops_following_the_tail() {
         &mut core,
         Completion::Agent {
             origin: scoped.clone(),
-            context: HashMap::from([(ItemId("agent".into()), Arc::new(agent()))]),
+            context: BTreeMap::from([(ItemId("agent".into()), Arc::new(agent()))]),
             error: None,
             effects,
         },

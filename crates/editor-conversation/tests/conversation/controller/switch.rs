@@ -245,7 +245,7 @@ fn returning_to_a_parked_thread_whose_latest_rows_were_evicted_waits_for_them() 
     conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
 
     assert!(conversation.is_landing());
-    assert_eq!(conversation.reveal(Instant::now()), 0.0);
+    assert!(conversation.reveal(Instant::now()) <= 0.0);
     assert!(conversation.scroll_actions().is_empty());
     let origin = current(&conversation);
     deliver(

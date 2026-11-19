@@ -56,7 +56,7 @@ use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_ui::collection::SelectionSourceBatch;
 use artisan_api::{ContentRef, SourceIndexFormat, TextContent};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -167,7 +167,7 @@ pub struct StoredConversation {
     scope: Option<PresentationScope>,
     owner: StoredOwner,
     literal: LiteralOwner,
-    bodies: HashMap<BodyKey, Body>,
+    bodies: BTreeMap<BodyKey, Body>,
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     live: Vec<Weak<StoredLeafLease>>,
     order: VecDeque<(BodyKey, usize)>,
@@ -185,7 +185,7 @@ impl StoredConversation {
             self.owner.clear();
             self.literal.clear();
             self.order.clear();
-            for (_, body) in self.bodies.drain() {
+            for body in std::mem::take(&mut self.bodies).into_values() {
                 body.release();
             }
             self.scope = scope;
@@ -291,7 +291,8 @@ impl StoredConversation {
             })
             .collect();
         let active: Vec<_> = self.live.iter().filter_map(Weak::upgrade).collect();
-        for release in std::mem::take(&mut *self.cleanup.borrow_mut()) {
+        let released = std::mem::take(&mut *self.cleanup.borrow_mut());
+        for release in released {
             let batch = &release.batch;
             if !active.iter().any(|lease| {
                 lease.batch.document() == batch.document() && lease.batch.owner() == batch.owner()

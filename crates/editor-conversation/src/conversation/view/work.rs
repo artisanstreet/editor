@@ -25,12 +25,12 @@ pub(crate) const fn line_role(mono: bool) -> TextRole {
 
 fn label(
     text: impl Into<String>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     foreground: aqua_core::GpuiTextColor,
     mono: bool,
 ) -> Element {
     line_role(mono)
-        .text(&theme, text.into())
+        .text(theme, text.into())
         .gpui_source_color(foreground)
         .build()
 }
@@ -129,7 +129,7 @@ pub(crate) fn chain(
     ids: &[ItemId],
     items: &HashMap<ItemId, std::sync::Arc<Item>>,
     open: bool,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     phrase: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     chevron: impl FnOnce(bool, aqua_core::GpuiHsla) -> Element,
     dispatch: Dispatch,
@@ -160,7 +160,7 @@ pub(crate) fn chain(
         .child(chevron(open, color.to_reference_paint()))
         .build();
     Some(activator(
-        &theme,
+        theme,
         format!("work-chain-{first}"),
         text,
         child,
@@ -175,7 +175,7 @@ pub(crate) fn chain(
 
 pub(crate) fn agent(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     dispatch: Dispatch,
 ) -> Option<Element> {
@@ -208,7 +208,7 @@ pub(crate) fn agent(
         ))
         .build();
     Some(activator(
-        &theme,
+        theme,
         format!("work-agent-{id}"),
         "Open agent",
         content,
@@ -220,7 +220,7 @@ pub(crate) fn activity_row<E>(
     item: &Item,
     expanded: bool,
     agents: &HashMap<ItemId, String>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor, bool) -> Element,
     dispatch: Dispatch,
     stored_failure: impl FnOnce() -> Result<Element, E>,
@@ -271,7 +271,7 @@ pub(crate) fn activity_row<E>(
     let sentence = if has_details {
         let id = item.id.clone();
         activator(
-            &theme,
+            theme,
             format!("work-item-{id}"),
             "Toggle details",
             line,
@@ -302,7 +302,7 @@ pub(crate) fn activity_row<E>(
                         .child(match error {
                             TextContent::Stored(_) => stored_failure()?,
                             TextContent::Inline(error) => TextRole::Label
-                                .text(&theme, error.trim().to_owned())
+                                .text(theme, error.trim().to_owned())
                                 .gpui_source_color(
                                     theme.colors.destructive_text.to_reference_text_color(),
                                 )
@@ -317,7 +317,7 @@ pub(crate) fn activity_row<E>(
     })
 }
 
-pub(crate) fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
+pub(crate) fn plan_entry(item: &Item, theme: &ArtisanTheme) -> Option<Element> {
     let ItemKind::Plan { approval, .. } = &item.kind else {
         return None;
     };
@@ -330,7 +330,7 @@ pub(crate) fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
             artisan_api::Decision::DenyAlways => "You denied this from now on.",
             artisan_api::Decision::Cancelled => "Cancelled.",
         };
-        content = content.child(TextRole::Label.text(&theme, text).build());
+        content = content.child(TextRole::Label.text(theme, text).build());
     }
     Some(content.build())
 }

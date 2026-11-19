@@ -11,13 +11,13 @@ impl RootViews {
         let Some(workspace) = shell.entry.workspace() else {
             return false;
         };
-        export.scope.current(&workspace.conversation, &shell.core)
+        export.scope().current(&workspace.conversation, &shell.core)
             && workspace
                 .conversation
                 .view
                 .as_ref()
-                .and_then(|view| view.item(&export.item))
-                .is_some_and(|item| export.is_current(&shell.core, &export.scope, item))
+                .and_then(|view| view.item(export.item()))
+                .is_some_and(|item| export.is_current(&shell.core, export.scope(), item))
     }
 
     pub(super) fn finish_source_dialog(
@@ -32,11 +32,11 @@ impl RootViews {
             .entry
             .workspace()
             .and_then(|workspace| workspace.conversation.view.as_ref())
-            .and_then(|view| view.item(&export.item))
+            .and_then(|view| view.item(export.item()))
         else {
             return false;
         };
-        let scope = export.scope.clone();
+        let scope = export.scope().clone();
         export.finish(&shell.core, &scope, item, result);
         true
     }
@@ -59,7 +59,7 @@ impl RootViews {
                     return false;
                 }
                 self.source_dialogs
-                    .open(export, ctx, &shell.dialogs, window);
+                    .open(*export, ctx, &shell.dialogs, window);
                 false
             }
         }

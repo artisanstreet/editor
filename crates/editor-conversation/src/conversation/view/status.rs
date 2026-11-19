@@ -27,11 +27,11 @@ impl StatusShimmers {
     }
     pub(crate) fn render(
         &self,
-        row: RowKey,
+        row: &RowKey,
         text: StatusText,
         live: bool,
         reduced_motion: bool,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> Element {
         let (content, timing, runs) = match text {
             StatusText::Status(text) => (text, ShimmerTiming::Status, None),
@@ -41,15 +41,15 @@ impl StatusShimmers {
             }
         };
         let key = format!("conversation-status-{:?}-{row:?}", self.scope);
-        let typography = TextRole::Prose.style(&theme);
+        let typography = TextRole::Prose.style(theme);
         let spans = runs.map_or_else(Vec::new, |runs| {
             runs.styled_spans(
                 &typography,
                 theme.colors.text_muted.to_reference_text_color(),
-                &theme,
+                theme,
             )
         });
-        ShimmerText::new(key, content, theme)
+        ShimmerText::new(key, content, *theme)
             .active(live)
             .reduced_motion(reduced_motion)
             .timing(timing)
@@ -60,11 +60,11 @@ impl StatusShimmers {
     }
 
     pub(crate) fn agent(
-        &mut self,
-        row: RowKey,
+        &self,
+        row: &RowKey,
         text: String,
         reduced_motion: bool,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> Element {
         self.render(row, StatusText::Status(text), true, reduced_motion, theme)
     }
@@ -73,7 +73,7 @@ impl StatusShimmers {
 pub(crate) fn run<T>(
     model: &RowModel,
     run: &RunId,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     render: impl FnOnce(StatusText, bool, ArtisanTheme) -> T,
 ) -> Option<T> {
     let phase = model
@@ -118,16 +118,16 @@ pub(crate) fn run<T>(
         .run
         .as_ref()
         .is_none_or(super::super::fold::RunSummary::live);
-    Some(render(text, live, theme))
+    Some(render(text, live, *theme))
 }
 
 pub(crate) fn agent<T>(
     doing: Option<&str>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     render: impl FnOnce(String, ArtisanTheme) -> T,
 ) -> Option<T> {
     let text = doing
         .or_else(|| phase::status_copy(Phase::Thinking))?
         .to_owned();
-    Some(render(text, theme))
+    Some(render(text, *theme))
 }

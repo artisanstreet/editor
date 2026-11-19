@@ -3,12 +3,13 @@ use super::{
 };
 use crate::conversation::fold::{self, Slot};
 use crate::conversation::presentation::{BodyKey, ScopedCodeAction};
+use crate::conversation::view::reveal::MountedReveal;
 use aqua_ui::collection::BatchedCollectionRow;
 use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use editor_ui::markdown::stored::PagePreparation;
 use editor_ui::markdown::visual::BodyTone;
 use editor_ui::rich::actions::ResourceScope;
-use std::cell::Cell;
+use editor_ui::text::slice::slice;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ fn pending_above(
 pub(super) fn plain_block(text: &str, block: usize) -> Option<&str> {
     fold::plain_ranges(text)
         .get(block)
-        .map(|range| &text[range.clone()])
+        .map(|range| slice(text, range.clone()))
 }
 
 impl RowFactory {
@@ -39,11 +40,7 @@ impl RowFactory {
         slot: Slot,
         block: usize,
         reference: &artisan_api::ContentRef,
-        reveal: Option<&(
-            Rc<editor_ui::markdown::reveal::PreparedReveal>,
-            bool,
-            Rc<Cell<bool>>,
-        )>,
+        reveal: Option<&crate::conversation::view::reveal::RevealHandle>,
         content_width: Option<f32>,
         batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<
@@ -97,7 +94,8 @@ impl RowFactory {
                 return Ok((self.page_failure(&key, offset, &cause), None));
             }
         }
-        let leaf = match services.owner.borrow_mut().leaf(&key, &source, block) {
+        let preparation = services.owner.borrow_mut().leaf(&key, &source, block);
+        let leaf = match preparation {
             LeafPreparation::Pending => return Ok((pending("Loading content…"), None)),
             LeafPreparation::Failed(error) => {
                 let full = self.slot_source_field(row_owner, item, slot, batches)?;
@@ -184,8 +182,8 @@ impl RowFactory {
             self.reduced_motion,
         )?;
         *row_owner.stored_leaf.borrow_mut() = Some(lease);
-        let prepared = if let (Some(resources), Some(_)) = (&self.reveals, reveal) {
-            resources.owners.borrow_mut().record_stored(
+        let prepared = if self.reveals.is_some() && reveal.is_some() {
+            MountedReveal::record_stored(
                 row_owner,
                 row.model.version,
                 block,
@@ -313,11 +311,11 @@ impl RowFactory {
                 return Ok(self.page_failure(&key, offset, &cause));
             }
         }
-        let leaf = match services
+        let preparation = services
             .owner
             .borrow_mut()
-            .literal_leaf(&key, &source, block)
-        {
+            .literal_leaf(&key, &source, block);
+        let leaf = match preparation {
             LiteralPreparation::Pending => return Ok(pending("Loading content…")),
             LiteralPreparation::Failed(error) => {
                 let full = self.slot_source_field(row_owner, item, slot, batches)?;

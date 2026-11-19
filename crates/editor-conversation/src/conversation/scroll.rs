@@ -27,6 +27,10 @@ impl SmoothScroll {
         self.frame = None;
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the flags are independent frame conditions from separate owners; the step is the one place that combines them"
+    )]
     pub fn step(
         &mut self,
         following: bool,

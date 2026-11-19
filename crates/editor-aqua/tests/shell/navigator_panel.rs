@@ -30,7 +30,7 @@ fn mounted_panel(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
         &markers,
         None,
         None,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         1.0,
         dispatch,
     );

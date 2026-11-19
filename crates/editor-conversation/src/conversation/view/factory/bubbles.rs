@@ -9,12 +9,12 @@ pub(super) fn truncate(
     text: String,
     color: aqua_core::GpuiTextColor,
     mono: bool,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use aqua_text::overflow::OverflowMode;
     use aqua_ui::style::{Length, Style};
     let role = work::line_role(mono);
-    role.text(&theme, text)
+    role.text(theme, text)
         .gpui_source_color(color)
         .overflow(OverflowMode::EndEllipsis)
         .style(
@@ -36,7 +36,12 @@ pub(super) fn media_width(reading: f32, slot: Slot, lists: usize) -> f32 {
         (false, true) => reading - super::super::CHAIN_INDENT.px(),
         (false, false) => reading,
     };
-    (lists as f32).mul_add(-editor_ui::markdown::LIST_INDENT, width)
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "list nesting depth is a handful of levels"
+    )]
+    let lists = lists as f32;
+    lists.mul_add(-editor_ui::markdown::LIST_INDENT, width)
 }
 
 pub(super) fn user_bubble(
@@ -47,7 +52,7 @@ pub(super) fn user_bubble(
     attachments: Option<aqua_ui::element::Element>,
     sender: Option<artisan_api::EngineId>,
     sticker: Option<editor_ui::sticker::Sticker>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
@@ -63,7 +68,7 @@ pub(super) fn user_bubble(
     if empty {
         return root.build();
     }
-    let bubble = ChatBubbleSegment::new(theme, SegmentPosition::for_index(index, count), content)
+    let bubble = ChatBubbleSegment::new(*theme, SegmentPosition::for_index(index, count), content)
         .sticker(sticker);
     let bubble = match sender {
         Some(engine) => bubble.tinted(match engine {

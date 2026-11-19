@@ -8,7 +8,7 @@ use editor_core::{
     delivery::Delivery, runtime::runtime,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -86,7 +86,7 @@ enum Completion {
     },
     Agent {
         origin: Origin,
-        context: HashMap<ItemId, Arc<Item>>,
+        context: BTreeMap<ItemId, Arc<Item>>,
         error: Option<String>,
         effects: Vec<Effect>,
     },
@@ -106,6 +106,10 @@ pub enum ScrollAction {
     Row(RowKey),
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the shell reads and steers the public transcript state directly; the private fields are caches and task handles whose invariants only the controller maintains"
+)]
 pub struct Conversation {
     pub open: Option<(HostId, ThreadId)>,
     host_instance: Option<HostInstance>,
@@ -114,7 +118,7 @@ pub struct Conversation {
     pub rows: Vec<(Row, u64)>,
     rows_epoch: u64,
     row_positions: RefCell<(u64, usize, HashMap<RowKey, usize>)>,
-    pub(crate) runs: HashMap<RunId, RunSummary>,
+    pub(crate) runs: BTreeMap<RunId, RunSummary>,
     pub disclosures: DisclosureState,
     pub question_pages: super::questions::QuestionPages,
     question_collection: super::questions::QuestionCollection,
@@ -196,7 +200,7 @@ impl Conversation {
             rows: Vec::new(),
             rows_epoch: next_rows_epoch(),
             row_positions: RefCell::new((0, 0, HashMap::new())),
-            runs: HashMap::new(),
+            runs: BTreeMap::new(),
             disclosures: DisclosureState::default(),
             question_pages: super::questions::QuestionPages::default(),
             question_collection: super::questions::QuestionCollection::default(),
@@ -1042,7 +1046,7 @@ impl Conversation {
                 };
                 let sender = self.delivery.sender();
                 self.agent_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-                    let mut context = HashMap::new();
+                    let mut context = BTreeMap::new();
                     let mut next = Some(agent);
                     let mut error = None;
                     for _ in 0..16 {

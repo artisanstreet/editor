@@ -19,7 +19,7 @@ fn work_clock_rolls_on_the_render_thread_without_requesting_application_animatio
                 "clock",
                 "Working for 1s".into(),
                 theme.colors.text_muted.to_reference_text_color(),
-                theme,
+                &theme,
                 0.0,
                 false,
             )
@@ -45,7 +45,7 @@ fn work_clock_rolls_on_the_render_thread_without_requesting_application_animatio
                 "clock",
                 "Working for 2s".into(),
                 theme.colors.text_muted.to_reference_text_color(),
-                theme,
+                &theme,
                 1.0,
                 false,
             )
@@ -113,7 +113,7 @@ fn an_overflowing_phrase_ends_with_an_ellipsis_after_its_last_whole_word() {
                 "chain",
                 words.to_owned(),
                 theme.colors.text_muted.to_reference_text_color(),
-                theme,
+                &theme,
                 0.0,
                 false,
             ))
@@ -265,7 +265,7 @@ impl PhraseStage {
                 "phrase",
                 text.to_owned(),
                 theme.colors.text_muted.to_reference_text_color(),
-                theme,
+                &theme,
                 now,
                 false,
             )

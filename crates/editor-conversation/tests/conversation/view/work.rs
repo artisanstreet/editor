@@ -48,7 +48,7 @@ fn stored_failures_open_sources_only_when_expanded() {
             &item,
             expanded,
             &HashMap::new(),
-            *ArtisanTheme::for_mode(ThemeMode::Dark),
+            ArtisanTheme::for_mode(ThemeMode::Dark),
             |text, _, _| Text::new(text).build(),
             Rc::new(|_| {}),
             || {

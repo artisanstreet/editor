@@ -2,12 +2,12 @@ use super::fold::{self, Row, RowKey};
 use super::thread::ThreadView;
 use artisan_api::ItemId;
 use editor_ui::motion::MotionCurve;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub struct DisclosureState {
-    pub disclosures: HashMap<RowKey, Flight>,
+    pub disclosures: BTreeMap<RowKey, Flight>,
     pub disclosure_clips: HashMap<RowKey, RowClip>,
     pub disclosure_hidden: HashSet<ItemId>,
     pub disclosure_fractions: HashMap<RowKey, f32>,

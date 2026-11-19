@@ -22,7 +22,7 @@ pub enum Effect {
     ScrollTo(Seq),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Input {
     Open,
     Resume,
@@ -53,6 +53,10 @@ pub enum Input {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the shell reads the paging cursor directly; the window state only changes through the viewport transitions"
+)]
 pub struct Viewport {
     state: State,
     pub oldest: Option<Seq>,

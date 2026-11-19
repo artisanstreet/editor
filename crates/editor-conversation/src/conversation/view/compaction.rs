@@ -22,7 +22,8 @@ const ROLE: TextRole = TextRole::Prose;
     clippy::disallowed_types,
     reason = "the compaction rule is an animated painted guide: it draws in and carries a travelling pulse"
 )]
-fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
+fn rule(frame: CompactionFrame, left: bool, theme: &ArtisanTheme) -> Element {
+    let theme = *theme;
     Canvas::new()
         .height(RULE_LINE)
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
@@ -47,11 +48,11 @@ fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
             if let Some(pulse) = frame.pulse {
                 let travel = eased(MotionCurve::SmoothOut, pulse);
                 let alpha = 0.55 * (std::f32::consts::PI * pulse).sin();
-                let lane = (bounds.w - PULSE_LENGTH).max(0.0);
+                let span = (bounds.w - PULSE_LENGTH).max(0.0);
                 let x = if left {
-                    bounds.x + lane * (1.0 - travel)
+                    bounds.x + span * (1.0 - travel)
                 } else {
-                    bounds.x + lane * travel
+                    bounds.x + span * travel
                 };
                 result.push(line(
                     x,
@@ -64,7 +65,7 @@ fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
         .build()
 }
 
-fn text(value: impl Into<String>, theme: ArtisanTheme) -> Element {
+fn text(value: impl Into<String>, theme: &ArtisanTheme) -> Element {
     Text::new(value.into())
         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
         .style(Style::new().text_wrap(false))
@@ -78,13 +79,17 @@ fn shimmering(style: Style, shimmer: Option<TextShimmer>) -> Style {
     }
 }
 
-fn switch_line(switch: &ModelSwitch, shimmer: Option<TextShimmer>, theme: ArtisanTheme) -> Element {
+fn switch_line(
+    switch: &ModelSwitch,
+    shimmer: Option<TextShimmer>,
+    theme: &ArtisanTheme,
+) -> Element {
     let model = |model: &NamedModel| {
         UiBox::new()
             .spaced(Space::S4)
             .style(Style::new().align(AlignItems::CENTER))
             .child(IconSize::Md.glyph(
-                editor_ui::engine::engine_icon(&theme, model.engine),
+                editor_ui::engine::engine_icon(theme, model.engine),
                 theme.colors.text.to_reference_paint(),
             ))
             .child(
@@ -125,7 +130,7 @@ pub fn label(
     phase: CompactionPhase,
     switch: Option<&ModelSwitch>,
     frame: CompactionFrame,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     shimmer_key: Option<u64>,
 ) -> Element {
     let widest = if phase == CompactionPhase::Stopped {
@@ -151,7 +156,7 @@ pub fn label(
     let shown = displayed_phase(phase, switch.is_some(), frame);
     let shimmer = shimmer_key
         .filter(|_| shown == CompactionPhase::Running)
-        .map(|key| sweep(&theme, ShimmerTiming::Progress, key));
+        .map(|key| sweep(theme, ShimmerTiming::Progress, key));
     let (opacity, top, blur) = match frame.swap.filter(|_| switch.is_none()) {
         Some((_, swap)) if swap < 0.5 => {
             let out = eased(MotionCurve::EaseInOut, swap * 2.0);
@@ -189,7 +194,7 @@ pub fn label(
 pub(crate) fn row(
     item: &Item,
     frame: CompactionFrame,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     label: impl FnOnce(CompactionPhase, Option<&ModelSwitch>, CompactionFrame, ArtisanTheme) -> Element,
 ) -> Option<Element> {
     let ItemKind::Compaction { switch, .. } = &item.kind else {
@@ -209,7 +214,7 @@ pub(crate) fn row(
             .height(ROLE.spec().line * frame.open)
             .clip(true)
             .spaced(Space::S12)
-            .style(ROLE.inherit(&theme))
+            .style(ROLE.inherit(theme))
             .style(
                 Style::new()
                     .min_width(Length::Pct(0.0))
@@ -217,7 +222,7 @@ pub(crate) fn row(
                     .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
             )
             .child(rule(frame, true, theme))
-            .child(label(phase, switch.as_ref(), frame, theme))
+            .child(label(phase, switch.as_ref(), frame, *theme))
             .child(rule(frame, false, theme))
             .build()
             .debug_selector("compaction"),

@@ -66,7 +66,7 @@ fn label_shimmers_only_while_it_reads_as_running() {
         UiBox::new()
             .width(400.0)
             .height(40.0)
-            .child(compaction::label(phase, None, current, theme, clock))
+            .child(compaction::label(phase, None, current, &theme, clock))
             .build()
             .with_key("row")
     };
@@ -128,7 +128,7 @@ fn a_rebuilt_model_switch_label_never_paints_a_frame_without_its_shimmer() {
                 CompactionPhase::Running,
                 Some(&switch),
                 current,
-                theme,
+                &theme,
                 Some(CLOCK),
             ))
             .build()

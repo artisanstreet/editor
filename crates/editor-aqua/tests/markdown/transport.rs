@@ -419,7 +419,7 @@ fn stored_conversation_transaction(
             scope.clone(),
             Rc::clone(&markdown),
             Rc::new(RefCell::new(StatusShimmers::default())),
-            *ArtisanTheme::for_mode(ThemeMode::Dark),
+            ArtisanTheme::for_mode(ThemeMode::Dark),
             true,
             Instant::now(),
             Rc::new(move || {

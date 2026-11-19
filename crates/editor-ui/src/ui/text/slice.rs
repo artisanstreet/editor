@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::slice::SliceIndex;
 
 #[track_caller]
-pub(crate) fn slice<R>(text: &str, range: R) -> &str
+pub fn slice<R>(text: &str, range: R) -> &str
 where
     R: SliceIndex<str, Output = str> + Clone + Debug,
 {

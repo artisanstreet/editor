@@ -52,6 +52,10 @@ impl QuestionOwner {
 }
 
 #[derive(Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the shell mounts and edits the source view in place; the page owners stay behind the question transitions"
+)]
 pub struct QuestionPages {
     questions: Option<QuestionOwner>,
     options: Option<Owner<QuestionOption>>,
@@ -445,10 +449,7 @@ impl QuestionCollection {
             CollectionAction::Request(index) => browser.request(core, index),
             CollectionAction::Retry => browser.retry(core),
             CollectionAction::Back => browser.clear_detail(),
-            CollectionAction::Read { page, index } => {
-                browser.open_detail(core, page, index, question_preview);
-            }
-            CollectionAction::Choose { page, index } => {
+            CollectionAction::Read { page, index } | CollectionAction::Choose { page, index } => {
                 browser.open_detail(core, page, index, question_preview);
             }
         }
@@ -456,7 +457,7 @@ impl QuestionCollection {
 
     pub(crate) fn view(
         &self,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         document: aqua_text::document::SelectionDocumentId,
         source_id: aqua_text::document::SelectionSourceId,
         stored_detail: Option<aqua_ui::element::Element>,
@@ -481,7 +482,7 @@ impl QuestionCollection {
         if browser.borrow().selected().is_some() {
             return Some(editor_sources::collection_detail(
                 &browser.borrow(),
-                &theme,
+                theme,
                 None,
                 document,
                 source_id,
@@ -493,7 +494,7 @@ impl QuestionCollection {
             element: editor_sources::collection_list(
                 &browser,
                 "Questions",
-                &theme,
+                theme,
                 None,
                 Rc::new(question_preview),
                 false,
@@ -568,7 +569,7 @@ impl QuestionPages {
 pub fn stored_options(
     pages: &QuestionPages,
     panel: &QuestionnairePanel,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     document: aqua_text::document::SelectionDocumentId,
     source_id: aqua_text::document::SelectionSourceId,
     stored_detail: Option<aqua_ui::element::Element>,
@@ -595,7 +596,7 @@ pub fn stored_options(
     if browser.borrow().selected().is_some() {
         return Some(editor_sources::collection_detail(
             &browser.borrow(),
-            &theme,
+            theme,
             None,
             document,
             source_id,
@@ -615,7 +616,7 @@ pub fn stored_options(
     );
     Some(editor_sources::ContentView {
         element: editor_sources::collection_list(
-            &browser, "Choices", &theme, None, present, true, &dispatch,
+            &browser, "Choices", theme, None, present, true, &dispatch,
         ),
         selection: None,
     })

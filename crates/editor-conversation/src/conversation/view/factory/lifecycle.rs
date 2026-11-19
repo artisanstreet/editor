@@ -104,7 +104,7 @@ impl RowFactory {
             app,
             conversation,
             core,
-            &mut self.markdown.borrow_mut(),
+            &self.markdown.borrow_mut(),
             stored.as_deref(),
         );
         if let Some(queue) = &self.admission {

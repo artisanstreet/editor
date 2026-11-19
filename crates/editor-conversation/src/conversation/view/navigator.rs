@@ -16,9 +16,17 @@ const PANEL_ROW: Row = Row::MenuItem;
 pub const PANEL_WIDTH: f32 = 320.0;
 const DIGIT_WIDTH: f32 = 7.5;
 
+fn panel_pitch() -> f32 {
+    PANEL_ROW
+        .height()
+        .expect("invariant: menu item rows have a fixed height")
+}
+
 fn number_width(count: usize) -> f32 {
     let digits = count.max(1).ilog10() + 1;
-    (digits as f32 + 1.0) * DIGIT_WIDTH
+    #[expect(clippy::cast_precision_loss, reason = "a usize has at most 20 digits")]
+    let digits = digits as f32;
+    (digits + 1.0) * DIGIT_WIDTH
 }
 
 fn entry(theme: &ArtisanTheme, number: usize, label: &str, current: bool, width: f32) -> Element {
@@ -62,11 +70,12 @@ pub fn panel(
     markers: &[OutlineEntry],
     active: Option<Seq>,
     cursor: Option<usize>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     progress: f32,
     dispatch: Dispatch,
 ) -> Element {
-    let pitch = PANEL_ROW.height().unwrap_or_default();
+    let theme = *theme;
+    let pitch = panel_pitch();
     let width = number_width(markers.len());
     let list = List::new()
         .items(markers.iter().cloned().enumerate())
@@ -102,7 +111,11 @@ pub fn panel(
 
 #[must_use]
 pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32 {
-    let pitch = PANEL_ROW.height().unwrap_or_default();
+    let pitch = panel_pitch();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "navigator entries are user messages in one thread, far below 2^23"
+    )]
     let top = index as f32 * pitch;
     let bottom = top + pitch;
     match (top < offset, bottom > offset + viewport_height) {
@@ -112,8 +125,12 @@ pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "navigator entries are user messages in one thread, far below 2^23"
+)]
 pub fn panel_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {
-    let pitch = PANEL_ROW.height().unwrap_or_default();
+    let pitch = panel_pitch();
     let full = count as f32 * pitch;
     (active as f32 + 0.5)
         .mul_add(pitch, -(viewport_height / 2.0))

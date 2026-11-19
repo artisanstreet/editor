@@ -84,7 +84,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     let first = motion
         .entrance(key.clone(), true, true, false, now)
         .unwrap();
-    assert!(first.settling);
+    assert!(first.settling());
     let invalidated = Rc::new(Cell::new(false));
     let notification = Rc::clone(&invalidated);
     let element = first
@@ -117,7 +117,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
             now + Duration::from_millis(125),
         )
         .unwrap();
-    assert!(halfway.settling);
+    assert!(halfway.settling());
     let element = halfway
         .wrap(
             UiBox::new()

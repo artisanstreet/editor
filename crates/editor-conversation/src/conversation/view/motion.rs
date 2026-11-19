@@ -51,7 +51,7 @@ pub struct EntranceFrame {
     grow: f32,
     reveal: f32,
     height: Rc<Cell<f32>>,
-    pub settling: bool,
+    settling: bool,
 }
 
 #[derive(Default)]
@@ -255,7 +255,7 @@ impl RowMotion {
         key: &str,
         text: String,
         color: GpuiTextColor,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: f64,
         reduced_motion: bool,
     ) -> Element {
@@ -269,7 +269,7 @@ impl RowMotion {
         retained_phrase_or_text(
             words.as_deref(),
             text,
-            role.style(&theme),
+            role.style(theme),
             color,
             role.spec().line,
             overflow,
@@ -295,7 +295,7 @@ impl RowMotion {
         let elapsed = now.saturating_duration_since(state.started).as_secs_f64();
         let progress = MotionCurve::SmoothOut.sample_f32(elapsed / 0.25);
         let current = (state.target - state.from).mul_add(progress, state.from);
-        if state.target != target {
+        if state.target.to_bits() != target.to_bits() {
             state.from = current;
             state.target = target;
             state.started = now;
@@ -329,6 +329,10 @@ impl RowMotion {
 }
 
 impl EntranceFrame {
+    pub const fn settling(&self) -> bool {
+        self.settling
+    }
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the entrance collapses the gap above the row while it grows; the negative margin is motion, not spacing"
@@ -344,7 +348,7 @@ impl EntranceFrame {
                     return;
                 };
                 if let Some(bounds) = tree.pre_transform_rect(parent)
-                    && measured.replace(bounds.h) != bounds.h
+                    && measured.replace(bounds.h).to_bits() != bounds.h.to_bits()
                 {
                     invalidate();
                 }

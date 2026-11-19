@@ -179,7 +179,7 @@ impl RowFactory {
         let view = owner
             .sources
             .borrow()
-            .view(&item.id, &field, theme, services.document, id, callback)
+            .view(&item.id, &field, &theme, services.document, id, callback)
             .ok_or(RealizeRowError::Unavailable(Part::SourceView))?;
         let row = self.retained_row(owner, key, services.document, view, Staleness::SourceBatch)?;
         batches.borrow_mut().extend(row.batches);

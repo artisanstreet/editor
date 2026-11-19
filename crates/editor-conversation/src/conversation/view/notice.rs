@@ -9,7 +9,7 @@ use editor_ui::theme::ArtisanTheme;
 
 pub(crate) fn render<E>(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     source: impl FnOnce(SourceField) -> Result<Element, E>,
 ) -> Result<Option<Element>, E> {
@@ -18,14 +18,15 @@ pub(crate) fn render<E>(
     };
     let (asset, prefix) = match kind {
         NoticeKind::Goal { state } => (AssetId::TABLER_TARGET_ARROW, format!("Goal {state}: ")),
-        NoticeKind::Safety => (AssetId::TABLER_SHIELD_LOCK, String::new()),
+        NoticeKind::Safety | NoticeKind::Unsandboxed { .. } => {
+            (AssetId::TABLER_SHIELD_LOCK, String::new())
+        }
         NoticeKind::Reroute { model } => (
             AssetId::TABLER_ARROW_RIGHT,
             format!("Switched to {model}: "),
         ),
         NoticeKind::Info => (AssetId::TABLER_BELL, String::new()),
         NoticeKind::YouShouldKnow { .. } => (AssetId::TABLER_SPARKLES, String::new()),
-        NoticeKind::Unsandboxed { .. } => (AssetId::TABLER_SHIELD_LOCK, String::new()),
     };
     let muted = theme.colors.text_muted.to_reference_text_color();
     let content = match text {
@@ -35,7 +36,7 @@ pub(crate) fn render<E>(
         ),
         TextContent::Stored(_) => {
             let prefix = TextRole::Prose
-                .text(&theme, prefix)
+                .text(theme, prefix)
                 .gpui_source_color(muted)
                 .build();
             UiBox::new()

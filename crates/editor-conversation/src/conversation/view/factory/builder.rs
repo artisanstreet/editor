@@ -22,7 +22,7 @@ impl RowFactory {
         scope: PresentationScope,
         markdown: Rc<RefCell<MarkdownOwners>>,
         statuses: Rc<RefCell<status::StatusShimmers>>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         reduced_motion: bool,
         now: Instant,
         allocate: Rc<dyn Fn() -> SelectionSourceId>,
@@ -46,7 +46,7 @@ impl RowFactory {
             scope,
             markdown,
             statuses,
-            theme,
+            theme: *theme,
             reduced_motion,
             now,
             allocate,
@@ -234,16 +234,16 @@ impl RowFactory {
                 }
             }
         }
-        self.rows = RowSource::Snapshots { snapshots, rows };
+        self.rows = RowSource::Snapshots {
+            snapshots: Box::new(snapshots),
+            rows,
+        };
         self.fingerprints.get_mut().clear();
         Ok(self)
     }
 
     #[must_use]
-    pub fn with_media(
-        mut self,
-        media: Rc<dyn Fn(&BodyKey, f32) -> Option<editor_ui::markdown::presenter::MediaServices>>,
-    ) -> Self {
+    pub fn with_media(mut self, media: super::MediaLookup) -> Self {
         self.media = Some(media);
         self
     }

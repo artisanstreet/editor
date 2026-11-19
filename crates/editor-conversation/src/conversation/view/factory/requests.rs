@@ -9,7 +9,7 @@ impl RowFactory {
         owner: &Rc<super::super::row_cache::RowOwner>,
         item: &artisan_api::Item,
         answer: Option<&crate::conversation::thread::AnswerState>,
-        dispatch: super::super::Dispatch,
+        dispatch: &super::super::Dispatch,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         let collected = RefCell::new(Vec::new());
@@ -18,7 +18,7 @@ impl RowFactory {
             item,
             answer.is_some_and(crate::conversation::thread::AnswerState::sending),
             answer.and_then(crate::conversation::thread::AnswerState::error),
-            self.theme,
+            &self.theme,
             |field| self.source_field(owner, item, field, &collected, &used),
             dispatch,
         )?;
@@ -50,8 +50,8 @@ impl RowFactory {
             item,
             expanded,
             names,
-            self.theme,
-            |text, color, mono| truncate(text, color, mono, self.theme),
+            &self.theme,
+            |text, color, mono| truncate(text, color, mono, &self.theme),
             dispatch,
             || {
                 self.source_field(
@@ -82,8 +82,8 @@ impl RowFactory {
         let used = RefCell::new(std::collections::HashSet::new());
         let result = super::super::notice::render(
             item,
-            self.theme,
-            |text, color| truncate(text, color, false, self.theme),
+            &self.theme,
+            |text, color| truncate(text, color, false, &self.theme),
             |field| self.source_field(owner, item, field, &collected, &used),
         )?;
         owner.retain_batches(&used.into_inner());
@@ -102,13 +102,13 @@ impl RowFactory {
         let used = RefCell::new(std::collections::HashSet::new());
         let result = super::super::request::question(
             item,
-            self.theme,
+            &self.theme,
             |field| self.source_field(owner, item, field, &collected, &used),
             |source| self.question_collection(owner, item, source, &collected, &used),
             |item, questions| {
                 super::super::request::answered(
                     questions,
-                    self.theme,
+                    &self.theme,
                     |field| self.source_field(owner, item, field, &collected, &used),
                     |source| self.question_collection(owner, item, source, &collected, &used),
                     || self.source_field(owner, item, SourceField::AnswerText, &collected, &used),
@@ -152,7 +152,8 @@ impl RowFactory {
         {
             return Err(RealizeRowError::Unavailable(Part::QuestionCollection));
         }
-        let stored_detail = if let Some(browser) = owner.questions.borrow().browser() {
+        let browser = owner.questions.borrow().browser();
+        let stored_detail = if let Some(browser) = browser {
             let browser = browser.borrow();
             if let Some(detail) = browser.detail() {
                 let detail_key = ResourceKey::QuestionDetail(item.id.clone());
@@ -227,7 +228,7 @@ impl RowFactory {
         let view = owner
             .questions
             .borrow()
-            .view(theme, services.document, id, stored_detail, callback)
+            .view(&theme, services.document, id, stored_detail, callback)
             .ok_or(RealizeRowError::Unavailable(Part::QuestionView))?;
         let row = self.retained_row(
             owner,
