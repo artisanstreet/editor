@@ -23,7 +23,7 @@ pub fn emit() {
     );
     println!(
         "cargo:rustc-env=ARTISAN_TARGET={}",
-        std::env::var("TARGET").unwrap_or_default()
+        std::env::var("TARGET").expect("invariant: cargo sets TARGET for every build script")
     );
 }
 
