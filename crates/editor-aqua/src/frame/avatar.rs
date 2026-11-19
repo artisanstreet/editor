@@ -38,12 +38,14 @@ enum Phase {
 
 const RELOAD_AFTER: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AvatarError {
     #[error("fetch the avatar")]
     Fetch(#[source] MediaLoadError),
     #[error("decode the avatar")]
-    Decode,
+    Decode(#[source] aqua::images::ImageAssetError),
+    #[error("the avatar decode was cancelled")]
+    DecodeCancelled,
 }
 
 impl Phase {
@@ -82,14 +84,17 @@ impl Avatar {
     pub fn image(&self) -> Option<Arc<ImageHandle>> {
         match &self.phase {
             Phase::Ready { image, .. } => Some(Arc::clone(image)),
-            _ => None,
+            Phase::Absent
+            | Phase::Fetching { .. }
+            | Phase::Decoding { .. }
+            | Phase::Failed { .. } => None,
         }
     }
 
     #[must_use]
-    pub const fn failure(&self) -> Option<AvatarError> {
+    pub const fn failure(&self) -> Option<&AvatarError> {
         match &self.phase {
-            Phase::Failed { error, .. } => Some(*error),
+            Phase::Failed { error, .. } => Some(error),
             Phase::Absent
             | Phase::Fetching { .. }
             | Phase::Decoding { .. }
@@ -111,7 +116,9 @@ impl Avatar {
             let owned = url.to_owned();
             let task = runtime::runtime().spawn(async move {
                 let result = source::load_image_bytes(&source, None, &media_http::client()).await;
-                let _ = sender.send(Fetched { url: owned, result }).await;
+                if sender.send(Fetched { url: owned, result }).await.is_err() {
+                    tracing::debug!("the avatar was replaced before its image arrived");
+                }
             });
             Phase::Fetching {
                 url: url.to_owned(),
@@ -132,26 +139,29 @@ impl Avatar {
                     _subscription: assets.subscribe(self.delivery.waker()),
                     image: Arc::new(image),
                 },
-                Ok(Err(_)) => Self::failed(fetched.url, AvatarError::Decode, now),
+                Ok(Err(error)) => Self::failed(fetched.url, AvatarError::Decode(error), now),
                 Err(error) => Self::failed(fetched.url, AvatarError::Fetch(error), now),
             };
             changed = true;
         }
         let status = match &self.phase {
             Phase::Decoding { image, .. } => Some(image.status()),
-            _ => None,
+            Phase::Absent | Phase::Fetching { .. } | Phase::Ready { .. } | Phase::Failed { .. } => {
+                None
+            }
         };
         let next = match (status, std::mem::replace(&mut self.phase, Phase::Absent)) {
             (Some(ImageStatus::Ready { .. }), Phase::Decoding { url, image, .. }) => {
                 changed = true;
                 Phase::Ready { url, image }
             }
-            (
-                Some(ImageStatus::Failed(_) | ImageStatus::Cancelled),
-                Phase::Decoding { url, .. },
-            ) => {
+            (Some(ImageStatus::Failed(error)), Phase::Decoding { url, .. }) => {
                 changed = true;
-                Self::failed(url, AvatarError::Decode, now)
+                Self::failed(url, AvatarError::Decode(error), now)
+            }
+            (Some(ImageStatus::Cancelled), Phase::Decoding { url, .. }) => {
+                changed = true;
+                Self::failed(url, AvatarError::DecodeCancelled, now)
             }
             (_, phase) => phase,
         };

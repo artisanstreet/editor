@@ -85,6 +85,7 @@ pub struct SignIn {
     sizes: Option<Sizes>,
     last: (Feedback, Feedback),
     art: Option<Arc<ImageHandle>>,
+    art_refused: Option<aqua::images::ImageAssetError>,
     events: Rc<RefCell<VecDeque<Event>>>,
 }
 
@@ -104,6 +105,7 @@ impl Default for SignIn {
             sizes: None,
             last: (Feedback::None, Feedback::None),
             art: None,
+            art_refused: None,
             events: Rc::default(),
         }
     }
@@ -129,20 +131,29 @@ impl SignIn {
         if self.art.is_some() {
             return;
         }
-        let Ok(decoded) = image::load_from_memory(editor_assets::art::MOUNTAIN) else {
-            return;
-        };
-        let rgba = decoded.to_rgba8();
+        let rgba = image::load_from_memory(editor_assets::art::MOUNTAIN)
+            .expect("invariant: the bundled sign-in artwork decodes")
+            .to_rgba8();
         let mask = dither::dither(dither::Source::new(&rgba), ART_BOX.0, ART_BOX.1, ART_PARAMS);
         let pixels = dither::paint(&mask, ART_PAINT);
-        let Ok(image) = aqua::images::DecodedImage::from_rgba(
+        let image = aqua::images::DecodedImage::from_rgba(
             pixels.width(),
             pixels.height(),
             pixels.into_raw(),
-        ) else {
-            return;
-        };
-        self.art = assets.insert(image).ok().map(Arc::new);
+        )
+        .expect("invariant: the dithered sign-in artwork has one RGBA pixel per cell");
+        match assets.insert(image) {
+            Ok(handle) => {
+                self.art = Some(Arc::new(handle));
+                self.art_refused = None;
+            }
+            Err(error) => {
+                if self.art_refused.as_ref() != Some(&error) {
+                    tracing::warn!(%error, "the sign-in artwork could not be uploaded");
+                }
+                self.art_refused = Some(error);
+            }
+        }
     }
 
     #[must_use]

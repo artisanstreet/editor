@@ -12,11 +12,10 @@ fn a_failed_avatar_keeps_its_cause_and_reloads_after_a_pause() {
         avatar.drain(&assets, start);
         avatar.failure().is_some()
     });
-    assert_eq!(avatar.failure(), Some(AvatarError::Decode));
+    assert!(matches!(avatar.failure(), Some(AvatarError::Decode(_))));
     avatar.want(Some(url), start + Duration::from_secs(5));
-    assert_eq!(
-        avatar.failure(),
-        Some(AvatarError::Decode),
+    assert!(
+        matches!(avatar.failure(), Some(AvatarError::Decode(_))),
         "a fresh failure is not refetched on every frame"
     );
     avatar.want(Some(url), start + Duration::from_secs(30));

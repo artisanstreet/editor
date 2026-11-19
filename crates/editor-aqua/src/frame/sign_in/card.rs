@@ -761,9 +761,14 @@ fn linked(
             EventPhase::Bubble,
             move |routed| {
                 if let RoutedInput::TextRangeActivated { id, .. } = &routed.input {
-                    if let Some(event) = usize::try_from(*id).ok().and_then(|at| events.get(at)) {
-                        emit(*event);
-                    }
+                    let at = usize::try_from(*id).expect("invariant: caption link ids fit in usize");
+                    let event = events.get(at).unwrap_or_else(|| {
+                        panic!(
+                            "invariant: link {id} indexes one of the caption's {} events",
+                            events.len()
+                        )
+                    });
+                    emit(*event);
                 }
                 InputResponse::default()
             },
