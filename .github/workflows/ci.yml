@@ -307,7 +307,6 @@ jobs:
       - *prune-target
       - *sccache-stats
   nix-packages:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
