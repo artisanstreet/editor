@@ -270,32 +270,6 @@ impl MarketplaceController {
             });
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn search_key(&self) -> Option<CompletionKey> {
-        self.remote_search.current().cloned()
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn finish_search_for_tests(
-        &self,
-        key: CompletionKey,
-        result: Result<Vec<Listing>, CallError>,
-    ) -> impl Future<Output = ()> + use<> {
-        let request = SearchRequest {
-            query: self.page.query.trim().to_owned(),
-            serial: self.page.search_serial,
-        };
-        let sender = self.completion.sender();
-        async move {
-            sender
-                .send(Completion::Search(key, request, result))
-                .await
-                .expect(
-                    "invariant: the marketplace owns its completion mailbox while a test drives it",
-                );
-        }
-    }
-
     pub(crate) fn clear_search(&mut self, core: &Core) {
         self.search.state().borrow_mut().set_text("");
         self.edited(core);

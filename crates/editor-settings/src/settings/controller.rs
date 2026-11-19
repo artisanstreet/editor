@@ -704,20 +704,6 @@ impl SettingsController {
         }
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn complete_setting_for_tests(&self, request: SettingRequest, result: Result<(), String>) {
-        let sender = self.completion.sender();
-        runtime::runtime().block_on(async move {
-            sender
-                .offer(HostCompletion {
-                    host: request.target.host.clone(),
-                    instance: request.target.instance,
-                    result: Completion::Setting(request, result),
-                })
-                .await;
-        });
-    }
-
     pub fn drain(&mut self, core: &mut Core) -> bool {
         let completions = self.completion.drain();
         let changed = !completions.is_empty();
