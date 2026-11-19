@@ -5,8 +5,6 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::default_trait_access,
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
     clippy::enum_variant_names,
     clippy::float_cmp,
     clippy::fn_params_excessive_bools,
@@ -56,6 +54,11 @@
     missing_debug_implementations,
     trivial_casts,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "editor-ui is the kit: it builds the components and tokens that these bans steer every other crate to"
 )]
 extern crate self as editor_ui;
 
