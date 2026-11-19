@@ -5,10 +5,6 @@ const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
 
 const MIN_NONCE_BYTES: usize = 12;
 
-#[cfg(test)]
-pub(crate) const EMPTY_BODY_HASH: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
 #[must_use]
 pub fn body_hash_hex(body: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(body))

@@ -204,17 +204,10 @@ pub async fn start_generation(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
 ) -> Result<Server, StartError> {
-    start_mode(
-        config,
-        Arc::new(forge_engines::harness),
-        Some(registry),
-        forge_store::Environment::system(),
-    )
-    .await
+    start_generation_with_harness(config, registry, Arc::new(forge_engines::harness)).await
 }
 
-#[cfg(test)]
-pub(crate) async fn start_generation_with_harness(
+async fn start_generation_with_harness(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
     harness_for: forge_runs::HarnessFor,

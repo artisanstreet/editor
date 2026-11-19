@@ -14,7 +14,10 @@ fn canonical_string_matches_core_shape() {
         canonical_request(1_700_000_000, "bm9uY2U", "post", "/v1/x?a=1", "abc"),
         "1700000000\nbm9uY2U\nPOST\n/v1/x?a=1\nabc"
     );
-    assert_eq!(body_hash_hex(b""), EMPTY_BODY_HASH);
+    assert_eq!(
+        body_hash_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
 }
 
 #[test]

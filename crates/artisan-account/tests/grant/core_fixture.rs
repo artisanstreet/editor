@@ -64,7 +64,8 @@ fn fixture_machine_proof_verifies_with_the_enrolled_key() {
     let body = proof["raw_body"].as_str().unwrap().as_bytes();
     assert_eq!(
         crate::machine_proof::body_hash_hex(body),
-        crate::machine_proof::EMPTY_BODY_HASH
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "the fixture signs an empty body"
     );
     let token = fixture["grant"].as_str().unwrap();
     let payload = token.split('.').nth(1).unwrap();
