@@ -92,8 +92,7 @@ async fn a_cold_turn_starts_without_servers_that_do_not_answer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
     let (fixture, seen) = recording_fixture().await;
-    let watcher = fixture.hub.clone();
-    tokio::spawn(async move { watcher.mcp().watch_server_changes().await });
+    tokio::spawn(fixture.hub.mcp().watch_server_changes());
     let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let up_address = up.local_addr().unwrap();
     let up_connections = counting(up);
@@ -136,5 +135,29 @@ async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
         turn_servers(&fixture, &seen).await,
         ["down", "local", "up"],
         "a server that answers again is back once the servers are checked again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn servers_configured_before_the_watcher_first_runs_are_still_checked() {
+    let (fixture, _seen) = recording_fixture().await;
+    let watching = fixture.hub.mcp().watch_server_changes();
+    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_address = up.local_addr().unwrap();
+    let up_connections = counting(up);
+    let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_address = other.local_addr().unwrap();
+    let _other_connections = counting(other);
+    configure(&fixture, up_address, other_address, "server").await;
+    tokio::spawn(watching);
+    test_support::wait::eventually(
+        "the servers configured before the watcher ran to be checked",
+        Duration::from_secs(10),
+        || async { fixture.hub.mcp().reachability().probed(2) },
+    )
+    .await;
+    assert!(
+        up_connections.load(Ordering::SeqCst) > 0,
+        "the watcher checked the server configured before it first ran"
     );
 }

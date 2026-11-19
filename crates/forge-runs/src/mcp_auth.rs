@@ -312,10 +312,8 @@ impl Mcp {
         }));
     }
 
-    pub async fn watch_server_changes(&self) {
-        Arc::clone(&self.reachability)
-            .watch_config(self.store.clone())
-            .await;
+    pub fn watch_server_changes(&self) -> impl Future<Output = ()> + Send + 'static {
+        Arc::clone(&self.reachability).watch_config(&self.store)
     }
 
     fn store(&self) -> &Store {

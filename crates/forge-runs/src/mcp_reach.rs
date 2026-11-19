@@ -129,33 +129,39 @@ impl Reachability {
         }));
     }
 
-    pub(crate) async fn watch_config(self: Arc<Self>, store: forge_store::Store) {
+    pub(crate) fn watch_config(
+        self: Arc<Self>,
+        store: &forge_store::Store,
+    ) -> impl Future<Output = ()> + Send + 'static {
         let mut changes = store.subscribe();
-        loop {
-            match changes.recv().await {
-                Ok(envelope) => {
-                    if let Event::Setting { key, value } = envelope.event
-                        && key == "mcp_servers"
-                    {
-                        match serde_json::from_value::<Vec<McpServer>>(value) {
+        let store = store.clone();
+        async move {
+            loop {
+                match changes.recv().await {
+                    Ok(envelope) => {
+                        if let Event::Setting { key, value } = envelope.event
+                            && key == "mcp_servers"
+                        {
+                            match serde_json::from_value::<Vec<McpServer>>(value) {
+                                Ok(servers) => self.spawn_probe(&servers, Refresh::All),
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "decode the changed MCP server list to probe it"
+                                ),
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        match crate::mcp_auth::read_mcp_servers(&store).await {
                             Ok(servers) => self.spawn_probe(&servers, Refresh::All),
                             Err(error) => tracing::warn!(
-                                %error,
-                                "decode the changed MCP server list to probe it"
+                                error = diagnostics::chain(&error),
+                                "read the MCP servers after missing their changes"
                             ),
                         }
                     }
+                    Err(RecvError::Closed) => return,
                 }
-                Err(RecvError::Lagged(_)) => {
-                    match crate::mcp_auth::read_mcp_servers(&store).await {
-                        Ok(servers) => self.spawn_probe(&servers, Refresh::All),
-                        Err(error) => tracing::warn!(
-                            error = diagnostics::chain(&error),
-                            "read the MCP servers after missing their changes"
-                        ),
-                    }
-                }
-                Err(RecvError::Closed) => return,
             }
         }
     }
