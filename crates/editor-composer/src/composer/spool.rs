@@ -18,8 +18,8 @@ pub struct DraftSpool {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SpooledDraft {
-    pub body: Value,
-    pub images: Vec<Vec<u8>>,
+    pub(crate) body: Value,
+    pub(crate) images: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, thiserror::Error)]

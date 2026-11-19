@@ -449,7 +449,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         self.detail.as_mut()
     }
 
-    pub fn inline_text(&self) -> Option<&str> {
+    pub(crate) fn inline_text(&self) -> Option<&str> {
         self.inline_text.as_deref()
     }
 

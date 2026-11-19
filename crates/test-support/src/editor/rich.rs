@@ -77,11 +77,6 @@ impl MountedBody {
         &self.presenter
     }
 
-    #[must_use]
-    pub fn app(&self) -> &UiApp {
-        &self.app
-    }
-
     fn render(&mut self) {
         self.invalidated.set(false);
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
@@ -234,14 +229,6 @@ impl MountedBody {
     pub fn rect(&self, key: &str) -> Rect {
         self.keyed(key)
             .unwrap_or_else(|| panic!("no mounted node is keyed {key:?}"))
-    }
-
-    #[must_use]
-    pub fn navigation_rect(&self) -> Rect {
-        self.app
-            .tree()
-            .visual_rect(self.navigation())
-            .expect("the chart's navigation is laid out")
     }
 
     #[must_use]

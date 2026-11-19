@@ -70,7 +70,7 @@ struct Pending {
 const SLOW_PAGE: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AnswerRequest(pub(crate) u64);
+pub(crate) struct AnswerRequest(u64);
 
 enum Completion {
     Held {
