@@ -1197,10 +1197,10 @@ impl Hub {
         let hub = self.clone();
         self.inner.tasks.spawn_on(
             async move {
-                let mut stalled = false;
+                let mut unclaimed_at = None;
                 let mut failures = 0_u32;
                 loop {
-                    let (parked, readable) = park::until_next(&hub, stalled).await;
+                    let (parked, readable) = park::until_next(&hub, unclaimed_at).await;
                     let retry = async {
                         if failures == 0 && readable {
                             std::future::pending::<()>().await;
@@ -1223,7 +1223,7 @@ impl Hub {
                         .deferred
                         .swap(false, std::sync::atomic::Ordering::AcqRel);
                     failed |= deferred;
-                    stalled = true;
+                    unclaimed_at = Some(artisan_api::now());
                     loop {
                         if deferred {
                             break;
@@ -1263,7 +1263,7 @@ impl Hub {
                         let Some(thread) = next else {
                             break;
                         };
-                        stalled = false;
+                        unclaimed_at = None;
                         hub.claim(thread, permit);
                     }
                     failures = if failed {

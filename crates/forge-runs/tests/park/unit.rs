@@ -15,16 +15,24 @@ fn overload_retries_back_off_to_five_minutes_and_keep_going() {
 #[test]
 fn a_parked_turn_the_dispatcher_could_not_start_waits_for_the_next_change_instead_of_polling() {
     assert_eq!(
-        wake(Parked::Due(900), 1_000, false),
+        wake(Parked::Due(900), 1_000, None),
         Wake::After(Duration::ZERO)
     );
-    assert_eq!(wake(Parked::Due(900), 1_000, true), Wake::Never);
+    assert_eq!(wake(Parked::Due(900), 1_000, Some(950)), Wake::Never);
     assert_eq!(
-        wake(Parked::Due(1_000 + 60_000), 1_000, true),
+        wake(Parked::Due(1_000 + 60_000), 1_000, Some(1_000)),
         Wake::After(Duration::from_mins(1))
     );
-    assert_eq!(wake(Parked::Unreadable, 1_000, false), Wake::Never);
-    assert_eq!(wake(Parked::Nothing, 1_000, true), Wake::Never);
+    assert_eq!(wake(Parked::Unreadable, 1_000, None), Wake::Never);
+    assert_eq!(wake(Parked::Nothing, 1_000, Some(1_000)), Wake::Never);
+}
+
+#[test]
+fn a_turn_that_came_due_after_the_dispatcher_last_looked_still_wakes_it() {
+    assert_eq!(
+        wake(Parked::Due(950), 1_000, Some(900)),
+        Wake::After(Duration::ZERO)
+    );
 }
 
 #[test]

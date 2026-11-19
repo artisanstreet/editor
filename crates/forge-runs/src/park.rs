@@ -91,10 +91,10 @@ pub(crate) enum Wake {
     Never,
 }
 
-fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
+fn wake(parked: Parked, now: Timestamp, unclaimed_at: Option<Timestamp>) -> Wake {
     match parked {
         Parked::Nothing | Parked::Unreadable => Wake::Never,
-        Parked::Due(due_at) if stalled && due_at <= now => Wake::Never,
+        Parked::Due(due_at) if unclaimed_at.is_some_and(|looked| due_at <= looked) => Wake::Never,
         Parked::Due(due_at) => Wake::After(Duration::from_millis(
             u64::try_from(due_at - now).unwrap_or(0),
         )),
@@ -103,7 +103,7 @@ fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
 
 pub(crate) async fn until_next(
     hub: &Hub,
-    stalled: bool,
+    unclaimed_at: Option<Timestamp>,
 ) -> (impl Future<Output = ()> + use<>, bool) {
     let parked = match hub.store().next_parked().await {
         Ok(Some(due_at)) => Parked::Due(due_at),
@@ -113,7 +113,7 @@ pub(crate) async fn until_next(
             Parked::Unreadable
         }
     };
-    let wake = wake(parked, artisan_api::now(), stalled);
+    let wake = wake(parked, artisan_api::now(), unclaimed_at);
     let waiting = async move {
         match wake {
             Wake::After(wait) => tokio::time::sleep(wait).await,
