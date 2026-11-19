@@ -15,9 +15,15 @@ pub struct MediaResponse {
     pub body: Vec<u8>,
 }
 
+enum FirstHop {
+    Public,
+    #[cfg(feature = "test-support")]
+    Unchecked(reqwest::Client),
+}
+
 pub struct MediaHttpClient {
-    first: reqwest::Client,
-    onward: reqwest::Client,
+    public: reqwest::Client,
+    first_hop: FirstHop,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +52,8 @@ pub enum MediaFetchError {
     },
     #[error("{url} is not HTTP or HTTPS")]
     Scheme { url: String },
+    #[error("{url} is not on the public internet")]
+    NotPublic { url: String },
     #[error("fetch {url}")]
     Fetch {
         url: String,
@@ -95,26 +103,44 @@ impl reqwest::dns::Resolve for PublicAddresses {
     }
 }
 
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .timeout(Duration::from_secs(30))
+}
+
+fn public_client() -> reqwest::Client {
+    builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicAddresses))
+        .build()
+        .expect("build public media HTTP client")
+}
+
 static SHARED: LazyLock<Arc<MediaHttpClient>> = LazyLock::new(|| {
-    let builder = || {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .timeout(Duration::from_secs(30))
-    };
     Arc::new(MediaHttpClient {
-        first: builder().build().expect("build public media HTTP client"),
-        onward: builder()
-            .no_proxy()
-            .dns_resolver(Arc::new(PublicAddresses))
-            .build()
-            .expect("build public media redirect HTTP client"),
+        public: public_client(),
+        first_hop: FirstHop::Public,
     })
 });
 
 pub fn client() -> Arc<MediaHttpClient> {
     Arc::clone(&SHARED)
+}
+
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn client_trusting_the_first_hop_for_tests() -> MediaHttpClient {
+    MediaHttpClient {
+        public: public_client(),
+        first_hop: FirstHop::Unchecked(
+            builder()
+                .build()
+                .expect("build the unchecked media HTTP client"),
+        ),
+    }
 }
 
 impl MediaHttpClient {
@@ -123,8 +149,12 @@ impl MediaHttpClient {
         url: &str,
         follow_redirects: bool,
     ) -> BoxFuture<'static, Result<MediaResponse, MediaFetchError>> {
-        let first = self.first.clone();
-        let onward = self.onward.clone();
+        let public = self.public.clone();
+        let first = match &self.first_hop {
+            FirstHop::Public => None,
+            #[cfg(feature = "test-support")]
+            FirstHop::Unchecked(client) => Some(client.clone()),
+        };
         let requested = url.to_owned();
         let parsed = url::Url::parse(url);
         Box::pin(async move {
@@ -135,9 +165,12 @@ impl MediaHttpClient {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err(MediaFetchError::Scheme { url: requested });
             }
+            if first.is_none() && !public_destination(&url) {
+                return Err(MediaFetchError::NotPublic { url: requested });
+            }
             let task = AbortOnDropHandle::new(runtime().spawn(async move {
                 let mut url = url;
-                let mut client = first;
+                let mut client = first.unwrap_or_else(|| public.clone());
                 for _ in 0..=MAX_REDIRECTS {
                     let response = client.get(url.clone()).send().await.map_err(|source| {
                         MediaFetchError::Fetch {
@@ -156,7 +189,7 @@ impl MediaHttpClient {
                         return Ok(MediaResponse { status, body });
                     }
                     url = next_hop(&url, response.headers()).map_err(MediaFetchError::Redirect)?;
-                    client = onward.clone();
+                    client = public.clone();
                 }
                 Err(MediaFetchError::Redirect(RedirectError::TooMany {
                     url: url.to_string(),
@@ -190,8 +223,18 @@ fn next_hop(
             url: url.to_string(),
             source,
         })?;
-    let public = matches!(next.scheme(), "http" | "https")
-        && match next.host() {
+    if !public_destination(&next) {
+        return Err(RedirectError::NotPublic {
+            url: url.to_string(),
+            to: next.to_string(),
+        });
+    }
+    Ok(next)
+}
+
+fn public_destination(url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && match url.host() {
             Some(url::Host::Ipv4(address)) => is_public(IpAddr::V4(address)),
             Some(url::Host::Ipv6(address)) => is_public(IpAddr::V6(address)),
             Some(url::Host::Domain(domain)) => {
@@ -199,14 +242,7 @@ fn next_hop(
                 domain != "localhost" && !domain.ends_with(".localhost")
             }
             None => false,
-        };
-    if !public {
-        return Err(RedirectError::NotPublic {
-            url: url.to_string(),
-            to: next.to_string(),
-        });
-    }
-    Ok(next)
+        }
 }
 
 fn is_public(address: IpAddr) -> bool {

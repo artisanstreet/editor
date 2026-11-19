@@ -33,6 +33,7 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
     let (inner, inner_hits) =
         serve(|| "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".to_owned())
             .await;
+    let http = editor_core::media_http::client_trusting_the_first_hop_for_tests();
     for target in [
         format!("http://127.0.0.1:{inner}/secret"),
         format!("http://localhost:{inner}/secret"),
@@ -40,7 +41,7 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
     ] {
         let (outer, outer_hits) = serve(redirect_to(target.clone())).await;
         let source = MediaSource::from(format!("http://127.0.0.1:{outer}/pixel.png"));
-        let result = load_image_bytes(&source, None, &editor_core::media_http::client()).await;
+        let result = load_image_bytes(&source, None, &http).await;
         assert!(
             matches!(
                 result,
