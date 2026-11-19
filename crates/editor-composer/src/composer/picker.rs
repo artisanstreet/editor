@@ -256,12 +256,12 @@ impl PickerState {
         host: &editor_core::HostData,
     ) {
         self.show_all_models = core
-            .settings
+            .settings()
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         self.hide_bad_model_options = core
-            .settings
+            .settings()
             .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);

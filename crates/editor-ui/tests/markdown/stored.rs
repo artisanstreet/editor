@@ -200,7 +200,7 @@ fn owner_fixture() -> (
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);
@@ -360,7 +360,7 @@ fn a_failed_page_reports_its_offset_and_cause_until_retried() {
     let client = editor_core::ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

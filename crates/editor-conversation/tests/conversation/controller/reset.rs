@@ -29,7 +29,7 @@ pub(super) fn fixture_at(
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

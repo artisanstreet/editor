@@ -512,7 +512,10 @@ fn device_settings_error(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    let message = match (core.settings.unreadable(), &controller.editor_setting_error) {
+    let message = match (
+        core.settings().unreadable(),
+        &controller.editor_setting_error,
+    ) {
         (Some(error), _) => format!(
             "Couldn't read settings.json: {}. The file is kept as it is and changes here are not saved until it can be read. Fix or remove the file, then reload.",
             ::diagnostics::chain(error)
@@ -633,7 +636,7 @@ fn notifications(
     include_header: bool,
 ) -> Element {
     let enabled = core
-        .settings
+        .settings()
         .get("notifications")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
@@ -1034,7 +1037,7 @@ fn performance(
     include_header: bool,
 ) -> Element {
     let lowered = core
-        .settings
+        .settings()
         .get("lower_refresh_rate")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
@@ -1056,7 +1059,7 @@ fn performance(
         Some(control),
     );
     let monitor_sync = core
-        .settings
+        .settings()
         .get("graphics_vsync")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
@@ -1098,7 +1101,7 @@ fn streaming_entries() -> Vec<SelectEntry<&'static str>> {
 
 fn streaming_value(core: &Core) -> &'static str {
     if core
-        .settings
+        .settings()
         .get("streaming_mode")
         .and_then(serde_json::Value::as_str)
         == Some("swift")
@@ -1177,7 +1180,7 @@ fn font_entries() -> Vec<SelectEntry<&'static str>> {
 
 fn font_value(core: &Core) -> &'static str {
     if core
-        .settings
+        .settings()
         .get("font_set")
         .and_then(serde_json::Value::as_str)
         == Some("system")
@@ -1237,7 +1240,7 @@ fn appearance(
     .build();
     let fonts = ui::fixed(fonts);
     let checked = core
-        .settings
+        .settings()
         .get("outline_text")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
@@ -1246,7 +1249,7 @@ fn appearance(
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
-        core.settings
+        core.settings()
             .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
@@ -1257,7 +1260,7 @@ fn appearance(
     let all_models = Switch::new(
         "settings-switch-show-all-models",
         *theme,
-        core.settings
+        core.settings()
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
@@ -1392,14 +1395,14 @@ impl ViewSnapshot {
                 Some(serde_json::json!(preferences.lower_frame_rate)),
                 Some(serde_json::json!(preferences.vsync)),
                 Some(serde_json::json!(
-                    core.settings
+                    core.settings()
                         .get("notifications")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(true)
                 )),
             ],
             device_settings_error: (
-                core.settings.unreadable().is_some(),
+                core.settings().unreadable().is_some(),
                 controller.editor_setting_error.clone(),
             ),
             host_settings: host_keys
@@ -1453,8 +1456,8 @@ impl ViewSnapshot {
                         core.mcp_sign_in(&host.id, &name).map(|sign_in| {
                             (
                                 name.clone(),
-                                sign_in.phase.clone(),
-                                sign_in.authorize_url.clone(),
+                                sign_in.phase().clone(),
+                                sign_in.authorize_url().map(str::to_owned),
                             )
                         })
                     })

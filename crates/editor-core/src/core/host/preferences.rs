@@ -48,7 +48,7 @@ impl HostData {
             .rev()
             .find_map(|(_, preference)| match preference {
                 Preference::ModelConfig(config) if config.engine == engine => Some(config),
-                _ => None,
+                Preference::ModelConfig(_) | Preference::ModelGroup { .. } => None,
             })
     }
     pub fn remember_model_group(&mut self, engine: EngineId, name: String, open: bool) {
@@ -92,7 +92,7 @@ impl HostData {
         self.preferences.generation = self.preferences.generation.wrapping_add(1);
         let generation = self.preferences.generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = match &preference {
                 Preference::ModelConfig(config) => client.set_model_config(config).await.map(drop),
@@ -100,8 +100,8 @@ impl HostData {
                     client.set_model_group(*engine, group).await
                 }
             };
-            let _ = sender
-                .send(HostCompletion::Preference(
+            sender
+                .offer(HostCompletion::Preference(
                     generation, choice, preference, result,
                 ))
                 .await;

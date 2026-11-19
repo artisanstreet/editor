@@ -48,7 +48,7 @@ fn source_owner_updates_revision_and_drops_recreated_host() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client.clone());

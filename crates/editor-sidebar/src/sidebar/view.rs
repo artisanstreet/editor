@@ -144,7 +144,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
         (
             core.screen().clone(),
             core.workspace_screen().clone(),
-            core.settings.get("dark_mode").cloned(),
+            core.settings().get("dark_mode").cloned(),
         ),
         (
             sidebar.menu.clone(),

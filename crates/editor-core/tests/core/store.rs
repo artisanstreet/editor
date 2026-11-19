@@ -30,7 +30,7 @@ fn unreadable_settings_are_kept_and_block_saves_until_recovered() {
     let original = b"{\"dark_mode\": false, \"font_set\": \"system\",".to_vec();
     std::fs::write(&path, &original).expect("seed settings.json");
     let mut core = Core::for_tests(files(&directory)).expect("core opens");
-    assert!(core.settings.unreadable().is_some());
+    assert!(core.settings().unreadable().is_some());
     assert!(matches!(
         core.set_setting("dark_mode", json!(true)),
         Err(SetSettingError::Unreadable { .. })
@@ -44,7 +44,7 @@ fn unreadable_settings_are_kept_and_block_saves_until_recovered() {
         Err(SetSettingError::Unreadable { .. })
     ));
     core.reload_settings();
-    assert!(core.settings.unreadable().is_none());
+    assert!(core.settings().unreadable().is_none());
     core.set_setting("dark_mode", json!(true))
         .expect("saves resume after recovery");
     settle(&mut core);
@@ -73,7 +73,7 @@ fn a_settings_file_that_breaks_later_is_not_overwritten() {
         std::fs::read(&path).expect("settings.json kept"),
         b"not json"
     );
-    assert!(core.settings.unreadable().is_some());
+    assert!(core.settings().unreadable().is_some());
 }
 
 #[cfg(unix)]
@@ -122,7 +122,7 @@ fn changing_a_setting_does_not_wait_for_a_slow_disk() {
 
     core.set_setting("dark_mode", json!(true))
         .expect("the change is taken at once");
-    assert_eq!(core.settings.get("dark_mode"), Some(&json!(true)));
+    assert_eq!(core.settings().get("dark_mode"), Some(&json!(true)));
     assert!(matches!(core.settings_save(), SettingsSave::Saving));
     opened
         .recv_timeout(Duration::from_secs(10))
@@ -138,7 +138,7 @@ fn changing_a_setting_does_not_wait_for_a_slow_disk() {
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("settings.json")).expect("json");
     assert_eq!(saved, json!({"dark_mode": true, "font_set": "system"}));
-    assert_eq!(core.settings.get("font_set"), Some(&json!("system")));
+    assert_eq!(core.settings().get("font_set"), Some(&json!("system")));
 }
 
 #[cfg(unix)]
@@ -165,7 +165,7 @@ fn a_setting_that_cannot_be_saved_says_why_and_goes_back() {
         SettingsSave::Failed(failure)
             if matches!(&**failure, SetSettingError::Save { key, .. } if key == "dark_mode")
     ));
-    assert_eq!(core.settings.get("dark_mode"), Some(&json!(false)));
+    assert_eq!(core.settings().get("dark_mode"), Some(&json!(false)));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("settings.json")).expect("json");
     assert_eq!(saved, json!({"dark_mode": false}));
@@ -199,7 +199,7 @@ fn forge(core: &mut Core, id: &str) -> HostId {
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     };
-    let identity = core.identity.clone().expect("test identity");
+    let identity = core.identity().cloned().expect("test identity");
     let client =
         ForgeClient::new(&config.address, &config.fingerprint, &identity).expect("test client");
     core.add_test_host(&config, client);
@@ -271,15 +271,15 @@ fn stored_settings_that_break_their_declaration_are_ignored_everywhere() {
     let mut core = Core::for_tests(files(&directory)).expect("core opens");
 
     assert_eq!(
-        core.settings.get("dark_mode"),
+        core.settings().get("dark_mode"),
         None,
         "a string where the theme takes a boolean is not the stored theme"
     );
-    assert!(core.settings.rejected("dark_mode").is_some());
-    assert_eq!(core.settings.get("streaming_mode"), None);
-    assert!(core.settings.rejected("streaming_mode").is_some());
-    assert_eq!(core.settings.get("graphics_vsync"), Some(&json!(false)));
-    assert_eq!(core.settings.get("font_set"), Some(&json!("system")));
+    assert!(core.settings().rejected("dark_mode").is_some());
+    assert_eq!(core.settings().get("streaming_mode"), None);
+    assert!(core.settings().rejected("streaming_mode").is_some());
+    assert_eq!(core.settings().get("graphics_vsync"), Some(&json!(false)));
+    assert_eq!(core.settings().get("font_set"), Some(&json!("system")));
 
     assert!(matches!(
         core.set_setting("streaming_mode", json!("fast")),
@@ -287,8 +287,8 @@ fn stored_settings_that_break_their_declaration_are_ignored_everywhere() {
     ));
     core.set_setting("dark_mode", json!(false))
         .expect("a valid value replaces the broken one");
-    assert_eq!(core.settings.get("dark_mode"), Some(&json!(false)));
-    assert!(core.settings.rejected("dark_mode").is_none());
+    assert_eq!(core.settings().get("dark_mode"), Some(&json!(false)));
+    assert!(core.settings().rejected("dark_mode").is_none());
 }
 
 #[test]

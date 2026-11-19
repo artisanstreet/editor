@@ -16,12 +16,7 @@ fn config() -> HostConfig {
 }
 
 fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new(
-        "127.0.0.1:1",
-        &"0".repeat(64),
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap()
+    ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
 }
 
 fn pending_copy(core: &Core, config: &HostConfig) -> ContentText {

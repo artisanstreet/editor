@@ -43,3 +43,9 @@ impl Clock {
         self.0.timestamp()
     }
 }
+
+impl std::fmt::Debug for Clock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Clock").finish_non_exhaustive()
+    }
+}

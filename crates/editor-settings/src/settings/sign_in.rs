@@ -17,7 +17,7 @@ impl Default for SignInForm {
 
 impl SignInForm {
     pub(crate) fn request_link(&self, core: &mut editor_core::Core) {
-        let device_name = core.device_name.clone();
+        let device_name = core.device_name().to_owned();
         core.account_mut()
             .request_link(self.email.borrow().text(), device_name);
     }

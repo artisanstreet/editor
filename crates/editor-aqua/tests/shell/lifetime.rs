@@ -8,7 +8,7 @@ use std::{
 use test_support::net::ClosingListener;
 
 fn client(core: &Core, address: &str) -> ForgeClient {
-    ForgeClient::new(address, &"0".repeat(64), core.identity.as_ref().unwrap()).unwrap()
+    ForgeClient::new(address, &"0".repeat(64), core.identity().unwrap()).unwrap()
 }
 
 fn config(address: &str) -> HostConfig {

@@ -7,7 +7,7 @@ impl RootViews {
     pub(super) fn warm_browser(&mut self, shell: &Shell) {
         let preferred = shell
             .core
-            .settings
+            .settings()
             .get("browser")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);

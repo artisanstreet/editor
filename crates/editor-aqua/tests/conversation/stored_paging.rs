@@ -174,7 +174,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
             &pairing.address,
             &pairing.code,
             &pairing.fingerprint,
-            core.identity.as_ref().unwrap(),
+            core.identity().unwrap(),
             "stored-paging",
             "Forge".to_owned(),
             HostKind::Local,
@@ -183,7 +183,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

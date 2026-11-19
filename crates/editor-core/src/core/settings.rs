@@ -94,10 +94,10 @@ impl Settings {
         }
     }
 
-    pub(crate) fn values(&self) -> crate::core::hosts::EditorSettings {
+    pub(crate) fn values(&self) -> EditorSettings {
         match self {
             Self::Loaded { values, .. } => values.clone(),
-            Self::Unreadable(_) => crate::core::hosts::EditorSettings::new(),
+            Self::Unreadable(_) => EditorSettings::new(),
         }
     }
 

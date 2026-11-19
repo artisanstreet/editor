@@ -36,6 +36,7 @@ pub enum HostSettingError {
     },
 }
 
+#[derive(Debug)]
 pub struct HostSettings {
     host: HostId,
     values: Map<String, Value>,
@@ -83,9 +84,9 @@ impl HostSettings {
         self.values.get(key)
     }
 
-    pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
-        let previous = self.values.insert(key.clone(), value);
-        self.decode(&key);
+    pub fn insert(&mut self, key: &str, value: Value) -> Option<Value> {
+        let previous = self.values.insert(key.to_owned(), value);
+        self.decode(key);
         previous
     }
 

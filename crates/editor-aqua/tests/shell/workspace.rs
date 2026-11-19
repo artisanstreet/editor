@@ -95,7 +95,7 @@ fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
             workspace.dispatch_actions(&mut core);
 
             assert_eq!(
-                core.settings.get("dark_mode"),
+                core.settings().get("dark_mode"),
                 Some(&serde_json::Value::Bool(dark))
             );
             assert_eq!(workspace.take_theme_transition(), Some(dark));

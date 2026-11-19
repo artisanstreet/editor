@@ -11,7 +11,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 const DECODE_FAILURE: &str = "Image is invalid or exceeds preview limits (32 MiB source, 64 MiB decoded, 8192px edges, 120 animation frames)";
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum BlobImage {
     Loading,
     Ready(Arc<ImageHandle>),
@@ -42,15 +42,13 @@ struct ImageValues {
     retained: HashMap<BlobHash, Retained>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BlobImages {
     values: Weak<RefCell<ImageValues>>,
 }
 impl BlobImages {
     pub fn lookup(&self, hash: &BlobHash) -> Option<BlobImage> {
-        let values = self.values.upgrade()?;
-        let result = values.borrow().lookup(hash);
-        result
+        self.values.upgrade()?.borrow().lookup(hash)
     }
 }
 impl ImageValues {
@@ -127,13 +125,13 @@ impl HostData {
         self.images.generation = self.images.generation.wrapping_add(1);
         let generation = self.images.generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let key = hash.clone();
         let task_hash = hash.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.blob(&task_hash).await;
-            let _ = sender
-                .send(HostCompletion::Image(key, generation, result))
+            sender
+                .offer(HostCompletion::Image(key, generation, result))
                 .await;
         });
         self.images
@@ -146,11 +144,11 @@ impl HostData {
         generation: u64,
         result: Result<Vec<u8>, crate::core::client::CallError>,
     ) -> bool {
-        if !self
+        if self
             .images
             .loads
             .get(&hash)
-            .is_some_and(|(current, _)| *current == generation)
+            .is_none_or(|(current, _)| *current != generation)
         {
             return false;
         }
@@ -162,36 +160,12 @@ impl HostData {
             }
             (Ok(bytes), Some(assets)) => match assets.decode_preview(Arc::<[u8]>::from(bytes)) {
                 Ok(handle) => {
-                    let notify = Arc::new(tokio::sync::Notify::new());
-                    let signal = Arc::clone(&notify);
-                    let subscription = assets.subscribe(Arc::new(move || signal.notify_one()));
-                    let sender = self.delivery.sender().map(HostMessage::Completion);
-                    let task_hash = hash.clone();
-                    let task = crate::core::runtime::runtime().spawn(async move {
-                        let _subscription = subscription;
-                        loop {
-                            let result = match handle.status() {
-                                ImageStatus::Pending => {
-                                    notify.notified().await;
-                                    continue;
-                                }
-                                ImageStatus::Ready { .. } => Ok(Arc::new(handle)),
-                                ImageStatus::Failed(_) | ImageStatus::Cancelled => {
-                                    Err(DECODE_FAILURE.to_owned())
-                                }
-                            };
-                            let _ = sender
-                                .send(HostCompletion::DecodedImage(task_hash, generation, result))
-                                .await;
-                            break;
-                        }
-                    });
-                    self.images
-                        .decoding
-                        .insert(hash, (generation, AbortOnDropHandle::new(task)));
+                    let assets = assets.clone();
+                    self.watch_decode(hash, generation, &assets, handle);
                     false
                 }
-                Err(_) => {
+                Err(error) => {
+                    tracing::debug!(host = %self.id, image = %hash, %error, "couldn't start decoding an image");
                     self.finish_image(hash, Err(DECODE_FAILURE.into()));
                     true
                 }
@@ -206,17 +180,50 @@ impl HostData {
             }
         }
     }
+    fn watch_decode(
+        &mut self,
+        hash: BlobHash,
+        generation: u64,
+        assets: &ImageAssets,
+        handle: ImageHandle,
+    ) {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&notify);
+        let subscription = assets.subscribe(Arc::new(move || signal.notify_one()));
+        let sender = self.delivery.sender().map(HostMessage::completion);
+        let task_hash = hash.clone();
+        let task = crate::core::runtime::runtime().spawn(async move {
+            let _subscription = subscription;
+            let result = loop {
+                match handle.status() {
+                    ImageStatus::Pending => notify.notified().await,
+                    ImageStatus::Ready { .. } => break Ok(Arc::new(handle)),
+                    ImageStatus::Failed(error) => {
+                        tracing::debug!(image = %task_hash, %error, "couldn't decode an image");
+                        break Err(DECODE_FAILURE.to_owned());
+                    }
+                    ImageStatus::Cancelled => break Err(DECODE_FAILURE.to_owned()),
+                }
+            };
+            sender
+                .offer(HostCompletion::DecodedImage(task_hash, generation, result))
+                .await;
+        });
+        self.images
+            .decoding
+            .insert(hash, (generation, AbortOnDropHandle::new(task)));
+    }
     pub(super) fn finish_decoded_image(
         &mut self,
         hash: BlobHash,
         generation: u64,
         result: Result<Arc<ImageHandle>, String>,
     ) -> bool {
-        if !self
+        if self
             .images
             .decoding
             .get(&hash)
-            .is_some_and(|(current, _)| *current == generation)
+            .is_none_or(|(current, _)| *current != generation)
         {
             return false;
         }
@@ -241,7 +248,7 @@ impl HostData {
                 .values()
                 .filter_map(|image| match image {
                     BlobImage::Ready(image) => image.decoded_bytes(),
-                    _ => None,
+                    BlobImage::Loading | BlobImage::Failed(_) => None,
                 })
                 .sum::<u64>()
                 > 16 * 1024 * 1024
@@ -260,7 +267,7 @@ impl HostData {
                         .retained
                         .insert(oldest, Retained::Failed(Arc::downgrade(&error)));
                 }
-                _ => {}
+                Some(BlobImage::Loading) | None => {}
             }
         }
         values.retained.retain(|_, result| result.alive());

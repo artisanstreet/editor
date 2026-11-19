@@ -81,7 +81,7 @@ impl Entry {
                         Err(problem) => self.sign_in.problem = Some(problem),
                         Ok(email) => {
                             self.sign_in.problem = None;
-                            let device = core.device_name.clone();
+                            let device = core.device_name().to_owned();
                             core.account_mut().request_link(email, device);
                         }
                     }

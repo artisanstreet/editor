@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RebuildStats {
     window_start: Option<Duration>,
     events: BTreeMap<&'static str, u32>,
@@ -103,19 +103,20 @@ fn enabled() -> bool {
 }
 
 fn now() -> Duration {
-    ORIGIN.with(|origin| origin.elapsed())
+    ORIGIN.with(Instant::elapsed)
 }
 
 pub fn record_event(kind: &'static str) {
     #[cfg(feature = "test-support")]
     TALLY.with(|tally| *tally.borrow_mut().events.entry(kind).or_default() += 1);
-    if enabled() {
-        if let Some(report) = STATS.with(|stats| stats.borrow_mut().event(now(), kind)) {
-            tracing::info!(target: "rebuild_stats", "{report}");
-        }
+    if enabled()
+        && let Some(report) = STATS.with(|stats| stats.borrow_mut().event(now(), kind))
+    {
+        tracing::info!(target: "rebuild_stats", "{report}");
     }
 }
 
+#[derive(Debug)]
 pub struct Span(&'static str, Option<Instant>);
 
 pub fn span(name: &'static str) -> Span {
@@ -142,10 +143,10 @@ pub fn record_rebuild(reasons: &[&'static str]) {
             *tally.reasons.entry(reason).or_default() += 1;
         }
     });
-    if enabled() {
-        if let Some(report) = STATS.with(|stats| stats.borrow_mut().rebuild(now(), reasons)) {
-            tracing::info!(target: "rebuild_stats", "{report}");
-        }
+    if enabled()
+        && let Some(report) = STATS.with(|stats| stats.borrow_mut().rebuild(now(), reasons))
+    {
+        tracing::info!(target: "rebuild_stats", "{report}");
     }
 }
 

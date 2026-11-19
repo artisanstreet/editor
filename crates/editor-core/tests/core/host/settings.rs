@@ -17,7 +17,7 @@ fn unreadable_mcp_servers_read_as_a_failure_not_as_none_configured() {
     assert_eq!(error.host, host);
 
     settings.insert(
-        MCP_SERVERS_KEY.to_owned(),
+        MCP_SERVERS_KEY,
         json!([{ "name": "github", "url": "https://mcp.example/github" }]),
     );
     let servers = settings.mcp_servers().expect("a corrected list reads");
@@ -40,7 +40,7 @@ fn unreadable_mcp_sign_in_states_read_as_a_failure_not_as_signed_out() {
         .expect_err("a list where a map of states belongs is not an empty map");
     assert!(matches!(error, HostSettingError::Decode { host: failed, .. } if *failed == host));
 
-    settings.insert(MCP_AUTH_KEY.to_owned(), json!({ "github": "signed_in" }));
+    settings.insert(MCP_AUTH_KEY, json!({ "github": "signed_in" }));
     let auth = settings.mcp_auth().expect("a corrected map reads");
     assert_eq!(auth.get("github"), Some(&McpAuthStatus::SignedIn));
 }
@@ -85,7 +85,7 @@ fn the_remembered_default_config_follows_its_setting() {
     let mut settings = HostSettings::new(HostId("forge".into()));
     assert!(settings.default_engine_config().is_none());
     settings.insert(
-        DEFAULT_ENGINE_CONFIG_KEY.to_owned(),
+        DEFAULT_ENGINE_CONFIG_KEY,
         json!({ "engine": "claude", "model": "opus", "effort": null }),
     );
     assert_eq!(
@@ -94,6 +94,6 @@ fn the_remembered_default_config_follows_its_setting() {
             .and_then(|config| config.model.as_deref()),
         Some("opus")
     );
-    settings.insert(DEFAULT_ENGINE_CONFIG_KEY.to_owned(), json!("opus"));
+    settings.insert(DEFAULT_ENGINE_CONFIG_KEY, json!("opus"));
     assert!(settings.default_engine_config().is_none());
 }

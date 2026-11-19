@@ -41,7 +41,7 @@ impl SettingWrites {
         value: Value,
     ) -> Option<SettingRequest> {
         self.failures.remove(&target);
-        let previous = settings.insert(target.key.to_owned(), value.clone());
+        let previous = settings.insert(target.key, value.clone());
         if let Some(write) = self.keys.get_mut(&target) {
             write.next = Some(value);
             return None;
@@ -103,7 +103,7 @@ impl SettingWrites {
         {
             match confirmed {
                 Some(value) => {
-                    settings.insert(request.target.key.to_owned(), value);
+                    settings.insert(request.target.key, value);
                 }
                 None => {
                     settings.remove(request.target.key);

@@ -19,7 +19,7 @@ fn host(core: &mut Core, id: &str) -> HostId {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

@@ -192,15 +192,19 @@ impl RootViews {
                 })
                 .collect();
             crate::core::diagnostics::open_timing::gate(
-                reveals.reason,
-                reveals.pending,
-                reveals.changed,
-                reveals.animating,
-                active,
-                painted_count,
-                visible_count,
-                candidates.len(),
-                lap_start.elapsed(),
+                &crate::core::diagnostics::open_timing::Gate {
+                    reason: reveals.reason,
+                    reveal: crate::core::diagnostics::open_timing::Reveal {
+                        pending: reveals.pending,
+                        changed: reveals.changed,
+                        animating: reveals.animating,
+                    },
+                    active,
+                    painted: painted_count,
+                    visible: visible_count,
+                    candidates: candidates.len(),
+                    elapsed: lap_start.elapsed(),
+                },
             );
             drop(tm_capture);
             let tm_ack = crate::shell::application::Tm::new("fc.ack");

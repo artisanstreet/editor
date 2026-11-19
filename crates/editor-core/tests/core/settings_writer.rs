@@ -118,7 +118,7 @@ fn an_older_failed_save_does_not_undo_a_newer_choice() {
     core.drain();
 
     assert_eq!(
-        core.settings.get("browser"),
+        core.settings().get("browser"),
         Some(&json!("third")),
         "the failed older save leaves the newer choice on screen"
     );
@@ -129,7 +129,7 @@ fn an_older_failed_save_does_not_undo_a_newer_choice() {
     drain_until(&mut core, "the newer save to land", |core| {
         matches!(core.settings_save(), SettingsSave::Saved)
     });
-    assert_eq!(core.settings.get("browser"), Some(&json!("third")));
+    assert_eq!(core.settings().get("browser"), Some(&json!("third")));
     assert_eq!(folder.stored(), json!({"browser": "third"}));
 }
 
@@ -152,11 +152,11 @@ fn a_rolled_back_change_stays_reported_after_a_later_save_lands() {
         &json!({"browser": "first", "dark_mode": false, "font_set": "system"}),
     );
     drain_until(&mut core, "the later save to land", |core| {
-        core.settings.get("font_set") == Some(&json!("system"))
+        core.settings().get("font_set") == Some(&json!("system"))
     });
 
-    assert_eq!(core.settings.get("browser"), Some(&json!("first")));
-    assert_eq!(core.settings.get("dark_mode"), Some(&json!(true)));
+    assert_eq!(core.settings().get("browser"), Some(&json!("first")));
+    assert_eq!(core.settings().get("dark_mode"), Some(&json!(true)));
     assert!(
         matches!(
             core.settings_save(),
@@ -189,7 +189,7 @@ fn reloading_settings_clears_a_failed_save() {
         matches!(core.settings_save(), SettingsSave::Saved),
         "Reload settings does not show the old failure again"
     );
-    assert_eq!(core.settings.get("dark_mode"), Some(&json!(false)));
+    assert_eq!(core.settings().get("dark_mode"), Some(&json!(false)));
 }
 
 fn child_process(test: &str) -> bool {

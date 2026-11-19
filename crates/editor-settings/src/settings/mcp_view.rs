@@ -37,7 +37,7 @@ fn button(
 
 fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
     if let Some(sign_in) = sign_in {
-        return Some(match &sign_in.phase {
+        return Some(match sign_in.phase() {
             McpSignInPhase::Starting => "Opening the sign-in…".into(),
             McpSignInPhase::Waiting => "Waiting for the browser…".into(),
             McpSignInPhase::Finishing => "Signing in…".into(),
@@ -71,7 +71,7 @@ fn controls(
             emit.clone(),
         )
     };
-    match sign_in.map(|sign_in| (&sign_in.phase, sign_in.authorize_url.clone())) {
+    match sign_in.map(|sign_in| (sign_in.phase(), sign_in.authorize_url().map(str::to_owned))) {
         Some((McpSignInPhase::Waiting, Some(url))) => vec![
             make(
                 "open",

@@ -154,10 +154,7 @@ impl MarketplaceController {
             }
             self.page.sync_host(
                 id.clone(),
-                host.skill_catalog
-                    .as_deref()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
+                host.skill_catalog.as_deref().unwrap_or_default(),
                 &servers,
             );
         } else {

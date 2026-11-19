@@ -191,10 +191,10 @@ impl Core {
             ImmediateCall::SettingGet { key } => {
                 let decl = editor_setting(&key)?;
                 if let Settings::Unreadable(source) = &self.settings {
-                    return Err(EditorCallError::Unreadable { key, source: source.clone() });
+                    return Err(EditorCallError::Unreadable { key, source: std::sync::Arc::clone(source) });
                 }
                 if let Some(source) = self.settings.rejected(&key) {
-                    return Err(EditorCallError::Stored { key, source: source.clone() });
+                    return Err(EditorCallError::Stored { key, source: std::sync::Arc::clone(source) });
                 }
                 Ok(self.settings.get(&key).cloned().unwrap_or_else(|| decl.default_value()))
             }

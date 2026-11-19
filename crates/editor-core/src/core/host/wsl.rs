@@ -68,7 +68,7 @@ impl HostData {
                 tracing::warn!(
                     "couldn't keep {distro} awake: {}",
                     ::diagnostics::chain(error)
-                )
+                );
             })
             .ok();
     }
@@ -79,11 +79,11 @@ impl HostData {
         self.wsl_generation = self.wsl_generation.wrapping_add(1);
         let generation = self.wsl_generation;
         let target = self.wsl_target.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = hosts::wsl_state().await;
-            let _ = sender
-                .send(HostCompletion::WslProbe(generation, target, result))
+            sender
+                .offer(HostCompletion::WslProbe(generation, target, result))
                 .await;
         });
         self.wsl_probe = Some(AbortOnDropHandle::new(task));
@@ -91,7 +91,7 @@ impl HostData {
     pub(super) fn finish_wsl_probe(
         &mut self,
         generation: u64,
-        target: WslTarget,
+        target: &WslTarget,
         result: Result<Vec<hosts::WslDistro>, hosts::WslStateError>,
     ) -> bool {
         if generation != self.wsl_generation {
@@ -111,7 +111,7 @@ impl HostData {
                 return false;
             }
         };
-        let found = distros.into_iter().find(|distro| match &target {
+        let found = distros.into_iter().find(|distro| match target {
             WslTarget::Distro(name) => &distro.name == name,
             WslTarget::Default => distro.default,
             WslTarget::None => false,
@@ -151,29 +151,27 @@ impl HostData {
         wsl.error = None;
         let distro = wsl.distro.clone();
         self.pending_events.push(HostEvent::Changed);
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = hosts::start_wsl_forge(distro.clone()).await;
-            let _ = sender
-                .send(HostCompletion::WslStarted(distro, result))
+            sender
+                .offer(HostCompletion::WslStarted(distro, result))
                 .await;
         });
         self.wsl_start = Some(AbortOnDropHandle::new(task));
     }
     pub(super) fn finish_wsl_start(
         &mut self,
-        distro: String,
+        distro: &str,
         result: Result<(), hosts::StartWslForgeError>,
     ) {
         self.wsl_start = None;
+        let failure = result.err();
         if let Some(wsl) = &mut self.wsl {
             wsl.starting = false;
-            wsl.error = result
-                .as_ref()
-                .err()
-                .map(|error| ::diagnostics::chain(&error));
+            wsl.error = failure.as_ref().map(|error| ::diagnostics::chain(error));
         }
-        if let Err(error) = &result {
+        if let Some(error) = &failure {
             tracing::warn!(
                 distro,
                 "couldn't start Forge in WSL: {}",
@@ -181,7 +179,7 @@ impl HostData {
             );
         }
         if self.wsl_target == WslTarget::Default {
-            self.wsl_target = WslTarget::Distro(distro);
+            self.wsl_target = WslTarget::Distro(distro.to_owned());
         }
         self.retry_now();
         self.probe_wsl();

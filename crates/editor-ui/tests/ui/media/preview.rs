@@ -23,7 +23,7 @@ fn fixture() -> (
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);
@@ -200,7 +200,7 @@ fn replacement_host_cannot_drive_a_preview_from_the_previous_instance() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);
@@ -358,7 +358,7 @@ fn ready_only_preview_rejects_replaced_host_and_stale_actions() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

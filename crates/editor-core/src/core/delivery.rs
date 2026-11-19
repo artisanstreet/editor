@@ -5,12 +5,15 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct AdmissionOrder(Arc<Mutex<u64>>);
 
 impl AdmissionOrder {
     pub(crate) fn inspect<R>(&self, inspect: impl FnOnce() -> R) -> R {
-        let _guard = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inspect()
     }
 }
@@ -87,6 +90,9 @@ impl<T, U> MappedSender<T, U> {
     pub(crate) async fn send(&self, message: T) -> Result<(), mpsc::error::SendError<U>> {
         self.sender.send((self.map)(message)).await
     }
+    pub(crate) async fn offer(&self, message: T) {
+        self.sender.offer((self.map)(message)).await;
+    }
 }
 impl<T> Clone for DeliverySender<T> {
     fn clone(&self) -> Self {
@@ -131,7 +137,8 @@ impl<T> Delivery<T> {
     pub(crate) fn reset_for_tests(&mut self) {
         let wake = self.sender.wake.clone();
         let order = self.sender.order.clone();
-        let capacity = NonZeroUsize::new(self.receiver.max_capacity()).unwrap();
+        let capacity = NonZeroUsize::new(self.receiver.max_capacity())
+            .expect("invariant: a delivery channel was built with a non-zero capacity");
         *self = Self::with_order(capacity, wake, order);
     }
     pub fn wake_mailbox(&self) -> Option<&Mailbox<()>> {
@@ -142,13 +149,13 @@ impl<T> Delivery<T> {
     }
     pub fn waker(&self) -> aqua::mailbox::Wake {
         let wake = self.sender.wake.clone();
-        Arc::new(move || {
-            let _ = wake.send(());
+        Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(SendError::Full(()) | SendError::Closed(())) => {}
         })
     }
     pub fn wake(&self) {
         match self.sender.wake.send(()) {
-            Ok(()) | Err(SendError::Full(())) | Err(SendError::Closed(())) => {}
+            Ok(()) | Err(SendError::Full(()) | SendError::Closed(())) => {}
         }
     }
     pub fn peek_order(&mut self) -> Option<u64> {
@@ -189,21 +196,25 @@ impl<T> DeliverySender<T> {
     fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
+    pub async fn offer(&self, message: T) {
+        if self.send(message).await.is_err() {
+            tracing::debug!("the delivery's owner has been dropped, so nobody is left to receive");
+        }
+    }
     pub async fn send(&self, message: T) -> Result<(), mpsc::error::SendError<T>> {
-        let slot = match Arc::clone(&self.slots).acquire_owned().await {
-            Ok(slot) => slot,
-            Err(_) => return Err(mpsc::error::SendError(message)),
-        };
-        let permit = match self.sender.reserve().await {
-            Ok(permit) => permit,
-            Err(_) => return Err(mpsc::error::SendError(message)),
+        let slot = Arc::clone(&self.slots)
+            .acquire_owned()
+            .await
+            .expect("invariant: a delivery never closes its admission slots");
+        let Ok(permit) = self.sender.reserve().await else {
+            return Err(mpsc::error::SendError(message));
         };
         {
             let mut sequence = self
                 .order
                 .0
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let current = *sequence;
             *sequence = sequence
                 .checked_add(1)
@@ -215,8 +226,41 @@ impl<T> DeliverySender<T> {
             });
         }
         match self.wake.send(()) {
-            Ok(()) | Err(SendError::Full(())) | Err(SendError::Closed(())) => {}
+            Ok(()) | Err(SendError::Full(()) | SendError::Closed(())) => {}
         }
         Ok(())
+    }
+}
+
+impl<T> std::fmt::Debug for Delivery<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Delivery")
+            .field("capacity", &self.receiver.max_capacity())
+            .field("queued", &self.receiver.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> std::fmt::Debug for OwnedDelivery<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedDelivery")
+            .field("delivery", &self.delivery)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> std::fmt::Debug for DeliverySender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeliverySender")
+            .field("closed", &self.sender.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, U> std::fmt::Debug for MappedSender<T, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedSender")
+            .field("sender", &self.sender)
+            .finish_non_exhaustive()
     }
 }

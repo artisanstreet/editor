@@ -91,7 +91,7 @@ fn coalescing_notifications_never_drops_the_underlying_text_appends() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

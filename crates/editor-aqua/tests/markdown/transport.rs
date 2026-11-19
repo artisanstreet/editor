@@ -117,7 +117,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             &pairing.address,
             &pairing.code,
             &pairing.fingerprint,
-            core.identity.as_ref().unwrap(),
+            core.identity().unwrap(),
             "stored-test",
             "Forge".to_owned(),
             HostKind::Local,
@@ -126,7 +126,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client.clone());

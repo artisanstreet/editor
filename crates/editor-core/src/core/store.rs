@@ -14,6 +14,7 @@ use crate::core::{
     settings::{SetSettingError, Settings},
     settings_writer::{SettingsSave, SettingsSaves},
 };
+use aqua::mailbox::SendError;
 use artisan_api::tls::Identity;
 use std::{
     collections::{HashMap, VecDeque},
@@ -62,7 +63,7 @@ pub enum DialError {
         host: HostId,
         label: String,
         #[source]
-        source: services::OpenRelayError,
+        source: Box<services::OpenRelayError>,
     },
     #[error("save the pairing with this machine's Forge {host}")]
     Save {
@@ -96,7 +97,7 @@ pub(crate) struct Effects {
 impl Effects {
     fn new(wake: aqua::mailbox::Sender<()>, draining: std::rc::Rc<std::cell::Cell<bool>>) -> Self {
         Self {
-            queue: Default::default(),
+            queue: std::rc::Rc::default(),
             wake,
             draining,
         }
@@ -104,7 +105,9 @@ impl Effects {
     fn enqueue(&self, effect: Effect) {
         self.queue.borrow_mut().push_back(effect);
         if !self.draining.get() {
-            let _ = self.wake.send(());
+            match self.wake.send(()) {
+                Ok(()) | Err(SendError::Full(()) | SendError::Closed(())) => {}
+            }
         }
     }
     fn push(&self, event: CoreEvent) {
@@ -129,10 +132,10 @@ impl Effects {
 }
 
 pub struct Core {
-    pub files: EditorFiles,
-    pub identity: Option<Identity>,
-    pub settings: Settings,
-    pub device_name: String,
+    pub(crate) files: EditorFiles,
+    pub(crate) identity: Option<Identity>,
+    pub(crate) settings: Settings,
+    pub(crate) device_name: String,
     hosts: HashMap<HostId, HostData>,
     hosts_file: HostsFile,
     relay_configs: HashMap<HostId, HostConfig>,
@@ -219,7 +222,7 @@ impl Core {
         let wake = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
         let admission = AdmissionOrder::default();
         let draining = std::rc::Rc::new(std::cell::Cell::new(false));
-        let events = Effects::new(wake.sender(), draining.clone());
+        let events = Effects::new(wake.sender(), std::rc::Rc::clone(&draining));
         let account = Account::new(
             files.clone(),
             services,
@@ -230,7 +233,7 @@ impl Core {
         let gate = account.entry_gate();
         let mcp_sign_ins = McpSignIns::new(wake.sender(), admission.clone(), events.clone());
         let opened = Delivery::with_order(
-            NonZeroUsize::new(64).unwrap(),
+            NonZeroUsize::new(64).expect("invariant: the dial delivery capacity is non-zero"),
             wake.sender(),
             admission.clone(),
         );
@@ -368,9 +371,9 @@ impl Core {
     }
 
     pub fn set_image_assets(&mut self, assets: aqua::images::ImageAssets) {
-        for host in self.hosts.values_mut() {
-            host.set_image_assets(assets.clone());
-        }
+        self.hosts
+            .values_mut()
+            .for_each(|host| host.set_image_assets(assets.clone()));
         self.image_assets = Some(assets);
     }
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
@@ -395,6 +398,18 @@ impl Core {
                 .any(|dial| matches!(dial, Dial::Opening { .. }));
             admitted || opening || !self.events.queue.borrow().is_empty()
         })
+    }
+    pub const fn files(&self) -> &EditorFiles {
+        &self.files
+    }
+    pub const fn identity(&self) -> Option<&Identity> {
+        self.identity.as_ref()
+    }
+    pub const fn settings(&self) -> &Settings {
+        &self.settings
+    }
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
     pub fn account(&self) -> &Account {
         &self.account
@@ -486,7 +501,11 @@ impl Core {
         if !matches!(self.gate, EntryGate::Ready { .. }) {
             return match screen {
                 Screen::Settings(SettingsPage::Account) | Screen::Home => screen,
-                _ => Screen::Home,
+                Screen::Thread { .. }
+                | Screen::NewThread { .. }
+                | Screen::Settings(_)
+                | Screen::Marketplace
+                | Screen::Usage => Screen::Home,
             };
         }
         match (screen, self.active_host()) {
@@ -601,7 +620,7 @@ impl Core {
         if let Settings::Unreadable(source) = &self.settings {
             return Err(SetSettingError::Unreadable {
                 key: key.to_owned(),
-                source: source.clone(),
+                source: std::sync::Arc::clone(source),
             });
         }
         if self.settings.get(key) == Some(&value) && self.settings.rejected(key).is_none() {
@@ -647,7 +666,7 @@ impl Core {
         self.relay_configs.remove(id);
         self.mcp_sign_ins.end_host(id);
         if let Some(host) = self.hosts.remove(id) {
-            host.client.close_relay();
+            host.close();
         }
         self.dials.remove(id);
         self.forget_navigation_to(std::slice::from_ref(id));
@@ -678,12 +697,14 @@ impl Core {
             );
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let _ = sender.send(Err(
-            crate::core::mcp_sign_in::StartMcpSignInError::Disconnected {
-                host: host.clone(),
-                server: server.to_owned(),
-            },
-        ));
+        sender
+            .send(Err(
+                crate::core::mcp_sign_in::StartMcpSignInError::Disconnected {
+                    host: host.clone(),
+                    server: server.to_owned(),
+                },
+            ))
+            .expect("invariant: the sign-in answer's receiver is still held here");
         receiver
     }
     pub fn cancel_mcp_sign_in(&mut self, host: &HostId, server: &str) {
@@ -762,36 +783,10 @@ impl Core {
                 }
                 .await
             } else {
-                let label = machine.label.clone();
-                let config = HostConfig {
-                    id: task_id.clone(),
-                    name: label.clone(),
-                    address: String::new(),
-                    fingerprint: String::new(),
-                    kind: HostKind::Account {
-                        account: account_id.clone(),
-                        machine: machine.id.clone(),
-                    },
-                };
-                match session {
-                    None => Err(DialError::SignedOut {
-                        host: task_id.clone(),
-                        label,
-                    }),
-                    Some(session) => {
-                        services::open_relay(route, http, session, account_id, machine)
-                            .await
-                            .map(|client| (config, client))
-                            .map_err(|source| DialError::Relay {
-                                host: task_id.clone(),
-                                label,
-                                source,
-                            })
-                    }
-                }
+                open_through_relay(task_id.clone(), machine, account_id, session, route, http).await
             };
-            let _ = sender
-                .send(Opened {
+            sender
+                .offer(Opened {
                     id: task_id,
                     generation,
                     result,
@@ -869,7 +864,7 @@ impl Core {
         for id in ids {
             self.mcp_sign_ins.end_host(id);
             if let Some(host) = self.hosts.remove(id) {
-                host.client.close_relay();
+                host.close();
             }
             self.relay_configs.remove(id);
             self.dials.remove(id);
@@ -897,9 +892,9 @@ impl Core {
     fn reconcile(&mut self) {
         let gate = self.account.entry_gate();
         if !matches!(gate, EntryGate::Ready { .. }) {
-            for host in self.hosts.values() {
-                host.revoke_source_providers();
-            }
+            self.hosts
+                .values()
+                .for_each(HostData::revoke_source_providers);
             self.mcp_sign_ins.end_all();
         }
         self.gate = gate.clone();
@@ -913,7 +908,12 @@ impl Core {
         let reading = self.account.reading_local_forge();
         let local = match self.account.local_forge() {
             LocalForge::Enrolled { machine_id } => Some(machine_id),
-            _ => None,
+            LocalForge::Unknown
+            | LocalForge::Unenrolled
+            | LocalForge::Pending
+            | LocalForge::Claimed { .. }
+            | LocalForge::Revoked { .. }
+            | LocalForge::OtherAccount => None,
         };
         let onboarded = self.account.onboarded_machine().map(str::to_owned);
         let stale: Vec<_> = self
@@ -954,7 +954,7 @@ impl Core {
         }
         self.events.push(CoreEvent::AccessChanged);
     }
-    pub fn drain_with(&mut self, receive: impl FnMut(&mut Core, CoreEvent)) {
+    pub fn drain_with(&mut self, receive: impl FnMut(&mut Self, CoreEvent)) {
         if self.drain_step(receive) {
             self.opened.wake();
         }
@@ -962,20 +962,13 @@ impl Core {
     pub fn wake(&self) {
         self.opened.wake();
     }
-    pub fn drain_step(&mut self, mut receive: impl FnMut(&mut Core, CoreEvent)) -> bool {
+    pub fn drain_step(&mut self, mut receive: impl FnMut(&mut Self, CoreEvent)) -> bool {
         if self.draining.replace(true) {
             return true;
         }
-        let _guard = DrainGuard(self.draining.clone());
+        let _guard = DrainGuard(std::rc::Rc::clone(&self.draining));
         self.wake.drain();
         self.dispatch_events(&mut receive);
-        enum Source {
-            Account,
-            Mcp,
-            Opened,
-            Saved,
-            Host(HostId),
-        }
         let admission = self.admission.clone();
         let next = admission.inspect(|| {
             let mut next: Option<(u64, Source)> = None;
@@ -990,9 +983,9 @@ impl Core {
             consider(self.mcp_sign_ins.peek_order(), Source::Mcp);
             consider(self.opened.peek_order(), Source::Opened);
             consider(self.saves.peek_order(), Source::Saved);
-            for (id, host) in &mut self.hosts {
-                consider(host.peek_order(), Source::Host(id.clone()));
-            }
+            self.hosts
+                .iter_mut()
+                .for_each(|(id, host)| consider(host.peek_order(), Source::Host(id.clone())));
             next
         });
         match next.map(|(_, source)| source) {
@@ -1032,22 +1025,22 @@ impl Core {
                     .any(|host| host.peek_order().is_some())
         })
     }
-    fn deliver_account(&mut self, receive: &mut impl FnMut(&mut Core, CoreEvent)) {
+    fn deliver_account(&mut self, receive: &mut impl FnMut(&mut Self, CoreEvent)) {
         let acknowledgement = self.account.drain();
         self.dispatch_events(receive);
         drop(acknowledgement);
     }
-    fn deliver_mcp(&mut self, receive: &mut impl FnMut(&mut Core, CoreEvent)) {
+    fn deliver_mcp(&mut self, receive: &mut impl FnMut(&mut Self, CoreEvent)) {
         self.mcp_sign_ins.drain();
         self.dispatch_events(receive);
     }
-    fn deliver_host(&mut self, id: &HostId, receive: &mut impl FnMut(&mut Core, CoreEvent)) {
+    fn deliver_host(&mut self, id: &HostId, receive: &mut impl FnMut(&mut Self, CoreEvent)) {
         if let Some(host) = self.hosts.get_mut(id) {
             host.drain();
         }
         self.dispatch_events(receive);
     }
-    fn dispatch_events(&mut self, receive: &mut impl FnMut(&mut Core, CoreEvent)) {
+    fn dispatch_events(&mut self, receive: &mut impl FnMut(&mut Self, CoreEvent)) {
         while let Some(effect) = self.events.pop() {
             match effect {
                 Effect::Core(event) => receive(self, event),
@@ -1127,4 +1120,57 @@ fn device_name() -> String {
         })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Artisan Editor".to_owned())
+}
+
+enum Source {
+    Account,
+    Mcp,
+    Opened,
+    Saved,
+    Host(HostId),
+}
+
+async fn open_through_relay(
+    id: HostId,
+    machine: artisan_account::network::MachineEntry,
+    account_id: String,
+    session: Option<artisan_account::network::SessionToken>,
+    route: services::RelayRoute,
+    http: artisan_account::network::CoreSessionClient,
+) -> Result<(HostConfig, ForgeClient), DialError> {
+    let label = machine.label.clone();
+    let config = HostConfig {
+        id: id.clone(),
+        name: label.clone(),
+        address: String::new(),
+        fingerprint: String::new(),
+        kind: HostKind::Account {
+            account: account_id.clone(),
+            machine: machine.id.clone(),
+        },
+    };
+    match session {
+        None => Err(DialError::SignedOut {
+            host: id.clone(),
+            label,
+        }),
+        Some(session) => services::open_relay(route, http, session, account_id, machine)
+            .await
+            .map(|client| (config, client))
+            .map_err(|source| DialError::Relay {
+                host: id,
+                label,
+                source: Box::new(source),
+            }),
+    }
+}
+
+impl std::fmt::Debug for Core {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Core")
+            .field("hosts", &self.hosts.len())
+            .field("workspace_host", &self.workspace_host)
+            .field("account", &self.account)
+            .finish_non_exhaustive()
+    }
 }

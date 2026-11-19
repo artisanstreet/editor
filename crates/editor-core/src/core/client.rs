@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ForgeClient {
     http: reqwest::Client,
     transport: Transport,
@@ -26,6 +26,15 @@ pub struct ForgeClient {
 enum Transport {
     Direct(String),
     Relay(Arc<artisan_account::relay_client::RelayClient>),
+}
+
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct(base) => f.debug_tuple("Direct").field(base).finish(),
+            Self::Relay(_) => f.write_str("Relay"),
+        }
+    }
 }
 
 struct Request {
@@ -492,7 +501,7 @@ impl ForgeClient {
         clippy::suspicious_operation_groupings,
         reason = "range totals are checked against the reference's record count on purpose"
     )]
-    pub(crate) async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
+    pub(crate) async fn collection_range<T: DeserializeOwned + Send + 'static>(
         &self,
         reference: &artisan_api::CollectionRef,
         offset: u64,
@@ -1091,8 +1100,7 @@ pub(crate) async fn read_body(
     Ok(bytes)
 }
 
-fn source_ranges() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
-    static RANGES: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-        std::sync::OnceLock::new();
-    RANGES.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+fn source_ranges() -> &'static Arc<tokio::sync::Semaphore> {
+    static RANGES: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    RANGES.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
 }

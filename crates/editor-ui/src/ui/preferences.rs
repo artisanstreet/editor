@@ -71,7 +71,7 @@ pub struct Preferences {
 
 impl Preferences {
     pub fn from_core(core: &Core, system: SystemAccess) -> Self {
-        let settings = &core.settings;
+        let settings = core.settings();
         let boolean = |key: &str| settings.get(key).and_then(serde_json::Value::as_bool);
         let string = |key: &str| settings.get(key).and_then(serde_json::Value::as_str);
         Self {

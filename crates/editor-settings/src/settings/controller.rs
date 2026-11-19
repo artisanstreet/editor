@@ -264,7 +264,7 @@ impl SettingsController {
 
     pub(crate) fn claim_forge(&mut self, core: &mut Core) {
         let code = self.forge_code.borrow().text().to_owned();
-        core.account_mut().claim_code(code);
+        core.account_mut().claim_code(&code);
         self.forge_code.borrow_mut().set_text("");
     }
 

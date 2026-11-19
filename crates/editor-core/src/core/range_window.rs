@@ -82,12 +82,14 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
     }
 }
 
+#[derive(Debug)]
 pub enum RangeState<R> {
     Loading,
     Ready(Arc<R>),
     Failed(String),
 }
 
+#[derive(Debug)]
 pub struct RangeWindow<R: RangePage + Send> {
     client: Option<ForgeClient>,
     source: R::Source,
@@ -103,6 +105,7 @@ pub type ContentWindow = RangeWindow<ContentRange>;
 pub type CollectionWindow<T> = RangeWindow<CollectionRange<T>>;
 
 #[cfg(feature = "test-support")]
+#[derive(Debug)]
 pub struct RangeCompletion<R: RangePage + Send> {
     generation: u64,
     sender: crate::core::delivery::DeliverySender<(u64, Result<R, RangeError>)>,
@@ -216,7 +219,7 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.read = Some(AbortOnDropHandle::new(
             crate::core::runtime::runtime().spawn(async move {
                 let result = future.await;
-                let _ = sender.send((generation, result)).await;
+                sender.offer((generation, result)).await;
             }),
         ));
     }

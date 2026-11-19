@@ -232,7 +232,7 @@ fn dispatch_reports_visible_changes_without_blocking_side_effects() {
         &mut core,
         ViewAction::SetNotifications(true)
     ));
-    assert_eq!(core.settings.get("notifications"), Some(&json!(true)));
+    assert_eq!(core.settings().get("notifications"), Some(&json!(true)));
     assert!(dispatch(
         &mut settings,
         &mut core,

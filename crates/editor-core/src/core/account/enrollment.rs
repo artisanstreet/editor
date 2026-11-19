@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::core::ae::{Ae, AeError};
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadBindingError {
+pub(super) enum ReadBindingError {
     #[error("ask `ae account status`")]
     Ae(#[source] AeError),
     #[error("read what `ae account status` printed")]
@@ -15,7 +15,7 @@ pub enum ReadBindingError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum BindForgeError {
+pub(super) enum BindForgeError {
     #[error("read the local Forge's account binding")]
     Status(#[source] ReadBindingError),
     #[error("ask `ae` to enroll this machine's Forge")]
@@ -33,7 +33,7 @@ pub enum BindForgeError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AeBinding {
+pub(super) enum AeBinding {
     Unenrolled,
     Pending,
     Claimed {

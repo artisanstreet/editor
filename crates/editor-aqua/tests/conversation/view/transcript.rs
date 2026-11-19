@@ -28,7 +28,7 @@ fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

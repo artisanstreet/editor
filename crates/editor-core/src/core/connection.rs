@@ -160,30 +160,31 @@ pub(super) fn follow(
 
 pub async fn run(
     client: ForgeClient,
-    mut updates: impl UpdateSink,
+    updates: impl UpdateSink,
     retry: Arc<Notify>,
     mut observed: watch::Receiver<Option<ThreadId>>,
     deadlines: Deadlines,
 ) {
     let budget = Arc::new(tokio::sync::Semaphore::new(EVENT_BUDGET));
-    let mut since = None;
+    let mut cursor = Cursor::default();
     let mut attempt = 0_u32;
     loop {
         let connecting = match attempt {
             0 => ConnectionStatus::Connecting,
             attempt => ConnectionStatus::Reconnecting { attempt },
         };
-        if (since.is_none() || attempt > 0) && !updates.deliver(Update::Status(connecting)).await {
+        if (cursor.since.is_none() || attempt > 0)
+            && !updates.deliver(Update::Status(connecting)).await
+        {
             return;
         }
-        let mut live_since = None;
+        cursor.live_since = None;
         let result = session(
             &client,
-            &mut since,
-            &mut updates,
+            &mut cursor,
+            &updates,
             &retry,
             &mut observed,
-            &mut live_since,
             &budget,
             deadlines,
         )
@@ -193,7 +194,7 @@ pub async fn run(
         }
         let (reason, fault) = match result {
             Ok(End::Reset) => {
-                since = None;
+                cursor.since = None;
                 attempt = 0;
                 continue;
             }
@@ -202,7 +203,10 @@ pub async fn run(
             Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
             Err(error) => (::diagnostics::chain(&error), error.fault()),
         };
-        if live_since.is_some_and(|live: tokio::time::Instant| live.elapsed() >= HEALTHY_STREAM) {
+        if cursor
+            .live_since
+            .is_some_and(|live| live.elapsed() >= HEALTHY_STREAM)
+        {
             attempt = 0;
         }
         attempt = attempt.saturating_add(1);
@@ -224,43 +228,28 @@ pub async fn run(
     }
 }
 
+#[derive(Debug, Default)]
+struct Cursor {
+    since: Option<Seq>,
+    live_since: Option<tokio::time::Instant>,
+}
+
 fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(250 * 2_u64.saturating_pow(attempt.min(6))).min(Duration::from_secs(15))
 }
 
-async fn session(
+async fn open_events(
     client: &ForgeClient,
-    since: &mut Option<Seq>,
-    updates: &mut impl UpdateSink,
-    retry: &Notify,
+    head: Seq,
     observed: &mut watch::Receiver<Option<ThreadId>>,
-    live_since: &mut Option<tokio::time::Instant>,
-    budget: &Arc<tokio::sync::Semaphore>,
     deadlines: Deadlines,
-) -> Result<End, SessionError> {
-    let head = if let Some(head) = *since {
-        head
-    } else {
-        let state = client.state().await.map_err(SessionError::State)?;
-        let head = state.head;
-        if !updates.deliver(Update::State(Box::new(state))).await {
-            return Ok(End::Dropped);
-        }
-        *since = Some(head);
-        head
-    };
-    if client.is_relay() {
-        return relay_session(
-            client, &head, since, updates, retry, observed, live_since, budget, deadlines,
-        )
-        .await;
-    }
+) -> Result<reqwest::Response, SessionError> {
     let observation = observed.borrow_and_update().clone();
     let mut query = vec![("summary", "true".to_owned())];
     if let Some(thread) = observation {
         query.push(("thread", thread.to_string()));
     }
-    let response = tokio::time::timeout(deadlines.open, async {
+    tokio::time::timeout(deadlines.open, async {
         let response = client
             .raw()
             .get(client.events_url(head))
@@ -276,14 +265,43 @@ async fn session(
     .await
     .map_err(|_elapsed| SessionError::OpenTimedOut {
         within: deadlines.open,
-    })??;
+    })?
+}
+
+async fn session(
+    client: &ForgeClient,
+    cursor: &mut Cursor,
+    updates: &impl UpdateSink,
+    retry: &Notify,
+    observed: &mut watch::Receiver<Option<ThreadId>>,
+    budget: &Arc<tokio::sync::Semaphore>,
+    deadlines: Deadlines,
+) -> Result<End, SessionError> {
+    let head = if let Some(head) = cursor.since {
+        head
+    } else {
+        let state = client.state().await.map_err(SessionError::State)?;
+        let head = state.head;
+        if !updates.deliver(Update::State(Box::new(state))).await {
+            return Ok(End::Dropped);
+        }
+        cursor.since = Some(head);
+        head
+    };
+    if client.is_relay() {
+        return relay_session(
+            client, &head, cursor, updates, retry, observed, budget, deadlines,
+        )
+        .await;
+    }
+    let response = open_events(client, head, observed, deadlines).await?;
     if !updates
         .deliver(Update::Status(ConnectionStatus::Live))
         .await
     {
         return Ok(End::Dropped);
     }
-    *live_since = Some(tokio::time::Instant::now());
+    cursor.live_since = Some(tokio::time::Instant::now());
     let mut stream = SseStream::with_decoder(SseDecoder::with_limit(FRAME_LIMIT));
     stream.attach(with_heartbeat(response.bytes_stream(), deadlines.heartbeat));
     loop {
@@ -306,7 +324,7 @@ async fn session(
                 });
             }
             Err(SseStreamError::PayloadTooLarge(_)) => {
-                *since = None;
+                cursor.since = None;
                 return Err(SessionError::FrameTooLarge {
                     limit: FRAME_LIMIT.get(),
                 });
@@ -315,9 +333,16 @@ async fn session(
         let SseEvent::Message(message) = event else {
             continue;
         };
-        let envelope = decode_envelope(&message.data, since)?;
-        let Some(admitted) =
-            admit(envelope, message.data.len(), since, budget, retry, observed).await?
+        let envelope = decode_envelope(&message.data, &mut cursor.since)?;
+        let Some(admitted) = admit(
+            envelope,
+            message.data.len(),
+            &mut cursor.since,
+            budget,
+            retry,
+            observed,
+        )
+        .await?
         else {
             return Ok(End::Observation);
         };
@@ -329,7 +354,7 @@ async fn session(
                     return Ok(End::Dropped);
                 }
                 if let Some(seq) = seq {
-                    *since = Some(seq);
+                    cursor.since = Some(seq);
                 }
             }
         }
@@ -342,10 +367,10 @@ enum Transport {
 }
 
 impl std::fmt::Display for Transport {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Read(error) => error.fmt(formatter),
-            Self::Silent => formatter.write_str("no heartbeat"),
+            Self::Read(error) => error.fmt(f),
+            Self::Silent => f.write_str("no heartbeat"),
         }
     }
 }
@@ -418,11 +443,10 @@ async fn admit(
 async fn relay_session(
     client: &ForgeClient,
     head: &Seq,
-    since: &mut Option<Seq>,
-    updates: &mut impl UpdateSink,
+    cursor: &mut Cursor,
+    updates: &impl UpdateSink,
     retry: &Notify,
     observed: &mut watch::Receiver<Option<ThreadId>>,
-    live_since: &mut Option<tokio::time::Instant>,
     budget: &Arc<tokio::sync::Semaphore>,
     deadlines: Deadlines,
 ) -> Result<End, SessionError> {
@@ -447,7 +471,7 @@ async fn relay_session(
     {
         return Ok(End::Dropped);
     }
-    *live_since = Some(tokio::time::Instant::now());
+    cursor.live_since = Some(tokio::time::Instant::now());
     loop {
         let next = tokio::select! {
             next = stream.next_event(deadlines.heartbeat) => next,
@@ -466,7 +490,9 @@ async fn relay_session(
         let bytes = serde_json::to_vec(&envelope)
             .map_err(SessionError::Encode)?
             .len();
-        let Some(admitted) = admit(envelope, bytes, since, budget, retry, observed).await? else {
+        let Some(admitted) =
+            admit(envelope, bytes, &mut cursor.since, budget, retry, observed).await?
+        else {
             unsubscribe(&mut stream).await;
             return Ok(End::Observation);
         };
@@ -478,7 +504,7 @@ async fn relay_session(
                     return Ok(End::Dropped);
                 }
                 if let Some(seq) = seq {
-                    *since = Some(seq);
+                    cursor.since = Some(seq);
                 }
             }
         }

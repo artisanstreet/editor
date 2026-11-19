@@ -10,7 +10,7 @@ impl HostData {
         });
         let wanted = needs && claude_ai_browser::can_renew(&self.id.0);
         let host = self.id.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let step = self
             .claude_ai
             .observe(wanted, std::time::Instant::now(), |ticket| {
@@ -49,7 +49,7 @@ impl HostData {
         };
         let client = self.client.clone();
         let host = self.id.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let handed = self.claude_ai.captured(ticket, move || {
             AbortOnDropHandle::new(crate::core::runtime::runtime().spawn(async move {
                 let result = client

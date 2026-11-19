@@ -19,7 +19,7 @@ fn paint_generation_tracks_completed_frames_and_revokes_replaced_scopes() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
     core.add_test_host(&config, client);

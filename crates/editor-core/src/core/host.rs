@@ -39,7 +39,7 @@ use tokio_util::task::AbortOnDropHandle;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HostInstance(u64);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ScopedSourceProvider {
     host: HostId,
     instance: HostInstance,
@@ -103,7 +103,7 @@ impl ScopedSourceProvider {
 
 static NEXT_HOST_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LiveSnapshot {
     pub epoch: u64,
     pub text: Arc<Rope>,
@@ -145,19 +145,24 @@ pub struct Attention {
 }
 impl std::ops::Add for Attention {
     type Output = Self;
-    fn add(self, other: Self) -> Self {
+    fn add(self, rhs: Self) -> Self {
         Self {
-            waiting: self.waiting + other.waiting,
-            stopped: self.stopped + other.stopped,
+            waiting: self.waiting + rhs.waiting,
+            stopped: self.stopped + rhs.stopped,
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ThreadSummary {
     pub value: Option<Arc<artisan_api::InspectorSummary>>,
     pub loading: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SummaryLoad {
+    view: ThreadSummary,
     minimum_revision: artisan_api::Seq,
     dirty: bool,
     task: Option<AbortOnDropHandle<()>>,
@@ -166,7 +171,7 @@ pub struct ThreadSummary {
 
 struct ObservedSummary {
     thread: ThreadId,
-    state: ThreadSummary,
+    state: SummaryLoad,
 }
 
 struct RepositoryEntry {
@@ -175,17 +180,41 @@ struct RepositoryEntry {
     failed: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ProjectionLoad {
     pub loading: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct Projection {
+    view: ProjectionLoad,
     _task: Option<AbortOnDropHandle<()>>,
     generation: u64,
 }
 
+impl Projection {
+    fn loading(generation: u64, task: Option<AbortOnDropHandle<()>>) -> Self {
+        Self {
+            view: ProjectionLoad {
+                loading: true,
+                error: None,
+            },
+            _task: task,
+            generation,
+        }
+    }
+}
+
 pub(super) enum HostMessage {
     Update(Update),
-    Completion(HostCompletion),
+    Completion(Box<HostCompletion>),
+}
+
+impl HostMessage {
+    fn completion(completion: HostCompletion) -> Self {
+        Self::Completion(Box::new(completion))
+    }
 }
 
 pub(super) enum HostCompletion {
@@ -265,6 +294,7 @@ pub(super) enum HostCompletion {
 }
 
 #[cfg(feature = "test-support")]
+#[derive(Debug)]
 pub struct TestHostTransitions {
     sender: crate::core::delivery::DeliverySender<HostMessage>,
 }
@@ -283,7 +313,7 @@ impl TestHostTransitions {
         let permit = Arc::new(tokio::sync::Semaphore::new(1))
             .acquire_owned()
             .await
-            .unwrap();
+            .expect("invariant: a fresh semaphore is open");
         let envelope = artisan_api::Envelope {
             seq: Some(1),
             live_revision: 0,
@@ -310,7 +340,7 @@ impl TestHostTransitions {
     ) {
         assert!(
             self.sender
-                .send(HostMessage::Completion(HostCompletion::ThreadPage {
+                .send(HostMessage::completion(HostCompletion::ThreadPage {
                     archived,
                     direction,
                     started_seq,
@@ -325,7 +355,7 @@ impl TestHostTransitions {
     pub async fn prompt(&self, generation: u64, prompt: artisan_api::GlobalPrompt) {
         assert!(
             self.sender
-                .send(HostMessage::Completion(HostCompletion::Prompt(
+                .send(HostMessage::completion(HostCompletion::Prompt(
                     generation,
                     Ok(prompt),
                 )))
@@ -337,7 +367,7 @@ impl TestHostTransitions {
     pub async fn catalog(&self, generation: u64, catalog: Vec<artisan_api::CatalogSkill>) {
         assert!(
             self.sender
-                .send(HostMessage::Completion(HostCompletion::Catalog(
+                .send(HostMessage::completion(HostCompletion::Catalog(
                     generation,
                     Ok(catalog),
                 )))
@@ -354,7 +384,7 @@ impl TestHostTransitions {
     ) {
         assert!(
             self.sender
-                .send(HostMessage::Completion(HostCompletion::DecodedImage(
+                .send(HostMessage::completion(HostCompletion::DecodedImage(
                     hash,
                     generation,
                     Ok(image),
@@ -367,7 +397,7 @@ impl TestHostTransitions {
     pub async fn image_failure(&self, hash: artisan_api::BlobHash, generation: u64, error: &str) {
         assert!(
             self.sender
-                .send(HostMessage::Completion(HostCompletion::DecodedImage(
+                .send(HostMessage::completion(HostCompletion::DecodedImage(
                     hash,
                     generation,
                     Err(error.to_owned()),
@@ -395,6 +425,10 @@ impl HostEffects {
     }
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "editor crates and their tests read and seed the Forge projection fields directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct HostData {
     instance: HostInstance,
     source_authority: RefCell<Rc<()>>,
@@ -413,13 +447,13 @@ pub struct HostData {
     pub engines: BTreeMap<EngineId, EngineStatus>,
     account: Option<Account>,
     pub global_prompt: Option<Arc<artisan_api::GlobalPrompt>>,
-    prompt_load: ProjectionLoad,
-    catalog_load: ProjectionLoad,
+    prompt_load: Projection,
+    catalog_load: Projection,
     projection_generation: u64,
     pending_events: HostEffects,
     prompt_revision: u64,
     catalog_revision: u64,
-    pub skill_catalog: Option<Arc<Vec<artisan_api::CatalogSkill>>>,
+    pub skill_catalog: Option<Arc<[artisan_api::CatalogSkill]>>,
     waiting: HashMap<ThreadId, BTreeSet<ItemId>>,
     thread_pages: pages::ThreadPages,
     preferences: preferences::Preferences,
@@ -443,7 +477,7 @@ pub struct HostData {
     summary_generation: u64,
     retry: Arc<Notify>,
     delivery: Delivery<HostMessage>,
-    _connection: AbortOnDropHandle<()>,
+    connection: AbortOnDropHandle<()>,
     claude_ai: claude_ai_browser::Renewal<AbortOnDropHandle<()>>,
     repositories: HashMap<ProjectId, RepositoryEntry>,
     repository_reads: HashMap<ProjectId, (u64, AbortOnDropHandle<()>)>,
@@ -471,7 +505,11 @@ impl HostData {
         order: AdmissionOrder,
         effects: crate::core::store::Effects,
     ) -> Self {
-        let delivery = Delivery::with_order(NonZeroUsize::new(64).unwrap(), wake, order);
+        let delivery = Delivery::with_order(
+            NonZeroUsize::new(64).expect("invariant: the host delivery capacity is non-zero"),
+            wake,
+            order,
+        );
         let retry = Arc::new(Notify::new());
         let (observed, observation) = watch::channel(None);
         let connection = connection::follow(
@@ -507,8 +545,8 @@ impl HostData {
             engines: BTreeMap::new(),
             account: None,
             global_prompt: None,
-            prompt_load: ProjectionLoad::default(),
-            catalog_load: ProjectionLoad::default(),
+            prompt_load: Projection::default(),
+            catalog_load: Projection::default(),
             projection_generation: 0,
             pending_events,
             prompt_revision: 0,
@@ -537,7 +575,7 @@ impl HostData {
             summary_generation: 0,
             retry,
             delivery,
-            _connection: connection,
+            connection,
             claude_ai: claude_ai_browser::Renewal::default(),
             repositories: HashMap::new(),
             repository_reads: HashMap::new(),
@@ -547,7 +585,7 @@ impl HostData {
     }
     #[cfg(feature = "test-support")]
     pub fn test_stop_connection(&mut self) {
-        self._connection.abort();
+        self.connection.abort();
         self.delivery.reset_for_tests();
         self.status = ConnectionStatus::Live;
         self.pending_events.clear();
@@ -562,18 +600,10 @@ impl HostData {
     pub fn test_begin_projections(&mut self) -> (u64, u64) {
         self.projection_generation += 1;
         let prompt = self.projection_generation;
-        self.prompt_load = ProjectionLoad {
-            loading: true,
-            generation: prompt,
-            ..ProjectionLoad::default()
-        };
+        self.prompt_load = Projection::loading(prompt, None);
         self.projection_generation += 1;
         let catalog = self.projection_generation;
-        self.catalog_load = ProjectionLoad {
-            loading: true,
-            generation: catalog,
-            ..ProjectionLoad::default()
-        };
+        self.catalog_load = Projection::loading(catalog, None);
         (prompt, catalog)
     }
 
@@ -605,30 +635,43 @@ impl HostData {
     pub fn mcp_servers(&self) -> Result<&[artisan_api::McpServer], &McpServersError> {
         self.settings.mcp_servers()
     }
+    pub(crate) fn close(self) {
+        self.connection.abort();
+        self.client.close_relay();
+    }
     pub fn retry_now(&self) {
         self.retry.notify_one();
     }
     pub fn attention(&self) -> Attention {
-        let mut attention = Attention::default();
-        for thread in self.threads.values() {
-            if thread.archived
-                || thread.parent_thread_id.is_some()
-                || !self.projects.contains_key(&thread.project_id)
-            {
-                continue;
+        self.threads
+            .values()
+            .filter(|thread| {
+                !thread.archived
+                    && thread.parent_thread_id.is_none()
+                    && self.projects.contains_key(&thread.project_id)
+            })
+            .map(|thread| self.thread_attention(thread))
+            .fold(Attention::default(), std::ops::Add::add)
+    }
+    fn thread_attention(&self, thread: &Thread) -> Attention {
+        let settled = thread.settled_seq > 0 && thread.settled_seq >= thread.activity_seq;
+        if self.is_waiting(&thread.id) {
+            Attention {
+                waiting: 1,
+                stopped: 0,
             }
-            let settled = thread.settled_seq > 0 && thread.settled_seq >= thread.activity_seq;
-            if self.is_waiting(&thread.id) {
-                attention.waiting += 1;
-            } else if !self.is_working(&thread.id)
-                && thread.parked_until.is_none()
-                && thread.is_unread()
-                && !settled
-            {
-                attention.stopped += 1;
+        } else if !self.is_working(&thread.id)
+            && thread.parked_until.is_none()
+            && thread.is_unread()
+            && !settled
+        {
+            Attention {
+                waiting: 0,
+                stopped: 1,
             }
+        } else {
+            Attention::default()
         }
-        attention
     }
     pub fn observe_thread(&mut self, thread: Option<ThreadId>) {
         if *self.observed.borrow() != thread {
@@ -714,12 +757,12 @@ impl HostData {
         true
     }
     pub fn invalidate_catalog(&mut self) {
-        self.catalog_load = ProjectionLoad::default();
+        self.catalog_load = Projection::default();
         self.skill_catalog = None;
         self.catalog_revision = self.catalog_revision.saturating_add(1);
     }
     fn invalidate_prompt(&mut self) {
-        self.prompt_load = ProjectionLoad::default();
+        self.prompt_load = Projection::default();
         self.global_prompt = None;
         self.prompt_revision = self.prompt_revision.saturating_add(1);
     }
@@ -732,7 +775,7 @@ impl HostData {
         if prompt.version < expected {
             return false;
         }
-        self.prompt_load = ProjectionLoad::default();
+        self.prompt_load = Projection::default();
         self.global_prompt = Some(Arc::new(prompt));
         self.pending_events.push(HostEvent::Changed);
         true
@@ -793,7 +836,7 @@ impl HostData {
         self.read_generation = self.read_generation.wrapping_add(1);
         let generation = self.read_generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let queued = std::time::Instant::now();
         let thread = id.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
@@ -813,8 +856,8 @@ impl HostData {
                     }
                 }
             }
-            let _ = sender
-                .send(HostCompletion::ReadAck(id, seq, generation, result))
+            sender
+                .offer(HostCompletion::ReadAck(id, seq, generation, result))
                 .await;
         });
         self.read_writer = Some(ReadWriter {
@@ -840,7 +883,7 @@ impl HostData {
         self.summary
             .as_ref()
             .filter(|summary| &summary.thread == thread)
-            .map(|summary| &summary.state)
+            .map(|summary| &summary.state.view)
     }
 
     pub fn load_thread_summary(&mut self, thread: &ThreadId, retry: bool) {
@@ -855,25 +898,26 @@ impl HostData {
             return;
         };
         let state = &mut summary.state;
-        if state.loading
-            || (!retry && (state.error.is_some() || (!state.dirty && state.value.is_some())))
+        if state.view.loading
+            || (!retry
+                && (state.view.error.is_some() || (!state.dirty && state.view.value.is_some())))
         {
             return;
         }
-        state.loading = true;
-        state.error = None;
+        state.view.loading = true;
+        state.view.error = None;
         let minimum = state.minimum_revision;
         self.summary_generation = self.summary_generation.wrapping_add(1);
         let generation = self.summary_generation;
         state.generation = generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let thread = thread.clone();
         let task_thread = thread.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.inspector(&task_thread).await;
-            let _ = sender
-                .send(HostCompletion::Summary(
+            sender
+                .offer(HostCompletion::Summary(
                     task_thread,
                     generation,
                     minimum,
@@ -893,9 +937,9 @@ impl HostData {
             .clone()
             .map(|thread| ObservedSummary {
                 thread,
-                state: ThreadSummary {
+                state: SummaryLoad {
                     dirty: true,
-                    ..ThreadSummary::default()
+                    ..SummaryLoad::default()
                 },
             });
         if let Some(thread) = self.summary.as_ref().map(|summary| summary.thread.clone()) {
@@ -909,7 +953,7 @@ impl HostData {
             return;
         };
         summary.state.task = None;
-        summary.state.loading = false;
+        summary.state.view.loading = false;
         summary.state.dirty = true;
         if live {
             let thread = summary.thread.clone();
@@ -936,7 +980,17 @@ impl HostData {
                         ..
                     }
             ),
-            _ => false,
+            Event::Hello { .. }
+            | Event::Project { .. }
+            | Event::Thread { .. }
+            | Event::ThreadRemoved { .. }
+            | Event::Setting { .. }
+            | Event::Live { .. }
+            | Event::Suggestion { .. }
+            | Event::Engine { .. }
+            | Event::EngineInstall { .. }
+            | Event::EditorCall { .. }
+            | Event::Reset => false,
         };
         if !relevant {
             return;
@@ -954,6 +1008,7 @@ impl HostData {
         let state = &mut summary.state;
         state.minimum_revision = state.minimum_revision.max(seq.unwrap_or(0));
         if state
+            .view
             .value
             .as_ref()
             .is_some_and(|value| value.revision >= state.minimum_revision)
@@ -961,66 +1016,56 @@ impl HostData {
             return;
         }
         state.dirty = true;
-        state.error = None;
+        state.view.error = None;
         self.load_thread_summary(thread, false);
     }
 
-    pub fn prompt_load(&self) -> &ProjectionLoad {
-        &self.prompt_load
+    pub const fn prompt_load(&self) -> &ProjectionLoad {
+        &self.prompt_load.view
     }
-    pub fn catalog_load(&self) -> &ProjectionLoad {
-        &self.catalog_load
+    pub const fn catalog_load(&self) -> &ProjectionLoad {
+        &self.catalog_load.view
     }
 
     pub fn load_prompt(&mut self, retry: bool) {
         if !self.is_live()
-            || self.prompt_load.loading
-            || (!retry && (self.global_prompt.is_some() || self.prompt_load.error.is_some()))
+            || self.prompt_load.view.loading
+            || (!retry && (self.global_prompt.is_some() || self.prompt_load.view.error.is_some()))
         {
             return;
         }
         self.projection_generation = self.projection_generation.wrapping_add(1);
         let generation = self.projection_generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.global_prompt().await;
-            let _ = sender
-                .send(HostCompletion::Prompt(generation, result))
+            sender
+                .offer(HostCompletion::Prompt(generation, result))
                 .await;
         });
-        self.prompt_load = ProjectionLoad {
-            loading: true,
-            error: None,
-            _task: Some(AbortOnDropHandle::new(task)),
-            generation,
-        };
+        self.prompt_load = Projection::loading(generation, Some(AbortOnDropHandle::new(task)));
         self.pending_events.push(HostEvent::Changed);
     }
 
     pub fn load_skill_catalog(&mut self, retry: bool) {
         if !self.is_live()
-            || self.catalog_load.loading
-            || (!retry && (self.skill_catalog.is_some() || self.catalog_load.error.is_some()))
+            || self.catalog_load.view.loading
+            || (!retry && (self.skill_catalog.is_some() || self.catalog_load.view.error.is_some()))
         {
             return;
         }
         self.projection_generation = self.projection_generation.wrapping_add(1);
         let generation = self.projection_generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.skill_catalog().await;
-            let _ = sender
-                .send(HostCompletion::Catalog(generation, result))
+            sender
+                .offer(HostCompletion::Catalog(generation, result))
                 .await;
         });
-        self.catalog_load = ProjectionLoad {
-            loading: true,
-            error: None,
-            _task: Some(AbortOnDropHandle::new(task)),
-            generation,
-        };
+        self.catalog_load = Projection::loading(generation, Some(AbortOnDropHandle::new(task)));
         self.pending_events.push(HostEvent::Changed);
     }
 
@@ -1056,13 +1101,13 @@ impl HostData {
         self.repository_generation = self.repository_generation.wrapping_add(1);
         let generation = self.repository_generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let project = project.clone();
         let key = project.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.project_repository(&project).await;
-            let _ = sender
-                .send(HostCompletion::Repository(project, generation, result))
+            sender
+                .offer(HostCompletion::Repository(project, generation, result))
                 .await;
         });
         self.repository_reads
@@ -1073,281 +1118,337 @@ impl HostData {
         self.delivery.peek_order()
     }
     pub(crate) fn drain(&mut self) {
-        let mut events = self.pending_events.clone();
-        let (update, completion) = match self.delivery.drain_one() {
-            Some(HostMessage::Update(update)) => (Some(update), None),
-            Some(HostMessage::Completion(completion)) => (None, Some(completion)),
-            None => (None, None),
-        };
-        for update in update.into_iter() {
-            match update {
-                Update::Status(status) => {
-                    if self.status != status {
-                        self.status = status;
-                        if !self.is_live() {
-                            self.prompt_load = ProjectionLoad::default();
-                            self.catalog_load = ProjectionLoad::default();
-                        }
-                        self.summary_connection_changed();
-                        self.wsl_connection_changed();
-                        events.push(HostEvent::Changed);
+        let events = self.pending_events.clone();
+        match self.delivery.drain_one() {
+            Some(HostMessage::Update(update)) => self.apply_update(update, &events),
+            Some(HostMessage::Completion(completion)) => {
+                self.apply_completion(*completion, &events);
+            }
+            None => {}
+        }
+    }
+    fn apply_update(&mut self, update: Update, events: &HostEffects) {
+        match update {
+            Update::Status(status) => {
+                if self.status != status {
+                    self.status = status;
+                    if !self.is_live() {
+                        self.prompt_load = Projection::default();
+                        self.catalog_load = Projection::default();
                     }
-                }
-                Update::State(state) => {
-                    self.repositories.clear();
-                    self.repository_reads.clear();
-                    self.repository_order.clear();
-                    let state = *state;
-                    let paths: HashMap<_, _> = state
-                        .projects
-                        .iter()
-                        .map(|project| (project.id.clone(), project.path.clone()))
-                        .collect();
-                    let projects = &self.projects;
-                    self.project_icons.reset(|id| {
-                        projects
-                            .get(id)
-                            .is_some_and(|old| paths.get(id) == Some(&old.path))
-                    });
-                    self.forge_version = Some(state.forge_version);
-                    self.rollback_notice = RollbackNotice::from_state(state.database_rollback);
-                    self.projects = state
-                        .projects
-                        .into_iter()
-                        .map(|project| (project.id.clone(), project))
-                        .collect();
-                    self.threads = state
-                        .threads
-                        .into_iter()
-                        .map(|thread| (thread.id.clone(), thread))
-                        .collect();
-                    self.reset_thread_pages(state.threads_next);
-                    self.runs.clear();
-                    for run in state.runs {
-                        self.remember_run(run);
-                    }
-                    self.settings = HostSettings::from_values(self.id.clone(), state.settings);
-                    self.invalidate_prompt();
-                    self.invalidate_catalog();
-                    self.learn_wsl_distro(
-                        state
-                            .account
-                            .as_ref()
-                            .and_then(|account| account.wsl_distro.as_deref()),
-                    );
-                    self.account = state.account;
+                    self.summary_connection_changed();
                     self.wsl_connection_changed();
-                    self.engines = state
-                        .engines
-                        .into_iter()
-                        .map(|status| (status.engine, status))
-                        .collect();
-                    self.renew_claude_ai();
-                    self.waiting.clear();
-                    for item in state.waiting {
-                        self.waiting
-                            .entry(item.thread_id.clone())
-                            .or_default()
-                            .insert(item.id);
-                    }
-                    self.live.clear();
-                    self.suggestions.clear();
-                    self.prune_threads();
-                    let observed = self.observed.borrow().clone();
-                    if let Some(thread) = observed {
-                        self.ensure_thread(&thread);
-                    }
-                    self.reset_thread_summary();
-                    events.push(HostEvent::Reset);
                     events.push(HostEvent::Changed);
                 }
-                Update::Event(envelope, _permit) => {
-                    self.invalidate_thread_summary(&envelope.event, envelope.seq);
-                    self.apply_event(envelope.event, &mut events);
+            }
+            Update::State(state) => self.reset_to_state(*state, events),
+            Update::Event(envelope, _permit) => {
+                self.invalidate_thread_summary(&envelope.event, envelope.seq);
+                self.apply_event(envelope.event, events);
+            }
+        }
+    }
+    fn reset_to_state(&mut self, state: artisan_api::State, events: &HostEffects) {
+        self.repositories.clear();
+        self.repository_reads.clear();
+        self.repository_order.clear();
+        let paths: HashMap<_, _> = state
+            .projects
+            .iter()
+            .map(|project| (project.id.clone(), project.path.clone()))
+            .collect();
+        let projects = &self.projects;
+        self.project_icons.reset(|id| {
+            projects
+                .get(id)
+                .is_some_and(|old| paths.get(id) == Some(&old.path))
+        });
+        self.forge_version = Some(state.forge_version);
+        self.rollback_notice = RollbackNotice::from_state(state.database_rollback);
+        self.projects = state
+            .projects
+            .into_iter()
+            .map(|project| (project.id.clone(), project))
+            .collect();
+        self.threads = state
+            .threads
+            .into_iter()
+            .map(|thread| (thread.id.clone(), thread))
+            .collect();
+        self.reset_thread_pages(state.threads_next);
+        self.runs.clear();
+        for run in state.runs {
+            self.remember_run(run);
+        }
+        self.settings = HostSettings::from_values(self.id.clone(), state.settings);
+        self.invalidate_prompt();
+        self.invalidate_catalog();
+        self.learn_wsl_distro(
+            state
+                .account
+                .as_ref()
+                .and_then(|account| account.wsl_distro.as_deref()),
+        );
+        self.account = state.account;
+        self.wsl_connection_changed();
+        self.engines = state
+            .engines
+            .into_iter()
+            .map(|status| (status.engine, status))
+            .collect();
+        self.renew_claude_ai();
+        self.waiting.clear();
+        for item in state.waiting {
+            self.waiting
+                .entry(item.thread_id.clone())
+                .or_default()
+                .insert(item.id);
+        }
+        self.live.clear();
+        self.suggestions.clear();
+        self.prune_threads();
+        let observed = self.observed.borrow().clone();
+        if let Some(thread) = observed {
+            self.ensure_thread(&thread);
+        }
+        self.reset_thread_summary();
+        events.push(HostEvent::Reset);
+        events.push(HostEvent::Changed);
+    }
+    fn apply_completion(&mut self, completion: HostCompletion, events: &HostEffects) {
+        match completion {
+            HostCompletion::ClaudeAiCaptured(ticket, result) => {
+                self.finish_claude_ai_capture(ticket, result);
+            }
+            HostCompletion::ClaudeAiHanded(ticket, result) => {
+                self.finish_claude_ai_handover(ticket, result);
+            }
+            HostCompletion::DecodedImage(hash, generation, result) => {
+                if self.finish_decoded_image(hash, generation, result) {
+                    events.push(HostEvent::ImagesChanged);
+                }
+            }
+            HostCompletion::ProjectIcon(project, generation, result) => {
+                if self.finish_project_icon(project, generation, result) {
+                    events.push(HostEvent::ImagesChanged);
+                }
+            }
+            HostCompletion::Image(hash, generation, result) => {
+                if self.finish_image_download(hash, generation, result) {
+                    events.push(HostEvent::ImagesChanged);
+                }
+            }
+            HostCompletion::Preference(generation, choice, preference, result) => {
+                if self.finish_preference(generation, choice, preference, result) {
+                    events.push(HostEvent::Changed);
+                }
+            }
+            HostCompletion::WslProbe(generation, target, result) => {
+                if self.finish_wsl_probe(generation, &target, result) {
+                    events.push(HostEvent::Changed);
+                }
+            }
+            HostCompletion::WslStarted(distro, result) => {
+                self.finish_wsl_start(&distro, result);
+                events.push(HostEvent::Changed);
+            }
+            HostCompletion::RollbackDismissed(result) => {
+                self.finish_rollback_dismissal(result);
+                events.push(HostEvent::Changed);
+            }
+            HostCompletion::ReadAck(id, seq, generation, result) => {
+                self.finish_read_ack(&id, seq, generation, result, events);
+            }
+            HostCompletion::ThreadPage {
+                archived,
+                direction,
+                started_seq,
+                generation,
+                result,
+            } => {
+                if self.finish_thread_page(archived, direction, started_seq, generation, result) {
+                    events.push(HostEvent::Changed);
+                }
+            }
+            HostCompletion::ThreadLookup(id, generation, result) => {
+                self.finish_thread_lookup(id, generation, result);
+            }
+            HostCompletion::Summary(thread, generation, minimum, result) => {
+                self.finish_summary(thread, generation, minimum, result, events);
+            }
+            HostCompletion::Prompt(generation, result) => {
+                self.finish_prompt(generation, result, events);
+            }
+            HostCompletion::Catalog(generation, result) => {
+                self.finish_catalog(generation, result, events);
+            }
+            HostCompletion::Repository(project, generation, result) => {
+                if self.finish_repository(project, generation, result) {
+                    events.push(HostEvent::Changed);
                 }
             }
         }
-        for completion in completion.into_iter() {
-            match completion {
-                HostCompletion::ClaudeAiCaptured(ticket, result) => {
-                    self.finish_claude_ai_capture(ticket, result);
+    }
+    fn finish_read_ack(
+        &mut self,
+        id: &ThreadId,
+        seq: artisan_api::Seq,
+        generation: u64,
+        result: Result<Thread, crate::core::client::CallError>,
+        events: &HostEffects,
+    ) {
+        if generation != self.read_generation {
+            return;
+        }
+        self.read_writer = None;
+        match result {
+            Ok(thread) => {
+                if self
+                    .read_acks
+                    .get(id)
+                    .is_some_and(|pending| *pending <= seq)
+                {
+                    self.read_acks.remove(id);
                 }
-                HostCompletion::ClaudeAiHanded(ticket, result) => {
-                    self.finish_claude_ai_handover(ticket, result);
-                }
-                HostCompletion::DecodedImage(hash, generation, result) => {
-                    if self.finish_decoded_image(hash, generation, result) {
-                        events.push(HostEvent::ImagesChanged);
-                    }
-                }
-                HostCompletion::ProjectIcon(project, generation, result) => {
-                    if self.finish_project_icon(project, generation, result) {
-                        events.push(HostEvent::ImagesChanged);
-                    }
-                }
-                HostCompletion::Image(hash, generation, result) => {
-                    if self.finish_image_download(hash, generation, result) {
-                        events.push(HostEvent::ImagesChanged);
-                    }
-                }
-                HostCompletion::Preference(generation, choice, preference, result) => {
-                    if self.finish_preference(generation, choice, preference, result) {
-                        events.push(HostEvent::Changed);
-                    }
-                }
-                HostCompletion::WslProbe(generation, target, result) => {
-                    if self.finish_wsl_probe(generation, target, result) {
-                        events.push(HostEvent::Changed);
-                    }
-                }
-                HostCompletion::WslStarted(distro, result) => {
-                    self.finish_wsl_start(distro, result);
-                    events.push(HostEvent::Changed);
-                }
-                HostCompletion::RollbackDismissed(result) => {
-                    self.finish_rollback_dismissal(result);
-                    events.push(HostEvent::Changed);
-                }
-                HostCompletion::ReadAck(id, seq, generation, result) => {
-                    if generation != self.read_generation {
-                        continue;
-                    }
-                    self.read_writer = None;
-                    match result {
-                        Ok(thread) => {
-                            if self
-                                .read_acks
-                                .get(&id)
-                                .is_some_and(|pending| *pending <= seq)
-                            {
-                                self.read_acks.remove(&id);
-                            }
-                            if self.remember_thread(thread) {
-                                events.push(HostEvent::ThreadChanged {
-                                    thread_id: id.clone(),
-                                });
-                            }
-                        }
-                        Err(error) => match read_ack_failure(&error) {
-                            ReadAckFailure::Refused => {
-                                tracing::warn!(
-                                    host = %self.id,
-                                    thread = %id,
-                                    seq,
-                                    error = %::diagnostics::chain(&error),
-                                    "Forge refused a read acknowledgement; dropping it"
-                                );
-                                self.read_acks.remove(&id);
-                            }
-                            ReadAckFailure::Transient => {
-                                tracing::debug!(
-                                    host = %self.id,
-                                    thread = %id,
-                                    seq,
-                                    error = %::diagnostics::chain(&error),
-                                    "read acknowledgement will retry"
-                                );
-                            }
-                        },
-                    }
-                    self.pump_read_acks(Some(&id));
-                }
-                HostCompletion::ThreadPage {
-                    archived,
-                    direction,
-                    started_seq,
-                    generation,
-                    result,
-                } => {
-                    if self.finish_thread_page(archived, direction, started_seq, generation, result)
-                    {
-                        events.push(HostEvent::Changed);
-                    }
-                }
-                HostCompletion::ThreadLookup(id, generation, result) => {
-                    self.finish_thread_lookup(id, generation, result);
-                }
-                HostCompletion::Summary(thread, generation, minimum, result) => {
-                    let Some(summary) = self.summary.as_mut().filter(|summary| {
-                        summary.thread == thread && summary.state.generation == generation
-                    }) else {
-                        continue;
-                    };
-                    let state = &mut summary.state;
-                    state.loading = false;
-                    state.error = None;
-                    state.task = None;
-                    match result {
-                        Ok(value) if value.revision < state.minimum_revision && state.minimum_revision > minimum => {
-                            self.load_thread_summary(&thread, true);
-                            continue;
-                        }
-                        Ok(value) if value.revision < state.minimum_revision => state.error = Some("Forge returned thread details older than its latest update. Retry to refresh.".into()),
-                        Ok(value) if summary_bytes(&value) > 16 * 1024 * 1024 => state.error = Some("Thread details exceed the 16 MiB display limit.".into()),
-                        Ok(value) => {
-                            if state.value.as_ref().is_none_or(|previous| value.revision >= previous.revision) {
-                                state.minimum_revision = value.revision;
-                                state.value = Some(Arc::new(value));
-                                state.dirty = false;
-                            }
-                        }
-                        Err(error) => state.error = Some(format!("Couldn't load thread details: {}", ::diagnostics::chain(&error))),
-                    }
-                    events.push(HostEvent::ThreadSummaryChanged { thread_id: thread });
-                }
-                HostCompletion::Prompt(generation, result) => {
-                    if self.prompt_load.generation != generation || !self.prompt_load.loading {
-                        continue;
-                    }
-                    self.prompt_load = ProjectionLoad::default();
-                    match result {
-                        Ok(prompt) => {
-                            let expected = self
-                                .settings
-                                .get("global_prompt_version")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0);
-                            if prompt.version < expected {
-                                self.prompt_load.error = Some(
-                                    "Forge returned an older prompt version. Retry to refresh."
-                                        .into(),
-                                );
-                            } else {
-                                self.global_prompt = Some(Arc::new(prompt));
-                            }
-                        }
-                        Err(error) => {
-                            self.prompt_load.error = Some(format!(
-                                "Couldn't read the global prompt: {}",
-                                ::diagnostics::chain(&error)
-                            ))
-                        }
-                    }
-                    events.push(HostEvent::Changed);
-                }
-                HostCompletion::Catalog(generation, result) => {
-                    if self.catalog_load.generation != generation || !self.catalog_load.loading {
-                        continue;
-                    }
-                    self.catalog_load = ProjectionLoad::default();
-                    match result {
-                        Ok(catalog) => self.skill_catalog = Some(Arc::new(catalog)),
-                        Err(error) => {
-                            self.catalog_load.error = Some(format!(
-                                "Couldn't list skills: {}",
-                                ::diagnostics::chain(&error)
-                            ))
-                        }
-                    }
-                    events.push(HostEvent::Changed);
-                }
-                HostCompletion::Repository(project, generation, result) => {
-                    if self.finish_repository(project, generation, result) {
-                        events.push(HostEvent::Changed);
-                    }
+                if self.remember_thread(thread) {
+                    events.push(HostEvent::ThreadChanged {
+                        thread_id: id.clone(),
+                    });
                 }
             }
+            Err(error) => match read_ack_failure(&error) {
+                ReadAckFailure::Refused => {
+                    tracing::warn!(
+                        host = %self.id,
+                        thread = %id,
+                        seq,
+                        error = %::diagnostics::chain(&error),
+                        "Forge refused a read acknowledgement; dropping it"
+                    );
+                    self.read_acks.remove(id);
+                }
+                ReadAckFailure::Transient => {
+                    tracing::debug!(
+                        host = %self.id,
+                        thread = %id,
+                        seq,
+                        error = %::diagnostics::chain(&error),
+                        "read acknowledgement will retry"
+                    );
+                }
+            },
         }
+        self.pump_read_acks(Some(id));
+    }
+    fn finish_summary(
+        &mut self,
+        thread: ThreadId,
+        generation: u64,
+        minimum: artisan_api::Seq,
+        result: Result<artisan_api::InspectorSummary, crate::core::client::CallError>,
+        events: &HostEffects,
+    ) {
+        let Some(summary) = self
+            .summary
+            .as_mut()
+            .filter(|summary| summary.thread == thread && summary.state.generation == generation)
+        else {
+            return;
+        };
+        let state = &mut summary.state;
+        state.view.loading = false;
+        state.view.error = None;
+        state.task = None;
+        match result {
+            Ok(value)
+                if value.revision < state.minimum_revision && state.minimum_revision > minimum =>
+            {
+                self.load_thread_summary(&thread, true);
+                return;
+            }
+            Ok(value) if value.revision < state.minimum_revision => {
+                state.view.error = Some(
+                    "Forge returned thread details older than its latest update. Retry to refresh."
+                        .into(),
+                );
+            }
+            Ok(value) if summary_bytes(&value) > 16 * 1024 * 1024 => {
+                state.view.error = Some("Thread details exceed the 16 MiB display limit.".into());
+            }
+            Ok(value) => {
+                if state
+                    .view
+                    .value
+                    .as_ref()
+                    .is_none_or(|previous| value.revision >= previous.revision)
+                {
+                    state.minimum_revision = value.revision;
+                    state.view.value = Some(Arc::new(value));
+                    state.dirty = false;
+                }
+            }
+            Err(error) => {
+                state.view.error = Some(format!(
+                    "Couldn't load thread details: {}",
+                    ::diagnostics::chain(&error)
+                ));
+            }
+        }
+        events.push(HostEvent::ThreadSummaryChanged { thread_id: thread });
+    }
+    fn finish_prompt(
+        &mut self,
+        generation: u64,
+        result: Result<artisan_api::GlobalPrompt, crate::core::client::CallError>,
+        events: &HostEffects,
+    ) {
+        if self.prompt_load.generation != generation || !self.prompt_load.view.loading {
+            return;
+        }
+        self.prompt_load = Projection::default();
+        match result {
+            Ok(prompt) => {
+                let expected = self
+                    .settings
+                    .get("global_prompt_version")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                if prompt.version < expected {
+                    self.prompt_load.view.error =
+                        Some("Forge returned an older prompt version. Retry to refresh.".into());
+                } else {
+                    self.global_prompt = Some(Arc::new(prompt));
+                }
+            }
+            Err(error) => {
+                self.prompt_load.view.error = Some(format!(
+                    "Couldn't read the global prompt: {}",
+                    ::diagnostics::chain(&error)
+                ));
+            }
+        }
+        events.push(HostEvent::Changed);
+    }
+    fn finish_catalog(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<artisan_api::CatalogSkill>, crate::core::client::CallError>,
+        events: &HostEffects,
+    ) {
+        if self.catalog_load.generation != generation || !self.catalog_load.view.loading {
+            return;
+        }
+        self.catalog_load = Projection::default();
+        match result {
+            Ok(catalog) => self.skill_catalog = Some(Arc::from(catalog)),
+            Err(error) => {
+                self.catalog_load.view.error = Some(format!(
+                    "Couldn't list skills: {}",
+                    ::diagnostics::chain(&error)
+                ));
+            }
+        }
+        events.push(HostEvent::Changed);
     }
     fn finish_repository(
         &mut self,
@@ -1355,10 +1456,10 @@ impl HostData {
         generation: u64,
         result: Result<Option<artisan_api::ProjectRepository>, crate::core::client::CallError>,
     ) -> bool {
-        if !self
+        if self
             .repository_reads
             .get(&project)
-            .is_some_and(|(current, _)| *current == generation)
+            .is_none_or(|(current, _)| *current != generation)
         {
             return false;
         }
@@ -1407,29 +1508,10 @@ impl HostData {
             .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
         self.finish_repository(project, generation, Ok(repository))
     }
-    fn apply_event(&mut self, event: Event, events: &mut HostEffects) {
+    fn apply_event(&mut self, event: Event, events: &HostEffects) {
         match event {
             Event::Hello { forge_version, .. } => self.forge_version = Some(forge_version),
-            Event::Project { project } => {
-                self.repositories.remove(&project.id);
-                self.repository_reads.remove(&project.id);
-                self.repository_order.retain(|id| id != &project.id);
-                let moved = self
-                    .projects
-                    .get(&project.id)
-                    .is_none_or(|old| old.path != project.path);
-                if project.removed || moved {
-                    self.project_icons.forget(&project.id);
-                } else {
-                    self.project_icons.refresh(&project.id);
-                }
-                if project.removed {
-                    self.projects.remove(&project.id);
-                } else {
-                    self.projects.insert(project.id.clone(), project);
-                }
-                events.push(HostEvent::Changed);
-            }
+            Event::Project { project } => self.apply_project(project, events),
             Event::Thread { thread } => {
                 let thread_id = thread.id.clone();
                 if self.remember_thread(thread) {
@@ -1465,7 +1547,7 @@ impl HostData {
                 if matches!(key.as_str(), "disabled_skills" | "skills_revision") {
                     self.invalidate_catalog();
                 }
-                self.settings.insert(key, value);
+                self.settings.insert(&key, value);
                 events.push(HostEvent::Changed);
             }
             Event::EngineInstall { engine, install } => {
@@ -1489,37 +1571,7 @@ impl HostData {
                 self.renew_claude_ai();
                 events.push(HostEvent::Changed);
             }
-            Event::Item { item } => {
-                let waiting = self.waiting.entry(item.thread_id.clone()).or_default();
-                let changed = if item.status == Status::AwaitingUser {
-                    waiting.insert(item.id.clone())
-                } else {
-                    waiting.remove(&item.id)
-                };
-                if let Some(live) = self.live.get_mut(&item.thread_id)
-                    && item.status.is_terminal()
-                {
-                    for target in [
-                        LiveTarget::Text {
-                            item_id: item.id.clone(),
-                        },
-                        LiveTarget::Shell {
-                            item_id: item.id.clone(),
-                        },
-                        LiveTarget::Progress {
-                            item_id: item.id.clone(),
-                        },
-                    ] {
-                        live.remove(&target);
-                    }
-                }
-                if changed {
-                    events.push(HostEvent::ThreadChanged {
-                        thread_id: item.thread_id.clone(),
-                    });
-                }
-                events.push(HostEvent::Item(Arc::new(item)));
-            }
+            Event::Item { item } => self.apply_item(item, events),
             Event::ItemState {
                 id,
                 thread_id,
@@ -1544,28 +1596,7 @@ impl HostData {
                 text,
                 append,
                 coverage,
-            } => {
-                let streams = self.live.entry(thread_id.clone()).or_default();
-                match streams.get_mut(&target) {
-                    Some(stream) if append => {
-                        let end = stream.text.len_chars();
-                        Arc::make_mut(&mut stream.text).insert(end, &text);
-                        stream.coverage = coverage;
-                    }
-                    _ => {
-                        self.live_streams += 1;
-                        streams.insert(
-                            target.clone(),
-                            LiveSnapshot {
-                                epoch: self.live_streams,
-                                text: Arc::new(Rope::from_str(&text)),
-                                coverage,
-                            },
-                        );
-                    }
-                }
-                events.push(HostEvent::Live { thread_id, target });
-            }
+            } => self.apply_live(thread_id, target, &text, append, coverage, events),
             Event::Suggestion { thread_id, text } => {
                 match text {
                     Some(text) => self.suggestions.insert(thread_id.clone(), text),
@@ -1576,6 +1607,87 @@ impl HostData {
             Event::EditorCall { id, call } => events.push(HostEvent::EditorCall { id, call }),
             Event::Reset => {}
         }
+    }
+    fn apply_project(&mut self, project: Project, events: &HostEffects) {
+        self.repositories.remove(&project.id);
+        self.repository_reads.remove(&project.id);
+        self.repository_order.retain(|id| id != &project.id);
+        let moved = self
+            .projects
+            .get(&project.id)
+            .is_none_or(|old| old.path != project.path);
+        if project.removed || moved {
+            self.project_icons.forget(&project.id);
+        } else {
+            self.project_icons.refresh(&project.id);
+        }
+        if project.removed {
+            self.projects.remove(&project.id);
+        } else {
+            self.projects.insert(project.id.clone(), project);
+        }
+        events.push(HostEvent::Changed);
+    }
+    fn apply_item(&mut self, item: Item, events: &HostEffects) {
+        let waiting = self.waiting.entry(item.thread_id.clone()).or_default();
+        let changed = if item.status == Status::AwaitingUser {
+            waiting.insert(item.id.clone())
+        } else {
+            waiting.remove(&item.id)
+        };
+        if let Some(live) = self.live.get_mut(&item.thread_id)
+            && item.status.is_terminal()
+        {
+            for target in [
+                LiveTarget::Text {
+                    item_id: item.id.clone(),
+                },
+                LiveTarget::Shell {
+                    item_id: item.id.clone(),
+                },
+                LiveTarget::Progress {
+                    item_id: item.id.clone(),
+                },
+            ] {
+                live.remove(&target);
+            }
+        }
+        if changed {
+            events.push(HostEvent::ThreadChanged {
+                thread_id: item.thread_id.clone(),
+            });
+        }
+        events.push(HostEvent::Item(Arc::new(item)));
+    }
+    fn apply_live(
+        &mut self,
+        thread_id: ThreadId,
+        target: LiveTarget,
+        text: &str,
+        append: bool,
+        coverage: LiveCoverage,
+        events: &HostEffects,
+    ) {
+        let streams = self.live.entry(thread_id.clone()).or_default();
+        match streams.get_mut(&target) {
+            Some(stream) if append => {
+                let end = stream.text.len_chars();
+                Arc::make_mut(&mut stream.text).insert(end, text);
+                stream.coverage = coverage;
+            }
+            _ => {
+                self.live_streams += 1;
+                streams.insert(
+                    target.clone(),
+                    LiveSnapshot {
+                        epoch: self.live_streams,
+                        text: Arc::new(Rope::from_str(text)),
+                        coverage,
+                    },
+                );
+            }
+        }
+        events.push(HostEvent::Live { thread_id, target });
     }
 }
 
@@ -1594,11 +1706,11 @@ fn summary_bytes(summary: &artisan_api::InspectorSummary) -> usize {
                         .map_or(0, artisan_api::TextContent::resident_bytes)
             })
     }
-    std::mem::size_of_val(summary)
+    size_of_val(summary)
         + summary
             .plan
             .resident_bytes(|step| step.text.resident_bytes())
-        + summary.questions.capacity() * std::mem::size_of::<artisan_api::ThreadQuestionnaire>()
+        + summary.questions.capacity() * size_of::<artisan_api::ThreadQuestionnaire>()
         + summary
             .questions
             .iter()
@@ -1607,7 +1719,7 @@ fn summary_bytes(summary: &artisan_api::InspectorSummary) -> usize {
                     + questionnaire.questions.resident_bytes(question_heap)
             })
             .sum::<usize>()
-        + summary.terminals.capacity() * std::mem::size_of::<artisan_api::InspectorTerminal>()
+        + summary.terminals.capacity() * size_of::<artisan_api::InspectorTerminal>()
         + summary
             .terminals
             .iter()
@@ -1617,13 +1729,13 @@ fn summary_bytes(summary: &artisan_api::InspectorSummary) -> usize {
                     + terminal.cwd.as_ref().map_or(0, String::capacity)
             })
             .sum::<usize>()
-        + summary.outline.capacity() * std::mem::size_of::<artisan_api::OutlineEntry>()
+        + summary.outline.capacity() * size_of::<artisan_api::OutlineEntry>()
         + summary
             .outline
             .iter()
             .map(|entry| entry.id.0.capacity() + entry.label.capacity())
             .sum::<usize>()
-        + summary.agents.capacity() * std::mem::size_of::<artisan_api::InspectorAgent>()
+        + summary.agents.capacity() * size_of::<artisan_api::InspectorAgent>()
         + summary
             .agents
             .iter()
@@ -1631,7 +1743,7 @@ fn summary_bytes(summary: &artisan_api::InspectorSummary) -> usize {
                 agent.id.0.capacity() + agent.label.capacity() + agent.description.resident_bytes()
             })
             .sum::<usize>()
-        + summary.workflows.capacity() * std::mem::size_of::<artisan_api::InspectorWorkflow>()
+        + summary.workflows.capacity() * size_of::<artisan_api::InspectorWorkflow>()
         + summary
             .workflows
             .iter()
@@ -1688,5 +1800,15 @@ fn read_ack_failure(error: &crate::core::client::CallError) -> ReadAckFailure {
             },
         )
         | None => ReadAckFailure::Transient,
+    }
+}
+
+impl std::fmt::Debug for HostData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostData")
+            .field("id", &self.id)
+            .field("instance", &self.instance)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
     }
 }

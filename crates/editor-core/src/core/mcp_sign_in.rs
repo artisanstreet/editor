@@ -193,7 +193,9 @@ async fn respond(mut stream: TcpStream, page: Page) {
     if let Err(error) = stream.write_all(response.as_bytes()).await {
         tracing::debug!("answering the browser: {error}");
     }
-    stream.shutdown().await.ok();
+    if let Err(error) = stream.shutdown().await {
+        tracing::debug!("closing the browser's connection: {error}");
+    }
 }
 
 fn escape(text: &str) -> String {
@@ -213,12 +215,35 @@ pub enum McpSignInPhase {
 
 #[derive(Clone, Debug)]
 pub struct McpSignIn {
-    pub phase: McpSignInPhase,
-    pub authorize_url: Option<String>,
+    phase: McpSignInPhase,
+    authorize_url: Option<String>,
     id: u64,
     instance: HostInstance,
     state: Option<String>,
     cancel: CancellationToken,
+}
+
+impl McpSignIn {
+    pub const fn phase(&self) -> &McpSignInPhase {
+        &self.phase
+    }
+    pub fn authorize_url(&self) -> Option<&str> {
+        self.authorize_url.as_deref()
+    }
+}
+
+type Answer = tokio::sync::oneshot::Sender<Result<String, StartMcpSignInError>>;
+
+fn reply(answer: Answer, key: &(HostId, String), outcome: Result<String, StartMcpSignInError>) {
+    if answer.send(outcome).is_err() {
+        tracing::debug!(host = %key.0, server = %key.1, "the MCP sign-in's requester stopped waiting for its answer");
+    }
+}
+
+async fn cancel_started(client: &ForgeClient, key: &(HostId, String), state: &str) {
+    if let Err(error) = client.mcp_sign_in_cancel(state).await {
+        tracing::debug!(host = %key.0, server = %key.1, error = %::diagnostics::chain(&error), "cancelling an MCP sign-in");
+    }
 }
 
 enum Message {
@@ -258,8 +283,132 @@ pub(crate) struct McpSignIns {
     events: crate::core::store::Effects,
 }
 
+async fn begin(
+    client: &ForgeClient,
+    key: &(HostId, String),
+) -> Result<(TcpListener, artisan_api::McpSignInStarted), StartMcpSignInError> {
+    let (listener, redirect_uri) = bind().await.map_err(|source| StartMcpSignInError::Listen {
+        server: key.1.clone(),
+        source,
+    })?;
+    let started = client
+        .mcp_sign_in_start(&McpSignInStart {
+            server: key.1.clone(),
+            redirect_uri,
+        })
+        .await
+        .map_err(|source| StartMcpSignInError::Start {
+            host: key.0.clone(),
+            server: key.1.clone(),
+            source,
+        })?;
+    Ok((listener, started))
+}
+
+async fn sign_in(
+    task_key: (HostId, String),
+    id: u64,
+    client: ForgeClient,
+    open: bool,
+    cancel: CancellationToken,
+    answer: Answer,
+    sender: crate::core::delivery::DeliverySender<Message>,
+) {
+    let (listener, started) = match begin(&client, &task_key).await {
+        Ok(value) => value,
+        Err(error) => {
+            sender
+                .offer(Message::Phase {
+                    key: task_key.clone(),
+                    id,
+                    phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
+                })
+                .await;
+            reply(answer, &task_key, Err(error));
+            sender.offer(Message::Cleanup { key: task_key, id }).await;
+            return;
+        }
+    };
+    let (accept, accepted) = tokio::sync::oneshot::channel();
+    if sender
+        .send(Message::Started {
+            key: task_key.clone(),
+            id,
+            url: started.authorize_url.clone(),
+            state: started.state.clone(),
+            open,
+            answer: accept,
+        })
+        .await
+        .is_err()
+        || !accepted.await.unwrap_or(false)
+    {
+        cancel_started(&client, &task_key, &started.state).await;
+        let outcome = Err(StartMcpSignInError::Cancelled {
+            host: task_key.0.clone(),
+            server: task_key.1.clone(),
+        });
+        reply(answer, &task_key, outcome);
+        sender.offer(Message::Finished { key: task_key, id }).await;
+        return;
+    }
+    reply(answer, &task_key, Ok(started.authorize_url));
+    let state = started.state;
+    let (code, stream) = match wait_for_code(listener, state.clone(), cancel).await {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            sender.offer(Message::Finished { key: task_key, id }).await;
+            return;
+        }
+        Err(error) => {
+            cancel_started(&client, &task_key, &state).await;
+            sender
+                .offer(Message::Phase {
+                    key: task_key.clone(),
+                    id,
+                    phase: McpSignInPhase::Failed(error.to_string()),
+                })
+                .await;
+            sender.offer(Message::Cleanup { key: task_key, id }).await;
+            return;
+        }
+    };
+    if sender
+        .send(Message::Phase {
+            key: task_key.clone(),
+            id,
+            phase: McpSignInPhase::Finishing,
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let finished = client
+        .mcp_sign_in_finish(&McpSignInFinish { state, code })
+        .await;
+    let page = match &finished {
+        Ok(_) => Page::signed_in(&task_key.1),
+        Err(error) => Page::failed(&task_key.1, &::diagnostics::chain(&error)),
+    };
+    runtime().spawn(respond(stream, page));
+    let message = match finished {
+        Ok(_) => Message::Finished {
+            key: task_key.clone(),
+            id,
+        },
+        Err(error) => Message::Phase {
+            key: task_key.clone(),
+            id,
+            phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
+        },
+    };
+    sender.offer(message).await;
+    sender.offer(Message::Cleanup { key: task_key, id }).await;
+}
+
 impl McpSignIns {
-    pub fn new(
+    pub(crate) fn new(
         wake: aqua::mailbox::Sender<()>,
         order: AdmissionOrder,
         effects: crate::core::store::Effects,
@@ -268,16 +417,26 @@ impl McpSignIns {
             next_id: 0,
             by_server: HashMap::new(),
             jobs: HashMap::new(),
-            delivery: Delivery::with_order(NonZeroUsize::new(64).unwrap(), wake, order),
+            delivery: Delivery::with_order(
+                NonZeroUsize::new(64)
+                    .expect("invariant: the sign-in delivery capacity is non-zero"),
+                wake,
+                order,
+            ),
             events: effects,
         }
     }
-    pub fn get(&self, host: &HostId, instance: HostInstance, server: &str) -> Option<&McpSignIn> {
+    pub(crate) fn get(
+        &self,
+        host: &HostId,
+        instance: HostInstance,
+        server: &str,
+    ) -> Option<&McpSignIn> {
         self.by_server
             .get(&(host.clone(), server.to_owned()))
             .filter(|entry| entry.instance == instance)
     }
-    pub fn end_host(&mut self, host: &HostId) {
+    pub(crate) fn end_host(&mut self, host: &HostId) {
         let ended = self.by_server.len();
         self.by_server.retain(|(owner, _), entry| {
             let kept = owner != host;
@@ -292,7 +451,7 @@ impl McpSignIns {
             self.delivery.wake();
         }
     }
-    pub fn end_all(&mut self) {
+    pub(crate) fn end_all(&mut self) {
         let hosts: Vec<HostId> = self
             .by_server
             .keys()
@@ -303,7 +462,7 @@ impl McpSignIns {
             self.end_host(&host);
         }
     }
-    pub fn start(
+    pub(crate) fn start(
         &mut self,
         host: HostId,
         instance: HostInstance,
@@ -327,21 +486,23 @@ impl McpSignIns {
                         self.events.mcp(McpEvent::OpenUrl(url.clone()));
                         self.delivery.wake();
                     }
-                    let _ = answer.send(Ok(url));
+                    reply(answer, &key, Ok(url));
                     return answered;
                 }
                 (McpSignInPhase::Starting | McpSignInPhase::Waiting, _) => {
-                    let _ = answer.send(Err(StartMcpSignInError::StillStarting {
+                    let outcome = Err(StartMcpSignInError::StillStarting {
                         host: key.0.clone(),
                         server: key.1.clone(),
-                    }));
+                    });
+                    reply(answer, &key, outcome);
                     return answered;
                 }
                 (McpSignInPhase::Finishing, _) => {
-                    let _ = answer.send(Err(StartMcpSignInError::Finishing {
+                    let outcome = Err(StartMcpSignInError::Finishing {
                         host: key.0.clone(),
                         server: key.1.clone(),
-                    }));
+                    });
+                    reply(answer, &key, outcome);
                     return answered;
                 }
                 (McpSignInPhase::Failed(_), _) => {}
@@ -365,122 +526,11 @@ impl McpSignIns {
         self.delivery.wake();
         let sender = self.delivery.sender();
         let task_key = key.clone();
-        let task = runtime().spawn(async move {
-            let begun = async {
-                let (listener, redirect_uri) =
-                    bind().await.map_err(|source| StartMcpSignInError::Listen {
-                        server: task_key.1.clone(),
-                        source,
-                    })?;
-                let started = client
-                    .mcp_sign_in_start(&McpSignInStart {
-                        server: task_key.1.clone(),
-                        redirect_uri,
-                    })
-                    .await
-                    .map_err(|source| StartMcpSignInError::Start {
-                        host: task_key.0.clone(),
-                        server: task_key.1.clone(),
-                        source,
-                    })?;
-                Ok::<_, StartMcpSignInError>((listener, started))
-            }
-            .await;
-            let (listener, started) = match begun {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = sender
-                        .send(Message::Phase {
-                            key: task_key.clone(),
-                            id,
-                            phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
-                        })
-                        .await;
-                    let _ = answer.send(Err(error));
-                    let _ = sender.send(Message::Cleanup { key: task_key, id }).await;
-                    return;
-                }
-            };
-            let (accept, accepted) = tokio::sync::oneshot::channel();
-            if sender
-                .send(Message::Started {
-                    key: task_key.clone(),
-                    id,
-                    url: started.authorize_url.clone(),
-                    state: started.state.clone(),
-                    open,
-                    answer: accept,
-                })
-                .await
-                .is_err()
-                || !accepted.await.unwrap_or(false)
-            {
-                client.mcp_sign_in_cancel(&started.state).await.ok();
-                let _ = answer.send(Err(StartMcpSignInError::Cancelled {
-                    host: task_key.0.clone(),
-                    server: task_key.1.clone(),
-                }));
-                let _ = sender.send(Message::Finished { key: task_key, id }).await;
-                return;
-            }
-            let _ = answer.send(Ok(started.authorize_url));
-            let state = started.state;
-            let (code, stream) = match wait_for_code(listener, state.clone(), cancel).await {
-                Ok(Some(found)) => found,
-                Ok(None) => {
-                    let _ = sender.send(Message::Finished { key: task_key, id }).await;
-                    return;
-                }
-                Err(error) => {
-                    client.mcp_sign_in_cancel(&state).await.ok();
-                    let _ = sender
-                        .send(Message::Phase {
-                            key: task_key.clone(),
-                            id,
-                            phase: McpSignInPhase::Failed(error.to_string()),
-                        })
-                        .await;
-                    let _ = sender.send(Message::Cleanup { key: task_key, id }).await;
-                    return;
-                }
-            };
-            if sender
-                .send(Message::Phase {
-                    key: task_key.clone(),
-                    id,
-                    phase: McpSignInPhase::Finishing,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let finished = client
-                .mcp_sign_in_finish(&McpSignInFinish { state, code })
-                .await;
-            let page = match &finished {
-                Ok(_) => Page::signed_in(&task_key.1),
-                Err(error) => Page::failed(&task_key.1, &::diagnostics::chain(&error)),
-            };
-            runtime().spawn(respond(stream, page));
-            let message = match finished {
-                Ok(_) => Message::Finished {
-                    key: task_key.clone(),
-                    id,
-                },
-                Err(error) => Message::Phase {
-                    key: task_key.clone(),
-                    id,
-                    phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
-                },
-            };
-            let _ = sender.send(message).await;
-            let _ = sender.send(Message::Cleanup { key: task_key, id }).await;
-        });
+        let task = runtime().spawn(sign_in(task_key, id, client, open, cancel, answer, sender));
         self.jobs.insert((key, id), AbortOnDropHandle::new(task));
         answered
     }
-    pub fn cancel(&mut self, host: &HostId, server: &str, client: ForgeClient) {
+    pub(crate) fn cancel(&mut self, host: &HostId, server: &str, client: ForgeClient) {
         let key = (host.clone(), server.to_owned());
         let Some(entry) = self.by_server.remove(&key) else {
             return;
@@ -496,10 +546,10 @@ impl McpSignIns {
         self.events.mcp(McpEvent::Changed);
         self.delivery.wake();
     }
-    pub fn peek_order(&mut self) -> Option<u64> {
+    pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.delivery.peek_order()
     }
-    pub fn drain(&mut self) {
+    pub(crate) fn drain(&mut self) {
         if let Some(message) = self.delivery.drain_one() {
             match message {
                 Message::Started {
@@ -525,7 +575,9 @@ impl McpSignIns {
                         }
                         self.events.mcp(McpEvent::Changed);
                     }
-                    let _ = answer.send(wanted);
+                    if answer.send(wanted).is_err() {
+                        tracing::debug!(host = %key.0, server = %key.1, "the MCP sign-in task ended before its start was accepted");
+                    }
                 }
                 Message::Phase { key, id, phase } => {
                     if let Some(entry) = self.by_server.get_mut(&key)

@@ -53,7 +53,7 @@ impl HostData {
             }
         };
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.dismiss_database_rollback().await;
             if sender

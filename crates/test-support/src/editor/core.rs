@@ -31,8 +31,7 @@ pub fn remote_host(id: &str) -> HostConfig {
 
 fn client(core: &Core, config: &HostConfig) -> ForgeClient {
     let identity = core
-        .identity
-        .as_ref()
+        .identity()
         .expect("invariant: a component-test Core has an identity");
     ForgeClient::new(&config.address, &config.fingerprint, identity)
         .unwrap_or_else(|error| panic!("build a client for host {}: {error:#}", config.id))

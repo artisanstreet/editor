@@ -10,14 +10,14 @@ const PAGE: u32 = 200;
 const RETAINED: usize = 5 * PAGE as usize;
 const CHANGES: usize = 600;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ThreadPageDirection {
     Latest,
     Older,
     Newer,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 enum PageLoad {
     #[default]
     Unloaded,
@@ -31,7 +31,7 @@ enum PageLoad {
     Failed(String),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ThreadPage {
     ids: Vec<ThreadId>,
     members: HashSet<ThreadId>,
@@ -147,16 +147,16 @@ pub enum ThreadUnavailable {
 }
 
 impl std::fmt::Display for ThreadUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Failed(error) => write!(
-                formatter,
+                f,
                 "Couldn't load this thread. {}",
                 error.source.fault().sentence()
             ),
-            Self::Missing => formatter.write_str("This thread isn't on this Forge."),
+            Self::Missing => f.write_str("This thread isn't on this Forge."),
             Self::Deleted => {
-                formatter.write_str("This thread was deleted after a long time without activity.")
+                f.write_str("This thread was deleted after a long time without activity.")
             }
         }
     }
@@ -208,7 +208,7 @@ impl ThreadPages {
 enum Accepted {
     Refused,
     New,
-    Replaced(Thread),
+    Replaced(Box<Thread>),
 }
 
 fn listed_in(thread: &Thread, archived: bool) -> bool {
@@ -321,11 +321,11 @@ impl HostData {
             query: None,
         };
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = client.threads(&query).await;
-            let _ = sender
-                .send(HostCompletion::ThreadPage {
+            sender
+                .offer(HostCompletion::ThreadPage {
                     archived,
                     direction,
                     started_seq,
@@ -348,7 +348,7 @@ impl HostData {
         direction: ThreadPageDirection,
         started_seq: artisan_api::Seq,
         generation: u64,
-        result: Result<artisan_api::ThreadsPage, crate::core::client::CallError>,
+        result: Result<artisan_api::ThreadsPage, CallError>,
     ) -> bool {
         let page = &mut self.thread_pages.pages[usize::from(archived)];
         let changed = match &mut page.load {
@@ -425,15 +425,15 @@ impl HostData {
         }
         let page = &mut self.thread_pages.pages[index];
         if page.at_latest {
-            for id in changed {
-                if self
-                    .threads
-                    .get(id)
-                    .is_some_and(|thread| listed_in(thread, archived))
-                {
-                    page.insert(id, &self.threads);
-                }
-            }
+            let threads = &self.threads;
+            changed
+                .iter()
+                .filter(|id| {
+                    threads
+                        .get(*id)
+                        .is_some_and(|thread| listed_in(thread, archived))
+                })
+                .for_each(|id| page.insert(id, threads));
         }
         page.window(older, &self.threads);
     }
@@ -469,12 +469,12 @@ impl HostData {
             self.thread_pages.generation = self.thread_pages.generation.wrapping_add(1);
             let generation = self.thread_pages.generation;
             let client = self.client.clone();
-            let sender = self.delivery.sender().map(HostMessage::Completion);
+            let sender = self.delivery.sender().map(HostMessage::completion);
             let task_id = id.clone();
             let task = crate::core::runtime::runtime().spawn(async move {
                 let result = client.thread(&task_id).await;
-                let _ = sender
-                    .send(HostCompletion::ThreadLookup(task_id, generation, result))
+                sender
+                    .offer(HostCompletion::ThreadLookup(task_id, generation, result))
                     .await;
             });
             self.thread_pages
@@ -486,13 +486,13 @@ impl HostData {
         &mut self,
         id: ThreadId,
         generation: u64,
-        result: Result<Thread, crate::core::client::CallError>,
+        result: Result<Thread, CallError>,
     ) -> bool {
-        if !self
+        if self
             .thread_pages
             .direct
             .get(&id)
-            .is_some_and(|(current, _)| *current == generation)
+            .is_none_or(|(current, _)| *current != generation)
         {
             return false;
         }
@@ -549,7 +549,7 @@ impl HostData {
             return Accepted::Refused;
         }
         self.store_thread(thread)
-            .map_or(Accepted::New, Accepted::Replaced)
+            .map_or(Accepted::New, |old| Accepted::Replaced(Box::new(old)))
     }
     pub(super) fn remember_thread(&mut self, thread: Thread) -> bool {
         let id = thread.id.clone();
@@ -558,7 +558,7 @@ impl HostData {
         let old = match self.accept_thread(thread) {
             Accepted::Refused => return false,
             Accepted::New => None,
-            Accepted::Replaced(old) => Some(old),
+            Accepted::Replaced(old) => Some(*old),
         };
         for page in &mut self.thread_pages.pages {
             if let PageLoad::Loading { changed, .. } = &mut page.load {

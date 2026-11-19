@@ -73,3 +73,13 @@ async fn installed(args: Vec<String>) -> Result<String, AeError> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
+
+impl std::fmt::Debug for Ae {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Installed => f.write_str("Installed"),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Scripted(_) => f.write_str("Scripted"),
+        }
+    }
+}

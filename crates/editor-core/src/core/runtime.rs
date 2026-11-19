@@ -18,9 +18,7 @@ pub fn runtime() -> &'static Runtime {
 }
 
 pub(crate) async fn run_http<T: Send + 'static>(
-    future: impl std::future::Future<Output = Result<T, artisan_account::network::NetworkError>>
-    + Send
-    + 'static,
+    future: impl Future<Output = Result<T, artisan_account::network::NetworkError>> + Send + 'static,
 ) -> Result<T, artisan_account::network::NetworkError> {
     match tokio_util::task::AbortOnDropHandle::new(runtime().spawn(future)).await {
         Ok(result) => result,

@@ -8,7 +8,7 @@ use artisan_account::network::MachineEntry as AccountMachine;
 
 const RELAY_URL_DEFAULT: &str = "wss://relay.editor.artisan.st";
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Services {
     pub(crate) core_url: Option<String>,
     pub(crate) ae: Ae,
@@ -160,4 +160,24 @@ pub(crate) async fn open_relay(
         machine: machine_id,
         source: Box::new(source),
     })
+}
+
+impl std::fmt::Debug for RelayRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(url) => f.debug_tuple("Url").field(url).finish(),
+            Self::Off => f.write_str("Off"),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Scripted(_) => f.write_str("Scripted"),
+        }
+    }
+}
+
+impl std::fmt::Debug for RelayDialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayDialRequest")
+            .field("account_id", &self.account_id)
+            .field("machine_id", &self.machine_id)
+            .finish_non_exhaustive()
+    }
 }

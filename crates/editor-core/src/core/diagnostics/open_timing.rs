@@ -131,18 +131,40 @@ pub fn acknowledged() {
     }
 }
 
-pub fn gate(
-    reason: &str,
-    pending: bool,
-    changed: bool,
-    animating: bool,
-    active: bool,
-    painted: usize,
-    visible: usize,
-    candidates: usize,
-    elapsed: Duration,
-) {
+#[derive(Clone, Copy, Debug)]
+pub struct Reveal {
+    pub pending: bool,
+    pub changed: bool,
+    pub animating: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Gate<'a> {
+    pub reason: &'a str,
+    pub reveal: Reveal,
+    pub active: bool,
+    pub painted: usize,
+    pub visible: usize,
+    pub candidates: usize,
+    pub elapsed: Duration,
+}
+
+pub fn gate(gate: &Gate<'_>) {
     if enabled() {
+        let Gate {
+            reason,
+            reveal:
+                Reveal {
+                    pending,
+                    changed,
+                    animating,
+                },
+            active,
+            painted,
+            visible,
+            candidates,
+            elapsed,
+        } = *gate;
         report(
             "gate",
             &format!(
