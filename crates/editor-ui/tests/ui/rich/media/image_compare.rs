@@ -139,7 +139,7 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
     let view = state
         .view(
             &model,
-            crate::ui::theme::ArtisanTheme::resolved(),
+            &crate::ui::theme::ArtisanTheme::resolved(),
             "compare",
             800.0,
             Rc::new(move |action| sink.borrow_mut().push(action)),
@@ -211,7 +211,7 @@ fn the_comparison_frame_is_a_named_slider_or_switch_that_assistive_tech_operates
         let view = state
             .view(
                 &model,
-                crate::ui::theme::ArtisanTheme::resolved(),
+                &crate::ui::theme::ArtisanTheme::resolved(),
                 "compare",
                 800.0,
                 Rc::new(move |action| sink.borrow_mut().push(action)),

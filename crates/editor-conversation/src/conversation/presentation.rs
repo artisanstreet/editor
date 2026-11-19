@@ -678,7 +678,7 @@ impl MarkdownOwners {
         let scope_instance = scope.instance;
         Ok(body.presenter.code_services(
             &body.id,
-            *theme,
+            theme,
             reduced_motion,
             Rc::new(move |effect| copy(CodeAction::Copy(effect))),
             copy_enabled,

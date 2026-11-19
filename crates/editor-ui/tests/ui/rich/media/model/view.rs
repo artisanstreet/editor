@@ -208,7 +208,7 @@ fn the_model_viewport_shows_a_focus_ring_when_tab_reaches_it() {
         Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build());
     let services = crate::ui::rich::media::model::services(
         "model",
-        crate::ui::theme::ArtisanTheme::resolved(),
+        &crate::ui::theme::ArtisanTheme::resolved(),
         assets.clone(),
         Rc::new(|| Some(RendererCapability::Software)),
         &glyph,

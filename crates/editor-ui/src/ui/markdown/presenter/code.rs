@@ -250,12 +250,13 @@ impl MarkdownPresenter {
     pub fn code_services(
         &self,
         owner: &str,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         reduced_motion: bool,
         effect: Rc<dyn Fn(crate::ui::code_copy::CopyEffect)>,
         copy_enabled: bool,
         reference: Option<ReferenceServices>,
     ) -> CodeServices {
+        let theme = *theme;
         let states = Rc::clone(&self.copies);
         let owner = owner.to_owned();
         CodeServices {

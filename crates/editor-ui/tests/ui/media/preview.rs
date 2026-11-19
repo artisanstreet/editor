@@ -274,7 +274,7 @@ fn mounted_preview_emits_source_frame_with_supported_entrance_transform() {
         UiBox::new()
             .width(viewport.w)
             .height(viewport.h)
-            .child(preview.view(theme, viewport, when, false, Rc::new(|_, _| {})))
+            .child(preview.view(&theme, viewport, when, false, Rc::new(|_, _| {})))
             .build()
     })
     .unwrap();
@@ -430,7 +430,7 @@ fn a_failed_preview_names_the_cause_and_retries_the_fetch() {
     let texts = |preview: &Preview, actions: &Rc<RefCell<Vec<Action>>>| {
         let sink = Rc::clone(actions);
         let view = preview.view(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             Size { w: 800.0, h: 600.0 },
             now,
             true,

@@ -331,7 +331,7 @@ impl CompareState {
     pub(crate) fn view(
         &self,
         model: &ImageCompare,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         id: &str,
         available_width: f32,
         emit: Rc<dyn Fn(Action)>,
@@ -364,19 +364,19 @@ impl CompareState {
                 .width(width)
                 .spaced(Space::S8)
                 .child(frame(
-                    &theme,
+                    theme,
                     half,
                     aspect,
-                    self.layer(Side::Before, &theme, id, half, half / aspect, &emit),
-                    vec![corner(&theme, before_label, true, false, half)],
+                    self.layer(Side::Before, theme, id, half, half / aspect, &emit),
+                    vec![corner(theme, before_label, true, false, half)],
                     consent.clone(),
                 ))
                 .child(frame(
-                    &theme,
+                    theme,
                     half,
                     aspect,
-                    self.layer(Side::After, &theme, id, half, half / aspect, &emit),
-                    vec![corner(&theme, after_label, true, false, half)],
+                    self.layer(Side::After, theme, id, half, half / aspect, &emit),
+                    vec![corner(theme, after_label, true, false, half)],
                     consent,
                 ))
                 .build()
@@ -395,19 +395,19 @@ impl CompareState {
             let mut layers = Vec::new();
             match self.mode {
                 Mode::Slider => {
-                    layers.push(self.layer(Side::After, &theme, id, width, height, &emit));
+                    layers.push(self.layer(Side::After, theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width * self.split)
                             .height(height)
                             .clip(true)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(self.layer(Side::Before, &theme, id, width, height, &emit))
+                            .child(self.layer(Side::Before, theme, id, width, height, &emit))
                             .build(),
                     );
-                    layers.push(corner(&theme, before_label, true, self.dragging, width));
-                    layers.push(corner(&theme, after_label, false, self.dragging, width));
-                    layers.extend(divider(&theme, self.split, width, height));
+                    layers.push(corner(theme, before_label, true, self.dragging, width));
+                    layers.push(corner(theme, after_label, false, self.dragging, width));
+                    layers.extend(divider(theme, self.split, width, height));
                 }
                 Mode::Toggle => {
                     let (side, label, left) = if self.showing_after {
@@ -415,18 +415,18 @@ impl CompareState {
                     } else {
                         (Side::Before, before_label, true)
                     };
-                    layers.push(self.layer(side, &theme, id, width, height, &emit));
-                    layers.push(corner(&theme, label, left, false, width));
+                    layers.push(self.layer(side, theme, id, width, height, &emit));
+                    layers.push(corner(theme, label, left, false, width));
                 }
                 Mode::Blend => {
-                    layers.push(self.layer(Side::Before, &theme, id, width, height, &emit));
+                    layers.push(self.layer(Side::Before, theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width)
                             .height(height)
                             .opacity(self.split)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(self.layer(Side::After, &theme, id, width, height, &emit))
+                            .child(self.layer(Side::After, theme, id, width, height, &emit))
                             .build(),
                     );
                     let text = format!(
@@ -444,14 +444,14 @@ impl CompareState {
                                     .justify(aqua_ui::JustifyContent::CENTER)
                                     .absolute_at(Some(0.0), None, None, Some(8.0)),
                             )
-                            .child(pill(&theme, text))
+                            .child(pill(theme, text))
                             .build(),
                     );
                 }
                 Mode::SideBySide => unreachable!(),
             }
             let frame = frame(
-                &theme,
+                theme,
                 width,
                 aspect,
                 UiBox::new().build(),
@@ -467,7 +467,7 @@ impl CompareState {
         let switch_emit = emit;
         let control = SegmentedControl::new(
             format!("{id}-modes"),
-            theme,
+            *theme,
             "Comparison mode",
             mode_index,
             Segment::new(0, Mode::ALL[0].label()),

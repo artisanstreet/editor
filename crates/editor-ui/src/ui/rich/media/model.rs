@@ -127,7 +127,7 @@ impl ModelBlock {
 
 pub(crate) fn services(
     id: &str,
-    theme: crate::ui::theme::ArtisanTheme,
+    theme: &crate::ui::theme::ArtisanTheme,
     assets: crate::ui::media::model::load::ModelAssets,
     capability: Rc<dyn Fn() -> Option<crate::ui::media::model::load::RendererCapability>>,
     glyph: &crate::ui::rich::narrative::callout::GlyphFactory,
@@ -141,6 +141,7 @@ pub(crate) fn services(
         element::{Element, ui},
         style::{Length, Style},
     };
+    let theme = *theme;
     let frame_hover = hovered;
     let frame_invalidate = Rc::clone(&invalidate);
     let frame = Rc::new(

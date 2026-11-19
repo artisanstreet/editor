@@ -276,7 +276,7 @@ pub(crate) fn view(
     let width = probe.get().map_or(480.0, |bounds| bounds.w);
     if data.mode == Mode::Box {
         return boxes(
-            id, theme, data, states, services, invalidate, hover, probe, reset, width,
+            id, &theme, data, states, services, invalidate, hover, probe, reset, width,
         );
     }
     let domain = data.domain();
@@ -610,7 +610,7 @@ fn navigation(
 
 fn boxes(
     id: &str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     data: &Arc<Distribution>,
     states: DistributionState,
     services: &Services,
@@ -620,6 +620,7 @@ fn boxes(
     reset: u64,
     width: f32,
 ) -> Element {
+    let theme = *theme;
     let count = data.samples.len();
     let selected = hover.map(|(_, y)| index_of(f64::from(y) * f64_of(count)).min(count - 1));
     let budget = index_of(f64::from((width * 0.75 / 96.0).floor().clamp(2.0, 24.0)));

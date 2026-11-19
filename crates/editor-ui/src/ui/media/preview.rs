@@ -490,7 +490,7 @@ impl Preview {
 
     pub fn view(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport: Size,
         now: Instant,
         reduced_motion: bool,
@@ -556,7 +556,7 @@ impl Preview {
                 .child(
                     TextRole::Label
                         .text(
-                            &theme,
+                            theme,
                             self.failure.map_or("Loading image…", ImageError::summary),
                         )
                         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
@@ -566,7 +566,7 @@ impl Preview {
                     let retry = Rc::clone(&emit);
                     Button::text(
                         "image-preview-retry",
-                        theme,
+                        *theme,
                         ButtonTone::Neutral,
                         "Try again",
                     )
@@ -633,7 +633,7 @@ impl Preview {
             .child(
                 IconButton::corner_close(
                     "image-preview-close",
-                    theme,
+                    *theme,
                     "Close image preview",
                     FRAME.radius_px(),
                 )
@@ -672,7 +672,7 @@ impl Preview {
                     } else {
                         "image-preview-previous"
                     },
-                    theme,
+                    *theme,
                     if forward {
                         editor_assets::AssetId::TABLER_CHEVRON_RIGHT
                     } else {
@@ -716,7 +716,7 @@ impl Preview {
                     .child(
                         TextRole::Caption
                             .text(
-                                &theme,
+                                theme,
                                 format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
                             )
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())

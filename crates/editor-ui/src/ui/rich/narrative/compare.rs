@@ -78,7 +78,7 @@ fn cell(
     column: usize,
     count: usize,
     selected: Option<usize>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     states: CompareState,
     block: String,
     invalidate: Rc<dyn Fn()>,
@@ -94,7 +94,7 @@ fn cell(
             .min_width(Length::Px(0.0)),
     );
     if selected == Some(column) {
-        cell = cell.style(Hover::Neutral.style(&theme));
+        cell = cell.style(Hover::Neutral.style(theme));
     }
     cell.child(content)
         .build()
@@ -169,7 +169,7 @@ impl Compare {
                 column,
                 count,
                 selected,
-                theme,
+                &theme,
                 states.clone(),
                 id.to_owned(),
                 Rc::clone(&invalidate),
@@ -230,7 +230,7 @@ impl Compare {
                         column,
                         count,
                         selected,
-                        theme,
+                        &theme,
                         row_states.clone(),
                         row_id.clone(),
                         Rc::clone(&row_invalidate),

@@ -450,7 +450,7 @@ impl StoredConversation {
         let reference = code_emit;
         let code = body.presenter.code_services(
             leaf_owner,
-            *theme,
+            theme,
             reduced_motion,
             Rc::new(move |effect| copy(super::presentation::CodeAction::Copy(effect))),
             true,

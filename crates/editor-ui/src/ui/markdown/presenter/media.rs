@@ -42,7 +42,7 @@ impl MarkdownPresenter {
         );
         let services = rich::media::model::services(
             &block_id,
-            *theme,
+            theme,
             media.model_assets.clone(),
             Rc::clone(&media.model_capability),
             glyph,
@@ -173,7 +173,7 @@ impl MarkdownPresenter {
         });
         let content = state
             .borrow()
-            .view(model, *theme, &block_id, services.width, &emit)
+            .view(model, theme, &block_id, services.width, &emit)
             .map_err(PresenterError::Unavailable)?;
         Ok(enveloped(theme, envelope, content))
     }
@@ -275,7 +275,7 @@ impl MarkdownPresenter {
         });
         let content = state
             .borrow()
-            .view(model, *theme, &block_id, services.width, emit)
+            .view(model, theme, &block_id, services.width, emit)
             .map_err(PresenterError::Unavailable)?;
         Ok(enveloped(theme, envelope, content))
     }

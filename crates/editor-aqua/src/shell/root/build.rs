@@ -396,7 +396,7 @@ impl RootViews {
         let image_preview = self.image_preview.as_ref().map(|preview| {
             let events = Rc::clone(&self.preview_actions);
             preview.view.view(
-                theme,
+                &theme,
                 aqua_core::Size::new(viewport.width, viewport.height),
                 now,
                 reduced,

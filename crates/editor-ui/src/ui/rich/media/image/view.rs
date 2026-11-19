@@ -139,7 +139,7 @@ impl ImageState {
     pub(crate) fn view(
         &self,
         block: &ImageBlock,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         id: &str,
         width: f32,
         emit: &Rc<dyn Fn(Action)>,
@@ -187,7 +187,7 @@ impl ImageState {
                         let retry = Rc::clone(emit);
                         Button::text(
                             format!("{id}-retry-{index}"),
-                            theme,
+                            *theme,
                             ButtonTone::Neutral,
                             "Try again",
                         )
@@ -197,8 +197,8 @@ impl ImageState {
                     });
                 let mut frame = Surface::Media(Framing::Frame)
                     .build(
-                        &theme,
-                        vec![content(loaded, &theme, &path, shown_width, height, retry)],
+                        theme,
+                        vec![content(loaded, theme, &path, shown_width, height, retry)],
                     )
                     .style(
                         Style::new()
@@ -403,7 +403,7 @@ impl ImageState {
                 {
                     column = column.child(
                         TextRole::Caption
-                            .text(&theme, caption.to_owned())
+                            .text(theme, caption.to_owned())
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
