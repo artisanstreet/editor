@@ -99,7 +99,7 @@ fn render(source: &str) -> Option<DiagramSvg> {
 }
 
 fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f32, String)> {
-    catch_unwind(AssertUnwindSafe(|| {
+    let laid_out = catch_unwind(AssertUnwindSafe(|| {
         let parsed = parse_mermaid_strict(source).ok()?;
         if parsed.graph.nodes.len()
             + parsed.graph.edges.len()
@@ -124,9 +124,22 @@ fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f3
             outline_text(&render_svg(&layout, &themes[1], &config))?,
         ];
         Some((svgs, size.width, size.height, summary(&parsed.graph)))
-    }))
-    .ok()
-    .flatten()
+    }));
+    match laid_out {
+        Ok(svg) => svg,
+        Err(panic) => {
+            tracing::error!(
+                bytes = source.len(),
+                panic = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("a non-text panic payload"),
+                "the diagram renderer panicked; the diagram shows as its source"
+            );
+            None
+        }
+    }
 }
 
 fn summary(graph: &Graph) -> String {
