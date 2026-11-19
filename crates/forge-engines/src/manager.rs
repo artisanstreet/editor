@@ -686,24 +686,6 @@ impl Engines {
         result
     }
 
-    #[cfg(test)]
-    pub(crate) async fn install_resolved(
-        &self,
-        engine: EngineId,
-        artifact: Artifact,
-        resolved: Resolved,
-    ) -> Result<String, InstallError> {
-        let _lock = install::lock(&self.inner.layout, engine)
-            .await
-            .map_err(|source| InstallError::Lock { engine, source })?;
-        let result = self
-            .fetch(engine, artifact, &resolved)
-            .await
-            .map(|()| resolved.version.clone())
-            .map_err(InstallError::Fetch);
-        self.finish(engine, result).await
-    }
-
     async fn refresh_models(&self, engine: EngineId) -> Result<Arc<[Model]>, RefreshModelsError> {
         let slot = self.slot(engine);
         let observed = {
@@ -843,3 +825,7 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "../tests/manager/lease_release.rs"]
 mod lease_release_tests;
+
+#[cfg(test)]
+#[path = "../tests/manager/install.rs"]
+mod install_resolved;

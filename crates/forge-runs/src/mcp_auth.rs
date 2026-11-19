@@ -341,14 +341,6 @@ impl Mcp {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn lifetime_holders(&self, server: &str) -> usize {
-        self.flows_lock()
-            .lifetimes
-            .get(server)
-            .map_or(0, Arc::strong_count)
-    }
-
     pub async fn sign_in_start(
         &self,
         name: &str,
@@ -783,3 +775,7 @@ impl Mcp {
         Ok(token)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/mcp_auth/support.rs"]
+mod support;

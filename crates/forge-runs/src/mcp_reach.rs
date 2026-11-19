@@ -105,15 +105,6 @@ impl Reachability {
         found
     }
 
-    #[cfg(test)]
-    pub(crate) fn probed(&self, endpoints: usize) -> bool {
-        let entries = self.entries();
-        entries.len() == endpoints
-            && entries
-                .values()
-                .all(|entry| matches!(entry, Entry::Probed { .. }))
-    }
-
     pub(crate) fn warm(self: &Arc<Self>, servers: &[McpServer]) {
         self.spawn_probe(servers, Refresh::Stale);
     }
@@ -206,3 +197,7 @@ impl Reachability {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/mcp_reach/support.rs"]
+mod support;
