@@ -110,6 +110,11 @@ impl StoredReply {
     }
 }
 
+pub(crate) enum TailRead {
+    Fetched(Result<ContentRange, RangeError>),
+    Unavailable,
+}
+
 pub(crate) enum ReplyTail {
     Reading {
         reply: StoredReply,
@@ -133,12 +138,8 @@ impl ReplyTail {
         }
     }
 
-    pub(crate) fn settle(
-        thread: &ThreadId,
-        reply: StoredReply,
-        result: Result<ContentRange, RangeError>,
-    ) -> Self {
-        match read_tail(thread, &reply, result) {
+    pub(crate) fn settle(thread: &ThreadId, reply: StoredReply, read: TailRead) -> Self {
+        match read_tail(thread, &reply, read) {
             Ok(tail) => Self::Read { reply, tail },
             Err(error) => {
                 tracing::warn!(
@@ -162,6 +163,14 @@ pub enum ReadReplyTailError {
         source: Box<RangeError>,
     },
     #[error(
+        "read the end of reply {item} ({content}) in thread {thread}: its Forge no longer serves this Editor"
+    )]
+    Unavailable {
+        thread: ThreadId,
+        item: ItemId,
+        content: ContentId,
+    },
+    #[error(
         "the end of reply {item} ({content}) in thread {thread} stopped at byte {end} of {total}"
     )]
     ShortOfEnd {
@@ -176,14 +185,23 @@ pub enum ReadReplyTailError {
 fn read_tail(
     thread: &ThreadId,
     reply: &StoredReply,
-    result: Result<ContentRange, RangeError>,
+    read: TailRead,
 ) -> Result<String, ReadReplyTailError> {
-    let range = result.map_err(|source| ReadReplyTailError::Read {
-        thread: thread.clone(),
-        item: reply.item.clone(),
-        content: reply.source.id.clone(),
-        source: Box::new(source),
-    })?;
+    let range = match read {
+        TailRead::Fetched(result) => result.map_err(|source| ReadReplyTailError::Read {
+            thread: thread.clone(),
+            item: reply.item.clone(),
+            content: reply.source.id.clone(),
+            source: Box::new(source),
+        })?,
+        TailRead::Unavailable => {
+            return Err(ReadReplyTailError::Unavailable {
+                thread: thread.clone(),
+                item: reply.item.clone(),
+                content: reply.source.id.clone(),
+            });
+        }
+    };
     if range.end != range.total {
         return Err(ReadReplyTailError::ShortOfEnd {
             thread: thread.clone(),
@@ -331,7 +349,7 @@ fn reply_text(view: &ThreadView, run: &Run) -> ReplyText {
 
 #[must_use]
 pub fn current(conversation: &Conversation) -> Announcement {
-    announcement(&turn(conversation, artisan_api::now()))
+    announcement(&turn(conversation, conversation.clock().timestamp()))
 }
 
 #[must_use]

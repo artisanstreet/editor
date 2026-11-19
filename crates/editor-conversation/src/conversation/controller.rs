@@ -102,7 +102,7 @@ enum Completion {
     ReplyTail {
         origin: Origin,
         reply: super::announce::StoredReply,
-        result: Result<artisan_api::ContentRange, editor_core::client::RangeError>,
+        read: super::announce::TailRead,
     },
 }
 
@@ -703,10 +703,11 @@ impl Conversation {
     }
 
     fn follow_reply_tail(&mut self, core: &Core) {
+        let now = self.clock.timestamp();
         let wanted = self
             .view
             .as_ref()
-            .and_then(|view| super::announce::finished_stored_reply(view, artisan_api::now()));
+            .and_then(|view| super::announce::finished_stored_reply(view, now));
         let Some(reply) = wanted else {
             self.reply_tail = None;
             return;
@@ -718,17 +719,15 @@ impl Conversation {
         {
             return;
         }
-        self.reply_tail = None;
         let (Some((host, _)), Some(instance)) = (&self.open, self.host_instance) else {
-            return;
+            unreachable!(
+                "invariant: a conversation showing a thread view has that thread open on a Forge instance"
+            );
         };
         let (offset, limit) = reply.tail_query();
-        let Some(read) = core
+        let read = core
             .source_provider(host, instance)
-            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit))
-        else {
-            return;
-        };
+            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit));
         let origin = Origin {
             host: host.clone(),
             instance,
@@ -737,12 +736,15 @@ impl Conversation {
         let sender = self.delivery.sender();
         let reading = reply.clone();
         let task = AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = read.await;
+            let read = match read {
+                Some(read) => super::announce::TailRead::Fetched(read.await),
+                None => super::announce::TailRead::Unavailable,
+            };
             sender
                 .offer(Completion::ReplyTail {
                     origin,
                     reply: reading,
-                    result,
+                    read,
                 })
                 .await;
         }));
@@ -1612,7 +1614,7 @@ impl Conversation {
                 Completion::ReplyTail {
                     origin,
                     reply,
-                    result,
+                    read,
                 } if self.accepts(core, &origin)
                     && matches!(
                         &self.reply_tail,
@@ -1623,8 +1625,7 @@ impl Conversation {
                         .open
                         .as_ref()
                         .expect("invariant: an accepted completion belongs to the open thread");
-                    self.reply_tail =
-                        Some(super::announce::ReplyTail::settle(thread, reply, result));
+                    self.reply_tail = Some(super::announce::ReplyTail::settle(thread, reply, read));
                     changed = true;
                 }
                 Completion::Held { .. }

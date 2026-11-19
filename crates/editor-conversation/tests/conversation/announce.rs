@@ -186,9 +186,11 @@ fn long_stored_reply() -> String {
     format!("{}{LAST_PARAGRAPH}", filler.repeat(600))
 }
 
+const FINISHED_AT: Timestamp = 1_700_000_000_000;
+
 fn finished_reply_page(thread: &ThreadId, source: ContentRef) -> ItemsPage {
     let run = RunId("long-run".into());
-    let now = artisan_api::now();
+    let now = FINISHED_AT;
     ItemsPage {
         items: vec![Item {
             id: ItemId("long-reply".into()),
@@ -273,7 +275,9 @@ impl FinishedReply {
             source.bytes > u64::from(REPLY_TAIL_BYTES),
             "the reply is too long to keep inline or fetch whole"
         );
-        let mut stub = StubbedHost::start(empty_state(), axum::Router::new());
+        let clock = test_support::clock::ManualClock::starting_at(FINISHED_AT);
+        let mut stub =
+            StubbedHost::start_with_clock(empty_state(), axum::Router::new(), clock.clock());
         let thread = ThreadId::from(thread);
         let mut conversation = Conversation::new(&stub.core);
         conversation.open_thread(&mut stub.core, stub.host.clone(), thread.clone());
