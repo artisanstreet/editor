@@ -69,16 +69,17 @@ impl PortReservation {
             .set_reuse_address(true)
             .expect("let the reserved port's owner bind beside the reservation");
         socket
-            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
-            .expect("reserve a loopback port");
-        let address = socket
+            .bind(&SocketAddr::from(([0, 0, 0, 0], 0)).into())
+            .expect("reserve a port on every address");
+        let port = socket
             .local_addr()
             .expect("read the reserved address")
             .as_socket()
-            .expect("invariant: an IPv4 reservation has a socket address");
+            .expect("invariant: an IPv4 reservation has a socket address")
+            .port();
         Self {
             _socket: socket,
-            address,
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
         }
     }
 
