@@ -1681,6 +1681,7 @@ dependencies = [
  "futures",
  "pulseaudio",
  "rodio",
+ "test-support",
 ]
 
 [[package]]

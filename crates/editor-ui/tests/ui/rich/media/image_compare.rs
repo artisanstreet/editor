@@ -68,7 +68,6 @@ fn sizing_uses_hints_and_height_cap_when_images_are_unavailable() {
 fn data_images_use_asset_decoder_and_release_leases_on_scope_change() {
     use base64::Engine as _;
     use std::io::Cursor;
-    use std::time::{Duration, Instant};
 
     let mut encoded = Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(2, 1)
@@ -84,14 +83,15 @@ fn data_images_use_asset_decoder_and_release_leases_on_scope_change() {
     let loader = Images::new();
     let fetcher = fetcher();
     let mut state = CompareState::new(&model, fetcher.clone(), loader.clone());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        loader.drain(&assets);
-        state.refresh();
-        if state.images.iter().all(|image| matches!(image, ImageState::Decoding(handle) if matches!(handle.status(), ImageStatus::Ready { width: 2, height: 1 }))) { break; }
-        assert!(Instant::now() < deadline, "image decoder did not finish");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    test_support::wait::wait_until(
+        "both images to decode",
+        test_support::wait::LIVENESS,
+        || {
+            loader.drain(&assets);
+            state.refresh();
+            state.images.iter().all(|image| matches!(image, ImageState::Decoding(handle) if matches!(handle.status(), ImageStatus::Ready { width: 2, height: 1 })))
+        },
+    );
     assert_eq!(frame_size(&state.images, model.hint), (2.0, 48.0));
     assert!(!state.reconcile(&model, fetcher.clone(), false));
     assert!(state.reconcile(&model, fetcher.clone(), true));
@@ -124,16 +124,11 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
     let loader = Images::new();
     let assets = ImageAssets::default();
     let mut state = CompareState::new(&model, fetcher, loader.clone());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while state.failure(Side::Before).is_none() || state.failure(Side::After).is_none() {
+    test_support::wait::wait_until("both sides to fail", test_support::wait::LIVENESS, || {
         loader.drain(&assets);
         state.refresh();
-        assert!(
-            std::time::Instant::now() < deadline,
-            "both sides fail in time"
-        );
-        std::thread::yield_now();
-    }
+        state.failure(Side::Before).is_some() && state.failure(Side::After).is_some()
+    });
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
     let view = state
@@ -179,15 +174,15 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
     assert_eq!(actions.borrow().as_slice(), &[Action::Retry(Side::After)]);
     reachable.store(true, Ordering::SeqCst);
     assert!(state.dispatch(Action::Retry(Side::After)));
-    while state.failure(Side::After) != Some(Failure::Fetch(MediaFailure::Missing)) {
-        loader.drain(&assets);
-        state.refresh();
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the retried side settles in time"
-        );
-        std::thread::yield_now();
-    }
+    test_support::wait::wait_until(
+        "the retried side to settle",
+        test_support::wait::LIVENESS,
+        || {
+            loader.drain(&assets);
+            state.refresh();
+            state.failure(Side::After) == Some(Failure::Fetch(MediaFailure::Missing))
+        },
+    );
     assert_eq!(
         state.failure(Side::Before),
         Some(Failure::Fetch(MediaFailure::Unreachable))

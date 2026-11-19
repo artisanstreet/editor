@@ -14,6 +14,9 @@ doctest = false
 rodio.workspace = true
 crossbeam-channel.workspace = true
 
+[dev-dependencies]
+test-support.workspace = true
+
 # Linux and the BSDs talk to PulseAudio (or PipeWire's pulse server) natively,
 # so no ALSA headers or system libraries are needed to build.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]

@@ -1,8 +1,5 @@
 use super::*;
-use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn fetcher() -> MediaFetcher {
     MediaFetcher::new("test", |_| {
@@ -41,15 +38,12 @@ fn retained_loader_publishes_after_consumer_drops_and_releases_cache_lease() {
             .is_none()
     );
     drop(consumer);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let image = loop {
-        loader.drain(&assets);
-        if let Some(result) = loader.request(&fetcher, &source, "image", 2, Arc::clone(&wake)) {
-            break result.unwrap();
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let image =
+        test_support::wait::wait_for("the image to decode", test_support::wait::LIVENESS, || {
+            loader.drain(&assets);
+            loader.request(&fetcher, &source, "image", 2, Arc::clone(&wake))
+        })
+        .unwrap();
     assert!(matches!(
         image.status(),
         ImageStatus::Ready {

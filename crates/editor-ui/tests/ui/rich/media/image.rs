@@ -1,9 +1,7 @@
 use super::*;
 use std::sync::Arc;
-use std::{
-    sync::atomic::AtomicBool,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::AtomicBool;
+use test_support::wait::{LIVENESS, wait_until};
 
 #[test]
 fn retry_refetches_the_failed_file_and_releases_the_cached_image() {
@@ -27,27 +25,18 @@ fn retry_refetches_the_failed_file_and_releases_the_cached_image() {
     let loader = Images::new();
     let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
     let mut state = ImageState::new(&block, fetcher.clone(), loader.clone());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    wait_until("the missing image to fail", LIVENESS, || {
         loader.drain(&assets);
         state.refresh();
-        if matches!(state.loaded[0], Loaded::Failed(_)) {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        matches!(state.loaded[0], Loaded::Failed(_))
+    });
     exists.store(true, Ordering::SeqCst);
     assert!(state.retry(0));
-    loop {
+    wait_until("the retried image to load", LIVENESS, || {
         loader.drain(&assets);
         state.refresh();
-        if matches!(state.loaded[0], Loaded::Ready(_)) {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        matches!(state.loaded[0], Loaded::Ready(_))
+    });
     assert!(!state.retry(0));
     drop(state);
     fetcher.retain_resources(&[]);
@@ -76,29 +65,18 @@ fn a_new_item_revision_fetches_fresh_image_pixels() {
     let block: ImageBlock = serde_json::from_str(r#"{"src":"image.png"}"#).unwrap();
     let loader = Images::new();
     let assets = aqua::images::ImageAssets::default();
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut first = ImageState::new(&block, fetcher.clone().owned_by(&[42], 1), loader.clone());
-    loop {
+    wait_until("the first revision's pixels", LIVENESS, || {
         loader.drain(&assets);
         first.refresh();
-        if matches!(&first.loaded[0], Loaded::Ready(image) if matches!(image.status(), ImageStatus::Ready { width: 2, .. }))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        matches!(&first.loaded[0], Loaded::Ready(image) if matches!(image.status(), ImageStatus::Ready { width: 2, .. }))
+    });
     let mut second = ImageState::new(&block, fetcher.owned_by(&[42], 2), loader.clone());
-    loop {
+    wait_until("the second revision's pixels", LIVENESS, || {
         loader.drain(&assets);
         second.refresh();
-        if matches!(&second.loaded[0], Loaded::Ready(image) if matches!(image.status(), ImageStatus::Ready { width: 3, .. }))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        matches!(&second.loaded[0], Loaded::Ready(image) if matches!(image.status(), ImageStatus::Ready { width: 3, .. }))
+    });
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -115,16 +93,11 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     let loader = Images::new();
     let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
     let mut state = ImageState::new(&block, fetcher, loader.clone());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !matches!(state.loaded[0], Loaded::Failed(_)) {
+    wait_until("the fetch to fail", LIVENESS, || {
         loader.drain(&assets);
         state.refresh();
-        assert!(
-            Instant::now() < deadline,
-            "the fetch fails within the deadline"
-        );
-        std::thread::yield_now();
-    }
+        matches!(state.loaded[0], Loaded::Failed(_))
+    });
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
     let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));
@@ -172,13 +145,11 @@ fn the_copy_path_menu_opens_from_the_keyboard_and_assistive_tech() {
     let loader = Images::new();
     let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
     let mut state = ImageState::new(&block, fetcher, loader.clone());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !matches!(state.loaded[0], Loaded::Ready(_)) {
+    wait_until("the image to load", LIVENESS, || {
         loader.drain(&assets);
         state.refresh();
-        assert!(Instant::now() < deadline, "the image loads in time");
-        std::thread::yield_now();
-    }
+        matches!(state.loaded[0], Loaded::Ready(_))
+    });
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
     let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));

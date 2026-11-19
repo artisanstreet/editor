@@ -28,11 +28,7 @@ fn completed_image_invalidates_retained_loading_row() {
             source::{MediaFetcher, MediaSource},
         },
     };
-    use std::{
-        cell::Cell,
-        sync::Arc,
-        time::{Duration, Instant},
-    };
+    use std::{cell::Cell, sync::Arc};
 
     let mut encoded = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(2, 1)
@@ -153,19 +149,16 @@ fn completed_image_invalidates_retained_loading_row() {
     app.layout().unwrap();
     assert_eq!(renders.get(), 1, "unchanged settled rows must be retained");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let ready = loop {
-        images.drain(&assets);
-        presenter.drain_media();
-        if let Some(result) = images.request(&fetcher, &source, "image-0", 99, Arc::new(|| {})) {
-            break result.unwrap();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the synthetic PNG must finish decoding"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let ready = test_support::wait::wait_for(
+        "the synthetic PNG to finish decoding",
+        test_support::wait::LIVENESS,
+        || {
+            images.drain(&assets);
+            presenter.drain_media();
+            images.request(&fetcher, &source, "image-0", 99, Arc::new(|| {}))
+        },
+    )
+    .unwrap();
     assert!(
         matches!(
             ready.status(),

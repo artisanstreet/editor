@@ -1,4 +1,4 @@
-use std::time::Instant;
+use test_support::wait::{LIVENESS, wait_for};
 
 use super::*;
 
@@ -7,14 +7,10 @@ fn playing_a_missing_file_fails_naming_it() {
     let path = std::env::temp_dir().join("artisan-audio-missing-track.wav");
     let player = Player::new();
     player.play(&path);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let snapshot = loop {
+    let snapshot = wait_for("the missing file to stop loading", LIVENESS, || {
         let snapshot = player.snapshot();
-        if !matches!(snapshot.state, PlaybackState::Loading) || Instant::now() > deadline {
-            break snapshot;
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
+        (!matches!(snapshot.state, PlaybackState::Loading)).then_some(snapshot)
+    });
     assert_eq!(snapshot.track.as_deref(), Some(path.as_path()));
     let PlaybackState::Failed(message) = snapshot.state else {
         panic!("expected a failure, got {:?}", snapshot.state);
