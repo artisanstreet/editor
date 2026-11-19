@@ -34,7 +34,7 @@ pub enum PrepareGenerationError {
     },
 }
 
-pub async fn prepare(
+pub(crate) async fn prepare(
     registry: &Registry,
     address: std::net::SocketAddr,
 ) -> Result<(forge_runs::runtime::Generation, TcpListener), PrepareGenerationError> {
@@ -153,7 +153,7 @@ async fn live(State(service): State<Service>, headers: HeaderMap) -> Response {
     Body::from_stream(stream).into_response()
 }
 
-pub fn start(
+pub(crate) fn start(
     hub: &Hub,
     listener: TcpListener,
     stop: &CancellationToken,
@@ -295,7 +295,7 @@ async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, active: A
     }
 }
 
-pub fn start_primary_services(
+pub(crate) fn start_primary_services(
     data: std::path::PathBuf,
     app: crate::routes::App,
     stop: &CancellationToken,

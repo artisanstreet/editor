@@ -10,21 +10,21 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub struct ChildProcess {
+pub(super) struct ChildProcess {
     child: Option<Child>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Exited(CancellationToken);
+pub(super) struct Exited(CancellationToken);
 
 impl Exited {
-    pub async fn wait(&self) {
+    pub(super) async fn wait(&self) {
         self.0.cancelled().await;
     }
 }
 
 impl ChildProcess {
-    pub fn release(mut self) -> Exited {
+    pub(super) fn release(mut self) -> Exited {
         reap(
             self.child
                 .take()
@@ -123,7 +123,7 @@ pub enum HealthyError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TerminateError {
+pub(super) enum TerminateError {
     #[error("check whether process {pid} exited")]
     Wait {
         pid: u32,
@@ -156,7 +156,7 @@ pub enum NotifyError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CandidateError {
+pub(super) enum CandidateError {
     #[error("replacement executable {} must be an absolute regular file", binary.display())]
     NotAFile { binary: PathBuf },
     #[error("stage the replacement in {}", path.display())]
@@ -181,7 +181,7 @@ pub enum CandidateError {
     Healthy(#[from] HealthyError),
 }
 
-pub fn listener() -> Result<std::net::TcpListener, InheritError> {
+pub(super) fn listener() -> Result<std::net::TcpListener, InheritError> {
     let fd =
         rustix::io::dup(std::io::stdin()).map_err(|errno| InheritError::Listener(errno.into()))?;
     let listener = std::net::TcpListener::from(fd);
@@ -191,7 +191,7 @@ pub fn listener() -> Result<std::net::TcpListener, InheritError> {
     Ok(listener)
 }
 
-pub fn inherited_lock() -> Result<File, InheritError> {
+pub(super) fn inherited_lock() -> Result<File, InheritError> {
     Ok(File::from(
         rustix::io::dup(std::io::stdout()).map_err(|errno| InheritError::Lock(errno.into()))?,
     ))
@@ -206,7 +206,7 @@ fn logging_to(command: &mut std::process::Command, log: &Destination) {
     }
 }
 
-pub fn spawn_backend(
+pub(super) fn spawn_backend(
     binary: &Path,
     data: &Path,
     log: &Destination,
@@ -236,7 +236,7 @@ pub fn spawn_backend(
         })
 }
 
-pub fn spawn_gateway(
+pub(super) fn spawn_gateway(
     binary: &Path,
     data: &Path,
     log: &Destination,
@@ -265,7 +265,7 @@ pub fn spawn_gateway(
         })
 }
 
-pub async fn ready<T: serde::de::DeserializeOwned>(
+pub(super) async fn ready<T: serde::de::DeserializeOwned>(
     child: &mut ChildProcess,
     path: &Path,
 ) -> Result<T, ReadyError> {
@@ -292,7 +292,7 @@ pub async fn ready<T: serde::de::DeserializeOwned>(
     }
 }
 
-pub async fn healthy(member: &Member) -> Result<(), HealthyError> {
+pub(super) async fn healthy(member: &Member) -> Result<(), HealthyError> {
     let generation = || member.id.clone();
     let value = runtime::request(member, &Command::Health)
         .await
@@ -313,7 +313,7 @@ pub async fn healthy(member: &Member) -> Result<(), HealthyError> {
     Ok(())
 }
 
-pub fn terminate(child: &mut ChildProcess) -> Result<(), TerminateError> {
+pub(super) fn terminate(child: &mut ChildProcess) -> Result<(), TerminateError> {
     if let Some(child) = child.child.as_mut() {
         terminate_child(child)?;
     }
@@ -341,7 +341,7 @@ fn terminate_child(child: &mut Child) -> Result<(), TerminateError> {
     Ok(())
 }
 
-pub fn notify(pid: u32) -> Result<(), NotifyError> {
+pub(super) fn notify(pid: u32) -> Result<(), NotifyError> {
     if std::env::var_os("NOTIFY_SOCKET").is_none() {
         return Ok(());
     }
@@ -357,7 +357,7 @@ pub fn notify(pid: u32) -> Result<(), NotifyError> {
     Ok(())
 }
 
-pub async fn candidate(
+pub(super) async fn candidate(
     registry: &Registry,
     data: &Path,
     log: &Destination,

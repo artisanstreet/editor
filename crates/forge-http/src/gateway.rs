@@ -20,7 +20,7 @@ pub enum StartGatewayError {
     Address(#[source] std::io::Error),
 }
 
-pub async fn start(
+pub(crate) async fn start(
     hub: &Hub,
     shutdown: CancellationToken,
     tasks: &TaskTracker,

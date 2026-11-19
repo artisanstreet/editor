@@ -2,7 +2,7 @@ use artisan_account::{GrantClaims, Scope, VerifyParams, is_account_id, is_machin
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const JWKS_TTL: Duration = Duration::from_mins(10);
+pub(crate) const JWKS_TTL: Duration = Duration::from_mins(10);
 
 #[derive(Clone, Debug)]
 struct CachedJwks {
@@ -10,7 +10,7 @@ struct CachedJwks {
     keys: HashMap<String, [u8; 32]>,
 }
 
-pub struct GrantVerifier {
+pub(crate) struct GrantVerifier {
     http: reqwest::Client,
     jwks_url: String,
     expected_iss: String,
@@ -19,10 +19,10 @@ pub struct GrantVerifier {
 
 #[derive(Debug, thiserror::Error)]
 #[error("build the JWKS HTTP client")]
-pub struct BuildVerifierError(#[source] reqwest::Error);
+pub(crate) struct BuildVerifierError(#[source] reqwest::Error);
 
 #[derive(Debug, thiserror::Error)]
-pub enum FetchJwksError {
+pub(crate) enum FetchJwksError {
     #[error("fetch Core's JWKS from {url}")]
     Reach {
         url: String,
@@ -51,7 +51,7 @@ pub enum FetchJwksError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum VerifyGrantError {
+pub(crate) enum VerifyGrantError {
     #[error("grant is not bound to a Core account/machine route ({account}/{machine})")]
     Route { account: String, machine: String },
     #[error("grant rejected: bad header")]
@@ -76,10 +76,10 @@ pub enum VerifyGrantError {
 }
 
 impl GrantVerifier {
-    pub fn new(jwks_url: &str, expected_iss: &str) -> Result<Self, BuildVerifierError> {
+    pub(crate) fn new(jwks_url: &str, expected_iss: &str) -> Result<Self, BuildVerifierError> {
         Ok(Self {
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(BuildVerifierError)?,
             jwks_url: jwks_url.to_owned(),
@@ -149,7 +149,7 @@ impl GrantVerifier {
         Ok(keys)
     }
 
-    pub async fn verify_channel_grant(
+    pub(crate) async fn verify_channel_grant(
         &self,
         token: &str,
         account: &str,

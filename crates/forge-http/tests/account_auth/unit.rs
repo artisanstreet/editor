@@ -79,14 +79,10 @@ async fn tunnel_grants_verify_against_core_jwks() {
         .unwrap();
     assert_eq!(claims.sub, sub);
     let routed = grant_token(&issuer_key, sub, mid, &[Scope::RelayConnect]);
-    assert!(
-        verifier
+    verifier
             .verify_channel_grant(&routed, sub, mid, 1_700_000_100, true)
-            .await
-            .is_err()
-    );
-    assert!(
-        verifier
+            .await.unwrap_err();
+    verifier
             .verify_channel_grant(
                 &token,
                 sub,
@@ -94,7 +90,5 @@ async fn tunnel_grants_verify_against_core_jwks() {
                 1_700_000_100,
                 true
             )
-            .await
-            .is_err()
-    );
+            .await.unwrap_err();
 }

@@ -1211,6 +1211,5 @@ pub(crate) async fn run_config_loop(
 mod sync_tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/sync/unit.rs"]
 mod tests;

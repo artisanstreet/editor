@@ -92,7 +92,7 @@ async fn upgrade(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReplaceGatewayError {
+pub(super) enum ReplaceGatewayError {
     #[error("take the upgrade lock")]
     Lock(#[source] RegistryFileError),
     #[error("another Forge upgrade is in progress")]
@@ -131,7 +131,7 @@ pub enum ReplaceGatewayError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CommitError {
+pub(super) enum CommitError {
     #[error("activate generation {generation}")]
     Activate {
         generation: String,
@@ -145,7 +145,7 @@ pub enum CommitError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RestoreError {
+pub(super) enum RestoreError {
     #[error("promote generation {generation} again")]
     Promote {
         generation: String,
@@ -468,7 +468,7 @@ pub enum ServeError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConnectionError {
+pub(super) enum ConnectionError {
     #[error("find the active generation")]
     Active(#[source] RegistryFileError),
     #[error("no generation is active")]
@@ -546,7 +546,7 @@ fn report(
     clippy::too_many_lines,
     reason = "one gateway lifetime from binding to drain"
 )]
-pub async fn serve(
+pub(super) async fn serve(
     config: crate::ServeConfig,
     binary: PathBuf,
     handoff: Option<PathBuf>,
@@ -886,7 +886,7 @@ async fn drain(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MaintainError {
+pub(super) enum MaintainError {
     #[error("read the gateway record")]
     Record(#[source] RegistryFileError),
     #[error("take the upgrade lock")]

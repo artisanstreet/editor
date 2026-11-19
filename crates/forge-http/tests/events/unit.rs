@@ -5,7 +5,7 @@ fn live(text: &str, revision: u64) -> Envelope {
         seq: None,
         live_revision: revision,
         event: Event::Live {
-            thread_id: artisan_api::ThreadId("thread".into()),
+            thread_id: ThreadId("thread".into()),
             target: LiveTarget::Text {
                 item_id: artisan_api::ItemId("item".into()),
             },
@@ -33,11 +33,8 @@ async fn byte_budget_blocks_even_when_the_entry_queue_has_space() {
         bytes: Arc::new(Semaphore::new(encoded)),
     };
     queue.send(envelope.clone()).await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), queue.send(envelope.clone()))
-            .await
-            .is_err()
-    );
+    tokio::time::timeout(Duration::from_millis(10), queue.send(envelope.clone()))
+            .await.unwrap_err();
     drop(receiver.recv().await.unwrap());
     queue.send(envelope).await.unwrap();
 }

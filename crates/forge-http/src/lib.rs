@@ -1,21 +1,3 @@
-#![expect(
-    missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::allow_attributes,
-        clippy::assertions_on_result_states,
-        clippy::let_underscore_untyped,
-        clippy::unused_result_ok,
-        let_underscore_drop,
-        reason = "pre-existing violations in the tests, cleared in plan.md phase 2"
-    )
-)]
-
 mod account_auth;
 mod account_service;
 pub mod core;
@@ -177,6 +159,16 @@ impl From<generation::PrepareGenerationError> for StartError {
     }
 }
 
+impl std::fmt::Debug for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("listener", &self.listener)
+            .field("store", &self.store)
+            .field("hub", &self.hub)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Server {
     listener: TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
@@ -190,7 +182,7 @@ pub struct Server {
 }
 
 pub async fn start(config: ServeConfig) -> Result<Server, StartError> {
-    start_with_harness(config, std::sync::Arc::new(forge_engines::harness)).await
+    start_with_harness(config, Arc::new(forge_engines::harness)).await
 }
 
 async fn start_with_harness(
@@ -687,7 +679,7 @@ pub async fn invite(store: &Store) -> Result<PairInvite, InviteError> {
     })
 }
 
-pub fn invite_offline(admin: &mut forge_store::admin::Admin) -> Result<PairInvite, InviteError> {
+pub fn invite_offline(admin: &forge_store::admin::Admin) -> Result<PairInvite, InviteError> {
     let stored = if let Some(stored) = admin
         .secret(IDENTITY_KEY)
         .map_err(IdentityError::ReadOffline)?

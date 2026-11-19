@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 
-pub const IN_FLIGHT: usize = 64;
-pub const PER_PEER: usize = 16;
+pub(crate) const IN_FLIGHT: usize = 64;
+pub(crate) const PER_PEER: usize = 16;
 
 #[derive(Clone)]
-pub struct Handshakes(Arc<Mutex<Slots>>);
+pub(crate) struct Handshakes(Arc<Mutex<Slots>>);
 
 struct Slots {
     in_flight: usize,
@@ -16,14 +16,14 @@ struct Slots {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Refused {
+pub(crate) enum Refused {
     #[error("{in_flight} TLS handshakes are already in flight")]
     Full { in_flight: usize },
     #[error("{peer} already has {in_flight} TLS handshakes in flight")]
     Peer { peer: IpAddr, in_flight: usize },
 }
 
-pub struct Slot {
+pub(crate) struct Slot {
     handshakes: Handshakes,
     peer: IpAddr,
 }
@@ -39,7 +39,7 @@ fn network_of(peer: IpAddr) -> IpAddr {
 
 impl Handshakes {
     #[must_use]
-    pub fn new(limit: usize, per_peer: usize) -> Self {
+    pub(crate) fn new(limit: usize, per_peer: usize) -> Self {
         Self(Arc::new(Mutex::new(Slots {
             in_flight: 0,
             limit,
@@ -52,7 +52,7 @@ impl Handshakes {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn admit(&self, peer: IpAddr) -> Result<Slot, Refused> {
+    pub(crate) fn admit(&self, peer: IpAddr) -> Result<Slot, Refused> {
         let peer = network_of(peer);
         let mut slots = self.slots();
         let held = slots.by_peer.get(&peer).copied().unwrap_or(0);

@@ -191,7 +191,7 @@ fn reachable_address() -> Result<SocketAddr, AddressError> {
 
 pub fn pair(json: bool) -> Result<(), PairError> {
     let data = data()?;
-    let invite = forge_http::invite_offline(&mut administer(&data)?.admin).map_err(|source| {
+    let invite = forge_http::invite_offline(&administer(&data)?.admin).map_err(|source| {
         PairError::Invite {
             data: data.clone(),
             source,

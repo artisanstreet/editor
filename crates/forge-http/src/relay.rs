@@ -6,7 +6,7 @@ use std::sync::Arc;
 type WsError = tokio_tungstenite::tungstenite::Error;
 
 #[derive(Debug, thiserror::Error)]
-pub enum FrameError {
+pub(crate) enum FrameError {
     #[error("encode the Relay {frame} frame for channel {channel}")]
     Encode {
         channel: String,
@@ -24,7 +24,7 @@ pub enum FrameError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ServeChannelError {
+pub(crate) enum ServeChannelError {
     #[error("connect to Relay at {url}")]
     Connect {
         url: String,
@@ -64,7 +64,7 @@ pub enum ServeChannelError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ChannelError {
+pub(crate) enum ChannelError {
     #[error("channel {channel} is not open")]
     Unknown { channel: String },
     #[error(transparent)]
@@ -365,7 +365,7 @@ const SEND_WINDOW_BYTES: u64 = 1024 * 1024;
 const SEND_QUEUE_BYTES: u64 = artisan_api::REASSEMBLY_MAX_BYTES_PER_CONN;
 
 #[derive(Debug, thiserror::Error)]
-pub enum NextFrameError {
+pub(crate) enum NextFrameError {
     #[error(transparent)]
     Noise(#[from] NoiseError),
     #[error("encode tunnel chunk {index} of transfer {transfer}")]
@@ -534,7 +534,7 @@ impl Connection {
     clippy::too_many_arguments,
     reason = "one connection turn needs all of these; callers pass a config struct next"
 )]
-pub async fn serve_channel(
+pub(crate) async fn serve_channel(
     ws_url: String,
     grant_jwt: String,
     grant_jti: String,
@@ -1283,6 +1283,5 @@ async fn dispatch_request(
 mod relay_tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/relay/unit.rs"]
 mod tests;

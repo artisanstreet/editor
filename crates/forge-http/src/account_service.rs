@@ -23,7 +23,7 @@ fn core_issuer() -> String {
         .unwrap_or_else(|| crate::core::core_base_url(None).trim().to_owned())
 }
 
-pub async fn run(
+pub(crate) async fn run(
     data_dir: PathBuf,
     app: crate::routes::App,
     shutdown: tokio_util::sync::CancellationToken,

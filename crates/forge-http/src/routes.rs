@@ -25,28 +25,28 @@ use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove
 use tracing::Instrument as _;
 
 #[derive(Clone)]
-pub struct App {
+pub(crate) struct App {
     pub hub: Hub,
     pub forge_version: String,
     pub shutdown: tokio_util::sync::CancellationToken,
     pub tasks: tokio_util::task::TaskTracker,
-    pub repositories: std::sync::Arc<crate::repository::Repositories>,
-    pub icons: std::sync::Arc<crate::repository::Icons>,
+    pub repositories: Arc<crate::repository::Repositories>,
+    pub icons: Arc<crate::repository::Icons>,
 }
 
 #[derive(Clone)]
-pub struct Client {
+pub(crate) struct Client {
     pub certificate: forge_store::DeviceCertificate,
 }
 
 #[derive(Clone)]
-pub struct TunnelAuth {
+pub(crate) struct TunnelAuth {
     pub claims: artisan_account::GrantClaims,
 }
 
 const PAIR_BODY_BYTES: usize = 4 * 1024;
 
-pub fn router(app: App) -> Router {
+pub(crate) fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
         .route("/database-rollback", delete(dismiss_database_rollback))
@@ -193,7 +193,7 @@ const fn status(code: ErrorCode) -> StatusCode {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Missing {
+pub(crate) enum Missing {
     #[error("thread {0} not found")]
     Thread(ThreadId),
     #[error("project {0} not found")]
@@ -243,7 +243,7 @@ impl Missing {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Rejected {
+pub(crate) enum Rejected {
     #[error("{path} is not a directory on this host")]
     NotADirectory { path: String },
     #[error("invalid source identity or range limit for {content}")]
@@ -332,7 +332,7 @@ impl Rejected {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Unauthorized {
+pub(crate) enum Unauthorized {
     #[error("the connection carries no client certificate")]
     NoCertificate,
     #[error("this device is not paired with Forge")]
@@ -359,7 +359,7 @@ const LISTING_ENTRIES: usize = 32_768;
 const LISTING_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ListDirectoryError {
+pub(crate) enum ListDirectoryError {
     #[error("wait for a directory listing slot")]
     Slot(#[source] tokio::sync::AcquireError),
     #[error("run the listing of {}", path.display())]
@@ -415,11 +415,11 @@ impl ListDirectoryError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("receive an uploaded blob")]
-pub struct ReceiveBlobError(#[source] axum::Error);
+pub(crate) struct ReceiveBlobError(#[source] axum::Error);
 
 #[derive(Debug, thiserror::Error)]
 #[error("read blob {hash} at {}", path.display())]
-pub struct ReadBlobError {
+pub(crate) struct ReadBlobError {
     hash: BlobHash,
     path: PathBuf,
     #[source]
@@ -428,7 +428,7 @@ pub struct ReadBlobError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("read resource {path}")]
-pub struct ReadResourceError {
+pub(crate) struct ReadResourceError {
     path: String,
     #[source]
     source: forge_runs::resources::ResourceError,
@@ -520,7 +520,7 @@ const fn internal<E>(_: &E) -> artisan_api::Failure {
 macro_rules! route_errors {
     ($($variant:ident($error:ty) => $wire:expr,)*) => {
         #[derive(Debug, thiserror::Error)]
-        pub enum RouteError {
+        pub(crate) enum RouteError {
             $(
                 #[error(transparent)]
                 $variant(#[from] $error),
@@ -616,13 +616,13 @@ route_errors! {
 
 #[derive(Debug, thiserror::Error)]
 #[error("use {engine} version")]
-pub struct VersionError {
+pub(crate) struct VersionError {
     engine: EngineId,
     #[source]
     source: forge_engines::ValidateVersionError,
 }
 
-pub struct Failure {
+pub(crate) struct Failure {
     failure: artisan_api::Failure,
     error: Box<RouteError>,
 }
@@ -639,7 +639,7 @@ impl Failure {
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         let message = forge_runs::failure::message(&*self.error, &self.failure);
-        let mut response = refusal(artisan_api::ApiError::new(self.failure, message));
+        let mut response = refusal(ApiError::new(self.failure, message));
         response
             .extensions_mut()
             .insert(Refusal(Arc::from(self.error)));
@@ -675,7 +675,7 @@ async fn log_internal(request: Request, next: Next) -> Response {
     .await
 }
 
-pub type Result<T> = std::result::Result<T, Failure>;
+pub(crate) type Result<T> = std::result::Result<T, Failure>;
 
 async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
     let snapshot = app.hub.store().state().await?;
@@ -815,7 +815,7 @@ async fn project_icon(
             return Ok(Json(Some(blob)));
         }
     }
-    let root = std::path::PathBuf::from(&project.path);
+    let root = PathBuf::from(&project.path);
     let Some(bytes) = app.repositories.avatar(&root).await else {
         return Ok(Json(None));
     };
@@ -850,7 +850,7 @@ async fn project_repository(
         .project(&id)
         .await?
         .ok_or(Missing::Project(id))?;
-    let path = std::path::PathBuf::from(project.path);
+    let path = PathBuf::from(project.path);
     let repository = app.repositories.read(&path).await;
     Ok(Json(repository))
 }
@@ -1280,7 +1280,7 @@ async fn set_draft(
 async fn put_blob(
     AppState(app): AppState<App>,
     body: axum::body::Body,
-) -> Result<Json<artisan_api::BlobRef>> {
+) -> Result<Json<BlobRef>> {
     let upload = app.hub.store().admit_blob().await;
     let bytes = axum::body::to_bytes(body, forge_store::MAX_BLOB_BYTES + 1024)
         .await

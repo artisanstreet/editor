@@ -115,7 +115,7 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .text()
         .await
         .unwrap();
-    let forge_key = crate::identity(&store).await.unwrap().key;
+    let forge_key = identity(&store).await.unwrap().key;
     assert!(
         !body.contains(forge_key.expose()),
         "Forge's private key never reaches a client"
@@ -851,7 +851,7 @@ async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
     tokio::time::timeout(Duration::from_secs(600), connection)
         .await
         .expect("a silent client held its TLS handshake open forever");
-    assert!(handshakes.admit(peer.ip()).is_ok());
+    handshakes.admit(peer.ip()).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -996,7 +996,7 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     let marker = Arc::new(());
     let owner = Arc::downgrade(&marker);
     let harness_for: forge_runs::HarnessFor = Arc::new(move |engine| {
-        let _ = &marker;
+        let _: &Arc<()> = &marker;
         forge_engines::harness(engine)
     });
     let result = start_with_harness(
@@ -1066,10 +1066,10 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
         "codex",
         "#!/bin/sh\n: > \"$0.started\"\nprintf 'not logged in\\n'\n",
     );
-    let marker = |binary: &std::path::Path, suffix: &str| {
+    let marker = |binary: &Path, suffix: &str| {
         let mut path = binary.as_os_str().to_os_string();
         path.push(suffix);
-        std::path::PathBuf::from(path)
+        PathBuf::from(path)
     };
     let server = start(ServeConfig {
         data_dir: data,
@@ -1505,7 +1505,7 @@ async fn forge_rolls_back_a_newer_database_and_tells_editors_until_one_dismisses
         rollback.restored,
         u32::try_from(Store::schema_version()).unwrap()
     );
-    assert!(std::path::Path::new(&rollback.set_aside).is_file());
+    assert!(Path::new(&rollback.set_aside).is_file());
 
     let dismissed = editor
         .http

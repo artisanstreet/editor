@@ -71,8 +71,8 @@ async fn a_slow_grant_check_does_not_stop_the_relay_connection_answering_pings()
         grant_jti,
         [0x45_u8; 32],
         [0x44_u8; 32],
-        super::tests::ACCOUNT.into(),
-        super::tests::MACHINE.into(),
+        tests::ACCOUNT.into(),
+        tests::MACHINE.into(),
         Arc::new(verifier),
         test_app(),
     ));

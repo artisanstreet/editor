@@ -25,7 +25,7 @@ struct Queue {
     bytes: Arc<Semaphore>,
 }
 #[derive(Debug, thiserror::Error)]
-pub enum SinkError {
+pub(crate) enum SinkError {
     #[error("encode an event at seq {seq:?} for the stream")]
     Encode {
         seq: Option<Seq>,
@@ -90,7 +90,7 @@ impl EnvelopeSink for Queue {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ForwardError {
+pub(crate) enum ForwardError {
     #[error("send the event stream's {step}")]
     Send {
         step: &'static str,
@@ -108,7 +108,7 @@ fn sent(step: &'static str) -> impl FnOnce(SinkError) -> ForwardError {
 }
 
 #[derive(Deserialize)]
-pub struct Since {
+pub(crate) struct Since {
     #[serde(default)]
     #[expect(
         clippy::struct_field_names,
@@ -117,7 +117,7 @@ pub struct Since {
     since: Seq,
     #[serde(default)]
     summary: bool,
-    thread: Option<artisan_api::ThreadId>,
+    thread: Option<ThreadId>,
 }
 
 impl Since {
@@ -130,11 +130,11 @@ impl Since {
     }
 }
 
-pub trait EnvelopeSink: Sync {
+pub(crate) trait EnvelopeSink: Sync {
     fn send(&self, envelope: Envelope) -> impl Future<Output = Result<(), SinkError>> + Send;
 }
 
-impl EnvelopeSink for tokio::sync::mpsc::Sender<Envelope> {
+impl EnvelopeSink for mpsc::Sender<Envelope> {
     async fn send(&self, envelope: Envelope) -> Result<(), SinkError> {
         if Self::send(self, envelope).await.is_err() {
             return Err(SinkError::Gone);
@@ -143,7 +143,7 @@ impl EnvelopeSink for tokio::sync::mpsc::Sender<Envelope> {
     }
 }
 
-pub async fn stream(
+pub(crate) async fn stream(
     State(app): State<App>,
     Query(scope): Query<Since>,
     Extension(client): Extension<crate::routes::Client>,
@@ -204,7 +204,7 @@ pub async fn stream(
     clippy::too_many_lines,
     reason = "one stream: backlog, live snapshot, engine statuses, then live changes"
 )]
-pub async fn forward(
+pub(crate) async fn forward(
     app: &App,
     scope: &Since,
     sender: &impl EnvelopeSink,

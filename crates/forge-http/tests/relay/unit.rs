@@ -154,48 +154,47 @@ async fn tunneled_state_unary_and_stream_against_stub_relay() {
             .unwrap();
         let (mut sink, mut source) = stream.split();
         let hello = recv_text(&mut source).await;
-        let hello: artisan_account::ClientFrame = serde_json::from_str(&hello).unwrap();
+        let hello: ClientFrame = serde_json::from_str(&hello).unwrap();
         let grant = match hello {
-            artisan_account::ClientFrame::Hello(h) => h.grant,
-            artisan_account::ClientFrame::Authenticate(_)
-            | artisan_account::ClientFrame::Open(_)
-            | artisan_account::ClientFrame::Data(_)
-            | artisan_account::ClientFrame::Ack(_)
-            | artisan_account::ClientFrame::Close(_)
-            | artisan_account::ClientFrame::Pong(_) => panic!("expected hello"),
+            ClientFrame::Hello(h) => h.grant,
+            ClientFrame::Authenticate(_)
+            | ClientFrame::Open(_)
+            | ClientFrame::Data(_)
+            | ClientFrame::Ack(_)
+            | ClientFrame::Close(_)
+            | ClientFrame::Pong(_) => panic!("expected hello"),
         };
         assert!(!grant.is_empty());
         let nonce = [0x66_u8; 32];
         send(
             &mut sink,
-            serde_json::to_string(&artisan_account::ServerFrame::Challenge(
-                artisan_account::ChallengeFrame {
-                    v: 1,
-                    nonce: b64u_encode(&nonce),
-                    timeout_ms: 60_000,
-                },
-            ))
+            serde_json::to_string(&ServerFrame::Challenge(artisan_account::ChallengeFrame {
+                v: 1,
+                nonce: b64u_encode(&nonce),
+                timeout_ms: 60_000,
+            }))
             .unwrap(),
         )
         .await;
         let auth = recv_text(&mut source).await;
-        let auth: artisan_account::ClientFrame = serde_json::from_str(&auth).unwrap();
+        let auth: ClientFrame = serde_json::from_str(&auth).unwrap();
         match auth {
-            artisan_account::ClientFrame::Authenticate(a) => {
+            ClientFrame::Authenticate(a) => {
                 assert!(!a.sig.is_empty());
             }
-            artisan_account::ClientFrame::Hello(_)
-            | artisan_account::ClientFrame::Open(_)
-            | artisan_account::ClientFrame::Data(_)
-            | artisan_account::ClientFrame::Ack(_)
-            | artisan_account::ClientFrame::Close(_)
-            | artisan_account::ClientFrame::Pong(_) => panic!("expected authenticate"),
+            ClientFrame::Hello(_)
+            | ClientFrame::Open(_)
+            | ClientFrame::Data(_)
+            | ClientFrame::Ack(_)
+            | ClientFrame::Close(_)
+            | ClientFrame::Pong(_) => panic!("expected authenticate"),
         }
         send(
             &mut sink,
-            serde_json::to_string(&artisan_account::ServerFrame::Ping(
-                artisan_account::PingFrame { v: 1, t: 1234 },
-            ))
+            serde_json::to_string(&ServerFrame::Ping(artisan_account::PingFrame {
+                v: 1,
+                t: 1234,
+            }))
             .unwrap(),
         )
         .await;
@@ -203,21 +202,19 @@ async fn tunneled_state_unary_and_stream_against_stub_relay() {
         assert_eq!(pong, serde_json::json!({"v": 1, "type": "pong", "t": 1234}));
         send(
             &mut sink,
-            serde_json::to_string(&artisan_account::ServerFrame::Ready(
-                artisan_account::ReadyFrame {
-                    v: 1,
-                    role: "forge".into(),
-                    account: "a".into(),
-                    machine: "m".into(),
-                    forge_online: true,
-                },
-            ))
+            serde_json::to_string(&ServerFrame::Ready(artisan_account::ReadyFrame {
+                v: 1,
+                role: "forge".into(),
+                account: "a".into(),
+                machine: "m".into(),
+                forge_online: true,
+            }))
             .unwrap(),
         )
         .await;
         send(
             &mut sink,
-            serde_json::to_string(&artisan_account::ServerFrame::ChannelOpened(
+            serde_json::to_string(&ServerFrame::ChannelOpened(
                 artisan_account::ChannelOpenedFrame {
                     v: 1,
                     channel: "ch1".into(),
@@ -231,32 +228,30 @@ async fn tunneled_state_unary_and_stream_against_stub_relay() {
         let mut init = NoiseChannel::initiator(&editor_noise, None, ctx("ch1")).unwrap();
         let mut relay_seq = 0_u64;
         let mut send_data = async |sink: &mut futures::stream::SplitSink<_, Ws>, raw: Vec<u8>| {
-            let frame = serde_json::to_string(&artisan_account::ClientFrame::Data(
-                artisan_account::DataFrame {
-                    v: 1,
-                    channel: "ch1".into(),
-                    seq: relay_seq,
-                    body: b64u_encode(&raw),
-                },
-            ))
+            let frame = serde_json::to_string(&ClientFrame::Data(artisan_account::DataFrame {
+                v: 1,
+                channel: "ch1".into(),
+                seq: relay_seq,
+                body: b64u_encode(&raw),
+            }))
             .unwrap();
             relay_seq += 1;
             sink.send(Ws::Text(frame.into())).await.unwrap();
         };
-        let mut next_server_frame = async || -> artisan_account::ServerFrame {
+        let mut next_server_frame = async || -> ServerFrame {
             loop {
                 let text = recv_text(&mut source).await;
                 let value: serde_json::Value = serde_json::from_str(&text).unwrap();
                 if value.get("type").and_then(|t| t.as_str()) == Some("ack") {
-                    let ack: artisan_account::ClientFrame = serde_json::from_value(value).unwrap();
+                    let ack: ClientFrame = serde_json::from_value(value).unwrap();
                     match ack {
-                        artisan_account::ClientFrame::Ack(a) => assert_eq!(a.channel, "ch1"),
-                        artisan_account::ClientFrame::Hello(_)
-                        | artisan_account::ClientFrame::Authenticate(_)
-                        | artisan_account::ClientFrame::Open(_)
-                        | artisan_account::ClientFrame::Data(_)
-                        | artisan_account::ClientFrame::Close(_)
-                        | artisan_account::ClientFrame::Pong(_) => panic!("expected ack shape"),
+                        ClientFrame::Ack(a) => assert_eq!(a.channel, "ch1"),
+                        ClientFrame::Hello(_)
+                        | ClientFrame::Authenticate(_)
+                        | ClientFrame::Open(_)
+                        | ClientFrame::Data(_)
+                        | ClientFrame::Close(_)
+                        | ClientFrame::Pong(_) => panic!("expected ack shape"),
                     }
                     continue;
                 }
@@ -300,7 +295,7 @@ async fn tunneled_state_unary_and_stream_against_stub_relay() {
         };
         init.receive_responder_confirm(&c2, &forge_enrolled_pub)
             .unwrap();
-        assert_eq!(init.phase(), artisan_account::Phase::Open);
+        assert_eq!(init.phase(), Phase::Open);
 
         let request = artisan_api::TunnelRequest {
             id: "r1".into(),
@@ -337,7 +332,7 @@ async fn tunneled_state_unary_and_stream_against_stub_relay() {
         forge_cnf,
         ACCOUNT.into(),
         MACHINE.into(),
-        std::sync::Arc::new(verifier),
+        Arc::new(verifier),
         app,
     ));
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(90), stub).await;
@@ -356,8 +351,8 @@ pub(super) fn test_app() -> crate::routes::App {
         forge_version: "test".into(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         tasks: tokio_util::task::TaskTracker::new(),
-        repositories: std::sync::Arc::new(crate::repository::Repositories::new().unwrap()),
-        icons: std::sync::Arc::default(),
+        repositories: Arc::new(crate::repository::Repositories::new().unwrap()),
+        icons: Arc::default(),
     }
 }
 

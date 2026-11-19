@@ -1,7 +1,7 @@
 use super::tests::{MACHINE, SECRET, mcp_servers, stub_server, test_client, test_hub};
 use super::*;
 
-fn statuses(stub: &super::tests::Stub) -> Vec<serde_json::Value> {
+fn statuses(stub: &tests::Stub) -> Vec<serde_json::Value> {
     stub.report_statuses()
 }
 

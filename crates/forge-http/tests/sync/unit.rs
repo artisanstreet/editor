@@ -106,7 +106,6 @@ async fn latest(State(stub): State<Stub>, headers: HeaderMap) -> impl axum::resp
         "manifest": serde_json::from_slice::<serde_json::Value>(&manifest_bytes()).unwrap(),
     }))
     .unwrap();
-    let _ = stub;
     (StatusCode::OK, body)
 }
 
@@ -146,7 +145,7 @@ async fn report(
     })))
 }
 
-pub(super) fn test_hub(dir: &std::path::Path) -> forge_runs::Hub {
+pub(super) fn test_hub(dir: &Path) -> forge_runs::Hub {
     let store = forge_store::Store::open(dir).unwrap();
     let engines = forge_engines::Engines::new(dir);
     forge_runs::Hub::new(store, engines, dir.to_owned())
@@ -226,7 +225,7 @@ async fn config_sync_rejects_tampered_manifest_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let hub = test_hub(dir.path());
     let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-    assert!(result.is_err());
+    result.unwrap_err();
     assert!(!sync_state_path(dir.path()).exists());
     assert_eq!(stub.reports.lock().unwrap().len(), 1);
     assert_eq!(
@@ -310,7 +309,7 @@ async fn a_skill_that_cannot_install_changes_nothing_else() {
         catalog.iter().all(|entry| entry.id != "local.brokenskill"),
         "no partial install may remain"
     );
-    assert!(!super::sync_state_path(dir.path()).exists());
+    assert!(!sync_state_path(dir.path()).exists());
     let reports = stub.reports.lock().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["status"], serde_json::json!("failed"));
@@ -332,7 +331,7 @@ async fn unknown_skill_without_bundle_fails_named() {
     let dir = tempfile::tempdir().unwrap();
     let hub = test_hub(dir.path());
     let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-    assert!(result.is_err());
+    result.unwrap_err();
     let reports = stub.reports.lock().unwrap();
     assert_eq!(reports[0]["status"], serde_json::json!("failed"));
     assert!(
