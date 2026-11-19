@@ -87,10 +87,11 @@ fn notch(lines: f32) -> InputEvent {
     }
 }
 
-fn glide_to_rest(app: &mut aqua::UiApp, glides: &mut WheelGlides) {
+fn glide_to_rest(app: &mut aqua::UiApp, glides: &mut WheelGlides, start: Instant) {
+    let mut now = start;
     for _ in 0..60 {
-        std::thread::sleep(Duration::from_millis(16));
-        let advance = glides.advance(app);
+        now += Duration::from_millis(16);
+        let advance = glides.advance(app, now);
         app.build_frame().unwrap();
         if !advance.active {
             return;
@@ -103,14 +104,18 @@ fn glide_to_rest(app: &mut aqua::UiApp, glides: &mut WheelGlides) {
 fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     assert!(following_tail(&app));
     test_support::assert_near!(offset(&app), 300.0);
 
     assert!(pause_tail(&mut app));
-    assert_eq!(glides.offer(&app, &notch(-3.0)), Some(Surface::Transcript));
-    glide_to_rest(&mut app, &mut glides);
+    assert_eq!(
+        glides.offer(&app, &notch(-3.0), start),
+        Some(Surface::Transcript)
+    );
+    glide_to_rest(&mut app, &mut glides, start);
 
     let rested = offset(&app);
     assert!(
@@ -125,12 +130,13 @@ fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
 fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
     let mut smooth = SmoothScroll::default();
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     assert!(pause_tail(&mut app));
-    glides.offer(&app, &notch(-3.0));
-    glide_to_rest(&mut app, &mut glides);
+    glides.offer(&app, &notch(-3.0), start);
+    glide_to_rest(&mut app, &mut glides, start);
     let rested = offset(&app);
 
     for _ in 0..30 {
@@ -155,6 +161,7 @@ fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
 fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reentering_it() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
     assert!(apply_step(
         &mut app,
         Step::Scroll {
@@ -166,8 +173,11 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
     app.build_frame().unwrap();
     test_support::assert_near!(offset(&app), 100.0);
 
-    assert_eq!(glides.offer(&app, &notch(1.0)), Some(Surface::Transcript));
-    glide_to_rest(&mut app, &mut glides);
+    assert_eq!(
+        glides.offer(&app, &notch(1.0), start),
+        Some(Surface::Transcript)
+    );
+    glide_to_rest(&mut app, &mut glides, start);
 
     let rested = offset(&app);
     assert!(rested > 100.0 && rested < 300.0, "got {rested}");
@@ -178,6 +188,7 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
 fn a_precise_wheel_gesture_glides_like_a_notch() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     pause_tail(&mut app);
@@ -185,7 +196,10 @@ fn a_precise_wheel_gesture_glides_like_a_notch() {
         at: Point::new(50.0, 50.0),
         delta: ScrollDelta { x: 0.0, y: -7.5 },
     };
-    assert_eq!(glides.offer(&app, &precise), Some(Surface::Transcript));
+    assert_eq!(
+        glides.offer(&app, &precise, start),
+        Some(Surface::Transcript)
+    );
     assert!(glides.active());
 }
 
@@ -193,16 +207,17 @@ fn a_precise_wheel_gesture_glides_like_a_notch() {
 fn a_horizontal_gesture_still_cancels_the_glide() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     pause_tail(&mut app);
-    glides.offer(&app, &notch(-3.0));
+    glides.offer(&app, &notch(-3.0), start);
     assert!(glides.active());
     let sideways = InputEvent::Scroll {
         at: Point::new(50.0, 50.0),
         delta: ScrollDelta { x: 12.0, y: -7.5 },
     };
-    assert_eq!(glides.offer(&app, &sideways), None);
+    assert_eq!(glides.offer(&app, &sideways, start), None);
     assert!(!glides.active());
 }
 
@@ -236,9 +251,10 @@ fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
     app.mount(|_| model_list(0.0)).unwrap();
     app.build_frame().unwrap();
     let mut glides = WheelGlides::default();
+    let start = Instant::now();
 
-    assert_eq!(glides.offer(&app, &notch(3.0)), Some(Surface::Model));
-    glide_to_rest(&mut app, &mut glides);
+    assert_eq!(glides.offer(&app, &notch(3.0), start), Some(Surface::Model));
+    glide_to_rest(&mut app, &mut glides, start);
 
     let rested =
         editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;

@@ -73,7 +73,9 @@ impl RootViews {
             return Some(true);
         }
         let _tm = crate::shell::application::Tm::new("pre.wheel");
-        self.wheel.offer(ui, input).map(|_| true)
+        self.wheel
+            .offer(ui, input, std::time::Instant::now())
+            .map(|_| true)
     }
 
     #[expect(

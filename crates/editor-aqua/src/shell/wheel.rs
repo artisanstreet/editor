@@ -2,6 +2,7 @@ use crate::conversation::scroll::{self, Step};
 use crate::ui::text::wheel_glide::{WheelGlide, WheelInput};
 use aqua::UiApp;
 use aqua_core::{InputEvent, NodeId, Point};
+use std::time::Instant;
 
 pub(crate) const THREADS: &str = "sidebar-threads";
 pub use crate::ui::scroll::MODEL_MENU;
@@ -139,7 +140,7 @@ impl WheelGlides {
         }
     }
 
-    pub fn offer(&mut self, ui: &UiApp, input: &InputEvent) -> Option<Surface> {
+    pub fn offer(&mut self, ui: &UiApp, input: &InputEvent, now: Instant) -> Option<Surface> {
         let InputEvent::Scroll { at, delta } = input else {
             return None;
         };
@@ -159,7 +160,7 @@ impl WheelGlides {
             Some(WheelInput::Notch(distance) | WheelInput::Precise(distance))
                 if !reduced && delta.x == 0.0 =>
             {
-                glide.push_down(metrics.offset, distance, metrics.max);
+                glide.push_down(metrics.offset, distance, metrics.max, now);
                 Some(surface)
             }
             _ => {
@@ -169,15 +170,15 @@ impl WheelGlides {
         }
     }
 
-    pub fn advance(&mut self, ui: &mut UiApp) -> Advance {
+    pub fn advance(&mut self, ui: &mut UiApp, now: Instant) -> Advance {
         Surface::ALL
             .into_iter()
             .fold(Advance::default(), |advance, surface| {
-                advance.merge(self.advance_surface(ui, surface))
+                advance.merge(self.advance_surface(ui, surface, now))
             })
     }
 
-    fn advance_surface(&mut self, ui: &mut UiApp, surface: Surface) -> Advance {
+    fn advance_surface(&mut self, ui: &mut UiApp, surface: Surface, now: Instant) -> Advance {
         let glide = self.glide(surface);
         if !glide.active() {
             return Advance::default();
@@ -187,7 +188,7 @@ impl WheelGlides {
             return Advance::default();
         };
         let glide = self.glide(surface);
-        let next = glide.step_down(metrics.offset, metrics.max);
+        let next = glide.step_down(metrics.offset, metrics.max, now);
         let active = glide.active();
         let moved = next.is_some_and(|next| surface.write(ui, metrics, next));
         Advance {

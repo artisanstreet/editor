@@ -57,7 +57,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let advance = self.wheel.advance(ui);
+        let advance = self.wheel.advance(ui, std::time::Instant::now());
         if advance.transcript_moved {
             self.observations.note_reader_move();
         }
@@ -76,7 +76,7 @@ impl RootViews {
         if let Some(workspace) = shell.entry.workspace_mut() {
             self.follow_tail_early(&mut workspace.conversation, ui);
         }
-        let advance = self.wheel.advance(ui);
+        let advance = self.wheel.advance(ui, std::time::Instant::now());
         if advance.threads_moved
             && let Some(workspace) = shell.entry.workspace_mut()
         {
