@@ -36,18 +36,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owner_of_the_data_folder_upgrades_it() {
-        let dir = older_database();
-        let lock = std::fs::File::create(dir.path().join("forge.lock")).unwrap();
-
-        let admin = Admin::open_exclusive(dir.path(), &lock).unwrap();
-
-        assert!(admin.devices().unwrap().is_empty());
-        assert_eq!(schema_of(dir.path()), forge_store::Store::schema_version());
-        Admin::open(dir.path()).unwrap();
-    }
-
-    #[test]
     fn administration_never_creates_a_database() {
         let dir = tempfile::tempdir().unwrap();
 

@@ -66,6 +66,7 @@ dependencies = [
  "cliclack",
  "diagnostics",
  "ed25519-dalek",
+ "flate2",
  "forge-engines",
  "forge-http",
  "forge-runs",

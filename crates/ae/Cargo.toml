@@ -47,6 +47,7 @@ build-info.workspace = true
 
 [dev-dependencies]
 artisan-api = { workspace = true, features = ["tls"] }
+flate2.workspace = true
 axum.workspace = true
 futures.workspace = true
 base64.workspace = true

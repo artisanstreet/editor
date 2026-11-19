@@ -19,24 +19,6 @@ pub(crate) enum ForgeDataError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AdministerError {
-    #[error("create {}", path.display())]
-    Create {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("open {}", path.display())]
-    Open {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("lock {}", path.display())]
-    Lock {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("open the Forge database in {}", data.display())]
     Admin {
         data: PathBuf,
@@ -127,44 +109,11 @@ fn data() -> Result<PathBuf, ForgeDataError> {
     Ok(data)
 }
 
-struct Administration {
-    admin: Admin,
-    _data_lock: Option<std::fs::File>,
-}
-
-fn administer(data: &Path) -> Result<Administration, AdministerError> {
-    let lock = data.join("forge.lock");
-    std::fs::create_dir_all(data).map_err(|source| AdministerError::Create {
-        path: data.to_owned(),
-        source,
-    })?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock)
-        .map_err(|source| AdministerError::Open {
-            path: lock.clone(),
-            source,
-        })?;
-    let admin = |source| AdministerError::Admin {
+fn administer(data: &Path) -> Result<Admin, AdministerError> {
+    Admin::open(data).map_err(|source| AdministerError::Admin {
         data: data.to_owned(),
         source: Box::new(source),
-    };
-    match file.try_lock() {
-        Ok(()) => Ok(Administration {
-            admin: Admin::open_exclusive(data, &file).map_err(admin)?,
-            _data_lock: Some(file),
-        }),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(Administration {
-            admin: Admin::open(data).map_err(admin)?,
-            _data_lock: None,
-        }),
-        Err(std::fs::TryLockError::Error(source)) => {
-            Err(AdministerError::Lock { path: lock, source })
-        }
-    }
+    })
 }
 
 fn paired_devices(data: &Path) -> Result<Vec<forge_store::Device>, ListDevicesError> {
@@ -191,12 +140,11 @@ fn reachable_address() -> Result<SocketAddr, AddressError> {
 
 pub(crate) fn pair(json: bool) -> Result<(), PairError> {
     let data = data()?;
-    let invite = forge_http::invite_offline(&administer(&data)?.admin).map_err(|source| {
-        PairError::Invite {
+    let invite =
+        forge_http::invite_offline(&administer(&data)?).map_err(|source| PairError::Invite {
             data: data.clone(),
             source,
-        }
-    })?;
+        })?;
     let fingerprint =
         tls::fingerprint_of(&invite.forge_certificate).map_err(PairError::Fingerprint)?;
     let address = reachable_address()?;
@@ -244,22 +192,18 @@ pub(crate) fn pair(json: bool) -> Result<(), PairError> {
             left / 60,
             left % 60
         ));
-        let administration = administer(&data)?;
-        let pending = administration
-            .admin
+        let admin = administer(&data)?;
+        let pending = admin
             .pair_code_pending(&code)
             .map_err(|source| PairError::Pending {
                 data: data.clone(),
                 source,
             })?;
         if !pending {
-            let devices = administration
-                .admin
-                .devices()
-                .map_err(|source| PairError::Devices {
-                    data: data.clone(),
-                    source,
-                })?;
+            let devices = admin.devices().map_err(|source| PairError::Devices {
+                data: data.clone(),
+                source,
+            })?;
             let paired = devices
                 .iter()
                 .filter(|device| device.created_at >= issued)
@@ -271,7 +215,7 @@ pub(crate) fn pair(json: bool) -> Result<(), PairError> {
             ui::outro("Done.");
             return Ok(());
         }
-        drop(administration);
+        drop(admin);
         std::thread::sleep(Duration::from_secs(1));
     }
 }
@@ -368,7 +312,6 @@ pub(crate) fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
         }
     }
     let revoked = administer(&data)?
-        .admin
         .revoke_device(&id)
         .map_err(|source| UnpairError::Revoke {
             id: id.clone(),

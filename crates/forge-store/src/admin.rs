@@ -10,12 +10,6 @@ const DATABASE: &str = "forge.sqlite3";
 pub enum AdminError {
     #[error("there is no Forge database in {}; start Forge once to create it", dir.display())]
     Missing { dir: PathBuf },
-    #[error("create {}", dir.display())]
-    Create {
-        dir: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("open {}", path.display())]
     Open {
         path: PathBuf,
@@ -27,12 +21,6 @@ pub enum AdminError {
         path: PathBuf,
         found: usize,
         expected: usize,
-    },
-    #[error("upgrade {} to schema {}", path.display(), schema::version())]
-    Migrate {
-        path: PathBuf,
-        #[source]
-        source: schema::SchemaError,
     },
 }
 
@@ -69,7 +57,10 @@ pub struct Admin {
 impl Admin {
     pub fn open(dir: &Path) -> Result<Self, AdminError> {
         let path = existing(dir)?;
-        let conn = connect(&path, OpenFlags::default())?;
+        let conn = connect(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         require_current(&path, &conn)?;
         Ok(Self {
             conn,
@@ -84,28 +75,6 @@ impl Admin {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         require_current(&path, &conn)?;
-        Ok(Self {
-            conn,
-            database: path,
-        })
-    }
-
-    pub fn open_exclusive(dir: &Path, _data_lock: &std::fs::File) -> Result<Self, AdminError> {
-        std::fs::create_dir_all(dir).map_err(|source| AdminError::Create {
-            dir: dir.to_owned(),
-            source,
-        })?;
-        let path = dir.join(DATABASE);
-        let mut conn = connect(&path, OpenFlags::default())?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|source| AdminError::Open {
-                path: path.clone(),
-                source: Box::new(source),
-            })?;
-        schema::migrate(&mut conn).map_err(|source| AdminError::Migrate {
-            path: path.clone(),
-            source,
-        })?;
         Ok(Self {
             conn,
             database: path,

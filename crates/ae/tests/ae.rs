@@ -78,6 +78,42 @@ async fn pair_json_beside_a_running_forge_pairs_an_editor() {
     assert_eq!(state.status(), 200, "the paired device is let in");
 }
 
+#[test]
+fn pairing_while_forge_is_stopped_leaves_an_older_database_for_forge_to_upgrade() {
+    use std::io::Read as _;
+    let dir = tempfile::tempdir().unwrap();
+    let data = App::Forge
+        .dir_under(&artisan_street(dir.path()))
+        .join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let database = data.join("forge.sqlite3");
+    let mut released = Vec::new();
+    flate2::read::GzDecoder::new(
+        &include_bytes!("../../forge-store/tests/fixtures/released/schema-26.sqlite3.gz")[..],
+    )
+    .read_to_end(&mut released)
+    .unwrap();
+    std::fs::write(&database, released).unwrap();
+
+    let mut command = ae();
+    command.args(["pair", "--json"]);
+    isolate(&mut command, dir.path());
+    let output = command.output().unwrap();
+
+    assert!(!output.status.success(), "ae refuses an older database");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("schema 26"), "{stderr}");
+    let schema: usize = rusqlite::Connection::open(&database)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 26, "only Forge upgrades its database");
+    assert!(
+        !data.join("forge.sqlite3.schema-26").exists(),
+        "ae leaves no backup of an upgrade it didn't do"
+    );
+}
+
 fn carrier_name() -> String {
     format!("ae-{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
