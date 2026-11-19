@@ -134,6 +134,8 @@ fn an_approval_answered_in_the_thread_lets_the_turn_finish() {
         "asking",
         editor.settle("the command to wait for approval", |view| {
             view.find(Role::Button, "Approve").is_some()
+                && view.shows("Waiting for you")
+                && view.shows("OpenCode is waiting for you")
         })
     );
     editor.click(Role::Button, "Always allow");
