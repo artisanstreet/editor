@@ -85,7 +85,7 @@ impl Surface {
         }
     }
 
-    fn metrics(self, ui: &UiApp, node: NodeId) -> Option<Metrics> {
+    fn metrics(ui: &UiApp, node: NodeId) -> Option<Metrics> {
         let offset = ui.tree().scroll_offset(node)?;
         let rect = ui.tree().rect(node)?;
         let content = ui.tree().content_size(node)?;
@@ -148,7 +148,7 @@ impl WheelGlides {
             .find(|surface| surface.node(ui).is_some_and(|node| under(ui, hit, node)))?;
         let _tm = crate::shell::application::Tm::new("wheel.metrics");
         let node = surface.node(ui)?;
-        let metrics = surface.metrics(ui, node)?;
+        let metrics = Surface::metrics(ui, node)?;
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let glide = self.glide(surface);
         match WheelInput::classify(delta.y) {
@@ -178,7 +178,7 @@ impl WheelGlides {
         if !glide.active() {
             return Advance::default();
         }
-        let Some(metrics) = surface.node(ui).and_then(|node| surface.metrics(ui, node)) else {
+        let Some(metrics) = surface.node(ui).and_then(|node| Surface::metrics(ui, node)) else {
             self.glide(surface).cancel();
             return Advance::default();
         };

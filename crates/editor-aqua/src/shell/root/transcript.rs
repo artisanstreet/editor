@@ -49,7 +49,7 @@ impl RootViews {
                 ctx.now() + deadline.saturating_duration_since(now),
             );
         }
-        self.request_landing_deadline(shell, ctx, window, now);
+        Self::request_landing_deadline(shell, ctx, window, now);
         if self.connection.animating(now, reduced)
             || self.thread_loading.animating(now, reduced)
             || self.thread_landing.animating(now, reduced)
@@ -65,8 +65,8 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
-        let _tm = crate::shell::application::Tm::new("v.scroll");
         use crate::conversation::scroll::Step;
+        let _tm = crate::shell::application::Tm::new("v.scroll");
         self.take_scroll_request(conversation);
         let Some(node) = crate::shell::wheel::keyed_node(ui, "conversation-transcript") else {
             return;
@@ -146,8 +146,8 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
-        let _tm = crate::shell::application::Tm::new("v.edges");
         use crate::ui::scroll_edge::EdgeSurface;
+        let _tm = crate::shell::application::Tm::new("v.edges");
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let now = std::time::Instant::now();
         let theme = shell.preferences.theme();

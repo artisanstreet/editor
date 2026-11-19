@@ -6,7 +6,10 @@ fn prose_and_code_find_colors_without_interpreting_issue_numbers() {
     let code = text.find("#333").unwrap();
     let values: Vec<_> = color_ranges(text, std::slice::from_ref(&(code..code + 4)))
         .into_iter()
-        .map(|range| &text[range])
+        .map(|range| {
+            text.get(range)
+                .expect("the test text slices on a char boundary")
+        })
         .collect();
     assert_eq!(values, ["#10B981", "rgb(255 0 0 / 50%)", "#333"]);
     assert!(color_ranges("foorgb(1 2 3), &#123; and page#abcdef0", &[]).is_empty());

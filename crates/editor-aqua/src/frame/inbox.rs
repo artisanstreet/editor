@@ -160,7 +160,7 @@ fn guidance(theme: &ArtisanTheme, text: String, action: Option<Element>) -> Elem
         .layout("column")
         .spaced(Space::S8)
         .padded(Space::S12)
-        .child(page::note(&theme, text).build())
+        .child(page::note(theme, text).build())
         .children(action)
         .build()
 }
@@ -174,7 +174,7 @@ pub fn states(
     let mut states = Vec::new();
     if let TextSearchStatus::Failed(cause) = sidebar.text_search_status() {
         states.push(
-            page::notice(&theme, format!("Couldn't search messages: {cause}"))
+            page::notice(theme, format!("Couldn't search messages: {cause}"))
                 .action(button(
                     "sidebar-search-retry",
                     theme,
@@ -201,7 +201,7 @@ pub fn states(
     }
     if let Some(error) = host.and_then(|host| host.thread_page(false).error()) {
         states.push(
-            page::notice(&theme, error)
+            page::notice(theme, error)
                 .action(button(
                     "sidebar-threads-retry",
                     theme,
@@ -214,7 +214,7 @@ pub fn states(
     }
     if host.is_some_and(crate::core::HostData::project_icons_failed) {
         states.push(
-            page::notice(&theme, "Some project icons didn't load.")
+            page::notice(theme, "Some project icons didn't load.")
                 .action(button(
                     "sidebar-metadata-retry",
                     theme,
@@ -227,7 +227,7 @@ pub fn states(
     }
     if let Some(error) = &sidebar.error {
         states.push(
-            page::notice(&theme, error.clone())
+            page::notice(theme, error.clone())
                 .action(button(
                     "sidebar-error-dismiss",
                     theme,

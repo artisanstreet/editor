@@ -1,5 +1,22 @@
 use super::*;
 use crate::shell::resource_preview::PreviewText;
+use crate::ui::dialog::Dialog;
+
+fn preview_dialog(
+    state: &ViewState,
+    preview: &ResourcePreview,
+    theme: &ArtisanTheme,
+    viewport_height: f32,
+    emit: Rc<dyn Fn(Action)>,
+) -> Result<Dialog, UnpreparedError> {
+    let content = state.content(preview, theme, viewport_height, Rc::clone(&emit))?;
+    let generation = state.generation;
+    Ok(
+        Dialog::new("resource-preview", *theme, preview.path.clone(), content)
+            .max_width(1100.0)
+            .on_dismiss(move |_| emit(Action::Dismiss { generation })),
+    )
+}
 
 #[test]
 fn preview_selection_includes_full_clipped_and_offscreen_lines() {
@@ -103,14 +120,14 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     assert_eq!(state.pending_jump(), Some(1));
     let events = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&events);
-    let dialog = state
-        .dialog(
-            &preview,
-            &ArtisanTheme::resolved(),
-            900.0,
-            Rc::new(move |action| sink.borrow_mut().push(action)),
-        )
-        .unwrap();
+    let dialog = preview_dialog(
+        &state,
+        &preview,
+        &ArtisanTheme::resolved(),
+        900.0,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    )
+    .unwrap();
     app.mount(|_| dialog.build_panel(Size::new(1000.0, 900.0)))
         .unwrap();
     app.set_viewport(1000.0, 900.0, 1.0);
@@ -150,15 +167,16 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
             }
         ]
     );
-    state.jumped(0);
-    assert_eq!(state.pending_jump(), Some(1));
-    state.jumped(1);
-    assert_eq!(state.pending_jump(), None);
     state.release(&mut app);
     assert!(
-        state
-            .dialog(&preview, &ArtisanTheme::resolved(), 900.0, Rc::new(|_| {}))
-            .is_err()
+        preview_dialog(
+            &state,
+            &preview,
+            &ArtisanTheme::resolved(),
+            900.0,
+            Rc::new(|_| {})
+        )
+        .is_err()
     );
 }
 
@@ -187,9 +205,7 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     state.prepare(&preview, &mut app).unwrap();
     let emit: Rc<dyn Fn(Action)> = Rc::new(|_| {});
     let theme = ArtisanTheme::resolved();
-    let dialog = state
-        .dialog(&preview, &theme, 700.0, Rc::clone(&emit))
-        .unwrap();
+    let dialog = preview_dialog(&state, &preview, &theme, 700.0, Rc::clone(&emit)).unwrap();
     let host = DialogHost::open(&mut app, owner, dialog).unwrap();
     assert!(app.focus_key("resource-copy-text"));
     let focused = app.tree().focused();

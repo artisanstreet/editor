@@ -237,8 +237,9 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     core.navigate(Screen::Marketplace);
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&events);
-    let emit = Rc::new(move |action| recorded.borrow_mut().push(action));
-    let mut controller = MarketplaceController::new(emit.clone());
+    let emit: Rc<dyn Fn(view::ViewAction)> =
+        Rc::new(move |action| recorded.borrow_mut().push(action));
+    let mut controller = MarketplaceController::new(Rc::clone(&emit));
     controller.sync(&mut core);
     controller.page.items = vec![
         Item::Server(ServerRow {

@@ -113,10 +113,11 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
         |_| {},
     )
     .unwrap();
-    let mut now = 0.0;
-    let mut run_until = |app: &mut UiApp, host: &mut AnimatedPickerHost, end: f64| {
-        while now < end {
-            now += 0.016;
+    let mut frame = 0_u32;
+    let mut run_until = |app: &mut UiApp, host: &mut AnimatedPickerHost, end_ms: u32| {
+        while frame * 16 < end_ms {
+            frame += 1;
+            let now = f64::from(frame) * 0.016;
             host.refresh_content(app, content()).unwrap();
             host.advance(app, now).unwrap();
             app.advance_clock(now);
@@ -128,7 +129,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
             matches!(&app.tree().get(node).unwrap().kind, NodeKind::Text(text) if text.text() == wanted)
         })
     };
-    run_until(&mut app, &mut host, 0.3);
+    run_until(&mut app, &mut host, 300);
     let row = app
         .tree()
         .traverse()
@@ -146,7 +147,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
         position: Point::new(rect.w.mul_add(0.5, rect.x), rect.h.mul_add(0.5, rect.y)),
         buttons: 0,
     }));
-    run_until(&mut app, &mut host, 1.0);
+    run_until(&mut app, &mut host, 1000);
     assert!(shows(&app, "Weekly usage for Claude Code"));
 }
 

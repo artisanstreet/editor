@@ -1597,6 +1597,7 @@ impl Workspace {
         core: &mut Core,
         assets: &aqua::images::ImageAssets,
     ) -> crate::shell::refresh::Invalidation {
+        use crate::shell::refresh::Cause;
         let tm_1 = crate::shell::application::Tm::new("dd.conversation");
         let conversation_changed = self.conversation.drain(core);
         drop(tm_1);
@@ -1655,7 +1656,6 @@ impl Workspace {
         let tm_8 = crate::shell::application::Tm::new("dd.images");
         let images_changed = self.images.drain(assets) | self.images.poll_assets();
         drop(tm_8);
-        use crate::shell::refresh::Cause;
         let mut causes = crate::shell::refresh::Invalidation::default();
         causes.note(Cause::ConversationState, conversation_changed);
         causes.note(Cause::ConversationImages, images_changed);

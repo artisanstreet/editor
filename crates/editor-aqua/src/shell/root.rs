@@ -308,7 +308,7 @@ impl SectionViews for RootViews {
         let now = std::time::Instant::now();
         let reduced = Self::reduced(ui);
         let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
-            .unwrap_or((crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
+            .unwrap_or_else(|| (crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
         let tree = workspace
             .sidebar
             .host
@@ -354,7 +354,7 @@ impl SectionViews for RootViews {
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
-            .unwrap_or((crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
+            .unwrap_or_else(|| (crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
         let element = crate::frame::inbox::view(
             &workspace.sidebar,
             &shell.core,

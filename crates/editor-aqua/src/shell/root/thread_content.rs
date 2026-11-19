@@ -98,7 +98,7 @@ impl RootViews {
                 scope.thread, scope.host
             )
         };
-        let items: HashMap<_, _> = workspace
+        let items: std::collections::BTreeMap<_, _> = workspace
             .conversation
             .view
             .iter()
@@ -346,7 +346,7 @@ impl RootViews {
         let mut controls = Vec::new();
         controls.extend(jump);
         if let Some(unavailable) = &unavailable {
-            let mut notice = crate::ui::page::notice(&theme, unavailable.to_string());
+            let mut notice = crate::ui::page::notice(theme, unavailable.to_string());
             if matches!(unavailable, crate::core::ThreadUnavailable::Failed(_)) {
                 let actions = Rc::clone(&self.conversation_actions);
                 let scope = scope.clone();
@@ -390,7 +390,7 @@ impl RootViews {
             .build();
             controls.push(
                 crate::ui::page::notice(
-                    &theme,
+                    theme,
                     format!("Couldn't refresh questions and goals: {error}"),
                 )
                 .action(retry)
@@ -415,8 +415,6 @@ impl RootViews {
         let (questionnaires, attachments) =
             workspace.composer_content(ui, theme, reduced_motion)?;
         let parts = view::ComposerParts {
-            nested: workspace.conversation.agent.is_some(),
-            placeholder: String::new(),
             questionnaires,
             attachments,
             mention_overlay: None,
@@ -432,7 +430,7 @@ impl RootViews {
             let body = match &workspace.conversation.load_error {
                 Some(error) => {
                     self.thread_loading.reset();
-                    view::conversation_notice(&theme, error.clone(), true)
+                    view::conversation_notice(theme, error.clone(), true)
                 }
                 None if loading => view::centered_body(self.thread_loading.build(
                     theme,
@@ -446,13 +444,13 @@ impl RootViews {
                 }
                 None => {
                     self.thread_loading.reset();
-                    view::conversation_notice(&theme, "No messages yet.".to_owned(), false)
+                    view::conversation_notice(theme, "No messages yet.".to_owned(), false)
                 }
             };
             view::conversation_body(
                 workspace,
                 core,
-                &theme,
+                theme,
                 width,
                 body,
                 Vec::new(),
@@ -483,7 +481,7 @@ impl RootViews {
                     )),
             ];
             if let Some(error) = &workspace.conversation.load_error {
-                overlays.push(view::conversation_load_error(&theme, error.clone()));
+                overlays.push(view::conversation_load_error(theme, error.clone()));
             }
             let drawer = self.transcript_viewport.and_then(|viewport| {
                 self.navigation.build(
@@ -520,7 +518,7 @@ impl RootViews {
             view::conversation_virtual(
                 workspace,
                 core,
-                &theme,
+                theme,
                 width,
                 24.0,
                 factory.layout_callback(),

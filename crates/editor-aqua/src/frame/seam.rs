@@ -82,7 +82,7 @@ pub(crate) fn surface(
             let target = motion
                 .borrow()
                 .destination()
-                .unwrap_or(Rect::from_edges(local.x, local.y, local.x, local.y));
+                .unwrap_or_else(|| Rect::from_edges(local.x, local.y, local.x, local.y));
             let edge = Edge::of(theme.colors.background, theme.colors.text);
             let colors = [
                 edge.rim_top,

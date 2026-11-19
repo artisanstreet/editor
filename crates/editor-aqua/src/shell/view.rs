@@ -71,8 +71,8 @@ pub fn settings_panel(
                 .min_height(Length::Pct(0.0)),
         )
         .style(Corners::TopLeft.style(Radius::Panel.px()))
-        .style(Seam::TopLeft.style(&theme))
-        .style(sheet(&theme))
+        .style(Seam::TopLeft.style(theme))
+        .style(sheet(theme))
         .clip(true)
         .child(page)
         .build();
@@ -93,8 +93,8 @@ pub fn settings_panel(
         .height(dimensions.size.height)
         .clip(true)
         .style(Radius::Shell.style())
-        .style(frame(&theme))
-        .style(Seam::Around.style(&theme))
+        .style(frame(theme))
+        .style(Seam::Around.style(theme))
         .child(
             UiBox::new()
                 .width(dimensions.navigation_width)
@@ -150,8 +150,6 @@ pub(crate) fn workspace(
 }
 
 pub(crate) struct ComposerParts {
-    pub nested: bool,
-    pub placeholder: String,
     pub questionnaires: Option<Element>,
     pub attachments: Option<Element>,
     pub mention_overlay: Option<Element>,

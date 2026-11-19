@@ -1340,18 +1340,18 @@ fn failure_card(message: &str, theme: &crate::ui::theme::ArtisanTheme) -> Elemen
         .spaced(Space::S8)
         .child(
             TextRole::Title
-                .text(&theme, "Something went wrong drawing this view")
+                .text(theme, "Something went wrong drawing this view")
                 .build(),
         )
         .child(
             TextRole::Caption
-                .text(&theme, message.to_owned())
+                .text(theme, message.to_owned())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .build(),
         )
         .build();
     let card = Surface::Callout(Tone::Danger)
-        .build(&theme, vec![body])
+        .build(theme, vec![body])
         .style(Style::new().width(Length::Px(WIDTH)));
     window_root(
         UiBox::new()
@@ -1363,7 +1363,7 @@ fn failure_card(message: &str, theme: &crate::ui::theme::ArtisanTheme) -> Elemen
                     .align(aqua_ui::AlignItems::CENTER)
                     .justify(aqua_ui::JustifyContent::CENTER),
             )
-            .style(sheet(&theme))
+            .style(sheet(theme))
             .child(card)
             .build(),
     )
@@ -1376,12 +1376,12 @@ fn window_root(element: Element) -> Element {
         .aria_language(crate::shell::host::INTERFACE_LANGUAGE)
 }
 
-pub(crate) struct Tm(
-    &'static str,
-    std::time::Instant,
-    aqua::profile::alloc::HeapCounts,
-    crate::core::diagnostics::rebuild_stats::Span,
-);
+pub(crate) struct Tm {
+    name: &'static str,
+    started: std::time::Instant,
+    heap: aqua::profile::alloc::HeapCounts,
+    _span: crate::core::diagnostics::rebuild_stats::Span,
+}
 const DEFAULT_THRESHOLD_MS: f64 = 3.0;
 
 impl Tm {
@@ -1402,26 +1402,26 @@ impl Tm {
 
     pub(crate) fn new(name: &'static str) -> Self {
         crate::core::diagnostics::rebuild_stats::record_event(name);
-        Self(
+        Self {
             name,
-            std::time::Instant::now(),
-            aqua::profile::alloc::snapshot(),
-            crate::core::diagnostics::rebuild_stats::span(name),
-        )
+            started: std::time::Instant::now(),
+            heap: aqua::profile::alloc::snapshot(),
+            _span: crate::core::diagnostics::rebuild_stats::span(name),
+        }
     }
 }
 impl Drop for Tm {
     fn drop(&mut self) {
-        let ms = self.1.elapsed().as_secs_f64() * 1000.0;
+        let ms = self.started.elapsed().as_secs_f64() * 1000.0;
         if aqua::profile::enabled() {
-            let heap = aqua::profile::alloc::snapshot().since(self.2);
+            let heap = aqua::profile::alloc::snapshot().since(self.heap);
             if ms > 0.25 || heap.allocs > 8 {
-                let name = self.0;
+                let name = self.name;
                 aqua::profile::note(|| format!("{name}={ms:.2}ms/a{}", heap.allocs));
             }
         }
         if ms > Self::threshold_ms() {
-            tracing::info!(target: "tm", what = self.0, ms);
+            tracing::info!(target: "tm", what = self.name, ms);
         }
     }
 }

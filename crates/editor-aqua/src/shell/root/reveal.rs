@@ -81,7 +81,10 @@ impl Folded {
                 unreachable!("invariant: windows(2) yields pairs");
             };
             clusters.push((folded.len(), start));
-            folded.push_str(&fold(&text[start..end]));
+            folded.push_str(&fold(
+                text.get(start..end)
+                    .expect("invariant: cluster starts fall on char boundaries"),
+            ));
         }
         clusters.push((folded.len(), text.len()));
         Self {

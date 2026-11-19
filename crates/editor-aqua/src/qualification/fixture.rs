@@ -763,7 +763,6 @@ pub struct VerifiedBootstrap {
     thread: ThreadId,
     dimensions: (f32, f32),
     fixture: ImmutableFixture,
-    snapshot: StoreSnapshot,
     server: ForgeServer,
     editor_dir: PathBuf,
 }
@@ -970,7 +969,6 @@ impl VerifiedBootstrap {
             thread,
             dimensions: (request.width, request.height),
             fixture,
-            snapshot,
             server,
             editor_dir,
         })

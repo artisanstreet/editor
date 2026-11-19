@@ -275,11 +275,11 @@ impl ConnectionPresenter {
                 .layout("column")
                 .style(Style::new().align(AlignItems::CENTER))
                 .spaced(Space::S8)
-                .child(TextRole::Heading.text(&theme, title).build())
+                .child(TextRole::Heading.text(theme, title).build())
                 .child(
                     UiBox::new()
                         .style(Style::new().max_width(Length::Px(TEXT_WIDTH)))
-                        .child(label(&theme, detail, theme.colors.text_muted))
+                        .child(label(theme, detail, theme.colors.text_muted))
                         .build(),
                 )
                 .child(
@@ -382,7 +382,7 @@ impl ConnectionPresenter {
                 (detail.to_owned(), actions.unwrap_or_default())
             };
             let first = "This is taking more time than expected…";
-            let typography = TextRole::Label.style(&theme);
+            let typography = TextRole::Label.style(theme);
             let color = theme.colors.text_muted.to_reference_text_color();
             let color = [
                 color.hue_degrees,
@@ -391,8 +391,7 @@ impl ConnectionPresenter {
                 color.alpha,
             ];
             let spans = vec![
-                StyledSpan::new(first, TextRole::LabelStrong.style(&theme))
-                    .gpui_source_color(color),
+                StyledSpan::new(first, TextRole::LabelStrong.style(theme)).gpui_source_color(color),
                 StyledSpan::new(format!(" {detail}"), typography).gpui_source_color(color),
             ];
             let mut line = UiBox::new()
@@ -406,7 +405,7 @@ impl ConnectionPresenter {
                 .child(Text::new(format!("{first} {detail}")).spans(spans).build());
             if let Some(error) = host.wsl.as_ref().and_then(|wsl| wsl.error.as_ref()) {
                 line = line.child(label(
-                    &theme,
+                    theme,
                     &format!("Couldn't start it: {error}"),
                     theme.colors.destructive_text,
                 ));
@@ -415,7 +414,7 @@ impl ConnectionPresenter {
                 && let Some(reason) = &self.last_failure
             {
                 line = line.child(label(
-                    &theme,
+                    theme,
                     &format!("Last attempt: {reason}"),
                     theme.colors.text_muted,
                 ));

@@ -146,6 +146,10 @@ pub(super) fn run(
     payload::write_notices().map_err(InstallError::Notices)
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a headless install reports its progress lines on stderr"
+)]
 pub(super) fn headless(arguments: &[String]) -> Result<(), InstallError> {
     let mut all = vec!["install".to_owned(), "--apply".to_owned()];
     all.extend_from_slice(arguments);

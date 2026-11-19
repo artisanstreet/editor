@@ -224,6 +224,8 @@ impl Shell {
     }
 
     pub(crate) fn drain(&mut self, window_active: bool, ui: &mut aqua::UiApp) -> ShellUpdates {
+        const MESSAGES_PER_DRAIN: usize = 256;
+        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
         let mut notifications = Vec::new();
         let mut causes = Invalidation::default();
         let tm_a = crate::shell::application::Tm::new("sd.assets");
@@ -258,8 +260,6 @@ impl Shell {
         let entry = &mut self.entry;
         let live = &mut self.live;
         let now = std::time::Instant::now();
-        const MESSAGES_PER_DRAIN: usize = 256;
-        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
         let mut exhausted = true;
         let mut live_events = super::live_batch::LiveBatch::default();
         let mut apply_event = |core: &mut Core, event: CoreEvent| {

@@ -13,9 +13,9 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let _tm = crate::shell::application::Tm::new("v.dispatch_conv");
         use crate::ui::color_copy_menu::ColorCopyEffect;
         use crate::ui::markdown::visual::LinkAction;
+        let _tm = crate::shell::application::Tm::new("v.dispatch_conv");
         self.connection.dispatch(&mut shell.core);
         let invalidated = self.conversation_invalidated.replace(false);
         let mut changed = self.noted.note(Cause::ConversationInvalidated, invalidated);
@@ -145,7 +145,7 @@ impl RootViews {
                 | ConversationAction::Blob(..)) => action,
             };
             match action {
-                ConversationAction::Media(_, _, _, _) | ConversationAction::Source(_) => continue,
+                ConversationAction::Media(_, _, _, _) | ConversationAction::Source(_) => {}
                 ConversationAction::Blob(scope, item, revision, action) => {
                     changed |= self.dispatch_blob(shell, ui, scope, item, revision, action);
                 }

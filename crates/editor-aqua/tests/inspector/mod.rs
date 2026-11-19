@@ -22,7 +22,9 @@ fn shell_command_lines_and_prompts_preserve_platform_conventions() {
     assert_eq!(
         lines
             .iter()
-            .map(|range| &command[range.clone()])
+            .map(|range| command
+                .get(range.clone())
+                .expect("the test text slices on a char boundary"))
             .collect::<Vec<_>>(),
         ["one", "two"]
     );

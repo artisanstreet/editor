@@ -82,14 +82,25 @@ fn mixed_inline_keeps_nested_styles_links_and_copy_substitutions() {
     let code = prepared
         .runs
         .iter()
-        .find(|run| &prepared.source.text[run.range.clone()] == "value")
+        .find(|run| {
+            prepared
+                .source
+                .text
+                .get(run.range.clone())
+                .expect("the test text slices on a char boundary")
+                == "value"
+        })
         .unwrap();
     assert_eq!(code.style.weight, Some(aqua_text::FontWeight::NORMAL));
     assert_eq!(code.style.color, Some(theme.colors.text_muted));
     assert!(code.style.monospace);
     assert_eq!(prepared.links[0].destination, "https://example.com");
     assert_eq!(
-        &prepared.source.text[prepared.interactions[0].range.clone()],
+        prepared
+            .source
+            .text
+            .get(prepared.interactions[0].range.clone())
+            .expect("the test text slices on a char boundary"),
         "link"
     );
     let len = prepared.source.text.len();

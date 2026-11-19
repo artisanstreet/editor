@@ -26,10 +26,18 @@ impl NotificationCenter {
         Err(NotificationError::Unsupported)
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "the non-Windows stub keeps the Windows notification center's method signatures"
+    )]
     fn withdraw(&self, _tag: &str) -> Result<(), NotificationError> {
         Err(NotificationError::Unsupported)
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "the non-Windows stub keeps the Windows notification center's method signatures"
+    )]
     fn show(&self, _notification: aqua::prelude::Notification) -> Result<(), NotificationError> {
         Err(NotificationError::Unsupported)
     }

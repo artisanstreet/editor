@@ -159,6 +159,10 @@ fn directory(variable: &str, fallback: &str) -> PathBuf {
 
 #[test]
 #[ignore = "judges fresh WARP captures from capture.sh, as the Windows CI job does; set AQUA_SCREENS_CANDIDATE"]
+#[expect(
+    clippy::print_stdout,
+    reason = "the screenshot gate prints its per-screen table for the CI log"
+)]
 fn candidate_screens_stay_within_the_tolerance_gate() {
     let reference = directory("AQUA_SCREENS_REFERENCE", "baselines/aqua");
     let candidate = directory("AQUA_SCREENS_CANDIDATE", "candidate");

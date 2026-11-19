@@ -354,7 +354,12 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
     );
     assert_eq!(selected(&nested), selected(&first));
     assert_eq!(selected(&table), selected(&first));
-    assert!(source[nested.source_range.clone()].contains("beta"));
+    assert!(
+        source
+            .get(nested.source_range.clone())
+            .expect("the test text slices on a char boundary")
+            .contains("beta")
+    );
     assert!(presenter.projected_is_current(2, &nested.source_range, &nested.proof));
     presenter.prepare(&engine, "replacement").unwrap();
     assert!(!presenter.projected_is_current(2, &nested.source_range, &nested.proof));
@@ -414,7 +419,12 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
         .map(|source| source.text.as_ref())
         .collect();
     assert_eq!(values, ["Before", "After"]);
-    assert!(source[row.source_range.clone()].contains("artisan-heatmap"));
+    assert!(
+        source
+            .get(row.source_range.clone())
+            .expect("the test text slices on a char boundary")
+            .contains("artisan-heatmap")
+    );
     assert!(presenter.projected_is_current(1, &row.source_range, &row.proof));
 }
 
@@ -518,7 +528,13 @@ fn projected_reveal_metadata_tracks_keyed_cells_and_streaming_tail() {
     reveal.begin_frame(std::time::Instant::now(), true, true, false, false);
     let text = row.reveal_text(&reveal);
     assert_eq!(text[0].end, text[0].text.len());
-    assert_eq!(&text[1].text[..text[1].end], "two words");
+    assert_eq!(
+        text[1]
+            .text
+            .get(..text[1].end)
+            .expect("the test text slices on a char boundary"),
+        "two words"
+    );
     assert!(std::sync::Arc::ptr_eq(
         &row.selection_batch,
         &same.selection_batch

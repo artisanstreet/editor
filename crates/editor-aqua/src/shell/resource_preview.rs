@@ -97,7 +97,9 @@ impl LineWindow {
 
     #[must_use]
     fn line(&self, index: usize) -> &str {
-        &self.text[self.range(index)]
+        self.text
+            .get(self.range(index))
+            .expect("invariant: preview line ranges fall on char boundaries")
     }
 }
 

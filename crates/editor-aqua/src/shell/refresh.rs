@@ -11,6 +11,7 @@ pub enum Refresh {
 }
 
 impl Refresh {
+    #[must_use]
     pub const fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Workspace, _) | (_, Self::Workspace) => Self::Workspace,

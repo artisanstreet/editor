@@ -26,7 +26,6 @@ impl PendingStall {
 
 impl RootViews {
     pub(super) fn request_landing_deadline(
-        &self,
         shell: &Shell,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,

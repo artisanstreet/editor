@@ -51,14 +51,15 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             "127.0.0.1:0".parse().unwrap(),
         ))
         .unwrap();
-    let text: String = (0..130)
+    let text = (0..130)
         .map(|index| {
             format!(
                 "Paragraph {index:03} with **bold** and {}.\n\n",
                 "payload ".repeat(22)
             )
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .concat();
     assert!(text.len() > artisan_api::INLINE_TEXT_BYTES);
     let (reference, item) = runtime().block_on(async {
         let project = server
@@ -195,7 +196,11 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     };
     let start = usize::try_from(descriptor.source_start).unwrap();
     let end = usize::try_from(descriptor.source_end).unwrap();
-    assert_eq!(leaf.source.as_ref(), &text[start..end]);
+    assert_eq!(
+        leaf.source.as_ref(),
+        text.get(start..end)
+            .expect("the test text slices on a char boundary")
+    );
     assert!(matches!(
         &leaf.content,
         IndexedLeafContent::Block(Block::Paragraph { .. })
@@ -333,13 +338,16 @@ fn stored_conversation_transaction(
     else {
         panic!("expected stored message")
     };
-    assert!(matches!(
-        stored
-            .borrow_mut()
-            .ensure(&scope, &provider, key.clone(), reference.clone(), version)
-            .expect("the stored body is requested"),
-        StoredPreparation::Pending
-    ));
+    assert!(
+        matches!(
+            stored
+                .borrow_mut()
+                .ensure(&scope, &provider, key.clone(), reference.clone(), version)
+                .expect("the stored body is requested"),
+            StoredPreparation::Pending
+        ),
+        "a fresh stored body is fetched before it shows"
+    );
     loop {
         stored.borrow_mut().drain_publish(&mut conversation, core);
         if stored
@@ -468,7 +476,10 @@ fn stored_conversation_transaction(
     let stale_host = painted
         .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
         .expect("the open thread has a presentation scope");
-    assert!(app.unregister_selection_source_in(document, source_id));
+    assert!(
+        app.unregister_selection_source_in(document, source_id),
+        "the row registered its selection source"
+    );
     let mut changed = item.clone();
     changed.seq += 1;
     if let ItemKind::AssistantMessage { text, .. } = &mut changed.kind {
@@ -489,7 +500,13 @@ fn stored_conversation_transaction(
         assert!(Instant::now() < deadline, "stored item update deadline");
         std::thread::yield_now();
     }
-    assert!(!candidate.acknowledge(&conversation, core, &markdown.borrow()));
+    assert!(
+        !candidate.acknowledge(&conversation, core, &markdown.borrow()),
+        "a changed body is not acknowledged as painted"
+    );
     core.add_test_host(config, client.clone());
-    assert!(!stale_host.acknowledge(&conversation, core, &markdown.borrow()));
+    assert!(
+        !stale_host.acknowledge(&conversation, core, &markdown.borrow()),
+        "a paint from a replaced host is not acknowledged"
+    );
 }

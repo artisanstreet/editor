@@ -122,7 +122,12 @@ fn a_search_ranks_fuzzy_matches_from_inbox_and_history_and_marks_what_matched() 
                 let marks: Vec<String> = row
                     .matched
                     .iter()
-                    .map(|range| row.title[range.clone()].to_owned())
+                    .map(|range| {
+                        row.title
+                            .get(range.clone())
+                            .expect("the test text slices on a char boundary")
+                            .to_owned()
+                    })
                     .collect();
                 (row.title, marks)
             })

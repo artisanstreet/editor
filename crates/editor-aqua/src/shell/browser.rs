@@ -31,7 +31,9 @@ pub fn program_of(command: &str) -> Option<PathBuf> {
     } else {
         let lower = command.to_ascii_lowercase();
         let end = lower.find(".exe").map_or(command.len(), |at| at + 4);
-        &command[..end]
+        command
+            .get(..end)
+            .expect("invariant: ASCII lowercasing keeps the .exe offset on a char boundary")
     };
     (!program.trim().is_empty()).then(|| PathBuf::from(program.trim()))
 }
@@ -55,7 +57,9 @@ pub fn pick(
                 .is_some_and(|own| own.eq_ignore_ascii_case(handler))
         })
     });
-    let index = named.or(default).or((!installed.is_empty()).then_some(0))?;
+    let index = named
+        .or(default)
+        .or_else(|| (!installed.is_empty()).then_some(0))?;
     installed.into_iter().nth(index)
 }
 

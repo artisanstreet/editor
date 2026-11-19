@@ -135,8 +135,6 @@ impl RootViews {
                         &shell.core,
                         &theme,
                         view::ComposerParts {
-                            nested: false,
-                            placeholder: String::new(),
                             questionnaires,
                             attachments,
                             mention_overlay: None,
@@ -273,26 +271,32 @@ impl RootViews {
             .flatten();
         self.context_reading = titlebar_scope.and_then(|scope| {
             let host = shell.core.host_if_instance(&scope.host, scope.instance)?;
-            let agent = scope.agent.as_ref().map(|id| {
-                workspace
-                    .conversation
-                    .view
-                    .as_ref()?
-                    .item(id)
-                    .and_then(|item| {
-                        if let artisan_api::ItemKind::Agent {
-                            context_used: Some(context_used),
-                            model,
-                            ..
-                        } = &item.kind
-                        {
-                            Some((*context_used, model.clone()))
-                        } else {
-                            None
-                        }
-                    })
-            });
-            crate::shell::context_meter::reading(host, &scope.thread, agent)
+            let subject =
+                scope
+                    .agent
+                    .as_ref()
+                    .map_or(crate::shell::context_meter::Subject::Thread, |id| {
+                        crate::shell::context_meter::Subject::Agent(
+                            workspace
+                                .conversation
+                                .view
+                                .as_ref()
+                                .and_then(|view| view.item(id))
+                                .and_then(|item| {
+                                    if let artisan_api::ItemKind::Agent {
+                                        context_used: Some(context_used),
+                                        model,
+                                        ..
+                                    } = &item.kind
+                                    {
+                                        Some((*context_used, model.clone()))
+                                    } else {
+                                        None
+                                    }
+                                }),
+                        )
+                    });
+            crate::shell::context_meter::reading(host, &scope.thread, subject)
         });
         workspace
             .inspector
@@ -342,7 +346,7 @@ impl RootViews {
                     .collect::<Vec<_>>();
                 let height =
                     crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
-                        .unwrap_or((viewport.height - 260.0).max(0.0));
+                        .unwrap_or_else(|| (viewport.height - 260.0).max(0.0));
                 let tree = crate::frame::inbox::view(
                     &workspace.sidebar,
                     &shell.core,

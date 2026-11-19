@@ -27,18 +27,23 @@ impl ContextReading {
     }
 }
 
+pub(crate) enum Subject {
+    Thread,
+    Agent(Option<(u64, Option<String>)>),
+}
+
 pub(crate) fn reading(
     host: &crate::core::HostData,
     thread: &artisan_api::ThreadId,
-    agent: Option<Option<(u64, Option<String>)>>,
+    subject: Subject,
 ) -> Option<ContextReading> {
     let run = host.runs.get(thread)?;
-    let (used, model) = match agent {
-        Some(agent) => {
+    let (used, model) = match subject {
+        Subject::Agent(agent) => {
             let (used, model) = agent?;
             (used, model.or_else(|| run.model.clone())?)
         }
-        None => (run.usage.context_used?, run.model.clone()?),
+        Subject::Thread => (run.usage.context_used?, run.model.clone()?),
     };
     let known = host
         .engines

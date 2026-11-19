@@ -91,20 +91,23 @@ impl RootViews {
         let connecting = self.connection.animating(now, reduced);
         let loading = self.thread_loading.animating(now, reduced);
         let landing = self.thread_landing.animating(now, reduced);
-        let mut action_changed = self.noted.note(Cause::Wheel, wheel)
-            | self.noted.note(Cause::Dispatch, dispatched)
-            | self.noted.note(Cause::Sidebar, sidebar)
-            | self.noted.note(Cause::ConnectionAnimation, connecting)
-            | self.noted.note(Cause::LoadingAnimation, loading)
-            | self.noted.note(Cause::LandingAnimation, landing);
-        if let Some(height) = self.composer_measurement.take()
+        let composer_resized = if let Some(height) = self.composer_measurement.take()
             && self
                 .composer_height
                 .is_none_or(|previous| (previous - height).abs() >= 0.5)
         {
             self.composer_height = Some(height);
-            action_changed = self.noted.note(Cause::ComposerHeight, true);
-        }
+            true
+        } else {
+            false
+        };
+        let action_changed = self.noted.note(Cause::Wheel, wheel)
+            | self.noted.note(Cause::Dispatch, dispatched)
+            | self.noted.note(Cause::Sidebar, sidebar)
+            | self.noted.note(Cause::ConnectionAnimation, connecting)
+            | self.noted.note(Cause::LoadingAnimation, loading)
+            | self.noted.note(Cause::LandingAnimation, landing)
+            | self.noted.note(Cause::ComposerHeight, composer_resized);
         let Some(rows) = &self.rows else {
             return action_changed;
         };
@@ -124,7 +127,7 @@ impl RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         aqua_core::checkpoint::reach();
-        let _tm_events = crate::shell::application::Tm::new("fc.events");
+        let tm_events = crate::shell::application::Tm::new("fc.events");
         let events = self.observations.drain();
         let painted_count = events.painted.len();
         #[cfg(feature = "qualification")]
@@ -288,7 +291,7 @@ impl RootViews {
                 changed |= self.noted.note(Cause::Landed, true);
             }
         }
-        drop(_tm_events);
+        drop(tm_events);
         aqua_core::checkpoint::reach();
         let _tm_after = crate::shell::application::Tm::new("fc.after");
         crate::conversation::view::transcript::apply_heights(

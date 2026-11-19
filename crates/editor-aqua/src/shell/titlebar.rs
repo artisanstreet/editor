@@ -120,7 +120,7 @@ impl Titlebar {
             );
         }
         if let Some(width) = inspector_width {
-            root = root.child(split(&theme).style(Style::new().absolute_at(
+            root = root.child(split(theme).style(Style::new().absolute_at(
                 None,
                 Some(0.0),
                 Some(width - 1.0),

@@ -51,6 +51,7 @@ pub struct ForgeInvite {
     pub pairing: PairingInput,
 }
 
+#[cfg(feature = "capture")]
 pub(crate) fn join_forge(
     files: &EditorFiles,
     pairing: &PairingInput,

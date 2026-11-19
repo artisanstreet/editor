@@ -112,7 +112,7 @@ fn content(
         .child(
             TextRole::Label
                 .text(
-                    &theme,
+                    theme,
                     format!("The browser didn't start: {}.", failure.cause),
                 )
                 .wrap(true)
@@ -120,7 +120,7 @@ fn content(
         )
         .child(
             TextRole::Code
-                .text(&theme, failure.url.clone())
+                .text(theme, failure.url.clone())
                 .wrap(true)
                 .build(),
         )

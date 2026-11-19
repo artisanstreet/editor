@@ -129,6 +129,7 @@ fn edits_during_a_write_are_not_discarded() {
 #[test]
 fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::composer::view::ComposerAction;
     use editor_aqua::composer::{
         controller::{Composer, ComposerTarget},
         persistence::DraftSessions,
@@ -164,7 +165,6 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         target.clone(),
         std::rc::Rc::new(|_| {}),
     );
-    use editor_aqua::composer::view::ComposerAction;
     assert!(
         !owner
             .dispatch_with_change(&mut core, ComposerAction::SelectPane(None), None)

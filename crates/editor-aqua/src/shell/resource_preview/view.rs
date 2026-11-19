@@ -11,7 +11,6 @@ use aqua_ui::{
 
 use super::{LineWindow, PreviewError, ResourcePreview};
 use crate::ui::{
-    dialog::Dialog,
     kit::{Button, ButtonTone, Hover, Space, Spaced, Surface, TextRole},
     theme::ArtisanTheme,
 };
@@ -126,12 +125,6 @@ impl ViewState {
         true
     }
 
-    fn jumped(&mut self, index: usize) {
-        if self.jump == Some(index) {
-            self.jump = None;
-        }
-    }
-
     pub(crate) fn release(&mut self, app: &mut aqua::UiApp) {
         if self.prepared.take().is_some() {
             app.unregister_selection_source_in(self.document, self.source);
@@ -165,11 +158,11 @@ impl ViewState {
             .build(),
         );
         match &preview.content {
-            None => body = body.child(body_text(&theme, "Reading source…")),
+            None => body = body.child(body_text(theme, "Reading source…")),
             Some(Err(error)) if error.retryable() => {
                 let retry = Rc::clone(&emit);
                 body = body.child(
-                    crate::ui::page::notice(&theme, failure(error))
+                    crate::ui::page::notice(theme, failure(error))
                         .action(
                             Button::text(
                                 "resource-retry",
@@ -183,7 +176,7 @@ impl ViewState {
                         .build(),
                 );
             }
-            Some(Err(error)) => body = body.child(body_text(&theme, &failure(error))),
+            Some(Err(error)) => body = body.child(body_text(theme, &failure(error))),
             Some(Ok(content)) => {
                 let full = Arc::clone(content.full());
                 let copy_file = Rc::clone(&emit);
@@ -203,13 +196,13 @@ impl ViewState {
                         })
                         .build(),
                     )
-                    .child(body_text(&theme, &content.note()));
+                    .child(body_text(theme, &content.note()));
                 if content.window().is_some() {
                     let prepared = self.prepared.as_ref().ok_or_else(|| UnpreparedError {
                         path: preview.path.clone(),
                     })?;
                     body = body.child(lines_view(
-                        &theme,
+                        theme,
                         viewport_height,
                         self.document,
                         self.source,
@@ -219,22 +212,6 @@ impl ViewState {
             }
         }
         Ok(body.build())
-    }
-
-    fn dialog(
-        &self,
-        preview: &ResourcePreview,
-        theme: &ArtisanTheme,
-        viewport_height: f32,
-        emit: Rc<dyn Fn(Action)>,
-    ) -> Result<Dialog, UnpreparedError> {
-        let content = self.content(preview, theme, viewport_height, Rc::clone(&emit))?;
-        let generation = self.generation;
-        Ok(
-            Dialog::new("resource-preview", *theme, preview.path.clone(), content)
-                .max_width(1100.0)
-                .on_dismiss(move |_| emit(Action::Dismiss { generation })),
-        )
     }
 }
 
@@ -279,7 +256,9 @@ fn lines_view(
             let line = prepared.window.start_line() + *index;
             let range = prepared.window.range(*index);
             let text = prepared.window.line(*index);
-            let visible = &text[..text.floor_char_boundary(text.len().min(16 * 1024))];
+            let visible = text
+                .get(..text.floor_char_boundary(text.len().min(16 * 1024)))
+                .expect("invariant: floor_char_boundary returns a char boundary");
             let target = line == prepared.target_line;
             let mut row = UiBox::new()
                 .width(Length::Pct(100.0))

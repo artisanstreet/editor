@@ -56,7 +56,8 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
     let services = Services::scripted(
         CORE_URL,
         Arc::new(move |_| {
-            match blocked.lock().unwrap().recv() {
+            let released = blocked.lock().unwrap().recv();
+            match released {
                 Ok(()) | Err(mpsc::RecvError) => {}
             }
             Err(editor_aqua::core::ae::AeError::Failed {
