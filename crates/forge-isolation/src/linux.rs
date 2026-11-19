@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const HIERARCHY: &str = "/sys/fs/cgroup";
@@ -21,6 +21,7 @@ const EVENTS_BYTES: usize = 256;
 
 static ENGINES_FOLDER: OnceLock<PathBuf> = OnceLock::new();
 static RUNS: AtomicU64 = AtomicU64::new(0);
+static LEFTOVERS_ALIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
@@ -179,37 +180,99 @@ fn remember(layout: &Layout) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn run_owner(folder_name: &str) -> Option<u32> {
-    folder_name
-        .strip_prefix(RUN_PREFIX)?
-        .split_once('-')
-        .and_then(|(pid, _)| pid.parse().ok())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOwner {
+    pub process: u32,
+    pub started: Option<u64>,
 }
 
-fn sweep_leftover_runs(engines: &Path) -> Result<(), String> {
+pub fn run_owner(folder_name: &str) -> Option<RunOwner> {
+    let parts: Vec<&str> = folder_name.strip_prefix(RUN_PREFIX)?.split('-').collect();
+    match parts.as_slice() {
+        [process, started, run] => {
+            run.parse::<u64>().ok()?;
+            Some(RunOwner {
+                process: process.parse().ok()?,
+                started: Some(started.parse().ok()?),
+            })
+        }
+        [process, run] => {
+            run.parse::<u64>().ok()?;
+            Some(RunOwner {
+                process: process.parse().ok()?,
+                started: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+fn start_of(process: u32) -> Result<Option<u64>, String> {
+    match std::fs::read_to_string(format!("/proc/{process}/stat")) {
+        Ok(stat) => start_time(&stat)
+            .map(Some)
+            .ok_or_else(|| format!("/proc/{process}/stat names no start time")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("read /proc/{process}/stat: {error}")),
+    }
+}
+
+fn abandoned(owner: RunOwner) -> Result<bool, String> {
+    let alive = start_of(owner.process)?;
+    Ok(match (alive, owner.started) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(now), Some(then)) => now != then,
+    })
+}
+
+fn sweep_leftover_runs(engines: &Path) -> Result<usize, String> {
     let entries = std::fs::read_dir(engines)
         .map_err(|error| format!("list {}: {error}", engines.display()))?;
+    let mut swept = 0;
     for entry in entries {
         let entry = entry.map_err(|error| format!("list {}: {error}", engines.display()))?;
-        let name = entry.file_name();
-        let abandoned = name
-            .to_str()
-            .and_then(run_owner)
-            .is_some_and(|owner| !Path::new("/proc").join(owner.to_string()).exists());
-        if !abandoned {
+        let Some(owner) = entry.file_name().to_str().and_then(run_owner) else {
+            continue;
+        };
+        if !abandoned(owner)? {
             continue;
         }
-        match std::fs::remove_dir(entry.path()) {
-            Ok(()) => {}
-            Err(error)
-                if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::BUSY) =>
-            {
-                tracing::warn!(group = %entry.path().display(), "a run cgroup left by an earlier Forge still has processes");
-            }
-            Err(error) => return Err(format!("remove {}: {error}", entry.path().display())),
+        let group = RunGroup::at(entry.path()).map_err(|error| error.to_string())?;
+        if let Err(failure) = group.end() {
+            LEFTOVERS_ALIVE.store(true, Ordering::SeqCst);
+            return Err(format!(
+                "{}; engine configuration stays guarded until Forge exits",
+                diagnostics_chain(&failure)
+            ));
         }
+        swept += 1;
     }
-    Ok(())
+    Ok(swept)
+}
+
+fn diagnostics_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        text.push_str(": ");
+        text.push_str(&error.to_string());
+        cause = error.source();
+    }
+    text
+}
+
+pub fn leftovers_alive() -> bool {
+    LEFTOVERS_ALIVE.load(Ordering::SeqCst)
 }
 
 pub fn protect_forge() -> Vec<Outcome> {
@@ -258,10 +321,15 @@ pub fn protect_forge() -> Vec<Outcome> {
     });
     vec![
         Outcome::Applied(SEPARATION.to_owned()),
-        Outcome::of(
-            "empty run cgroups left by an earlier Forge are removed",
-            swept,
-        ),
+        match swept {
+            Ok(count) => Outcome::Applied(format!(
+                "{count} run cgroups left by an earlier Forge were killed and removed"
+            )),
+            Err(reason) => Outcome::Skipped {
+                measure: "run cgroups left by an earlier Forge are killed and removed".to_owned(),
+                reason,
+            },
+        },
         match capped {
             Ok(bytes) => Outcome::Applied(format!(
                 "engines reclaim their own memory above {} MiB",
@@ -350,6 +418,8 @@ pub enum RunGroupError {
         #[source]
         source: std::io::Error,
     },
+    #[error("tell which Forge owns the engine run cgroups in {}: {reason}", path.display())]
+    Owner { path: PathBuf, reason: String },
     #[error("name the cgroup {} for an engine run", path.display())]
     Name {
         path: PathBuf,
@@ -403,7 +473,14 @@ impl RunGroup {
 
     fn create_in(engines: &Path) -> Result<Self, RunGroupError> {
         let run = RUNS.fetch_add(1, Ordering::Relaxed);
-        let folder = engines.join(format!("{RUN_PREFIX}{}-{run}", std::process::id()));
+        let process = std::process::id();
+        let own_start = start_of(process)
+            .and_then(|started| started.ok_or_else(|| format!("/proc/{process} is gone")))
+            .map_err(|reason| RunGroupError::Owner {
+                path: engines.to_path_buf(),
+                reason,
+            })?;
+        let folder = engines.join(format!("{RUN_PREFIX}{process}-{own_start}-{run}"));
         let created = match std::fs::create_dir(&folder) {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 std::fs::remove_dir(&folder).map_err(|source| RunGroupError::Stale {
@@ -418,6 +495,10 @@ impl RunGroup {
             path: folder.clone(),
             source,
         })?;
+        Self::at(folder)
+    }
+
+    fn at(folder: PathBuf) -> Result<Self, RunGroupError> {
         let procs = folder.join("cgroup.procs");
         let procs =
             CString::new(procs.as_os_str().as_bytes()).map_err(|source| RunGroupError::Name {
@@ -486,8 +567,10 @@ impl RunGroup {
                 &events,
                 rustix::event::PollFlags::PRI,
             )];
-            rustix::event::poll(&mut watched, Some(&timeout))
-                .map_err(|source| watching(source.into()))?;
+            match rustix::event::poll(&mut watched, Some(&timeout)) {
+                Ok(_) | Err(rustix::io::Errno::INTR) => {}
+                Err(source) => return Err(watching(source.into())),
+            }
         }
     }
 }

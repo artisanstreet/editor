@@ -486,3 +486,46 @@ async fn a_global_prompt_an_auto_run_edited_is_restored_before_a_full_access_run
         "an Auto run injected instructions into the next Full-access run's global prompt"
     );
 }
+
+#[tokio::test]
+async fn run_cgroups_an_earlier_forge_left_populated_are_killed_at_startup() {
+    if !sandboxed() || !founding_forge() {
+        return;
+    }
+    let separation = forge_isolation::protect_forge();
+    assert!(
+        matches!(
+            separation.first(),
+            Some(forge_isolation::Outcome::Applied(_))
+        ),
+        "{separation:?}"
+    );
+    let membership = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+    let own = forge_isolation::linux::unified_membership(&membership).unwrap();
+    let engines = Path::new("/sys/fs/cgroup")
+        .join(own.trim_start_matches('/'))
+        .with_file_name("engines");
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    let leftover = engines.join(format!("run-{}-1-0", gone.id()));
+    std::fs::create_dir(&leftover).unwrap();
+    let mut escaped = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .unwrap();
+    std::fs::write(leftover.join("cgroup.procs"), escaped.id().to_string()).unwrap();
+
+    let separation = forge_isolation::protect_forge();
+
+    let status = tokio::time::timeout(test_support::wait::LIVENESS, async {
+        tokio::task::spawn_blocking(move || escaped.wait().unwrap())
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap_or_else(|_elapsed| {
+        panic!("a process left in an earlier Forge's run cgroup is still alive: {separation:?}")
+    });
+    assert!(!status.success());
+    assert!(!leftover.exists(), "{separation:?}");
+}

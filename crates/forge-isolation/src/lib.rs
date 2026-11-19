@@ -100,6 +100,18 @@ impl EngineTree {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn leftover_runs_alive() -> bool {
+    linux::leftovers_alive()
+}
+
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub const fn leftover_runs_alive() -> bool {
+    false
+}
+
 #[cfg(unix)]
 pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>, tree: &EngineTree) {
     unix::contain(command, sandbox.cloned(), tree);

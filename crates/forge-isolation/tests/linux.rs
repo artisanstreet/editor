@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use forge_isolation::linux::{
-    Controller, Standing, delegated, engine_memory_ceiling, standing, total_memory,
-    unified_membership,
+    Controller, RunOwner, Standing, delegated, engine_memory_ceiling, run_owner, standing,
+    start_time, total_memory, unified_membership,
 };
 use std::path::Path;
 
@@ -138,4 +138,40 @@ fn attaching_moves_the_engine_and_raises_its_oom_score() {
 fn an_engine_that_already_exited_is_not_an_isolation_failure() {
     let dir = tempfile::tempdir().unwrap();
     forge_isolation::linux::attach(None, dir.path(), 4242).unwrap();
+}
+
+#[test]
+fn a_run_cgroup_names_the_forge_that_made_it_down_to_its_start_time() {
+    assert_eq!(
+        run_owner("run-4182-998877-3"),
+        Some(RunOwner {
+            process: 4182,
+            started: Some(998_877),
+        })
+    );
+    assert_eq!(
+        run_owner("run-4182-3"),
+        Some(RunOwner {
+            process: 4182,
+            started: None,
+        }),
+        "a run cgroup named by an older Forge is owned by its process alone"
+    );
+    for foreign in [
+        "forge",
+        "engines",
+        "run-",
+        "run-x-1",
+        "run-1-2-3-4",
+        "run-1-2-x",
+    ] {
+        assert_eq!(run_owner(foreign), None, "{foreign}");
+    }
+}
+
+#[test]
+fn a_process_start_time_survives_a_name_with_spaces_and_parentheses() {
+    let stat = "4182 (forge (worker) 2) S 1 4182 4182 0 -1 4194560 2385 0 0 0 9 4 0 0 20 0 7 0 998877 1234 5";
+    assert_eq!(start_time(stat), Some(998_877));
+    assert_eq!(start_time("4182 (forge) S 1"), None);
 }

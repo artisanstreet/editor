@@ -488,6 +488,9 @@ fn hold(engine: EngineId, home: &Path, name: &str) -> Result<fs::File, GuardErro
 }
 
 fn still_exposed(engine: EngineId, home: &Path) -> Result<bool, GuardError> {
+    if forge_isolation::leftover_runs_alive() {
+        return Ok(true);
+    }
     let markers = beside(home, LIVE_MARKERS);
     let locking = |path: &Path| {
         let path = path.to_path_buf();
