@@ -159,12 +159,36 @@ async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply()
     };
     let taken_before_the_reader_blocked = 3;
     let unread_limit = 32;
-    test_support::wait::eventually(
-        "Codex to write 32 MiB that nobody has read",
-        Duration::from_secs(20),
-        || async { fixture.flooded_mib() >= taken_before_the_reader_blocked + unread_limit },
+    let in_flight = 2;
+    let most_written = taken_before_the_reader_blocked + unread_limit + in_flight;
+    let quiet = Duration::from_secs(1);
+    let stalled_at = test_support::wait::within(
+        "Codex's writes to stall while the run reads nothing",
+        test_support::wait::LIVENESS,
+        async {
+            let mut seen = fixture.flooded_mib();
+            let mut moved_at = tokio::time::Instant::now();
+            loop {
+                let written = fixture.flooded_mib();
+                assert!(
+                    written <= most_written,
+                    "Codex wrote {written} MiB while the run read none, so Forge buffered it all"
+                );
+                if written != seen {
+                    seen = written;
+                    moved_at = tokio::time::Instant::now();
+                } else if moved_at.elapsed() >= quiet {
+                    break written;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        },
     )
     .await;
+    assert!(
+        stalled_at >= taken_before_the_reader_blocked + unread_limit,
+        "Codex stalled after {stalled_at} MiB, before 32 MiB were waiting"
+    );
 
     while let Some(event) = received.recv().await {
         if let EngineEvent::Live { text, .. } = &event {
