@@ -9,7 +9,7 @@ mod tests {
     use test_support::net::PortReservation;
     use test_support::sandbox::{artisan_street, isolate};
 
-    const BROKEN_FORGE: &str = "#!/bin/sh\nif [ \"$1\" = \"--schema-version\" ]; then echo 999; exit 0; fi\necho 'this Forge cannot start' >&2\nexit 3\n";
+    const BROKEN_FORGE: &str = "#!/bin/sh\nif [ \"$1\" = \"--schema-version\" ]; then echo '{\"schema\":999,\"recall_index\":1}'; exit 0; fi\necho 'this Forge cannot start' >&2\nexit 3\n";
     const NO_SYSTEMD: &str = "#!/bin/sh\nexit 1\n";
 
     fn forge_binary() -> PathBuf {
@@ -38,6 +38,10 @@ mod tests {
 
     impl Sandbox {
         fn new(address: SocketAddr) -> Self {
+            Self::with_previous(address, &forge_binary())
+        }
+
+        fn with_previous(address: SocketAddr, previous: &Path) -> Self {
             assert!(address.ip().is_loopback(), "{address} is not loopback");
             let root = tempfile::Builder::new()
                 .prefix("artisan-install-rollback ")
@@ -47,7 +51,7 @@ mod tests {
             let data = app.join("data");
             std::fs::create_dir_all(&data).expect("create Forge's data folder");
             let installed = app.join(App::Forge.binary_name());
-            std::fs::copy(forge_binary(), &installed).expect("install the previous Forge");
+            std::fs::copy(previous, &installed).expect("install the previous Forge");
             std::fs::write(
                 data.join("config.json"),
                 format!(r#"{{"listen": "{address}"}}"#),
@@ -131,6 +135,98 @@ mod tests {
             "the previous Forge binary is back"
         );
         assert!(sandbox.listening(), "the previous Forge serves again");
+    }
+
+    const RELEASED_SCHEMA: usize = 26;
+    const RELEASED_DATABASE: &[u8] =
+        include_bytes!("../../forge-store/tests/fixtures/released/schema-26.sqlite3.gz");
+
+    fn released_forge() -> PathBuf {
+        let legacy = Path::new(env!("CARGO_BIN_EXE_ae"))
+            .with_file_name("examples")
+            .join("legacy_forge");
+        assert!(
+            legacy.is_file(),
+            "{} is missing; build it first (`cargo build -p ae --examples`)",
+            legacy.display()
+        );
+        legacy
+    }
+
+    fn schema_of(database: &Path) -> usize {
+        rusqlite::Connection::open(database)
+            .expect("open Forge's database")
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read the schema version")
+    }
+
+    #[test]
+    fn a_first_update_that_fails_after_upgrading_the_database_puts_the_released_forge_back_running()
+    {
+        use std::io::Read as _;
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let data = App::Forge
+            .dir_under(&artisan_street(sandbox.root.path()))
+            .join("data");
+        let database = data.join("forge.sqlite3");
+        let mut released = Vec::new();
+        flate2::read::GzDecoder::new(RELEASED_DATABASE)
+            .read_to_end(&mut released)
+            .expect("unpack the released database");
+        std::fs::write(&database, released).expect("give the released Forge its database");
+        let started = sandbox.ae(&["forge", "start"]);
+        assert!(
+            started.status.success(),
+            "the released Forge starts: {}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        std::fs::copy(env!("CARGO_BIN_EXE_ae"), stage.join("ae")).expect("stage ae");
+        script(
+            &stage.join(App::Forge.binary_name()),
+            &format!(
+                "#!/bin/sh\nexec '{}' --listen 192.0.2.1:9 \"$@\"\n",
+                forge_binary().display()
+            ),
+        );
+
+        let update = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "here",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&update.stdout),
+            String::from_utf8_lossy(&update.stderr)
+        );
+        assert!(!update.status.success(), "the update fails: {said}");
+        assert!(
+            said.contains("the previous Forge is back in place and running"),
+            "{said}"
+        );
+        assert_eq!(
+            schema_of(&database),
+            RELEASED_SCHEMA,
+            "the released Forge has its own database again"
+        );
+        assert!(
+            data.join(format!(
+                "forge.sqlite3.rolled-back-from-{}-0",
+                forge_store::Store::schema_version()
+            ))
+            .is_file(),
+            "the upgraded database is kept beside it"
+        );
+        assert!(sandbox.listening(), "the released Forge serves again");
     }
 
     fn ae_only_stage(sandbox: &Sandbox) -> String {

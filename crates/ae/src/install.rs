@@ -202,6 +202,12 @@ pub(crate) enum InstallHereError {
 pub(crate) enum InstallAppError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error("read the storage version of the stopped Forge's database in {}", data.display())]
+    DatabaseVersion {
+        data: PathBuf,
+        #[source]
+        source: forge_store::admin::StorageVersionError,
+    },
     #[error("create {}", path.display())]
     CreateDir {
         path: PathBuf,
@@ -266,7 +272,25 @@ pub(crate) enum PutBack {
     Restored,
     Restarted,
     NotRestored(String),
+    DatabaseNotRestored(Box<RestoreDatabaseError>),
     NotRestarted(Box<StartError>),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RestoreDatabaseError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("stop the Forge that failed to start")]
+    Stop(#[source] StopError),
+    #[error("take Forge's data folder to restore its database")]
+    Lock(#[source] forge_store::LockDataError),
+    #[error("put back the schema {schema} database the previous Forge used in {}", data.display())]
+    RollBack {
+        data: PathBuf,
+        schema: usize,
+        #[source]
+        source: Box<forge_store::RollbackError>,
+    },
 }
 
 impl std::fmt::Display for PutBack {
@@ -280,6 +304,11 @@ impl std::fmt::Display for PutBack {
                     "putting the previous version back also failed: {problems}"
                 )
             }
+            Self::DatabaseNotRestored(error) => write!(
+                f,
+                "the previous Forge is back in place but its database couldn't be put back, so it wasn't started: {}",
+                diagnostics::chain(error)
+            ),
             Self::NotRestarted(error) => write!(
                 f,
                 "the previous Forge is back in place but didn't start: {}",
@@ -695,10 +724,11 @@ impl Plan {
     }
 
     fn here(&self) -> Vec<App> {
-        let mut apps = vec![App::Ae];
+        let mut apps = Vec::new();
         if self.forge_here {
             apps.push(App::Forge);
         }
+        apps.push(App::Ae);
         if self.editor == EditorTarget::Here {
             apps.push(App::Editor);
         }
@@ -1361,7 +1391,14 @@ fn put_in_place(
             progress.message("Stopping Forge");
             service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
             service::stop()?;
-            Stopped::Forge
+            let data = paths::data(App::Forge)?;
+            let database = forge_store::admin::storage_version(&data).map_err(|source| {
+                InstallAppError::DatabaseVersion {
+                    data: data.clone(),
+                    source,
+                }
+            })?;
+            Stopped::Forge { database }
         }
         App::Editor => {
             if platform::close_processes(std::slice::from_ref(&binary))
@@ -1411,7 +1448,7 @@ fn put_in_place(
 
 #[derive(Clone, Copy)]
 enum Stopped {
-    Forge,
+    Forge { database: Option<StorageVersion> },
     Nothing,
 }
 
@@ -1430,11 +1467,16 @@ fn put_back(
     let outcome = match (previous, stopped) {
         (Previous::Broken, _) => return failed,
         (Previous::InPlace, Stopped::Nothing) => PutBack::Restored,
-        (Previous::InPlace, Stopped::Forge) => {
-            progress.message("Starting the previous Forge again");
-            match service::start() {
-                Ok(_) => PutBack::Restarted,
-                Err(error) => PutBack::NotRestarted(Box::new(error)),
+        (Previous::InPlace, Stopped::Forge { database }) => {
+            match restore_database(database, progress) {
+                Ok(()) => {
+                    progress.message("Starting the previous Forge again");
+                    match service::start() {
+                        Ok(_) => PutBack::Restarted,
+                        Err(error) => PutBack::NotRestarted(Box::new(error)),
+                    }
+                }
+                Err(error) => PutBack::DatabaseNotRestored(Box::new(error)),
             }
         }
     };
@@ -1442,6 +1484,36 @@ fn put_back(
         failed: Box::new(failed),
         outcome,
     }
+}
+
+fn restore_database(
+    database: Option<StorageVersion>,
+    progress: &ui::Progress,
+) -> Result<(), RestoreDatabaseError> {
+    let Some(database) = database else {
+        return Ok(());
+    };
+    service::stop().map_err(RestoreDatabaseError::Stop)?;
+    let data = paths::data(App::Forge)?;
+    let lock = forge_store::DataLock::acquire(&data).map_err(RestoreDatabaseError::Lock)?;
+    match forge_store::admin::roll_back_for(&data, &lock, database.schema).map_err(|source| {
+        RestoreDatabaseError::RollBack {
+            data: data.clone(),
+            schema: database.schema,
+            source: Box::new(source),
+        }
+    })? {
+        forge_store::admin::RolledBack::Current => {}
+        forge_store::admin::RolledBack::Restored {
+            found,
+            restored,
+            aside,
+        } => progress.message(format!(
+            "Put back the schema {restored} database for the previous Forge; the schema {found} data is kept in {}",
+            aside.display()
+        )),
+    }
+    Ok(())
 }
 
 fn finish(

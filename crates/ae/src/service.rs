@@ -105,6 +105,12 @@ pub(crate) enum StartError {
     Spawn(#[from] SpawnError),
     #[error(transparent)]
     NotReady(#[from] NotReadyError),
+    #[error("record the pid of the Forge serving at {}", path.display())]
+    RecordPid {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("stopping the Forge that didn't start failed too: {stopping}")]
     NotReadyNorStopped {
         #[source]
@@ -410,16 +416,26 @@ fn start_unlocked() -> Result<Option<u32>, StartError> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     )?;
-    if let Err(error) = wait_ready(pid, &log) {
-        if process_exists(pid)
-            && let Err(stopping) = stop_process(pid, &data)
-        {
-            return Err(StartError::NotReadyNorStopped {
-                source: error,
-                stopping: diagnostics::chain(&stopping),
-            });
+    match wait_ready(pid, address, &log) {
+        Ok(Ready::Recorded) => {}
+        Ok(Ready::Serving) => {
+            let recorded = pid_file()?;
+            std::fs::write(&recorded, pid.to_string()).map_err(|source| StartError::RecordPid {
+                path: recorded,
+                source,
+            })?;
         }
-        return Err(error.into());
+        Err(error) => {
+            if process_exists(pid)
+                && let Err(stopping) = stop_process(pid, &data)
+            {
+                return Err(StartError::NotReadyNorStopped {
+                    source: error,
+                    stopping: diagnostics::chain(&stopping),
+                });
+            }
+            return Err(error.into());
+        }
     }
     Ok(Some(pid))
 }
@@ -427,8 +443,15 @@ fn start_unlocked() -> Result<Option<u32>, StartError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Startup {
     Ready,
+    Serving,
     Starting,
     Exited,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ready {
+    Recorded,
+    Serving,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -451,7 +474,7 @@ impl StartWatch {
 
     fn observe(&mut self, startup: Startup, logged: u64, now: Instant) -> Verdict {
         match startup {
-            Startup::Ready => return Verdict::Ready,
+            Startup::Ready | Startup::Serving => return Verdict::Ready,
             Startup::Exited => return Verdict::Exited,
             Startup::Starting => {}
         }
@@ -467,13 +490,15 @@ impl StartWatch {
     }
 }
 
-fn startup(pid: u32) -> Startup {
+fn startup(pid: u32, address: SocketAddr) -> Startup {
     if pid_file().ok().and_then(|path| recorded_pid(&path)) == Some(pid) {
         Startup::Ready
-    } else if process_exists(pid) {
-        Startup::Starting
-    } else {
+    } else if !process_exists(pid) {
         Startup::Exited
+    } else if listening(address) {
+        Startup::Serving
+    } else {
+        Startup::Starting
     }
 }
 
@@ -481,11 +506,13 @@ fn log_length(log: &Path) -> u64 {
     std::fs::metadata(log).map_or(0, |metadata| metadata.len())
 }
 
-fn wait_ready(pid: u32, log: &Path) -> Result<(), NotReadyError> {
+fn wait_ready(pid: u32, address: SocketAddr, log: &Path) -> Result<Ready, NotReadyError> {
     let mut watch = StartWatch::new(log_length(log), Instant::now());
     loop {
-        match watch.observe(startup(pid), log_length(log), Instant::now()) {
-            Verdict::Ready => return Ok(()),
+        let now = startup(pid, address);
+        match watch.observe(now, log_length(log), Instant::now()) {
+            Verdict::Ready if now == Startup::Serving => return Ok(Ready::Serving),
+            Verdict::Ready => return Ok(Ready::Recorded),
             Verdict::Exited => {
                 return Err(NotReadyError::Exited {
                     pid,
