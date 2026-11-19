@@ -282,8 +282,12 @@ fn stem(host: &HostId, scope: &str) -> String {
 fn file_safe(text: &str) -> String {
     text.bytes()
         .map(|byte| match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' => char::from(byte).to_string(),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => char::from(byte).to_string(),
             byte => format!("_{byte:02x}"),
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/spool.rs"]
+mod tests;
