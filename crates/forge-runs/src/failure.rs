@@ -621,8 +621,13 @@ impl ResourceError {
             Self::Refused { path: file, .. } => {
                 Failure::Resource(ResourceFailure::Refused { path: path(file) })
             }
+            Self::Linked { path: file, .. } => {
+                Failure::Resource(ResourceFailure::Linked { path: path(file) })
+            }
             Self::Folder(source) => source.wire(),
-            Self::Read { .. } | Self::Task { .. } => Failure::Internal,
+            Self::Read { .. } | Self::Root { .. } | Self::Open { .. } | Self::Task { .. } => {
+                Failure::Internal
+            }
         }
     }
 }

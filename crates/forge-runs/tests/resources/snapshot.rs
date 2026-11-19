@@ -152,8 +152,9 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
     let absolute = key.display().to_string();
     let shown = absolute.clone();
     let fixture = fixture(Arc::new(move |_, io| {
-        let text =
-            format!("![key]({shown}) ![linked](linked.png) ![env](secrets/env.png) ![ok](ok.png)");
+        let text = format!(
+            "![key]({shown}) ![linked](linked.png) ![through](keys/id_ed25519) ![env](secrets/env.png) ![ok](ok.png)"
+        );
         Box::pin(async move {
             io.emit(reply("reply", &text)).await;
             Outcome::done()
@@ -165,6 +166,10 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
     std::os::unix::fs::symlink(&key, project.join("linked.png")).unwrap();
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&key, project.join("linked.png")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), project.join("keys")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(outside.path(), project.join("keys")).unwrap();
     std::fs::create_dir_all(project.join("secrets")).unwrap();
     std::fs::write(project.join("secrets/env.png"), b"API_KEY=1").unwrap();
     std::fs::create_dir_all(project.join(".claude")).unwrap();
@@ -191,7 +196,12 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
         .await
         .unwrap()
         .unwrap();
-    for path in [absolute.as_str(), "linked.png", "secrets/env.png"] {
+    for path in [
+        absolute.as_str(),
+        "linked.png",
+        "keys/id_ed25519",
+        "secrets/env.png",
+    ] {
         assert!(!kept_at(&fixture, &item, path).exists(), "{path} was kept");
         let written = Written {
             path: path.to_owned(),
@@ -204,7 +214,9 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
         assert!(
             matches!(
                 shown,
-                Err(ResourceError::Outside { .. } | ResourceError::Refused { .. })
+                Err(ResourceError::Outside { .. }
+                    | ResourceError::Linked { .. }
+                    | ResourceError::Refused { .. })
             ),
             "{path} reached the Editor: {shown:?}"
         );

@@ -273,6 +273,8 @@ pub enum ResourceFailure {
     NotAFile { path: String },
     #[error("{path} is outside the thread's folder.")]
     Outside { path: String },
+    #[error("{path} is reached through a symbolic link, which Forge won't follow for the agent.")]
+    Linked { path: String },
     #[error("{path} is covered by a permission rule, so Forge won't read it for the agent.")]
     Refused { path: String },
     #[error("{path} can't be listed.")]
@@ -507,6 +509,7 @@ impl ResourceFailure {
             | Self::NoHome
             | Self::NotAFile { .. }
             | Self::Outside { .. }
+            | Self::Linked { .. }
             | Self::Refused { .. }
             | Self::Unlistable { .. } => ErrorCode::BadRequest,
         }
