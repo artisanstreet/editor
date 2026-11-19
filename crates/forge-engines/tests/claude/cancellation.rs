@@ -13,13 +13,13 @@ async fn cancellation_sends_the_interrupt_and_reaps_even_an_unresponsive_cli() {
             "claude-interrupt",
             &[("IGNORE_INTERRUPT", &ignore_interrupt)],
         ));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dir.path().join("ready").exists() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let marker = dir.path().join("ready");
+        test_support::wait::eventually(
+            "the fake CLI to be ready",
+            test_support::wait::LIVENESS,
+            || std::future::ready(marker.exists()),
+        )
+        .await;
         running.cancel();
         let outcome = running.outcome(Duration::from_secs(10)).await.unwrap();
         assert_eq!(
@@ -46,13 +46,13 @@ async fn cancellation_sends_the_interrupt_and_reaps_even_an_unresponsive_cli() {
 async fn cancellation_still_ends_a_cli_that_closed_its_output_but_lives_on() {
     let dir = tempfile::tempdir().unwrap();
     let mut running = scenario::start(scenario::turn(dir.path(), "claude-closes-output", &[]));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !dir.path().join("closed").exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let marker = dir.path().join("closed");
+    test_support::wait::eventually(
+        "the fake CLI to be closed",
+        test_support::wait::LIVENESS,
+        || std::future::ready(marker.exists()),
+    )
+    .await;
     running.cancel();
     let outcome = running
         .outcome(Duration::from_secs(2))

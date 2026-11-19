@@ -94,19 +94,21 @@ async fn input_stays_open_while_a_background_agent_works() {
         "{outcome:?}"
     );
     let traces = dir.path().join("data/traces");
-    let mut trace = String::new();
-    for _ in 0..200 {
-        trace = std::fs::read_dir(&traces)
+    let read_traces = || -> String {
+        std::fs::read_dir(&traces)
             .into_iter()
             .flatten()
             .flatten()
             .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
-            .collect();
-        if trace.contains("exited") {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+            .collect()
+    };
+    test_support::wait::eventually(
+        "the trace to record the exit",
+        test_support::wait::LIVENESS,
+        || std::future::ready(read_traces().contains("exited")),
+    )
+    .await;
+    let trace = read_traces();
     for expected in [
         "background_tasks_changed",
         "input stays open for background work (1 background task(s)",

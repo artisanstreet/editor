@@ -6,14 +6,13 @@ use std::time::Duration;
 async fn a_steer_is_answered_while_a_monitor_outlives_the_reply() {
     let dir = tempfile::tempdir().unwrap();
     let mut running = scenario::start(scenario::turn(dir.path(), "claude-monitor-steer", &[]));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !dir.path().join("replied").exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the first reply arrives");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let replied = dir.path().join("replied");
+    test_support::wait::eventually(
+        "the first reply to be handled",
+        test_support::wait::LIVENESS,
+        || std::future::ready(replied.exists()),
+    )
+    .await;
     running.steer("change course").await;
     let outcome = running
         .outcome(Duration::from_secs(10))

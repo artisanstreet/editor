@@ -1,14 +1,18 @@
-use crate::{alive, drain_input, emit, read_line, touch};
+use crate::{alive, drain_input, emit, live_until_killed, read_line, touch};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 const REPLAYED: &str = r#"{"type":"user","isReplay":true,"message":{"content":"go"}}"#;
 const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m"}"#;
 const AGENT_STARTED: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}"#;
 const NO_BACKGROUND: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#;
+const SYNC_ID: &str = "artisan-test-sync";
+const SYNC: &str =
+    r#"{"type":"control_request","request_id":"artisan-test-sync","request":{"subtype":"sync"}}"#;
+const OUTLAST_THE_SETTLE_GRACE: Duration = Duration::from_secs(1);
 
 pub(crate) fn interrupt() -> ExitCode {
     let _alive = alive("cli");
@@ -19,10 +23,9 @@ pub(crate) fn interrupt() -> ExitCode {
         if line.contains(r#""subtype":"interrupt""#) {
             touch("interrupted");
             if !ignore {
-                std::thread::sleep(Duration::from_millis(30));
                 return ExitCode::SUCCESS;
             }
-            std::thread::sleep(Duration::from_secs(30));
+            live_until_killed();
         }
     }
     ExitCode::SUCCESS
@@ -32,8 +35,7 @@ pub(crate) fn closes_output() -> ExitCode {
     read_line();
     close_stdout();
     touch("closed");
-    std::thread::sleep(Duration::from_secs(60));
-    ExitCode::SUCCESS
+    live_until_killed()
 }
 
 #[expect(
@@ -62,8 +64,10 @@ pub(crate) fn monitor_steer() -> ExitCode {
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"m1","task_type":"local_bash","description":"Tail a log"}]}"#,
     );
     emit(r#"{"type":"result","subtype":"success","result":"All done.","usage":{}}"#);
+    emit(SYNC);
+    let synced = read_line().is_some_and(|line| line.contains(SYNC_ID));
     touch("replied");
-    if let Some(steer) = read_line() {
+    if let Some(steer) = read_line().filter(|_| synced) {
         std::fs::write("steer", steer).expect("the fake records the steer");
         emit(r#"{"type":"user","isReplay":true,"message":{"content":"steer"}}"#);
         emit(r#"{"type":"result","subtype":"success","result":"Changed course.","usage":{}}"#);
@@ -71,7 +75,7 @@ pub(crate) fn monitor_steer() -> ExitCode {
         drain_input();
     } else {
         touch("input_closed_under_the_monitor");
-        std::thread::sleep(Duration::from_secs(30));
+        live_until_killed();
     }
     ExitCode::SUCCESS
 }
@@ -140,8 +144,7 @@ pub(crate) fn background_agent() -> ExitCode {
     emit(AGENT_STARTED);
     emit(r#"{"type":"result","subtype":"success","result":"started","usage":{}}"#);
     let input = follow_input();
-    std::thread::sleep(Duration::from_secs(1));
-    if closed(&input) {
+    if !synced(&input) {
         emit(
             r#"{"type":"result","subtype":"error_during_execution","errors":["input closed while the agent worked"],"usage":{}}"#,
         );
@@ -164,8 +167,9 @@ pub(crate) fn long_turn() -> ExitCode {
         r#"{"type":"assistant","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"Reading the report."}]}}"#,
     );
     let input = follow_input();
-    std::thread::sleep(Duration::from_secs(1));
-    if closed(&input) {
+    let synced_before_the_grace = synced(&input);
+    std::thread::sleep(OUTLAST_THE_SETTLE_GRACE);
+    if !synced_before_the_grace || !synced(&input) {
         emit(
             r#"{"type":"result","subtype":"error_during_execution","errors":["input closed mid-turn"],"usage":{}}"#,
         );
@@ -193,11 +197,9 @@ fn follow_input() -> Receiver<String> {
     input
 }
 
-fn closed(input: &Receiver<String>) -> bool {
-    matches!(
-        input.recv_timeout(Duration::from_millis(50)),
-        Err(RecvTimeoutError::Disconnected)
-    )
+fn synced(input: &Receiver<String>) -> bool {
+    emit(SYNC);
+    input.recv().is_ok_and(|line| line.contains(SYNC_ID))
 }
 
 pub(crate) fn side_fork() -> ExitCode {

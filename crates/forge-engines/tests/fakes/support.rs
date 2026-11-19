@@ -1,7 +1,6 @@
 use crate::Launch;
-use std::fs::{OpenOptions, TryLockError};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 pub(crate) fn binary() -> PathBuf {
     let test = std::env::current_exe().expect("the test binary has a path");
@@ -37,21 +36,15 @@ pub(crate) async fn ended(dir: &Path, name: &str) -> bool {
         .write(true)
         .open(&path)
         .unwrap_or_else(|error| panic!("the fake engine marked {} alive: {error}", path.display()));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match marker.try_lock() {
-                Ok(()) => break,
-                Err(TryLockError::WouldBlock) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(TryLockError::Error(error)) => {
-                    panic!("lock the liveness marker {}: {error}", path.display())
-                }
-            }
-        }
-    })
-    .await
-    .is_ok()
+    let (released, release) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || released.send(marker.lock()));
+    let Ok(locked) = tokio::time::timeout(test_support::wait::LIVENESS, release).await else {
+        return false;
+    };
+    locked
+        .expect("the thread waiting on the liveness marker reports back")
+        .unwrap_or_else(|error| panic!("lock the liveness marker {}: {error}", path.display()));
+    true
 }
 
 #[cfg(unix)]

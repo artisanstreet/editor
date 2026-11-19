@@ -7,7 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead as _, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
 
 fn main() -> ExitCode {
     let Some(scenario) = std::env::var_os("ARTISAN_FAKE") else {
@@ -46,8 +45,13 @@ fn hold() -> ExitCode {
     writeln!(stderr, "held")
         .and_then(|()| stderr.flush())
         .expect("the parent reads that the marker is held");
-    std::thread::sleep(Duration::from_secs(30));
-    ExitCode::SUCCESS
+    live_until_killed()
+}
+
+fn live_until_killed() -> ! {
+    loop {
+        std::thread::park();
+    }
 }
 
 fn emit(line: &str) {
