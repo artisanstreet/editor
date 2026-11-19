@@ -80,6 +80,7 @@ impl Landlock {
     pub const fn writes_only_to(
         self,
         _roots: &[std::path::PathBuf],
+        _private: &std::path::Path,
         _sockets: &[std::path::PathBuf],
     ) -> Result<Ruleset, RulesetError> {
         match self.0 {}

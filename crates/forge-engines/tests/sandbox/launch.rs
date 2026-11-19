@@ -73,6 +73,7 @@ fn turn(permissions: Permissions, folders: &Folders) -> Turn {
         launch: Launch {
             env: vec![("HOME".to_owned(), folders.user_home.display().to_string())],
             tool_caches: Some(folders.caches.clone()),
+            git_common: crate::shared_git_folder(&folders.project),
             ..Launch::default()
         },
         trace_dir: None,
@@ -397,4 +398,29 @@ async fn pnpm_installs_inside_auto_with_its_store_in_the_sandbox() {
         .unwrap()
         .count();
     assert!(stored > 0, "pnpm didn't use the sandbox's store: {lines:?}");
+}
+
+#[tokio::test]
+async fn a_codex_home_the_engine_replaced_with_a_link_does_not_make_its_target_writable() {
+    if !sandboxed() {
+        return;
+    }
+    let folders = folders();
+    let codex_home = folders.engine_home.join(".codex");
+    std::os::unix::fs::symlink(&folders.user_home, &codex_home).unwrap();
+    let mut turn = turn(Permissions::Auto, &folders);
+    turn.launch
+        .env
+        .push(("CODEX_HOME".to_owned(), codex_home.display().to_string()));
+    let lines = run_script(
+        &turn,
+        WRITE_EACH,
+        &[folders.user_home.display().to_string()],
+    )
+    .await;
+    assert_eq!(lines.last().map(String::as_str), Some("done"), "{lines:?}");
+    assert!(
+        !folders.user_home.join("planted").exists(),
+        "a `.codex` link the engine planted let the next Auto launch write the user's home: {lines:?}"
+    );
 }

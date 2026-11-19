@@ -140,10 +140,9 @@ impl Sandbox {
                     })?;
                 }
                 let redirects = caches.map_or_else(Vec::new, |caches| redirects(turn, caches));
-                let mut roots = writable_roots(turn);
-                roots.push(temporary.path().to_path_buf());
+                let roots = writable_roots(turn);
                 let ruleset = landlock
-                    .writes_only_to(&roots, &reachable_sockets(turn))
+                    .writes_only_to(&roots, temporary.path(), &reachable_sockets(turn))
                     .map_err(|source| SandboxError::Ruleset {
                         engine: turn.engine,
                         thread: turn.thread_id.clone(),
@@ -218,7 +217,7 @@ fn writable_roots(turn: &Turn) -> Vec<PathBuf> {
     [turn.cwd.clone(), turn.home.clone()]
         .into_iter()
         .chain(codex_home)
-        .chain(shared_git_folder(&turn.cwd))
+        .chain(turn.launch.git_common.clone())
         .chain(temporary)
         .chain(turn.launch.tool_caches.clone())
         .collect()
@@ -269,7 +268,8 @@ fn launch_value(turn: &Turn, name: &str) -> Option<OsString> {
         .or_else(|| std::env::var_os(name))
 }
 
-fn shared_git_folder(project: &Path) -> Option<PathBuf> {
+#[must_use]
+pub fn shared_git_folder(project: &Path) -> Option<PathBuf> {
     let pointer_file = project.join(".git");
     if !pointer_file.is_file() {
         return None;

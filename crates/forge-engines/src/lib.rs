@@ -61,6 +61,7 @@ pub use marketplace::{
     FetchSkillError, SKILLS_SH_URL, SearchSkillsError, fetch_skill, search_skills,
 };
 pub use mentions::{with_skill_mentions, with_thread_mentions};
+pub use sandbox::shared_git_folder;
 pub use usage::UsageCache;
 pub(crate) use usage::has_usage_reader;
 

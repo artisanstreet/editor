@@ -45,11 +45,12 @@ fn a_sandboxed_child_writes_inside_its_folders_and_nowhere_else() {
     let Some(landlock) = landlock() else {
         return;
     };
+    let own = tempfile::tempdir().unwrap();
     let allowed = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("existing"), "kept").unwrap();
     let ruleset = landlock
-        .writes_only_to(&[allowed.path().to_path_buf()], &[])
+        .writes_only_to(&[allowed.path().to_path_buf()], own.path(), &[])
         .unwrap();
     let stderr = run(allowed.path(), outside.path(), Some(&ruleset));
     assert_eq!(
@@ -119,6 +120,7 @@ fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
     let Some(landlock) = landlock() else {
         return;
     };
+    let own = tempfile::tempdir().unwrap();
     if landlock.coverage().truncation == Reach::Open {
         eprintln!(
             "SKIPPED: Landlock ABI {} can't block truncation, and Forge reports that",
@@ -131,7 +133,7 @@ fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
     let file = outside.path().join("kept");
     std::fs::write(&file, "kept").unwrap();
     let ruleset = landlock
-        .writes_only_to(&[allowed.path().to_path_buf()], &[])
+        .writes_only_to(&[allowed.path().to_path_buf()], own.path(), &[])
         .unwrap();
     let mut command = Command::new("truncate");
     command.args(["-s", "0"]).arg(&file);
@@ -157,6 +159,7 @@ fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
     let Some(landlock) = landlock() else {
         return;
     };
+    let own = tempfile::tempdir().unwrap();
     if landlock.coverage().signals == Reach::Open {
         eprintln!(
             "SKIPPED: Landlock ABI {} can't scope signals, and Forge reports that",
@@ -167,7 +170,7 @@ fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
     let mut bystander = Command::new("sleep").arg("600").spawn().unwrap();
     let allowed = tempfile::tempdir().unwrap();
     let ruleset = landlock
-        .writes_only_to(&[allowed.path().to_path_buf()], &[])
+        .writes_only_to(&[allowed.path().to_path_buf()], own.path(), &[])
         .unwrap();
     let mut command = Command::new("/bin/sh");
     command.args([
@@ -190,4 +193,55 @@ fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
         still_running && stdout.contains("bystander refused"),
         "a sandboxed child killed a process outside its sandbox: {stdout}"
     );
+}
+
+#[test]
+fn a_link_inside_a_writable_folder_does_not_make_its_target_writable() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    let own = tempfile::tempdir().unwrap();
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("existing"), "kept").unwrap();
+    let planted = allowed.path().join("config");
+    std::os::unix::fs::symlink(outside.path(), &planted).unwrap();
+    let ruleset = landlock
+        .writes_only_to(&[allowed.path().to_path_buf(), planted], own.path(), &[])
+        .unwrap();
+    let stderr = run(allowed.path(), outside.path(), Some(&ruleset));
+    assert!(
+        !outside.path().join("escaped").exists(),
+        "a link the sandbox could plant made its target writable: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("existing")).unwrap(),
+        "kept",
+        "a link the sandbox could plant let it overwrite a file outside: {stderr}"
+    );
+}
+
+#[test]
+fn a_folder_reached_through_a_link_the_sandbox_could_plant_is_refused() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    let own = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let allowed = base.path().join("allowed");
+    let outside = base.path().join("outside");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, allowed.join("hop")).unwrap();
+    let project = base.path().join("project");
+    std::os::unix::fs::symlink(allowed.join("hop"), &project).unwrap();
+    let refused = landlock.writes_only_to(&[allowed.clone(), project.clone()], own.path(), &[]);
+    match refused {
+        Err(forge_isolation::RulesetError::LinkedThroughWritable { path, link_folder }) => {
+            assert_eq!((path, link_folder), (project, allowed));
+        }
+        other => panic!(
+            "a folder resolved through a link inside a writable folder was granted: {other:?}"
+        ),
+    }
 }

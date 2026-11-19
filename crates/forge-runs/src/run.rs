@@ -23,6 +23,18 @@ pub enum PrepareError {
         #[source]
         source: Box<crate::scratch::ThreadFolderError>,
     },
+    #[error("find the shared git folder of thread {thread}")]
+    GitCommon {
+        thread: ThreadId,
+        #[source]
+        source: Box<crate::scratch::GitCommonError>,
+    },
+    #[error("run the shared git folder task of thread {thread}")]
+    GitCommonTask {
+        thread: ThreadId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("read what {engine} gets at launch")]
     Customisation {
         engine: EngineId,
@@ -1002,6 +1014,26 @@ pub(crate) async fn prepare(
     prepare_on(hub, thread, session_id, input, binary, transport).await
 }
 
+async fn git_common(
+    hub: &Hub,
+    thread: &artisan_api::Thread,
+    folder: &std::path::Path,
+) -> Result<Option<PathBuf>, PrepareError> {
+    let owner = hub.clone();
+    let project = thread.project_id.clone();
+    let folder = folder.to_path_buf();
+    tokio::task::spawn_blocking(move || owner.sandbox_git_common(&project, &folder))
+        .await
+        .map_err(|source| PrepareError::GitCommonTask {
+            thread: thread.id.clone(),
+            source,
+        })?
+        .map_err(|source| PrepareError::GitCommon {
+            thread: thread.id.clone(),
+            source: Box::new(source),
+        })
+}
+
 async fn prepare_on(
     hub: &Hub,
     thread: &artisan_api::Thread,
@@ -1053,6 +1085,7 @@ async fn prepare_on(
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
     launch.tool_caches = Some(hub.sandbox_tool_caches(&thread.project_id));
+    launch.git_common = git_common(hub, thread, &cwd).await?;
     let mut config = thread.config.clone();
     match transport.and_then(ClaudeTransport::option) {
         Some(option) => {
