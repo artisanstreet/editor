@@ -1,5 +1,5 @@
 use crate::error::StorageError;
-use crate::{BUSY_TIMEOUT, DataLock, Device, Environment, PairCodeHash, schema};
+use crate::{BUSY_TIMEOUT, DataLock, Device, Environment, PairCodeHash, recall, schema};
 use artisan_api::{DeviceId, Timestamp, WallClock};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,38 @@ pub enum AdminError {
         found: usize,
         expected: usize,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageVersionError {
+    #[error("open {} to read its schema", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    #[error("read the recall index version of {}", path.display())]
+    RecallIndex {
+        path: PathBuf,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageVersion {
+    pub schema: usize,
+    pub recall_index: Option<i64>,
+}
+
+impl StorageVersion {
+    #[must_use]
+    pub const fn this_forge() -> Self {
+        Self {
+            schema: schema::version(),
+            recall_index: Some(recall::INDEX_VERSION),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -185,16 +217,40 @@ impl Admin {
     }
 }
 
-pub fn schema_version(dir: &Path) -> Result<Option<usize>, AdminError> {
+pub fn storage_version(dir: &Path) -> Result<Option<StorageVersion>, StorageVersionError> {
     let path = dir.join(DATABASE);
     if !path.is_file() {
         return Ok(None);
     }
-    let conn = connect(
+    let opened = |source| StorageVersionError::Open {
+        path: path.clone(),
+        source: Box::new(source),
+    };
+    let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    version(&path, &conn).map(Some)
+    )
+    .map_err(opened)?;
+    conn.busy_timeout(BUSY_TIMEOUT).map_err(opened)?;
+    let schema = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(opened)?;
+    let recall_index = match recall::index_state(&conn) {
+        Ok(recall::IndexState::Stale { built }) => built,
+        Ok(recall::IndexState::Building { .. } | recall::IndexState::Built) => {
+            Some(recall::INDEX_VERSION)
+        }
+        Err(source) => {
+            return Err(StorageVersionError::RecallIndex {
+                path,
+                source: Box::new(source),
+            });
+        }
+    };
+    Ok(Some(StorageVersion {
+        schema,
+        recall_index,
+    }))
 }
 
 pub fn roll_back_for(

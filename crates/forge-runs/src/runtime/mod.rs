@@ -360,7 +360,7 @@ impl crate::Hub {
         let name = command.name();
         match command {
             Command::Health => Ok(
-                serde_json::json!({"protocol":PROTOCOL,"schema":forge_store::Store::schema_version(),"active":self.generation().is_some_and(Generation::accepting),"runs":self.local_active_count(),"generation":self.generation().map(|generation| generation.member().clone())}),
+                serde_json::json!({"protocol":PROTOCOL,"schema":forge_store::Store::schema_version(),"recall_index":forge_store::Store::recall_index_version(),"active":self.generation().is_some_and(Generation::accepting),"runs":self.local_active_count(),"generation":self.generation().map(|generation| generation.member().clone())}),
             ),
             Command::Activate => {
                 self.activate().await?;

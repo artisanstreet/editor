@@ -27,6 +27,7 @@ forge-http.workspace = true
 forge-isolation.workspace = true
 forge-runs.workspace = true
 forge-store.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing.workspace = true

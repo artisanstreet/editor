@@ -56,10 +56,30 @@ const DEFAULT_FEED_FOR_TESTS: &str = release::DEFAULT_FEED;
 #[cfg(unix)]
 #[test]
 fn a_running_forge_is_handed_over_only_when_its_database_needs_no_upgrade() {
-    assert_eq!(forge_upgrade(true, Some(12), 12), ForgeUpgrade::Online);
-    assert_eq!(forge_upgrade(true, Some(11), 12), ForgeUpgrade::Restart);
-    assert_eq!(forge_upgrade(true, None, 12), ForgeUpgrade::Restart);
-    assert_eq!(forge_upgrade(false, Some(12), 12), ForgeUpgrade::Restart);
+    let storage = |schema, recall_index| StorageVersion {
+        schema,
+        recall_index: Some(recall_index),
+    };
+    assert_eq!(
+        forge_upgrade(true, Some(storage(12, 2)), storage(12, 2)),
+        ForgeUpgrade::Online
+    );
+    assert_eq!(
+        forge_upgrade(true, Some(storage(11, 2)), storage(12, 2)),
+        ForgeUpgrade::Restart
+    );
+    assert_eq!(
+        forge_upgrade(true, Some(storage(12, 1)), storage(12, 2)),
+        ForgeUpgrade::Restart
+    );
+    assert_eq!(
+        forge_upgrade(true, None, storage(12, 2)),
+        ForgeUpgrade::Restart
+    );
+    assert_eq!(
+        forge_upgrade(false, Some(storage(12, 2)), storage(12, 2)),
+        ForgeUpgrade::Restart
+    );
 }
 
 #[test]

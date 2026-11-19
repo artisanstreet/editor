@@ -63,14 +63,12 @@ fn main() -> std::process::ExitCode {
     let mut cli = Cli::parse();
     if cli.schema_version {
         use std::io::Write as _;
-        return match writeln!(
-            std::io::stdout(),
-            "{}",
-            forge_store::Store::schema_version()
-        ) {
+        let version = serde_json::to_string(&forge_store::admin::StorageVersion::this_forge())
+            .expect("invariant: the storage version encodes as JSON");
+        return match writeln!(std::io::stdout(), "{version}") {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
-                report(format_args!("print the schema version: {error}"));
+                report(format_args!("print the storage version: {error}"));
                 std::process::ExitCode::FAILURE
             }
         };

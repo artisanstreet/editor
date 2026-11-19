@@ -14,6 +14,7 @@ use crate::ui::{self, AskError};
 use crate::{service, wsl};
 use artisan_paths::{App, ChooseRootError, EnvPathError, RootError};
 use clap::Args;
+use forge_store::admin::StorageVersion;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -295,11 +296,11 @@ pub(crate) enum UpgradeOnlineError {
     Locate(#[from] LocateError),
     #[error("check whether Forge hands over to a new version")]
     Gateway(#[source] forge_http::upgrade::GatewayRecordError),
-    #[error("read the schema version of Forge's database in {}", data.display())]
+    #[error("read the storage version of Forge's database in {}", data.display())]
     Schema {
         data: PathBuf,
         #[source]
-        source: forge_store::admin::AdminError,
+        source: forge_store::admin::StorageVersionError,
     },
     #[error("run {} --schema-version", forge.display())]
     Probe {
@@ -309,11 +310,11 @@ pub(crate) enum UpgradeOnlineError {
     },
     #[error("{} --schema-version failed ({status})", forge.display())]
     ProbeFailed { forge: PathBuf, status: ExitStatus },
-    #[error("read the schema version of {}", forge.display())]
+    #[error("read the storage version of {}", forge.display())]
     ProbeOutput {
         forge: PathBuf,
         #[source]
-        source: std::num::ParseIntError,
+        source: serde_json::Error,
     },
     #[error("start the async runtime")]
     Runtime(#[source] io::Error),
@@ -747,7 +748,11 @@ enum ForgeUpgrade {
 }
 
 #[cfg(unix)]
-const fn forge_upgrade(hands_over: bool, database: Option<usize>, incoming: usize) -> ForgeUpgrade {
+fn forge_upgrade(
+    hands_over: bool,
+    database: Option<StorageVersion>,
+    incoming: StorageVersion,
+) -> ForgeUpgrade {
     match database {
         Some(database) if hands_over && database == incoming => ForgeUpgrade::Online,
         Some(_) | None => ForgeUpgrade::Restart,
@@ -1215,7 +1220,7 @@ fn choose_forge(release: &Release, version: &str) -> Result<ForgePlace, AskError
 }
 
 #[cfg(unix)]
-fn incoming_schema(forge: &Path) -> Result<usize, UpgradeOnlineError> {
+fn incoming_schema(forge: &Path) -> Result<StorageVersion, UpgradeOnlineError> {
     let output = sys::output_within(
         std::process::Command::new(forge).arg("--schema-version"),
         SCHEMA_PROBE_DEADLINE,
@@ -1230,13 +1235,10 @@ fn incoming_schema(forge: &Path) -> Result<usize, UpgradeOnlineError> {
             status: output.status,
         });
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .map_err(|source| UpgradeOnlineError::ProbeOutput {
-            forge: forge.to_owned(),
-            source,
-        })
+    serde_json::from_slice(&output.stdout).map_err(|source| UpgradeOnlineError::ProbeOutput {
+        forge: forge.to_owned(),
+        source,
+    })
 }
 
 #[cfg(unix)]
@@ -1252,11 +1254,12 @@ fn upgrade_forge_online(
     if !hands_over {
         return Ok(false);
     }
-    let database =
-        forge_store::admin::schema_version(&data).map_err(|source| UpgradeOnlineError::Schema {
+    let database = forge_store::admin::storage_version(&data).map_err(|source| {
+        UpgradeOnlineError::Schema {
             data: data.clone(),
             source,
-        })?;
+        }
+    })?;
     let forge = incoming.join(App::Forge.binary_name());
     match forge_upgrade(hands_over, database, incoming_schema(&forge)?) {
         ForgeUpgrade::Online => {

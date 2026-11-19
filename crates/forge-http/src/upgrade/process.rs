@@ -118,7 +118,7 @@ pub enum HealthyError {
     },
     #[error("generation {generation} has an incompatible runtime protocol")]
     Protocol { generation: String },
-    #[error("generation {generation} requires an incompatible database schema")]
+    #[error("generation {generation} requires an incompatible database schema or recall index")]
     Schema { generation: String },
 }
 
@@ -305,7 +305,9 @@ pub(super) async fn healthy(member: &Member) -> Result<(), HealthyError> {
             generation: generation(),
         });
     }
-    if value["schema"].as_u64() != Some(forge_store::Store::schema_version() as u64) {
+    if value["schema"].as_u64() != Some(forge_store::Store::schema_version() as u64)
+        || value["recall_index"].as_i64() != Some(forge_store::Store::recall_index_version())
+    {
         return Err(HealthyError::Schema {
             generation: generation(),
         });

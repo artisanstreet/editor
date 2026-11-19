@@ -30,7 +30,9 @@ mod tests {
         assert!(matches!(read_only, Err(AdminError::Schema { .. })));
         assert_eq!(schema_of(dir.path()), before);
         assert_eq!(
-            forge_store::admin::schema_version(dir.path()).unwrap(),
+            forge_store::admin::storage_version(dir.path())
+                .unwrap()
+                .map(|version| version.schema),
             Some(before)
         );
     }
