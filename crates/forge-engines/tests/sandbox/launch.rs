@@ -78,18 +78,22 @@ fn turn(permissions: Permissions, folders: &Folders) -> Turn {
 }
 
 async fn run(turn: &Turn, folders: &Folders) -> Vec<String> {
-    let mut process = spawn(
+    run_script(
         turn,
+        SCRIPT,
         &[
-            "-c".to_owned(),
-            SCRIPT.to_owned(),
-            "sh".to_owned(),
             folders.outside.display().to_string(),
             folders.engine_home.display().to_string(),
             folders.user_home.display().to_string(),
         ],
     )
-    .unwrap();
+    .await
+}
+
+async fn run_script(turn: &Turn, script: &str, args: &[String]) -> Vec<String> {
+    let mut command = vec!["-c".to_owned(), script.to_owned(), "sh".to_owned()];
+    command.extend_from_slice(args);
+    let mut process = spawn(turn, &command).unwrap();
     let mut lines = Vec::new();
     while let Some(line) = tokio::time::timeout(Duration::from_secs(10), process.next_line())
         .await
@@ -170,5 +174,111 @@ async fn a_full_access_engine_writes_wherever_the_user_can() {
     assert_eq!(
         std::fs::read_to_string(folders.user_home.join(".bashrc")).unwrap(),
         "kept\nhijacked\n"
+    );
+}
+
+const WRITE_EACH: &str = r#"
+for folder in "$@"; do
+  echo planted > "$folder/planted" && echo "wrote $folder"
+done
+echo done
+"#;
+
+fn repository(folder: &Path) {
+    std::fs::create_dir_all(folder.join("objects")).expect("an objects folder");
+    std::fs::create_dir_all(folder.join("refs")).expect("a refs folder");
+    std::fs::write(folder.join("HEAD"), "ref: refs/heads/main\n").expect("a HEAD");
+}
+
+fn worktree_of(common: &Path, project: &Path, commondir: &str) {
+    let own = common.join("worktrees").join("project");
+    std::fs::create_dir_all(&own).expect("a worktree git folder");
+    std::fs::write(
+        own.join("gitdir"),
+        format!("{}\n", project.join(".git").display()),
+    )
+    .expect("a backlink");
+    std::fs::write(own.join("commondir"), format!("{commondir}\n")).expect("a commondir");
+    std::fs::write(own.join("HEAD"), "ref: refs/heads/feature\n").expect("a HEAD");
+    std::fs::write(project.join(".git"), format!("gitdir: {}\n", own.display()))
+        .expect("a git pointer");
+}
+
+async fn written(folders: &Folders, targets: &[&Path]) -> Vec<String> {
+    let args: Vec<String> = targets
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    let lines = run_script(&turn(Permissions::Auto, folders), WRITE_EACH, &args).await;
+    assert_eq!(lines.last().map(String::as_str), Some("done"), "{lines:?}");
+    lines
+}
+
+fn sandboxed() -> bool {
+    if let Support::Unavailable(reason) = forge_isolation::support() {
+        eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
+        return false;
+    }
+    true
+}
+
+#[tokio::test]
+async fn a_git_pointer_the_engine_wrote_does_not_make_its_target_writable() {
+    if !sandboxed() {
+        return;
+    }
+    let folders = folders();
+    repository(&folders.outside);
+    for target in [&folders.outside, &folders.user_home] {
+        std::fs::write(
+            folders.project.join(".git"),
+            format!("gitdir: {}\n", target.display()),
+        )
+        .unwrap();
+        written(&folders, &[target]).await;
+        assert!(
+            !target.join("planted").exists(),
+            "a `.git` file pointing at {} let an Auto engine write there",
+            target.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_worktree_commondir_naming_another_folder_does_not_make_it_writable() {
+    if !sandboxed() {
+        return;
+    }
+    let folders = folders();
+    let common = folders.user_home.join("repository");
+    repository(&common);
+    repository(&folders.outside);
+    let hostile = folders.outside.display().to_string();
+    worktree_of(&common, &folders.project, &hostile);
+    written(&folders, &[&folders.outside, &common]).await;
+    assert!(
+        !folders.outside.join("planted").exists(),
+        "a worktree's commondir let an Auto engine write another folder"
+    );
+    assert!(
+        !common.join("planted").exists(),
+        "a worktree with a tampered commondir still got its shared folder"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_worktree_lets_git_write_its_shared_folder() {
+    if !sandboxed() {
+        return;
+    }
+    let folders = folders();
+    let common = folders.user_home.join("repository");
+    repository(&common);
+    worktree_of(&common, &folders.project, "../..");
+    let objects = common.join("objects");
+    let lines = written(&folders, &[&objects]).await;
+    assert!(
+        objects.join("planted").exists(),
+        "git can't write the repository's shared folder from a worktree: {lines:?}"
     );
 }
