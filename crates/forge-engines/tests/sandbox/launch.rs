@@ -290,6 +290,19 @@ async fn a_linked_worktree_lets_git_write_its_shared_folder() {
     );
 }
 
+fn rustc_beside(cargo: &Path) -> PathBuf {
+    let sibling = cargo.with_file_name("rustc");
+    if sibling.is_file() {
+        return sibling;
+    }
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|folder| folder.join("rustc"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or(sibling)
+}
+
 #[tokio::test]
 async fn cargo_builds_inside_auto_with_its_registry_in_the_sandbox() {
     if !sandboxed() {
@@ -316,7 +329,7 @@ async fn cargo_builds_inside_auto_with_its_registry_in_the_sandbox() {
         ("RUSTC_WRAPPER".to_owned(), String::new()),
         (
             "RUSTC".to_owned(),
-            cargo.with_file_name("rustc").display().to_string(),
+            rustc_beside(&cargo).display().to_string(),
         ),
     ]);
     let lines = run_script(
