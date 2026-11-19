@@ -45,7 +45,8 @@ fn watchers_of_this_process() -> Vec<String> {
 )]
 fn stand_in_for_forge() -> ! {
     for _ in 0..LAUNCHES {
-        let tree = EngineTree::new().expect("an engine tree");
+        let tree =
+            EngineTree::new(forge_isolation::Containment::OwnCgroup).expect("an engine tree");
         let mut engine = Command::new("/bin/sh");
         engine
             .args(["-c", "exit 0"])

@@ -575,9 +575,56 @@ impl RunGroup {
     }
 }
 
-pub(crate) fn started(group: Option<&RunGroup>, pid: u32) {
-    let membership =
-        group.map(|group| Path::new(std::ffi::OsStr::from_bytes(group.procs.to_bytes())));
+#[derive(Debug)]
+pub(crate) enum Cgroup {
+    Unseparated,
+    Shared(CString),
+    Run(RunGroup),
+}
+
+impl Cgroup {
+    pub(crate) fn own() -> Result<Self, RunGroupError> {
+        RunGroup::create().map(|group| group.map_or(Self::Unseparated, Self::Run))
+    }
+
+    pub(crate) fn shared() -> Self {
+        ENGINES_FOLDER.get().map_or(Self::Unseparated, |engines| {
+            Self::Shared(
+                CString::new(engines.join("cgroup.procs").as_os_str().as_bytes()).expect(
+                    "invariant: the engines cgroup was checked to be named without NUL bytes",
+                ),
+            )
+        })
+    }
+
+    pub(crate) fn membership(&self) -> Option<CString> {
+        match self {
+            Self::Unseparated => None,
+            Self::Shared(procs) => Some(procs.clone()),
+            Self::Run(group) => Some(group.membership()),
+        }
+    }
+
+    pub(crate) fn kill_switch(&self) -> Option<CString> {
+        match self {
+            Self::Unseparated | Self::Shared(_) => None,
+            Self::Run(group) => Some(group.kill_switch()),
+        }
+    }
+
+    pub(crate) fn end(&self) -> Result<(), EndRunError> {
+        match self {
+            Self::Unseparated | Self::Shared(_) => Ok(()),
+            Self::Run(group) => group.end(),
+        }
+    }
+}
+
+pub(crate) fn started(cgroup: &Cgroup, pid: u32) {
+    let membership = cgroup.membership();
+    let membership = membership
+        .as_deref()
+        .map(|procs| Path::new(std::ffi::OsStr::from_bytes(procs.to_bytes())));
     if let Err(failure) = attach(membership, Path::new("/proc"), pid) {
         let error: &dyn std::error::Error = &failure;
         tracing::warn!(error, "engine isolation is incomplete");

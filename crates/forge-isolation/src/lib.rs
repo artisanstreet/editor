@@ -58,16 +58,26 @@ pub type RunGroupError = std::convert::Infallible;
 #[cfg(not(target_os = "linux"))]
 pub type EndRunError = std::convert::Infallible;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Containment {
+    OwnCgroup,
+    Shared,
+}
+
 #[derive(Debug)]
 pub struct EngineTree {
     #[cfg(target_os = "linux")]
-    group: Option<linux::RunGroup>,
+    cgroup: linux::Cgroup,
 }
 
 impl EngineTree {
     #[cfg(target_os = "linux")]
-    pub fn new() -> Result<Self, RunGroupError> {
-        linux::RunGroup::create().map(|group| Self { group })
+    pub fn new(containment: Containment) -> Result<Self, RunGroupError> {
+        let cgroup = match containment {
+            Containment::OwnCgroup => linux::Cgroup::own()?,
+            Containment::Shared => linux::Cgroup::shared(),
+        };
+        Ok(Self { cgroup })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -75,18 +85,23 @@ impl EngineTree {
         clippy::unnecessary_wraps,
         reason = "the same signature as Linux, where making the run's cgroup can fail"
     )]
-    pub const fn new() -> Result<Self, RunGroupError> {
+    pub const fn new(_containment: Containment) -> Result<Self, RunGroupError> {
         Ok(Self {})
     }
 
     #[cfg(target_os = "linux")]
-    const fn group(&self) -> Option<&linux::RunGroup> {
-        self.group.as_ref()
+    pub(crate) fn membership(&self) -> Option<std::ffi::CString> {
+        self.cgroup.membership()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn kill_switch(&self) -> Option<std::ffi::CString> {
+        self.cgroup.kill_switch()
     }
 
     #[cfg(target_os = "linux")]
     pub fn end(&self) -> Result<(), EndRunError> {
-        self.group.as_ref().map_or(Ok(()), linux::RunGroup::end)
+        self.cgroup.end()
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -132,7 +147,7 @@ pub fn started(_tree: &EngineTree, process_id: u32) {
 
 #[cfg(target_os = "linux")]
 pub fn started(tree: &EngineTree, process_id: u32) {
-    linux::started(tree.group(), process_id);
+    linux::started(&tree.cgroup, process_id);
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

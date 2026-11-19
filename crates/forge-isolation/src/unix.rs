@@ -67,10 +67,10 @@ struct Watch {
 impl Watch {
     #[cfg(target_os = "linux")]
     fn of(tree: &crate::EngineTree) -> Self {
-        match tree.group() {
-            Some(group) => Self {
+        match tree.kill_switch() {
+            Some(kill_switch) => Self {
                 script: KILL_RUN_WHEN_FORGE_ENDS,
-                argument: group.kill_switch(),
+                argument: kill_switch,
             },
             None => Self {
                 script: KILL_GROUP_WHEN_FORGE_ENDS,
@@ -94,7 +94,7 @@ pub(crate) fn contain(
     tree: &crate::EngineTree,
 ) {
     #[cfg(target_os = "linux")]
-    let membership = tree.group().map(crate::linux::RunGroup::membership);
+    let membership = tree.membership();
     let watch = Watch::of(tree);
     let forge_alive = lifeline();
     let enter = move || {

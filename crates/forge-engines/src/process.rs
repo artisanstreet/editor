@@ -361,10 +361,16 @@ pub(crate) fn owned_command(
 ) -> Result<OwnedChild, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
     sandbox.prepare(&mut command);
-    let tree = forge_isolation::EngineTree::new().map_err(|source| SpawnError::Tree {
-        program: program.clone(),
-        source,
-    })?;
+    let containment = if sandbox.confined() {
+        forge_isolation::Containment::OwnCgroup
+    } else {
+        forge_isolation::Containment::Shared
+    };
+    let tree =
+        forge_isolation::EngineTree::new(containment).map_err(|source| SpawnError::Tree {
+            program: program.clone(),
+            source,
+        })?;
     forge_isolation::contain(command.as_std_mut(), sandbox.ruleset(), &tree);
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);

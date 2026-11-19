@@ -72,7 +72,7 @@ fn run(allowed: &Path, outside: &Path, sandbox: Option<&forge_isolation::Ruleset
     contain(
         &mut command,
         sandbox,
-        &EngineTree::new().expect("an engine tree"),
+        &EngineTree::new(forge_isolation::Containment::OwnCgroup).expect("an engine tree"),
     );
     let output = command.output().expect("the shell runs");
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -167,7 +167,11 @@ fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
         .unwrap();
     let mut command = Command::new("truncate");
     command.args(["-s", "0"]).arg(&file);
-    contain(&mut command, Some(&ruleset), &EngineTree::new().unwrap());
+    contain(
+        &mut command,
+        Some(&ruleset),
+        &EngineTree::new(forge_isolation::Containment::OwnCgroup).unwrap(),
+    );
     let output = command.output().expect("truncate runs");
     assert!(
         !output.status.success(),
@@ -201,7 +205,11 @@ fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
         "sh",
         &bystander.id().to_string(),
     ]);
-    contain(&mut command, Some(&ruleset), &EngineTree::new().unwrap());
+    contain(
+        &mut command,
+        Some(&ruleset),
+        &EngineTree::new(forge_isolation::Containment::OwnCgroup).unwrap(),
+    );
     let output = command.output().expect("the shell runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let still_running = bystander.try_wait().unwrap().is_none();
@@ -295,7 +303,7 @@ fn connects_from_the_sandbox(
     contain(
         &mut command,
         Some(ruleset),
-        &EngineTree::new().expect("an engine tree"),
+        &EngineTree::new(forge_isolation::Containment::OwnCgroup).expect("an engine tree"),
     );
     command.output().expect("the child runs").status.success()
 }

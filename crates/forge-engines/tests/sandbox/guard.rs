@@ -529,3 +529,30 @@ async fn run_cgroups_an_earlier_forge_left_populated_are_killed_at_startup() {
     assert!(!status.success());
     assert!(!leftover.exists(), "{separation:?}");
 }
+
+#[tokio::test]
+async fn a_process_a_full_access_run_detached_outlives_the_run() {
+    if !sandboxed() || !founding_forge() {
+        return;
+    }
+    forge_isolation::protect_forge();
+    let (_base, home) = engine_home();
+
+    let lines = run(
+        &turn(EngineId::Claude, &home, Permissions::Full),
+        "mkfifo ready; setsid sh -c 'echo up > ready; exec sleep 600' </dev/null >/dev/null 2>&1 & read _ < ready; echo $!; echo done",
+    )
+    .await;
+
+    let detached = Path::new("/proc").join(&lines[0]);
+    let alive =
+        std::fs::read_to_string(detached.join("stat")).is_ok_and(|stat| !stat.contains(") Z "));
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &lines[0]])
+        .status()
+        .unwrap();
+    assert!(
+        alive && killed.success(),
+        "a dev server a Full-access run started with setsid died when the run ended"
+    );
+}
