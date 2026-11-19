@@ -280,7 +280,7 @@ fn sleep_as(executable: &Path) -> Child {
         .find(|path| path.is_file())
         .unwrap();
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    fs::copy(&sleep, executable).unwrap();
+    test_support::executable::install(&sleep, executable);
     Command::new(executable)
         .arg0("sleep")
         .arg("600")

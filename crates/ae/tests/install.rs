@@ -51,7 +51,7 @@ mod tests {
             let data = app.join("data");
             std::fs::create_dir_all(&data).expect("create Forge's data folder");
             let installed = app.join(App::Forge.binary_name());
-            std::fs::copy(previous, &installed).expect("install the previous Forge");
+            test_support::executable::install(previous, &installed);
             std::fs::write(
                 data.join("config.json"),
                 format!(r#"{{"listen": "{address}"}}"#),
@@ -105,7 +105,7 @@ mod tests {
         );
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
-        std::fs::copy(env!("CARGO_BIN_EXE_ae"), stage.join("ae")).expect("stage ae");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
         script(&stage.join(App::Forge.binary_name()), BROKEN_FORGE);
 
         let update = sandbox.ae(&[
@@ -183,7 +183,7 @@ mod tests {
         );
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
-        std::fs::copy(env!("CARGO_BIN_EXE_ae"), stage.join("ae")).expect("stage ae");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
         script(
             &stage.join(App::Forge.binary_name()),
             &format!(
@@ -232,7 +232,7 @@ mod tests {
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
-        std::fs::copy(env!("CARGO_BIN_EXE_ae"), stage.join("ae")).expect("stage ae");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
         sandbox
             .root
             .path()

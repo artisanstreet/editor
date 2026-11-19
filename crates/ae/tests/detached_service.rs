@@ -37,7 +37,7 @@ mod tests {
             let app = App::Forge.dir_under(&artisan_street(root.path()));
             let data = app.join("data");
             std::fs::create_dir_all(&data).unwrap();
-            std::fs::copy(forge_binary(), app.join(App::Forge.binary_name())).unwrap();
+            test_support::executable::install(&forge_binary(), &app.join(App::Forge.binary_name()));
             std::fs::write(
                 data.join("config.json"),
                 format!(r#"{{"listen": "{address}"}}"#),

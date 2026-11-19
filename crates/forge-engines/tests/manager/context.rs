@@ -176,7 +176,7 @@ esac
             .version_dir(EngineId::Codex, version)
             .join(host_spec(EngineId::Codex).artifact.unwrap().entry);
         std::fs::create_dir_all(next.parent().unwrap()).unwrap();
-        std::fs::copy(&old_binary, next).unwrap();
+        test_support::executable::install(&old_binary, &next);
         install::switch(&layout, EngineId::Codex, version).unwrap();
     }
     install::prune(&layout, EngineId::Codex).unwrap();
