@@ -1,36 +1,8 @@
 use super::*;
-use std::sync::{Arc, Mutex};
-
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
 
 #[tokio::test]
 async fn engine_stderr_stays_out_of_the_logs() {
-    let captured = Captured::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(captured.clone())
-        .finish();
-    let _logging = tracing::subscriber::set_default(subscriber);
+    let (captured, _logging) = test_support::logs::capture();
     let base = tempfile::tempdir().unwrap();
     let home = base.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -61,7 +33,7 @@ async fn engine_stderr_stays_out_of_the_logs() {
         stderr.await.unwrap();
     }
     assert!(process.stderr_tail().contains("engine-secret"));
-    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let logged = captured.text();
     assert!(
         logged.contains("stderr"),
         "the stderr read is still logged as metadata: {logged}"

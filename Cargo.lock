@@ -2260,7 +2260,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "vte",
  "walkdir",
@@ -5646,6 +5645,8 @@ dependencies = [
  "test-support",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "windows 0.62.2",
 ]
 

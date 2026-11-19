@@ -11,6 +11,8 @@ pub mod editor;
 pub mod http;
 #[cfg(feature = "items")]
 pub mod items;
+#[cfg(feature = "logs")]
+pub mod logs;
 #[cfg(feature = "net")]
 pub mod net;
 #[cfg(feature = "replay")]

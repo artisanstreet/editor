@@ -55,6 +55,34 @@ fn a_usage_limit_says_when_it_resets() {
 }
 
 #[test]
+fn a_usage_limit_is_logged_without_the_provider_payload() {
+    let (captured, _logging) = test_support::logs::capture();
+    let limit = json!({
+        "type": "exceeded_limit",
+        "representativeClaim": "seven_day",
+        "resetsAt": 1_792_620_000,
+        "organizationUuid": "org-7f3a9c",
+        "overageDisabledReason": "org-billing-note",
+    });
+    let body = json!({"error":{"type":"rate_limit_error", "message": limit.to_string()}});
+    assert_eq!(
+        refusal(StatusCode::TOO_MANY_REQUESTS, false, &body.to_string()),
+        Refusal::UsageLimit {
+            resets_at: Some(1_792_620_000_000),
+            message: "weekly usage limit".to_owned()
+        }
+    );
+    let logged = captured.text();
+    assert!(logged.contains("weekly usage limit"), "{logged}");
+    for payload in ["org-7f3a9c", "org-billing-note", "representativeClaim"] {
+        assert!(
+            !logged.contains(payload),
+            "the provider's {payload} was logged: {logged}"
+        );
+    }
+}
+
+#[test]
 fn a_concurrency_limit_is_not_exhausted_usage() {
     let body = json!({"error":{"type":"rate_limit_error", "message":json!({"type":"exceeded_limit", "representativeClaim":"concurrents"}).to_string()}});
     assert_eq!(

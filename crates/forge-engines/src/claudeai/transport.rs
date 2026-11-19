@@ -149,44 +149,72 @@ pub(super) fn rate_limit(message: &str) -> Refusal {
     })
 }
 
-pub(super) fn limit_refusal(limit: &Value) -> Refusal {
-    tracing::warn!(limit = %limit, "claude.ai reported a completion limit");
-    if limit["representativeClaim"].as_str() == Some("concurrents") {
-        return Refusal::RateLimited(
-            "Claude.ai has too many active responses. Try again shortly.".to_owned(),
-        );
-    }
-    let quota = match limit["representativeClaim"].as_str() {
-        Some("five_hour") => Some("session usage limit"),
-        Some("seven_day") if limit["perModelLimit"].as_bool() == Some(true) => {
-            Some("weekly usage limit for this model")
+#[derive(Debug)]
+enum Limit {
+    Concurrent,
+    Exceeded {
+        quota: &'static str,
+        resets_at: Option<i64>,
+    },
+    Unidentified,
+}
+
+impl Limit {
+    fn read(limit: &Value) -> Self {
+        let claim = limit["representativeClaim"].as_str();
+        if claim == Some("concurrents") {
+            return Self::Concurrent;
         }
-        Some("seven_day") => Some("weekly usage limit"),
-        Some("seven_day_opus") => Some("weekly Opus usage limit"),
-        Some("seven_day_sonnet") => Some("weekly Sonnet usage limit"),
-        Some("overage") => Some("extra usage limit"),
-        _ => None,
+        let quota = match claim {
+            Some("five_hour") => Some("session usage limit"),
+            Some("seven_day") if limit["perModelLimit"].as_bool() == Some(true) => {
+                Some("weekly usage limit for this model")
+            }
+            Some("seven_day") => Some("weekly usage limit"),
+            Some("seven_day_opus") => Some("weekly Opus usage limit"),
+            Some("seven_day_sonnet") => Some("weekly Sonnet usage limit"),
+            Some("overage") => Some("extra usage limit"),
+            _ => None,
+        }
+        .or_else(|| {
+            [("5h", "session usage limit"), ("7d", "weekly usage limit")]
+                .into_iter()
+                .find_map(|(key, label)| {
+                    (limit["windows"][key]["status"].as_str() == Some("exceeded_limit"))
+                        .then_some(label)
+                })
+        });
+        match quota.filter(|_| limit["type"].as_str() == Some("exceeded_limit")) {
+            Some(quota) => Self::Exceeded {
+                quota,
+                resets_at: limit["resetsAt"]
+                    .as_i64()
+                    .map(|seconds| seconds.saturating_mul(1000)),
+            },
+            None => Self::Unidentified,
+        }
     }
-    .or_else(|| {
-        [("5h", "session usage limit"), ("7d", "weekly usage limit")]
-            .into_iter()
-            .find_map(|(key, label)| {
-                (limit["windows"][key]["status"].as_str() == Some("exceeded_limit"))
-                    .then_some(label)
-            })
-    });
-    let Some(message) = quota.filter(|_| limit["type"].as_str() == Some("exceeded_limit")) else {
-        return Refusal::RateLimited(
-            "Claude.ai rejected this request because of a limit, but did not identify which limit. Try again shortly.".to_owned(),
-        );
-    };
-    let resets_at = limit["resetsAt"]
-        .as_i64()
-        .map(|seconds| seconds.saturating_mul(1000));
-    Refusal::UsageLimit {
-        resets_at,
-        message: message.to_owned(),
+
+    fn refusal(self) -> Refusal {
+        match self {
+            Self::Concurrent => Refusal::RateLimited(
+                "Claude.ai has too many active responses. Try again shortly.".to_owned(),
+            ),
+            Self::Exceeded { quota, resets_at } => Refusal::UsageLimit {
+                resets_at,
+                message: quota.to_owned(),
+            },
+            Self::Unidentified => Refusal::RateLimited(
+                "Claude.ai rejected this request because of a limit, but did not identify which limit. Try again shortly.".to_owned(),
+            ),
+        }
     }
+}
+
+pub(super) fn limit_refusal(limit: &Value) -> Refusal {
+    let limit = Limit::read(limit);
+    tracing::warn!(?limit, "claude.ai reported a completion limit");
+    limit.refusal()
 }
 
 fn quote(body: &str, status: reqwest::StatusCode) -> String {
