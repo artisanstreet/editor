@@ -130,3 +130,68 @@ async fn a_run_switched_from_full_access_to_auto_says_it_finishes_outside_the_sa
         "a sandboxed Auto run has nothing to say"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continued_turn_says_once_that_it_isnt_sandboxed_and_the_next_turn_says_it_again() {
+    let started = Arc::new(Notify::new());
+    let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (script_started, script_launches) = (Arc::clone(&started), Arc::clone(&launches));
+    let fixture = fixture_on_host(
+        Arc::new(move |_turn, io| {
+            let started = Arc::clone(&script_started);
+            let launch = script_launches.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if launch == 0 {
+                    started.notify_one();
+                    io.cancel.cancelled().await;
+                    return Outcome::done();
+                }
+                io.emit(reply(&format!("m{launch}"), "done")).await;
+                Outcome::done()
+            })
+        }),
+        sandbox::Host::Unavailable(forge_isolation::Unavailable::Windows),
+    )
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("work"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    let continued = fixture.settled().await.remove(0);
+    assert_eq!(
+        continued.continuation,
+        Some(artisan_api::Continuation::Requested)
+    );
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        2,
+        "the stop and its continuation"
+    );
+    assert_eq!(
+        unsandboxed(&fixture.items().await).len(),
+        1,
+        "continuing the turn doesn't repeat the notice"
+    );
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("more"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    assert_eq!(
+        unsandboxed(&fixture.items().await)
+            .iter()
+            .map(|(reason, _)| *reason)
+            .collect::<Vec<_>>(),
+        [UnsandboxedReason::Windows, UnsandboxedReason::Windows],
+        "a new message starts a turn that says it again"
+    );
+}

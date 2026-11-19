@@ -73,8 +73,8 @@ pub use items::{
     ReadContinueError, ReadItemError, ReopenAgentError, RequestContinueError,
     ResolveCollectionsError, RestoreInputsError, RunnableInputError, SendMessageError,
     SetItemStatusError, SettleAgentError, SettleRunError, SpawnAgentError, SpawnFailure,
-    TakeContinueError, TranscriptPageError, TranscriptRowsError, UnparkError, UpsertItemError,
-    ValidateAnswersError, WorkPageError,
+    TakeContinueError, TranscriptPageError, TranscriptRowsError, TurnUnsandboxedError, UnparkError,
+    UpsertItemError, ValidateAnswersError, WorkPageError,
 };
 pub use pairing::{
     AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,

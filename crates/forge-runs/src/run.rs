@@ -608,7 +608,7 @@ async fn execute(
         prepared = preparing => prepared?,
     };
     run.config = Some(turn.config.clone());
-    let mut coverage = crate::sandbox::Coverage::new(hub.inner.sandbox, turn.config.permissions);
+    let mut coverage = turn_coverage(hub, run, turn.config.permissions).await;
     if let Some(reason) = coverage.observe(turn.config.permissions) {
         announce_unsandboxed(hub, &run.thread_id, &run.id, reason).await;
     }
@@ -881,6 +881,22 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
         );
     }
     true
+}
+
+async fn turn_coverage(hub: &Hub, run: &Run, launched: Permissions) -> crate::sandbox::Coverage {
+    match hub.store().turn_said_unsandboxed(&run.thread_id).await {
+        Ok(true) => crate::sandbox::Coverage::Announced,
+        Ok(false) => crate::sandbox::Coverage::new(hub.inner.sandbox, launched),
+        Err(error) => {
+            tracing::warn!(
+                thread = %run.thread_id,
+                run = %run.id,
+                "read whether this turn said it isn't sandboxed, so this run says it: {}",
+                diagnostics::chain(&error)
+            );
+            crate::sandbox::Coverage::new(hub.inner.sandbox, launched)
+        }
+    }
 }
 
 async fn announce_unsandboxed(
