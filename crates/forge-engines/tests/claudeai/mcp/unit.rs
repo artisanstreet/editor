@@ -6,6 +6,7 @@ use super::fakes::{fake_reply, fake_server, fake_stdio, read_request};
 use super::*;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake screenshot";
+const PROGRESS_PACE: Duration = Duration::from_millis(100);
 
 #[test]
 #[expect(
@@ -31,7 +32,8 @@ fn fake_stdio_server() {
                 .append(true)
                 .open(path)
                 .expect("the log");
-            writeln!(file, "{line}").expect("a log line");
+            file.write_all(format!("{line}\n").as_bytes())
+                .expect("a log line");
         }
     };
     log("start");
@@ -66,8 +68,13 @@ fn fake_stdio_server() {
         let id = message["id"].clone();
         match message["method"].as_str() {
             Some("initialize") => {
-                let delay = var("FAKE_DELAY_MS").parse().unwrap_or(0);
-                std::thread::sleep(Duration::from_millis(delay));
+                let gate = var("FAKE_GATE");
+                if !gate.is_empty() {
+                    log("initialize");
+                    std::fs::File::open(&gate)
+                        .and_then(|gate| gate.lock_shared())
+                        .expect("the gate opens");
+                }
                 say(&result(
                     &id,
                     json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": { "name": "fake", "version": "1" } }),
@@ -93,15 +100,8 @@ fn fake_stdio_server() {
                 )),
                 Some("slow") => {
                     let say = say.clone();
-                    let answer = result(&id, text("slow done"));
                     let token = id.clone();
-                    std::thread::spawn(move || {
-                        for step in 0..30 {
-                            say(&json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": { "progressToken": token, "progress": step } }).to_string());
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                        say(&answer);
-                    });
+                    std::thread::spawn(move || report_progress_forever(say, &token));
                 }
                 Some("ping") => {
                     say(&json!({ "jsonrpc": "2.0", "id": id, "method": "ping" }).to_string());
@@ -140,6 +140,15 @@ fn fake_stdio_server() {
             _ if !id.is_null() => say(&result(&id, json!({}))),
             _ => {}
         }
+    }
+}
+
+fn report_progress_forever(say: impl Fn(&str), token: &Value) -> ! {
+    let mut step = 0_u64;
+    loop {
+        say(&json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": { "progressToken": token, "progress": step } }).to_string());
+        std::thread::sleep(PROGRESS_PACE);
+        step += 1;
     }
 }
 
@@ -303,20 +312,17 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
     let transport = &servers.clients[0].transport;
-    let started = std::time::Instant::now();
-    let error = transport
-        .request(
+    let error = test_support::wait::within(
+        "progress to stop extending the call",
+        test_support::wait::LIVENESS,
+        transport.request(
             "tools/call",
             json!({ "name": "slow", "arguments": {} }),
-            Instant::now() + Duration::from_millis(600),
-        )
-        .await
-        .expect_err("the call outlives its deadline");
-    assert!(
-        started.elapsed() < Duration::from_millis(1500),
-        "progress kept the call open for {:?}",
-        started.elapsed()
-    );
+            Instant::now() + PROGRESS_PACE * 6,
+        ),
+    )
+    .await
+    .expect_err("the call outlives its deadline");
     assert!(
         matches!(&error, RequestError::TimedOut { method, .. } if method == "tools/call"),
         "{error}"
@@ -475,23 +481,29 @@ async fn a_failed_start_tells_the_model_why_without_the_servers_output() {
 
 #[tokio::test]
 async fn servers_connect_at_once() {
-    let started = std::time::Instant::now();
-    let servers = Servers::connect(
-        &[
-            fake_stdio("one", &[("FAKE_DELAY_MS", "1000")]),
-            fake_stdio("two", &[("FAKE_DELAY_MS", "1000")]),
-        ],
-        Path::new("."),
-        &Sandbox::Open,
-    )
-    .await;
+    let dir = tempfile::tempdir().expect("a dir");
+    let log = dir.path().join("log");
+    let gate_path = dir.path().join("gate");
+    let gate = std::fs::File::create(&gate_path).expect("the gate");
+    gate.lock().expect("the test holds the gate shut");
+    let env = [
+        ("FAKE_GATE", gate_path.to_string_lossy().into_owned()),
+        ("FAKE_LOG", log.to_string_lossy().into_owned()),
+    ];
+    let env: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let configs = [fake_stdio("one", &env), fake_stdio("two", &env)];
+    let (servers, ()) = tokio::join!(
+        Servers::connect(&configs, Path::new("."), &Sandbox::Open,),
+        async {
+            logged(&log, "initialize", 2).await;
+            gate.unlock().expect("the test opens the gate");
+        },
+    );
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
     assert_eq!(servers.offered(), vec![("one", 1), ("two", 1)]);
-    assert!(
-        started.elapsed() < Duration::from_millis(1900),
-        "two one-second starts took {:?}",
-        started.elapsed()
-    );
 }
 
 #[tokio::test]
