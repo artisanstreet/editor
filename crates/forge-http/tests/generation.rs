@@ -201,6 +201,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     let original = store.latest_run(&threads[0]).await.unwrap().unwrap();
     let (replacement, _) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
     let new_member = replacement.generation().unwrap().member.clone();
+    let mut events = replacement.store().subscribe();
     assert_eq!(
         store.latest_run(&threads[0]).await.unwrap().unwrap().id,
         original.id
@@ -228,7 +229,14 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
             .unwrap(),
         false
     );
-    let mut events = replacement.store().subscribe();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            events.recv().await.unwrap().event,
+            artisan_api::Event::Reset
+        ) {}
+    })
+    .await
+    .unwrap();
     replacement
         .send_message(&threads[0], message("steered"))
         .await
