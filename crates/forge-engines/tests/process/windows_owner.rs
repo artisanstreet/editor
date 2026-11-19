@@ -1,9 +1,11 @@
 use super::*;
 #[tokio::test]
 async fn native_job_drop_closes_pipes_held_by_its_own_descendants() {
-    let mut command = Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/c ping -n 30 127.0.0.1 >NUL' -NoNewWindow -PassThru; Write-Output 'ready'; Wait-Process -Id $child.Id"])
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut command = Command::new("cmd.exe");
+    command
+        .raw_arg("/d /s /c \"echo ready& ping -n 30 127.0.0.1 >NUL\"")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = owned_command(command, Sandbox::Open).unwrap();
     let mut pipe = BufReader::new(child.stdout().take().unwrap());
     let mut ready = String::new();
