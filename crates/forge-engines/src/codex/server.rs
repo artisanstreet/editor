@@ -204,7 +204,7 @@ fn launch_key(turn: &Turn) -> u64 {
     turn.launch.args.hash(&mut hasher);
     turn.launch.env.hash(&mut hasher);
     std::fs::read(super::codex_home(turn).join("config.toml"))
-        .ok()
+        .map_err(|error| error.kind())
         .hash(&mut hasher);
     hasher.finish()
 }
@@ -733,7 +733,13 @@ impl Actor {
         };
         if run == SERVER_RUN {
             if let Some(id) = id.and_then(Value::as_u64) {
-                let frame: Value = serde_json::from_str(line).unwrap_or_default();
+                let frame: Value = match serde_json::from_str(line) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        tracing::warn!(id, %error, "Codex answered Forge's own request with a line that isn't JSON");
+                        return;
+                    }
+                };
                 if frame["result"]["status"] == "notLoaded" {
                     if let Some(release) = self.releasing.get(&id) {
                         let thread = release.thread.clone();
@@ -762,8 +768,12 @@ impl Actor {
         if !self.runs.contains_key(&run) {
             return;
         }
-        let Ok(mut frame) = serde_json::from_str::<Value>(line) else {
-            return;
+        let mut frame = match serde_json::from_str::<Value>(line) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(run, %error, "dropped a Codex answer that isn't JSON");
+                return;
+            }
         };
         frame["id"] = theirs;
         self.deliver(run, frame.to_string());

@@ -163,16 +163,29 @@ async fn run(program: &Program<'_>, args: &[&str]) -> Result<String, RunError> {
 fn read_json_file(path: &Path) -> Option<Value> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_OUTPUT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let read = std::fs::File::open(path).and_then(|file| {
+        file.take(MAX_OUTPUT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+    });
+    match read {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "skipped an unreadable model cache");
+            return None;
+        }
+    }
     if bytes.len() > MAX_OUTPUT_BYTES {
         tracing::warn!(path = %path.display(), "model cache exceeds byte budget");
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "skipped a model cache that isn't JSON");
+            None
+        }
+    }
 }
 
 fn readable_name(raw: &str) -> String {
@@ -331,7 +344,15 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>, Cla
 fn claude_served_cache(dir: &Path) -> Option<Value> {
     let mut newest: Option<(u64, Value)> = None;
     let mut matched = 0;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::debug!(directory = %dir.display(), %error, "the Claude catalog cache can't be listed");
+            return None;
+        }
+    };
+    for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().ends_with("-cc.json") {
             continue;
         }

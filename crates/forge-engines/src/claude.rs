@@ -693,14 +693,26 @@ fn config_dir(turn: &Turn) -> PathBuf {
 }
 
 fn title_from_transcript(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "the Claude transcript can't be read for its title");
+            return None;
+        }
+    };
     text.lines()
         .rev()
         .filter(|line| line.contains("\"ai-title\""))
-        .find_map(|line| {
-            let record: Value = serde_json::from_str(line).ok()?;
-            let title = record.get("aiTitle")?.as_str()?.trim();
-            (!title.is_empty()).then(|| title.to_owned())
+        .find_map(|line| match serde_json::from_str::<Value>(line) {
+            Ok(record) => {
+                let title = record.get("aiTitle")?.as_str()?.trim();
+                (!title.is_empty()).then(|| title.to_owned())
+            }
+            Err(error) => {
+                tracing::debug!(path = %path.display(), %error, "skipped a transcript title line that isn't JSON");
+                None
+            }
         })
 }
 
