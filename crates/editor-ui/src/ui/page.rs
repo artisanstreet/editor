@@ -21,6 +21,7 @@ fn lead(space: Space) -> Style {
         ..Insets::default()
     })
 }
+#[derive(Debug)]
 pub struct PageBlock {
     content: Element,
 }
@@ -32,6 +33,7 @@ impl PageBlock {
         self.content
     }
 }
+#[derive(Debug)]
 pub struct Notice {
     theme: ArtisanTheme,
     children: Vec<Element>,

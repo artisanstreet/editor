@@ -28,6 +28,12 @@ type Loaded = (Result<MediaBytes, MediaLoadError>, usize);
 pub struct AudioAssets {
     loads: Loads<Loader, Loaded>,
 }
+
+impl std::fmt::Debug for AudioAssets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioAssets").finish_non_exhaustive()
+    }
+}
 impl Default for AudioAssets {
     fn default() -> Self {
         Self::new()

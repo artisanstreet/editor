@@ -63,6 +63,7 @@ struct CachedSources {
     rows: Vec<Range<usize>>,
 }
 
+#[derive(Debug)]
 pub struct ShapedSource {
     source: String,
     command: Option<String>,

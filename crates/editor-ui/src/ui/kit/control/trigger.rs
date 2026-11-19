@@ -26,6 +26,7 @@ impl TriggerSize {
     }
 }
 
+#[derive(Debug)]
 pub enum Lead {
     Glyph(AssetId),
     Avatar(Element),
@@ -42,6 +43,12 @@ pub struct Trigger {
     open: bool,
     disabled: bool,
     on_activate: Option<Box<dyn Fn()>>,
+}
+
+impl std::fmt::Debug for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trigger").finish_non_exhaustive()
+    }
 }
 
 impl Trigger {

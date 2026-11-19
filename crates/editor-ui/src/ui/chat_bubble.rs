@@ -40,6 +40,7 @@ impl SegmentPosition {
     }
 }
 
+#[derive(Debug)]
 pub struct ChatBubbleSegment {
     theme: ArtisanTheme,
     position: SegmentPosition,

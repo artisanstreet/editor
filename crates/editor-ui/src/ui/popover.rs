@@ -68,6 +68,12 @@ pub struct Popover {
     dismiss: Rc<dyn Fn()>,
 }
 
+impl std::fmt::Debug for Popover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popover").finish_non_exhaustive()
+    }
+}
+
 impl Popover {
     pub fn new(
         id: impl Into<Key>,
@@ -113,6 +119,7 @@ impl Popover {
     }
 }
 
+#[derive(Debug)]
 pub struct PickerPopupHost {
     overlay: aqua_ui::overlay::OverlayId,
 }
@@ -159,7 +166,7 @@ impl PickerPopupHost {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum PickerEntrance {
     Slide,
     Scale { origin: aqua_core::Point },
@@ -176,6 +183,12 @@ pub struct AnimatedPickerHost {
     close_duration: std::time::Duration,
     flight: Option<(u64, f64)>,
     now: f64,
+}
+
+impl std::fmt::Debug for AnimatedPickerHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnimatedPickerHost").finish_non_exhaustive()
+    }
 }
 
 impl AnimatedPickerHost {

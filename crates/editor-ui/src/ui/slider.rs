@@ -52,7 +52,7 @@ impl SliderRange {
         }
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum SliderCommand {
     Start,
     End,
@@ -78,6 +78,7 @@ use aqua_ui::{
 use super::kit::{Space, Spaced, TextRole};
 use super::theme::{ArtisanTheme, Opacity};
 
+#[derive(Debug)]
 pub struct SliderState {
     range: SliderRange,
     value: f64,

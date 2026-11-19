@@ -131,6 +131,7 @@ fn on_glass(content: Element) -> Element {
         .build()
 }
 
+#[derive(Debug)]
 pub struct ComposerFrame {
     theme: ArtisanTheme,
     content: Element,

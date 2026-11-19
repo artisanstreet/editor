@@ -40,6 +40,7 @@ pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaFailure
 static MEDIA_WORK: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
+#[derive(Debug)]
 pub struct MediaBytes {
     pub bytes: Arc<[u8]>,
     pub permit: tokio::sync::OwnedSemaphorePermit,
@@ -82,6 +83,12 @@ pub struct MediaFetcher {
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
     resources: Arc<ResourceCache>,
     remote: Arc<RemoteConsent>,
+}
+
+impl std::fmt::Debug for MediaFetcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaFetcher").finish_non_exhaustive()
+    }
 }
 
 impl MediaFetcher {
@@ -199,6 +206,12 @@ pub struct MediaProvider {
     scope: String,
     owner: u64,
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
+}
+
+impl std::fmt::Debug for MediaProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaProvider").finish_non_exhaustive()
+    }
 }
 
 impl MediaProvider {

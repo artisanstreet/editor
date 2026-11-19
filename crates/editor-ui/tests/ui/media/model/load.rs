@@ -147,12 +147,10 @@ fn capability_format_and_up_select_distinct_cached_results() {
             .is_none()
     );
     fixture.reply(Ok(Arc::from(OBJ)));
-    assert!(
-        fixture
-            .request(&fixture.fetcher, soft, Some(Format::Stl), None, 4)
-            .unwrap()
-            .is_err()
-    );
+    fixture
+        .request(&fixture.fetcher, soft, Some(Format::Stl), None, 4)
+        .unwrap()
+        .expect_err("an OBJ body declared as STL fails to load");
     fixture.calls.try_recv().unwrap_err();
 }
 

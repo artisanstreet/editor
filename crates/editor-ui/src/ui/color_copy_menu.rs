@@ -134,6 +134,12 @@ pub struct ColorCopyMenuHost {
     now: f64,
 }
 
+impl std::fmt::Debug for ColorCopyMenuHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColorCopyMenuHost").finish_non_exhaustive()
+    }
+}
+
 impl ColorCopyMenuHost {
     pub fn open(
         app: &mut aqua::UiApp,

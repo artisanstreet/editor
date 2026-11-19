@@ -86,6 +86,12 @@ pub struct Button {
     debug_selector: Option<String>,
 }
 
+impl std::fmt::Debug for Button {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Button").finish_non_exhaustive()
+    }
+}
+
 impl Button {
     pub fn new(
         key: impl Into<Key>,

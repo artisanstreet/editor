@@ -40,6 +40,12 @@ pub struct Dialog {
     soft_backdrop: bool,
 }
 
+impl std::fmt::Debug for Dialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dialog").finish_non_exhaustive()
+    }
+}
+
 impl Dialog {
     pub fn new(
         id: impl Into<Key>,
@@ -172,6 +178,12 @@ pub struct DialogHost {
     closing: Rc<std::cell::Cell<Option<DialogDismissReason>>>,
     theme: Rc<std::cell::Cell<ArtisanTheme>>,
     rebuild: DialogRebuild,
+}
+
+impl std::fmt::Debug for DialogHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialogHost").finish_non_exhaustive()
+    }
 }
 
 type DialogRebuild = Rc<dyn Fn(Element, Size) -> Element>;

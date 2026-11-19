@@ -57,6 +57,7 @@ fn platform_offset(offset: u64) -> Result<usize, String> {
         .map_err(|error| format!("Markdown source offset {offset} exceeds this platform: {error}"))
 }
 
+#[derive(Debug)]
 pub struct RangeCollector {
     reference: ContentRef,
     range: Range<usize>,
@@ -141,6 +142,12 @@ pub struct StoredSource {
     owner: String,
 }
 
+impl std::fmt::Debug for StoredSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredSource").finish_non_exhaustive()
+    }
+}
+
 impl StoredSource {
     pub(crate) fn literal_content_range(
         &self,
@@ -184,14 +191,14 @@ fn page_start(ordinal: usize) -> u64 {
     (ordinal - ordinal % PAGE_LEAVES) as u64
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum StoredPreparation {
     Pending,
     Ready(StoredSource),
     Failed(String),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum LeafPreparation {
     Pending,
     Ready(Arc<StoredLeaf>),
@@ -220,6 +227,12 @@ pub struct StoredLeaf {
     _capacity: PreparedLease,
 }
 
+impl std::fmt::Debug for StoredLeaf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredLeaf").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone)]
 pub struct LeafProof {
     provider: ScopedSourceProvider,
@@ -227,6 +240,12 @@ pub struct LeafProof {
     reference: ContentRef,
     descriptor: SourceLeafDescriptor,
     generation: u64,
+}
+
+impl std::fmt::Debug for LeafProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafProof").finish_non_exhaustive()
+    }
 }
 
 impl LeafProof {
@@ -369,6 +388,12 @@ pub struct StoredOwner {
     prepared_capacity: Arc<Semaphore>,
     worker: Result<tokio::sync::mpsc::Sender<WorkerJob>, String>,
     delivery: Delivery<Completion>,
+}
+
+impl std::fmt::Debug for StoredOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredOwner").finish_non_exhaustive()
+    }
 }
 
 impl Default for StoredOwner {

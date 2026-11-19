@@ -45,6 +45,7 @@ pub fn sweep(theme: &ArtisanTheme, timing: ShimmerTiming, key: u64) -> TextShimm
     }
 }
 
+#[derive(Debug)]
 pub struct ShimmerText {
     id: Key,
     content: String,

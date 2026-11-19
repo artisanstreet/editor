@@ -41,6 +41,12 @@ pub struct EditorController {
     native_follow_caret: Rc<std::cell::Cell<bool>>,
 }
 
+impl std::fmt::Debug for EditorController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditorController").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Framing {
     mode: Mode,

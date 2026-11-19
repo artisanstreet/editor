@@ -9,6 +9,12 @@ pub struct DialogRoutes {
     routes: RefCell<HashMap<RequestId, Route>>,
 }
 
+impl std::fmt::Debug for DialogRoutes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialogRoutes").finish_non_exhaustive()
+    }
+}
+
 impl DialogRoutes {
     pub fn route(&self, request: RequestId, route: impl FnOnce(DialogOutcome) + 'static) {
         self.routes.borrow_mut().insert(request, Box::new(route));

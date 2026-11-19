@@ -10,11 +10,13 @@ use aqua_core::{
 use super::kit::{Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, ShadowLayer};
 
+#[derive(Debug)]
 pub struct TabCardStrip {
     pub reveal: f32,
     pub content: aqua_ui::element::Element,
 }
 
+#[derive(Debug)]
 pub struct TabCard {
     pub id: String,
     pub tab: aqua_ui::element::Element,

@@ -12,6 +12,7 @@ const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
 const HIGHLIGHT: f32 = 0.12;
 
+#[derive(Debug)]
 pub struct Edge {
     pub rim_top: Oklch,
     pub rim_bottom: Oklch,
@@ -33,6 +34,7 @@ impl Edge {
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 
+#[derive(Debug)]
 pub struct Surfaces {
     pub bg: Oklch,
     pub inner: Oklch,

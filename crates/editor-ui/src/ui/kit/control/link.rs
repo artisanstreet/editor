@@ -21,6 +21,12 @@ pub struct Link {
     on_activate: Option<Box<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link").finish_non_exhaustive()
+    }
+}
+
 impl Link {
     pub fn new(
         key: impl Into<Key>,

@@ -75,6 +75,7 @@ impl Identity {
     }
 }
 
+#[derive(Debug)]
 pub struct Account {
     pub identity: Identity,
     pub avatar: Option<Arc<ImageHandle>>,
@@ -110,6 +111,12 @@ pub struct Trigger<'a> {
     pub menu: &'a Menu,
     pub now: Instant,
     pub emit: Rc<dyn Fn(Event)>,
+}
+
+impl<'a> std::fmt::Debug for Trigger<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trigger").finish_non_exhaustive()
+    }
 }
 
 #[must_use]
@@ -160,6 +167,12 @@ pub struct Sheet<'a> {
     pub width: f32,
     pub now: Instant,
     pub emit: Rc<dyn Fn(Event)>,
+}
+
+impl<'a> std::fmt::Debug for Sheet<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sheet").finish_non_exhaustive()
+    }
 }
 
 #[must_use]

@@ -78,6 +78,12 @@ pub struct ScrollEdges {
     entrance: Rc<[Cell<Entrance>; 2]>,
 }
 
+impl std::fmt::Debug for ScrollEdges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScrollEdges").finish_non_exhaustive()
+    }
+}
+
 impl PartialEq for ScrollEdges {
     fn eq(&self, _: &Self) -> bool {
         true
@@ -303,7 +309,7 @@ pub fn keyed(ui: &aqua::UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key)
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct EdgeBands {
     pub scroll: &'static str,
     pub top: &'static str,
@@ -335,6 +341,7 @@ impl EdgeBands {
     }
 }
 
+#[derive(Debug)]
 pub struct EdgeSurface<'a> {
     pub edges: &'a ScrollEdges,
     pub scroller: &'a str,

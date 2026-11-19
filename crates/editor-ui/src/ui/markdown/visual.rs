@@ -34,6 +34,7 @@ pub struct InlineLink {
     pub destination: String,
 }
 
+#[derive(Debug)]
 pub struct PreparedInline {
     pub source: SelectionSource,
     pub runs: Vec<InlineRun>,
@@ -344,6 +345,7 @@ pub enum LeafError {
     InlineDecorations,
 }
 
+#[derive(Debug)]
 pub struct ProseLeaf {
     pub element: Element,
     pub source: SelectionSource,

@@ -32,21 +32,24 @@ mod rendering;
 mod stored_leaves;
 use self::code::code_card;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PreparationProof(Arc<()>);
 
+#[derive(Debug)]
 pub struct RenderedMarkdown {
     pub element: Element,
     pub selection_sources: Vec<SelectionSource>,
     pub proof: PreparationProof,
 }
 
+#[derive(Debug)]
 pub struct ProjectedTextLeaf {
     pub key: String,
     pub slot: usize,
     pub text: Arc<str>,
 }
 
+#[derive(Debug)]
 pub struct ProjectedRevealText {
     pub key: String,
     pub text: Arc<str>,
@@ -54,6 +57,7 @@ pub struct ProjectedRevealText {
     pub fades: Vec<super::reveal::Fade>,
 }
 
+#[derive(Debug)]
 pub struct ProjectedLeafInfo {
     pub source_range: std::ops::Range<usize>,
     pub list_depth: usize,
@@ -83,6 +87,7 @@ impl ProjectedRevealText {
     }
 }
 
+#[derive(Debug)]
 pub struct ProjectedGeometry {
     pub frame_key: String,
     pub text: Vec<ProjectedTextLeaf>,
@@ -97,6 +102,12 @@ pub struct ProjectedMarkdown {
     pub geometry: ProjectedGeometry,
     pub source_range: std::ops::Range<usize>,
     pub proof: PreparationProof,
+}
+
+impl std::fmt::Debug for ProjectedMarkdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectedMarkdown").finish_non_exhaustive()
+    }
 }
 
 impl ProjectedMarkdown {
@@ -126,6 +137,13 @@ pub struct StoredProjectedMarkdown {
     #[cfg(test)]
     pub list_depth: usize,
     pub proof: super::stored::LeafProof,
+}
+
+impl std::fmt::Debug for StoredProjectedMarkdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredProjectedMarkdown")
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredProjectedMarkdown {
@@ -162,9 +180,21 @@ pub struct CodeServices {
     pub reference: Option<ReferenceServices>,
 }
 
+impl std::fmt::Debug for CodeServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeServices").finish_non_exhaustive()
+    }
+}
+
 pub struct ReferenceServices {
     pub instance: Option<editor_core::HostInstance>,
     pub open: Rc<dyn Fn(rich::actions::OpenReference, Option<editor_core::HostInstance>)>,
+}
+
+impl std::fmt::Debug for ReferenceServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReferenceServices").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -182,6 +212,12 @@ pub struct MediaServices {
     pub wake: aqua::mailbox::Wake,
 }
 
+impl std::fmt::Debug for MediaServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaServices").finish_non_exhaustive()
+    }
+}
+
 pub struct HeatmapServices {
     empty: Rc<dyn Fn(&str) -> Element>,
     readout: Rc<dyn Fn(f32, &str, &str) -> Element>,
@@ -189,10 +225,23 @@ pub struct HeatmapServices {
     concentration: ConcentrationServices,
 }
 
+impl std::fmt::Debug for HeatmapServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeatmapServices").finish_non_exhaustive()
+    }
+}
+
 pub struct ConcentrationServices {
     frame: Rc<dyn Fn(Element, &str, &str) -> Element>,
     plot_label: Rc<dyn Fn(f32, f32, &str, GpuiHsla) -> Element>,
     readout: Rc<dyn Fn(f32, &str, &str, &str, GpuiHsla) -> Element>,
+}
+
+impl std::fmt::Debug for ConcentrationServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConcentrationServices")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConcentrationServices {
@@ -308,6 +357,12 @@ pub struct MarkdownPresenter {
     concentration_ids: RefCell<HashMap<String, HashSet<String>>>,
     copies: Rc<RefCell<HashMap<String, HashMap<String, crate::ui::code_copy::CodeCopyController>>>>,
     diagrams: RefCell<HashMap<String, Rc<RefCell<super::diagram::view::DiagramState>>>>,
+}
+
+impl std::fmt::Debug for MarkdownPresenter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkdownPresenter").finish_non_exhaustive()
+    }
 }
 
 struct RetainedRich {

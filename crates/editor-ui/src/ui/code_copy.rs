@@ -93,6 +93,12 @@ pub struct CodeCopyButton {
     effect: Rc<dyn Fn(CopyEffect)>,
 }
 
+impl std::fmt::Debug for CodeCopyButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeCopyButton").finish_non_exhaustive()
+    }
+}
+
 impl CodeCopyButton {
     pub fn new(
         id: impl Into<Key>,

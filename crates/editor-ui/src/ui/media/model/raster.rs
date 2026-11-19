@@ -82,6 +82,7 @@ pub struct Look {
     pub(crate) edges: Option<(Vec3, f32)>,
 }
 
+#[derive(Debug)]
 pub struct Frame {
     pub(crate) width: u32,
     pub(crate) height: u32,

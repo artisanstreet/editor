@@ -20,6 +20,12 @@ pub struct Switch {
     on_change: Option<Box<dyn Fn(bool)>>,
 }
 
+impl std::fmt::Debug for Switch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Switch").finish_non_exhaustive()
+    }
+}
+
 impl Switch {
     pub fn new(
         id: impl Into<Key>,

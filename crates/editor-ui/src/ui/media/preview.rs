@@ -31,7 +31,7 @@ const FRAME: Surface = Surface::Media(MediaKind::Frame);
 
 static NEXT_WAITER: AtomicU64 = AtomicU64::new(1 << 62);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OpenPreview {
     pub fetcher: MediaFetcher,
     pub sources: Vec<MediaSource>,
@@ -40,7 +40,7 @@ pub struct OpenPreview {
     pub opener_key: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Effect {
     Open(OpenPreview),
     ShowCopyMenu(crate::ui::rich::actions::ShowCopyMenu),
@@ -116,6 +116,12 @@ pub struct Preview {
     pan: aqua_core::Point,
     waiter: u64,
     wake: aqua::mailbox::Mailbox<()>,
+}
+
+impl std::fmt::Debug for Preview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Preview").finish_non_exhaustive()
+    }
 }
 
 impl Preview {

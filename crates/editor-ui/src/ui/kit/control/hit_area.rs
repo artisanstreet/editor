@@ -14,6 +14,12 @@ pub struct HitArea {
     on_activate: Option<Box<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for HitArea {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HitArea").finish_non_exhaustive()
+    }
+}
+
 impl HitArea {
     pub fn new(
         key: impl Into<Key>,

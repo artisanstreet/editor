@@ -753,6 +753,7 @@ fn progress_line(
     element
 }
 
+#[derive(Debug)]
 #[cfg(feature = "test-support")]
 pub struct AudioFixture;
 #[cfg(feature = "test-support")]

@@ -40,6 +40,7 @@ impl ImageError {
     }
 }
 
+#[derive(Debug)]
 pub struct ImageLoader;
 
 impl ResourceLoader for ImageLoader {
@@ -93,6 +94,12 @@ impl Drop for State {
 pub struct Images {
     state: Rc<RefCell<State>>,
     mailbox: Rc<aqua::mailbox::Mailbox<()>>,
+}
+
+impl std::fmt::Debug for Images {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Images").finish_non_exhaustive()
+    }
 }
 
 impl Default for Images {

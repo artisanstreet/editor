@@ -42,6 +42,12 @@ pub struct PreparedReveal {
     fully_visible: Cell<bool>,
 }
 
+impl std::fmt::Debug for PreparedReveal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedReveal").finish_non_exhaustive()
+    }
+}
+
 impl Default for PreparedReveal {
     fn default() -> Self {
         Self {

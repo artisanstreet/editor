@@ -5,6 +5,7 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::default_trait_access,
+    clippy::elidable_lifetime_names,
     clippy::enum_variant_names,
     clippy::float_cmp,
     clippy::fn_params_excessive_bools,
@@ -46,7 +47,6 @@
     clippy::used_underscore_binding,
     clippy::useless_let_if_seq,
     clippy::wildcard_enum_match_arm,
-    missing_debug_implementations,
     trivial_casts,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]

@@ -571,6 +571,13 @@ pub struct ChartFixture {
     model: Arc<Model>,
     state: ChartState,
 }
+
+#[cfg(feature = "test-support")]
+impl std::fmt::Debug for ChartFixture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChartFixture").finish_non_exhaustive()
+    }
+}
 #[cfg(feature = "test-support")]
 impl ChartFixture {
     pub fn new(json: &str) -> Self {

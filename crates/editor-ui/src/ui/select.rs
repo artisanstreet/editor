@@ -298,6 +298,12 @@ pub struct Select<V: Clone + Eq + 'static> {
     open_change: Option<OpenChange>,
 }
 
+impl<V: Clone + Eq + 'static> std::fmt::Debug for Select<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Select").finish_non_exhaustive()
+    }
+}
+
 impl<V: Clone + Eq + 'static> Select<V> {
     pub fn new(
         id: impl Into<Key>,
@@ -472,6 +478,12 @@ pub struct SelectMenu<V: Clone + Eq + 'static> {
     trigger_width: f32,
     change: Option<SelectChange<V>>,
     open_change: Option<OpenChange>,
+}
+
+impl<V: Clone + Eq + 'static> std::fmt::Debug for SelectMenu<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectMenu").finish_non_exhaustive()
+    }
 }
 
 impl<V: Clone + Eq + 'static> SelectMenu<V> {

@@ -60,7 +60,13 @@ pub struct PhraseOverflow {
     pub refit: Option<Rc<dyn Fn()>>,
 }
 
-#[derive(Default)]
+impl std::fmt::Debug for PhraseOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhraseOverflow").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct PhraseMotion {
     current: Vec<String>,
     previous: Vec<String>,

@@ -187,6 +187,12 @@ pub struct ResourceCache {
     state: Mutex<State>,
 }
 
+impl std::fmt::Debug for ResourceCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceCache").finish_non_exhaustive()
+    }
+}
+
 pub trait ResourceLoader: 'static {
     type Source: Clone + PartialEq + Send + 'static;
     type Output: Clone + Send + 'static;
@@ -199,6 +205,7 @@ pub(crate) enum Load<L: ResourceLoader> {
     TooLarge,
 }
 
+#[derive(Debug)]
 pub struct LoadTicket<L: ResourceLoader> {
     cache: Weak<ResourceCache>,
     source: L::Source,

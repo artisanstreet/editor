@@ -728,7 +728,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         [10, 11]
     );
     presenter.release_stored_leaf("row", 1);
-    assert!(render_leaf(&presenter, &owner, 1, 10).is_err());
+    render_leaf(&presenter, &owner, 1, 10).expect_err("a released leaf no longer renders");
     let oversized = IndexedLeafContent::Block(Block::Paragraph {
         spans: vec![Span::Text("x".repeat(PREPARED_BYTES / 2 + 1))],
         range: 0..1,
@@ -760,7 +760,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             .is_err()
     );
     owner.release("row");
-    assert!(render(&presenter, &owner).is_err());
+    render(&presenter, &owner).expect_err("a released row no longer renders");
 }
 
 fn tampered_record(token: serde_json::Value) -> artisan_markdown_index::LeafRecord {

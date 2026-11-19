@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkingPulse {
     started: Rc<std::cell::Cell<Option<u32>>>,
 }

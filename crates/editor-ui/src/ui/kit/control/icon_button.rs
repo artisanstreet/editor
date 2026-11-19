@@ -60,6 +60,12 @@ pub struct IconButton {
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 
+impl std::fmt::Debug for IconButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IconButton").finish_non_exhaustive()
+    }
+}
+
 impl IconButton {
     pub fn new(
         key: impl Into<Key>,

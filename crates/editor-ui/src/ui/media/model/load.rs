@@ -23,11 +23,13 @@ struct Request {
     renderer: RendererCapability,
 }
 
+#[derive(Debug)]
 pub enum Geometry {
     Mesh(Arc<GpuiMesh>),
     Software(super::Mesh),
 }
 
+#[derive(Debug)]
 pub struct LoadedModel {
     pub(crate) geometry: Geometry,
     pub(crate) triangles: usize,
@@ -89,6 +91,12 @@ type Loaded = Result<Arc<LoadedModel>, String>;
 #[derive(Clone)]
 pub struct ModelAssets {
     loads: Loads<Loader, Loaded>,
+}
+
+impl std::fmt::Debug for ModelAssets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelAssets").finish_non_exhaustive()
+    }
 }
 impl Default for ModelAssets {
     fn default() -> Self {

@@ -34,6 +34,12 @@ pub struct MediaFrame {
     visible: Option<Rc<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for MediaFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaFrame").finish_non_exhaustive()
+    }
+}
+
 impl MediaFrame {
     pub fn new(theme: ArtisanTheme, aspect: f32, measured_width: f32, content: Element) -> Self {
         let aspect = if aspect.is_finite() && aspect > 0.0 {

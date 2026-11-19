@@ -99,6 +99,12 @@ pub struct Editor {
     vertical_goal_column: Option<usize>,
 }
 
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor").finish_non_exhaustive()
+    }
+}
+
 impl Editor {
     pub fn new(text: &str, mode: Mode) -> Self {
         let limit_notice = text.len() > MAX_BYTES;

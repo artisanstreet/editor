@@ -39,6 +39,12 @@ pub struct AttachmentTile {
     activate: Option<Rc<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for AttachmentTile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachmentTile").finish_non_exhaustive()
+    }
+}
+
 impl AttachmentTile {
     pub fn new(id: impl Into<Key>, theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {

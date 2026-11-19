@@ -123,6 +123,12 @@ pub struct SceneCache {
     paths: std::cell::RefCell<Option<((u32, u32), Vec<Option<LocalPath>>)>>,
 }
 
+impl std::fmt::Debug for SceneCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneCache").finish_non_exhaustive()
+    }
+}
+
 impl SceneCache {
     fn path<R>(
         &self,

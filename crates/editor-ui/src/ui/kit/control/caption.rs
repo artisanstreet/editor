@@ -32,6 +32,12 @@ pub struct CaptionButton {
     on_hover: Option<Box<dyn Fn(bool)>>,
 }
 
+impl std::fmt::Debug for CaptionButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptionButton").finish_non_exhaustive()
+    }
+}
+
 impl CaptionButton {
     pub fn new(
         key: impl Into<Key>,

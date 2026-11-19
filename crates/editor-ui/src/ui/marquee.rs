@@ -5,6 +5,7 @@ use aqua_ui::{
     tree::hash_key,
 };
 
+#[derive(Debug)]
 pub struct Marquee {
     id: String,
     text: String,

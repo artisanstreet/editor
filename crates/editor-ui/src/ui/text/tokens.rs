@@ -13,6 +13,7 @@ pub struct GlyphToken {
     pub color: Oklch,
 }
 
+#[derive(Debug)]
 pub struct CompiledTokens {
     pub spans: Vec<StyledSpan>,
     pub glyphs: Vec<GlyphToken>,

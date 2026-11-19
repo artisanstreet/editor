@@ -837,6 +837,7 @@ impl FontSet {
 pub struct FontRole {
     pub family: &'static str,
 }
+#[derive(Debug)]
 pub struct ProseTypography;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProseHeading {

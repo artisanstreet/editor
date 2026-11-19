@@ -479,6 +479,13 @@ pub struct HeatmapFixture {
 }
 
 #[cfg(feature = "test-support")]
+impl std::fmt::Debug for HeatmapFixture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeatmapFixture").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "test-support")]
 impl HeatmapFixture {
     pub fn new(json: &str) -> Self {
         let model = serde_json::from_str(json).expect("valid heatmap");

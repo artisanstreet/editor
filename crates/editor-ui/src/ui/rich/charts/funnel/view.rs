@@ -350,6 +350,13 @@ pub struct FunnelFixture {
     model: Funnel,
     state: FunnelState,
 }
+
+#[cfg(feature = "test-support")]
+impl std::fmt::Debug for FunnelFixture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FunnelFixture").finish_non_exhaustive()
+    }
+}
 #[cfg(feature = "test-support")]
 impl FunnelFixture {
     pub fn new(json: &str) -> Self {
