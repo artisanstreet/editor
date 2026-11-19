@@ -191,8 +191,8 @@ struct Connection {
 pub(crate) enum OpenCodeConnectionsError {
     #[error("list OpenCode's integrations")]
     Run(#[source] RunShortError),
-    #[error("OpenCode could not list its integrations: {stderr}")]
-    Refused { stderr: String },
+    #[error("OpenCode could not list its integrations ({stderr_bytes} bytes on stderr)")]
+    Refused { stderr_bytes: usize },
     #[error("read OpenCode's integrations")]
     Decode(#[source] serde_json::Error),
 }
@@ -212,7 +212,7 @@ async fn opencode_connections(
     .map_err(OpenCodeConnectionsError::Run)?;
     if !success {
         return Err(OpenCodeConnectionsError::Refused {
-            stderr: strip_ansi(stderr.trim()),
+            stderr_bytes: stderr.len(),
         });
     }
     let listing: serde_json::Value =
@@ -264,8 +264,8 @@ enum OpenCodeLogoutError {
         #[source]
         source: RunShortError,
     },
-    #[error("signing out of {name}: {stderr}")]
-    Refused { name: String, stderr: String },
+    #[error("OpenCode refused to sign out of {name} ({stderr_bytes} bytes on stderr)")]
+    Refused { name: String, stderr_bytes: usize },
 }
 
 async fn opencode_logout(binary: &Path, home: &Path) -> Result<(), OpenCodeLogoutError> {
@@ -297,7 +297,7 @@ async fn opencode_logout(binary: &Path, home: &Path) -> Result<(), OpenCodeLogou
         if !success {
             return Err(OpenCodeLogoutError::Refused {
                 name: connection.name,
-                stderr: strip_ansi(stderr.trim()),
+                stderr_bytes: stderr.len(),
             });
         }
     }

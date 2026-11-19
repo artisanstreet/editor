@@ -68,6 +68,34 @@ fn opencode_device_login_yields_link_and_code() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn an_opencode_sign_in_check_that_fails_keeps_what_it_printed_out_of_the_message() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let home = fixture.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let binary = fixture.path().join("opencode");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\necho 'refresh failed for token sk-live-0123456789abcdef' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sign_in = SignIn::new(EngineId::OpenCode, home);
+
+    sign_in.check(&binary).await;
+
+    let SignInState::Failed { message } = sign_in.state() else {
+        panic!("a failed check is reported: {:?}", sign_in.state());
+    };
+    assert!(
+        !message.contains("sk-live-0123456789abcdef"),
+        "the check's output reached the message: {message}"
+    );
+    assert!(message.contains("bytes on stderr"), "{message}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn opencode_is_signed_in_by_its_logins_and_signs_out_of_all() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = tempfile::tempdir().unwrap();

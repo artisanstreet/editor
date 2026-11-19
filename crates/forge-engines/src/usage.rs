@@ -414,8 +414,8 @@ async fn read_opencode(
 pub(crate) enum ReadGoUsageError {
     #[error("list OpenCode credentials")]
     Run(#[source] crate::account::RunShortError),
-    #[error("listing OpenCode credentials: {stderr}")]
-    Refused { stderr: String },
+    #[error("OpenCode could not list its credentials ({stderr_bytes} bytes on stderr)")]
+    Refused { stderr_bytes: usize },
     #[error("read OpenCode's credentials")]
     Credentials(#[source] serde_json::Error),
     #[error("no OpenCode Console or Go credential")]
@@ -447,7 +447,7 @@ async fn read_opencode_go(
     .map_err(ReadGoUsageError::Run)?;
     if !success {
         return Err(ReadGoUsageError::Refused {
-            stderr: crate::account::strip_ansi(stderr.trim()),
+            stderr_bytes: stderr.len(),
         });
     }
     let listing: Value = serde_json::from_str(&stdout).map_err(ReadGoUsageError::Credentials)?;
@@ -535,8 +535,11 @@ pub(crate) enum ReadSpendError {
         #[source]
         source: crate::account::RunShortError,
     },
-    #[error("opencode stats for {days} days: {stderr}")]
-    Refused { days: &'static str, stderr: String },
+    #[error("opencode stats for {days} days failed ({stderr_bytes} bytes on stderr)")]
+    Refused {
+        days: &'static str,
+        stderr_bytes: usize,
+    },
     #[error("read opencode stats for {days} days")]
     Decode {
         days: &'static str,
@@ -561,7 +564,7 @@ async fn read_opencode_spend(binary: &Path, home: &Path) -> Result<UsageSpend, R
         if !success {
             return Err(ReadSpendError::Refused {
                 days,
-                stderr: crate::account::strip_ansi(stderr.trim()),
+                stderr_bytes: stderr.len(),
             });
         }
         let stats: Value = serde_json::from_str(&stdout)
