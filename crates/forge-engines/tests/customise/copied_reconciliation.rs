@@ -29,7 +29,7 @@ fn unchanged_real_copied_skill_keeps_files_and_timestamps_on_reconciliation() {
     }
     let wanted = BTreeMap::from([("skill".to_owned(), source.clone())]);
     for _ in 0..3 {
-        sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
+        sync_skill_folder(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
     }
     assert!(fs::symlink_metadata(&copy).unwrap().is_dir());
     assert!(
@@ -51,7 +51,7 @@ fn unchanged_real_copied_skill_keeps_files_and_timestamps_on_reconciliation() {
     )
     .unwrap();
     assert!(!copied_skill_matches(&copy, &source).unwrap());
-    sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
+    sync_skill_folder(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
     assert_eq!(
         fs::read(copy.join("SKILL.md")).unwrap(),
         fs::read(source.join("SKILL.md")).unwrap()

@@ -32,7 +32,7 @@ pub(crate) fn engine_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some((directory, _)) = crate::engines::host_spec(engine).config
-        && let Err(error) = std::fs::create_dir_all(home.join(directory))
+        && let Err(error) = crate::sandbox::home::make_folder(home, Path::new(directory))
     {
         tracing::warn!(home = %home.display(), %error, "couldn't create engine configuration directory");
     }

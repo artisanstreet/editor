@@ -32,7 +32,7 @@ pub enum SaveSessionError {
     Write {
         path: PathBuf,
         #[source]
-        source: artisan_paths::private::PrivateFileError,
+        source: std::io::Error,
     },
 }
 
@@ -52,7 +52,9 @@ pub struct RemoveSessionError {
     source: std::io::Error,
 }
 
-static FILE_LOCK: Mutex<()> = Mutex::new(());
+pub(super) static FILE_LOCK: Mutex<()> = Mutex::new(());
+const SESSION_FILE: &str = ".claude-ai/session.json";
+const SESSION_MODE: u32 = 0o600;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
@@ -116,7 +118,7 @@ impl Session {
 
     #[must_use]
     pub fn path(home: &Path) -> PathBuf {
-        home.join(".claude-ai").join("session.json")
+        home.join(SESSION_FILE)
     }
 
     #[must_use]
@@ -147,12 +149,12 @@ impl Session {
 
     pub(crate) fn load(home: &Path) -> Result<Option<Self>, LoadSessionError> {
         let path = Self::path(home);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let bytes = match crate::sandbox::home::read(home, Path::new(SESSION_FILE)) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
             Err(source) => return Err(LoadSessionError::Read { path, source }),
         };
-        serde_json::from_str(&text)
+        serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|source| LoadSessionError::Parse { path, source })
     }
@@ -171,7 +173,7 @@ impl Session {
                 path: path.clone(),
                 source,
             })?;
-        artisan_paths::private::write_file(&path, text.as_bytes())
+        crate::sandbox::home::write(home, Path::new(SESSION_FILE), text.as_bytes(), SESSION_MODE)
             .map_err(|source| SaveSessionError::Write { path, source })
     }
 
@@ -197,13 +199,12 @@ impl Session {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = Self::path(home);
-        match std::fs::remove_file(&path) {
-            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
-                Err(RemoveSessionError { path, source })
+        crate::sandbox::home::remove(home, Path::new(SESSION_FILE)).map_err(|source| {
+            RemoveSessionError {
+                path: Self::path(home),
+                source,
             }
-            _ => Ok(()),
-        }
+        })
     }
 
     pub(crate) fn apply(&mut self, changes: &[CookieChange]) {

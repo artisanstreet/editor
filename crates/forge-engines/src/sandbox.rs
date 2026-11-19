@@ -30,6 +30,9 @@ pub(crate) enum Sandbox {
 #[cfg(target_os = "linux")]
 pub(crate) mod guard;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod home;
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod guard {
     use artisan_api::EngineId;
@@ -90,7 +93,7 @@ pub(crate) mod guard {
     pub(crate) fn write(
         engine: EngineId,
         home: &Path,
-        relative: &str,
+        relative: &Path,
         bytes: &[u8],
         _mode: u32,
     ) -> Result<(), GuardError> {
@@ -110,7 +113,7 @@ pub(crate) mod guard {
     pub(crate) fn read(
         engine: EngineId,
         home: &Path,
-        relative: &str,
+        relative: &Path,
     ) -> Result<Option<Vec<u8>>, GuardError> {
         let path = home.join(relative);
         match std::fs::read(&path) {
@@ -124,7 +127,7 @@ pub(crate) mod guard {
         }
     }
 
-    pub(crate) fn remove(engine: EngineId, home: &Path, relative: &str) -> Result<(), GuardError> {
+    pub(crate) fn remove(engine: EngineId, home: &Path, relative: &Path) -> Result<(), GuardError> {
         let path = home.join(relative);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -136,6 +139,65 @@ pub(crate) mod guard {
             }),
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod home {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+
+    pub(crate) fn write(home: &Path, relative: &Path, bytes: &[u8], _mode: u32) -> io::Result<()> {
+        let path = home.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        artisan_paths::private::write_file(&path, bytes).map_err(io::Error::other)
+    }
+
+    pub(crate) fn read(home: &Path, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(home.join(relative)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn append(home: &Path, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+        io::Write::write_all(
+            &mut fs::OpenOptions::new()
+                .append(true)
+                .open(home.join(relative))?,
+            bytes,
+        )
+    }
+
+    pub(crate) fn remove(home: &Path, relative: &Path) -> io::Result<()> {
+        let path = home.join(relative);
+        let removed = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path),
+            Err(error) => Err(error),
+        };
+        match removed {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    pub(crate) fn make_folder(home: &Path, relative: &Path) -> io::Result<()> {
+        fs::create_dir_all(home.join(relative))
+    }
+}
+
+#[must_use]
+pub(crate) fn forge_records(home: &Path) -> PathBuf {
+    let own = home
+        .file_name()
+        .expect("invariant: an engine home is a named folder");
+    let mut sibling = own.to_os_string();
+    sibling.push(".artisan");
+    home.with_file_name(sibling)
 }
 
 pub(crate) use guard::GuardError;

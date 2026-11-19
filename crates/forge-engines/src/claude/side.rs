@@ -250,17 +250,17 @@ fn discard(turn: &Turn, fork: Option<&str>) {
         return;
     };
     let directory = config_dir(turn).join("projects").join(project_dir(turn));
-    let transcript = directory.join(format!("{fork}.jsonl"));
-    if let Err(error) = std::fs::remove_file(&transcript)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::debug!(path = %transcript.display(), "removing a Claude fork's transcript: {error}");
-    }
-    let attachments = directory.join(fork);
-    if let Err(error) = std::fs::remove_dir_all(&attachments)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::debug!(path = %attachments.display(), "removing a Claude fork's directory: {error}");
+    for path in [
+        directory.join(format!("{fork}.jsonl")),
+        directory.join(fork),
+    ] {
+        let removed = match path.strip_prefix(&turn.home) {
+            Ok(relative) => crate::sandbox::home::remove(&turn.home, relative),
+            Err(_outside_the_home) => remove_outside(&path),
+        };
+        if let Err(error) = removed {
+            tracing::debug!(path = %path.display(), %error, "couldn't remove a Claude fork's files");
+        }
     }
 }
 
@@ -330,3 +330,15 @@ fn base36(mut value: u32) -> String {
 #[cfg(test)]
 #[path = "../../tests/claude/side.rs"]
 mod tests;
+
+fn remove_outside(path: &Path) -> std::io::Result<()> {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}

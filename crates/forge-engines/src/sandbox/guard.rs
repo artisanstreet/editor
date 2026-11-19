@@ -1,5 +1,5 @@
+use super::home::{Create, Folder, Found, Home, MAX_DEPTH};
 use artisan_api::EngineId;
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -7,9 +7,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
 const SNAPSHOT_FOLDER: &str = "guarded-config";
@@ -20,13 +17,7 @@ const CLAUDE_STATE: &str = ".claude.json";
 const CLAUDE_STATE_COPY: &str = "claude-mcp-servers.json";
 const LIVE_MARKERS: &str = "guarded-config-live";
 const BUSY_LOCK: &str = "guarded-config-busy";
-const TEMPORARY_PREFIX: &str = ".artisan-guard-";
-const PLANTED_PREFIX: &str = ".artisan-planted-";
-const RANDOM_BYTES: usize = 16;
-const MAX_DEPTH: usize = 128;
-const FOLDER_MODE: u32 = 0o700;
 const CLAUDE_STATE_MODE: u32 = 0o600;
-const PERMISSION_BITS: u32 = 0o7777;
 
 const fn surfaces(engine: EngineId) -> &'static [&'static str] {
     match engine {
@@ -37,6 +28,7 @@ const fn surfaces(engine: EngineId) -> &'static [&'static str] {
             ".claude/hooks",
             ".claude/commands",
             ".claude/agents",
+            ".claude/skills",
             ".claude/CLAUDE.md",
             ".artisan/claude-mcp.json",
         ],
@@ -45,6 +37,7 @@ const fn surfaces(engine: EngineId) -> &'static [&'static str] {
             ".codex/hooks.json",
             ".codex/plugins",
             ".codex/rules",
+            ".codex/skills",
             ".codex/AGENTS.md",
             ".codex/AGENTS.override.md",
         ],
@@ -60,6 +53,8 @@ const fn surfaces(engine: EngineId) -> &'static [&'static str] {
             "config/opencode/commands",
             "config/opencode/agent",
             "config/opencode/agents",
+            "config/opencode/skill",
+            "config/opencode/skills",
             "config/opencode/AGENTS.md",
         ],
     }
@@ -108,6 +103,14 @@ pub enum GuardError {
         #[source]
         source: io::Error,
     },
+    #[error("move {engine}'s {} out to {}", path.display(), to.display())]
+    Take {
+        engine: EngineId,
+        path: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("read {engine}'s guarded configuration record {}", path.display())]
     Manifest {
         engine: EngineId,
@@ -136,15 +139,6 @@ enum Entry {
 }
 
 type Manifest = BTreeMap<PathBuf, Entry>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Found {
-    Missing,
-    Folder,
-    Link(PathBuf),
-    File { length: u64, mode: u32 },
-    Other,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -186,185 +180,9 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn random_name(prefix: &str) -> io::Result<OsString> {
-    let mut bytes = [0_u8; RANDOM_BYTES];
-    getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
-    Ok(OsString::from(format!("{prefix}{}", hex::encode(bytes))))
-}
-
-#[derive(Debug)]
-struct Folder(OwnedFd);
-
-impl Folder {
-    fn found(&self, name: &OsStr) -> io::Result<Found> {
-        let stat = match rustix::fs::statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(rustix::io::Errno::NOENT) => return Ok(Found::Missing),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(match FileType::from_raw_mode(stat.st_mode) {
-            FileType::Directory => Found::Folder,
-            FileType::Symlink => {
-                let target = rustix::fs::readlinkat(&self.0, name, Vec::new())?;
-                Found::Link(PathBuf::from(OsString::from_vec(target.into_bytes())))
-            }
-            FileType::RegularFile => Found::File {
-                length: stat.st_size.unsigned_abs(),
-                mode: stat.st_mode & PERMISSION_BITS,
-            },
-            FileType::Fifo
-            | FileType::Socket
-            | FileType::CharacterDevice
-            | FileType::BlockDevice
-            | FileType::Unknown => Found::Other,
-        })
-    }
-
-    fn open(&self, name: &OsStr) -> io::Result<Self> {
-        rustix::fs::openat(
-            &self.0,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(Self)
-        .map_err(io::Error::from)
-    }
-
-    fn names(&self) -> io::Result<BTreeSet<OsString>> {
-        let mut names = BTreeSet::new();
-        for entry in rustix::fs::Dir::read_from(&self.0)? {
-            let name = entry?.file_name().to_bytes().to_vec();
-            if name != b"." && name != b".." {
-                names.insert(OsString::from_vec(name));
-            }
-        }
-        Ok(names)
-    }
-
-    fn read(&self, name: &OsStr, length: u64) -> io::Result<Vec<u8>> {
-        let file = rustix::fs::openat(
-            &self.0,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        if FileType::from_raw_mode(rustix::fs::fstat(&file)?.st_mode) != FileType::RegularFile {
-            return Err(io::Error::other("not a regular file"));
-        }
-        let mut bytes = Vec::new();
-        fs::File::from(file)
-            .take(length.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn holds(&self, name: &OsStr, length: u64, wanted: &str) -> io::Result<bool> {
-        let bytes = self.read(name, length)?;
-        Ok(bytes.len() as u64 == length && digest(&bytes) == wanted)
-    }
-
-    fn make_folder(&self, name: &OsStr) -> io::Result<Self> {
-        rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(FOLDER_MODE))?;
-        self.open(name)
-    }
-
-    fn put_link(&self, name: &OsStr, target: &Path) -> io::Result<()> {
-        rustix::fs::symlinkat(target, &self.0, name).map_err(io::Error::from)
-    }
-
-    fn put_file(&self, name: &OsStr, bytes: &[u8], mode: u32) -> io::Result<()> {
-        let temporary = random_name(TEMPORARY_PREFIX)?;
-        let file = rustix::fs::openat(
-            &self.0,
-            &temporary,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode),
-        )?;
-        let written = rustix::fs::fchmod(&file, Mode::from_raw_mode(mode))
-            .map_err(io::Error::from)
-            .and_then(|()| fs::File::from(file).write_all(bytes))
-            .and_then(|()| {
-                rustix::fs::renameat(&self.0, &temporary, &self.0, name).map_err(io::Error::from)
-            });
-        if written.is_err() {
-            match rustix::fs::unlinkat(&self.0, &temporary, AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        written
-    }
-
-    fn remove(&self, name: &OsStr, home: &Home) -> io::Result<()> {
-        match self.found(name)? {
-            Found::Missing => Ok(()),
-            Found::Folder => {
-                let planted = random_name(PLANTED_PREFIX)?;
-                rustix::fs::renameat(&self.0, name, &home.folder.0, &planted)?;
-                fs::remove_dir_all(home.path.join(&planted))
-            }
-            Found::Link(_) | Found::File { .. } | Found::Other => {
-                match rustix::fs::unlinkat(&self.0, name, AtFlags::empty()) {
-                    Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-                    Err(error) => Err(error.into()),
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Home {
-    path: PathBuf,
-    folder: Folder,
-}
-
-impl Home {
-    fn open(path: &Path) -> io::Result<Self> {
-        let folder = rustix::fs::open(
-            path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            folder: Folder(folder),
-        })
-    }
-
-    fn open_existing(path: &Path) -> io::Result<Option<Self>> {
-        match Self::open(path) {
-            Ok(home) => Ok(Some(home)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn reach(&self, relative: &Path, create: bool) -> io::Result<Option<Folder>> {
-        let mut folder = Folder(self.folder.0.try_clone()?);
-        for component in relative.components() {
-            let Component::Normal(name) = component else {
-                return Err(io::Error::other(format!(
-                    "{} isn't a plain relative path",
-                    relative.display()
-                )));
-            };
-            folder = match (folder.found(name)?, create) {
-                (Found::Folder, _) => folder.open(name)?,
-                (Found::Missing | Found::Link(_) | Found::File { .. } | Found::Other, false) => {
-                    return Ok(None);
-                }
-                (Found::Missing, true) => folder.make_folder(name)?,
-                (Found::Link(_) | Found::File { .. } | Found::Other, true) => {
-                    tracing::warn!(path = %self.path.join(relative).display(), "replacing what a sandboxed run put where Forge keeps an engine's configuration");
-                    folder.remove(name, self)?;
-                    folder.make_folder(name)?
-                }
-            };
-        }
-        Ok(Some(folder))
-    }
+fn holds(folder: &Folder, name: &OsStr, length: u64, wanted: &str) -> io::Result<bool> {
+    let bytes = folder.read(name, length)?;
+    Ok(bytes.len() as u64 == length && digest(&bytes) == wanted)
 }
 
 static EXPOSURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -692,49 +510,60 @@ impl Walk<'_> {
             .in_scope(folder, relative)
             .map_err(self.snapshotting(relative))?;
         for name in names {
-            let child = relative.join(&name);
-            let scope = scope(self.engine, &child);
-            if scope == Scope::Outside {
-                continue;
+            self.record_one(folder, &name, &relative.join(&name), manifest, depth)?;
+        }
+        Ok(())
+    }
+
+    fn record_one(
+        &self,
+        folder: &Folder,
+        name: &OsStr,
+        child: &Path,
+        manifest: &mut Manifest,
+        depth: usize,
+    ) -> Result<(), GuardError> {
+        let scope = scope(self.engine, child);
+        if scope == Scope::Outside {
+            return Ok(());
+        }
+        match folder.found(name).map_err(self.snapshotting(child))? {
+            Found::Missing | Found::Other => {}
+            Found::Folder => {
+                manifest.insert(child.to_path_buf(), Entry::Folder);
+                let inner = folder.open(name).map_err(self.snapshotting(child))?;
+                self.record(&inner, child, manifest, self.deeper(child, depth)?)?;
             }
-            match folder.found(&name).map_err(self.snapshotting(&child))? {
-                Found::Missing | Found::Other => {}
-                Found::Folder => {
-                    manifest.insert(child.clone(), Entry::Folder);
-                    let inner = folder.open(&name).map_err(self.snapshotting(&child))?;
-                    self.record(&inner, &child, manifest, self.deeper(&child, depth)?)?;
-                }
-                Found::Link(_) if scope == Scope::Containing => {
-                    return Err(GuardError::LinkedFolder {
+            Found::Link(_) if scope == Scope::Containing => {
+                return Err(GuardError::LinkedFolder {
+                    engine: self.engine,
+                    path: self.home.path.join(child),
+                });
+            }
+            Found::Link(target) => {
+                manifest.insert(child.to_path_buf(), Entry::Link(target));
+            }
+            Found::File { length, mode } => {
+                let bytes = folder
+                    .read(name, length)
+                    .map_err(self.snapshotting(child))?;
+                let copy = self.copies.join(child);
+                copy.parent()
+                    .map_or(Ok(()), fs::create_dir_all)
+                    .and_then(|()| fs::write(&copy, &bytes))
+                    .map_err(|source| GuardError::Snapshot {
                         engine: self.engine,
-                        path: self.home.path.join(&child),
-                    });
-                }
-                Found::Link(target) => {
-                    manifest.insert(child, Entry::Link(target));
-                }
-                Found::File { length, mode } => {
-                    let bytes = folder
-                        .read(&name, length)
-                        .map_err(self.snapshotting(&child))?;
-                    let copy = self.copies.join(&child);
-                    copy.parent()
-                        .map_or(Ok(()), fs::create_dir_all)
-                        .and_then(|()| fs::write(&copy, &bytes))
-                        .map_err(|source| GuardError::Snapshot {
-                            engine: self.engine,
-                            path: copy.clone(),
-                            source,
-                        })?;
-                    manifest.insert(
-                        child,
-                        Entry::File {
-                            digest: digest(&bytes),
-                            length: bytes.len() as u64,
-                            mode,
-                        },
-                    );
-                }
+                        path: copy.clone(),
+                        source,
+                    })?;
+                manifest.insert(
+                    child.to_path_buf(),
+                    Entry::File {
+                        digest: digest(&bytes),
+                        length: bytes.len() as u64,
+                        mode,
+                    },
+                );
             }
         }
         Ok(())
@@ -797,7 +626,7 @@ impl Walk<'_> {
                 },
             ) if length == found_length
                 && mode == found_mode
-                && folder.holds(name, *length, digest).map_err(restoring())? =>
+                && holds(folder, name, *length, digest).map_err(restoring())? =>
             {
                 return Ok(());
             }
@@ -808,14 +637,14 @@ impl Walk<'_> {
             tracing::warn!(engine = %self.engine, path = %self.home.path.join(child).display(), "engine configuration changed while a sandboxed run could write it; restoring Forge's trusted copy");
         }
         match recorded {
-            None => folder.remove(name, self.home).map_err(restoring()),
+            None => folder.remove(name).map_err(restoring()),
             Some(Entry::Folder) => {
-                folder.remove(name, self.home).map_err(restoring())?;
+                folder.remove(name).map_err(restoring())?;
                 let inner = folder.make_folder(name).map_err(restoring())?;
                 self.reconcile(&inner, child, manifest, self.deeper(child, depth)?)
             }
             Some(Entry::Link(target)) => folder
-                .remove(name, self.home)
+                .remove(name)
                 .and_then(|()| folder.put_link(name, target))
                 .map_err(restoring()),
             Some(Entry::File {
@@ -836,7 +665,7 @@ impl Walk<'_> {
                     });
                 }
                 if matches!(found, Found::Folder) {
-                    folder.remove(name, self.home).map_err(restoring())?;
+                    folder.remove(name).map_err(restoring())?;
                 }
                 folder.put_file(name, &bytes, *mode).map_err(restoring())
             }
@@ -877,37 +706,131 @@ pub(crate) fn restore(engine: EngineId, home: &Path) -> Result<(), GuardError> {
     Ok(())
 }
 
-fn split(relative: &str) -> (&Path, &OsStr) {
-    let path = Path::new(relative);
-    let name = path
-        .file_name()
-        .unwrap_or_else(|| unreachable!("invariant: guarded file {relative} has a name"));
-    (path.parent().unwrap_or_else(|| Path::new("")), name)
+fn split(relative: &Path) -> (&Path, &OsStr) {
+    let name = relative.file_name().unwrap_or_else(|| {
+        unreachable!("invariant: guarded entry {} has a name", relative.display())
+    });
+    (relative.parent().unwrap_or_else(|| Path::new("")), name)
+}
+
+fn guarded_only(engine: EngineId, relative: &Path) {
+    assert!(
+        scope(engine, relative) == Scope::Guarded,
+        "invariant: Forge changes only guarded {engine} configuration through the guard, not {}",
+        relative.display()
+    );
+}
+
+struct Held {
+    _busy: fs::File,
+    opened: Home,
+}
+
+fn held(engine: EngineId, home: &Path, relative: &Path) -> Result<Held, GuardError> {
+    let busy = hold(engine, home, BUSY_LOCK)?;
+    let writing = |source| GuardError::Write {
+        engine,
+        path: home.join(relative),
+        source,
+    };
+    fs::create_dir_all(home).map_err(writing)?;
+    let opened = Home::open(home).map_err(writing)?;
+    Ok(Held {
+        _busy: busy,
+        opened,
+    })
+}
+
+fn record_change(
+    engine: EngineId,
+    home: &Path,
+    change: impl FnOnce(&mut Manifest, &Path) -> Result<(), GuardError>,
+) -> Result<(), GuardError> {
+    let snapshot = snapshot_folder(home);
+    let Some(mut manifest) = read_manifest(engine, &snapshot)? else {
+        return Ok(());
+    };
+    change(&mut manifest, &snapshot.join(COPIES))?;
+    write_manifest(engine, &snapshot, &manifest)
+}
+
+fn record_ancestors(manifest: &mut Manifest, relative: &Path) {
+    for ancestor in relative.ancestors().skip(1) {
+        if !ancestor.as_os_str().is_empty() {
+            manifest.insert(ancestor.to_path_buf(), Entry::Folder);
+        }
+    }
+}
+
+fn forget(manifest: &mut Manifest, relative: &Path) {
+    manifest.retain(|path, _| !path.starts_with(relative));
+}
+
+pub(crate) fn read(
+    engine: EngineId,
+    home: &Path,
+    relative: &Path,
+) -> Result<Option<Vec<u8>>, GuardError> {
+    let reading = |source| GuardError::Read {
+        engine,
+        path: home.join(relative),
+        source,
+    };
+    let Some(opened) = Home::open_existing(home).map_err(reading)? else {
+        return Ok(None);
+    };
+    live_file(engine, &opened, relative)
+}
+
+fn live_file(
+    engine: EngineId,
+    opened: &Home,
+    relative: &Path,
+) -> Result<Option<Vec<u8>>, GuardError> {
+    let reading = |source| GuardError::Read {
+        engine,
+        path: opened.path.join(relative),
+        source,
+    };
+    let (parent, name) = split(relative);
+    let Some(folder) = opened.reach(parent, Create::No).map_err(reading)? else {
+        return Ok(None);
+    };
+    match folder.found(name).map_err(reading)? {
+        Found::File { length, .. } => folder.read(name, length).map(Some).map_err(reading),
+        Found::Missing | Found::Folder | Found::Link(_) | Found::Other => Ok(None),
+    }
 }
 
 pub(crate) fn write(
     engine: EngineId,
     home: &Path,
-    relative: &str,
+    relative: &Path,
     bytes: &[u8],
     mode: u32,
 ) -> Result<(), GuardError> {
-    assert!(
-        scope(engine, Path::new(relative)) == Scope::Guarded,
-        "invariant: Forge writes only guarded {engine} configuration through the guard, not {relative}"
-    );
-    let _busy = hold(engine, home, BUSY_LOCK)?;
-    let path = home.join(relative);
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
+    put(engine, home, &held, relative, bytes, mode)
+}
+
+fn put(
+    engine: EngineId,
+    home: &Path,
+    held: &Held,
+    relative: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), GuardError> {
     let writing = |source| GuardError::Write {
         engine,
-        path: path.clone(),
+        path: home.join(relative),
         source,
     };
     let (parent, name) = split(relative);
-    fs::create_dir_all(home).map_err(writing)?;
-    let opened = Home::open(home).map_err(writing)?;
-    let folder = opened
-        .reach(parent, true)
+    let folder = held
+        .opened
+        .reach(parent, Create::Replacing)
         .map_err(writing)?
         .expect("invariant: reaching a folder while creating it always yields it");
     let wanted = digest(bytes);
@@ -919,96 +842,190 @@ pub(crate) fn write(
         } => {
             length == bytes.len() as u64
                 && found_mode == mode
-                && folder.holds(name, length, &wanted).map_err(writing)?
+                && holds(&folder, name, length, &wanted).map_err(writing)?
         }
         Found::Missing | Found::Folder | Found::Link(_) | Found::Other => false,
     };
     if !unchanged {
         if matches!(current, Found::Folder) {
-            folder.remove(name, &opened).map_err(writing)?;
+            folder.remove(name).map_err(writing)?;
         }
         folder.put_file(name, bytes, mode).map_err(writing)?;
     }
-    let snapshot = snapshot_folder(home);
-    let Some(mut manifest) = read_manifest(engine, &snapshot)? else {
-        return Ok(());
-    };
-    let copy = snapshot.join(COPIES).join(relative);
-    copy.parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| fs::write(&copy, bytes))
-        .map_err(|source| GuardError::Snapshot {
-            engine,
-            path: copy.clone(),
-            source,
-        })?;
-    for ancestor in Path::new(relative).ancestors().skip(1) {
-        if !ancestor.as_os_str().is_empty() {
-            manifest.insert(ancestor.to_path_buf(), Entry::Folder);
-        }
-    }
-    manifest.insert(
-        PathBuf::from(relative),
-        Entry::File {
-            digest: wanted,
-            length: bytes.len() as u64,
-            mode,
-        },
-    );
-    write_manifest(engine, &snapshot, &manifest)
+    record_change(engine, home, |manifest, copies| {
+        let copy = copies.join(relative);
+        copy.parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&copy, bytes))
+            .map_err(|source| GuardError::Snapshot {
+                engine,
+                path: copy.clone(),
+                source,
+            })?;
+        record_ancestors(manifest, relative);
+        manifest.insert(
+            relative.to_path_buf(),
+            Entry::File {
+                digest: wanted,
+                length: bytes.len() as u64,
+                mode,
+            },
+        );
+        Ok(())
+    })
 }
 
-pub(crate) fn read(
+pub(crate) fn link(
     engine: EngineId,
     home: &Path,
-    relative: &str,
-) -> Result<Option<Vec<u8>>, GuardError> {
-    let path = home.join(relative);
-    let reading = |source| GuardError::Read {
+    relative: &Path,
+    target: &Path,
+) -> Result<(), GuardError> {
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
+    let writing = |source| GuardError::Write {
         engine,
-        path: path.clone(),
+        path: home.join(relative),
         source,
     };
     let (parent, name) = split(relative);
-    let Some(opened) = Home::open_existing(home).map_err(reading)? else {
-        return Ok(None);
-    };
-    let Some(folder) = opened.reach(parent, false).map_err(reading)? else {
-        return Ok(None);
-    };
-    match folder.found(name).map_err(reading)? {
-        Found::File { length, .. } => folder.read(name, length).map(Some).map_err(reading),
-        Found::Missing | Found::Folder | Found::Link(_) | Found::Other => Ok(None),
+    let folder = held
+        .opened
+        .reach(parent, Create::Replacing)
+        .map_err(writing)?
+        .expect("invariant: reaching a folder while creating it always yields it");
+    if matches!(folder.found(name).map_err(writing)?, Found::Folder) {
+        folder.remove(name).map_err(writing)?;
     }
+    folder.put_link(name, target).map_err(writing)?;
+    record_change(engine, home, |manifest, _| {
+        record_ancestors(manifest, relative);
+        manifest.insert(relative.to_path_buf(), Entry::Link(target.to_path_buf()));
+        Ok(())
+    })
 }
 
-pub(crate) fn remove(engine: EngineId, home: &Path, relative: &str) -> Result<(), GuardError> {
-    assert!(
-        scope(engine, Path::new(relative)) == Scope::Guarded,
-        "invariant: Forge removes only guarded {engine} configuration through the guard, not {relative}"
-    );
-    let _busy = hold(engine, home, BUSY_LOCK)?;
-    let path = home.join(relative);
+pub(crate) fn remove(engine: EngineId, home: &Path, relative: &Path) -> Result<(), GuardError> {
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
     let removing = |source| GuardError::Write {
         engine,
-        path: path.clone(),
+        path: home.join(relative),
         source,
     };
     let (parent, name) = split(relative);
-    let Some(opened) = Home::open_existing(home).map_err(removing)? else {
+    if let Some(folder) = held.opened.reach(parent, Create::No).map_err(removing)? {
+        folder.remove(name).map_err(removing)?;
+    }
+    record_change(engine, home, |manifest, _| {
+        forget(manifest, relative);
+        Ok(())
+    })
+}
+
+pub(crate) fn give(
+    engine: EngineId,
+    home: &Path,
+    relative: &Path,
+    from: &Path,
+) -> Result<(), GuardError> {
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
+    let moving = |source| GuardError::Take {
+        engine,
+        path: from.to_path_buf(),
+        to: home.join(relative),
+        source,
+    };
+    let (parent, name) = split(relative);
+    let folder = held
+        .opened
+        .reach(parent, Create::Replacing)
+        .map_err(moving)?
+        .expect("invariant: reaching a folder while creating it always yields it");
+    let (source_folder, source_name) = split(from);
+    let source = Home::open(source_folder).map_err(moving)?;
+    source
+        .folder
+        .move_into_new(source_name, &folder, name)
+        .map_err(moving)?;
+    record_change(engine, home, |manifest, copies| {
+        record_ancestors(manifest, relative);
+        let walk = Walk {
+            engine,
+            home: &held.opened,
+            copies,
+        };
+        walk.record_one(&folder, name, relative, manifest, 0)
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placed {
+    Link(PathBuf),
+    Other,
+}
+
+pub(crate) fn entries(
+    engine: EngineId,
+    home: &Path,
+    relative: &Path,
+) -> Result<Vec<(OsString, Placed)>, GuardError> {
+    let reading = |source| GuardError::Read {
+        engine,
+        path: home.join(relative),
+        source,
+    };
+    let Some(opened) = Home::open_existing(home).map_err(reading)? else {
+        return Ok(Vec::new());
+    };
+    let Some(folder) = opened.reach(relative, Create::No).map_err(reading)? else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for name in folder.names().map_err(reading)? {
+        let placed = match folder.found(&name).map_err(reading)? {
+            Found::Missing => continue,
+            Found::Link(target) => Placed::Link(target),
+            Found::Folder | Found::File { .. } | Found::Other => Placed::Other,
+        };
+        entries.push((name, placed));
+    }
+    Ok(entries)
+}
+
+pub(crate) fn take(
+    engine: EngineId,
+    home: &Path,
+    relative: &Path,
+    to: &Path,
+) -> Result<(), GuardError> {
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
+    let moving = |source| GuardError::Take {
+        engine,
+        path: home.join(relative),
+        to: to.to_path_buf(),
+        source,
+    };
+    let (parent, name) = split(relative);
+    let Some(folder) = held.opened.reach(parent, Create::No).map_err(moving)? else {
         return Ok(());
     };
-    if let Some(folder) = opened.reach(parent, false).map_err(removing)? {
-        folder.remove(name, &opened).map_err(removing)?;
+    let (into, to_name) = split(to);
+    let destination = Home::open(into).map_err(moving)?;
+    match folder.move_to(name, &destination.folder, to_name) {
+        Ok(()) => {}
+        Err(error) if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::XDEV) => {
+            folder.copy_tree_to(name, to, 0).map_err(moving)?;
+            folder.remove(name).map_err(moving)?;
+        }
+        Err(error) => return Err(moving(error)),
     }
-    let snapshot = snapshot_folder(home);
-    let Some(mut manifest) = read_manifest(engine, &snapshot)? else {
-        return Ok(());
-    };
-    if manifest.remove(Path::new(relative)).is_some() {
-        write_manifest(engine, &snapshot, &manifest)?;
-    }
-    Ok(())
+    record_change(engine, home, |manifest, _| {
+        forget(manifest, relative);
+        Ok(())
+    })
 }
 
 fn claude_folder(home: &Home) -> io::Result<Option<Folder>> {
@@ -1034,7 +1051,7 @@ fn claude_state(engine: EngineId, home: &Home) -> Result<Option<(Folder, Value)>
         Found::Missing => return Ok(Some((folder, Value::Object(serde_json::Map::new())))),
         Found::Folder | Found::Link(_) | Found::Other => {
             tracing::warn!(%engine, path = %path.display(), "Claude's state file was replaced by something else while a sandboxed run could write it; removing it");
-            folder.remove(name, home).map_err(reading)?;
+            folder.remove(name).map_err(reading)?;
             return Ok(Some((folder, Value::Object(serde_json::Map::new()))));
         }
     };

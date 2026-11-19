@@ -92,3 +92,49 @@ fn cookie(session: &Session, name: &str) -> Option<String> {
             .map(str::to_owned)
     })
 }
+
+#[cfg(unix)]
+#[test]
+fn a_session_folder_replaced_with_a_link_does_not_redirect_the_session() {
+    let root = tempfile::tempdir().expect("a root");
+    let home = root.path().join("home");
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir_all(&home).expect("a home");
+    std::fs::create_dir_all(&elsewhere).expect("a folder outside the home");
+    std::fs::write(elsewhere.join("session.json"), "the user's file").expect("a user file");
+    std::os::unix::fs::symlink(&elsewhere, home.join(".claude-ai")).expect("a planted link");
+
+    session().save(&home).expect("the session saves");
+
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("session.json")).expect("the user file"),
+        "the user's file"
+    );
+    let read = Session::load(&home)
+        .expect("the session loads")
+        .expect("there is a session");
+    assert_eq!(cookie(&read, "sessionKey").as_deref(), Some("abc"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_file_replaced_with_a_link_is_not_read_through() {
+    let root = tempfile::tempdir().expect("a root");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".claude-ai")).expect("a session folder");
+    let planted = root.path().join("planted.json");
+    let mut stranger = session();
+    stranger.org_uuid = "someone else's org".to_owned();
+    std::fs::write(
+        &planted,
+        serde_json::to_vec(&stranger).expect("a session encodes"),
+    )
+    .expect("a planted session");
+    std::os::unix::fs::symlink(&planted, home.join(".claude-ai/session.json"))
+        .expect("a planted link");
+
+    assert!(matches!(
+        Session::load(&home),
+        Err(LoadSessionError::Read { .. })
+    ));
+}

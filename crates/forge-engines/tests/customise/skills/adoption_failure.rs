@@ -44,7 +44,7 @@ fn a_later_backup_failure_restores_every_original_and_allows_normal_retry() {
         (EngineId::Claude, Some(claude)),
         (EngineId::Codex, Some(codex)),
     ];
-    let digest = measure(&claude_copy).unwrap().0;
+    let digest = measure_inner(&claude_copy, false).unwrap().0;
     let id = discovered_id("recoverable", &digest);
     let parent = codex_copy.parent().unwrap();
     let permissions = fs::metadata(parent).unwrap().permissions();

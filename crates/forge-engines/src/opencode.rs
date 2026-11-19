@@ -676,8 +676,8 @@ fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     }
 }
 
-fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerError> {
-    let dir = home.join("artisan/opencode");
+pub(crate) fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerError> {
+    let dir = crate::sandbox::forge_records(home).join("opencode");
     let agents: serde_json::Map<String, Value> = [Permissions::Auto, Permissions::Full]
         .into_iter()
         .map(|permissions| {

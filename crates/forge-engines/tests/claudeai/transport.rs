@@ -88,23 +88,15 @@ enum SessionRelease {
 #[cfg(unix)]
 #[test]
 fn other_requests_run_while_a_new_cookie_waits_for_a_slow_disk() {
-    use std::io::Write as _;
     let home = tempfile::tempdir().unwrap();
-    let path = Session::path(home.path());
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let saved = serde_json::to_vec(&signed_in()).unwrap();
+    signed_in().save(home.path()).unwrap();
     let (opened_tx, opened) = tokio::sync::oneshot::channel();
     let (release_tx, release) = std::sync::mpsc::channel::<()>();
     let slow_disk = std::thread::spawn({
         move || {
-            let mut fifo = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            let held = super::super::session::FILE_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             opened_tx.send(()).unwrap();
             let released = match release.recv_timeout(std::time::Duration::from_secs(10)) {
                 Ok(()) => SessionRelease::WhileWaiting,
@@ -113,7 +105,7 @@ fn other_requests_run_while_a_new_cookie_waits_for_a_slow_disk() {
                     unreachable!("the test holds the release sender until it releases")
                 }
             };
-            fifo.write_all(&saved).unwrap();
+            drop(held);
             released
         }
     });
@@ -123,8 +115,8 @@ fn other_requests_run_while_a_new_cookie_waits_for_a_slow_disk() {
         .unwrap();
     runtime.block_on(async {
         let transport = Transport::new(home.path(), signed_in()).unwrap();
-        transport.keep_cookies(&set_cookie("new"));
         opened.await.unwrap();
+        transport.keep_cookies(&set_cookie("new"));
         tokio::spawn(async {}).await.unwrap();
         release_tx.send(()).unwrap();
         transport.writer.flushed().await;

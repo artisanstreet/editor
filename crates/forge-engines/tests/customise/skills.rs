@@ -1,6 +1,6 @@
 use super::*;
 use crate::customise::materialize;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 use crate::customise::publish_copy;
 
 fn skill(folder: &Path, name: &str, body: &str) {
@@ -74,7 +74,7 @@ fn replacing_an_installed_skill_leaves_no_replacement_record() {
     assert_eq!(names(&config.skills_dir), ["review"]);
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[test]
 fn a_failed_copy_keeps_the_engine_reading_the_previous_copy() {
     let dir = tempfile::tempdir().unwrap();
@@ -112,12 +112,22 @@ fn a_failed_quarantine_keeps_the_previously_quarantined_copy() {
     skill(&held, "animation", "kept");
     skill(&engine_skills.join("animation"), "animation", "newer");
     fs::set_permissions(&engine_skills, fs::Permissions::from_mode(0o555)).unwrap();
-    quarantine_foreign(EngineId::Claude, &engine_skills, &skills_dir, &[]);
+    quarantine_foreign(
+        EngineId::Claude,
+        &dir.path().join("claude"),
+        &skills_dir,
+        &[],
+    );
     fs::set_permissions(&engine_skills, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(body(&held).contains("kept"));
     assert!(body(&engine_skills.join("animation")).contains("newer"));
 
-    quarantine_foreign(EngineId::Claude, &engine_skills, &skills_dir, &[]);
+    quarantine_foreign(
+        EngineId::Claude,
+        &dir.path().join("claude"),
+        &skills_dir,
+        &[],
+    );
     assert!(body(&held).contains("newer"));
     assert!(!engine_skills.join("animation").exists());
     assert_eq!(
@@ -130,7 +140,6 @@ fn a_failed_quarantine_keeps_the_previously_quarantined_copy() {
 fn an_interrupted_quarantine_is_finished_at_the_next_launch() {
     let dir = tempfile::tempdir().unwrap();
     let skills_dir = dir.path().join("extensions/skills");
-    let engine_skills = dir.path().join("claude/.claude/skills");
     let root = quarantine_root(&skills_dir).join("claude");
     skill(
         &root.join(".incoming-4294967295-0-animation"),
@@ -138,7 +147,12 @@ fn an_interrupted_quarantine_is_finished_at_the_next_launch() {
         "moved",
     );
     skill(&root.join(".retired-4294967295-1-pdf"), "pdf", "old pdf");
-    quarantine_foreign(EngineId::Claude, &engine_skills, &skills_dir, &[]);
+    quarantine_foreign(
+        EngineId::Claude,
+        &dir.path().join("claude"),
+        &skills_dir,
+        &[],
+    );
     assert!(body(&root.join("animation")).contains("moved"));
     assert!(body(&root.join("pdf")).contains("old pdf"));
     assert_eq!(names(&root), ["animation", "pdf"]);

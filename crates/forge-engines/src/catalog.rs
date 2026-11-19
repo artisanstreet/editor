@@ -1180,8 +1180,11 @@ fn lab_name(lab: &str, digest: Option<&Value>) -> String {
         )
 }
 
+const MODELS_DEV_CACHE: &str = "cache/models-dev.json";
+const MODELS_DEV_CACHE_MODE: u32 = 0o600;
+
 async fn models_dev(http: &reqwest::Client, home: &Path) -> Result<Option<Value>, ListModelsError> {
-    let path = home.join("cache/models-dev.json");
+    let path = home.join(MODELS_DEV_CACHE);
     let cached = {
         let path = path.clone();
         tokio::task::spawn_blocking(move || {
@@ -1215,13 +1218,16 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Result<Option<Value>
         Ok(digest) => {
             let bytes =
                 serde_json::to_vec(&digest).expect("invariant: a catalog digest serializes");
+            let home = home.to_path_buf();
             tokio::task::spawn_blocking(move || {
-                let written = path
-                    .parent()
-                    .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| std::fs::write(&path, bytes));
+                let written = crate::sandbox::home::write(
+                    &home,
+                    Path::new(MODELS_DEV_CACHE),
+                    &bytes,
+                    MODELS_DEV_CACHE_MODE,
+                );
                 if let Err(error) = written {
-                    tracing::debug!(%error, "models.dev digest not cached");
+                    tracing::debug!(path = %path.display(), %error, "models.dev digest not cached");
                 }
             });
             Ok(Some(digest))

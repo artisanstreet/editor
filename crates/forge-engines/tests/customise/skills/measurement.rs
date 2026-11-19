@@ -16,7 +16,7 @@ fn invalid_native_metadata_is_never_adoptable() {
     };
     let homes = [(EngineId::Claude, Some(home))];
     assert!(skill_catalog(&homes, &customisation).unwrap().is_empty());
-    let digest = measure(&native).unwrap().0;
+    let digest = measure_inner(&native, false).unwrap().0;
     adopt_skill(&homes, &customisation, &discovered_id("broken", &digest))
         .expect_err("a broken discovered skill is not adopted");
     assert!(!customisation.skills_dir.exists());
@@ -38,7 +38,7 @@ fn catalog_generation_reuses_content_but_adoption_always_revalidates_it() {
         .unwrap()
         .set_modified(modified)
         .unwrap();
-    assert_ne!(measure(folder.path()).unwrap().0, first.0);
+    assert_ne!(measure_inner(folder.path(), false).unwrap().0, first.0);
     fs::write(&file, "a longer resource").unwrap();
     assert_ne!(measure_inner(folder.path(), true).unwrap(), first);
 }
