@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::config::DbConfig;
 use crate::schema::{MIGRATIONS, migrate_to};
 
 fn open(path: &Path) -> Connection {
@@ -100,8 +101,12 @@ fn a_newer_database_with_its_log_still_on_disk_is_rolled_back_keeping_the_logged
         remember(&conn, "before upgrade");
     }
     let mut crashed = open(&database);
+    crashed
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .expect("leave the log unchecked on close, as a crash does");
     migrate_to(&mut crashed, MIGRATIONS.len()).expect("newer Forge upgrades");
     remember(&crashed, "only in the log");
+    drop(crashed);
     assert!(
         dir.path().join("forge.sqlite3-wal").exists(),
         "the crashed Forge left its log"
@@ -119,5 +124,4 @@ fn a_newer_database_with_its_log_still_on_disk_is_rolled_back_keeping_the_logged
     }
     assert_eq!(version(&database), previous);
     assert_eq!(keys(&database), ["before upgrade"]);
-    drop(crashed);
 }
