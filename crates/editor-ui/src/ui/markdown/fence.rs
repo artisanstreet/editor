@@ -1,4 +1,5 @@
 use crate::ui::kit::{Space, Spaced, TextRole};
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -77,19 +78,19 @@ impl Fence {
         let mut swatches = Vec::new();
         let mut cursor = 0;
         for range in &colors {
-            shown.push_str(&source[cursor..range.start]);
+            shown.push_str(slice(source, cursor..range.start));
             let start = shown.len();
             shown.push_str(SWATCH_SLOT);
             let slot = start..shown.len();
-            shown.push_str(&source[range.clone()]);
+            shown.push_str(slice(source, range.clone()));
             swatches.push(Swatch {
                 range: start..shown.len(),
                 slot,
-                value: source[range.clone()].to_owned(),
+                value: slice(source, range.clone()).to_owned(),
             });
             cursor = range.end;
         }
-        shown.push_str(&source[cursor..]);
+        shown.push_str(slice(source, cursor..));
         let tokens: Vec<_> = fence
             .tokens
             .as_deref()
@@ -146,7 +147,7 @@ impl Fence {
             .into_iter()
             .zip(line_tokens.into_iter().zip(line_colors))
             .map(|(range, (tokens, colors))| Line {
-                text: Arc::from(&shown[range]),
+                text: Arc::from(slice(&shown, range)),
                 tokens,
                 colors,
             })
@@ -285,14 +286,14 @@ fn line_view(
     for (range, kind) in &line.tokens {
         if cursor < range.start {
             spans.push(span(
-                &line.text[cursor..range.start],
+                slice(&line.text, cursor..range.start),
                 &style,
                 theme.colors.text,
             ));
         }
         if cursor <= range.start {
             spans.push(span(
-                &line.text[range.clone()],
+                slice(&line.text, range.clone()),
                 &style,
                 token_color(theme, *kind),
             ));
@@ -300,7 +301,7 @@ fn line_view(
         }
     }
     if cursor < line.text.len() {
-        spans.push(span(&line.text[cursor..], &style, theme.colors.text));
+        spans.push(span(slice(&line.text, cursor..), &style, theme.colors.text));
     }
     if spans.is_empty() {
         spans.push(span("", &style, theme.colors.text));

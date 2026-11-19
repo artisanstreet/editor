@@ -1,4 +1,5 @@
 use super::Span;
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -73,14 +74,14 @@ fn push_prose(flat: &mut FlatInline, text: &str, chain: &[InlineLayer]) {
     let mut cursor = 0;
     for color in colors {
         let start = flat.source.len();
-        flat.source.push_str(&text[cursor..color.start]);
+        flat.source.push_str(slice(text, cursor..color.start));
         let end = flat.source.len();
         emit(flat, start, end, chain);
-        push_swatch(flat, &text[color.clone()], true);
+        push_swatch(flat, slice(text, color.clone()), true);
         cursor = color.end;
     }
     let start = flat.source.len();
-    flat.source.push_str(&text[cursor..]);
+    flat.source.push_str(slice(text, cursor..));
     let end = flat.source.len();
     emit(flat, start, end, chain);
 }
@@ -93,7 +94,7 @@ fn push_code(flat: &mut FlatInline, code: &str, chain: &mut Vec<InlineLayer>, in
         Vec::new()
     };
     if let [only] = colors.as_slice()
-        && code[only.clone()] == *code.trim()
+        && slice(code, only.clone()) == code.trim()
     {
         push_swatch(flat, code.trim(), true);
         return;
@@ -101,18 +102,18 @@ fn push_code(flat: &mut FlatInline, code: &str, chain: &mut Vec<InlineLayer>, in
     let start = flat.source.len();
     let mut cursor = 0;
     for color in colors {
-        flat.source.push_str(&code[cursor..color.start]);
-        let slot = push_swatch(flat, &code[color.clone()], false);
-        flat.source.push_str(&code[color.clone()]);
+        flat.source.push_str(slice(code, cursor..color.start));
+        let slot = push_swatch(flat, slice(code, color.clone()), false);
+        flat.source.push_str(slice(code, color.clone()));
         flat.colors.push(InlineColor {
             range: slot.start..flat.source.len(),
             slot,
-            value: code[color.clone()].to_owned(),
+            value: slice(code, color.clone()).to_owned(),
             alone: false,
         });
         cursor = color.end;
     }
-    flat.source.push_str(&code[cursor..]);
+    flat.source.push_str(slice(code, cursor..));
     let end = flat.source.len();
     if start < end {
         flat.code_ranges.push(start..end);
@@ -230,25 +231,26 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
     let mut consumed = 0;
     let mut cursor = 0;
     while cursor < text.len() {
-        let Some(relative) = text[cursor..].find("http") else {
+        let Some(relative) = slice(text, cursor..).find("http") else {
             break;
         };
         let start = cursor + relative;
         cursor = start + 4;
-        if !(text[start..].starts_with("https://") || text[start..].starts_with("http://"))
-            || text[..start]
+        if !(slice(text, start..).starts_with("https://")
+            || slice(text, start..).starts_with("http://"))
+            || slice(text, ..start)
                 .chars()
                 .next_back()
                 .is_some_and(|c| c.is_alphanumeric() || c == '_')
         {
             continue;
         }
-        let tail = &text[start..];
+        let tail = slice(text, start..);
         let mut end = tail
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
             .unwrap_or(tail.len());
         let mut balance = [0isize; 3];
-        for ch in tail[..end].chars() {
+        for ch in slice(tail, ..end).chars() {
             for (index, (open, close)) in [('(', ')'), ('[', ']'), ('{', '}')].iter().enumerate() {
                 if ch == *open {
                     balance[index] -= 1;
@@ -258,7 +260,7 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
                 }
             }
         }
-        while let Some(last) = tail[..end].chars().next_back() {
+        while let Some(last) = slice(tail, ..end).chars().next_back() {
             let closer = [')', ']', '}'].iter().position(|close| *close == last);
             if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
                 end -= last.len_utf8();
@@ -269,7 +271,7 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
                 break;
             }
         }
-        let destination = &tail[..end];
+        let destination = slice(tail, ..end);
         let authority = destination
             .split_once("://")
             .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
@@ -278,7 +280,7 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
             continue;
         }
         if consumed < start {
-            result.push(Span::Text(text[consumed..start].to_owned()));
+            result.push(Span::Text(slice(text, consumed..start).to_owned()));
         }
         result.push(Span::Link {
             label: vec![Span::Text(destination.to_owned())],
@@ -291,7 +293,7 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
         return None;
     }
     if consumed < text.len() {
-        result.push(Span::Text(text[consumed..].to_owned()));
+        result.push(Span::Text(slice(text, consumed..).to_owned()));
     }
     Some(result)
 }

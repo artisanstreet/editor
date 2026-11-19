@@ -58,7 +58,10 @@ fn literal_selection_copies_exact_raw_text_while_display_removes_one_newline() {
         source: source.id,
         range: range.clone(),
     };
-    assert_eq!(&source.text[range], "**literal** &amp; 界🙂\n");
+    assert_eq!(
+        crate::ui::text::slice::slice(&source.text, range),
+        "**literal** &amp; 界🙂\n"
+    );
     assert_eq!(slice.position(slice.range.end).offset, slice.range.end);
     assert_eq!(source.order, [4, 2]);
     assert_eq!(source.separator.as_ref(), "\n\n");

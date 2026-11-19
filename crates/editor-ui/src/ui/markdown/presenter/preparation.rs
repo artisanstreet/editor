@@ -1,6 +1,7 @@
 use super::super::{CodeFence, MarkdownEngine};
 use super::{MarkdownPresenter, PreparationProof, PresenterError, RetainedRich, fence_key};
 use crate::ui::rich::{self, RichFence};
+use crate::ui::text::slice::slice;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -148,7 +149,7 @@ impl MarkdownPresenter {
             })
             .collect();
         if kept > 0 {
-            self.source.push_str(&source[self.source.len()..]);
+            self.source.push_str(slice(source, self.source.len()..));
         } else {
             self.source.clear();
             self.source.push_str(source);

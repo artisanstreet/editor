@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use aqua_core::{GpuiTextColor, Role, Transform2D};
 use aqua_text::{TextStyle, style::FontFeature};
 use aqua_ui::{
@@ -348,8 +349,12 @@ fn retained_extension(
             UiBox::new()
                 .layout("row")
                 .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                .child(label(word[..kept].to_owned(), typography, color))
-                .child(retained_enter(word[kept..].to_owned(), typography, color))
+                .child(label(slice(word, ..kept).to_owned(), typography, color))
+                .child(retained_enter(
+                    slice(word, kept..).to_owned(),
+                    typography,
+                    color,
+                ))
                 .build(),
         )
         .build()
@@ -384,7 +389,7 @@ fn segments(word: &str) -> Vec<Segment> {
     let mut at = 0;
     while at < word.len() {
         let next = model.next_grapheme(at);
-        let cluster = &word[at..next];
+        let cluster = slice(word, at..next);
         match (cluster.chars().next(), segments.last_mut()) {
             (Some(digit), _) if cluster.len() == 1 && digit.is_ascii_digit() => {
                 segments.push(Segment::Digit(digit));

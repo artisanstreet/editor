@@ -2,6 +2,7 @@ mod bidi;
 pub mod editor;
 pub(crate) mod metrics;
 pub mod mount;
+pub(crate) mod slice;
 pub mod tokens;
 pub mod wheel_glide;
 

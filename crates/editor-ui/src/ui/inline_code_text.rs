@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 use aqua_core::GpuiTextColor;
@@ -63,7 +64,8 @@ impl InlineRuns {
                         style.strikethrough = true;
                     }
                 }
-                StyledSpan::new(&self.text[run.range.clone()], style).gpui_source_color(source)
+                StyledSpan::new(slice(&self.text, run.range.clone()), style)
+                    .gpui_source_color(source)
             })
             .collect()
     }

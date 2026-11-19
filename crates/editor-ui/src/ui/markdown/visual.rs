@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::sync::Arc;
 
 use aqua_text::document::{
@@ -135,7 +136,7 @@ impl PreparedInline {
         for run in &self.runs {
             if cursor < run.range.start {
                 spans.push(styled_span(
-                    &self.source.text[cursor..run.range.start],
+                    slice(&self.source.text, cursor..run.range.start),
                     base.clone(),
                     base_color,
                 ));
@@ -152,14 +153,18 @@ impl PreparedInline {
                 style.letter_spacing_em = Some(0.0);
             }
             spans.push(styled_span(
-                &self.source.text[run.range.clone()],
+                slice(&self.source.text, run.range.clone()),
                 style,
                 run.style.color.unwrap_or(base_color),
             ));
             cursor = run.range.end;
         }
         if cursor < self.source.text.len() {
-            spans.push(styled_span(&self.source.text[cursor..], base, base_color));
+            spans.push(styled_span(
+                slice(&self.source.text, cursor..),
+                base,
+                base_color,
+            ));
         }
         spans
     }

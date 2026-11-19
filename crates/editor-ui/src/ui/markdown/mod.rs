@@ -5,6 +5,7 @@
 
 pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
 
+use crate::ui::text::slice::slice;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::str::FromStr;
@@ -536,7 +537,7 @@ impl<'a> Iterator for LineOffsets<'a> {
         let remainder = self.source.get(self.cursor..)?;
         match remainder.find('\n') {
             Some(newline) => {
-                let item = (self.cursor, &remainder[..=newline]);
+                let item = (self.cursor, slice(remainder, ..=newline));
                 self.cursor += newline + 1;
                 Some(item)
             }
@@ -757,7 +758,7 @@ impl DocumentBuilder {
                 Event::Start(tag) => self.start_tag(tag, range.start),
                 Event::End(tag_end) => self.end_tag(tag_end, range, source),
                 Event::Text(_) if self.code.is_some() || self.html.is_some() => {
-                    let raw = &source[range];
+                    let raw = slice(source, range);
                     if let Some(fence) = self.code.as_mut() {
                         fence.source.push_str(raw);
                     } else if let Some(html) = self.html.as_mut() {
@@ -773,7 +774,7 @@ impl DocumentBuilder {
                     Some(open) => open.push_str(html.as_ref()),
                     None if self.code.is_none() => {
                         self.push_block(Block::Html {
-                            source: source[range].to_owned(),
+                            source: slice(source, range).to_owned(),
                         });
                     }
                     None => {}

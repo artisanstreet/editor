@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -828,10 +829,12 @@ impl Editor {
         } else {
             self.selection.end
         };
-        let start = self.text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+        let start = slice(&self.text, ..cursor)
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
         let column = *self
             .vertical_goal_column
-            .get_or_insert_with(|| self.text[start..cursor].encode_utf16().count());
+            .get_or_insert_with(|| slice(&self.text, start..cursor).encode_utf16().count());
         let mut target = visual_target.map_or_else(
             || logical_vertical_target(&self.text, cursor, up, column),
             |index| self.text.floor_char_boundary(index.min(self.text.len())),
@@ -965,7 +968,7 @@ pub(crate) fn grapheme_prefix(text: &str, max: usize) -> &str {
     } else {
         model.prev_grapheme(max)
     };
-    &text[..end]
+    slice(text, ..end)
 }
 
 fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
@@ -1049,8 +1052,10 @@ impl aqua_text::input_service::TextInputService for Editor {
 
 fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usize) -> usize {
     let cursor = text.floor_char_boundary(cursor.min(text.len()));
-    let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
-    let line_end = text[cursor..]
+    let line_start = slice(text, ..cursor)
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = slice(text, cursor..)
         .find('\n')
         .map_or(text.len(), |index| cursor + index);
     let (target_start, target_end) = if up {
@@ -1059,7 +1064,7 @@ fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usi
         }
         let previous_end = line_start - 1;
         (
-            text[..previous_end]
+            slice(text, ..previous_end)
                 .rfind('\n')
                 .map_or(0, |index| index + 1),
             previous_end,
@@ -1071,14 +1076,14 @@ fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usi
         let next_start = line_end + 1;
         (
             next_start,
-            text[next_start..]
+            slice(text, next_start..)
                 .find('\n')
                 .map_or(text.len(), |index| next_start + index),
         )
     };
     let mut column = 0usize;
     let mut target_offset = 0usize;
-    for (byte_offset, character) in text[target_start..target_end].char_indices() {
+    for (byte_offset, character) in slice(text, target_start..target_end).char_indices() {
         let next = column + character.len_utf16();
         if next > goal_column {
             break;

@@ -1,6 +1,7 @@
 use super::*;
 use crate::ui::markdown::presenter::{MarkdownPresenter, PresenterError, StoredProjectedMarkdown};
 use crate::ui::markdown::visual::BodyTone;
+use crate::ui::text::slice::slice;
 use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
 use std::sync::Arc;
 
@@ -138,7 +139,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
             total: reference.bytes,
             start: 2,
             end: 5,
-            text: full[2..5].to_owned(),
+            text: slice(full, 2..5).to_owned(),
         })
         .unwrap();
     collector
@@ -147,7 +148,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
             total: reference.bytes,
             start: 5,
             end: 9,
-            text: full[5..9].to_owned(),
+            text: slice(full, 5..9).to_owned(),
         })
         .unwrap();
     assert_eq!(collector.finish().unwrap(), "β🙂");

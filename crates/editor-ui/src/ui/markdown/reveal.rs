@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -135,7 +136,7 @@ impl PreparedReveal {
         if end > text.len() || !text.is_char_boundary(end) {
             return false;
         }
-        let Some((index, _)) = text[..end].char_indices().next_back() else {
+        let Some((index, _)) = slice(text, ..end).char_indices().next_back() else {
             return true;
         };
         let Some(frontier) = app.text_frontier(node, index, aqua_text::CaretAffinity::Downstream)

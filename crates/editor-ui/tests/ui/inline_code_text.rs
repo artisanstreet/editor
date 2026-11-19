@@ -8,36 +8,57 @@ fn commonmark_nested_marks_and_code_use_flattened_utf8_ranges() {
         inline_runs(r"é ``a ` b`` and **bold _nested_** \*literal\* [label](https://example.com)");
     assert_eq!(runs.text, "é a ` b and bold nested *literal* label");
     let code = runs.ranges.iter().find(|run| run.style.code).unwrap();
-    assert_eq!(&runs.text[code.range.clone()], "a ` b");
+    assert_eq!(
+        runs.text
+            .get(code.range.clone())
+            .expect("run range lies on char boundaries"),
+        "a ` b"
+    );
     assert_eq!(code.range.start, 3);
     let nested = runs
         .ranges
         .iter()
         .find(|run| run.style.strong && run.style.em)
         .unwrap();
-    assert_eq!(&runs.text[nested.range.clone()], "nested");
+    assert_eq!(
+        runs.text
+            .get(nested.range.clone())
+            .expect("run range lies on char boundaries"),
+        "nested"
+    );
 }
 
 #[test]
 fn block_breaks_and_code_precedence_preserve_source_rules() {
     let runs = inline_runs("  ~~crossed~~\nnext\n\n**`mono`**\n\n```\nblock\n```\n");
     assert_eq!(runs.text, "crossed next mono block");
-    assert!(
-        runs.ranges
-            .iter()
-            .any(|run| run.style.strike && &runs.text[run.range.clone()] == "crossed")
-    );
+    assert!(runs.ranges.iter().any(|run| {
+        run.style.strike
+            && runs
+                .text
+                .get(run.range.clone())
+                .expect("run range lies on char boundaries")
+                == "crossed"
+    }));
     let code = runs
         .ranges
         .iter()
         .find(|run| run.style.code && run.style.strong)
         .unwrap();
-    assert_eq!(&runs.text[code.range.clone()], "mono");
-    assert!(
-        runs.ranges
-            .iter()
-            .any(|run| run.style.code && runs.text[run.range.clone()].contains("block"))
+    assert_eq!(
+        runs.text
+            .get(code.range.clone())
+            .expect("run range lies on char boundaries"),
+        "mono"
     );
+    assert!(runs.ranges.iter().any(|run| {
+        run.style.code
+            && runs
+                .text
+                .get(run.range.clone())
+                .expect("run range lies on char boundaries")
+                .contains("block")
+    }));
 }
 
 #[test]

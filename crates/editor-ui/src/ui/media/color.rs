@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 use crate::ui::rich::actions::CopyEntry;
@@ -230,7 +231,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
             let letters = bytes[at + 1..end].iter().any(u8::is_ascii_alphabetic);
             let plausible =
                 matches!(digits, 6 | 8) || (matches!(digits, 3 | 4) && (in_code || letters));
-            if bounded && plausible && parse(&text[at..end]).is_some() {
+            if bounded && plausible && parse(slice(text, at..end)).is_some() {
                 found.push(at..end);
             }
             at = end.max(at + 1);
@@ -242,7 +243,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
                     .iter()
                     .take_while(|byte| byte.is_ascii_alphabetic() || **byte == b'-')
                     .count();
-            let name = text[at..name_end].to_ascii_lowercase();
+            let name = slice(text, at..name_end).to_ascii_lowercase();
             if bytes.get(name_end) == Some(&b'(') && COLOR_FUNCTIONS.contains(&name.as_str()) {
                 let close = bytes[name_end..]
                     .iter()
@@ -251,7 +252,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
                     .position(|byte| *byte == b')')
                     .map(|offset| name_end + offset + 1);
                 if let Some(end) = close
-                    && parse(&text[at..end]).is_some()
+                    && parse(slice(text, at..end)).is_some()
                 {
                     found.push(at..end);
                     at = end;

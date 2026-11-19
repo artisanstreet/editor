@@ -1,6 +1,7 @@
 use super::{HeatmapServices, MarkdownPresenter};
 use crate::ui::markdown::MarkdownEngine;
 use crate::ui::markdown::visual::BodyTone;
+use crate::ui::text::slice::slice;
 use crate::ui::theme::{ArtisanTheme, ThemeMode};
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use std::rc::Rc;
@@ -76,7 +77,7 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
     let mut streamed = MarkdownPresenter::default();
     let mut identities = Vec::new();
     for end in (1..=reply.len()).filter(|end| reply.is_char_boundary(*end)) {
-        let source = &reply[..end];
+        let source = slice(reply, ..end);
         streamed.prepare(&engine, source).expect("streamed prepare");
         let mut whole = MarkdownPresenter::default();
         whole.prepare(&engine, source).expect("whole prepare");
@@ -115,7 +116,7 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
     let mut streamed = MarkdownPresenter::default();
     for end in (1..=rich_only.len()).step_by(7).chain([rich_only.len()]) {
         streamed
-            .prepare(&engine, &rich_only[..end])
+            .prepare(&engine, slice(rich_only, ..end))
             .expect("streamed prepare");
     }
     streamed.prepare_document(&engine).expect("whole document");
