@@ -295,7 +295,7 @@ impl SettingsController {
                     .update_thread(&request.thread, &update)
                     .await
                     .map(|_| ())
-                    .map_err(|error| format!("{error:#}"));
+                    .map_err(|error| ::diagnostics::chain(&error));
                 let _ = sender
                     .send(HostCompletion {
                         host: id,
@@ -360,7 +360,7 @@ impl SettingsController {
                 let result = client
                     .set_setting(request.target.key, &request.value)
                     .await
-                    .map_err(|error| format!("{error:#}"));
+                    .map_err(|error| ::diagnostics::chain(&error));
                 let _ = sender
                     .send(HostCompletion {
                         host: request.target.host.clone(),
@@ -465,7 +465,7 @@ impl SettingsController {
                         server: server.clone(),
                     })
                     .await
-                    .map_err(|error| format!("{error:#}"));
+                    .map_err(|error| ::diagnostics::chain(&error));
                 let _ = sender
                     .send(HostCompletion {
                         host: id,
@@ -550,7 +550,7 @@ impl SettingsController {
                     .mutate_mcp(&request.mutation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| format!("{error:#}"));
+                    .map_err(|error| ::diagnostics::chain(&error));
                 let _ = sender
                     .send(HostCompletion {
                         host: id,
@@ -591,7 +591,11 @@ impl SettingsController {
                     .await
                     .map(|_| ())
                     .map_err(|error| {
-                        format!("Couldn't {verb} {}: {error:#}", engine.display_name())
+                        format!(
+                            "Couldn't {verb} {}: {}",
+                            engine.display_name(),
+                            ::diagnostics::chain(&error)
+                        )
                     });
                 let _ = sender
                     .send(HostCompletion {
@@ -638,7 +642,7 @@ impl SettingsController {
                     Some(resolution) => client.resolve_global_prompt(&resolution).await,
                     None => client.save_global_prompt(&request.save).await,
                 }
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| ::diagnostics::chain(&error));
                 let _ = sender
                     .send(HostCompletion {
                         host: id,

@@ -19,7 +19,7 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum TurnAction {
     Stop,
     Continue,
@@ -32,7 +32,7 @@ struct TurnCompletion {
     generation: u64,
     thread: ThreadId,
     action: TurnAction,
-    error: Option<String>,
+    error: Option<editor_core::client::CallError>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,7 +361,7 @@ impl Composer {
                 TurnAction::Unpark => client.cancel(&thread).await,
                 TurnAction::Permissions => unreachable!(),
             };
-            let error = result.err().map(|error| format!("{error:#}"));
+            let error = result.err();
             let _ = delivery
                 .send(TurnCompletion {
                     instance,
@@ -399,11 +399,7 @@ impl Composer {
                 config: Some(config),
                 ..Default::default()
             };
-            let error = client
-                .update_thread(&thread, &update)
-                .await
-                .err()
-                .map(|error| format!("{error:#}"));
+            let error = client.update_thread(&thread, &update).await.err();
             let _ = delivery
                 .send(TurnCompletion {
                     instance,
@@ -428,34 +424,23 @@ impl Composer {
             {
                 continue;
             }
-            match completion.action {
+            let failed = match completion.action {
                 TurnAction::Stop => {
                     self.cancelling = false;
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't stop the run: {error}"));
-                    }
+                    "Couldn't stop the run"
                 }
                 TurnAction::Continue => {
                     self.continuing = false;
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't continue: {error}"));
-                    }
+                    "Couldn't continue"
                 }
-                TurnAction::ClearGoal => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't clear the goal: {error}"));
-                    }
-                }
-                TurnAction::Unpark => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't cancel the pickup: {error}"));
-                    }
-                }
-                TurnAction::Permissions => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't change access: {error}"));
-                    }
-                }
+                TurnAction::ClearGoal => "Couldn't clear the goal",
+                TurnAction::Unpark => "Couldn't cancel the pickup",
+                TurnAction::Permissions => "Couldn't change access",
+            };
+            if let Some(error) = completion.error {
+                let error = diagnostics::chain(&error);
+                tracing::warn!(thread = %completion.thread, action = ?completion.action, %error, "turn action failed");
+                self.notice = Some(format!("{failed}: {error}"));
             }
         }
         before != (self.cancelling, self.continuing, self.notice.clone())

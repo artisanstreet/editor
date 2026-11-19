@@ -261,14 +261,16 @@ impl QuestionnairePanel {
         client: &ForgeClient,
         item: &ItemId,
         answer: &Answer,
-    ) -> Result<(), String> {
-        client
-            .answer(item, answer)
-            .await
-            .map_err(|error| format!("Couldn't send your answer: {error:#}"))
+    ) -> Result<(), editor_core::client::CallError> {
+        client.answer(item, answer).await
     }
 
-    pub(crate) fn settled(&mut self, item: &ItemId, error: Option<String>, text: &mut String) {
+    pub(crate) fn settled(
+        &mut self,
+        item: &ItemId,
+        error: Option<editor_core::client::CallError>,
+        text: &mut String,
+    ) {
         if self.sending.as_ref() != Some(item) {
             return;
         }
@@ -285,7 +287,11 @@ impl QuestionnairePanel {
                 self.ticked.clear();
                 self.load(text);
             }
-            Some(error) => self.error = Some(error),
+            Some(error) => {
+                let error = diagnostics::chain(&error);
+                tracing::warn!(%item, %error, "sending a questionnaire answer failed");
+                self.error = Some(format!("Couldn't send your answer: {error}"));
+            }
         }
         self.sync_mode(text);
     }

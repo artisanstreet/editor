@@ -626,7 +626,7 @@ struct AnswerCompletion {
     instance: editor_core::HostInstance,
     generation: u64,
     item: artisan_api::ItemId,
-    result: Result<(), String>,
+    result: Result<(), editor_core::client::CallError>,
 }
 
 #[derive(Clone, Debug)]

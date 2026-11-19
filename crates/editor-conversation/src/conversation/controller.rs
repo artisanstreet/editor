@@ -1056,7 +1056,10 @@ impl Conversation {
                                 break;
                             }
                             Err(err) => {
-                                error = Some(format!("Couldn't load agent: {err:#}"));
+                                error = Some(format!(
+                                    "Couldn't load agent: {}",
+                                    ::diagnostics::chain(&err)
+                                ));
                                 break;
                             }
                         }
