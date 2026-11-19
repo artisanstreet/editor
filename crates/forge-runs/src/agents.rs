@@ -478,6 +478,16 @@ enum SettleAgentError {
 }
 
 impl Hub {
+    fn acting_config(&self, caller: &Thread) -> EngineConfig {
+        let launched = self.lock().get(&caller.id).and_then(|live| live.launched);
+        let mut config = caller.config.clone();
+        config.permissions = match (caller.config.permissions, launched) {
+            (Permissions::Auto, _) | (_, Some(Permissions::Auto)) => Permissions::Auto,
+            (Permissions::Full, Some(Permissions::Full) | None) => Permissions::Full,
+        };
+        config
+    }
+
     pub async fn spawn_agent(
         &self,
         parent: &ThreadId,
@@ -508,8 +518,9 @@ impl Hub {
             ))));
         }
         let engine = request.harness.unwrap_or(thread.config.engine);
+        let acting = self.acting_config(&thread);
         let (config, warnings) =
-            resolve(&thread.config, &request, &self.engines().status(engine)).map_err(refused)?;
+            resolve(&acting, &request, &self.engines().status(engine)).map_err(refused)?;
         let child = ThreadId::new();
         let agent = ItemId::new();
         let run_id = store
@@ -603,8 +614,9 @@ impl Hub {
             return Err(refused(Refused(format!("There is no project {project}."))));
         }
         let engine = request.harness.unwrap_or(from.config.engine);
+        let acting = self.acting_config(&from);
         let (config, warnings) =
-            resolve(&from.config, &request, &self.engines().status(engine)).map_err(refused)?;
+            resolve(&acting, &request, &self.engines().status(engine)).map_err(refused)?;
         let title = Some(request.task.trim().to_owned()).filter(|title| !title.is_empty());
         let thread = store
             .create_thread(CreateThread {
@@ -677,7 +689,7 @@ impl Hub {
                 thread: thread.clone(),
                 refused: Refused(format!("There is no thread {thread}.")),
             })?;
-        if exceeds(&target.config, &from.config) {
+        if exceeds(&target.config, &self.acting_config(&from)) {
             self.ask_approval(
                 caller,
                 "thread_send",

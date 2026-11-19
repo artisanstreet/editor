@@ -608,6 +608,11 @@ async fn execute(
         prepared = preparing => prepared?,
     };
     run.config = Some(turn.config.clone());
+    if let Some(live) = hub.lock().get_mut(&run.thread_id)
+        && live.id == run.id
+    {
+        live.launched = Some(turn.config.permissions);
+    }
     let mut coverage = turn_coverage(hub, run, turn.config.permissions).await;
     if let Some(reason) = coverage.observe(turn.config.permissions) {
         announce_unsandboxed(hub, &run.thread_id, &run.id, reason).await;
