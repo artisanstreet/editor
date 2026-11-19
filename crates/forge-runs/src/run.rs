@@ -1814,7 +1814,7 @@ async fn finish(
 ) -> Result<(), forge_store::SettleRunError> {
     let open = open_items(items);
     if let Some(error) = ending.error() {
-        tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {ended:?}: {error}");
+        tracing::warn!(thread = %run.thread_id, run = %run.id, outcome = ?ended, failure_bytes = error.len(), "the run ended with a failure, shown in the thread");
     }
     let note = match ending.error() {
         Some(error) if !items.errored => Some(new_item(

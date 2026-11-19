@@ -31,7 +31,7 @@ pub use decoder::DecodeError;
 pub use goal::{ClearGoalError, GoalError};
 pub use side::SideQueryError;
 
-use crate::process::{self, EngineProcess, ReadError, SpawnError};
+use crate::process::{self, EngineProcess, ReadError, SpawnError, StderrWritten};
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, Turn, UserInput};
 use artisan_api::{ItemId, Permissions, ThreadId};
 use base64::Engine as _;
@@ -289,12 +289,7 @@ impl Harness for OpenCodeHarness {
                         let error: &dyn std::error::Error = &failure;
                         tracing::warn!(thread = %turn.thread_id, error, "OpenCode run failed");
                     }
-                    let message = diagnostics::chain(&failure);
-                    Outcome::failed(if stderr.is_empty() {
-                        message
-                    } else {
-                        format!("{message}: OpenCode stderr: {stderr}")
-                    })
+                    Outcome::failed(format!("{}; {stderr}", diagnostics::chain(&failure)))
                 }
             }
         })
@@ -339,7 +334,7 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
     }
     .await;
     server.kill().await;
-    server.wait().await;
+    server.finish().await;
     result
 }
 
@@ -357,10 +352,10 @@ async fn connect(server: &mut EngineProcess, password: String) -> Result<Api, Se
     Api::new(base, password)
 }
 
-async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, String) {
+async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, StderrWritten) {
     let (mut server, password) = match prepare(turn) {
         Ok(prepared) => prepared,
-        Err(source) => return (Err(RunError::Server(source)), String::new()),
+        Err(source) => return (Err(RunError::Server(source)), StderrWritten::default()),
     };
     let cancel = io.cancel.clone();
     let result = async {
@@ -373,8 +368,8 @@ async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, String)
     }
     .await;
     server.kill().await;
-    server.wait().await;
-    (result, server.stderr_tail())
+    server.finish().await;
+    (result, server.stderr())
 }
 
 fn spawn(turn: &Turn, password: &str, config_dir: &Path) -> Result<EngineProcess, ServerError> {

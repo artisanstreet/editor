@@ -1,5 +1,5 @@
 use super::{SIDE_QUERY_LIMIT, apply_env, config_dir, launch_args};
-use crate::process::{self, ReadError, SendError, SpawnError};
+use crate::process::{self, Exit, ReadError, SendError, SpawnError, StderrWritten};
 use crate::{SideReply, SideUsage, Turn};
 use artisan_api::EngineConfig;
 use serde_json::{Value, json};
@@ -25,8 +25,12 @@ pub enum SideQueryError {
     Cancelled,
     #[error("the Claude fork gave no answer in {}s", after.as_secs())]
     TimedOut { after: Duration },
-    #[error("the Claude fork exited ({}) without an answer: {stderr}", code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")))]
-    Exited { code: Option<i32>, stderr: String },
+    #[error("the Claude fork ended without an answer; {stderr}")]
+    Exited {
+        stderr: StderrWritten,
+        #[source]
+        exit: Exit,
+    },
     #[error("the Claude fork failed: {reason}")]
     Failed { reason: String },
     #[error(
@@ -132,11 +136,11 @@ async fn query(
             }
         };
         let Some(line) = line else {
-            let code = engine.wait().await;
+            let exit = engine.wait().await;
             discard(&turn, fork.as_deref());
             return Err(SideQueryError::Exited {
-                code,
-                stderr: engine.stderr_tail(),
+                stderr: engine.stderr(),
+                exit,
             });
         };
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
@@ -182,7 +186,7 @@ async fn query(
         }
     };
     engine.close_stdin("the side query has its answer");
-    engine.wait().await;
+    engine.finish().await;
     discard(&turn, fork.as_deref());
     reply
 }

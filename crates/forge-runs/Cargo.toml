@@ -49,7 +49,7 @@ windows = { workspace = true, features = [
 axum.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
-test-support = { workspace = true, features = ["tokio", "http"] }
+test-support = { workspace = true, features = ["tokio", "http", "logs"] }
 image = { workspace = true, features = ["png"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

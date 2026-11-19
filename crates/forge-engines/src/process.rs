@@ -5,12 +5,13 @@ use artisan_api::{EngineId, ThreadId};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
 pub(crate) const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
-const STDERR_TAIL_BYTES: usize = 8 * 1024;
+const PROBE_STDERR_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
@@ -34,6 +35,50 @@ pub enum SpawnError {
         #[source]
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Exit {
+    #[error("exited with code {0}")]
+    Code(i32),
+    #[error("was ended by a signal")]
+    Signal,
+    #[error("couldn't be waited for")]
+    Unreaped(#[source] std::io::Error),
+    #[error("was stopped by Forge after its output closed")]
+    Killed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StderrWritten {
+    bytes: u64,
+    trace: Option<Arc<str>>,
+}
+
+impl StderrWritten {
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl std::fmt::Display for StderrWritten {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.bytes, &self.trace) {
+            (0, _) => write!(f, "nothing on stderr"),
+            (bytes, Some(trace)) => write!(
+                f,
+                "{bytes} bytes on stderr, kept in the engine trace {trace}"
+            ),
+            (bytes, None) => write!(f, "{bytes} bytes on stderr"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum StderrUse {
+    Traced,
+    Captured(Arc<Mutex<Vec<u8>>>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -124,7 +169,7 @@ pub struct EngineProcess {
     child: OwnedChild,
     stdin: Option<StdinWriter>,
     stdout: BufReader<ChildStdout>,
-    stderr_tail: Arc<Mutex<String>>,
+    stderr_bytes: Arc<AtomicU64>,
     line: Vec<u8>,
     oversized: bool,
     trace: Trace,
@@ -194,11 +239,11 @@ pub(crate) fn spawn_in(
         thread: turn.thread_id.clone(),
         source: Box::new(source),
     })?;
-    spawn_command(command, trace, sandbox)
+    spawn_command(command, trace, sandbox, StderrUse::Traced)
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError> {
-    spawn_command(command, Trace::default(), Sandbox::Open)
+    spawn_command(command, Trace::default(), Sandbox::Open, StderrUse::Traced)
 }
 
 #[derive(Debug)]
@@ -283,6 +328,7 @@ fn spawn_command(
     mut command: Command,
     trace: Trace,
     sandbox: Sandbox,
+    stderr_use: StderrUse,
 ) -> Result<EngineProcess, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
     command.stdout(Stdio::piped());
@@ -299,32 +345,44 @@ fn spawn_command(
             program.display()
         )
     }));
-    let stderr_tail = Arc::new(Mutex::new(String::new()));
+    let stderr_bytes = Arc::new(AtomicU64::new(0));
+    let captured = match stderr_use {
+        StderrUse::Traced => None,
+        StderrUse::Captured(captured) => Some(captured),
+    };
     let stderr_task = child.stderr().take().map(|mut stderr| {
-        let tail = Arc::clone(&stderr_tail);
+        let counted = Arc::clone(&stderr_bytes);
         let stderr_trace = trace.clone();
+        let reader_program = program.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut buffer = vec![0_u8; 4096];
             let mut traced = stderr_trace.stream(Kind::Stderr);
-            while let Ok(read) = stderr.read(&mut buffer).await {
-                if read == 0 {
-                    break;
-                }
-                let text = String::from_utf8_lossy(&buffer[..read]);
-                tracing::debug!(target: "engine_stderr", bytes = read, "the engine wrote to stderr");
-                traced.write(&buffer[..read]);
-                let mut tail = tail
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                tail.push_str(&text);
-                if tail.len() > STDERR_TAIL_BYTES {
-                    let mut cut = tail.len() - STDERR_TAIL_BYTES;
-                    while !tail.is_char_boundary(cut) {
-                        cut += 1;
+            loop {
+                let read = match stderr.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(error) => {
+                        tracing::debug!(program = %reader_program.display(), %error, "stopped reading the engine's stderr");
+                        break;
                     }
-                    tail.drain(..cut);
+                };
+                counted.fetch_add(read as u64, Ordering::Relaxed);
+                traced.write(&buffer[..read]);
+                if let Some(captured) = &captured {
+                    let mut captured = captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    captured.extend_from_slice(&buffer[..read]);
+                    let excess = captured.len().saturating_sub(PROBE_STDERR_BYTES);
+                    captured.drain(..excess);
                 }
             }
+            tracing::debug!(
+                target: "engine_stderr",
+                program = %reader_program.display(),
+                bytes = counted.load(Ordering::Relaxed),
+                "the engine's stderr closed"
+            );
         }))
     });
     Ok(EngineProcess {
@@ -332,7 +390,7 @@ fn spawn_command(
         child,
         stdin,
         stdout,
-        stderr_tail,
+        stderr_bytes,
         line: Vec::new(),
         oversized: false,
         trace,
@@ -422,12 +480,11 @@ impl EngineProcess {
     }
 
     #[must_use]
-    pub(crate) fn stderr_tail(&self) -> String {
-        self.stderr_tail
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .trim()
-            .to_owned()
+    pub(crate) fn stderr(&self) -> StderrWritten {
+        StderrWritten {
+            bytes: self.stderr_bytes.load(Ordering::Relaxed),
+            trace: self.trace.name(),
+        }
     }
 
     pub(crate) async fn kill(&mut self) {
@@ -439,12 +496,21 @@ impl EngineProcess {
         }
     }
 
-    pub(crate) async fn wait(&mut self) -> Option<i32> {
+    pub(crate) async fn finish(&mut self) {
+        if let Exit::Unreaped(error) = self.wait().await {
+            tracing::debug!(program = %self.program.display(), %error, "couldn't reap a finished engine process");
+        }
+    }
+
+    pub(crate) async fn wait(&mut self) -> Exit {
         let status = self.child.wait().await;
         self.child.shutdown();
         self.trace
             .record(Kind::Note, &format!("exited: {status:?}"));
-        status.ok().and_then(|status| status.code())
+        match status {
+            Ok(status) => status.code().map_or(Exit::Signal, Exit::Code),
+            Err(error) => Exit::Unreaped(error),
+        }
     }
 }
 
@@ -457,7 +523,14 @@ pub async fn probe(
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut process = spawn_probe(command).map_err(ProbeError::Spawn)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut process = spawn_command(
+        command,
+        Trace::default(),
+        Sandbox::Open,
+        StderrUse::Captured(Arc::clone(&captured)),
+    )
+    .map_err(ProbeError::Spawn)?;
     let program = process.program.clone();
     let result = tokio::time::timeout(timeout, async {
         let mut stdout = Vec::new();
@@ -492,7 +565,11 @@ pub async fn probe(
         }
         Ok(std::process::Output {
             stdout,
-            stderr: process.stderr_tail().into_bytes(),
+            stderr: std::mem::take(
+                &mut *captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
             status,
         })
     })

@@ -180,7 +180,7 @@ async fn query(
         }
     }
     server.kill().await;
-    server.wait().await;
+    server.finish().await;
     answer
 }
 

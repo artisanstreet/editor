@@ -7,7 +7,7 @@ pub(crate) use decoder::{ClaudeDecoder, DecodeError};
 use door::{Door, Ending, Session};
 pub use side::SideQueryError;
 
-use crate::process::{self, EngineProcess, ReadError, SendError};
+use crate::process::{self, EngineProcess, Exit, ReadError, SendError, StderrWritten};
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
 use artisan_api::{EngineConfig, ItemId, Permissions, ThreadId};
 use base64::Engine as _;
@@ -309,7 +309,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
                 ));
             }
         };
-        let (code, cancelled) = reap(&mut engine, &io.cancel, finished.cancelled).await;
+        let (exit, cancelled) = reap(&mut engine, &io.cancel, finished.cancelled).await;
         for event in decoder.finish() {
             io.emit(event).await;
         }
@@ -322,9 +322,10 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         if let Some(result) = decoder.take_outcome() {
             outcome = Some(result);
         } else {
-            let stderr = engine.stderr_tail();
-            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, stderr_bytes = stderr.len(), "Claude exited without a result");
-            return exited_without_result(code, &stderr);
+            let stderr = engine.stderr();
+            let failure = exited_without_result(&exit, &stderr);
+            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), exit = %diagnostics::chain(&exit), stderr_bytes = stderr.bytes(), "Claude exited without a result");
+            return failure;
         }
         if outcome
             .as_ref()
@@ -348,15 +349,10 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
     outcome.unwrap_or_else(|| Outcome::failed("Claude produced no result"))
 }
 
-fn exited_without_result(code: Option<i32>, stderr: &str) -> Outcome {
+fn exited_without_result(exit: &Exit, stderr: &StderrWritten) -> Outcome {
     Outcome::failed(format!(
-        "Claude exited ({}) before finishing{}",
-        code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
-        if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {stderr}")
-        }
+        "Claude {} before finishing; {stderr}",
+        diagnostics::chain(exit)
     ))
 }
 
@@ -368,15 +364,15 @@ async fn reap(
     engine: &mut EngineProcess,
     cancel: &CancellationToken,
     cancelling: bool,
-) -> (Option<i32>, bool) {
+) -> (Exit, bool) {
     let cancelled = tokio::select! {
-        code = engine.wait() => return (code, cancelling),
+        exit = engine.wait() => return (exit, cancelling),
         () = cancel.cancelled() => true,
         () = tokio::time::sleep(EXIT_GRACE) => cancelling,
     };
     engine.note("the output closed but the process lives on: killing it");
     engine.kill().await;
-    (None, cancelled)
+    (Exit::Killed, cancelled)
 }
 
 #[expect(

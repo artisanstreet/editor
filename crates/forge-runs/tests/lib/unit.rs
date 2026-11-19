@@ -16,6 +16,9 @@ mod coordination;
 mod disk_guard;
 #[path = "../run/durability.rs"]
 mod durability;
+#[cfg(unix)]
+#[path = "../run/engine_failures.rs"]
+mod engine_failures;
 #[path = "../extensions/skills.rs"]
 mod extensions_tests;
 #[path = "../gateway/calls.rs"]

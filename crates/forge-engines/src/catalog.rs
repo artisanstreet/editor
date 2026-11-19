@@ -279,8 +279,10 @@ pub(crate) enum ClaudeCommandsError {
     Send(#[source] crate::process::SendError),
     #[error("read Claude's initialize answer")]
     Read(#[source] crate::process::ReadError),
-    #[error("Claude closed before answering initialize: {stderr}")]
-    Closed { stderr: String },
+    #[error("Claude closed before answering initialize; {stderr}")]
+    Closed {
+        stderr: crate::process::StderrWritten,
+    },
     #[error("Claude initialize timed out after {}s", DEADLINE.as_secs())]
     TimedOut,
 }
@@ -322,7 +324,7 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>, Cla
             }
         }
         Err(ClaudeCommandsError::Closed {
-            stderr: process.stderr_tail(),
+            stderr: process.stderr(),
         })
     })
     .await

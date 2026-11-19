@@ -26,13 +26,13 @@ async fn engine_stderr_stays_out_of_the_logs() {
         ],
     )
     .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), process.wait())
+    tokio::time::timeout(std::time::Duration::from_secs(5), process.finish())
         .await
         .expect("the engine exits within the bound");
     if let Some(stderr) = process.stderr_task.take() {
         stderr.await.unwrap();
     }
-    assert!(process.stderr_tail().contains("engine-secret"));
+    assert!(process.stderr().bytes() > 0, "the stderr write is counted");
     let logged = captured.text();
     assert!(
         logged.contains("stderr"),

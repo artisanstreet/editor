@@ -1,5 +1,7 @@
 use crate::Turn;
-use crate::process::{self, EngineProcess, ReadError, SendError, SpawnError, StdinWriter};
+use crate::process::{
+    self, EngineProcess, ReadError, SendError, SpawnError, StderrWritten, StdinWriter,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -52,11 +54,11 @@ pub enum StartError {
     },
     #[error("spawn the app-server")]
     Spawn(#[source] SpawnError),
-    #[error("the app-server didn't answer initialize in {}s: {stderr}", INITIALIZE_TIMEOUT.as_secs())]
-    InitializeTimedOut { stderr: String },
-    #[error("initialize the app-server: {stderr}")]
+    #[error("the app-server didn't answer initialize in {}s; {stderr}", INITIALIZE_TIMEOUT.as_secs())]
+    InitializeTimedOut { stderr: StderrWritten },
+    #[error("initialize the app-server; {stderr}")]
     Initialize {
-        stderr: String,
+        stderr: StderrWritten,
         #[source]
         source: InitializeError,
     },
@@ -237,12 +239,12 @@ impl Server {
         match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process)).await {
             Err(_elapsed) => {
                 return Err(StartError::InitializeTimedOut {
-                    stderr: process.stderr_tail(),
+                    stderr: process.stderr(),
                 });
             }
             Ok(Err(source)) => {
                 return Err(StartError::Initialize {
-                    stderr: process.stderr_tail(),
+                    stderr: process.stderr(),
                     source,
                 });
             }
@@ -251,7 +253,7 @@ impl Server {
         let stdin = process
             .take_stdin()
             .map_err(|source| StartError::Initialize {
-                stderr: process.stderr_tail(),
+                stderr: process.stderr(),
                 source: InitializeError::Send(source),
             })?;
         let (outgoing, queue) = mpsc::unbounded_channel();
@@ -580,13 +582,9 @@ impl Actor {
     }
 
     async fn end(&mut self, why: &str) {
-        let tail = self.process.stderr_tail();
-        let ended = if tail.is_empty() {
-            why.to_owned()
-        } else {
-            format!("{why}: {tail}")
-        };
-        tracing::info!(why, "Codex app-server ended");
+        let stderr = self.process.stderr();
+        let ended = format!("{why}; {stderr}");
+        tracing::info!(why, stderr_bytes = stderr.bytes(), "Codex app-server ended");
         *self
             .server
             .ended

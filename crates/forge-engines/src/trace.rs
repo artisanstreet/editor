@@ -198,6 +198,7 @@ fn frame_end(bytes: &[u8]) -> usize {
 
 #[derive(Debug)]
 struct Sink {
+    name: Arc<str>,
     secrets: Secrets,
     sender: SyncSender<Record>,
     remaining: AtomicUsize,
@@ -359,7 +360,8 @@ impl Trace {
                 "older engine traces stay until the next trace starts"
             );
         }
-        let path = dir.join(format!("{name}-{}.jsonl", artisan_api::now()));
+        let file_name: Arc<str> = Arc::from(format!("{name}-{}.jsonl", artisan_api::now()));
+        let path = dir.join(&*file_name);
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -373,6 +375,7 @@ impl Trace {
         let (sender, receiver) = sync_channel::<Record>(32);
         let dropped = Arc::new(AtomicUsize::new(0));
         let sink = Arc::new(Sink {
+            name: file_name,
             secrets,
             sender,
             remaining: AtomicUsize::new(MAX_TRACE_BYTES),
@@ -387,6 +390,11 @@ impl Trace {
             trace: Self { sink: Some(sink) },
             writer,
         })
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<Arc<str>> {
+        self.sink.as_ref().map(|sink| Arc::clone(&sink.name))
     }
 
     #[must_use]

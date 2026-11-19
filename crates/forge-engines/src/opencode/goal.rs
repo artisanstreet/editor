@@ -92,6 +92,6 @@ pub(super) async fn clear_goal(turn: Turn) -> Result<(), ClearGoalError> {
     }
     .await;
     server.kill().await;
-    server.wait().await;
+    server.finish().await;
     result
 }

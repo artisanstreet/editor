@@ -31,8 +31,11 @@ pub(crate) enum CallError {
     Refused { method: String, error: Value },
     #[error("the answer to {method} has no result")]
     NoResult { method: String },
-    #[error("the engine closed stdout while answering {method}: {stderr}")]
-    Closed { method: String, stderr: String },
+    #[error("the engine closed stdout while answering {method}; {stderr}")]
+    Closed {
+        method: String,
+        stderr: process::StderrWritten,
+    },
 }
 
 pub(crate) struct Session {
@@ -91,7 +94,7 @@ impl Session {
             let Some(line) = line else {
                 return Err(CallError::Closed {
                     method: method.to_owned(),
-                    stderr: self.process.stderr_tail(),
+                    stderr: self.process.stderr(),
                 });
             };
             if line.len() > MAX_RESPONSE_BYTES {
