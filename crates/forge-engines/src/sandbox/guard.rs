@@ -607,6 +607,10 @@ impl Walk<'_> {
         let recorded = manifest.get(child);
         let planted = match (recorded, &found) {
             (None, Found::Missing) => return Ok(()),
+            (None, Found::Folder) if scope(self.engine, child) == Scope::Containing => {
+                let inner = folder.open(name).map_err(restoring())?;
+                return self.reconcile(&inner, child, manifest, self.deeper(child, depth)?);
+            }
             (Some(Entry::Folder), Found::Folder) => {
                 let inner = folder.open(name).map_err(restoring())?;
                 return self.reconcile(&inner, child, manifest, self.deeper(child, depth)?);

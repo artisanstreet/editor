@@ -563,6 +563,31 @@ async fn a_skill_planted_by_an_auto_run_is_gone_before_a_full_access_run() {
 }
 
 #[tokio::test]
+async fn a_folder_an_auto_run_made_around_guarded_configuration_keeps_what_isnt_guarded() {
+    if !sandboxed() {
+        return;
+    }
+    let (_base, home) = engine_home();
+
+    run(
+        &turn(EngineId::OpenCode, &home, Permissions::Auto),
+        "mkdir -p config/gh config/opencode/plugin && echo 'token: mine' > config/gh/hosts.yml && echo 'evil()' > config/opencode/plugin/evil.js; echo done",
+    )
+    .await;
+    let lines = run(
+        &turn(EngineId::OpenCode, &home, Permissions::Full),
+        "cat config/gh/hosts.yml; ls -A config/opencode 2>&1 | grep -c plugin; echo done",
+    )
+    .await;
+
+    assert_eq!(
+        lines,
+        ["token: mine", "0", "done"],
+        "restoring after the Auto run either deleted the GitHub CLI's login or kept a planted plugin"
+    );
+}
+
+#[tokio::test]
 async fn opencodes_execution_policy_folder_is_out_of_an_auto_runs_reach() {
     if !sandboxed() {
         return;
