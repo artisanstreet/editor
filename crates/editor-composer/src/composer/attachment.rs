@@ -38,7 +38,12 @@ impl State {
                 *self = Self::Failed(reason.clone());
                 false
             }
-            _ => false,
+            (Self::Encoding, Input::Uploaded(_))
+            | (Self::Uploading, Input::Encoded)
+            | (
+                Self::Ready(_) | Self::Failed(_),
+                Input::Encoded | Input::Uploaded(_) | Input::Failed(_),
+            ) => false,
         }
     }
 }

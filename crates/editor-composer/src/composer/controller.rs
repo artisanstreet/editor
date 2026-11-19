@@ -1047,18 +1047,20 @@ impl Composer {
         let Some(config) = self.effective_config(host) else {
             return false;
         };
-        let (create, thread_config) = match &self.target {
+        let (create, thread_config, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,
                 host.threads.get(thread).map(|thread| thread.config.clone()),
+                thread.clone(),
             ),
             ComposerTarget::NewThread { .. } => {
                 let Some(project_id) = self.project(host) else {
                     return false;
                 };
+                let thread = ThreadId::new();
                 (
                     Some(CreateThread {
-                        id: ThreadId::new(),
+                        id: thread.clone(),
                         project_id,
                         config: config.clone(),
                         title: None,
@@ -1066,13 +1068,9 @@ impl Composer {
                         spawned_by: None,
                     }),
                     Some(config.clone()),
+                    thread,
                 )
             }
-        };
-        let thread = match (&create, &self.target) {
-            (Some(create), _) => create.id.clone(),
-            (None, ComposerTarget::Thread { thread, .. }) => thread.clone(),
-            _ => return false,
         };
         let message = SendMessage {
             id: ItemId::new(),
