@@ -159,7 +159,7 @@ const MIGRATIONS: &[&[Step]] = &[
         Step::Rust(backfill_outline),
         Step::Sql(include_str!("sql/migrations/v28_b.sql")),
     ],
-    &[Step::Sql(include_str!("sql/pairing/track_revisions.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v29.sql"))],
     &[],
     &[Step::Sql(include_str!("sql/migrations/v31.sql"))],
 ];
