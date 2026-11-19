@@ -14,8 +14,8 @@ use forge_runs::{
     },
 };
 use futures::StreamExt as _;
-use std::{collections::HashSet, time::Duration};
-use tokio::net::TcpListener;
+use std::{collections::HashSet, sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Debug, thiserror::Error)]
@@ -188,19 +188,29 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
     let mut overlap = generation.watch();
     let mut cursor = hub.store().head();
     let mut peers = HashSet::new();
-    let mut interval = tokio::time::interval(Duration::from_millis(50));
+    let peer_active = Arc::new(Notify::new());
+    let mut quiet = 0_u32;
+    let mut last = tokio::time::Instant::now();
     loop {
-        if !overlap.borrow_and_update().overlapping() {
+        if overlap.borrow_and_update().overlapping() {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                () = peer_active.notified() => {}
+                () = tokio::time::sleep_until(last + quiet_sync(quiet)) => {}
+            }
+        } else {
             tokio::select! {
                 () = stop.cancelled() => break,
                 watching = settled(&mut overlap, Overlap::overlapping) => if !watching { break },
             }
-            interval.reset_immediately();
+            quiet = 0;
         }
         tokio::select! {
             () = stop.cancelled() => break,
-            _tick = interval.tick() => {}
+            () = tokio::time::sleep_until(last + SYNC_SOONEST) => {}
         }
+        last = tokio::time::Instant::now();
+        let before = cursor;
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
             tracing::warn!(
                 generation = %generation.member.id,
@@ -215,6 +225,11 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
                 "follow the other generations"
             );
         }
+        quiet = if cursor == before {
+            quiet.saturating_add(1)
+        } else {
+            0
+        };
         hub.runtime_changed();
         let members = match generation.registry.list_peers().await {
             Ok(members) => members,
@@ -232,16 +247,30 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
             if member.id == generation.member.id || !peers.insert(member.id.clone()) {
                 continue;
             }
-            tasks.spawn(relay_peer(hub.clone(), member, stop.clone()));
+            tasks.spawn(relay_peer(
+                hub.clone(),
+                member,
+                stop.clone(),
+                Arc::clone(&peer_active),
+            ));
         }
     }
 }
 
-async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken) {
+const SYNC_SOONEST: Duration = Duration::from_millis(50);
+const SYNC_QUIETEST: Duration = Duration::from_secs(5);
+
+fn quiet_sync(quiet: u32) -> Duration {
+    SYNC_SOONEST
+        .saturating_mul(2_u32.saturating_pow(quiet.min(8)))
+        .min(SYNC_QUIETEST)
+}
+
+async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, active: Arc<Notify>) {
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
-            result = relay(&hub, &member) => {
+            result = relay(&hub, &member, &active) => {
                 if let Err(error) = result { tracing::debug!(generation = %member.id, error = diagnostics::chain(&error), "live relay"); }
             }
         }
@@ -357,7 +386,7 @@ enum RelayLiveError {
     },
 }
 
-async fn relay(hub: &Hub, member: &Member) -> Result<(), RelayLiveError> {
+async fn relay(hub: &Hub, member: &Member, active: &Notify) -> Result<(), RelayLiveError> {
     let generation = || member.id.clone();
     let reach = |source| RelayLiveError::Reach {
         generation: generation(),
@@ -400,6 +429,7 @@ async fn relay(hub: &Hub, member: &Member) -> Result<(), RelayLiveError> {
                 }
             })?;
             hub.store().relay_live(envelope.event);
+            active.notify_one();
             pending.drain(..=end);
         }
     }
