@@ -9,13 +9,13 @@ use self::cpal as platform;
 use self::pulse as platform;
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SendError, Sender};
 use std::thread;
 
 use crate::state::Shared;
 
 #[derive(Clone, Debug)]
-pub struct Format {
+pub(crate) struct Format {
     #[cfg_attr(
         not(all(unix, not(target_os = "macos"))),
         expect(dead_code, reason = "cpal maps channels per sample instead")
@@ -34,7 +34,7 @@ enum Command {
     Flush,
 }
 
-pub struct Output {
+pub(crate) struct Output {
     commands: Sender<Command>,
 }
 
@@ -57,11 +57,17 @@ impl Output {
     }
 
     pub(crate) fn sync(&self) {
-        self.commands.send(Command::Sync).ok();
+        self.send(Command::Sync);
+    }
+
+    fn send(&self, command: Command) {
+        match self.commands.send(command) {
+            Ok(()) | Err(SendError(Command::Sync | Command::Flush)) => {}
+        }
     }
 
     pub(crate) fn flush(&self) {
-        self.commands.send(Command::Flush).ok();
+        self.send(Command::Flush);
     }
 }
 

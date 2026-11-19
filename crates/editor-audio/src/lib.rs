@@ -1,22 +1,10 @@
-#![expect(
-    clippy::inconsistent_struct_constructor,
-    clippy::unused_result_ok,
-    missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::assertions_on_result_states,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
-
 mod decode;
 mod mix;
 mod output;
 mod state;
 mod stream;
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -27,6 +15,14 @@ use state::Shared;
 #[derive(Clone)]
 pub struct Player {
     owner: Arc<Owner>,
+}
+
+impl fmt::Debug for Player {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Player")
+            .field("snapshot", &self.snapshot())
+            .finish()
+    }
 }
 
 struct Owner {

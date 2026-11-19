@@ -73,8 +73,8 @@ fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
 ) -> Result<::cpal::Stream, String> {
     let out_channels = usize::from(config.channels);
     let step = f64::from(track_rate) / f64::from(config.sample_rate.max(1));
-    let callback_shared = std::sync::Arc::clone(shared);
-    let error_shared = std::sync::Arc::clone(shared);
+    let callback_shared = Arc::clone(shared);
+    let error_shared = Arc::clone(shared);
     let mut phase = 0.0;
     device
         .build_output_stream::<T, _, _>(

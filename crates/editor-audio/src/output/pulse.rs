@@ -1,4 +1,6 @@
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -52,11 +54,9 @@ pub(super) fn run(
         },
         ..PlaybackStreamParams::default()
     };
-    if let Some(title) = format
-        .title
-        .as_deref()
-        .and_then(|title| CString::new(title).ok())
-    {
+    if let Some(title) = format.title.as_deref().map(|title| {
+        CString::new(title.replace('\0', "")).expect("invariant: NULs were removed from the title")
+    }) {
         params.props.set(Prop::MediaName, title);
     }
 
@@ -115,6 +115,12 @@ pub(super) fn run(
     result
 }
 
+enum Cookie {
+    Read(Vec<u8>),
+    Missing,
+    Unreadable(PathBuf, std::io::Error),
+}
+
 fn connect() -> Result<Client, String> {
     let socket =
         server_socket().ok_or_else(|| "No audio output: PulseAudio is not running".to_owned())?;
@@ -124,24 +130,43 @@ fn connect() -> Result<Client, String> {
             socket.display()
         )
     })?;
-    let cookie = pulseaudio::cookie_path_from_env().and_then(|path| std::fs::read(path).ok());
-    let missing_cookie = cookie.is_none();
-    Client::new_unix(c"Artisan Editor", connection, cookie).map_err(|error| {
-        if missing_cookie {
-            "No audio output: PulseAudio refused the connection (no auth cookie found)".to_owned()
-        } else {
-            format!(
-                "No audio output: PulseAudio refused the connection ({})",
-                error_chain(&error)
-            )
+    let cookie = pulseaudio::cookie_path_from_env().map_or(Cookie::Missing, |path| {
+        match std::fs::read(&path) {
+            Ok(bytes) => Cookie::Read(bytes),
+            Err(error) if error.kind() == ErrorKind::NotFound => Cookie::Missing,
+            Err(error) => Cookie::Unreadable(path, error),
         }
+    });
+    let (bytes, unauthenticated) = match cookie {
+        Cookie::Read(bytes) => (Some(bytes), None),
+        Cookie::Missing => (None, Some("no auth cookie found".to_owned())),
+        Cookie::Unreadable(path, error) => (
+            None,
+            Some(format!(
+                "couldn't read the auth cookie at {}: {error}",
+                path.display()
+            )),
+        ),
+    };
+    Client::new_unix(c"Artisan Editor", connection, bytes).map_err(|error| {
+        unauthenticated.map_or_else(
+            || {
+                format!(
+                    "No audio output: PulseAudio refused the connection ({})",
+                    error_chain(&error)
+                )
+            },
+            |reason| format!("No audio output: PulseAudio refused the connection ({reason})"),
+        )
     })
 }
 
 fn server_socket() -> Option<PathBuf> {
-    let configured = std::env::var("PULSE_SERVER").ok().and_then(|server| {
-        let path = server.strip_prefix("unix:").unwrap_or(&server);
-        path.starts_with('/').then(|| PathBuf::from(path))
+    let configured = std::env::var_os("PULSE_SERVER").and_then(|server| {
+        let bytes = server.as_bytes();
+        let path = bytes.strip_prefix(b"unix:").unwrap_or(bytes);
+        path.starts_with(b"/")
+            .then(|| PathBuf::from(OsStr::from_bytes(path)))
     });
     let runtime =
         std::env::var_os("PULSE_RUNTIME_PATH").map(|path| PathBuf::from(path).join("native"));

@@ -6,11 +6,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const CHUNK_FRAMES: usize = 2048;
+pub(crate) const CHUNK_FRAMES: usize = 2048;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
 #[derive(Debug)]
-pub struct Audio {
+pub(crate) struct Audio {
     pub(crate) samples: VecDeque<f32>,
     pub(crate) channels: usize,
     pub(crate) rate: u32,
@@ -34,14 +34,14 @@ impl Audio {
             .unwrap_or(usize::MAX)
     }
 }
-pub fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
 }
 
-pub struct StreamDecoder {
+pub(crate) struct StreamDecoder {
     source: Box<dyn Source + Send>,
     channels: usize,
     rate: u32,
@@ -63,11 +63,12 @@ impl StreamDecoder {
         if input_channels == 0 || input_channels > 32 || rate == 0 {
             return Err("Audio has an unsupported channel layout or sample rate".to_owned());
         }
+        let duration = source.total_duration();
         Ok(Self {
-            duration: source.total_duration(),
             source: Box::new(source),
             channels: input_channels.min(2),
             rate,
+            duration,
             input_channels,
         })
     }
@@ -112,7 +113,7 @@ fn describe(error: rodio::decoder::DecoderError) -> String {
     }
 }
 
-pub const fn sanitize(sample: f32) -> f32 {
+pub(crate) const fn sanitize(sample: f32) -> f32 {
     if sample.is_finite() {
         sample.clamp(-1.0, 1.0)
     } else {
@@ -120,7 +121,7 @@ pub const fn sanitize(sample: f32) -> f32 {
     }
 }
 
-pub fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
+pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
     if channels <= 2 {
         out.extend(frames.iter().copied().map(sanitize));
         return;

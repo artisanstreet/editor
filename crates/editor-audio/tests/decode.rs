@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::*;
 
@@ -44,12 +45,14 @@ fn decodes_a_stereo_wav() {
 fn decodes_the_same_audio_from_memory() {
     let frames: Vec<i16> = (0..800).flat_map(|i| [i16::MAX / 2, -(i % 100)]).collect();
     let path = write_wav("memory.wav", 2, 8000, &frames);
-    let bytes: std::sync::Arc<[u8]> = std::fs::read(&path).expect("read").into();
+    let bytes: Arc<[u8]> = std::fs::read(&path).expect("read").into();
     let audio = decode_bytes(Path::new("from-forge/clip.wav"), bytes).expect("decodes");
     assert_eq!(audio.channels, 2);
     assert_eq!(audio.rate, 8000);
     assert_eq!(audio.frames(), 800);
-    assert!(decode_bytes(Path::new("clip.wav"), b"not audio".as_slice().into()).is_err());
+    let error = decode_bytes(Path::new("clip.wav"), b"not audio".as_slice().into())
+        .expect_err("text is not audio");
+    assert!(!error.is_empty(), "the failure explains itself");
 }
 
 #[test]

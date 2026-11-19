@@ -5,11 +5,11 @@ use crossbeam_channel::{Receiver, Sender, bounded, select};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub enum PcmEvent {
+pub(crate) enum PcmEvent {
     Data { epoch: u64, samples: Vec<f32> },
     End { epoch: u64 },
 }
-pub struct StreamState {
+pub(crate) struct StreamState {
     pub(crate) pcm: Receiver<PcmEvent>,
     pub(crate) signal: Sender<()>,
     pub(crate) epoch: u64,
@@ -27,9 +27,9 @@ impl StreamState {
         Self {
             pcm,
             signal,
-            duration,
             epoch: 0,
             seek: None,
+            duration,
             start: 0,
             ended: false,
         }
@@ -37,7 +37,7 @@ impl StreamState {
 }
 const QUEUE_CHUNKS: usize = 8;
 
-pub fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
+pub(crate) fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
     let first = match decoder.chunk() {
         Ok(samples) if !samples.is_empty() => decoder.audio(samples),
         Ok(_) => {

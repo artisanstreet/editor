@@ -1,8 +1,3 @@
-#![expect(
-    clippy::print_stdout,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,13 +15,19 @@ fn main() -> Result<(), String> {
     let mut paused = false;
     loop {
         let snapshot = player.snapshot();
-        println!(
-            "{:>5} ms  {:?}  {:?} / {:?}",
-            started.elapsed().as_millis(),
-            snapshot.state,
-            snapshot.position,
-            snapshot.duration
-        );
+        #[expect(
+            clippy::print_stdout,
+            reason = "this example is a terminal program that reports playback on stdout"
+        )]
+        {
+            println!(
+                "{:>5} ms  {:?}  {:?} / {:?}",
+                started.elapsed().as_millis(),
+                snapshot.state,
+                snapshot.position,
+                snapshot.duration
+            );
+        }
         match snapshot.state {
             PlaybackState::Ended => return Ok(()),
             PlaybackState::Failed(message) => return Err(message),

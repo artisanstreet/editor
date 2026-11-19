@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use crossbeam_channel::TrySendError;
+
 use crate::decode::Audio;
 use crate::mix;
 use crate::output::{Format, Output};
@@ -9,7 +11,7 @@ use crate::stream::{PcmEvent, StreamState};
 use crate::{PlaybackState, Snapshot};
 
 #[derive(Default)]
-pub struct Shared {
+pub(crate) struct Shared {
     inner: Mutex<Inner>,
 }
 
@@ -19,7 +21,7 @@ impl Shared {
     }
 }
 
-pub struct Inner {
+pub(crate) struct Inner {
     generation: u64,
     track: Option<PathBuf>,
     state: PlaybackState,
@@ -166,7 +168,9 @@ impl Inner {
             audio.samples.clear();
             self.cursor = 0;
             while stream.pcm.try_recv().is_ok() {}
-            stream.signal.try_send(()).ok();
+            match stream.signal.try_send(()) {
+                Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+            }
             if self.state == PlaybackState::Ended {
                 self.state = PlaybackState::Paused;
             }
@@ -195,7 +199,7 @@ impl Inner {
                 )
             }),
             duration: self.stream.as_ref().map_or_else(
-                || self.audio.as_ref().map(super::decode::Audio::duration),
+                || self.audio.as_ref().map(Audio::duration),
                 |stream| stream.duration,
             ),
         }

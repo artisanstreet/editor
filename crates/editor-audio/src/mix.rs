@@ -5,7 +5,7 @@ use crate::decode::Audio;
     clippy::cast_sign_loss,
     reason = "samples narrow to f32 by design, and the whole-frame advance is a small non-negative count"
 )]
-pub fn render_mapped<T: Copy>(
+pub(crate) fn render_mapped<T: Copy>(
     audio: &Audio,
     cursor: &mut usize,
     phase: &mut f64,
