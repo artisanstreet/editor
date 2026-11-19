@@ -1,6 +1,6 @@
-use aqua_core::vector::PathCommand;
 use crate::frame::strip::RADIUS as TAB;
 use crate::ui::kit::Radius;
+use aqua_core::vector::PathCommand;
 use aqua_core::{Point, Rect};
 
 fn arc(radius: f32, sweep: bool, x: f32, y: f32) -> PathCommand {
@@ -37,8 +37,12 @@ pub fn trace(body: Rect, tab: Option<Rect>, inset: f32) -> Vec<PathCommand> {
                 .max(0.0)
                 .min((right - left) * 0.5)
                 .min((y0 - top) * 0.5);
-            let left_fillet = (TAB.px() + inset).min((left - x0) * 0.5).min((y0 - top) * 0.5);
-            let right_fillet = (TAB.px() + inset).min((x1 - right) * 0.5).min((y0 - top) * 0.5);
+            let left_fillet = (TAB.px() + inset)
+                .min((left - x0) * 0.5)
+                .min((y0 - top) * 0.5);
+            let right_fillet = (TAB.px() + inset)
+                .min((x1 - right) * 0.5)
+                .min((y0 - top) * 0.5);
             let left_corner = radius.min((left - x0 - left_fillet).max(0.0));
             let right_corner = radius.min((x1 - right - right_fillet).max(0.0));
             path.extend([

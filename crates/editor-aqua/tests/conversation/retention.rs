@@ -51,7 +51,13 @@ fn model(status: Status) -> RowModel {
     }
 }
 
-fn fingerprint(model: &RowModel, disclosure: &RowDisclosure, held: bool, body: Option<u64>, epoch: u64) -> u64 {
+fn fingerprint(
+    model: &RowModel,
+    disclosure: &RowDisclosure,
+    held: bool,
+    body: Option<u64>,
+    epoch: u64,
+) -> u64 {
     RowFingerprint {
         model,
         disclosure,
@@ -67,7 +73,10 @@ fn fingerprint_is_stable_for_equal_inputs_and_tracks_every_input() {
     let base = model(Status::Done);
     let disclosure = RowDisclosure::default();
     let reference = fingerprint(&base, &disclosure, false, Some(1), 0);
-    assert_eq!(reference, fingerprint(&model(Status::Done), &disclosure, false, Some(1), 0));
+    assert_eq!(
+        reference,
+        fingerprint(&model(Status::Done), &disclosure, false, Some(1), 0)
+    );
 
     let mut versioned = model(Status::Done);
     versioned.version = 4;

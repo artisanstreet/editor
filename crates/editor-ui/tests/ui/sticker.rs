@@ -27,7 +27,9 @@ fn the_top_right_lands_before_the_bottom_left_corner_flattens() {
 
 #[test]
 fn the_press_sweeps_forward_only() {
-    let glue: Vec<f32> = (0..=20).map(|step| at(f64::from(step) / 20.0).glue).collect();
+    let glue: Vec<f32> = (0..=20)
+        .map(|step| at(f64::from(step) / 20.0).glue)
+        .collect();
     assert!(glue.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 

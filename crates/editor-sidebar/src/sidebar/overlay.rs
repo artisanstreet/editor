@@ -10,9 +10,7 @@ use super::{
 };
 use editor_core::{Core, HostId, HostInstance};
 use editor_ui::{
-    dialog::DialogHost,
-    popover::AnimatedPickerHost,
-    text::mount::EditorController,
+    dialog::DialogHost, popover::AnimatedPickerHost, text::mount::EditorController,
     theme::ArtisanTheme,
 };
 

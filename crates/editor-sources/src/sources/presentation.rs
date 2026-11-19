@@ -1,9 +1,9 @@
-use editor_core::Core;
 use crate::sources::{ContentAction, ContentEffect, ContentText, ContentView};
-use editor_ui::theme::ArtisanTheme;
 use aqua::prelude::AquaWindowId;
 use aqua::{AppCtx, UiApp};
 use aqua_text::document::{SelectionDocumentId, SelectionSourceError, SelectionSourceId};
+use editor_core::Core;
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
 pub struct SourceView {

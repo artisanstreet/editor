@@ -77,8 +77,16 @@ fn shaped_bodies_report_their_leaf_count() {
 #[test]
 fn finishing_a_reply_reversions_only_its_last_block() {
     let mut projections = Projections::default();
-    let live = versions(&expand_with(&mut projections, "alpha\n\nbeta\n\ngamma", true));
-    let done = versions(&expand_with(&mut projections, "alpha\n\nbeta\n\ngamma", false));
+    let live = versions(&expand_with(
+        &mut projections,
+        "alpha\n\nbeta\n\ngamma",
+        true,
+    ));
+    let done = versions(&expand_with(
+        &mut projections,
+        "alpha\n\nbeta\n\ngamma",
+        false,
+    ));
     assert_eq!(live[..2], done[..2]);
     assert_ne!(live[2], done[2]);
 }

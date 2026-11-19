@@ -1,5 +1,5 @@
-use aqua::render::lower::Lowering;
 use aqua::render::link::ExternalUpdate;
+use aqua::render::lower::Lowering;
 use aqua_gpu_d3d11::scene::{AdapterPreference, OffscreenBackend};
 use aqua_gpu_ref::conformance::render as render_plan;
 use aqua_protocol::{GpuBackend, SurfacePixels};
@@ -62,7 +62,11 @@ pub struct Pixels {
 
 impl Pixels {
     pub fn is_opaque(&self) -> bool {
-        self.rgba.as_chunks::<4>().0.iter().all(|[_, _, _, alpha]| *alpha == 255)
+        self.rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|[_, _, _, alpha]| *alpha == 255)
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<(), SaveError> {
@@ -155,7 +159,12 @@ impl Surface {
         );
         let lowered = self
             .lowering
-            .lower(scene, size, self.scale, self.device.capabilities().plan_limits())
+            .lower(
+                scene,
+                size,
+                self.scale,
+                self.device.capabilities().plan_limits(),
+            )
             .map_err(|error| SurfaceError::Lower {
                 message: format!("{error:?}"),
             })?;

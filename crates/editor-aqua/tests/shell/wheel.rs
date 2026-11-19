@@ -109,11 +109,17 @@ fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
     assert_eq!(offset(&app), 300.0);
 
     assert!(pause_tail(&mut app));
-    assert_eq!(glides.offer(&mut app, &notch(-3.0)), Some(Surface::Transcript));
+    assert_eq!(
+        glides.offer(&mut app, &notch(-3.0)),
+        Some(Surface::Transcript)
+    );
     glide_to_rest(&mut app, &mut glides);
 
     let rested = offset(&app);
-    assert!(rested < 300.0 - 40.0, "the notch moved the transcript up, got {rested}");
+    assert!(
+        rested < 300.0 - 40.0,
+        "the notch moved the transcript up, got {rested}"
+    );
     assert!(!following_tail(&app));
     assert!(!glides.active());
 }
@@ -163,7 +169,10 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
     app.build_frame().unwrap();
     assert_eq!(offset(&app), 100.0);
 
-    assert_eq!(glides.offer(&mut app, &notch(1.0)), Some(Surface::Transcript));
+    assert_eq!(
+        glides.offer(&mut app, &notch(1.0)),
+        Some(Surface::Transcript)
+    );
     glide_to_rest(&mut app, &mut glides);
 
     let rested = offset(&app);
@@ -237,12 +246,15 @@ fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
     assert_eq!(glides.offer(&mut app, &notch(3.0)), Some(Surface::Model));
     glide_to_rest(&mut app, &mut glides);
 
-    let rested = editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
+    let rested =
+        editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
     assert!(rested > 40.0, "the notch moved the list, got {rested}");
 
-    app.refresh_subtree(editor_aqua::shell::wheel::MODEL_MENU, model_list(rested)).unwrap();
+    app.refresh_subtree(editor_aqua::shell::wheel::MODEL_MENU, model_list(rested))
+        .unwrap();
     app.build_frame().unwrap();
-    let kept = editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
+    let kept =
+        editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
     assert_eq!(kept, rested);
 }
 

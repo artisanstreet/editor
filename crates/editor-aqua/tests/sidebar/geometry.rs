@@ -111,7 +111,12 @@ fn a_search_ranks_fuzzy_matches_from_inbox_and_history_and_marks_what_matched() 
             })
             .collect::<Vec<_>>()
     };
-    let titles = |query: &str| found(query).into_iter().map(|row| row.0).collect::<Vec<_>>();
+    let titles = |query: &str| {
+        found(query)
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>()
+    };
 
     let unfiltered = lists().searched("  ");
     assert_eq!((unfiltered.inbox.len(), unfiltered.history.len()), (2, 1));
@@ -168,7 +173,10 @@ fn message_hits_follow_the_thread_matches_under_their_own_heading() {
     let lists = Lists {
         inbox: vec![row(&project, "Scene bound fix")],
         history: Vec::new(),
-        hits: vec![found.clone(), hit("the scene bound is 512", (4, 15)).unwrap()],
+        hits: vec![
+            found.clone(),
+            hit("the scene bound is 512", (4, 15)).unwrap(),
+        ],
         next_tick: None,
     };
     let listed = entries(&lists, true);

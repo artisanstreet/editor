@@ -119,11 +119,7 @@ impl ShimmerText {
             .min_width(Length::Px(0.0))
             .gpui_source_text_color(color);
         let style = if self.active && !self.reduced_motion {
-            style.text_shimmer(sweep(
-                &self.theme,
-                self.timing,
-                hash_key(self.id.clone()),
-            ))
+            style.text_shimmer(sweep(&self.theme, self.timing, hash_key(self.id.clone())))
         } else {
             style
         };

@@ -2,6 +2,8 @@
 mod client_error;
 #[path = "core/connection.rs"]
 mod connection;
+#[path = "core/host.rs"]
+mod host;
 #[path = "core/hosts.rs"]
 mod hosts;
 #[path = "core/mcp_sign_in.rs"]
@@ -12,8 +14,6 @@ mod media_http;
 mod pages;
 #[path = "core/host/preferences.rs"]
 mod preferences;
-#[path = "core/host.rs"]
-mod host;
 #[path = "core/host/project_icons.rs"]
 mod project_icons;
 #[path = "core/range_window.rs"]

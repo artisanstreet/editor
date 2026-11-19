@@ -112,20 +112,37 @@ fn replacing_a_question_set_drops_answers_recorded_against_the_old_one() {
     panel.set_questionnaires(asked(&["a", "b"]), &mut text);
     assert!(
         panel
-            .answer(QuestionAnswer::Text { text: "for a".into() }, true, &mut text)
+            .answer(
+                QuestionAnswer::Text {
+                    text: "for a".into()
+                },
+                true,
+                &mut text
+            )
             .is_none()
     );
     assert_eq!(panel.step, 1);
 
     panel.set_questionnaires(asked(&["b"]), &mut text);
-    assert_eq!(panel.step, 0, "progress through [a, b] does not carry into [b]");
+    assert_eq!(
+        panel.step, 0,
+        "progress through [a, b] does not carry into [b]"
+    );
     let (_, answer) = panel
-        .answer(QuestionAnswer::Text { text: "for b".into() }, true, &mut text)
+        .answer(
+            QuestionAnswer::Text {
+                text: "for b".into(),
+            },
+            true,
+            &mut text,
+        )
         .expect("answering the only question submits");
     assert_eq!(
         answer,
         Answer::Question {
-            answers: vec![Some(QuestionAnswer::Text { text: "for b".into() })]
+            answers: vec![Some(QuestionAnswer::Text {
+                text: "for b".into()
+            })]
         },
         "a's answer is not sent as b's"
     );

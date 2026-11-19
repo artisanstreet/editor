@@ -42,11 +42,19 @@ fn the_engine_bar_follows_the_section_under_it_and_lands_on_the_last_at_the_end(
 fn opening_centres_the_current_model_without_scrolling_past_the_ends() {
     let rows = rows();
     let layout = ListLayout::new(&rows);
-    let first = layout.centred(&rows, EngineId::Claude, "c0", VIEWPORT).unwrap();
+    let first = layout
+        .centred(&rows, EngineId::Claude, "c0", VIEWPORT)
+        .unwrap();
     assert_eq!(first, 0.0);
-    let last = layout.centred(&rows, EngineId::Codex, "x5", VIEWPORT).unwrap();
+    let last = layout
+        .centred(&rows, EngineId::Codex, "x5", VIEWPORT)
+        .unwrap();
     assert_eq!(last, layout.max_scroll(VIEWPORT));
-    assert!(layout.centred(&rows, EngineId::Codex, "gone", VIEWPORT).is_none());
+    assert!(
+        layout
+            .centred(&rows, EngineId::Codex, "gone", VIEWPORT)
+            .is_none()
+    );
 }
 
 #[test]
@@ -58,7 +66,10 @@ fn a_reader_scrolling_during_a_jump_takes_over() {
     let first = scroll.offset(0.0, 400.0, now, false);
     let second = scroll.offset(first, 400.0, now + Duration::from_millis(100), false);
     assert!(second > first);
-    assert_eq!(scroll.offset(second + 40.0, 400.0, now, false), second + 40.0);
+    assert_eq!(
+        scroll.offset(second + 40.0, 400.0, now, false),
+        second + 40.0
+    );
     assert!(!scroll.jumping());
 }
 

@@ -428,7 +428,10 @@ fn details_grow_in_only_when_they_open() {
     use editor_aqua::conversation::view::motion::RowMotion;
     let now = Instant::now();
     let mut motion = RowMotion::default();
-    assert!(motion.disclosed("tool".into(), true, false, now).is_none(), "already open on first sight");
+    assert!(
+        motion.disclosed("tool".into(), true, false, now).is_none(),
+        "already open on first sight"
+    );
     assert!(motion.disclosed("tool".into(), false, false, now).is_none());
     assert!(motion.disclosed("tool".into(), true, false, now).is_some());
     assert!(motion.animating());
@@ -438,7 +441,10 @@ fn details_grow_in_only_when_they_open() {
             .is_none()
     );
     motion.disclosed("tool".into(), false, false, now);
-    assert!(motion.disclosed("tool".into(), true, true, now).is_none(), "reduced motion");
+    assert!(
+        motion.disclosed("tool".into(), true, true, now).is_none(),
+        "reduced motion"
+    );
 }
 
 #[test]
@@ -446,20 +452,46 @@ fn status_labels_swap_only_between_labels() {
     use editor_aqua::conversation::view::motion::RowMotion;
     let now = Instant::now();
     let mut motion = RowMotion::default();
-    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
-    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
-    assert_eq!(motion.swap("status".into(), Some("Reading".into()), false, now), Some(0.0));
+    assert_eq!(
+        motion.swap("status".into(), Some("Thinking".into()), false, now),
+        None
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Thinking".into()), false, now),
+        None
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Reading".into()), false, now),
+        Some(0.0)
+    );
     assert!(
         motion
-            .swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(75))
+            .swap(
+                "status".into(),
+                Some("Reading".into()),
+                false,
+                now + Duration::from_millis(75)
+            )
             .is_some_and(|progress| progress > 0.0 && progress < 1.0)
     );
     assert_eq!(
-        motion.swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(150)),
+        motion.swap(
+            "status".into(),
+            Some("Reading".into()),
+            false,
+            now + Duration::from_millis(150)
+        ),
         None
     );
-    assert_eq!(motion.swap("status".into(), None, false, now), None, "streamed reasoning");
-    assert_eq!(motion.swap("status".into(), Some("Writing".into()), false, now), None);
+    assert_eq!(
+        motion.swap("status".into(), None, false, now),
+        None,
+        "streamed reasoning"
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Writing".into()), false, now),
+        None
+    );
 }
 
 #[test]
@@ -469,9 +501,17 @@ fn images_fade_in_when_they_finish_loading_but_not_when_cached() {
     let mut motion = RowMotion::default();
     assert_eq!(motion.arrival("cached".into(), true, false, now), None);
     assert_eq!(motion.arrival("loading".into(), false, false, now), None);
-    assert_eq!(motion.arrival("loading".into(), true, false, now), Some(0.0));
     assert_eq!(
-        motion.arrival("loading".into(), true, false, now + Duration::from_millis(350)),
+        motion.arrival("loading".into(), true, false, now),
+        Some(0.0)
+    );
+    assert_eq!(
+        motion.arrival(
+            "loading".into(),
+            true,
+            false,
+            now + Duration::from_millis(350)
+        ),
         None
     );
 }
@@ -490,7 +530,10 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let start = Instant::now();
     let mut motion = RowMotion::default();
     let sticker = motion.sticker(key.clone(), true, false, start).unwrap();
-    assert!(!motion.animating(), "a sticker must not rebuild every frame");
+    assert!(
+        !motion.animating(),
+        "a sticker must not rebuild every frame"
+    );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.set_viewport(400.0, 200.0, 1.0);
     app.advance_clock(1.0);
@@ -514,7 +557,9 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let paint = |app: &aqua::UiApp| {
         let node = app
             .tree()
-            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from("bubble")))
+            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                "bubble",
+            )))
             .unwrap();
         app.tree().paint(node).unwrap()
     };

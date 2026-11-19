@@ -377,7 +377,10 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
             .set_setting("fixture-change".into(), serde_json::json!(true))
             .await
             .unwrap();
-        snapshot.verify_stable(&server.store, &input).await.unwrap_err();
+        snapshot
+            .verify_stable(&server.store, &input)
+            .await
+            .unwrap_err();
         let updated = StoreSnapshot::capture_stable(&server.store, &input)
             .await
             .unwrap();

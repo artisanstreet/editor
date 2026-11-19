@@ -35,7 +35,12 @@ fn layout(outline: Option<f32>) -> Placed {
         UiBox::new()
             .layout("row")
             .width(1200.0)
-            .children(strip::strip(&ArtisanTheme::resolved(), &[tab], false, &emit))
+            .children(strip::strip(
+                &ArtisanTheme::resolved(),
+                &[tab],
+                false,
+                &emit,
+            ))
             .build()
     })
     .unwrap();
@@ -57,7 +62,10 @@ fn layout(outline: Option<f32>) -> Placed {
     let chevron = tree
         .traverse()
         .into_iter()
-        .find(|id| tree.get(*id).is_some_and(|node| node.key == Some(chevron_key)))
+        .find(|id| {
+            tree.get(*id)
+                .is_some_and(|node| node.key == Some(chevron_key))
+        })
         .and_then(|id| tree.rect(id))
         .map(|rect| (rect.x, rect.right()));
     Placed { labels, chevron }

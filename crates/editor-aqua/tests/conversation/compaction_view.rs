@@ -1,6 +1,6 @@
 use aqua::UiApp;
-use aqua_text::{SharedFonts, SharedRuns};
 use aqua_core::{DisplayItem, scene::GpuiTextShimmer};
+use aqua_text::{SharedFonts, SharedRuns};
 use aqua_ui::{
     element::{Box as UiBox, Key},
     tree::hash_key,

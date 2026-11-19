@@ -25,13 +25,19 @@ fn hovering_spells_toggle_and_leaving_spells_artisan_again() {
     assert_eq!(text(&wordmark.shown(after(start, 300))), ["TO", "GG", "LE"]);
 
     wordmark.leave(after(start, 300));
-    wordmark.advance(after(start, 300) + LEAVE_DELAY - Duration::from_millis(1), false);
+    wordmark.advance(
+        after(start, 300) + LEAVE_DELAY - Duration::from_millis(1),
+        false,
+    );
     assert_eq!(wordmark.face(), Face::Swap);
     wordmark.advance(after(start, 300) + LEAVE_DELAY, false);
     assert_eq!(wordmark.face(), Face::Rest);
     assert!(wordmark.scrambling());
     wordmark.advance(after(start, 800), false);
-    assert_eq!(text(&wordmark.shown(after(start, 800))), ["AR", "TIS", "AN"]);
+    assert_eq!(
+        text(&wordmark.shown(after(start, 800))),
+        ["AR", "TIS", "AN"]
+    );
 }
 
 #[test]

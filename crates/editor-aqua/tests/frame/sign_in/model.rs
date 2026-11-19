@@ -1,7 +1,7 @@
 use editor_aqua::core::account::{AccountPhase, Approval, Factor, SecondFactor};
 use editor_aqua::frame::sign_in::model::{
-    EmailProblem, Feedback, Page, Provider, Step, View, checked_email, feedback_of, locked, page_of,
-    view_of,
+    EmailProblem, Feedback, Page, Provider, Step, View, checked_email, feedback_of, locked,
+    page_of, view_of,
 };
 
 fn approval(totp_required: bool) -> Approval {
@@ -15,18 +15,42 @@ fn approval(totp_required: bool) -> Approval {
 
 #[test]
 fn emails_are_trimmed_and_checked_for_shape() {
-    assert_eq!(checked_email("  you@artisan.email "), Ok("you@artisan.email"));
+    assert_eq!(
+        checked_email("  you@artisan.email "),
+        Ok("you@artisan.email")
+    );
     assert_eq!(checked_email("   "), Err(EmailProblem::Missing));
-    for malformed in ["you", "you@", "@artisan.email", "you@artisan", "you@artisan.", "a@b@c.d", "y ou@artisan.email"] {
-        assert_eq!(checked_email(malformed), Err(EmailProblem::Malformed), "{malformed}");
+    for malformed in [
+        "you",
+        "you@",
+        "@artisan.email",
+        "you@artisan",
+        "you@artisan.",
+        "a@b@c.d",
+        "y ou@artisan.email",
+    ] {
+        assert_eq!(
+            checked_email(malformed),
+            Err(EmailProblem::Malformed),
+            "{malformed}"
+        );
     }
 }
 
 #[test]
 fn second_factor_codes_split_into_authenticator_and_recovery() {
-    assert_eq!(SecondFactor::parse(" 123456 ").map(|factor| factor.kind()), Some(Factor::Authenticator));
-    assert_eq!(SecondFactor::parse("12345").map(|factor| factor.kind()), Some(Factor::Recovery));
-    assert_eq!(SecondFactor::parse("abcd-efgh").map(|factor| factor.kind()), Some(Factor::Recovery));
+    assert_eq!(
+        SecondFactor::parse(" 123456 ").map(|factor| factor.kind()),
+        Some(Factor::Authenticator)
+    );
+    assert_eq!(
+        SecondFactor::parse("12345").map(|factor| factor.kind()),
+        Some(Factor::Recovery)
+    );
+    assert_eq!(
+        SecondFactor::parse("abcd-efgh").map(|factor| factor.kind()),
+        Some(Factor::Recovery)
+    );
     assert_eq!(SecondFactor::parse("  "), None);
 }
 
@@ -61,7 +85,9 @@ fn a_rejected_code_returns_to_the_code_page_with_a_factor_specific_error() {
     );
     assert_eq!(page_of(&view), Page::Code);
     assert!(!locked(&view));
-    assert!(matches!(feedback_of(&view), Feedback::Error(message) if message.contains("recovery code")));
+    assert!(
+        matches!(feedback_of(&view), Feedback::Error(message) if message.contains("recovery code"))
+    );
 }
 
 #[test]
@@ -73,7 +99,12 @@ fn verifying_a_code_locks_the_code_page() {
         },
         None,
     );
-    assert_eq!(view, View::SecondFactor { step: Step::Verifying });
+    assert_eq!(
+        view,
+        View::SecondFactor {
+            step: Step::Verifying
+        }
+    );
     assert!(locked(&view));
     assert_eq!(feedback_of(&view), Feedback::None);
 }
@@ -83,7 +114,10 @@ fn the_signed_out_form_reports_the_email_problem() {
     let view = view_of(&AccountPhase::SignedOut, Some(EmailProblem::Missing));
     assert!(!locked(&view));
     assert!(matches!(feedback_of(&view), Feedback::Error(_)));
-    assert_eq!(feedback_of(&view_of(&AccountPhase::SignedOut, None)), Feedback::None);
+    assert_eq!(
+        feedback_of(&view_of(&AccountPhase::SignedOut, None)),
+        Feedback::None
+    );
 }
 
 #[test]
@@ -94,7 +128,12 @@ fn waiting_on_the_browser_keeps_the_form_open_and_says_where_to_continue() {
         },
         None,
     );
-    assert_eq!(view, View::Browser { provider: Provider::GitHub });
+    assert_eq!(
+        view,
+        View::Browser {
+            provider: Provider::GitHub
+        }
+    );
     assert_eq!(page_of(&view), Page::Email);
     assert!(!locked(&view));
     assert!(matches!(feedback_of(&view), Feedback::Success(message) if message.contains("GitHub")));
@@ -108,12 +147,16 @@ fn locked_sign_in_attempts_keep_cancellation_available() {
         View::Waiting,
         View::Approved,
         View::Finishing,
-        View::SecondFactor { step: Step::Verifying },
+        View::SecondFactor {
+            step: Step::Verifying,
+        },
     ] {
         assert!(locked(&view));
         assert!(cancellable(&view), "{view:?}");
     }
-    assert!(cancellable(&View::Browser { provider: Provider::Google }));
+    assert!(cancellable(&View::Browser {
+        provider: Provider::Google
+    }));
     assert!(!cancellable(&View::Form { problem: None }));
     assert!(!cancellable(&View::Restoring));
 }

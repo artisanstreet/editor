@@ -36,7 +36,6 @@ mod tunnel;
 
 pub use agent_names::*;
 pub use content::*;
-pub use secret::Secret;
 pub use engine::*;
 pub use event::*;
 pub use extensions::*;
@@ -46,6 +45,7 @@ pub use model::*;
 pub use reassembly::*;
 pub use request::*;
 pub use search::*;
+pub use secret::Secret;
 pub use settings::*;
 pub use source_index::*;
 pub use thread::*;

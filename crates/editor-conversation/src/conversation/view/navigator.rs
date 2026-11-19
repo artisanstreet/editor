@@ -21,13 +21,7 @@ fn number_width(count: usize) -> f32 {
     (digits as f32 + 1.0) * DIGIT_WIDTH
 }
 
-fn entry(
-    theme: &ArtisanTheme,
-    number: usize,
-    label: &str,
-    current: bool,
-    width: f32,
-) -> Element {
+fn entry(theme: &ArtisanTheme, number: usize, label: &str, current: bool, width: f32) -> Element {
     let role = match current {
         true => TextRole::LabelStrong,
         false => TextRole::Label,

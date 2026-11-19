@@ -34,17 +34,17 @@ fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
     core.add_test_host(&config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), ThreadId::from("thread"));
-    conversation.viewport(&core, Input::Loaded {
-        fetch: Fetch::Tail,
-        first: Some(50),
-        last: Some(60),
-        more: true,
-    });
+    conversation.viewport(
+        &core,
+        Input::Loaded {
+            fetch: Fetch::Tail,
+            first: Some(50),
+            last: Some(60),
+            more: true,
+        },
+    );
     conversation.rows = vec![
-        (
-            Row::WorkHeader(RunId::from("done")),
-            1,
-        ),
+        (Row::WorkHeader(RunId::from("done")), 1),
         (Row::Status(RunId::from("live")), 1),
     ];
     assert!(!conversation.view.as_ref().unwrap().viewport.in_flight);

@@ -5,13 +5,13 @@ use super::{
     surface::{SaveError, Surface, SurfaceError},
 };
 use crate::shell::{application::ShellApplication, host::ShellResources, root::RootViews};
-use aqua_protocol::{LogicalSize, WindowEvent};
 use aqua::prelude::{AquaWindowId, ObservedWindowState};
 use aqua::{Application, Aqua, AquaConfig};
 use aqua_core::{
     ColorProfile, InputEvent, Key, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
     PointerKind, ScrollDelta,
 };
+use aqua_protocol::{LogicalSize, WindowEvent};
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},

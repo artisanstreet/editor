@@ -24,13 +24,10 @@ impl Rail<'_> {
         core: &Core,
         viewport: CollectionViewport,
     ) -> bool {
-        match self.navigation.refresh(
-            ui,
-            conversation,
-            core,
-            viewport,
-            Instant::now(),
-        ) {
+        match self
+            .navigation
+            .refresh(ui, conversation, core, viewport, Instant::now())
+        {
             Ok(Refresh::InPlace) => {
                 ctx.request_frame(window, FrameReason::ANIMATION);
                 false
@@ -73,8 +70,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let (Some(workspace), Some(viewport)) =
-            (shell.entry.workspace(), self.transcript_viewport)
+        let (Some(workspace), Some(viewport)) = (shell.entry.workspace(), self.transcript_viewport)
         else {
             return false;
         };
@@ -83,6 +79,13 @@ impl RootViews {
             marker: &mut self.navigation_marker,
             transcript_viewport: self.transcript_viewport,
         }
-        .refresh_in_place(ui, ctx, window, &workspace.conversation, &shell.core, viewport)
+        .refresh_in_place(
+            ui,
+            ctx,
+            window,
+            &workspace.conversation,
+            &shell.core,
+            viewport,
+        )
     }
 }

@@ -2,8 +2,8 @@ use aqua::UiApp;
 use aqua_core::{NodeId, Point, Rect};
 use aqua_text::{SharedFonts, SharedRuns};
 use aqua_ui::element::{Box as UiBox, Key};
-use aqua_ui::style::Length;
 use aqua_ui::events::hit_test;
+use aqua_ui::style::Length;
 use aqua_ui::tree::{UiTree, hash_key};
 use editor_aqua::conversation::view::thread_frame;
 use editor_aqua::ui::kit::surface::drawer;
@@ -40,7 +40,8 @@ fn frame(progress: f32) -> UiApp {
         let composer = UiBox::new()
             .width(Length::Pct(100.0))
             .height(120.0)
-            .build().with_key("composer");
+            .build()
+            .with_key("composer");
         let panel = drawer::build(&theme, PANEL, progress, Vec::new()).with_key("drawer");
         UiBox::new()
             .width(WIDTH)

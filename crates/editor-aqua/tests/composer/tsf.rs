@@ -4,7 +4,7 @@ use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
 use aqua_ime_tsf::double::TsfDouble;
 use aqua_protocol::{Instant, Machine, PixelSize, RuntimeInput, ShellEvent, WindowId};
 use aqua_text::{SharedFonts, SharedRuns};
-use artisan_api::tls::{fingerprint, Identity};
+use artisan_api::tls::{Identity, fingerprint};
 use editor_aqua::composer::controller::ComposerTarget;
 use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::view::ComposerOwner;

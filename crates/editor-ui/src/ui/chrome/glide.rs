@@ -59,7 +59,10 @@ fn curve(p1: f64, p2: f64, t: f64) -> f64 {
 
 fn slope(p1: f64, p2: f64, t: f64) -> f64 {
     let inverse = 1.0 - t;
-    (3.0 * inverse * inverse).mul_add(p1, (6.0 * inverse * t).mul_add(p2 - p1, 3.0 * t * t * (1.0 - p2)))
+    (3.0 * inverse * inverse).mul_add(
+        p1,
+        (6.0 * inverse * t).mul_add(p2 - p1, 3.0 * t * t * (1.0 - p2)),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,7 +127,9 @@ impl Glide {
         let shortening = match self {
             Self::Running(run) if (run.from - to).abs() < f32::EPSILON => {
                 let output = transition.easing.sample(run.progress(now));
-                output.mul_add(run.shortening, 1.0 - run.shortening).clamp(0.0, 1.0)
+                output
+                    .mul_add(run.shortening, 1.0 - run.shortening)
+                    .clamp(0.0, 1.0)
             }
             Self::Running(_) | Self::Resting(_) => 1.0,
         };
