@@ -250,6 +250,23 @@ jobs:
         run: cargo nextest run --locked --workspace --no-fail-fast
       - name: Qualification and capture tests
         run: cargo nextest run --locked -p editor-aqua --features capture --no-fail-fast
+      - name: Screens match their baselines on the WARP reference renderer
+        shell: bash
+        env:
+          SCREENS: ${{ runner.temp }}/screens
+        run: |
+          cargo build --locked -p editor-aqua --features capture --bin editor-aqua
+          AQUA_BIN="$PWD/target/debug/editor-aqua.exe" crates/editor-aqua/tests/qualification/capture.sh "$SCREENS/candidate"
+          AQUA_SCREENS_CANDIDATE="$SCREENS/candidate" AQUA_SCREENS_HEATMAPS="$SCREENS/heatmaps" \
+            AQUA_SCREENS_REPORT="$SCREENS/report.json" \
+            cargo nextest run --locked -p editor-aqua --test screens --run-ignored only --no-fail-fast
+      - name: Keep the captured screens
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: screens
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
       - *save-target
       - *prune-target
       - *sccache-stats

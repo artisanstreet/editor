@@ -6,7 +6,7 @@ use aqua_protocol::{GpuBackend, SurfacePixels};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceError {
-    #[error("no D3D12 adapter for capture: {message}")]
+    #[error("the WARP reference renderer is unavailable for capture: {message}")]
     NoAdapter { message: String },
     #[error("lower the scene: {message}")]
     Lower { message: String },
@@ -106,15 +106,11 @@ impl Surface {
     ) -> Result<Self, SurfaceError> {
         let width = physical(logical_width, scale);
         let height = physical(logical_height, scale);
-        let device = OffscreenBackend::new(AdapterPreference::MinimumPower)
-            .or_else(|_| OffscreenBackend::new(AdapterPreference::Warp))
-            .map_err(|error| SurfaceError::NoAdapter {
+        let device = OffscreenBackend::new(AdapterPreference::Warp).map_err(|error| {
+            SurfaceError::NoAdapter {
                 message: format!("{error:?}"),
-            })?;
-        let adapter = match device.is_software() {
-            true => "WARP".to_owned(),
-            false => "D3D12 hardware adapter".to_owned(),
-        };
+            }
+        })?;
         Ok(Self {
             device,
             lowering: Lowering::new(fonts, runs).with_frozen_shaders(aqua_protocol::Instant::ZERO),
@@ -122,7 +118,7 @@ impl Surface {
             width,
             height,
             scale: scale as f32,
-            adapter,
+            adapter: "WARP".to_owned(),
             backend: "D3D11".to_owned(),
         })
     }

@@ -8,11 +8,11 @@
   "height": 760,
   "scale_bits": 1065353216,
   "backend": "D3D11",
-  "adapter": "D3D12 hardware adapter",
+  "adapter": "WARP",
   "pixel_format": "rgba8-unorm",
   "alpha": "opaque",
   "color_profile": "gpui-windows-encoded",
   "surface": "offscreen-client-area-no-native-chrome",
   "repeat_identical": true,
-  "sha256": "15b58bef6f1934054c61738b6173c637c06b473ea01fb5e56920d7890a105804"
+  "sha256": "0f4d48344d3807e9135370f25121e0e1887e6f6959ffdf8279d478656dd1ceb4"
 }
