@@ -1,9 +1,3 @@
-#![expect(
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -243,29 +237,29 @@ impl MarkdownIndex {
             .map(|leaf| &self.contexts[leaf.context])
     }
     pub fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.leaves.capacity() * std::mem::size_of::<IndexedLeaf>()
-            + self.contexts.capacity() * std::mem::size_of::<LeafContext>()
-            + self.decoded.capacity() * std::mem::size_of::<Arc<str>>()
+        size_of::<Self>()
+            + self.leaves.capacity() * size_of::<IndexedLeaf>()
+            + self.contexts.capacity() * size_of::<LeafContext>()
+            + self.decoded.capacity() * size_of::<Arc<str>>()
             + self
                 .decoded
                 .iter()
-                .map(|text| text.len() + 2 * std::mem::size_of::<usize>())
+                .map(|text| text.len() + 2 * size_of::<usize>())
                 .sum::<usize>()
             + self
                 .contexts
                 .iter()
                 .map(|c| {
-                    c.lists.capacity() * std::mem::size_of::<ListLevel>()
-                        + c.table_alignments.capacity() * std::mem::size_of::<TableAlignment>()
-                        + c.spacing.capacity() * std::mem::size_of::<LeafSpacing>()
+                    c.lists.capacity() * size_of::<ListLevel>()
+                        + c.table_alignments.capacity() * size_of::<TableAlignment>()
+                        + c.spacing.capacity() * size_of::<LeafSpacing>()
                 })
                 .sum::<usize>()
             + self
                 .leaves
                 .iter()
                 .map(|leaf| {
-                    leaf.events.capacity() * std::mem::size_of::<IndexedEvent>()
+                    leaf.events.capacity() * size_of::<IndexedEvent>()
                         + leaf
                             .events
                             .iter()
@@ -352,10 +346,10 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
             id, classes, attrs, ..
         }) => {
             id.as_ref().map_or(0, |v| v.len())
-                + classes.capacity() * std::mem::size_of::<pulldown_cmark::CowStr<'_>>()
+                + classes.capacity() * size_of::<pulldown_cmark::CowStr<'_>>()
                 + classes.iter().map(|v| v.len()).sum::<usize>()
                 + attrs.capacity()
-                    * std::mem::size_of::<(
+                    * size_of::<(
                         pulldown_cmark::CowStr<'_>,
                         Option<pulldown_cmark::CowStr<'_>>,
                     )>()
@@ -364,9 +358,7 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
                     .map(|(key, value)| key.len() + value.as_ref().map_or(0, |v| v.len()))
                     .sum::<usize>()
         }
-        Event::Start(Tag::Table(alignments)) => {
-            alignments.capacity() * std::mem::size_of::<Alignment>()
-        }
+        Event::Start(Tag::Table(alignments)) => alignments.capacity() * size_of::<Alignment>(),
         _ => 0,
     }
 }
@@ -470,13 +462,13 @@ impl LeafRecord {
 mod event_serde {
     use pulldown_cmark::Event;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         event: &Event<'static>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         event.serialize(serializer)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Event<'static>, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;

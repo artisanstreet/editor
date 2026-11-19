@@ -24,7 +24,7 @@ struct ActiveLeaf {
     implicit: bool,
 }
 
-pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
+pub(crate) fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
     build_from(source, 0, None)
 }
 
@@ -36,7 +36,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
     clippy::wildcard_enum_match_arm,
     reason = "pulldown-cmark's events and tags: only the ones named here shape the index"
 )]
-pub fn build_from(
+pub(crate) fn build_from(
     source: &str,
     start: usize,
     previous: Option<BlockShape>,
@@ -141,8 +141,7 @@ pub fn build_from(
                     },
                 ],
             });
-            admission_bytes +=
-                2 * (std::mem::size_of::<IndexedLeaf>() + 2 * std::mem::size_of::<IndexedEvent>());
+            admission_bytes += 2 * (size_of::<IndexedLeaf>() + 2 * size_of::<IndexedEvent>());
             for item in &mut items {
                 item.first = false;
             }
@@ -280,7 +279,7 @@ pub fn build_from(
                 });
             }
             active = Some(ActiveLeaf { leaf, implicit });
-            admission_bytes += 2 * std::mem::size_of::<IndexedLeaf>();
+            admission_bytes += 2 * size_of::<IndexedLeaf>();
         }
         let Some(current) = active.as_mut() else {
             continue;
@@ -346,7 +345,7 @@ pub fn build_from(
             }
         };
         current.leaf.events.push(IndexedEvent { token, range });
-        admission_bytes += 2 * std::mem::size_of::<IndexedEvent>();
+        admission_bytes += 2 * size_of::<IndexedEvent>();
         if admission_bytes > INDEX_BYTES {
             return Err(BuildIndexError::IndexTooLarge);
         }
@@ -427,10 +426,10 @@ fn intern_context(
         return *id;
     }
     *bytes += 2
-        * (std::mem::size_of::<LeafContext>()
-            + context.lists.capacity() * std::mem::size_of::<ListLevel>()
-            + context.table_alignments.capacity() * std::mem::size_of::<TableAlignment>()
-            + context.spacing.capacity() * std::mem::size_of::<LeafSpacing>()
+        * (size_of::<LeafContext>()
+            + context.lists.capacity() * size_of::<ListLevel>()
+            + context.table_alignments.capacity() * size_of::<TableAlignment>()
+            + context.spacing.capacity() * size_of::<LeafSpacing>()
             + 64);
     let id = owned.len();
     owned.push(context.clone());
@@ -453,11 +452,11 @@ fn intern_text(
     if let Some(known) = decoded.get(text) {
         return Ok(Text::Decoded(Arc::clone(known)));
     }
-    if bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64) > INDEX_BYTES {
+    if bytes.saturating_add(text.len() + 2 * size_of::<usize>() + 64) > INDEX_BYTES {
         return Err(BuildIndexError::IndexTooLarge);
     }
     let text: Arc<str> = Arc::from(text);
-    *bytes = bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64);
+    *bytes = bytes.saturating_add(text.len() + 2 * size_of::<usize>() + 64);
     decoded.insert(Arc::clone(&text));
     Ok(Text::Decoded(text))
 }

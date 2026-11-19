@@ -1,8 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_markdown_index::{LeafRecord, MarkdownIndex, TableAlignment};
 use pulldown_cmark::{Event, Tag};
 
@@ -13,7 +8,10 @@ fn serialized_leaf_replays_original_reference_resolution_and_entities() {
     let encoded = serde_json::to_string(&index.record(0).unwrap()).unwrap();
     let leaf: LeafRecord = serde_json::from_str(&encoded).unwrap();
     let range = leaf.leaf.source_range();
-    let events = leaf.replay(range.start, &text[range]).unwrap();
+    let source = text
+        .get(range.clone())
+        .expect("the leaf range lies on character boundaries");
+    let events = leaf.replay(range.start, source).unwrap();
     assert!(events.iter().any(|(event,_)|matches!(event,Event::Start(Tag::Link{dest_url,..}) if dest_url.as_ref()=="https://example.com")));
     assert!(
         events
@@ -51,7 +49,7 @@ fn literal_replay_preserves_every_byte_and_has_no_markdown_events() {
             serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
         let events = decoded.replay(start, line).unwrap();
         assert_eq!(events.len(), 1);
-        let artisan_markdown_index::Event::Text(text) = &events[0].0 else {
+        let Event::Text(text) = &events[0].0 else {
             panic!("literal event")
         };
         assert_eq!(text.as_ref(), line);
