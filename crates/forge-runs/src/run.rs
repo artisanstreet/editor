@@ -1752,9 +1752,15 @@ async fn apply_item(
     }
     let finished_text = status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
     let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
-        text.inline()
-            .map(crate::resources::written_sources)
-            .unwrap_or_default()
+        match text {
+            artisan_api::TextContent::Inline(markdown) => {
+                crate::resources::written_sources(markdown)
+            }
+            artisan_api::TextContent::Stored(content) => unreachable!(
+                "invariant: the engine sends item {id} of run {} inline, not as {content:?}",
+                run.id
+            ),
+        }
     } else {
         Vec::new()
     };
