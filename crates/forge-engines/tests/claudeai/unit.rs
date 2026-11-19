@@ -1921,7 +1921,7 @@ async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallba
 }
 
 fn write_settings(work: &Path, settings: &str) -> PathBuf {
-    let folder = work.join("home/.claude");
+    let folder = work.join("home").join(".claude");
     std::fs::create_dir_all(&folder).expect("the settings folder");
     let file = folder.join("settings.json");
     std::fs::write(&file, settings).expect("the settings");

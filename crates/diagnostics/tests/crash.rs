@@ -54,7 +54,7 @@ fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
         "{head}"
     );
     assert!(
-        head.contains(&format!("tests/crash.rs:{PANIC_LINE}:5")),
+        head.contains(&format!("{}:{PANIC_LINE}:5", file!())),
         "{head}"
     );
     assert!(spans.contains("turn"), "{spans}");
