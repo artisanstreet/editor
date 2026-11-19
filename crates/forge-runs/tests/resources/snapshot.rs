@@ -163,6 +163,8 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
     let project = fixture.dir.path();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&key, project.join("linked.png")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&key, project.join("linked.png")).unwrap();
     std::fs::create_dir_all(project.join("secrets")).unwrap();
     std::fs::write(project.join("secrets/env.png"), b"API_KEY=1").unwrap();
     std::fs::create_dir_all(project.join(".claude")).unwrap();
