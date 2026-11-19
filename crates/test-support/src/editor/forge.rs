@@ -111,7 +111,13 @@ struct Shared {
     held: Held,
     log: Mutex<Log>,
     head: watch::Sender<Seq>,
-    epoch: watch::Sender<u64>,
+    streams: watch::Sender<Streams>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Streams {
+    Open { epoch: u64 },
+    Stopped,
 }
 
 pub struct TlsServer {
@@ -229,7 +235,7 @@ impl StubForge {
                 events: Vec::new(),
             }),
             head: watch::Sender::new(head),
-            epoch: watch::Sender::new(0),
+            streams: watch::Sender::new(Streams::Open { epoch: 0 }),
         });
         let app = routes.merge(
             axum::Router::new()
@@ -273,7 +279,14 @@ impl StubForge {
     }
 
     pub fn close_streams(&self) {
-        self.shared.epoch.send_modify(|epoch| *epoch += 1);
+        self.shared.streams.send_modify(|streams| match streams {
+            Streams::Open { epoch } => *epoch += 1,
+            Streams::Stopped => {}
+        });
+    }
+
+    pub fn stop_streaming(&self) {
+        self.shared.streams.send_replace(Streams::Stopped);
     }
 
     #[track_caller]
@@ -369,8 +382,10 @@ async fn stream_events(
     axum::extract::State(shared): axum::extract::State<Arc<Shared>>,
     axum::extract::Query(Since { since }): axum::extract::Query<Since>,
 ) -> Response {
-    let mut epoch = shared.epoch.subscribe();
-    epoch.mark_unchanged();
+    let mut streams = shared.streams.subscribe();
+    if *streams.borrow_and_update() == Streams::Stopped {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let head = shared.head.subscribe();
     let sent = {
         let log = shared
@@ -383,8 +398,8 @@ async fn stream_events(
             .unwrap_or(log.events.len())
     };
     let stream = futures::stream::unfold(
-        (shared, head, epoch, sent),
-        |(shared, mut head, mut epoch, mut sent)| async move {
+        (shared, head, streams, sent),
+        |(shared, mut head, mut streams, mut sent)| async move {
             loop {
                 let next = shared
                     .log
@@ -401,14 +416,14 @@ async fn stream_events(
                     );
                     return Some((
                         Ok::<_, std::convert::Infallible>(Bytes::from(frame)),
-                        (shared, head, epoch, sent),
+                        (shared, head, streams, sent),
                     ));
                 }
                 tokio::select! {
                     changed = head.changed() => if changed.is_err() { return None },
-                    _ = epoch.changed() => return None,
+                    _ = streams.changed() => return None,
                     () = tokio::time::sleep(Duration::from_secs(5)) => {
-                        return Some((Ok(Bytes::from_static(b": keep-alive\n\n")), (shared, head, epoch, sent)));
+                        return Some((Ok(Bytes::from_static(b": keep-alive\n\n")), (shared, head, streams, sent)));
                     }
                 }
             }

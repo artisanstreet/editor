@@ -131,7 +131,7 @@ fn screen_readers_hear_a_lost_connection_once_one_was_lost() {
         !announces_a_lost_connection(&mut opened, Shown::First),
         "a live Forge is not announced as lost"
     );
-    forge.close_streams();
+    forge.stop_streaming();
     let host = opened.host.id.clone();
     test_support::wait::wait_until(
         "the Editor to notice the dropped stream",
