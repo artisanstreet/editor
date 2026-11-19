@@ -5821,6 +5821,83 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
     assert!(runs.iter().any(|run| run.status() == RunStatus::Cancelled));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_during_a_handoff_that_never_winds_down_says_the_engine_did_not_confirm_it() {
+    struct StuckSummary {
+        entered: Arc<Notify>,
+    }
+    impl Harness for StuckSummary {
+        fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
+            Box::pin(async move {
+                io.emit(EngineEvent::InputAccepted { id: turn.input.id })
+                    .await;
+                io.emit(EngineEvent::Session {
+                    id: "source".into(),
+                })
+                .await;
+                io.emit(reply("answer", "done")).await;
+                Outcome::done()
+            })
+        }
+        fn compact(
+            &self,
+            _turn: Turn,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>>
+        {
+            let entered = Arc::clone(&self.entered);
+            Box::pin(async move {
+                entered.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+    let entered = Arc::new(Notify::new());
+    let harness: Arc<dyn Harness> = Arc::new(StuckSummary {
+        entered: Arc::clone(&entered),
+    });
+    let fixture = fixture_in(
+        EngineId::Claude,
+        Arc::new(move |_| Arc::clone(&harness)),
+        Surroundings {
+            disk: disk::Probe::system(),
+            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
+            stop_deadline: Duration::from_millis(200),
+        },
+        false,
+    )
+    .await;
+    install_fake(fixture.dir.path(), EngineId::Codex);
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("start"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message_on(EngineId::Codex, "continue"))
+        .await
+        .unwrap();
+    tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
+        .await
+        .unwrap();
+
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+
+    let runs = fixture.settled().await;
+    let stopped = runs
+        .iter()
+        .find(|run| run.status() == RunStatus::Cancelled)
+        .expect("the handoff's run is stopped");
+    assert!(
+        stopped
+            .error()
+            .is_some_and(|error| error.contains("did not confirm it stopped")),
+        "{runs:#?}"
+    );
+}
+
 struct BackgroundTitle {
     session: String,
     release_title: Arc<Notify>,

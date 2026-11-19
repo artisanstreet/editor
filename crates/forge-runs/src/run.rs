@@ -585,15 +585,18 @@ async fn continue_prompt(
 
 async fn settle_handoff<T, E: std::error::Error>(
     thread: &ThreadId,
+    deadline: Duration,
     handing_off: &mut std::pin::Pin<&mut impl Future<Output = Result<T, E>>>,
-) {
-    match tokio::time::timeout(Duration::from_secs(20), handing_off).await {
-        Ok(Ok(_)) => {}
+) -> Cleanup {
+    match tokio::time::timeout(deadline, handing_off).await {
+        Ok(Ok(_)) => Cleanup::Confirmed,
         Ok(Err(error)) => {
             tracing::debug!(%thread, "the stopped handoff ended with: {}", diagnostics::chain(&error));
+            Cleanup::Confirmed
         }
         Err(_elapsed) => {
-            tracing::warn!(%thread, "the stopped handoff did not settle within 20 seconds");
+            tracing::warn!(%thread, seconds = deadline.as_secs(), "the stopped handoff did not settle in time");
+            Cleanup::Unconfirmed
         }
     }
 }
@@ -643,13 +646,13 @@ async fn execute(
         tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                settle_handoff(&run.thread_id, &mut handing_off).await;
-                return Ok(Ending::Stopped(Cleanup::Confirmed));
+                let cleanup = settle_handoff(&run.thread_id, hub.inner.stop_deadline, &mut handing_off).await;
+                return Ok(Ending::Stopped(cleanup));
             }
             () = hub.inner.shutdown.cancelled() => {
                 cancel.cancel();
-                settle_handoff(&run.thread_id, &mut handing_off).await;
-                return Ok(Ending::Stopped(Cleanup::Confirmed));
+                let cleanup = settle_handoff(&run.thread_id, hub.inner.stop_deadline, &mut handing_off).await;
+                return Ok(Ending::Stopped(cleanup));
             }
             handoff = &mut handing_off => handoff.map_err(|source| ExecuteError::Handoff { thread: thread.id.clone(), source: Box::new(source) })?,
         }
