@@ -787,6 +787,119 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
     });
 }
 
+async fn draft_or_blob_request(
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (TlsStream<TcpStream>, String, Vec<u8>) {
+    loop {
+        let (socket, route, body) = request_bytes(listener, acceptor).await;
+        if route.contains(" /drafts/") || route.starts_with("PUT /blobs") {
+            return (socket, route, body);
+        }
+        drop(socket);
+    }
+}
+
+#[test]
+fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text",
+    ) {
+        return;
+    }
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "recovering-image");
+        let client = core.host(&host).unwrap().client.clone();
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), DraftSession::is_loaded).await;
+        composer.sync(&core);
+        composer
+            .editor
+            .borrow_mut()
+            .set_text("written before closing");
+        composer.edited();
+        hand_over_pasted_image(composer.session.as_ref().unwrap(), client);
+        drop(composer);
+        drop(sessions);
+        let mut held = Vec::new();
+        let mut routes = Vec::new();
+        for _ in 0..2 {
+            let (socket, route, _) = draft_or_blob_request(&listener, &acceptor).await;
+            routes.push(route);
+            held.push(socket);
+        }
+        routes.sort();
+        assert!(routes[0].starts_with("PUT /blobs"), "{routes:?}");
+        assert!(routes[1].starts_with("PUT /drafts/"), "{routes:?}");
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(held);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        let hash = "e".repeat(64);
+        let mut loading = None;
+        for _ in 0..2 {
+            let (mut socket, route, body) = draft_or_blob_request(&listener, &acceptor).await;
+            if route.starts_with("PUT /blobs") {
+                respond(&mut socket, json!({"hash": hash, "bytes": body.len()})).await;
+            } else {
+                assert!(route.starts_with("GET /drafts/"), "{route}");
+                loading = Some(socket);
+            }
+        }
+        wait_for_session(composer.session.as_ref().unwrap(), |state| {
+            state.body().images.len() == 1
+        })
+        .await;
+        composer.sync(&core);
+        assert_eq!(
+            composer.editor.borrow().text(),
+            "written before closing",
+            "the text kept with the draft shows although its image finished uploading first"
+        );
+        assert_eq!(
+            composer.attachments.as_ref().unwrap().items.len(),
+            1,
+            "the image kept with the draft shows beside its text"
+        );
+        assert_eq!(
+            composer
+                .session
+                .as_ref()
+                .unwrap()
+                .read(|state| state.body().text.clone()),
+            "written before closing",
+            "showing the draft does not replace its text"
+        );
+        drop(loading);
+    });
+}
+
 #[test]
 fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
     use editor_aqua::composer::draft_session::DraftSession;

@@ -744,11 +744,11 @@ impl Composer {
                     self.bring_back_follow_up();
                 }
                 SessionEvent::ImageAdopted(hash) => {
-                    if let Some(attachments) = &mut self.attachments
+                    if self.restore_revision != Some(self.edit_revision)
+                        && let Some(attachments) = &mut self.attachments
                         && !attachments.contains(hash)
                     {
                         attachments.restore(hash.clone());
-                        self.save();
                     }
                 }
                 SessionEvent::Reloaded => {
