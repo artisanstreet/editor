@@ -33,6 +33,7 @@ mod read;
 mod recall;
 mod resources;
 mod retention;
+mod rollbacks;
 mod schema;
 mod secrets;
 mod settings;
@@ -94,6 +95,7 @@ pub use resources::{
     keep as keep_resource_snapshot,
 };
 pub use retention::RemoveInactiveError;
+pub use rollbacks::DismissRollbackError;
 pub use schema::{BackupError, MigrationFailure, QuestionPart, RollbackError, SchemaError};
 pub use settings::{
     BumpRevisionError, McpSecret, MutateMcpError, PromptVersionError, ReadDraftError,
@@ -264,6 +266,7 @@ pub struct Snapshot {
     pub threads_next: Option<artisan_api::ThreadCursor>,
     pub runs: Vec<Run>,
     pub settings: serde_json::Map<String, serde_json::Value>,
+    pub database_rollback: Option<artisan_api::DatabaseRollback>,
 }
 
 #[derive(Clone)]
@@ -358,6 +361,21 @@ pub enum OpenStoreError {
     },
     #[error("there is no running Forge store to join at {}", database.display())]
     NotRunning { database: PathBuf },
+    #[error(
+        "{} is at schema {found} but this build works with schema {supported}; start Forge so it upgrades the database first",
+        database.display()
+    )]
+    Mismatch {
+        database: PathBuf,
+        found: usize,
+        supported: usize,
+    },
+    #[error("record that {} was rolled back", database.display())]
+    RecordRollback {
+        database: PathBuf,
+        #[source]
+        source: StorageError,
+    },
     #[error("rebuild the recall index of {}", database.display())]
     RecallIndex {
         database: PathBuf,
@@ -462,6 +480,47 @@ fn secure_database(dir: &Path, database: &Path) -> Result<(), SecureDatabaseErro
     Ok(())
 }
 
+enum Opening {
+    Upgrade(Option<artisan_api::DatabaseRollback>),
+    Join,
+}
+
+fn recover_after_opening(
+    writer: &mut Writer,
+    opening: Opening,
+    database: &Path,
+) -> Result<(), OpenStoreError> {
+    match opening {
+        Opening::Join => Ok(()),
+        Opening::Upgrade(rolled_back) => {
+            writer
+                .transact(Durability::Background, |tx| tx.recover_threads(None))
+                .map_err(OpenStoreError::Recover)?;
+            rolled_back.map_or(Ok(()), |rolled_back| {
+                writer
+                    .transact(Durability::Acknowledged, |tx| {
+                        tx.record_rollback(&rolled_back)
+                    })
+                    .map_err(|source| OpenStoreError::RecordRollback {
+                        database: database.to_owned(),
+                        source,
+                    })
+            })
+        }
+    }
+}
+
+fn stored_version(database: &Path) -> Result<usize, OpenStoreError> {
+    let prepare = |source| OpenStoreError::Database {
+        database: database.to_owned(),
+        source,
+    };
+    open_database(database)
+        .map_err(prepare)?
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|source| prepare(source.into()))
+}
+
 fn upgrade(conn: &mut Connection, database: &Path) -> Result<(), OpenStoreError> {
     schema::migrate(conn).map_err(|source| OpenStoreError::Migrate {
         database: database.to_owned(),
@@ -479,7 +538,7 @@ pub struct PendingInputs {
 }
 
 impl Store {
-    pub fn open(dir: &Path) -> Result<Self, OpenStoreError> {
+    fn prepare(dir: &Path) -> Result<(PathBuf, PathBuf), OpenStoreError> {
         let database = dir.join("forge.sqlite3");
         secure_database(dir, &database).map_err(|source| OpenStoreError::Secure {
             dir: dir.to_path_buf(),
@@ -494,25 +553,73 @@ impl Store {
             path: blob_dir.clone(),
             source,
         })?;
-        let rollback = schema::roll_back(&database).map_err(|source| OpenStoreError::RollBack {
-            database: database.clone(),
-            source,
-        })?;
-        match rollback {
-            schema::Rollback::Current => {}
+        Ok((database, blob_dir))
+    }
+
+    pub fn open(dir: &Path) -> Result<Self, OpenStoreError> {
+        let (database, blob_dir) = Self::prepare(dir)?;
+        Self::start(
+            database,
+            blob_dir,
+            dir.join("resources"),
+            Opening::Upgrade(None),
+        )
+    }
+
+    pub fn open_restoring(dir: &Path, _data_lock: &std::fs::File) -> Result<Self, OpenStoreError> {
+        let (database, blob_dir) = Self::prepare(dir)?;
+        let rolled_back = match schema::roll_back(&database).map_err(|source| {
+            OpenStoreError::RollBack {
+                database: database.clone(),
+                source,
+            }
+        })? {
+            schema::Rollback::Current => None,
             schema::Rollback::Restored {
                 found,
                 restored,
                 aside,
-            } => tracing::warn!(
-                database = %database.display(),
-                found,
-                restored,
-                aside = %aside.display(),
-                "rolled the database back to the schema this Forge supports; newer data was set aside"
-            ),
+            } => {
+                tracing::warn!(
+                    database = %database.display(),
+                    found,
+                    restored,
+                    aside = %aside.display(),
+                    "rolled the database back to the schema this Forge supports; newer data was set aside"
+                );
+                Some(artisan_api::DatabaseRollback {
+                    found: u32::try_from(found).expect("invariant: schema versions fit in u32"),
+                    restored: u32::try_from(restored)
+                        .expect("invariant: schema versions fit in u32"),
+                    set_aside: aside.display().to_string(),
+                    at: artisan_api::now(),
+                })
+            }
+        };
+        Self::start(
+            database,
+            blob_dir,
+            dir.join("resources"),
+            Opening::Upgrade(rolled_back),
+        )
+    }
+
+    pub fn open_current(dir: &Path) -> Result<Self, OpenStoreError> {
+        let database = dir.join("forge.sqlite3");
+        if database.is_file() {
+            match stored_version(&database)? {
+                0 => {}
+                found if found == schema::version() => {}
+                found => {
+                    return Err(OpenStoreError::Mismatch {
+                        database,
+                        found,
+                        supported: schema::version(),
+                    });
+                }
+            }
         }
-        Self::start(database, blob_dir, dir.join("resources"), true)
+        Self::open(dir)
     }
 
     pub fn join(dir: &Path) -> Result<Self, OpenStoreError> {
@@ -520,22 +627,19 @@ impl Store {
         if !database.is_file() {
             return Err(OpenStoreError::NotRunning { database });
         }
-        let prepare = |source| OpenStoreError::Database {
-            database: database.clone(),
-            source,
-        };
-        let conn = open_database(&database).map_err(prepare)?;
-        let found: usize = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|source| prepare(source.into()))?;
+        let found = stored_version(&database)?;
         if found != schema::version() {
             return Err(OpenStoreError::Schema {
                 expected: schema::version(),
                 found,
             });
         }
-        drop(conn);
-        Self::start(database, dir.join("blobs"), dir.join("resources"), false)
+        Self::start(
+            database,
+            dir.join("blobs"),
+            dir.join("resources"),
+            Opening::Join,
+        )
     }
 
     pub const fn schema_version() -> usize {
@@ -546,8 +650,9 @@ impl Store {
         database: PathBuf,
         blob_dir: PathBuf,
         resource_dir: PathBuf,
-        recover: bool,
+        opening: Opening,
     ) -> Result<Self, OpenStoreError> {
+        let recover = matches!(opening, Opening::Upgrade(_));
         let prepare = |source| OpenStoreError::Database {
             database: database.clone(),
             source,
@@ -584,11 +689,7 @@ impl Store {
             },
         )
         .map_err(prepare)?;
-        if recover {
-            writer
-                .transact(Durability::Background, |tx| tx.recover_threads(None))
-                .map_err(OpenStoreError::Recover)?;
-        }
+        recover_after_opening(&mut writer, opening, &database)?;
 
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
         let writer_thread = std::thread::Builder::new()

@@ -180,6 +180,19 @@ pub fn states(
         );
     }
     let host = sidebar.host_data(core).filter(|host| host.is_live());
+    if let Some(message) = host.and_then(|host| host.rollback_notice().message()) {
+        states.push(
+            page::notice(&theme, message)
+                .action(button(
+                    "sidebar-rollback-dismiss",
+                    theme,
+                    "Dismiss",
+                    ViewAction::DismissRollbackNotice,
+                    emit,
+                ))
+                .build(),
+        );
+    }
     if let Some(error) = host.and_then(|host| host.thread_page(false).error()) {
         states.push(
             page::notice(&theme, error)

@@ -363,11 +363,13 @@ fn binding(
     lock.try_lock_exclusive().map_err(BindingError::Locked)?;
     if registry.peers().map_err(BindingError::Peers)?.is_empty() {
         registry.retire_unused().map_err(BindingError::Retire)?;
-        let _exclusive = crate::lock_data_dir(&config.data_dir)?;
+        let exclusive = crate::lock_data_dir(&config.data_dir)?;
         drop(
-            forge_store::Store::open(&config.data_dir).map_err(|source| BindingError::Store {
-                dir: config.data_dir.clone(),
-                source: Box::new(source),
+            forge_store::Store::open_restoring(&config.data_dir, &exclusive).map_err(|source| {
+                BindingError::Store {
+                    dir: config.data_dir.clone(),
+                    source: Box::new(source),
+                }
             })?,
         );
     }

@@ -7,6 +7,24 @@ mod tests;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
+    #[error("measure {database} and the free space beside it before backing up schema {version}")]
+    Measure {
+        database: String,
+        version: usize,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "the disk holding {database} is full: backing up schema {version} before the upgrade needs about {needed} bytes and {available} are free; free some space and start Forge again"
+    )]
+    NoSpace {
+        database: String,
+        version: usize,
+        needed: u64,
+        available: u64,
+        #[source]
+        source: Option<Box<rusqlite::Error>>,
+    },
     #[error("copy schema {version} of {database} to {backup}")]
     Copy {
         database: String,
@@ -51,8 +69,6 @@ pub enum RollbackError {
         #[source]
         source: Box<rusqlite::Error>,
     },
-    #[error("{database} is still open in another process; stop the running Forge and start again")]
-    StillOpen { database: PathBuf },
     #[error("restore {backup} over {database}")]
     Restore {
         database: PathBuf,
@@ -85,6 +101,41 @@ fn copy_into(conn: &Connection, target: &str) -> rusqlite::Result<()> {
         .map(drop)
 }
 
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Room {
+    needed: u64,
+    available: u64,
+}
+
+fn room(database: &Path) -> std::io::Result<Room> {
+    let wal = {
+        let mut name = database.as_os_str().to_owned();
+        name.push("-wal");
+        PathBuf::from(name)
+    };
+    let wal_bytes = match std::fs::metadata(&wal) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    let folder = database.parent().unwrap_or_else(|| Path::new("."));
+    Ok(Room {
+        needed: std::fs::metadata(database)?.len() + wal_bytes,
+        available: fs2::available_space(folder)?,
+    })
+}
+
+fn disk_full(error: &rusqlite::Error) -> bool {
+    error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
+}
+
 pub fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupError> {
     match conn.path() {
         Some(database) if !database.is_empty() && version > 0 => {
@@ -95,26 +146,48 @@ pub fn before_migrating(conn: &Connection, version: usize) -> Result<(), BackupE
                 backup: backup.clone(),
                 source,
             };
-            match std::fs::remove_file(&partial) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(stored(error)),
+            let measure = || {
+                room(Path::new(database)).map_err(|source| BackupError::Measure {
+                    database: database.to_owned(),
+                    version,
+                    source,
+                })
+            };
+            remove_if_present(Path::new(&partial)).map_err(stored)?;
+            let before = measure()?;
+            if before.available < before.needed {
+                return Err(BackupError::NoSpace {
+                    database: database.to_owned(),
+                    version,
+                    needed: before.needed,
+                    available: before.available,
+                    source: None,
+                });
             }
-            copy_into(conn, &partial).map_err(|source| BackupError::Copy {
-                database: database.to_owned(),
-                version,
-                backup: backup.clone(),
-                source: Box::new(source),
-            })?;
+            if let Err(source) = copy_into(conn, &partial) {
+                remove_if_present(Path::new(&partial)).map_err(stored)?;
+                if disk_full(&source) {
+                    let after = measure()?;
+                    return Err(BackupError::NoSpace {
+                        database: database.to_owned(),
+                        version,
+                        needed: before.needed,
+                        available: after.available,
+                        source: Some(Box::new(source)),
+                    });
+                }
+                return Err(BackupError::Copy {
+                    database: database.to_owned(),
+                    version,
+                    backup: backup.clone(),
+                    source: Box::new(source),
+                });
+            }
             sync(Path::new(&partial)).map_err(stored)?;
             std::fs::rename(&partial, &backup).map_err(stored)?;
-            (1..version).try_for_each(|older| {
-                match std::fs::remove_file(backup_name(database, older)) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(stored(error)),
-                }
-            })
+            (1..version)
+                .try_for_each(|older| remove_if_present(Path::new(&backup_name(database, older))))
+                .map_err(stored)
         }
         Some(_) | None => Ok(()),
     }
@@ -164,13 +237,10 @@ pub fn roll_back(database: &Path, supported: usize) -> Result<Rollback, Rollback
         backup: backup.clone(),
         source,
     };
-    if PathBuf::from(format!("{name}-wal")).exists() {
-        std::fs::remove_file(&aside).map_err(restore)?;
-        return Err(RollbackError::StillOpen {
-            database: database.to_owned(),
-        });
-    }
     sync(Path::new(&aside)).map_err(restore)?;
+    ["-wal", "-shm"].into_iter().try_for_each(|suffix| {
+        remove_if_present(Path::new(&format!("{name}{suffix}"))).map_err(restore)
+    })?;
     std::fs::rename(&backup, database).map_err(restore)?;
     Ok(Rollback::Restored {
         found,

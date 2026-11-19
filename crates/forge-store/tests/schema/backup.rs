@@ -90,26 +90,34 @@ fn a_newer_database_without_a_backup_is_refused_and_left_untouched() {
 }
 
 #[test]
-fn a_database_another_forge_holds_open_is_not_rolled_back() {
+fn a_newer_database_with_its_log_still_on_disk_is_rolled_back_keeping_the_logged_writes() {
     let dir = tempfile::tempdir().expect("data dir");
     let database = dir.path().join("forge.sqlite3");
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
         migrate_to(&mut conn, previous).expect("previous Forge creates its database");
+        remember(&conn, "before upgrade");
     }
-    let mut running = open(&database);
-    migrate_to(&mut running, MIGRATIONS.len()).expect("newer Forge upgrades");
-    remember(&running, "live");
-    let error = roll_back(&database, previous).expect_err("held open");
-    assert!(matches!(error, RollbackError::StillOpen { .. }), "{error}");
-    drop(running);
-    assert_eq!(version(&database), MIGRATIONS.len());
-    assert_eq!(keys(&database), ["live"]);
-    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-        .expect("list data dir")
-        .map(|entry| entry.expect("entry").file_name())
-        .filter(|name| name.to_string_lossy().contains("rolled-back"))
-        .collect();
-    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let mut crashed = open(&database);
+    migrate_to(&mut crashed, MIGRATIONS.len()).expect("newer Forge upgrades");
+    remember(&crashed, "only in the log");
+    assert!(
+        dir.path().join("forge.sqlite3-wal").exists(),
+        "the crashed Forge left its log"
+    );
+
+    match roll_back(&database, previous).expect("roll back after the crash") {
+        Rollback::Restored { aside, .. } => {
+            assert_eq!(
+                keys(&aside),
+                ["before upgrade", "only in the log"],
+                "the logged write is kept with the newer data"
+            );
+        }
+        Rollback::Current => panic!("a newer database was left in place"),
+    }
+    assert_eq!(version(&database), previous);
+    assert_eq!(keys(&database), ["before upgrade"]);
+    drop(crashed);
 }

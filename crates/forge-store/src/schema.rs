@@ -118,6 +118,7 @@ const MIGRATIONS: &[&[Step]] = &[
     ],
     &[Step::Sql(include_str!("sql/pairing/track_revisions.sql"))],
     &[],
+    &[Step::Sql(include_str!("sql/migrations/v31.sql"))],
 ];
 
 pub const fn version() -> usize {

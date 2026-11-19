@@ -4,6 +4,8 @@ mod agent_calls;
 mod client_error;
 #[path = "core/connection.rs"]
 mod connection;
+#[path = "core/host/database_rollback.rs"]
+mod database_rollback;
 #[path = "core/host.rs"]
 mod host;
 #[path = "core/hosts.rs"]

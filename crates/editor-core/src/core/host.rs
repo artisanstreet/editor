@@ -1,4 +1,5 @@
 mod claude_ai;
+mod database_rollback;
 mod images;
 mod pages;
 pub use images::{BlobImage, BlobImages};
@@ -10,6 +11,7 @@ pub use settings::{
 };
 pub mod stopping;
 mod wsl;
+pub use database_rollback::RollbackNotice;
 pub use pages::{LoadThreadError, ThreadPage, ThreadPageDirection, ThreadUnavailable};
 pub use wsl::WslStatus;
 
@@ -214,6 +216,7 @@ pub(super) enum HostCompletion {
         Result<Vec<crate::core::hosts::WslDistro>, crate::core::hosts::WslStateError>,
     ),
     WslStarted(String, Result<(), crate::core::hosts::StartWslForgeError>),
+    RollbackDismissed(Result<(), crate::core::client::CallError>),
     ReadAck(
         ThreadId,
         artisan_api::Seq,
@@ -401,6 +404,7 @@ pub struct HostData {
     pub client: ForgeClient,
     pub status: ConnectionStatus,
     pub forge_version: Option<String>,
+    rollback_notice: RollbackNotice,
     pub projects: BTreeMap<ProjectId, Project>,
     pub threads: HashMap<ThreadId, Thread>,
     pub runs: HashMap<ThreadId, Run>,
@@ -494,6 +498,7 @@ impl HostData {
             client,
             status: ConnectionStatus::Connecting,
             forge_version: None,
+            rollback_notice: RollbackNotice::Hidden,
             projects: BTreeMap::new(),
             threads: HashMap::new(),
             runs: HashMap::new(),
@@ -1105,6 +1110,7 @@ impl HostData {
                             .is_some_and(|old| paths.get(id) == Some(&old.path))
                     });
                     self.forge_version = Some(state.forge_version);
+                    self.rollback_notice = RollbackNotice::from_state(state.database_rollback);
                     self.projects = state
                         .projects
                         .into_iter()
@@ -1196,6 +1202,10 @@ impl HostData {
                 }
                 HostCompletion::WslStarted(distro, result) => {
                     self.finish_wsl_start(distro, result);
+                    events.push(HostEvent::Changed);
+                }
+                HostCompletion::RollbackDismissed(result) => {
+                    self.finish_rollback_dismissal(result);
                     events.push(HostEvent::Changed);
                 }
                 HostCompletion::ReadAck(id, seq, generation, result) => {

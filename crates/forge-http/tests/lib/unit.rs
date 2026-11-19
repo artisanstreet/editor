@@ -1428,3 +1428,91 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
         }
     ));
 }
+
+async fn titled(store: &Store, title: &str) {
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/app".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: Some(title.into()),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forge_rolls_back_a_newer_database_and_tells_editors_until_one_dismisses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    titled(&Store::open(&data).unwrap(), "Before the upgrade").await;
+    let database = data.join("forge.sqlite3");
+    let backup = data.join(format!("forge.sqlite3.schema-{}", Store::schema_version()));
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute(include_str!("back_up.sql"), [backup.to_str().unwrap()])
+        .unwrap();
+    titled(&Store::open(&data).unwrap(), "After the upgrade").await;
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(include_str!("stamp_newer.sql"))
+        .unwrap();
+
+    let server = start(ServeConfig {
+        data_dir: data.clone(),
+        listen: "127.0.0.1:0".parse().unwrap(),
+    })
+    .await
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+    let editor = paired(&store, address, "laptop").await;
+    let state = || async {
+        editor
+            .http
+            .get(editor.url("/state"))
+            .send()
+            .await
+            .unwrap()
+            .json::<State>()
+            .await
+            .unwrap()
+    };
+
+    let before = state().await;
+    let titles: Vec<_> = before
+        .threads
+        .iter()
+        .filter_map(|thread| thread.title.as_deref())
+        .collect();
+    assert_eq!(titles, ["Before the upgrade"]);
+    let rollback = before
+        .database_rollback
+        .expect("the Editor is told the database went back");
+    assert_eq!(rollback.found, 1000);
+    assert_eq!(
+        rollback.restored,
+        u32::try_from(Store::schema_version()).unwrap()
+    );
+    assert!(std::path::Path::new(&rollback.set_aside).is_file());
+
+    let dismissed = editor
+        .http
+        .delete(editor.url("/database-rollback"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dismissed.status(), 204);
+    assert_eq!(state().await.database_rollback, None);
+}

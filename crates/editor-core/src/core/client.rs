@@ -755,6 +755,11 @@ impl ForgeClient {
             .await
     }
 
+    pub async fn dismiss_database_rollback(&self) -> Result<(), CallError> {
+        self.call_empty(self.request(reqwest::Method::DELETE, "/database-rollback"))
+            .await
+    }
+
     pub async fn cancel(&self, thread: &ThreadId) -> Result<(), CallError> {
         self.call_empty(self.request(reqwest::Method::POST, &format!("/threads/{thread}/cancel")))
             .await

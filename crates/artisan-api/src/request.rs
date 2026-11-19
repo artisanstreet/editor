@@ -20,6 +20,16 @@ pub struct State {
     pub waiting: Vec<PendingItem>,
     #[serde(default)]
     pub account: Option<Account>,
+    #[serde(default)]
+    pub database_rollback: Option<DatabaseRollback>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseRollback {
+    pub found: u32,
+    pub restored: u32,
+    pub set_aside: String,
+    pub at: crate::Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

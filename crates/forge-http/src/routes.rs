@@ -49,6 +49,7 @@ const PAIR_BODY_BYTES: usize = 4 * 1024;
 pub fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
+        .route("/database-rollback", delete(dismiss_database_rollback))
         .route("/events", get(events::stream))
         .route("/projects", post(create_project))
         .route("/projects/{id}", delete(remove_project))
@@ -557,6 +558,7 @@ route_errors! {
     ReadResource(ReadResourceError) => |error| error.source.wire(&error.path),
     Authorize(forge_store::AuthorizeError) => internal,
     AwaitingItems(forge_store::AwaitingItemsError) => internal,
+    DismissRollback(forge_store::DismissRollbackError) => internal,
     CreateProject(forge_store::CreateProjectError) => |error| wire::create_project(&error.cause),
     CreateThread(forge_store::CreateThreadError) => wire::create_thread,
     Inspector(forge_store::InspectorError) => |error| wire::content(&error.cause),
@@ -694,7 +696,13 @@ async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
         runs: snapshot.runs,
         settings: snapshot.settings,
         engines,
+        database_rollback: snapshot.database_rollback,
     }))
+}
+
+async fn dismiss_database_rollback(AppState(app): AppState<App>) -> Result<StatusCode> {
+    app.hub.store().dismiss_rollback().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn account() -> artisan_api::Account {

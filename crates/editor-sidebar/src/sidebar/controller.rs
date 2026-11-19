@@ -808,6 +808,17 @@ impl Sidebar {
         }
     }
 
+    pub(crate) fn dismiss_rollback_notice(&self, core: &mut Core) {
+        if let Some(host) = self
+            .host
+            .as_ref()
+            .zip(self.host_instance)
+            .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
+        {
+            host.dismiss_rollback_notice();
+        }
+    }
+
     pub(crate) fn retry_threads(&self, core: &mut Core) {
         if let Some(host) = self
             .host

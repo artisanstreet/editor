@@ -87,6 +87,7 @@ pub enum ViewAction {
     CreateProject(PickerIdentity),
     DismissProjectPicker(PickerIdentity),
     RetryProjectIcons,
+    DismissRollbackNotice,
     RetryThreads,
     ClearSearch,
     DismissError,
@@ -386,6 +387,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
         }
         ViewAction::RetryProjectIcons => sidebar.retry_project_icons(core),
+        ViewAction::DismissRollbackNotice => sidebar.dismiss_rollback_notice(core),
         ViewAction::RetryThreads => sidebar.retry_threads(core),
         ViewAction::ClearSearch => sidebar.clear_search(core, artisan_api::now()),
         ViewAction::DismissError => sidebar.error = None,

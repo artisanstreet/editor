@@ -743,7 +743,7 @@ fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
         return Ok(());
     }
     let _lock = forge_http::lock_data_dir(&data_dir)?;
-    let store = forge_store::Store::open(&data_dir).map_err(|source| SyncError::Store {
+    let store = forge_store::Store::open_current(&data_dir).map_err(|source| SyncError::Store {
         data: data_dir.clone(),
         source: Box::new(source),
     })?;

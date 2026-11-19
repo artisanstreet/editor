@@ -237,7 +237,7 @@ async fn start_mode(
     let store = if registry.is_some() {
         Store::join(&config.data_dir)
     } else {
-        Store::open(&config.data_dir)
+        Store::open_restoring(&config.data_dir, &lock)
     }
     .map_err(|source| StartError::Store {
         dir: config.data_dir.clone(),

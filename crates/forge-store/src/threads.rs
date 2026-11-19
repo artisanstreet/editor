@@ -503,6 +503,7 @@ fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageE
         threads_next,
         runs,
         settings,
+        database_rollback: crate::rollbacks::current(conn)?,
     })
 }
 
