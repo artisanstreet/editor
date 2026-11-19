@@ -313,49 +313,6 @@ impl Concentration {
     }
 }
 
-#[cfg(feature = "test-support")]
-pub struct ConcentrationFixture {
-    model: Concentration,
-    state: ConcentrationState,
-}
-
-#[cfg(feature = "test-support")]
-impl std::fmt::Debug for ConcentrationFixture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConcentrationFixture")
-            .finish_non_exhaustive()
-    }
-}
-#[cfg(feature = "test-support")]
-impl ConcentrationFixture {
-    pub fn new(json: &str) -> Self {
-        let model = serde_json::from_str(json).expect("valid concentration");
-        let state = ConcentrationState::default();
-        state.ensure("test");
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        self.model = serde_json::from_str(json).expect("valid concentration");
-        self.state.ensure("test");
-    }
-    pub fn hover(&self, x: f32, y: f32) -> bool {
-        self.state.hover("test", x, y)
-    }
-    pub fn selected(&self) -> Option<f64> {
-        self.state.ensure("test").0
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        self.state.key("test", key, alt)
-    }
-    pub fn held(&self) -> Option<f64> {
-        Some(Concentration::share_of_total(
-            &self.model.curve()?,
-            self.selected()?,
-        ))
-    }
-    pub fn sample_points(&self, limit: usize) -> Vec<(f64, f64)> {
-        self.model
-            .curve()
-            .map_or_else(Vec::new, |curve| sample(&curve, limit))
-    }
-}
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/concentration/view.rs"]
+mod tests;

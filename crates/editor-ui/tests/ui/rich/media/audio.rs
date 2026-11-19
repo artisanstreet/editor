@@ -293,3 +293,90 @@ fn a_track_transcript_is_parsed_and_disclosed_to_the_accessibility_tree() {
             .any(|node| node.label == "Hello there")
     );
 }
+
+fn snapshot(state: PlaybackState) -> Snapshot {
+    Snapshot {
+        track: Some("track.wav".into()),
+        state,
+        position: Duration::from_secs(75),
+        duration: Some(Duration::from_secs(100)),
+    }
+}
+
+fn shown(snapshot: &Snapshot, track: &str) -> (Shown, f32, Option<String>) {
+    let shown = Shown::of(snapshot, Path::new(track));
+    let (progress, time) = (shown.progress(), shown.time());
+    (shown, progress, time)
+}
+
+#[test]
+fn shared_player_renders_only_its_track_and_clamps_position() {
+    let mut value = snapshot(PlaybackState::Playing);
+    assert_eq!(shown(&value, "other.wav"), (Shown::Idle, 0.0, None));
+    assert_eq!(
+        shown(&value, "track.wav"),
+        (
+            Shown::Playing {
+                position: Duration::from_secs(75),
+                duration: Duration::from_secs(100),
+            },
+            0.75,
+            Some("1:15 / 1:40".into())
+        )
+    );
+    value.position = Duration::from_secs(200);
+    assert_eq!(
+        shown(&value, "track.wav"),
+        (
+            Shown::Playing {
+                position: Duration::from_secs(100),
+                duration: Duration::from_secs(100),
+            },
+            1.0,
+            Some("1:40 / 1:40".into())
+        )
+    );
+}
+
+#[test]
+fn loading_ended_and_missing_duration_keep_source_time_semantics() {
+    let mut value = snapshot(PlaybackState::Loading);
+    assert_eq!(
+        shown(&value, "track.wav"),
+        (Shown::Loading, 0.0, Some("Loading…".into()))
+    );
+    value.state = PlaybackState::Ended;
+    value.duration = Some(Duration::from_secs(3725));
+    assert_eq!(
+        shown(&value, "track.wav"),
+        (
+            Shown::Ended {
+                duration: Duration::from_secs(3725),
+            },
+            1.0,
+            Some("1:02:05".into())
+        )
+    );
+    value.state = PlaybackState::Paused;
+    value.duration = None;
+    assert_eq!(
+        shown(&value, "track.wav"),
+        (
+            Shown::Paused {
+                position: Duration::ZERO,
+                duration: Duration::ZERO,
+            },
+            0.0,
+            Some("0:00 / 0:00".into())
+        )
+    );
+}
+
+#[test]
+fn data_identity_uses_payload_bytes_and_rejects_remote_url() {
+    let track = |source: &str| track_path(&MediaSource::from(source.to_owned()), None, "test");
+    let first = track("data:audio/wav;base64,SGVsbG8=").expect("a data track has an identity");
+    assert_eq!(Some(first.clone()), track("data:audio/wav;base64,SGVsbG8="));
+    assert_ne!(Some(first), track("data:audio/wav;base64,V29ybGQ="));
+    assert_eq!(track("https://example.invalid/a.wav"), None);
+}

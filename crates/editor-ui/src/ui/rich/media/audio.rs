@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::AudioFixture;
 pub(crate) use view::AudioState;
 
 use crate::ui::media::source::MediaSource;

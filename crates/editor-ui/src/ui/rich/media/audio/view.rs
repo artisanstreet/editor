@@ -180,6 +180,16 @@ impl Shown {
             Self::Idle | Self::Loading | Self::Failed(_) => Duration::ZERO,
         }
     }
+    fn time(&self) -> Option<String> {
+        match self {
+            Self::Playing { position, duration } | Self::Paused { position, duration } => {
+                Some(format!("{} / {}", clock(*position), clock(*duration)))
+            }
+            Self::Ended { duration } => Some(clock(*duration)),
+            Self::Loading => Some("Loading…".to_owned()),
+            Self::Idle | Self::Failed(_) => None,
+        }
+    }
     fn progress(&self) -> f32 {
         match self {
             Self::Playing { position, duration } | Self::Paused { position, duration }
@@ -582,14 +592,7 @@ impl AudioBlock {
                     Rc::clone(invalidate),
                 ),
             };
-            let time = match shown {
-                Shown::Playing { position, duration } | Shown::Paused { position, duration } => {
-                    Some(format!("{} / {}", clock(position), clock(duration)))
-                }
-                Shown::Ended { duration } => Some(clock(duration)),
-                Shown::Loading => Some("Loading…".to_owned()),
-                Shown::Idle | Shown::Failed(_) => None,
-            };
+            let time = shown.time();
             let mut result = row().child(button).child(title).child(detail);
             if let Some(time) = time {
                 result = result.child(
@@ -773,37 +776,6 @@ fn progress_line(
             });
     }
     element
-}
-
-#[derive(Debug)]
-#[cfg(feature = "test-support")]
-pub struct AudioFixture;
-#[cfg(feature = "test-support")]
-impl AudioFixture {
-    pub fn shown(snapshot: &Snapshot, path: &Path) -> (String, f32, Option<String>) {
-        let shown = Shown::of(snapshot, path);
-        let label = match &shown {
-            Shown::Idle => "idle",
-            Shown::Loading => "loading",
-            Shown::Playing { .. } => "playing",
-            Shown::Paused { .. } => "paused",
-            Shown::Ended { .. } => "ended",
-            Shown::Failed(_) => "failed",
-        };
-        let time = match &shown {
-            Shown::Playing { position, duration } | Shown::Paused { position, duration } => {
-                Some(format!("{} / {}", clock(*position), clock(*duration)))
-            }
-            Shown::Ended { duration } => Some(clock(*duration)),
-            Shown::Loading => Some("Loading…".to_owned()),
-            Shown::Idle | Shown::Failed(_) => None,
-        };
-        (label.to_owned(), shown.progress(), time)
-    }
-    pub fn data_track(source: &str) -> Option<PathBuf> {
-        let source = MediaSource::from(source.to_owned());
-        track_path(&source, None, "test")
-    }
 }
 
 #[cfg(test)]

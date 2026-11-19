@@ -3,8 +3,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::FunnelFixture;
 pub(crate) use view::{FunnelState, TextFactory, TextRole};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

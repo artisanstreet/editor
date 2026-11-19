@@ -3,8 +3,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::ConcentrationFixture;
 pub(crate) use view::ConcentrationState;
 
 #[derive(Debug, Deserialize)]

@@ -3,8 +3,6 @@ use super::scale::{Domain, f64_of, index_of, nice_step, quantile, sorted_finite}
 use serde::Deserialize;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::DistributionFixture;
 pub(crate) use view::{DistributionState, PlotFrame, ReadoutRow, Services, Tick, view};
 
 const MAX_AUTO_BINS: usize = 50;

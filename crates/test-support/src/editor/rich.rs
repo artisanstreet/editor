@@ -6,7 +6,7 @@ use aqua_core::{
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_ui::element::{Key as ElementKey, ui};
 use aqua_ui::style::{Length, Style};
-use aqua_ui::tree::hash_key;
+use aqua_ui::tree::{NodeKind, hash_key};
 use editor_ui::markdown::presenter::{
     BodyServices, HeatmapServices, MarkdownPresenter, SelectionPlace,
 };
@@ -163,9 +163,18 @@ impl MountedBody {
         self.press_with(key, Modifiers::ALT);
     }
 
+    pub fn press_on(&mut self, control: &str, key: NamedKey) {
+        assert!(self.app.focus_key(control), "{control:?} takes focus");
+        self.send(key, Modifiers::NONE);
+    }
+
     fn press_with(&mut self, key: NamedKey, modifiers: Modifiers) {
         let navigation = self.navigation();
         self.app.tree_mut().set_focused(Some(navigation));
+        self.send(key, modifiers);
+    }
+
+    fn send(&mut self, key: NamedKey, modifiers: Modifiers) {
         let event = KeyEvent {
             key: Key::Named(key),
             modifiers,
@@ -194,6 +203,22 @@ impl MountedBody {
     #[must_use]
     pub fn shows(&self, text: &str) -> bool {
         self.texts().iter().any(|painted| painted == text)
+    }
+
+    #[must_use]
+    pub fn text_rect(&self, text: &str) -> Rect {
+        let tree = self.app.tree();
+        let node = tree
+            .traverse()
+            .into_iter()
+            .find(|node| {
+                tree.get(*node).is_some_and(
+                    |record| matches!(&record.kind, NodeKind::Text(content) if content.text() == text),
+                )
+            })
+            .unwrap_or_else(|| panic!("{text:?} is not painted"));
+        tree.visual_rect(node)
+            .unwrap_or_else(|| panic!("{text:?} is not laid out"))
     }
 
     #[must_use]

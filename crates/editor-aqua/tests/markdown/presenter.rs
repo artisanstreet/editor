@@ -550,25 +550,21 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
     assert_eq!(captured.borrow().as_str(), "let x = 1;\nlet y = 2;");
 }
 
-#[cfg(feature = "test-support")]
 #[test]
 fn rich_identity_survives_surrounding_edits_but_not_replacement() {
-    let engine = MarkdownEngine::new().unwrap();
-    let mut presenter = MarkdownPresenter::default();
+    use test_support::editor::rich::MountedBody;
     let chart = "```artisan-heatmap\n{\"values\":[[1]]}\n```";
-    let first = presenter
-        .prepare(&engine, &format!("before\n\n{chart}"))
-        .unwrap();
-    let id = presenter.rich_identities()[0];
-    presenter
-        .prepare(&engine, &format!("extra\n\nbefore\n\n{chart}\n\nafter"))
-        .unwrap();
-    assert_eq!(presenter.rich_identities(), [id]);
-    assert!(!presenter.is_current(&first));
-    presenter.prepare(&engine, "plain only").unwrap();
-    assert!(presenter.rich_identities().is_empty());
-    presenter.prepare(&engine, chart).unwrap();
-    assert_ne!(presenter.rich_identities(), [id]);
+    let mut body = MountedBody::new(&format!("before\n\n{chart}"));
+    let unselected = body.label();
+    body.press(aqua_core::NamedKey::End);
+    let selected = body.label();
+    assert_ne!(selected, unselected);
+    body.edit(&format!("extra\n\nbefore\n\n{chart}\n\nafter"));
+    assert_eq!(body.label(), selected);
+    body.edit("plain only");
+    assert!(body.texts().iter().all(|text| text == "plain only"));
+    body.edit(chart);
+    assert_eq!(body.label(), unselected);
 }
 
 #[test]

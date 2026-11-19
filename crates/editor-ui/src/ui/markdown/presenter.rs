@@ -497,11 +497,6 @@ impl MarkdownPresenter {
         &self.wake
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn rich_identities(&self) -> Vec<u64> {
-        self.rich.iter().flatten().map(|entry| entry.id).collect()
-    }
-
     pub fn release(&self, id: &str) {
         self.stored_leaves
             .borrow_mut()

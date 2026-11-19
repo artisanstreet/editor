@@ -4,8 +4,6 @@ pub mod model;
 pub(crate) mod plot;
 mod view;
 
-#[cfg(feature = "test-support")]
-pub use view::ChartFixture;
 pub(crate) use view::{ChartState, Services, view};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]

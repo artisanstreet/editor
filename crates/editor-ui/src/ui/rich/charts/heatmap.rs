@@ -3,8 +3,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::HeatmapFixture;
 pub(crate) use view::{EnvelopeTextFactory, HeatmapState, TextFactory, TextRole, envelope};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]

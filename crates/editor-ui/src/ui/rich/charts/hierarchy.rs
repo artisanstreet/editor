@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::HierarchyFixture;
 pub(crate) use view::{HierarchyState, PartLabel, Services, levels, view};
 
 use super::scale::f32_of;

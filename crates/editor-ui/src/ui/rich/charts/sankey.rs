@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::SankeyFixture;
 pub(crate) use view::{LabelFactory, NodeLabel, ReadoutFactory, SankeyState, view};
 
 use super::scale::{f32_of, f64_of};
