@@ -20,7 +20,7 @@ fn mounted_panel(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
     use aqua_text::{SharedFonts, SharedRuns};
     use editor_aqua::conversation::adapter::Action;
     let markers = outline(count);
-    let sink = jumps.clone();
+    let sink = jumps;
     let dispatch: Dispatch = Rc::new(move |action| {
         if let Action::Jump(position) = action {
             sink.borrow_mut().push(position);
@@ -67,7 +67,7 @@ fn press_and_release(app: &mut aqua::UiApp, at: Point) {
 #[test]
 fn clicking_a_panel_row_jumps_to_its_turn() {
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_panel(8, jumps.clone());
+    let mut app = mounted_panel(8, Rc::clone(&jumps));
     let at = row_center(&app, "item-3");
     press_and_release(&mut app, at);
     assert_eq!(&*jumps.borrow(), &[30]);
@@ -77,7 +77,7 @@ fn clicking_a_panel_row_jumps_to_its_turn() {
 fn clicking_a_row_of_the_scrolled_panel_jumps_to_its_turn() {
     use aqua_ui::tree::NodeKind;
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_panel(40, jumps.clone());
+    let mut app = mounted_panel(40, Rc::clone(&jumps));
     let scroll = app
         .tree()
         .traverse()

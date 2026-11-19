@@ -82,7 +82,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
         .unwrap();
     assert!(first.settling);
     let invalidated = Rc::new(Cell::new(false));
-    let notification = invalidated.clone();
+    let notification = Rc::clone(&invalidated);
     let element = first
         .wrap(
             UiBox::new()

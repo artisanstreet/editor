@@ -237,9 +237,9 @@ fn rebuilds_follow_state_changes_and_effect_only_focus_is_applied() {
     let change = Rc::new(Cell::new(false));
     let focused = Rc::new(Cell::new(false));
     let views = Fixture {
-        builds: builds.clone(),
-        change: change.clone(),
-        focused: focused.clone(),
+        builds: Rc::clone(&builds),
+        change: Rc::clone(&change),
+        focused: Rc::clone(&focused),
     };
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::new(files.clone(), resources, views);
@@ -375,9 +375,9 @@ fn editor_word_left_consumes_alt_left_before_workspace_back() {
         |_| {},
     );
     let views = ShortcutFixture {
-        root: Default::default(),
+        root: editor_aqua::shell::root::RootViews::default(),
         editor,
-        clear_focus: clear_focus.clone(),
+        clear_focus: Rc::clone(&clear_focus),
     };
     let mut app = ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
     let mut core = Core::for_tests(files).unwrap();

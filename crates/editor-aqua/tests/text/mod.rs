@@ -162,7 +162,7 @@ fn mounted_input_and_composition_edit_editor_once() {
     use std::cell::RefCell;
 
     let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded = events.clone();
+    let recorded = Rc::clone(&events);
     let controller = EditorController::new(Editor::new("", Mode::Prompt), move |event| {
         recorded.borrow_mut().push(event);
     });
@@ -476,7 +476,7 @@ fn mounted(
     use editor_aqua::ui::theme::ArtisanTheme;
 
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let recorded = events.clone();
+    let recorded = Rc::clone(&events);
     let controller = EditorController::new(Editor::new(text, mode), move |event| {
         recorded.borrow_mut().push(event);
     });
@@ -632,8 +632,8 @@ fn shared_controller_reports_selection_and_controls_disabled_state() {
 
     let shared = Rc::new(RefCell::new(Editor::new("abc", Mode::Prompt)));
     let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded = events.clone();
-    let controller = EditorController::from_shared(shared.clone(), move |event| {
+    let recorded = Rc::clone(&events);
+    let controller = EditorController::from_shared(Rc::clone(&shared), move |event| {
         recorded.borrow_mut().push(event);
     });
     let fonts = SharedFonts::new();
@@ -677,7 +677,7 @@ fn styled_tokenizer_caches_each_revision_and_retains_atomic_ranges() {
     use std::cell::Cell;
 
     let calls = Rc::new(Cell::new(0));
-    let observed = calls.clone();
+    let observed = Rc::clone(&calls);
     let mut editor = Editor::new("@person", Mode::Prompt);
     editor.set_styled_tokenizer(Some(Rc::new(move |text| {
         observed.set(observed.get() + 1);
@@ -1094,9 +1094,10 @@ fn native_text_service_queries_live_selection_and_invalidates_after_edit() {
 
     let model = Rc::new(RefCell::new(Editor::new("abc", Mode::Document)));
     let events = Rc::new(RefCell::new(Vec::new()));
-    let output = events.clone();
-    let controller =
-        EditorController::from_shared(model.clone(), move |event| output.borrow_mut().push(event));
+    let output = Rc::clone(&events);
+    let controller = EditorController::from_shared(Rc::clone(&model), move |event| {
+        output.borrow_mut().push(event)
+    });
     let theme = ArtisanTheme::resolved();
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
@@ -1195,7 +1196,7 @@ fn secondary_text_click_reports_shaped_byte_without_selecting() {
     use std::cell::RefCell;
 
     let hits = Rc::new(RefCell::new(Vec::new()));
-    let recorded = hits.clone();
+    let recorded = Rc::clone(&hits);
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());

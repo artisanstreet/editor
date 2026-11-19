@@ -67,6 +67,14 @@ pub struct SelectionScope {
     allocator: SelectionAllocator,
 }
 
+impl std::fmt::Debug for SelectionScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectionScope")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SelectionScope {
     pub(crate) fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
         let allocator = self.allocator.clone();

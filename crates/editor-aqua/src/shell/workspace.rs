@@ -139,14 +139,17 @@ impl Workspace {
     ) -> (Self, NotificationEffects) {
         let marketplace_actions = Rc::new(RefCell::new(VecDeque::new()));
         let sink = Rc::clone(&marketplace_actions);
+        let inspector = crate::inspector::InspectorOwner::new(core, selections.inspector);
+        let conversation_selection =
+            crate::conversation::presentation::SelectionOwners::new(selections.conversation);
+        let markdown = Rc::new(RefCell::new(
+            crate::conversation::presentation::MarkdownOwners::new(selections.conversation),
+        ));
         let mut workspace = Self {
-            inspector: crate::inspector::InspectorOwner::new(core, selections.inspector),
-            conversation_selection: crate::conversation::presentation::SelectionOwners::new(
-                selections.conversation,
-            ),
-            markdown: Rc::new(RefCell::new(
-                crate::conversation::presentation::MarkdownOwners::new(selections.conversation),
-            )),
+            selections,
+            inspector,
+            conversation_selection,
+            markdown,
             status_shimmers: Rc::new(RefCell::new(
                 crate::conversation::view::status::StatusShimmers::default(),
             )),
@@ -154,7 +157,6 @@ impl Workspace {
             code_actions: Rc::new(RefCell::new(VecDeque::new())),
             code_frame_pending: false,
             code_deadline: None,
-            selections,
             inspector_actions: Rc::new(RefCell::new(VecDeque::new())),
             terminal_dialog: None,
             terminal_content: None,
@@ -163,8 +165,6 @@ impl Workspace {
             settings_sidebar: crate::sidebar::controller::Sidebar::new(false),
             usage: crate::sidebar::usage::controller::UsagePage::default(),
             usage_actions: Rc::new(RefCell::new(VecDeque::new())),
-            sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
-            settings_sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
             conversation: crate::conversation::controller::Conversation::new(core),
             composer: None,
             composer_target: None,
@@ -178,8 +178,8 @@ impl Workspace {
             composer_focus_pending: false,
             composer_was_focused: false,
             composer_mentions_dirty: true,
-            composer_tooltip: None,
             retiring_tooltips: Vec::new(),
+            composer_tooltip: None,
             question_option_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source: None,
@@ -189,11 +189,13 @@ impl Workspace {
             marketplace: crate::marketplace::controller::MarketplaceController::new(Rc::new(
                 move |action| sink.borrow_mut().push_back(action),
             )),
+            marketplace_focus_pending: false,
+            marketplace_reveal_pending: false,
             settings: crate::settings::controller::SettingsController::default(),
             home: crate::settings::controller::SettingsController::default(),
             home_actions: Rc::new(RefCell::new(VecDeque::new())),
-            marketplace_focus_pending: false,
-            marketplace_reveal_pending: false,
+            sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
+            settings_sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
             marketplace_actions,
             settings_actions: Rc::new(RefCell::new(VecDeque::new())),
             theme_transition: None,

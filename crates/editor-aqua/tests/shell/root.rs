@@ -185,7 +185,7 @@ fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation
     let mut opened = ThreadShell::open("root-host", "root-thread", Motion::Full);
     let workspace = opened.workspace();
     let document = workspace.selections.conversation;
-    let markdown = workspace.markdown.clone();
+    let markdown = std::rc::Rc::clone(&workspace.markdown);
     replies(&mut opened, 1000);
     let window = opened.window("root");
     let ThreadShell {

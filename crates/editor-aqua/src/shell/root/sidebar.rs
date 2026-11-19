@@ -240,7 +240,6 @@ impl RootViews {
         now: std::time::Instant,
     ) -> crate::frame::view::Sidebar {
         crate::frame::view::Sidebar {
-            search,
             width: self.sidebar.width(now),
             open: self.sidebar.open(),
             wordmark: self.sidebar.wordmark(now),
@@ -259,6 +258,7 @@ impl RootViews {
                     },
                 )
             }),
+            search,
             tree,
         }
     }

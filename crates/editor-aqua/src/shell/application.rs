@@ -160,6 +160,14 @@ pub struct ShellApplication<V> {
     render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
 }
 
+impl<V> std::fmt::Debug for ShellApplication<V> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellApplication")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(feature = "qualification")]
 impl ShellApplication<crate::shell::root::RootViews> {
     pub fn qualification_observation(

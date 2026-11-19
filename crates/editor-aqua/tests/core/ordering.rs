@@ -151,7 +151,7 @@ fn hosts_and_image_completions_expose_each_admitted_state() {
         second_sender.event(setting("order", 1.into())).await;
         account_sender.transport_failure().await;
         first_sender
-            .image(a.clone(), a_generation, image.clone())
+            .image(a.clone(), a_generation, Arc::clone(&image))
             .await;
         first_sender.event(setting("order", 2.into())).await;
         first_sender.image(b.clone(), b_generation, image).await;
@@ -213,7 +213,7 @@ fn image_facade_observes_current_results_without_retaining_host_or_evicted_image
             .unwrap(),
     );
     let sender = core.host(&id).unwrap().test_transition_sender();
-    runtime().block_on(sender.image(first.clone(), generation, first_image.clone()));
+    runtime().block_on(sender.image(first.clone(), generation, Arc::clone(&first_image)));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while matches!(facade.lookup(&first), Some(BlobImage::Loading)) {
         assert!(
@@ -231,7 +231,7 @@ fn image_facade_observes_current_results_without_retaining_host_or_evicted_image
     for index in 0..32 {
         let hash = BlobHash(format!("other-{index}"));
         let generation = core.host_mut(&id).unwrap().test_begin_image(hash.clone());
-        runtime().block_on(sender.image(hash.clone(), generation, other.clone()));
+        runtime().block_on(sender.image(hash.clone(), generation, Arc::clone(&other)));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while matches!(facade.lookup(&hash), Some(BlobImage::Loading)) {
             assert!(

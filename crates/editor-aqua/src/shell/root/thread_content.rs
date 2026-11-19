@@ -301,7 +301,7 @@ impl RootViews {
                     image_assets: media_resources.image_assets.clone(),
                     model_capability: Rc::clone(&media_resources.model_capability),
                     scale: media_resources.scale,
-                    wake: wake.clone(),
+                    wake: std::sync::Arc::clone(&wake),
                 })
             })),
         );

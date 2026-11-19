@@ -44,10 +44,10 @@ pub(crate) fn settings_layout(window: Size) -> SettingsLayout {
         height: (window.height * scale).max(1.0),
     };
     SettingsLayout {
+        size,
         navigation_width: settings_sidebar_width(size.width)
             .min(260.0)
             .min(size.width * 0.4),
-        size,
     }
 }
 

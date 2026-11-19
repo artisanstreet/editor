@@ -54,7 +54,7 @@ impl WordmarkLoader {
             .on_paint(move |bounds| {
                 let vector = |color| DisplayItem::GpuiSvg {
                     bounds,
-                    source: source.clone(),
+                    source: std::sync::Arc::clone(&source),
                     tint: Some(color),
                     opacity: 1.0,
                 };

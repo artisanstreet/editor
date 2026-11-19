@@ -69,9 +69,9 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
     let cache = Rc::new(RefCell::new(RowCache::default()));
     let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(510))));
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let observed = actions.clone();
+    let observed = Rc::clone(&actions);
     let source_actions = Rc::new(RefCell::new(Vec::new()));
-    let observed_sources = source_actions.clone();
+    let observed_sources = Rc::clone(&source_actions);
     let row = |sending| {
         realized(RowModel {
             version: 7,
@@ -83,19 +83,19 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
                     AnswerState::Failed("Previous failure".into())
                 },
             )]),
-            ..row_model(Row::Prompt(item.id.clone()), [item.clone()])
+            ..row_model(Row::Prompt(item.id.clone()), [Arc::clone(&item)])
         })
     };
     let factory = |sending| {
         row_factory_with(
             vec![row(sending)],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             true,
             fixed_source(511),
             Instant::now(),
             {
-                let observed = observed.clone();
+                let observed = Rc::clone(&observed);
                 let action_scope = action_scope.clone();
                 Rc::new(move |action: Action| {
                     observed
@@ -105,9 +105,9 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
             },
             Rc::default(),
         )
-        .with_row_cache(cache.clone())
+        .with_row_cache(Rc::clone(&cache))
         .with_sources(provider.clone(), SelectionDocumentId(510), {
-            let observed_sources = observed_sources.clone();
+            let observed_sources = Rc::clone(&observed_sources);
             Rc::new(move |action| observed_sources.borrow_mut().push(action))
         })
         .unwrap()
@@ -155,19 +155,19 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
                 id: notice.id.clone(),
                 run: None,
             },
-            [notice.clone()],
+            [Arc::clone(&notice)],
         )
     });
     let notice_factory = row_factory(
         vec![notice_row],
         scope.clone(),
-        markdown.clone(),
+        Rc::clone(&markdown),
         true,
         fixed_source(512),
     )
-    .with_row_cache(cache.clone())
+    .with_row_cache(Rc::clone(&cache))
     .with_sources(provider.clone(), SelectionDocumentId(510), {
-        let observed_sources = observed_sources.clone();
+        let observed_sources = Rc::clone(&observed_sources);
         Rc::new(move |action| observed_sources.borrow_mut().push(action))
     })
     .unwrap();

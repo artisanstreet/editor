@@ -35,7 +35,7 @@ fn refresh_preserves_focus_and_selection_then_disposes_before_owner() {
     let owner = app.tree().root().unwrap();
     assert!(app.tree_mut().set_focused(Some(owner)));
     let dismissed = Rc::new(Cell::new(0));
-    let callback = dismissed.clone();
+    let callback = Rc::clone(&dismissed);
     let dialog = Dialog::new(
         "terminal-dialog",
         ArtisanTheme::resolved(),

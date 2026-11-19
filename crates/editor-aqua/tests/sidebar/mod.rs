@@ -210,11 +210,12 @@ fn projection_prioritizes_live_state_and_preserves_history_age() {
     let mut settled = thread(&project.id, 4, 0);
     settled.settled_seq = 4;
     let older = thread(&project.id, 3, day * 2);
+    let live = waiting.id.clone();
     let host = Host {
-        waiting: vec![waiting.id.clone()],
-        working: vec![waiting.id.clone()],
         project,
         threads: vec![older, settled, waiting],
+        waiting: vec![live.clone()],
+        working: vec![live],
     };
     let result = lists(&host, None, 1_000_000_000);
     assert_eq!(result.inbox.len(), 1);

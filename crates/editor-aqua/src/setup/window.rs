@@ -41,7 +41,7 @@ pub enum SetupWindowError {
 
 pub(super) fn run(setup: Setup) -> Result<(), SetupWindowError> {
     let mut config = aqua::AquaConfig::default();
-    config.window.title = "Artisan Editor Setup".to_owned();
+    "Artisan Editor Setup".clone_into(&mut config.window.title);
     config.window.inner_size.width = view::WINDOW.0;
     config.window.inner_size.height = view::WINDOW.1;
     config.window.resizable = false;

@@ -124,8 +124,8 @@ impl Shell {
                 models: crate::ui::media::model::load::ModelAssets::new(),
                 meshes_supported: std::rc::Rc::default(),
                 meshes_changed: std::cell::Cell::new(false),
-                dialogs: Default::default(),
-                live: Default::default(),
+                dialogs: crate::ui::dialogs::DialogRoutes::default(),
+                live: crate::shell::live_throttle::LiveThrottle::default(),
                 build,
                 images,
             },
@@ -389,6 +389,14 @@ impl Shell {
 pub struct ShellResources {
     pub ui: aqua::UiApp,
     pub images: ImageAssets,
+}
+
+impl std::fmt::Debug for ShellResources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellResources")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ShellResources {

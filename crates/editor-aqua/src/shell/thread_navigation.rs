@@ -334,6 +334,14 @@ pub struct ThreadNavigation {
     context: Option<BuildContext>,
 }
 
+impl std::fmt::Debug for ThreadNavigation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThreadNavigation")
+            .finish_non_exhaustive()
+    }
+}
+
 impl ThreadNavigation {
     pub(crate) fn toggle(&mut self, now: Instant, reduced_motion: bool) {
         let state = &mut self.interaction;
@@ -407,7 +415,7 @@ impl ThreadNavigation {
     ) -> Option<Element> {
         self.context = Some(BuildContext {
             theme,
-            dispatch: dispatch.clone(),
+            dispatch: std::rc::Rc::clone(&dispatch),
         });
         self.build_with(conversation, core, viewport, now, theme, dispatch)
     }

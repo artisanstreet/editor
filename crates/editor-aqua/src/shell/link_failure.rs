@@ -31,6 +31,14 @@ pub struct LinkFailureDialog {
     events: Rc<RefCell<VecDeque<Event>>>,
 }
 
+impl std::fmt::Debug for LinkFailureDialog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LinkFailureDialog")
+            .finish_non_exhaustive()
+    }
+}
+
 impl LinkFailureDialog {
     pub fn show(&mut self, url: String, error: &dyn std::error::Error) {
         self.failure = Some(LinkFailure {

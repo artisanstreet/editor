@@ -236,7 +236,7 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     );
     core.navigate(Screen::Marketplace);
     let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded = events.clone();
+    let recorded = Rc::clone(&events);
     let emit = Rc::new(move |action| recorded.borrow_mut().push(action));
     let mut controller = MarketplaceController::new(emit.clone());
     controller.sync(&mut core);
@@ -621,7 +621,7 @@ fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
     controller.drain(&mut core);
     assert!(matches!(controller.page.listings, Remote::Failed(_)));
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
+    let sink = Rc::clone(&actions);
     let mut app = marketplace_app(
         &controller,
         &core,

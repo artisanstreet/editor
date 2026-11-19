@@ -103,7 +103,7 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
         &core,
         &mut sessions,
         ComposerTarget::NewThread {
-            host: host.clone(),
+            host,
             project: None,
         },
         std::rc::Rc::new(|_| {}),

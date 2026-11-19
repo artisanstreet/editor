@@ -41,7 +41,7 @@ fn navigation_copies_the_selected_original_payload_and_dismisses() {
     assert!(app.focus_key("owner"));
     let owner = app.tree().focused().unwrap();
     let effects = Rc::new(RefCell::new(Vec::new()));
-    let capture = effects.clone();
+    let capture = Rc::clone(&effects);
     let menu = ShowCopyMenu {
         position: Point::new(30.0, 30.0),
         entries: vec![
@@ -102,7 +102,7 @@ fn disposal_during_entrance_releases_motion_and_restores_focus() {
     assert!(app.focus_key("owner"));
     let owner = app.tree().focused().unwrap();
     let effects = Rc::new(RefCell::new(Vec::new()));
-    let capture = effects.clone();
+    let capture = Rc::clone(&effects);
     let menu = ShowCopyMenu {
         position: Point::new(30.0, 30.0),
         entries: vec![CopyEntry::primary("Copy Value", "red")],

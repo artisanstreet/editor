@@ -158,8 +158,8 @@ fn signing_out_clears_the_badge_and_disowns_old_notifications() {
     assert_eq!(
         activation(&shell, &posted),
         Some(Screen::Thread {
-            host: host.id.clone(),
-            thread: thread.clone(),
+            host: host.id,
+            thread,
         })
     );
     shell.core.account_mut().sign_out();

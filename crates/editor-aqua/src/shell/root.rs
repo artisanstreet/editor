@@ -343,7 +343,7 @@ impl SectionViews for RootViews {
                 false
             }
         })
-        .fold(true, |all, refreshed| all && refreshed)
+        .all(|refreshed| refreshed)
     }
 
     fn refresh_sidebar(&self, shell: &Shell, ui: &mut UiApp, window: &ObservedWindowState) -> bool {

@@ -26,6 +26,14 @@ pub struct Notifications {
     posted: HashMap<HostId, HashSet<ThreadId>>,
 }
 
+impl std::fmt::Debug for Notifications {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Notifications")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Notifications {
     pub fn reset(&mut self, host: &impl NotificationHost) {
         let baseline = host.is_live().then(|| {
@@ -175,6 +183,7 @@ pub(crate) fn parse_tag(tag: &str) -> Option<(HostId, ThreadId)> {
     Some((HostId(host.to_owned()), ThreadId(thread.to_owned())))
 }
 
+#[derive(Debug)]
 pub struct NotificationChanges {
     pub withdraw: Vec<String>,
     pub show: Option<Notification>,
@@ -183,7 +192,6 @@ pub struct NotificationChanges {
 impl Notifications {
     pub fn thread_changed(
         &mut self,
-#[derive(Debug)]
         host: &impl NotificationHost,
         thread: &ThreadId,
         watching: Option<&ThreadId>,

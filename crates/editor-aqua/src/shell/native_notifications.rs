@@ -62,6 +62,14 @@ pub struct NativeNotifications {
     responses: Arc<Mutex<VecDeque<NotificationResponse>>>,
 }
 
+impl std::fmt::Debug for NativeNotifications {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeNotifications")
+            .finish_non_exhaustive()
+    }
+}
+
 impl NativeNotifications {
     pub(crate) fn new() -> Result<Self, NotificationError> {
         let wake = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);

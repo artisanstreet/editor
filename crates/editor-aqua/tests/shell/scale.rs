@@ -57,7 +57,7 @@ fn scale_change_reaches_layout_before_the_rebuild() {
     };
     let seen = Rc::new(RefCell::new(Vec::new()));
     let views = Probe {
-        scale_was_already_applied: seen.clone(),
+        scale_was_already_applied: Rc::clone(&seen),
         runtime: Vec::new(),
     };
     let mut app = ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);

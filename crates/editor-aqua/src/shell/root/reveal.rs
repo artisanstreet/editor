@@ -39,9 +39,10 @@ pub(super) struct Reveal {
 
 impl Reveal {
     pub(super) fn new(hit: HitRow) -> Self {
+        let needle = fold(&hit.needle);
         Self {
-            needle: fold(&hit.needle),
             hit,
+            needle,
             stage: Stage::Opening,
             until: Instant::now() + PATIENCE,
         }

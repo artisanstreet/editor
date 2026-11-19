@@ -65,7 +65,7 @@ pub(crate) fn view(
         height,
         inbox_entries,
         ThreadPane::Inbox,
-        visuals.clone(),
+        Rc::clone(&visuals),
         Rc::clone(&emit),
     );
     let inbox = Aqua::Box()

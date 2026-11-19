@@ -53,9 +53,9 @@ fn palette_navigation_clamps_and_enter_closes_even_when_empty() {
 #[test]
 fn stale_and_closed_sessions_reject_search_selection_and_callbacks() {
     let events = Rc::new(RefCell::new(Vec::new()));
-    let received = events.clone();
+    let received = Rc::clone(&events);
     let old = PaletteView::new(Rc::new(move |event| received.borrow_mut().push(event)));
-    let received = events.clone();
+    let received = Rc::clone(&events);
     let callback = guarded(
         old.session,
         &old.active,

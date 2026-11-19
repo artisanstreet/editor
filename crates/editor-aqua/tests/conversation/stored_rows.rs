@@ -55,14 +55,14 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     let items = [question("one", '1'), question("two", '2')];
     let rows = items
         .iter()
-        .map(|item| realized(row_model(Row::Prompt(item.id.clone()), [item.clone()])))
+        .map(|item| realized(row_model(Row::Prompt(item.id.clone()), [Arc::clone(item)])))
         .collect();
     let (ids, allocate) = source_ids(0);
     let emitted = Rc::new(RefCell::new(Vec::new()));
-    let capture = emitted.clone();
+    let capture = Rc::clone(&emitted);
     let factory = Rc::new(
         row_factory(rows, scope.clone(), markdown, true, allocate)
-            .with_row_cache(cache.clone())
+            .with_row_cache(Rc::clone(&cache))
             .with_sources(
                 provider,
                 SelectionDocumentId(415),
@@ -248,7 +248,7 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
     let actions = Rc::new(RefCell::new(Vec::new()));
     let make_view = |owners: &mut SourceOwners| {
         assert!(owners.open_provider(&provider, &item, SourceField::Notice));
-        let actions = actions.clone();
+        let actions = Rc::clone(&actions);
         owners
             .view(
                 &item.id,

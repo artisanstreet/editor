@@ -205,7 +205,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             &owner,
             "row",
             0,
-            leaf.clone(),
+            Arc::clone(&leaf),
             theme,
             SelectionDocumentId(9),
             &[7],
@@ -382,11 +382,11 @@ fn stored_conversation_transaction(
         RowFactory::new(
             vec![RealizedRow {
                 model,
-                disclosure: Default::default(),
+                disclosure: editor_aqua::conversation::disclosure::RowDisclosure::default(),
                 held: false,
             }],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             Rc::new(RefCell::new(StatusShimmers::default())),
             *ArtisanTheme::for_mode(ThemeMode::Dark),
             true,
@@ -403,14 +403,14 @@ fn stored_conversation_transaction(
             Rc::new(|_| {}),
             editor_aqua::conversation::view::factory::WorkResources {
                 motion: Rc::default(),
-                names: Default::default(),
+                names: std::collections::HashMap::default(),
                 seconds: 0.0,
                 timestamp: 0,
             },
         )
         .with_sources(provider.clone(), document, Rc::new(|_| {}))
         .unwrap()
-        .with_stored(stored.clone(), provider)
+        .with_stored(Rc::clone(&stored), provider)
         .unwrap()
         .with_observations(observations.clone()),
     );

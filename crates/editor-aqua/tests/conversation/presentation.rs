@@ -37,7 +37,7 @@ fn measured_heights_ignore_stale_rows_and_invalid_values() {
         key: RowKey::Gap,
         version,
         height,
-        active: active.clone(),
+        active: Rc::clone(&active),
     };
     let dir = tempfile::tempdir().unwrap();
     let core = test_core(dir.path());
@@ -132,15 +132,15 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
             row_factory_with(
                 rows(),
                 scope.clone(),
-                markdown.clone(),
+                Rc::clone(&markdown),
                 false,
                 fixed_source(9000),
                 at,
                 Rc::new(|_| {}),
-                motion.clone(),
+                Rc::clone(&motion),
             )
-            .with_admission(conversation.reveal.clone())
-            .with_row_cache(row_cache.clone()),
+            .with_admission(Rc::clone(&conversation.reveal))
+            .with_row_cache(Rc::clone(&row_cache)),
         )
     };
     let first = factory(now);
@@ -172,14 +172,14 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     let _replacement_factory = row_factory_with(
         Vec::new(),
         replacement_scope,
-        markdown.clone(),
+        Rc::clone(&markdown),
         false,
         fixed_source(9001),
         Instant::now(),
         Rc::new(|_| {}),
-        motion.clone(),
+        Rc::clone(&motion),
     )
-    .with_row_cache(row_cache.clone());
+    .with_row_cache(Rc::clone(&row_cache));
     assert!(next.realize(0, &keys[0]).is_err());
     first.dispose();
     assert!(first.realize(0, &keys[0]).is_err());
@@ -293,13 +293,13 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         row_factory(
             vec![realized(model)],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             true,
             source_ids(900).1,
         )
         .with_observations(observations.clone())
-        .with_row_cache(row_cache.clone())
-        .with_reveals(&conversation, &core, owners.clone(), false)
+        .with_row_cache(Rc::clone(&row_cache))
+        .with_reveals(&conversation, &core, Rc::clone(&owners), false)
         .unwrap(),
     );
     let row_key = RowKey::Item(id.clone());
@@ -320,12 +320,12 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     let replacement = row_factory(
         vec![realized(row_model(&conversation, index, None).unwrap())],
         scope.clone(),
-        markdown.clone(),
+        Rc::clone(&markdown),
         true,
         fixed_source(9999),
     )
-    .with_row_cache(row_cache.clone())
-    .with_reveals(&conversation, &core, owners.clone(), false)
+    .with_row_cache(Rc::clone(&row_cache))
+    .with_reveals(&conversation, &core, Rc::clone(&owners), false)
     .unwrap();
     replacement.realize(0, &row_key).unwrap();
     assert!(Rc::ptr_eq(
@@ -374,15 +374,15 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         row_factory(
             vec![],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             true,
             fixed_source(9999),
         )
         .with_lazy_rows(&conversation, &core, None)
         .unwrap()
         .with_observations(complete_observations.clone())
-        .with_row_cache(row_cache.clone())
-        .with_reveals(&conversation, &core, owners.clone(), false)
+        .with_row_cache(Rc::clone(&row_cache))
+        .with_reveals(&conversation, &core, Rc::clone(&owners), false)
         .unwrap(),
     );
     let mut complete_app = mounted(
@@ -490,7 +490,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let factory = Rc::new(row_factory(
         vec![make_row(0), make_row(1)],
         scope.clone(),
-        markdown.clone(),
+        Rc::clone(&markdown),
         true,
         allocate,
     ));
@@ -525,14 +525,14 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     assert!(factory.realize(0, &keys[0]).is_err());
 
     let activations = Rc::new(Cell::new(0));
-    let activated = activations.clone();
+    let activated = Rc::clone(&activations);
     let gap_factory = row_factory_with(
         vec![realized(RowModel {
             version: 3,
             ..row_model(Row::Gap, [])
         })],
         scope.clone(),
-        markdown.clone(),
+        Rc::clone(&markdown),
         true,
         fixed_source(999),
         std::time::Instant::now(),
@@ -581,13 +581,13 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     };
     let (user_ids, allocate) = source_ids(100);
     let blob_events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = blob_events.clone();
+    let emitted = Rc::clone(&blob_events);
     let images = core.host(&scope.host).unwrap().blob_images();
     let user_factory = Rc::new(
         row_factory(
             vec![user_row(0), user_row(1)],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             true,
             allocate,
         )
@@ -636,12 +636,12 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
         .items
         .insert(user_id.clone(), Arc::new(empty_item));
     let empty_events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = empty_events.clone();
+    let emitted = Rc::clone(&empty_events);
     let empty_factory = Rc::new(
         row_factory(
             vec![empty_row],
             scope.clone(),
-            markdown.clone(),
+            Rc::clone(&markdown),
             true,
             fixed_source(999),
         )
@@ -1101,7 +1101,7 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
             provider,
         )
         .unwrap()
-        .with_reveals(&conversation, &core, owners.clone(), false)
+        .with_reveals(&conversation, &core, Rc::clone(&owners), false)
         .unwrap(),
     );
     let row_key = RowKey::Item(id);

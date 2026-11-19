@@ -254,7 +254,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
                         instance: first,
                         generation,
                         anchor: content.anchor.clone(),
-                        content: Some(content.clone()),
+                        content: Some(content),
                         hovered: true,
                     },
                     None
@@ -412,7 +412,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             .read(|session| session.body().clone()),
         serde_json::Value::Null
     );
-    let editor = current.editor.clone();
+    let editor = std::rc::Rc::clone(&current.editor);
     current.editor.borrow_mut().replace(0..0, "unsent");
     current.edited();
     current.set_target(

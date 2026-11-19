@@ -191,7 +191,7 @@ fn engine_login_code_requires_text_and_clears_only_on_submission() {
     let mut form = EnginesForm::default();
     form.sync_host(Some("forge".into()));
     form.prepare(EngineId::Claude);
-    let editor = form.login_codes.get(&EngineId::Claude).unwrap().clone();
+    let editor = std::rc::Rc::clone(form.login_codes.get(&EngineId::Claude).unwrap());
     editor.borrow_mut().set_text("   ");
     assert!(form.login_code(EngineId::Claude).is_none());
     assert_eq!(editor.borrow().text(), "   ");
@@ -837,7 +837,7 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
         Some(&json!(false))
     );
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
+    let sink = Rc::clone(&actions);
     let mut app = render_settings(
         &settings,
         &core,
@@ -899,16 +899,19 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
     settings.sync(&mut core);
     settings.engines.busy.insert(engine);
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
+    let sink = Rc::clone(&actions);
     let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
-    let mut app = render_settings(&settings, &core, emit.clone());
+    let mut app = render_settings(&settings, &core, Rc::clone(&emit));
     test_support::editor::ui::click(&mut app, &format!("settings-engine-cancel-login-{engine}"));
     for action in actions.borrow_mut().drain(..) {
         dispatch(&mut settings, &mut core, action);
     }
     assert!(settings.engines.cancelling.contains(&engine));
-    let texts =
-        test_support::editor::ui::painted_texts(&render_settings(&settings, &core, emit.clone()));
+    let texts = test_support::editor::ui::painted_texts(&render_settings(
+        &settings,
+        &core,
+        Rc::clone(&emit),
+    ));
     assert!(texts.iter().any(|text| text == "Cancelling…"), "{texts:?}");
 
     settings.engines.busy.remove(&engine);
@@ -972,7 +975,7 @@ fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
     settings.sync(&mut core);
     let _started = core.start_mcp_sign_in(&id, "linear", false);
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
+    let sink = Rc::clone(&actions);
     let mut app = render_settings(
         &settings,
         &core,

@@ -146,7 +146,8 @@ fn artwork(art: Option<Arc<aqua::images::ImageHandle>>) -> Element {
         ));
     match art {
         Some(image) => {
-            let lease: Arc<dyn std::any::Any + Send + Sync> = image.clone();
+            let lease: Arc<dyn std::any::Any + Send + Sync> =
+                Arc::<aqua::images::ImageHandle>::clone(&image);
             frame
                 .child(
                     Media::new(ImageRef::with_lease(image.id(), lease))

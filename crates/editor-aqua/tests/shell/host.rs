@@ -57,7 +57,7 @@ fn refresh(
     watched: Option<&(HostId, ThreadId)>,
     on_screen: bool,
 ) -> Option<Refresh> {
-    event_cause(event, watched, on_screen).map(|cause| cause.refresh())
+    event_cause(event, watched, on_screen).map(editor_aqua::shell::refresh::Cause::refresh)
 }
 
 #[test]

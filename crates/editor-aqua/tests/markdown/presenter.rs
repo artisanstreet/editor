@@ -76,17 +76,17 @@ fn completed_image_invalidates_retained_loading_row() {
     let settled = Rc::new(Cell::new(false));
     let renders = Rc::new(Cell::new(0));
     let list = || {
-        let revision = settled.clone();
-        let settled = settled.clone();
-        let presenter = presenter.clone();
-        let renders = renders.clone();
+        let revision = Rc::clone(&settled);
+        let settled = Rc::clone(&settled);
+        let presenter = Rc::clone(&presenter);
+        let renders = Rc::clone(&renders);
         List::new()
             .items([0_usize])
             .key(|_| "image-row")
             .revision(move |_| revision.get().then_some(1))
             .row(move |_| {
                 renders.set(renders.get() + 1);
-                let invalidated = settled.clone();
+                let invalidated = Rc::clone(&settled);
                 let element = presenter
                     .render(
                         "item",
@@ -417,7 +417,7 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
     let source = "Before\n\n```rust\nlet x = 1;\nlet y = 2;\n```\n\nAfter";
     presenter.prepare(&engine, source).unwrap();
     let captured = Rc::new(std::cell::RefCell::new(String::new()));
-    let capture = captured.clone();
+    let capture = Rc::clone(&captured);
     let code = editor_aqua::ui::markdown::presenter::CodeServices {
         copy_enabled: true,
         reference: None,
@@ -527,7 +527,7 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
     );
     presenter.prepare(&engine, &source).unwrap();
     let copied = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let capture = copied.clone();
+    let capture = Rc::clone(&copied);
     let code = editor_aqua::ui::markdown::presenter::CodeServices {
         copy_enabled: true,
         reference: None,

@@ -91,7 +91,7 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
     );
     workspace.conversation.rows.push((
         Row::Text {
-            id: reply.id.clone(),
+            id: reply.id,
             slot: Slot::Prose,
             block: 0,
             run: None,

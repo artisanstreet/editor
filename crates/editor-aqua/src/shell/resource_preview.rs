@@ -151,17 +151,25 @@ pub struct ResourcePreview {
     thread: Option<artisan_api::ThreadId>,
 }
 
+impl std::fmt::Debug for ResourcePreview {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResourcePreview")
+            .finish_non_exhaustive()
+    }
+}
+
 impl ResourcePreview {
     pub fn new(path: String, line: Option<u32>, source: Option<PreviewSource>) -> Self {
         let target_line = line.unwrap_or(1).saturating_sub(1) as usize;
         let mut preview = Self {
+            path,
+            target_line,
             content: None,
             delivery: crate::core::delivery::Delivery::new(NonZeroUsize::MIN),
             request: None,
             source: None,
             thread: None,
-            path,
-            target_line,
         };
         preview.start(source);
         preview

@@ -40,7 +40,7 @@ fn recorder() -> (
     impl FnOnce(DialogOutcome) + 'static,
 ) {
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let sink = seen.clone();
+    let sink = Rc::clone(&seen);
     (seen, move |outcome| sink.borrow_mut().push(outcome))
 }
 

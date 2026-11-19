@@ -223,13 +223,13 @@ impl Entry {
             )
         };
         let email = editor(
-            self.controller.sign_in.email.clone(),
+            Rc::clone(&self.controller.sign_in.email),
             "artisan-sign-in-email",
             "you@artisan.email",
             Event::SubmitEmail,
         );
         let code = editor(
-            self.controller.sign_in.second_factor.clone(),
+            Rc::clone(&self.controller.sign_in.second_factor),
             "artisan-sign-in-code",
             "123456",
             Event::SubmitCode,

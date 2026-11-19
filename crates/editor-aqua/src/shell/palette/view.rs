@@ -65,6 +65,14 @@ pub struct PaletteView {
     active: Rc<Cell<bool>>,
 }
 
+impl std::fmt::Debug for PaletteView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaletteView")
+            .finish_non_exhaustive()
+    }
+}
+
 impl PaletteView {
     pub(crate) fn new(emit: Rc<dyn Fn(Event)>) -> Self {
         let session = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
@@ -196,7 +204,7 @@ impl PaletteView {
         );
         let mut content = UiBox::new().layout("column").spaced(Space::S4).child(query);
         if let Some(problem) = palette.search_error {
-            let callback = guarded(self.session, &self.active, emit.clone());
+            let callback = guarded(self.session, &self.active, Rc::clone(&emit));
             let (text, label, action) = match problem {
                 SearchProblem::NoForge => (
                     "Connect to a Forge to search older threads.".to_owned(),
@@ -240,7 +248,7 @@ impl PaletteView {
         }
         for (index, entry) in palette.entries.iter().enumerate() {
             let screen = entry.screen.clone();
-            let callback = guarded(self.session, &self.active, emit.clone());
+            let callback = guarded(self.session, &self.active, Rc::clone(&emit));
             content = content.child(
                 row(theme, index, entry, index == palette.highlighted)
                     .on_activate(move || callback(Action::Select(screen.clone())))

@@ -136,7 +136,7 @@ impl Titlebar {
     }
 
     fn measured(&self, content: Element, lead: bool, meter: bool, height: f32) -> Element {
-        let regions = self.regions.clone();
+        let regions = Rc::clone(&self.regions);
         Canvas::new()
             .width(Length::Pct(100.0))
             .height(height)
@@ -213,9 +213,9 @@ impl Titlebar {
             (CaptionControl::Maximize, false) => (MAX, "Maximize window", Caption::Maximize),
             (CaptionControl::Close, _) => (CLOSE, "Close window", Caption::Close),
         };
-        let actions = self.actions.clone();
-        let hovered = self.hovered.clone();
-        let changed = self.changed.clone();
+        let actions = Rc::clone(&self.actions);
+        let hovered = Rc::clone(&self.hovered);
+        let changed = Rc::clone(&self.changed);
         CaptionButton::new(selector, theme, caption, label)
             .stroke(stroke)
             .lit(self.hovered.get() == Some(control))

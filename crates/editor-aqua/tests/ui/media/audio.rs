@@ -12,9 +12,9 @@ use std::time::Duration;
 #[test]
 fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let counter = calls.clone();
+    let counter = Arc::clone(&calls);
     let fetcher = MediaFetcher::new("forge", move |request| {
-        let counter = counter.clone();
+        let counter = Arc::clone(&counter);
         Box::pin(async move {
             counter.fetch_add(1, Ordering::SeqCst);
             if request.path == "missing.wav" {

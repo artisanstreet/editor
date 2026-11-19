@@ -39,7 +39,7 @@ async fn media_paths_fetch_through_captured_thread_scope() {
     };
     use std::sync::{Arc, Mutex};
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = requests.clone();
+    let captured = Arc::clone(&requests);
     let fetcher = MediaFetcher::new("thread-a", move |request| {
         captured.lock().unwrap().push(request);
         Box::pin(async { Ok(Arc::<[u8]>::from([1, 2, 3])) })

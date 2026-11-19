@@ -71,7 +71,10 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
         services,
     )
     .unwrap();
-    let mut entry = editor_aqua::shell::entry::Entry::new(None, Default::default());
+    let mut entry = editor_aqua::shell::entry::Entry::new(
+        None,
+        editor_aqua::shell::selection::SelectionAllocator::default(),
+    );
     core.account_mut().sign_out();
     core.account_mut()
         .request_link(" test@example.invalid ", "Test".into());
@@ -117,7 +120,10 @@ fn a_late_cancel_does_not_clear_an_authenticated_profile() {
     })
     .unwrap();
     let original = core.account().profile().unwrap().clone();
-    let mut entry = editor_aqua::shell::entry::Entry::new(None, Default::default());
+    let mut entry = editor_aqua::shell::entry::Entry::new(
+        None,
+        editor_aqua::shell::selection::SelectionAllocator::default(),
+    );
     entry.sign_in.emit()(editor_aqua::frame::sign_in::Event::Cancel);
     entry.dispatch(&mut core);
     assert_eq!(core.account().profile(), Some(&original));

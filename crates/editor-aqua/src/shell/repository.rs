@@ -16,6 +16,14 @@ pub struct RepositoryContext {
     working: bool,
 }
 
+impl std::fmt::Debug for RepositoryContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryContext")
+            .finish_non_exhaustive()
+    }
+}
+
 impl RepositoryContext {
     pub(crate) fn reset(&mut self) {
         self.selected = None;

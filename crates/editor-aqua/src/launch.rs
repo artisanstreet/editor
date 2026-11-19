@@ -244,7 +244,7 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
     }
     let fit_launch = !qualifying && !source_encoded;
     let mut config = aqua::AquaConfig::default();
-    config.window.title = crate::shell::host::WINDOW_NAME.to_owned();
+    crate::shell::host::WINDOW_NAME.clone_into(&mut config.window.title);
     config.window.inner_size.width = width;
     config.window.inner_size.height = height;
     let mut minimum = config.window.inner_size;

@@ -71,7 +71,7 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     core.remove_host(&config.id).unwrap();
     workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
 
-    assert!(draft.read(|state| state.removed()));
+    assert!(draft.read(editor_aqua::composer::draft_session::DraftSession::removed));
     assert_eq!(
         draft.read(|state| state.body().clone()),
         serde_json::Value::Null

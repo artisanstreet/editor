@@ -10,11 +10,19 @@ pub struct RowSourceDialogs {
     picked: crate::core::delivery::Delivery<(u64, SourceDialogResult)>,
 }
 
+impl std::fmt::Debug for RowSourceDialogs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RowSourceDialogs")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for RowSourceDialogs {
     fn default() -> Self {
         Self {
             next: 0,
-            pending: Default::default(),
+            pending: std::collections::HashMap::default(),
             picked: crate::core::delivery::Delivery::new(std::num::NonZeroUsize::MIN),
         }
     }

@@ -98,7 +98,7 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     assert!(!state.prepare(&preview, &mut app).unwrap());
     assert_eq!(state.pending_jump(), Some(1));
     let events = Rc::new(RefCell::new(Vec::new()));
-    let sink = events.clone();
+    let sink = Rc::clone(&events);
     let dialog = state
         .dialog(
             &preview,

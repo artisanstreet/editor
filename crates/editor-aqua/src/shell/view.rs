@@ -386,7 +386,14 @@ pub(crate) fn new_conversation(
     docked: Option<f32>,
     look: Option<&Sky>,
 ) -> Result<Element, BuildError> {
-    let artwork = look.map(|look| sky(theme, composer_measurement.clone(), reduced_motion, look));
+    let artwork = look.map(|look| {
+        sky(
+            theme,
+            std::rc::Rc::clone(&composer_measurement),
+            reduced_motion,
+            look,
+        )
+    });
     let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
     let body = match docked {
         Some(width) => crate::conversation::view::thread_frame(
