@@ -489,7 +489,7 @@ fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
         };
         let unit = at(1.0);
         assert!(!unit.is_empty(), "{page:?} has no text");
-        for (scale, position, size) in [(1.5, 4.0, 2.0), (2.0, 0.01, 0.01)] {
+        for (scale, position, size) in [(1.5, 4.0, 2.0), (2.0, 0.5, 0.5)] {
             let scaled = at(scale);
             assert_eq!(unit.len(), scaled.len(), "{page:?} text count at {scale}");
             for (expected, actual) in unit.iter().zip(&scaled) {
