@@ -296,7 +296,7 @@ pub(crate) async fn drive(
     hub.open_suggestion(thread_id, &run_id);
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
-    let mut ending = match Box::pin(execute(
+    let ending = match Box::pin(execute(
         hub,
         &thread,
         &mut run,
@@ -316,34 +316,12 @@ pub(crate) async fn drive(
         Err(error) => Ending::Finished(Outcome::failed(diagnostics::chain(&error))),
     };
     adapter_cancel.cancel();
-    let stopped_through = hub.stopped_through(thread_id);
-    if let Some(cancel_cutoff) = stopped_through
-        && let Err(error) = store
-            .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
-            .await
-    {
-        run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
-        ending = ending.failed_cleanup(format!(
-            "persist cancellation: {}",
-            diagnostics::chain(&error)
-        ));
-    }
-    let stopped_by = match (stopped_through, hub.inner.shutdown.is_cancelled()) {
-        (Some(_), _) => Some(StoppedBy::User),
-        (None, true) => Some(StoppedBy::Shutdown),
-        (None, false) => None,
-    };
-    if stopped_by == Some(StoppedBy::User) {
-        ending = ending.stopped_by_user();
-    }
-    let ended = ending.run_outcome(stopped_by, &run.id);
-    let status = ended.status();
     hub.attention_lock()
         .entry(thread_id.clone())
         .or_default()
         .add(&items.weighed);
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
-    finish(hub, &mut run, &items, ending, ended, attempted).await?;
+    let status = conclude(hub, &mut run, &items, ending, attempted).await?;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
@@ -419,16 +397,56 @@ async fn fail_unstarted(
     tracing::error!(thread = %run.thread_id, run = %run.id, "the run could not start: {}", diagnostics::chain(error));
     let mut run = hub.store().begin_run(run).await?;
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
-    finish(
+    Ok(conclude(
         hub,
         &mut run,
         &Work::default(),
         Ending::Finished(Outcome::failed(diagnostics::chain(error))),
-        RunOutcome::Failed,
         attempted,
     )
-    .await?;
-    Ok(RunStatus::Failed)
+    .await?)
+}
+
+async fn conclude(
+    hub: &Hub,
+    run: &mut Run,
+    items: &Work,
+    mut ending: Ending,
+    attempted: Vec<ItemId>,
+) -> Result<RunStatus, forge_store::SettleRunError> {
+    let park = match &ending {
+        Ending::Finished(outcome @ Outcome::Failed(_)) => {
+            crate::park::plan(hub, run, outcome).await
+        }
+        Ending::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
+        | Ending::Stopped(_) => None,
+    };
+    let _admission = hub.inner.admission.lock().await;
+    let stopped_through = hub.stopped_through(&run.thread_id);
+    if let Some(cancel_cutoff) = stopped_through
+        && let Err(error) = hub
+            .store()
+            .cancel_pending_inputs(run.thread_id.clone(), cancel_cutoff)
+            .await
+    {
+        run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
+        ending = ending.failed_cleanup(format!(
+            "persist cancellation: {}",
+            diagnostics::chain(&error)
+        ));
+    }
+    let stopped_by = match (stopped_through, hub.inner.shutdown.is_cancelled()) {
+        (Some(_), _) => Some(StoppedBy::User),
+        (None, true) => Some(StoppedBy::Shutdown),
+        (None, false) => None,
+    };
+    if stopped_by == Some(StoppedBy::User) {
+        ending = ending.stopped_by_user();
+    }
+    let ended = ending.run_outcome(stopped_by, &run.id);
+    let park = park.filter(|_| matches!(ending, Ending::Finished(Outcome::Failed(_))));
+    finish(hub, run, items, ending, ended, attempted, park).await?;
+    Ok(ended.status())
 }
 
 struct Delivery<'a> {
@@ -1811,6 +1829,7 @@ async fn finish(
     ending: Ending,
     ended: RunOutcome,
     attempted: Vec<ItemId>,
+    park: Option<forge_store::Park>,
 ) -> Result<(), forge_store::SettleRunError> {
     let open = open_items(items);
     if let Some(error) = ending.error() {
@@ -1831,13 +1850,6 @@ async fn finish(
             },
         )),
         Some(_) | None => None,
-    };
-    let park = match &ending {
-        Ending::Finished(outcome @ Outcome::Failed(_)) => {
-            crate::park::plan(hub, run, outcome).await
-        }
-        Ending::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
-        | Ending::Stopped(_) => None,
     };
     let error = ending.error().map(str::to_owned);
     match run.finish(ended, error.clone(), hub.store().now()) {

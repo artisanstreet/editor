@@ -322,7 +322,7 @@ impl Fixture {
             || async {
                 let store = self.hub.store();
                 let before = store.head();
-                let idle = !self.hub.is_live(&self.thread_id);
+                let idle = !self.hub.lock().holds(&self.thread_id);
                 let waiting = store
                     .pending_threads(8, Vec::new())
                     .await
@@ -333,7 +333,7 @@ impl Fixture {
                     .await
                     .unwrap()
                     .is_some_and(|run| run.status() == RunStatus::Running);
-                let still_idle = !self.hub.is_live(&self.thread_id);
+                let still_idle = !self.hub.lock().holds(&self.thread_id);
                 (store.head() == before && idle && !waiting && !running && still_idle).then_some(())
             },
         )
@@ -2387,13 +2387,13 @@ async fn durable_queued_threads_do_not_allocate_live_owners_until_a_slot_is_free
         queued.push(thread.id);
     }
     tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while fixture.hub.lock().len() < 8 {
+        while fixture.hub.lock().keys().count() < 8 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert_eq!(fixture.hub.lock().len(), 8);
+    assert_eq!(fixture.hub.lock().keys().count(), 8);
     assert!(
         fixture.hub.inner.tasks.len() <= 11,
         "only dispatcher, status forwarder, coordination worker and eight run tasks"
@@ -2405,7 +2405,7 @@ async fn durable_queued_threads_do_not_allocate_live_owners_until_a_slot_is_free
     finish.add_permits(32);
     tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
-            if fixture.hub.lock().is_empty()
+            if fixture.hub.lock().keys().next().is_none()
                 && fixture
                     .hub
                     .store()
@@ -2540,7 +2540,7 @@ async fn one_thread_drains_multiple_bounded_initial_batches_in_order() {
             .await
             .unwrap();
     }
-    assert!(fixture.hub.lock().is_empty());
+    assert!(fixture.hub.lock().keys().next().is_none());
     drop(slots);
     fixture.hub.resume_pending();
     fixture.settled().await;
@@ -2666,7 +2666,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
             for thread in &threads {
                 delivered += usize::from(fixture.delivered(thread).await);
             }
-            if fixture.hub.lock().len() == 8 && delivered == 8 {
+            if fixture.hub.lock().keys().count() == 8 && delivered == 8 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -2676,7 +2676,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
     .unwrap();
     fixture.hub.shutdown();
     fixture.hub.inner.tasks.wait().await;
-    assert!(fixture.hub.lock().is_empty());
+    assert!(fixture.hub.lock().keys().next().is_none());
     let observed = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&observed);
     let harness: Arc<dyn Harness> = Arc::new(Scripted(Arc::new(move |turn, _| {
@@ -2698,7 +2698,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
     resumed.resume_pending();
     tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
-            if resumed.lock().is_empty()
+            if resumed.lock().keys().next().is_none()
                 && resumed
                     .store()
                     .pending_threads(8, Vec::new())

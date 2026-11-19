@@ -747,3 +747,176 @@ async fn a_continue_pressed_while_a_failed_save_winds_down_still_carries_the_tur
         "the stop keeps why the run could not be saved: {history:#?}"
     );
 }
+
+async fn ended(fixture: &Fixture) {
+    test_support::wait::within("the run to end", test_support::wait::LIVENESS, async {
+        while fixture.hub.is_live(&fixture.thread_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_stop_cancels_a_continue_still_waiting_on_an_unsaved_stop() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    let disk = durability::DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
+        .await
+        .unwrap();
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    winding.release.notify_one();
+    ended(&fixture).await;
+
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    disk.clear();
+    fixture.hub.settle_unsettled().await;
+    fixture.hub.continue_owed().await;
+
+    let runs = fixture.settled().await;
+    assert_eq!(winding.turns(), 1, "the second Stop wins over the Continue");
+    assert_eq!(
+        runs.iter()
+            .map(artisan_api::Run::status)
+            .collect::<Vec<_>>(),
+        [RunStatus::Cancelled]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continue_pressed_while_the_stop_is_unsaved_brings_back_the_unread_message() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let asked = Asked::default();
+    let script: Script = Arc::new({
+        let (entered, release, asked) = (
+            Arc::clone(&entered),
+            Arc::clone(&release),
+            Arc::clone(&asked),
+        );
+        move |turn, io| {
+            let (entered, release, asked) = (
+                Arc::clone(&entered),
+                Arc::clone(&release),
+                Arc::clone(&asked),
+            );
+            Box::pin(async move {
+                let first = {
+                    let mut asked = asked.lock().unwrap();
+                    asked.push((turn.input.text.clone(), turn.session_id.clone()));
+                    asked.len() == 1
+                };
+                if first {
+                    io.cancel.cancelled().await;
+                    entered.notify_one();
+                    release.notified().await;
+                    return Outcome::cancelled();
+                }
+                io.emit(EngineEvent::InputAccepted {
+                    id: turn.input.id.clone(),
+                })
+                .await;
+                io.emit(reply("done", "the wheel goes left")).await;
+                Outcome::done()
+            })
+        }
+    });
+    let harness: Arc<dyn Harness> = Arc::new(Unscripted(script));
+    let fixture = fixture_with_harness(Arc::new(move |_| Arc::clone(&harness))).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("where should the wheel go?"))
+        .await
+        .unwrap();
+    test_support::wait::eventually(
+        "the engine to start the turn",
+        test_support::wait::LIVENESS,
+        || async { !asked.lock().unwrap().is_empty() },
+    )
+    .await;
+    let disk = durability::DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
+        .await
+        .unwrap();
+    release.notify_one();
+    ended(&fixture).await;
+
+    fixture
+        .hub
+        .continue_turn(&fixture.thread_id)
+        .await
+        .expect("Continue on the stopped turn is accepted while its end is unsaved");
+    disk.clear();
+    fixture.hub.resume_pending();
+
+    let runs = fixture.settled().await;
+    assert_eq!(runs[0].status(), RunStatus::Done, "{runs:#?}");
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(
+        asked[1].0.contains("where should the wheel go?"),
+        "the unread message reaches the engine: {asked:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
+    let fixture = fixture(Arc::new(|_, io| {
+        Box::pin(async move {
+            io.emit(reply("done", "all done")).await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("finish it"))
+        .await
+        .unwrap();
+    assert_eq!(fixture.settled().await[0].status(), RunStatus::Done);
+    let (inbox, _receiver) = mpsc::channel(1);
+    let through = fixture.hub.store().head();
+    fixture
+        .hub
+        .lock()
+        .claim(fixture.thread_id.clone(), |retries| LiveRun {
+            id: RunId::new(),
+            inbox,
+            cancel: CancellationToken::new(),
+            engine: None,
+            launched: None,
+            live: std::collections::BTreeMap::new(),
+            foreground_bytes: 0,
+            terminal_bytes: 0,
+            phase: turns::Phase::Stopping {
+                through,
+                then: turns::AfterStop::Continue,
+            },
+            retries,
+        });
+
+    fixture.hub.end_live(&fixture.thread_id, false).await;
+
+    assert!(
+        fixture
+            .items()
+            .await
+            .iter()
+            .all(|item| !matches!(item.kind, ItemKind::Error { .. })),
+        "a Continue that finds the turn finished settles quietly"
+    );
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .continue_pending(&fixture.thread_id)
+            .await
+            .unwrap()
+    );
+    assert!(fixture.hub.active_thread_ids().is_empty());
+}
