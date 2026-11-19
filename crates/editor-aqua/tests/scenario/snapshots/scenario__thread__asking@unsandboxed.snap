@@ -1,0 +1,55 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the command to wait for approval\", |view|\n{\n    view.find(Role::Button, \"Approve\").is_some() &&\n    view.shows(\"Waiting for you\") && view.shows(\"OpenCode is waiting for you\")\n})"
+---
+Group "Artisan Editor"
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Echo" [selected]
+        Label "Echo"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Echo"
+    Group "Project / Echo"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Echo"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Group "You"
+        Label "Echo hello"
+    ListItem
+      Label "Working for [duration]"
+    ListItem
+      Label "[unsandboxed notice]"
+    ListItem
+      Group "OpenCode"
+        Label "I'll run the shell command first."
+    ListItem
+      Label "Approval requested"
+      Label "$ "
+      Label "echo hello"
+      Button "Approve"
+        Label "Approve"
+      Button "Always allow"
+        Label "Always allow"
+      Button "Deny"
+        Label "Deny"
+    ListItem
+      Label "Waiting for you"
+  Label "OpenCode is waiting for you"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message" [focused]
+  Button "Stop"

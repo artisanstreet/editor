@@ -1,0 +1,42 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the continued turn to finish\", |view|\n{\n    view.shows(\"Picked the parser refactor back up.\") &&\n    view.find(Role::Button, \"Stop\").is_none()\n})"
+---
+Group "Artisan Editor"
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Parser" [selected]
+        Label "Parser"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Parser"
+    Group "Project / Parser"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Parser"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Group "You"
+        Label "Refactor the parser"
+    ListItem
+      Button "Show work"
+        Label "Thought for [duration]"
+    ListItem
+      Group "Claude Code"
+        Label "Picked the parser refactor back up."
+  Label "Picked the parser refactor back up.\n\nReply finished"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message" [focused]
+  Button "Send message" [disabled]
