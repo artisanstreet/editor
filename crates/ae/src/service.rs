@@ -111,6 +111,8 @@ pub(crate) enum RunningError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error(transparent)]
+    Unit(#[from] UnitError),
+    #[error(transparent)]
     Pid(#[from] PidError),
     #[error("ask systemd whether Forge's service is active")]
     Systemd(#[source] RunError),
@@ -127,6 +129,8 @@ pub(crate) enum StartError {
     Lock(#[from] OperationLockError),
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error(transparent)]
+    Unit(#[from] UnitError),
     #[error("start Forge's service")]
     Systemctl(#[source] RunError),
     #[error("Forge's service isn't active after starting{log}")]
@@ -171,6 +175,8 @@ pub(crate) enum StartError {
 pub(crate) enum StopError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
+    #[error(transparent)]
+    Unit(#[from] UnitError),
     #[error("check whether Forge is running")]
     Running(#[source] RunningError),
     #[error(transparent)]
@@ -213,6 +219,8 @@ pub(crate) enum StopError {
 pub(crate) enum RestartError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
+    #[error(transparent)]
+    Unit(#[from] UnitError),
     #[error("restart Forge's service")]
     Systemctl(#[source] RunError),
     #[error("Forge's service isn't active after restarting{log}")]
@@ -236,8 +244,8 @@ pub(crate) fn log_file() -> Result<PathBuf, LocateError> {
     Ok(data()?.join("forge.log"))
 }
 
-pub(crate) fn log_hint() -> Result<String, LocateError> {
-    if uses_systemd() {
+pub(crate) fn log_hint() -> Result<String, UnitError> {
+    if uses_systemd()? {
         Ok(format!("journalctl --user -u {UNIT}"))
     } else {
         Ok(log_file()?.display().to_string())
@@ -270,8 +278,8 @@ fn unit_is_ours() -> Result<bool, UnitError> {
     }
 }
 
-fn uses_systemd() -> bool {
-    unit_is_ours().is_ok_and(|ours| ours) && systemd_available()
+fn uses_systemd() -> Result<bool, UnitError> {
+    Ok(unit_is_ours()? && systemd_available())
 }
 
 fn unit_runs(text: &str, forge: &Path) -> bool {
@@ -291,28 +299,45 @@ enum StopMode {
     ProcessGroup,
 }
 
-fn service_path(installer: &str, temporary: &Path) -> String {
-    let mut kept: Vec<&str> = Vec::new();
-    for entry in installer.split(':') {
-        let transient = entry.is_empty()
-            || entry.starts_with("/nix/store/")
-            || Path::new(entry).starts_with(temporary);
-        if !transient && !kept.contains(&entry) {
-            kept.push(entry);
-        }
-    }
-    kept.join(":")
+#[derive(Debug, PartialEq, Eq)]
+struct ServicePath {
+    kept: String,
+    unrepresentable: Vec<PathBuf>,
 }
 
-fn unit_text(forge: &Path, mode: StopMode, path: &str) -> String {
+fn service_path(installer: &std::ffi::OsStr, temporary: &Path) -> ServicePath {
+    let mut kept: Vec<String> = Vec::new();
+    let mut unrepresentable = Vec::new();
+    for entry in std::env::split_paths(installer) {
+        match entry.to_str() {
+            Some(text) => {
+                let transient = text.is_empty()
+                    || text.starts_with("/nix/store/")
+                    || entry.starts_with(temporary);
+                if !transient && !kept.iter().any(|known| known == text) {
+                    kept.push(text.to_owned());
+                }
+            }
+            None => unrepresentable.push(entry),
+        }
+    }
+    ServicePath {
+        kept: kept.join(":"),
+        unrepresentable,
+    }
+}
+
+fn unit_text(forge: &Path, mode: StopMode, path: Option<&str>) -> String {
     let kill_mode = match mode {
         StopMode::Gateway => "mixed",
         StopMode::ProcessGroup => "control-group",
     };
-    let path = unit_quote(&format!("PATH={path}"));
+    let path = path.map_or_else(String::new, |path| {
+        format!("Environment={}\n", unit_quote(&format!("PATH={path}")))
+    });
     format!(
         "[Unit]\nDescription=Artisan Forge\nAfter=network-online.target\n\n\
-         [Service]\nType=notify\nNotifyAccess=all\nDelegate=yes\nDelegateSubgroup=forge\nExecStart={}\nEnvironment={path}\n\
+         [Service]\nType=notify\nNotifyAccess=all\nDelegate=yes\nDelegateSubgroup=forge\nExecStart={}\n{path}\
          Environment=GLIBC_TUNABLES=glibc.malloc.arena_max=2\n\
          Restart=on-failure\nRestartSec=5\nTimeoutStartSec=180\nTimeoutStopSec=30\nKillMode={kill_mode}\nSendSIGKILL=no\n\n[Install]\nWantedBy=default.target\n",
         unit_quote(&forge.to_string_lossy())
@@ -320,11 +345,18 @@ fn unit_text(forge: &Path, mode: StopMode, path: &str) -> String {
 }
 
 fn this_unit(mode: StopMode) -> Result<String, LocateError> {
-    let installer = std::env::var("PATH").unwrap_or_default();
+    let path =
+        std::env::var_os("PATH").map(|installer| service_path(&installer, &std::env::temp_dir()));
+    for left_out in path.iter().flat_map(|path| &path.unrepresentable) {
+        crate::ui::warning(format!(
+            "Forge's service leaves {} off its PATH because systemd can't hold a folder name that isn't Unicode",
+            left_out.to_string_lossy()
+        ));
+    }
     Ok(unit_text(
         &paths::binary(App::Forge)?,
         mode,
-        &service_path(&installer, &std::env::temp_dir()),
+        path.as_ref().map(|path| path.kept.as_str()),
     ))
 }
 
@@ -334,7 +366,7 @@ fn write_unit(mode: StopMode) -> Result<(), AutostartError> {
 }
 
 pub(crate) fn prepare_bootstrap_stop() -> Result<(), AutostartError> {
-    if uses_systemd() {
+    if uses_systemd()? {
         write_unit(StopMode::ProcessGroup)?;
         sys::run("systemctl", &["--user", "daemon-reload"])?;
     }
@@ -432,7 +464,7 @@ pub(crate) fn start() -> Result<Option<u32>, StartError> {
 }
 
 fn start_unlocked() -> Result<Option<u32>, StartError> {
-    if uses_systemd() {
+    if uses_systemd()? {
         sys::run("systemctl", &["--user", "start", UNIT]).map_err(StartError::Systemctl)?;
         if !systemd_active().map_err(StartError::Systemctl)? {
             return Err(StartError::Inactive { log: recent_log() });
@@ -597,14 +629,17 @@ fn systemd_active() -> Result<bool, RunError> {
 }
 
 fn recent_log() -> String {
-    let text = if uses_systemd() {
-        sys::output(
+    let text = match uses_systemd() {
+        Err(error) => format!(
+            "(finding out whether systemd runs Forge failed: {})",
+            diagnostics::chain(&error)
+        ),
+        Ok(true) => sys::output(
             "journalctl",
             &["--user", "-u", UNIT, "-n", "15", "--no-pager", "-o", "cat"],
         )
-        .unwrap_or_else(|error| format!("(journalctl failed: {})", diagnostics::chain(&error)))
-    } else {
-        match log_file().map(std::fs::read_to_string) {
+        .unwrap_or_else(|error| format!("(journalctl failed: {})", diagnostics::chain(&error))),
+        Ok(false) => match log_file().map(std::fs::read_to_string) {
             Ok(Ok(text)) => {
                 let lines: Vec<&str> = text.lines().collect();
                 lines[lines.len().saturating_sub(15)..].join("\n")
@@ -612,7 +647,7 @@ fn recent_log() -> String {
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Ok(Err(error)) => format!("(reading the log failed: {error})"),
             Err(error) => format!("(finding the log failed: {})", diagnostics::chain(&error)),
-        }
+        },
     };
     if text.trim().is_empty() {
         String::new()
@@ -627,7 +662,7 @@ pub(crate) fn stop() -> Result<bool, StopError> {
 }
 
 fn stop_unlocked() -> Result<bool, StopError> {
-    if uses_systemd() {
+    if uses_systemd()? {
         let was = is_running().map_err(StopError::Running)?;
         sys::run("systemctl", &["--user", "stop", UNIT]).map_err(StopError::Systemctl)?;
         return Ok(was);
@@ -687,7 +722,7 @@ fn wait_stopped(pid: u32, data: &Path, deadline: Duration) -> Result<bool, StopE
 
 pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
     let _operation = operation_lock()?;
-    if uses_systemd() {
+    if uses_systemd()? {
         sys::run("systemctl", &["--user", "restart", UNIT]).map_err(RestartError::Systemctl)?;
         if !systemd_active().map_err(RestartError::Systemctl)? {
             return Err(RestartError::Inactive { log: recent_log() });
@@ -699,7 +734,7 @@ pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
 }
 
 pub(crate) fn is_running() -> Result<bool, RunningError> {
-    if uses_systemd() {
+    if uses_systemd()? {
         systemd_active().map_err(RunningError::Systemd)
     } else {
         Ok(running_pid()?.is_some())
