@@ -41,9 +41,11 @@ impl ClosingListener {
 impl Drop for ClosingListener {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::SeqCst);
-        let wake = TcpStream::connect(self.address)
-            .expect("invariant: the closing listener accepts its own wake-up connection");
-        drop(wake);
+        match TcpStream::connect(self.address) {
+            Ok(wake) => drop(wake),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            Err(error) => panic!("the closing listener's wake-up connection failed: {error}"),
+        }
         if let Some(worker) = self.worker.take() {
             worker
                 .join()
