@@ -308,6 +308,7 @@ enum Outcome {
     Nothing,
     Kept,
     Moved { from: PathBuf },
+    Returned { to: PathBuf },
 }
 
 impl DataMove {
@@ -417,8 +418,8 @@ impl DataMove {
 
     fn pending(&self) -> Result<bool, MigrateError> {
         Ok(match (self.landed()?, self.staged()?) {
-            (Landed::Own, _) => false,
             (Landed::Migrated { .. }, _) | (_, Staged::Partial | Staged::Complete { .. }) => true,
+            (Landed::Own, Staged::Nothing) => false,
             (Landed::Empty | Landed::Unrelated, Staged::Nothing) => self.newest()?.is_some(),
         })
     }
@@ -434,7 +435,12 @@ impl DataMove {
         };
         let landed = self.landed()?;
         let from = match (landed, staged) {
-            (Landed::Own, _) => return Ok(Outcome::Kept),
+            (Landed::Own, Staged::Complete { from }) => {
+                return Ok(Outcome::Returned {
+                    to: self.put_back(&from)?,
+                });
+            }
+            (Landed::Own, Staged::Nothing | Staged::Partial) => return Ok(Outcome::Kept),
             (Landed::Migrated { from }, _) => {
                 self.finish(&from)?;
                 return Ok(Outcome::Moved { from });
@@ -534,6 +540,43 @@ impl DataMove {
         #[cfg(unix)]
         retarget_links(&staging, from, &self.destination)?;
         Ok(())
+    }
+
+    fn put_back(&self, from: &Path) -> Result<PathBuf, MigrateError> {
+        let staging = self.staging();
+        let to = if exists(from)? {
+            set_aside_name(&self.destination)
+        } else {
+            from.to_owned()
+        };
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| MigrateError::Move {
+                from: staging.clone(),
+                to: parent.to_owned(),
+                source,
+            })?;
+        }
+        let to = match std::fs::rename(&staging, &to) {
+            Ok(()) => to,
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                let aside = set_aside_name(&self.destination);
+                std::fs::rename(&staging, &aside).map_err(|source| MigrateError::Move {
+                    from: staging.clone(),
+                    to: aside.clone(),
+                    source,
+                })?;
+                aside
+            }
+            Err(source) => {
+                return Err(MigrateError::Move {
+                    from: staging,
+                    to,
+                    source,
+                });
+            }
+        };
+        remove(&to.join(RECORD))?;
+        Ok(to)
     }
 
     fn finish(&self, from: &Path) -> Result<(), MigrateError> {
@@ -636,12 +679,18 @@ impl Work<'_> {
         platform::close_processes(&executables).map_err(MigrateError::StopPrograms)?;
         let mut moved = Vec::new();
         for data_move in self.moves {
-            if let Outcome::Moved { from } = data_move.run()? {
-                moved.push(format!(
+            match data_move.run()? {
+                Outcome::Moved { from } => moved.push(format!(
                     "{} from {}",
                     data_move.data.description(),
                     from.display()
-                ));
+                )),
+                Outcome::Returned { to } => ui::warning(format!(
+                    "{} is already in Artisan Street, so the earlier copy went back to {} instead of replacing it",
+                    data_move.data.description(),
+                    to.display()
+                )),
+                Outcome::Nothing | Outcome::Kept => {}
             }
         }
         for program in self.removable(&self.old.programs) {

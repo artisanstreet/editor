@@ -175,6 +175,65 @@ fn a_complete_staging_whose_source_is_gone_is_put_in_place() {
     assert!(!staging.exists());
 }
 
+#[test]
+fn staged_old_data_goes_back_when_forge_already_has_its_own() {
+    let machine = Machine::new();
+    let forge = machine.forge();
+    let staging = forge.staging();
+    write(&staging.join("forge.sqlite3"), "earlier database");
+    write_record(&staging, &forge.sources[1]).unwrap();
+    write(&forge.destination.join("forge.sqlite3"), "new database");
+
+    assert!(forge.pending().unwrap(), "the staged data is not forgotten");
+    machine.run(&[App::Ae, App::Forge], &[forge]).unwrap();
+
+    let forge = machine.forge();
+    assert_eq!(
+        read(&forge.destination.join("forge.sqlite3")),
+        "new database"
+    );
+    assert_eq!(
+        read(&forge.sources[1].join("forge.sqlite3")),
+        "earlier database",
+        "the earlier data is back where it came from"
+    );
+    assert!(!forge.sources[1].join(RECORD).exists());
+    assert!(!staging.exists());
+    assert!(!forge.pending().unwrap());
+}
+
+#[test]
+fn staged_old_data_is_set_aside_when_its_old_place_is_taken_again() {
+    let machine = Machine::new();
+    let forge = machine.forge();
+    let staging = forge.staging();
+    write(&staging.join("forge.sqlite3"), "earlier database");
+    write_record(&staging, &forge.sources[1]).unwrap();
+    write(
+        &forge.sources[1].join("forge.sqlite3"),
+        "recreated database",
+    );
+    write(&forge.destination.join("forge.sqlite3"), "new database");
+
+    machine.run(&[App::Ae, App::Forge], &[forge]).unwrap();
+
+    let forge = machine.forge();
+    assert_eq!(
+        read(&forge.sources[1].join("forge.sqlite3")),
+        "recreated database"
+    );
+    let parent = forge.destination.parent().unwrap();
+    let aside: Vec<PathBuf> = fs::read_dir(parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains("before-migration"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(read(&aside[0].join("forge.sqlite3")), "earlier database");
+    assert!(!aside[0].join(RECORD).exists());
+    assert!(!staging.exists());
+}
+
 fn old_programs(machine: &Machine) -> Vec<PathBuf> {
     let data = machine.root.join("data");
     let paths = [
