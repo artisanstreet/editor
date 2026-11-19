@@ -7,10 +7,6 @@ use std::{
 };
 
 #[derive(Default)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "other crates' tests seed the engine form's busy and cancelling sets directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct EnginesForm {
     pub(crate) host: Option<String>,
     pub login_codes: HashMap<EngineId, Rc<RefCell<Editor>>>,

@@ -17,10 +17,6 @@ struct AnswerDraft {
     error: Option<String>,
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace and tests read the active step and ticked options; per-question drafts stay private"
-)]
 #[derive(Debug, Default)]
 pub struct QuestionnairePanel {
     questionnaires: Vec<ComposerQuestionnaire>,

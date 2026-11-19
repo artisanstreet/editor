@@ -93,10 +93,6 @@ enum Steering {
     Keys,
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace and composer tests read the catalog, rows and highlight; reveal and scroll bookkeeping stay private"
-)]
 #[derive(Debug, Default)]
 pub struct Mentions {
     pub catalog: Vec<Row>,

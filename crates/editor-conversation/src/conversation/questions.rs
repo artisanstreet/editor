@@ -52,10 +52,6 @@ impl QuestionOwner {
 }
 
 #[derive(Default)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the shell mounts and edits the source view in place; the page owners stay behind the question transitions"
-)]
 pub struct QuestionPages {
     questions: Option<QuestionOwner>,
     options: Option<Owner<QuestionOption>>,

@@ -53,10 +53,6 @@ pub(crate) struct OpenMenus {
     pub(crate) retention: bool,
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the Editor shell and other crates' tests drive the settings forms and editors directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct SettingsController {
     pub(crate) reported_prompt_dirty: bool,
     pub(crate) reported_menus: OpenMenus,

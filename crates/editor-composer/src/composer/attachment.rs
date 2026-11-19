@@ -145,10 +145,6 @@ impl Source {
     }
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace reads each attachment's key and preview; its upload state stays private to the attachment list"
-)]
 #[derive(Debug)]
 pub struct Attachment {
     pub key: u64,
@@ -204,10 +200,6 @@ enum Completion {
     Restored(u64, Result<Vec<u8>, String>),
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace renders the attachment items directly; the client and delivery stay private"
-)]
 #[derive(Debug)]
 pub struct Attachments {
     pub items: Vec<Attachment>,

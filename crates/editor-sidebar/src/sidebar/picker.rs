@@ -1,10 +1,6 @@
 use artisan_api::{CreateProject, DirListing, ProjectId};
 
 #[derive(Debug, Default)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "other crates' tests seed the folder picker's listing directly; making it private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct FolderPicker {
     pub listing: Option<DirListing>,
     pub(crate) hidden: bool,

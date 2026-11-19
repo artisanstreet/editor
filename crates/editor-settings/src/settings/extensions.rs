@@ -94,10 +94,6 @@ impl McpEditing {
 }
 
 #[derive(Clone, Debug, Default)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "other crates' tests read the form's saving and editing state directly; making it private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct ExtensionsForm {
     pub(crate) host: Option<String>,
     pub editing: Option<McpEditing>,

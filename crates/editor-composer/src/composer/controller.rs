@@ -161,10 +161,6 @@ fn open_draft(
     }
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace, conversation adapter and composer tests read and seed composer state directly; narrowing that is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,

@@ -305,10 +305,6 @@ impl HostEffects {
     }
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "editor crates and their tests read and seed the Forge projection fields directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct HostData {
     instance: HostInstance,
     source_authority: RefCell<Rc<()>>,

@@ -237,10 +237,6 @@ pub struct ComposerNote {
     pub text: String,
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "composer tests drive the strip motion directly; the rest of the strip state stays private"
-)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StripState {
     pub motion: GoalStrip,

@@ -68,10 +68,6 @@ pub(crate) struct ViewSnapshot {
     prompt_attention: Option<String>,
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the Editor shell and other crates' tests seed the page and search editor directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct MarketplaceController {
     pub page: Marketplace,
     pub search: EditorController,

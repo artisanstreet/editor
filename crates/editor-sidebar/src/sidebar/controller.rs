@@ -89,10 +89,6 @@ pub enum TextSearchStatus<'a> {
     Failed(&'a str),
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the Editor shell and other crates' tests read and seed the sidebar's lists, search and motion state directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,

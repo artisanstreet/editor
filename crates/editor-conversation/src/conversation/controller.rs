@@ -106,10 +106,6 @@ pub enum ScrollAction {
     Row(RowKey),
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the shell reads and steers the public transcript state directly; the private fields are caches and task handles whose invariants only the controller maintains"
-)]
 pub struct Conversation {
     pub open: Option<(HostId, ThreadId)>,
     host_instance: Option<HostInstance>,

@@ -607,10 +607,6 @@ pub(crate) fn goal_label(
     row.build()
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace borrows the controller and editor directly; popups, motion and caches stay private"
-)]
 pub struct ComposerOwner {
     pub controller: Rc<std::cell::RefCell<super::controller::Composer>>,
     pub editor: editor_ui::text::mount::EditorController,

@@ -84,10 +84,6 @@ pub enum ListKey {
 }
 
 #[derive(Debug, Default)]
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "other crates' tests seed the page's items and listings directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
-)]
 pub struct Marketplace {
     pub host: Option<HostId>,
     generation: u64,

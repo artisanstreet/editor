@@ -237,10 +237,6 @@ impl AxisCursor {
     }
 }
 
-#[expect(
-    clippy::partial_pub_fields,
-    reason = "the workspace reads the open menu and tests seed picker options; the model rows and scroll edges stay crate-private"
-)]
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct PickerState {
     show_all_models: bool,
