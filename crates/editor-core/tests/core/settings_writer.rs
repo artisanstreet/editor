@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
-use editor_core::{Core, EditorFiles, SetSettingError, SettingsSave};
+use editor_core::{
+    Core, EditorFiles, SetSettingError, SettingsSave, SettingsShutdown, drain_settings,
+};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write as _;
@@ -188,4 +190,53 @@ fn reloading_settings_clears_a_failed_save() {
         "Reload settings does not show the old failure again"
     );
     assert_eq!(core.settings.get("dark_mode"), Some(&json!(false)));
+}
+
+fn child_process(test: &str) -> bool {
+    if std::env::var("ARTISAN_SETTINGS_SHUTDOWN_TEST").as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env("ARTISAN_SETTINGS_SHUTDOWN_TEST", test)
+        .output()
+        .expect("run the shutdown test alone");
+    assert!(
+        output.status.success(),
+        "child settings shutdown failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+#[test]
+fn closing_the_editor_waits_for_every_queued_settings_change() {
+    if !child_process("settings_writer::closing_the_editor_waits_for_every_queued_settings_change")
+    {
+        return;
+    }
+    let folder = Folder::new(&json!({}));
+    let mut core = folder.core();
+    folder.slow_disk();
+    core.set_setting("dark_mode", json!(true))
+        .expect("the first change is taken");
+    let first_save = reader_opened(&folder.settings());
+    core.set_setting("browser", json!("helium"))
+        .expect("the queued change is taken");
+    drop(core);
+
+    editor_core::runtime::runtime().block_on(async {
+        let mut shutdown = Box::pin(drain_settings(Duration::from_secs(10)));
+        assert!(
+            test_support::poll::poll_once(shutdown.as_mut()).is_pending(),
+            "shutdown waits while a save is still writing"
+        );
+        answer(first_save, &json!({}));
+        assert_eq!(shutdown.await, SettingsShutdown::Saved);
+    });
+    assert_eq!(
+        folder.stored(),
+        json!({"dark_mode": true, "browser": "helium"})
+    );
 }

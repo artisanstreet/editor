@@ -71,6 +71,8 @@ pub enum LaunchError {
         timed_out: usize,
         kept_locally: usize,
     },
+    #[error("could not finish saving settings: {failed} saves failed, {timed_out} timed out")]
+    Settings { failed: usize, timed_out: usize },
 }
 
 fn dimension(name: &'static str) -> Result<f64, LaunchError> {
@@ -300,10 +302,24 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
     let result = runtime
         .run(app)
         .map_err(|message| LaunchError::Run { message });
-    let shutdown = crate::core::runtime::runtime().block_on(
-        crate::composer::persistence::drain_pending(std::time::Duration::from_secs(5)),
-    );
-    let shutdown = match shutdown {
+    let (drafts, settings) = crate::core::runtime::runtime().block_on(async {
+        tokio::join!(
+            crate::composer::persistence::drain_pending(std::time::Duration::from_secs(5)),
+            crate::core::drain_settings(std::time::Duration::from_secs(5)),
+        )
+    });
+    let settings = match settings {
+        crate::core::SettingsShutdown::Saved => Ok(()),
+        crate::core::SettingsShutdown::Incomplete { failed, timed_out } => {
+            tracing::error!(
+                failed,
+                timed_out,
+                "Editor closed before every settings change was saved"
+            );
+            Err(LaunchError::Settings { failed, timed_out })
+        }
+    };
+    let shutdown = match drafts {
         crate::composer::persistence::ShutdownOutcome::Saved => Ok(()),
         crate::composer::persistence::ShutdownOutcome::Incomplete {
             failed,
@@ -338,5 +354,5 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
     };
     #[cfg(feature = "qualification")]
     drop(bootstrap);
-    result.and(shutdown)
+    result.and(shutdown).and(settings)
 }

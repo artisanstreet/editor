@@ -8,8 +8,13 @@ use crate::core::{
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub enum SettingsSave {
@@ -18,6 +23,7 @@ pub enum SettingsSave {
     Failed(Arc<SetSettingError>),
 }
 
+#[derive(Debug)]
 pub(crate) struct Saved {
     first: u64,
     through: u64,
@@ -44,15 +50,74 @@ enum Queue {
     Writing(Vec<Change>),
 }
 
+struct Writer {
+    queue: Mutex<Queue>,
+    busy: watch::Sender<bool>,
+    unseen_failures: AtomicUsize,
+}
+
+impl Writer {
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn unsettled(&self) -> bool {
+        *self.busy.borrow() || self.unseen_failures.load(Ordering::Acquire) > 0
+    }
+}
+
 pub(crate) struct SettingsSaves {
     files: EditorFiles,
-    queue: Arc<Mutex<Queue>>,
+    writer: Arc<Writer>,
     saved: Delivery<Saved>,
     confirmed: EditorSettings,
     latest: u64,
     latest_by_key: HashMap<String, u64>,
     settled_through: u64,
     state: SettingsSave,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SettingsShutdown {
+    Saved,
+    Incomplete { failed: usize, timed_out: usize },
+}
+
+fn closing_writers() -> MutexGuard<'static, Vec<Arc<Writer>>> {
+    static CLOSING: OnceLock<Mutex<Vec<Arc<Writer>>>> = OnceLock::new();
+    CLOSING
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+pub async fn drain_settings(timeout: Duration) -> SettingsShutdown {
+    let writers = std::mem::take(&mut *closing_writers());
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut failed = 0;
+    let mut timed_out = 0;
+    for writer in writers {
+        let mut busy = writer.busy.subscribe();
+        if tokio::time::timeout_at(deadline, busy.wait_for(|busy| !busy))
+            .await
+            .is_err()
+        {
+            timed_out += 1;
+        }
+        failed += writer.unseen_failures.swap(0, Ordering::AcqRel);
+    }
+    match (failed, timed_out) {
+        (0, 0) => SettingsShutdown::Saved,
+        _ => SettingsShutdown::Incomplete { failed, timed_out },
+    }
+}
+
+impl Drop for SettingsSaves {
+    fn drop(&mut self) {
+        if self.writer.unsettled() {
+            closing_writers().push(Arc::clone(&self.writer));
+        }
+    }
 }
 
 impl SettingsSaves {
@@ -64,7 +129,11 @@ impl SettingsSaves {
     ) -> Self {
         Self {
             files,
-            queue: Arc::new(Mutex::new(Queue::Idle)),
+            writer: Arc::new(Writer {
+                queue: Mutex::new(Queue::Idle),
+                busy: watch::Sender::new(false),
+                unseen_failures: AtomicUsize::new(0),
+            }),
             saved: Delivery::with_order(
                 NonZeroUsize::new(64).expect("invariant: 64 is not zero"),
                 wake,
@@ -108,14 +177,15 @@ impl SettingsSaves {
             key,
             value,
         };
-        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut queue = self.writer.queue();
         match &mut *queue {
             Queue::Writing(pending) => pending.push(change),
             Queue::Idle => {
                 *queue = Queue::Writing(vec![change]);
+                self.writer.busy.send_replace(true);
                 drop(runtime().spawn(write_queued(
                     self.files.clone(),
-                    Arc::clone(&self.queue),
+                    Arc::clone(&self.writer),
                     self.saved.sender(),
                 )));
             }
@@ -145,7 +215,10 @@ impl SettingsSaves {
                     (false, None)
                 }
             }
-            Err(error) => self.fail(settings, saved.changes, error),
+            Err(error) => {
+                self.writer.unseen_failures.fetch_sub(1, Ordering::AcqRel);
+                self.fail(settings, saved.changes, error)
+            }
         };
         Some(Settled {
             changed,
@@ -205,13 +278,14 @@ impl SettingsSaves {
     }
 }
 
-async fn write_queued(files: EditorFiles, queue: Arc<Mutex<Queue>>, saved: DeliverySender<Saved>) {
+async fn write_queued(files: EditorFiles, writer: Arc<Writer>, saved: DeliverySender<Saved>) {
     loop {
         let batch = {
-            let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut queue = writer.queue();
             match &mut *queue {
                 Queue::Writing(pending) if pending.is_empty() => {
                     *queue = Queue::Idle;
+                    writer.busy.send_replace(false);
                     return;
                 }
                 Queue::Writing(pending) => std::mem::take(pending),
@@ -240,17 +314,24 @@ async fn write_queued(files: EditorFiles, queue: Arc<Mutex<Queue>>, saved: Deliv
         })
         .await
         .expect("invariant: saving settings.json does not panic");
-        if saved
-            .send(Saved {
+        if result.is_err() {
+            writer.unseen_failures.fetch_add(1, Ordering::AcqRel);
+        }
+        let outcome = Saved {
+            first,
+            through,
+            changes,
+            result,
+        };
+        if let Err(undelivered) = saved.send(outcome).await
+            && let Err(error) = &undelivered.0.result
+        {
+            tracing::error!(
                 first,
                 through,
-                changes,
-                result,
-            })
-            .await
-            .is_err()
-        {
-            return;
+                error = %::diagnostics::chain(error),
+                "saving Editor settings failed after the Editor closed"
+            );
         }
     }
 }

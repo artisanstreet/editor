@@ -55,6 +55,6 @@ pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSec
 pub use services::RelayScript;
 pub use services::{RelayDialRequest, Services};
 pub use settings::{SetSettingError, Settings, StoredSettingError};
-pub use settings_writer::SettingsSave;
+pub use settings_writer::{SettingsSave, SettingsShutdown, drain_settings};
 pub use store::{Core, CoreEvent, OpenCoreError};
 pub mod diagnostics;
