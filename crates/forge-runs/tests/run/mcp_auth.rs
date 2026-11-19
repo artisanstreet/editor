@@ -44,6 +44,7 @@ struct Provider {
     probe_status: AtomicU16,
     probe_gate: Gate,
     token_status: AtomicU16,
+    token_failure: Mutex<Value>,
     token_gate: Gate,
     code_expires_in: AtomicU16,
     registrations: Mutex<Vec<String>>,
@@ -83,7 +84,16 @@ impl Provider {
     fn token(&self, form: &str) -> Response {
         let status = self.token_status.load(Ordering::SeqCst);
         if status != 0 {
-            return Code::from_u16(status).expect("status").into_response();
+            let status = Code::from_u16(status).expect("status");
+            let failure = self.token_failure.lock().unwrap().clone();
+            return match failure {
+                Value::Null => status.into_response(),
+                body @ (Value::Bool(_)
+                | Value::Number(_)
+                | Value::String(_)
+                | Value::Array(_)
+                | Value::Object(_)) => (status, Json(body)).into_response(),
+            };
         }
         let fields: HashMap<String, String> = url::form_urlencoded::parse(form.as_bytes())
             .into_owned()
@@ -284,6 +294,44 @@ async fn a_refresh_during_an_outage_keeps_the_sign_in() {
         Some("Bearer a2"),
         "the refresh token survived the outage"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_refresh_logs_none_of_the_text_the_authorization_server_sent() {
+    let (captured, _logging) = test_support::logs::capture();
+    let (provider, _stub) = provider().await;
+    let fixture = mcp_fixture(&provider).await;
+    provider.code_expires_in.store(0, Ordering::SeqCst);
+    sign_in(&fixture).await;
+    provider.token_status.store(500, Ordering::SeqCst);
+
+    *provider.token_failure.lock().unwrap() = serde_json::json!({
+        "error": "temporarily_unavailable",
+        "error_description": "retry with client_secret=hunter2",
+    });
+    assert_eq!(launch_token(&fixture).await.as_deref(), Some("Bearer a1"));
+    *provider.token_failure.lock().unwrap() = serde_json::json!({
+        "error": "refresh_token r1 was echoed",
+    });
+    assert_eq!(launch_token(&fixture).await.as_deref(), Some("Bearer a1"));
+
+    let logs = captured.text();
+    let failures: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("refreshing an MCP token"))
+        .collect();
+    assert_eq!(failures.len(), 2, "{logs}");
+    assert!(
+        failures[0].contains("HTTP 500 (temporarily_unavailable)"),
+        "{logs}"
+    );
+    assert!(failures[1].contains("HTTP 500"), "{logs}");
+    for echoed in ["hunter2", "r1 was echoed"] {
+        assert!(
+            !logs.contains(echoed),
+            "the log holds {echoed:?} from the authorization server: {logs}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

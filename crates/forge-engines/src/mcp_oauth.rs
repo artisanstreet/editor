@@ -227,7 +227,7 @@ pub enum ResponseError {
     },
     #[error("the answer from {url} is over {limit} bytes")]
     TooLarge { url: Box<Url>, limit: usize },
-    #[error("{url} answered HTTP {status}{}", oauth_reason(.body))]
+    #[error("{url} answered HTTP {status}{}", oauth_reason(*.body))]
     Status {
         url: Box<Url>,
         status: u16,
@@ -241,25 +241,79 @@ pub enum ResponseError {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorBody {
-    OAuth {
-        error: String,
-        description: Option<String>,
-    },
+    OAuth(OAuthCode),
     Other,
 }
 
-fn oauth_reason(body: &ErrorBody) -> String {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OAuthCode {
+    InvalidRequest,
+    InvalidClient,
+    InvalidGrant,
+    UnauthorizedClient,
+    UnsupportedGrantType,
+    InvalidScope,
+    InvalidRedirectUri,
+    InvalidClientMetadata,
+    InvalidSoftwareStatement,
+    UnapprovedSoftwareStatement,
+    InvalidToken,
+    InsufficientScope,
+    AccessDenied,
+    ServerError,
+    TemporarilyUnavailable,
+    Unrecognized,
+}
+
+impl OAuthCode {
+    fn of(code: &str) -> Self {
+        match code {
+            "invalid_request" => Self::InvalidRequest,
+            "invalid_client" => Self::InvalidClient,
+            "invalid_grant" => Self::InvalidGrant,
+            "unauthorized_client" => Self::UnauthorizedClient,
+            "unsupported_grant_type" => Self::UnsupportedGrantType,
+            "invalid_scope" => Self::InvalidScope,
+            "invalid_redirect_uri" => Self::InvalidRedirectUri,
+            "invalid_client_metadata" => Self::InvalidClientMetadata,
+            "invalid_software_statement" => Self::InvalidSoftwareStatement,
+            "unapproved_software_statement" => Self::UnapprovedSoftwareStatement,
+            "invalid_token" => Self::InvalidToken,
+            "insufficient_scope" => Self::InsufficientScope,
+            "access_denied" => Self::AccessDenied,
+            "server_error" => Self::ServerError,
+            "temporarily_unavailable" => Self::TemporarilyUnavailable,
+            _ => Self::Unrecognized,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidClient => "invalid_client",
+            Self::InvalidGrant => "invalid_grant",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::InvalidRedirectUri => "invalid_redirect_uri",
+            Self::InvalidClientMetadata => "invalid_client_metadata",
+            Self::InvalidSoftwareStatement => "invalid_software_statement",
+            Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
+            Self::InvalidToken => "invalid_token",
+            Self::InsufficientScope => "insufficient_scope",
+            Self::AccessDenied => "access_denied",
+            Self::ServerError => "server_error",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::Unrecognized => "an OAuth error code Artisan doesn't know",
+        }
+    }
+}
+
+fn oauth_reason(body: ErrorBody) -> String {
     match body {
-        ErrorBody::OAuth {
-            description: Some(description),
-            ..
-        } => format!(" ({description})"),
-        ErrorBody::OAuth {
-            error,
-            description: None,
-        } => format!(" ({error})"),
+        ErrorBody::OAuth(code) => format!(" ({})", code.code()),
         ErrorBody::Other => String::new(),
     }
 }
@@ -267,20 +321,18 @@ fn oauth_reason(body: &ErrorBody) -> String {
 #[derive(Deserialize)]
 struct OAuthErrorAnswer {
     error: String,
-    error_description: Option<String>,
 }
 
 impl ErrorBody {
     fn of(bytes: &[u8]) -> Self {
         match serde_json::from_slice::<OAuthErrorAnswer>(bytes) {
-            Ok(answer) => Self::OAuth {
-                error: answer.error,
-                description: answer
-                    .error_description
-                    .filter(|description| !description.trim().is_empty()),
-            },
+            Ok(answer) => Self::OAuth(OAuthCode::of(&answer.error)),
             Err(not_oauth) => {
-                tracing::debug!("an error answer without an OAuth error: {not_oauth}");
+                tracing::debug!(
+                    line = not_oauth.line(),
+                    column = not_oauth.column(),
+                    "an error answer without an OAuth error"
+                );
                 Self::Other
             }
         }
@@ -678,7 +730,14 @@ async fn first_document<T: serde::de::DeserializeOwned>(
         match serde_json::from_slice::<T>(&answer.body) {
             Ok(document) => return Ok(Some(document)),
             Err(not_metadata) => {
-                tracing::debug!(server, url = %candidate, "not sign-in metadata: {not_metadata}");
+                tracing::debug!(
+                    server,
+                    url = %candidate,
+                    category = ?not_metadata.classify(),
+                    line = not_metadata.line(),
+                    column = not_metadata.column(),
+                    "not sign-in metadata"
+                );
             }
         }
     }
@@ -823,12 +882,24 @@ pub enum Revocation {
 }
 
 impl Revocation {
-    fn of(error: &str) -> Option<Self> {
-        match error {
-            "invalid_grant" => Some(Self::InvalidGrant),
-            "invalid_client" => Some(Self::InvalidClient),
-            "unauthorized_client" => Some(Self::UnauthorizedClient),
-            _ => None,
+    const fn of(code: OAuthCode) -> Option<Self> {
+        match code {
+            OAuthCode::InvalidGrant => Some(Self::InvalidGrant),
+            OAuthCode::InvalidClient => Some(Self::InvalidClient),
+            OAuthCode::UnauthorizedClient => Some(Self::UnauthorizedClient),
+            OAuthCode::InvalidRequest
+            | OAuthCode::UnsupportedGrantType
+            | OAuthCode::InvalidScope
+            | OAuthCode::InvalidRedirectUri
+            | OAuthCode::InvalidClientMetadata
+            | OAuthCode::InvalidSoftwareStatement
+            | OAuthCode::UnapprovedSoftwareStatement
+            | OAuthCode::InvalidToken
+            | OAuthCode::InsufficientScope
+            | OAuthCode::AccessDenied
+            | OAuthCode::ServerError
+            | OAuthCode::TemporarilyUnavailable
+            | OAuthCode::Unrecognized => None,
         }
     }
 }
@@ -967,9 +1038,9 @@ async fn tokens(
     .map_err(|source| match &source {
         ResponseError::Status {
             status: 400 | 401,
-            body: ErrorBody::OAuth { error, .. },
+            body: ErrorBody::OAuth(code),
             ..
-        } => Revocation::of(error).map_or_else(
+        } => Revocation::of(*code).map_or_else(
             || TokenError::Request {
                 server: server.to_owned(),
                 issuer: issuer(),
