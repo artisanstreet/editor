@@ -11,7 +11,7 @@ pub struct Entry {
     controller: crate::settings::controller::SettingsController,
     actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     selections: crate::shell::selection::SelectionAllocator,
-    pub sign_in: crate::frame::sign_in::SignIn,
+    pub(crate) sign_in: crate::frame::sign_in::SignIn,
 }
 
 impl std::fmt::Debug for Entry {
@@ -21,6 +21,11 @@ impl std::fmt::Debug for Entry {
 }
 
 impl Entry {
+    #[must_use]
+    pub const fn sign_in(&self) -> &crate::frame::sign_in::SignIn {
+        &self.sign_in
+    }
+
     pub fn new(
         failure: Option<String>,
         selections: crate::shell::selection::SelectionAllocator,

@@ -80,16 +80,21 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
         ..
     } = opened;
     let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.conversation.view.as_mut().unwrap().apply_page(
-        editor_aqua::conversation::viewport::Fetch::Tail,
-        ItemsPage {
-            items: vec![reply.clone()],
-            runs: Vec::new(),
-            more: false,
-            work: Vec::new(),
-        },
-    );
-    workspace.conversation.rows.push((
+    workspace
+        .conversation_mut()
+        .view
+        .as_mut()
+        .unwrap()
+        .apply_page(
+            editor_aqua::conversation::viewport::Fetch::Tail,
+            ItemsPage {
+                items: vec![reply.clone()],
+                runs: Vec::new(),
+                more: false,
+                work: Vec::new(),
+            },
+        );
+    workspace.conversation_mut().rows.push((
         Row::Text {
             id: reply.id,
             slot: Slot::Prose,
@@ -98,7 +103,7 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
         },
         1,
     ));
-    workspace.conversation.landing = None;
+    workspace.conversation_mut().landing = None;
     assert!(!window.focused);
     let mut root = RootViews::default();
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();

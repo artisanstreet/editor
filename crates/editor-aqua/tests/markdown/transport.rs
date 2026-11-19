@@ -63,7 +63,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     assert!(text.len() > artisan_api::INLINE_TEXT_BYTES);
     let (reference, item) = runtime().block_on(async {
         let project = server
-            .store
+            .store()
             .create_project(CreateProject {
                 id: ProjectId::new(),
                 path: "/stored-test".into(),
@@ -72,7 +72,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             .await
             .unwrap();
         let thread = server
-            .store
+            .store()
             .create_thread(CreateThread {
                 id: ThreadId::new(),
                 project_id: project.id,
@@ -84,7 +84,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             .await
             .unwrap();
         let item = server
-            .store
+            .store()
             .upsert_item(forge_store::NewItem {
                 id: ItemId::new(),
                 thread_id: thread.id,

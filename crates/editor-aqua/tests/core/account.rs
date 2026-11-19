@@ -81,7 +81,7 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
         .request_link(" test@example.invalid ", "Test".into());
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(request["email"], "test@example.invalid");
-    entry.sign_in.emit()(editor_aqua::frame::sign_in::Event::Cancel);
+    entry.sign_in().emit()(editor_aqua::frame::sign_in::Event::Cancel);
     entry.dispatch(&mut core);
     assert!(matches!(core.account().phase(), AccountPhase::SignedOut));
     let success = serde_json::json!({"request_id":"request", "request_secret":"secret", "expires_at":"2099-01-01T00:00:00Z"}).to_string();
@@ -99,7 +99,7 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
     assert!(
         matches!(core.account().phase(), AccountPhase::Pending { email, .. } if email == "retry@example.invalid")
     );
-    entry.sign_in.emit()(editor_aqua::frame::sign_in::Event::Cancel);
+    entry.sign_in().emit()(editor_aqua::frame::sign_in::Event::Cancel);
     entry.dispatch(&mut core);
     core.account_mut()
         .request_link("retry@example.invalid", "Test".into());
@@ -125,7 +125,7 @@ fn a_late_cancel_does_not_clear_an_authenticated_profile() {
         None,
         editor_aqua::shell::selection::SelectionAllocator::default(),
     );
-    entry.sign_in.emit()(editor_aqua::frame::sign_in::Event::Cancel);
+    entry.sign_in().emit()(editor_aqua::frame::sign_in::Event::Cancel);
     entry.dispatch(&mut core);
     assert_eq!(core.account().profile(), Some(&original));
 }

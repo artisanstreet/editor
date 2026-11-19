@@ -34,8 +34,8 @@ pub(crate) enum OpenNoticesError {
 
 pub(super) struct Staged {
     _folder: tempfile::TempDir,
-    pub ae: PathBuf,
-    pub linux_ae: Option<PathBuf>,
+    pub(crate) ae: PathBuf,
+    pub(crate) linux_ae: Option<PathBuf>,
 }
 
 pub(super) fn stage() -> Result<Staged, StageError> {

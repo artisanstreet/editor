@@ -133,7 +133,7 @@ fn real_forge_seed_snapshot_restores_identical_tree_at_pinned_path() {
             .unwrap();
         snapshot
             .store
-            .verify_stable(&reopened.store, &input)
+            .verify_stable(reopened.store(), &input)
             .await
             .unwrap();
         reopened.shutdown_unique().await.unwrap();
@@ -349,7 +349,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
         let server = ForgeServer::start(data.clone(), "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let baseline = server.store.state().await.unwrap();
+        let baseline = server.store().state().await.unwrap();
         let scratch = baseline
             .projects
             .iter()
@@ -358,11 +358,11 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
         assert_eq!(std::path::Path::new(&scratch.path), data.join("scratch"));
         let mut invalid = fixture();
         invalid.items[0].parent_id = Some("item-a".into());
-        let head = server.store.head();
-        invalid.seed(&server.store).await.unwrap_err();
-        assert_eq!(server.store.head(), head);
+        let head = server.store().head();
+        invalid.seed(server.store()).await.unwrap_err();
+        assert_eq!(server.store().head(), head);
         let input = fixture();
-        let snapshot = input.seed(&server.store).await.unwrap();
+        let snapshot = input.seed(server.store()).await.unwrap();
         assert!(snapshot.projects.iter().any(|project| project == scratch));
         assert!(
             snapshot
@@ -371,17 +371,20 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
                 .any(|project| project.id.as_str() == "project-a")
         );
         assert_eq!(snapshot.items["thread-a"].len(), 1);
-        snapshot.verify_stable(&server.store, &input).await.unwrap();
+        snapshot
+            .verify_stable(server.store(), &input)
+            .await
+            .unwrap();
         server
-            .store
+            .store()
             .set_setting("fixture-change".into(), serde_json::json!(true))
             .await
             .unwrap();
         snapshot
-            .verify_stable(&server.store, &input)
+            .verify_stable(server.store(), &input)
             .await
             .unwrap_err();
-        let updated = StoreSnapshot::capture_stable(&server.store, &input)
+        let updated = StoreSnapshot::capture_stable(server.store(), &input)
             .await
             .unwrap();
         assert!(updated.head > snapshot.head);
@@ -389,7 +392,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
             updated.settings.get("fixture-change"),
             Some(&serde_json::json!(true))
         );
-        updated.verify_stable(&server.store, &input).await.unwrap();
+        updated.verify_stable(server.store(), &input).await.unwrap();
         server.shutdown().await.unwrap();
     });
 }

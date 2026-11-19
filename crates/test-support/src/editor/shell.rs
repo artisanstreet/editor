@@ -75,7 +75,7 @@ impl ThreadShell {
             .workspace_mut()
             .expect("a signed-in shell on a thread shows a workspace");
         workspace
-            .conversation
+            .conversation_mut()
             .open_thread(&mut shell.core, host.id.clone(), thread.clone());
         workspace.sync_composer(&shell.core, &mut resources.ui);
         Self {

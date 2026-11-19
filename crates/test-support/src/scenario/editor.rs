@@ -259,7 +259,7 @@ fn serve(scenario: Scenario, root: &Path, work: &Path) -> Served {
             settings: side_queries_off(),
         };
         runtime
-            .block_on(fixture.seed(&forge.store))
+            .block_on(fixture.seed(forge.store()))
             .unwrap_or_else(|error| panic!("seed the Forge {}: {error}", seed.name));
         let pairing = runtime
             .block_on(forge.pairing_input())

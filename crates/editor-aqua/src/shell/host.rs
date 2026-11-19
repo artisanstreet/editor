@@ -13,19 +13,19 @@ pub(crate) const INTERFACE_LANGUAGE: &str = "en";
 pub(crate) const WINDOW_NAME: &str = "Artisan Editor";
 
 pub struct Shell {
-    pub(crate) titlebar: crate::shell::titlebar::Titlebar,
+    pub titlebar: crate::shell::titlebar::Titlebar,
     pub core: Core,
     pub entry: Entry,
     pub preferences: Preferences,
-    pub(crate) audio: editor_audio::Player,
-    pub(crate) audio_assets: crate::ui::media::audio::AudioAssets,
-    pub(crate) models: crate::ui::media::model::load::ModelAssets,
-    pub(crate) meshes_supported: std::rc::Rc<std::cell::Cell<Option<bool>>>,
-    pub(crate) meshes_changed: std::cell::Cell<bool>,
+    pub audio: editor_audio::Player,
+    pub audio_assets: crate::ui::media::audio::AudioAssets,
+    pub models: crate::ui::media::model::load::ModelAssets,
+    pub meshes_supported: std::rc::Rc<std::cell::Cell<Option<bool>>>,
+    pub meshes_changed: std::cell::Cell<bool>,
     pub dialogs: crate::ui::dialogs::DialogRoutes,
-    pub(crate) live: crate::shell::live_throttle::LiveThrottle,
-    pub(crate) build: BuildInfo,
-    images: ImageAssets,
+    pub live: crate::shell::live_throttle::LiveThrottle,
+    pub build: BuildInfo,
+    pub images: ImageAssets,
 }
 
 impl std::fmt::Debug for Shell {

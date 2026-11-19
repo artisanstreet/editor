@@ -60,7 +60,7 @@ impl SelectionAllocator {
 pub struct SelectionScope {
     pub(crate) key: u64,
     pub(crate) inspector: crate::inspector::SourceIds,
-    pub conversation: SelectionDocumentId,
+    pub(crate) conversation: SelectionDocumentId,
     pub(crate) question: (SelectionDocumentId, SelectionSourceId),
     pub(crate) question_options: (SelectionDocumentId, SelectionSourceId),
     pub(crate) question_option_detail: (SelectionDocumentId, SelectionSourceId),
@@ -74,6 +74,11 @@ impl std::fmt::Debug for SelectionScope {
 }
 
 impl SelectionScope {
+    #[must_use]
+    pub const fn conversation(&self) -> SelectionDocumentId {
+        self.conversation
+    }
+
     pub(crate) fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
         let allocator = self.allocator.clone();
         Rc::new(move || SelectionSourceId(allocator.next()))

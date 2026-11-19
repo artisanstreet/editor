@@ -61,7 +61,7 @@ fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     let mut current = pending_preview(&core, &config);
     wait_for_result(&current);
     assert!(current.drain(&core));
-    assert!(matches!(current.content, Some(Err(_))));
+    assert!(matches!(current.content(), Some(Err(_))));
 
     let mut removed = pending_preview(&core, &config);
     wait_for_result(&removed);
@@ -69,7 +69,7 @@ fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     core.remove_host(&config.id).unwrap();
     assert!(removed.drain(&core));
     assert!(matches!(
-        removed.content,
+        removed.content(),
         Some(Err(PreviewError::HostGone { .. }))
     ));
 
@@ -81,7 +81,7 @@ fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     core.add_test_host(&config, client(&core, &address));
     assert!(replaced.drain(&core));
     assert!(matches!(
-        replaced.content,
+        replaced.content(),
         Some(Err(PreviewError::HostGone { .. }))
     ));
 }

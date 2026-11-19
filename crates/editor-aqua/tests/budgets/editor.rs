@@ -131,7 +131,7 @@ pub(crate) fn seed(fixture: &Fixture) -> Seeded {
         .block_on(ForgeServer::start(forge_dir, loopback))
         .expect("Forge starts");
     runtime()
-        .block_on(fixture.seed(&forge.store))
+        .block_on(fixture.seed(forge.store()))
         .expect("the fixture seeds Forge");
     let pairing = runtime()
         .block_on(forge.pairing_input())
@@ -219,7 +219,7 @@ impl Editor {
             host,
             directory,
         } = seeded;
-        let changes = forge.store.subscribe();
+        let changes = forge.store().subscribe();
         take_tally();
         let mut core = Core::for_tests(files).expect("the Editor core opens");
         core.navigate(Screen::Thread {
@@ -292,7 +292,7 @@ impl Editor {
     }
 
     pub(crate) fn store(&self) -> &forge_store::Store {
-        &self.forge.store
+        self.forge.store()
     }
 
     pub(crate) fn observation(&self) -> Option<Observation> {

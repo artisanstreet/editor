@@ -62,7 +62,7 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
     workspace.sync_composer(&core, &mut ui);
     let draft = {
-        let composer = workspace.composer.as_ref().unwrap().controller.borrow();
+        let composer = workspace.composer().as_ref().unwrap().controller.borrow();
         composer.editor.borrow_mut().set_text("queued draft");
         composer.save();
         editor_aqua::composer::persistence::DraftHandle::clone(composer.session.as_ref().unwrap())

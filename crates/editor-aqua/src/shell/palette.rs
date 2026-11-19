@@ -58,7 +58,7 @@ struct SearchResult {
 }
 
 pub struct Palette {
-    pub query: String,
+    pub(crate) query: String,
     highlighted: usize,
     entries: Vec<Entry>,
     search_error: Option<SearchProblem>,
@@ -137,6 +137,10 @@ impl Default for Palette {
 }
 
 impl Palette {
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+    }
+
     pub(crate) fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
     }

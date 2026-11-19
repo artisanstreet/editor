@@ -146,7 +146,7 @@ type PreviewSource = (
 pub struct ResourcePreview {
     pub(crate) path: String,
     target_line: usize,
-    pub content: Option<Result<PreviewText, PreviewError>>,
+    pub(crate) content: Option<Result<PreviewText, PreviewError>>,
     delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
     request: Option<tokio_util::task::AbortOnDropHandle<()>>,
     source: Option<(crate::core::HostId, crate::core::HostInstance)>,
@@ -160,6 +160,11 @@ impl std::fmt::Debug for ResourcePreview {
 }
 
 impl ResourcePreview {
+    #[must_use]
+    pub const fn content(&self) -> Option<&Result<PreviewText, PreviewError>> {
+        self.content.as_ref()
+    }
+
     pub fn new(path: String, line: Option<u32>, source: Option<PreviewSource>) -> Self {
         let target_line = line.unwrap_or(1).saturating_sub(1) as usize;
         let mut preview = Self {

@@ -81,7 +81,7 @@ pub struct Sizes {
 #[derive(Debug)]
 pub struct SignIn {
     pub(crate) problem: Option<EmailProblem>,
-    pub reduced: bool,
+    pub(crate) reduced: bool,
     motion: Motion,
     shown: Page,
     sizes: Option<Sizes>,
@@ -114,6 +114,10 @@ impl Default for SignIn {
 }
 
 impl SignIn {
+    pub const fn set_reduced(&mut self, reduced: bool) {
+        self.reduced = reduced;
+    }
+
     #[must_use]
     pub fn emit(&self) -> Rc<dyn Fn(Event)> {
         let events = Rc::clone(&self.events);

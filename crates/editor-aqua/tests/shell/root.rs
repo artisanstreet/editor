@@ -12,7 +12,7 @@ use test_support::items::{assistant_reply, item, user_message};
 
 fn replies(opened: &mut ThreadShell, count: u64) {
     let thread = opened.thread.clone();
-    let conversation = &mut opened.workspace().conversation;
+    let conversation = opened.workspace().conversation_mut();
     for index in 0..count {
         let reply = Arc::new(item(
             format!("reply-{index}"),
@@ -61,16 +61,21 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             ..
         } = opened;
         let workspace = shell.entry.workspace_mut().unwrap();
-        workspace.conversation.view.as_mut().unwrap().apply_page(
-            editor_aqua::conversation::viewport::Fetch::Tail,
-            artisan_api::ItemsPage {
-                items: vec![item.as_ref().clone()],
-                runs: Vec::new(),
-                more: false,
-                work: Vec::new(),
-            },
-        );
-        workspace.conversation.rows.push((
+        workspace
+            .conversation_mut()
+            .view
+            .as_mut()
+            .unwrap()
+            .apply_page(
+                editor_aqua::conversation::viewport::Fetch::Tail,
+                artisan_api::ItemsPage {
+                    items: vec![item.as_ref().clone()],
+                    runs: Vec::new(),
+                    more: false,
+                    work: Vec::new(),
+                },
+            );
+        workspace.conversation_mut().rows.push((
             Row::Text {
                 id: item.id.clone(),
                 slot: Slot::Text(editor_aqua::conversation::fold::TextSection::User),
@@ -81,7 +86,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
         ));
         let settle = std::time::Duration::from_secs(60);
         let deadline = shell.core.clock().now() + settle;
-        workspace.conversation.landing =
+        workspace.conversation_mut().landing =
             Some(editor_aqua::conversation::controller::Landing::Settling { until: deadline });
         let mut root = RootViews::default();
         let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
@@ -94,7 +99,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             0.0,
             "landing must initially hide loaded rows"
         );
-        let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
+        let conversation = shell.entry.workspace_mut().unwrap().conversation_mut();
         if expire {
             clock.advance(settle);
             assert!(
@@ -188,8 +193,8 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
 fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation() {
     let mut opened = ThreadShell::open("root-host", "root-thread", Motion::Full);
     let workspace = opened.workspace();
-    let document = workspace.selections.conversation;
-    let markdown = std::rc::Rc::clone(&workspace.markdown);
+    let document = workspace.selections().conversation();
+    let markdown = std::rc::Rc::clone(workspace.markdown());
     replies(&mut opened, 1000);
     let window = opened.window("root");
     let ThreadShell {
@@ -227,13 +232,13 @@ fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation
     let removed = ItemId("reply-0".into());
     let workspace = shell.entry.workspace_mut().unwrap();
     workspace
-        .conversation
+        .conversation_mut()
         .view
         .as_mut()
         .unwrap()
         .context
         .remove(&removed);
-    workspace.conversation.rows.remove(0);
+    workspace.conversation_mut().rows.remove(0);
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.refresh(vec![element]).unwrap();
     resources.ui.layout().unwrap();
@@ -255,7 +260,7 @@ fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation
 #[test]
 fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     let mut opened = ThreadShell::open("root-host", "root-thread", Motion::Reduced);
-    opened.workspace().conversation.landing = None;
+    opened.workspace().conversation_mut().landing = None;
     replies(&mut opened, 40);
     let window = opened.window("root");
     let ThreadShell {
@@ -271,7 +276,7 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     assert!(resources.ui.tree().sole_node_with_key(key).is_none());
     assert!(root.refresh_transcript(&mut shell, &mut resources.ui, &window));
     let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.conversation.viewport(
+    workspace.conversation_mut().viewport(
         &shell.core,
         editor_aqua::conversation::viewport::Input::ScrolledAway {
             anchor: 1,
@@ -284,7 +289,7 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     resources.ui.layout().unwrap();
     assert!(resources.ui.tree().sole_node_with_key(key).is_some());
     let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.conversation.viewport(
+    workspace.conversation_mut().viewport(
         &shell.core,
         editor_aqua::conversation::viewport::Input::ScrolledAway {
             anchor: 2,
@@ -293,7 +298,7 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     );
     assert!(root.refresh_transcript(&mut shell, &mut resources.ui, &window));
     let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.conversation.viewport(
+    workspace.conversation_mut().viewport(
         &shell.core,
         editor_aqua::conversation::viewport::Input::BottomReached,
     );
@@ -401,7 +406,7 @@ fn every_workspace_route_mounts_its_screen() {
         ("usage", Screen::Usage, "usage-screen"),
     ] {
         let mut palette = editor_aqua::shell::palette::Palette::default();
-        palette.query = query.into();
+        palette.set_query(query.into());
         palette.refresh(Some(&host.id), &[]);
         assert_eq!(
             palette.selected(),
@@ -537,7 +542,7 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
     use editor_aqua::conversation::scroll::{following_tail, leave_tail};
 
     let mut opened = ThreadShell::open("scroll-host", "scroll-thread", Motion::Reduced);
-    opened.workspace().conversation.landing = None;
+    opened.workspace().conversation_mut().landing = None;
     replies(&mut opened, 40);
     let window = opened.window("scroll");
     let ThreadShell {
@@ -552,7 +557,7 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
     leave_tail(&mut resources.ui);
     assert!(!following_tail(&resources.ui));
 
-    let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
+    let conversation = shell.entry.workspace_mut().unwrap().conversation_mut();
     let last = conversation.rows[39].0.key();
     conversation.reveal_row(39);
     conversation.rows.truncate(30);
@@ -563,7 +568,7 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
     root.advance_glides(&mut shell, &mut resources.ui);
 
-    let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
+    let conversation = shell.entry.workspace_mut().unwrap().conversation_mut();
     conversation.jump(
         &shell.core,
         editor_aqua::conversation::viewport::Jump::Latest,

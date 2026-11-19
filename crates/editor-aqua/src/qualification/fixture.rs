@@ -352,8 +352,8 @@ pub enum ShutdownError {
 }
 
 pub struct ForgeServer {
-    pub store: forge_store::Store,
-    pub address: SocketAddr,
+    pub(crate) store: forge_store::Store,
+    pub(crate) address: SocketAddr,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<Result<(), ForgeFailure>>>,
 }
@@ -1021,6 +1021,16 @@ impl VerifiedBootstrap {
 }
 
 impl ForgeServer {
+    #[must_use]
+    pub const fn store(&self) -> &forge_store::Store {
+        &self.store
+    }
+
+    #[must_use]
+    pub const fn address(&self) -> SocketAddr {
+        self.address
+    }
+
     pub async fn start(data_dir: PathBuf, listen: SocketAddr) -> Result<Self, StartForgeError> {
         let server = forge_http::start(forge_http::ServeConfig {
             data_dir: data_dir.clone(),

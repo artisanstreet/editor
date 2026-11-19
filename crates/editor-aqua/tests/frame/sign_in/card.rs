@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 fn waiting(reduced: bool) -> (SignIn, Instant) {
     let start = Instant::now();
     let mut sign_in = SignIn::default();
-    sign_in.reduced = reduced;
+    sign_in.set_reduced(reduced);
     sign_in.present(
         Page::Email,
         true,

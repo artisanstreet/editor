@@ -145,19 +145,19 @@ pub trait SectionViews {
 pub struct ShellApplication<V> {
     pub shell: Shell,
     pub views: V,
-    ui: ManagedUiApp,
-    notifications: Option<NativeNotifications>,
-    notifications_started: bool,
-    notifications_enabled: bool,
-    initial: Option<ShellUpdates>,
-    mounted: bool,
-    font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    usage_deadline: Option<Instant>,
-    fit_launch: bool,
+    pub ui: ManagedUiApp,
+    pub notifications: Option<NativeNotifications>,
+    pub notifications_started: bool,
+    pub notifications_enabled: bool,
+    pub initial: Option<ShellUpdates>,
+    pub mounted: bool,
+    pub font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub usage_deadline: Option<Instant>,
+    pub fit_launch: bool,
     #[cfg(feature = "capture")]
-    render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
+    pub render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
 }
 
 impl<V> std::fmt::Debug for ShellApplication<V> {

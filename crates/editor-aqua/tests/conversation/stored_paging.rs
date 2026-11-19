@@ -112,7 +112,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
             "127.0.0.1:0".parse().unwrap(),
         ))
         .unwrap();
-    let address = server.address;
+    let address = server.address();
     let filler = "words ".repeat(16);
     let text = (0..200)
         .map(|index| format!("Paragraph {index:03} of a long reply, {filler}.\n\n"))
@@ -120,7 +120,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
         .concat();
     let item = runtime().block_on(async {
         let project = server
-            .store
+            .store()
             .create_project(CreateProject {
                 id: ProjectId::new(),
                 path: "/stored-paging".into(),
@@ -129,7 +129,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
             .await
             .unwrap();
         let thread = server
-            .store
+            .store()
             .create_thread(CreateThread {
                 id: ThreadId::new(),
                 project_id: project.id,
@@ -141,7 +141,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
             .await
             .unwrap();
         server
-            .store
+            .store()
             .upsert_item(forge_store::NewItem {
                 id: ItemId::new(),
                 thread_id: thread.id,

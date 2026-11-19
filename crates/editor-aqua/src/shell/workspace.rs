@@ -128,10 +128,10 @@ impl SidePanel {
 }
 
 pub struct Workspace {
-    pub selections: crate::shell::selection::SelectionScope,
+    pub(crate) selections: crate::shell::selection::SelectionScope,
     pub(crate) inspector: crate::inspector::InspectorOwner,
     pub(crate) conversation_selection: crate::conversation::presentation::SelectionOwners,
-    pub markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
+    pub(crate) markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
     pub(crate) status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
     pub(crate) images: Rc<crate::ui::media::image::Images>,
     code_actions: Rc<RefCell<VecDeque<crate::conversation::presentation::ScopedCodeAction>>>,
@@ -145,8 +145,8 @@ pub struct Workspace {
     pub(crate) settings_sidebar: crate::sidebar::controller::Sidebar,
     pub(crate) usage: crate::sidebar::usage::controller::UsagePage,
     usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage::view::Action>>>,
-    pub conversation: crate::conversation::controller::Conversation,
-    pub composer: Option<crate::composer::view::ComposerOwner>,
+    pub(crate) conversation: crate::conversation::controller::Conversation,
+    pub(crate) composer: Option<crate::composer::view::ComposerOwner>,
     composer_target: Option<(
         crate::composer::controller::ComposerTarget,
         Option<crate::core::HostInstance>,
@@ -202,6 +202,36 @@ impl std::fmt::Debug for Workspace {
 }
 
 impl Workspace {
+    #[must_use]
+    pub const fn selections(&self) -> &crate::shell::selection::SelectionScope {
+        &self.selections
+    }
+
+    #[must_use]
+    pub const fn markdown(
+        &self,
+    ) -> &Rc<RefCell<crate::conversation::presentation::MarkdownOwners>> {
+        &self.markdown
+    }
+
+    #[must_use]
+    pub const fn conversation(&self) -> &crate::conversation::controller::Conversation {
+        &self.conversation
+    }
+
+    pub const fn conversation_mut(&mut self) -> &mut crate::conversation::controller::Conversation {
+        &mut self.conversation
+    }
+
+    #[must_use]
+    pub const fn composer(&self) -> Option<&crate::composer::view::ComposerOwner> {
+        self.composer.as_ref()
+    }
+
+    pub const fn composer_mut(&mut self) -> Option<&mut crate::composer::view::ComposerOwner> {
+        self.composer.as_mut()
+    }
+
     pub fn new(
         core: &Core,
         failure: Option<String>,
