@@ -1,4 +1,5 @@
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::writer::{InputFailure, Tx, WriteFailure, valid_config};
 use crate::{
@@ -69,12 +70,6 @@ impl From<AnswerRefused> for AnswerFailure {
 
 impl From<StorageError> for AnswerFailure {
     fn from(error: StorageError) -> Self {
-        Self::Content(error.into())
-    }
-}
-
-impl From<rusqlite::Error> for AnswerFailure {
-    fn from(error: rusqlite::Error) -> Self {
         Self::Content(error.into())
     }
 }
@@ -418,11 +413,10 @@ impl Store {
 
     pub async fn next_parked(&self) -> Result<Option<artisan_api::Timestamp>, NextParkedError> {
         self.read(|conn| {
-            Ok(
-                conn.query_row(include_str!("sql/continues/next_due.sql"), [], |row| {
-                    row.get(0)
-                })?,
-            )
+            conn.query_row(include_str!("sql/continues/next_due.sql"), [], |row| {
+                row.get(0)
+            })
+            .at("continues/next_due.sql")
         })
         .await
         .map_err(|cause| NextParkedError {
@@ -434,11 +428,12 @@ impl Store {
         let asked = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| {
-            Ok(conn.query_row(
+            conn.query_row(
                 include_str!("sql/continues/pending.sql"),
                 [thread.as_str()],
                 |row| row.get(0),
-            )?)
+            )
+            .at("continues/pending.sql")
         })
         .await
         .map_err(|cause| ContinuePendingError {
@@ -454,9 +449,10 @@ impl Store {
         let asked = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| {
-            Ok(conn
-                .prepare_cached(include_str!("sql/items/turn_unsandboxed.sql"))?
-                .query_row([thread.as_str()], |row| row.get(0))?)
+            conn.prepare_cached(include_str!("sql/items/turn_unsandboxed.sql"))
+                .at("items/turn_unsandboxed.sql")?
+                .query_row([thread.as_str()], |row| row.get(0))
+                .at("items/turn_unsandboxed.sql")
         })
         .await
         .map_err(|cause| TurnUnsandboxedError {
@@ -471,6 +467,7 @@ impl Store {
         self.read(move |conn| {
             read::items(
                 conn,
+                "items/cancelled.sql",
                 include_str!("sql/items/cancelled.sql"),
                 [run.as_str()],
             )
@@ -490,6 +487,7 @@ impl Store {
         self.write_acknowledged(move |tx| {
             let inputs: Vec<Item> = read::items(
                 tx,
+                "pending/undelivered_inputs.sql",
                 include_str!("sql/pending/undelivered_inputs.sql"),
                 params![thread.as_str()],
             )?;
@@ -523,6 +521,7 @@ impl Store {
             tx.take_continue(&thread)?;
             let inputs: Vec<Item> = read::items(
                 tx,
+                "items/pending_inputs_through.sql",
                 include_str!("sql/items/pending_inputs_through.sql"),
                 params![thread.as_str(), through],
             )?;
@@ -712,11 +711,12 @@ impl Store {
         let item = id.clone();
         let id = id.clone();
         self.read(move |conn| {
-            Ok(conn
-                .prepare_cached(include_str!("sql/items/native_id.sql"))?
+            conn.prepare_cached(include_str!("sql/items/native_id.sql"))
+                .at("items/native_id.sql")?
                 .query_row([id.as_str()], |row| row.get::<_, Option<String>>(0))
                 .optional()
-                .map(Option::flatten)?)
+                .map(Option::flatten)
+                .at("items/native_id.sql")
         })
         .await
         .map_err(|cause| NativeIdError {

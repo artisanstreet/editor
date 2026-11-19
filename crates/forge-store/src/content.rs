@@ -1,4 +1,5 @@
 use crate::collection::AnswerRefused;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use artisan_api::{
     ContentId, ContentQuery, ContentRange, ContentRef, EditTotals, Item, TextContent, ToolKind,
@@ -72,12 +73,6 @@ pub enum ContentError {
     Refused(#[from] AnswerRefused),
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for ContentError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -272,11 +267,13 @@ pub(crate) fn normalize_text(conn: &Stamped<'_>, text: &mut TextContent) -> Resu
                     content: source.id.clone(),
                 });
             }
-            let known: bool = conn.query_row(
-                include_str!("sql/content/exists_with_size.sql"),
-                params![source.id.as_str(), source.bytes, source.lines],
-                |row| row.get(0),
-            )?;
+            let known: bool = conn
+                .query_row(
+                    include_str!("sql/content/exists_with_size.sql"),
+                    params![source.id.as_str(), source.bytes, source.lines],
+                    |row| row.get(0),
+                )
+                .at("content/exists_with_size.sql")?;
             if !known {
                 return Err(ContentError::UnknownReference {
                     content: source.id.clone(),
@@ -300,23 +297,39 @@ pub(crate) fn own(conn: &Connection, item: &Item) -> Result<()> {
         next.insert(source.id.0.clone());
         Ok::<_, ContentError>(())
     })?;
-    let mut query = conn.prepare_cached(include_str!("sql/content/owned.sql"))?;
+    let mut query = conn
+        .prepare_cached(include_str!("sql/content/owned.sql"))
+        .at("content/owned.sql")?;
     let old = query
-        .query_map([item.id.as_str()], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        .query_map([item.id.as_str()], |row| row.get::<_, String>(0))
+        .at("content/owned.sql")?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .at("content/owned.sql")?;
     for id in old.iter().filter(|id| !next.contains(*id)) {
         conn.execute(
             include_str!("sql/content/disown.sql"),
             params![item.id.as_str(), id],
-        )?;
+        )
+        .at("content/disown.sql")?;
     }
     for id in next.into_iter().filter(|id| !old.contains(id)) {
         conn.execute(
             include_str!("sql/content/own.sql"),
             params![item.id.as_str(), id],
-        )?;
+        )
+        .at("content/own.sql")?;
     }
     Ok(())
+}
+
+fn reaches_expected_end(start: u64, end: u64, limit: u32, total: u64) -> bool {
+    let expected_end = start.saturating_add(u64::from(limit)).min(total);
+    end <= expected_end
+        && if expected_end == total {
+            end == total
+        } else {
+            expected_end - end <= 3
+        }
 }
 
 pub(crate) fn range(
@@ -339,7 +352,8 @@ pub(crate) fn range(
             [id.as_str()],
             |row| row.get::<_, u64>(0),
         )
-        .optional()?
+        .optional()
+        .at("content/bytes.sql")?
     else {
         return Ok(None);
     };
@@ -359,24 +373,35 @@ pub(crate) fn range(
             text: String::new(),
         }));
     }
-    let start_chunk: u64 = conn.query_row(
-        include_str!("sql/content/chunk_start.sql"),
-        params![id.as_str(), query.offset],
-        |row| row.get(0),
-    )?;
-    let mut read = conn.prepare_cached(include_str!("sql/content/chunks.sql"))?;
-    let mut rows = read.query(params![
-        id.as_str(),
-        start_chunk,
-        query.offset.saturating_add(u64::from(limit))
-    ])?;
+    let start_chunk: u64 = conn
+        .query_row(
+            include_str!("sql/content/chunk_start.sql"),
+            params![id.as_str(), query.offset],
+            |row| row.get(0),
+        )
+        .at("content/chunk_start.sql")?;
+    let mut read = conn
+        .prepare_cached(include_str!("sql/content/chunks.sql"))
+        .at("content/chunks.sql")?;
+    let mut rows = read
+        .query(params![
+            id.as_str(),
+            start_chunk,
+            query.offset.saturating_add(u64::from(limit))
+        ])
+        .at("content/chunks.sql")?;
     let mut text = String::with_capacity(limit as usize);
     let mut actual_start = query.offset;
-    while let Some(row) = rows.next()? {
-        let chunk_start: u64 = row.get(0)?;
-        let value = row.get_ref(1)?;
-        let chunk = std::str::from_utf8(value.as_blob().map_err(rusqlite::Error::from)?)
-            .map_err(|_not_utf8| damaged(id, Damage::NotUtf8))?;
+    while let Some(row) = rows.next().at("content/chunks.sql")? {
+        let chunk_start: u64 = row.get(0).at("content/chunks.sql")?;
+        let value = row.get_ref(1).at("content/chunks.sql")?;
+        let chunk = std::str::from_utf8(
+            value
+                .as_blob()
+                .map_err(rusqlite::Error::from)
+                .at("content/chunks.sql")?,
+        )
+        .map_err(|_not_utf8| damaged(id, Damage::NotUtf8))?;
         let from = chunk.floor_char_boundary(to_usize(query.offset.saturating_sub(chunk_start)));
         if text.is_empty() {
             actual_start = chunk_start + from as u64;
@@ -399,14 +424,7 @@ pub(crate) fn range(
         return Err(damaged(id, Damage::MissingChunk));
     }
     let end = actual_start + text.len() as u64;
-    let expected_end = actual_start.saturating_add(u64::from(limit)).min(total);
-    let complete = end <= expected_end
-        && if expected_end == total {
-            end == total
-        } else {
-            expected_end - end <= 3
-        };
-    if !complete {
+    if !reaches_expected_end(actual_start, end, limit, total) {
         return Err(damaged(id, Damage::IncompleteRange));
     }
     Ok(Some(ContentRange {
@@ -506,16 +524,18 @@ pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<E
         for diff in slice.iter().filter_map(|change| change.diff.as_ref()) {
             let count = match diff {
                 TextContent::Inline(text) => diff_totals(text),
-                TextContent::Stored(source) => conn.query_row(
-                    include_str!("sql/content/diff_totals.sql"),
-                    [source.id.as_str()],
-                    |row| {
-                        Ok(EditTotals {
-                            added: row.get(0)?,
-                            removed: row.get(1)?,
-                        })
-                    },
-                )?,
+                TextContent::Stored(source) => conn
+                    .query_row(
+                        include_str!("sql/content/diff_totals.sql"),
+                        [source.id.as_str()],
+                        |row| {
+                            Ok(EditTotals {
+                                added: row.get(0)?,
+                                removed: row.get(1)?,
+                            })
+                        },
+                    )
+                    .at("content/diff_totals.sql")?,
             };
             total.added = total.added.saturating_add(count.added);
             total.removed = total.removed.saturating_add(count.removed);
@@ -536,35 +556,43 @@ pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<E
 
 pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError> {
     const BATCH_BYTES: u64 = 16 * 1024 * 1024;
-    let mut query = conn.prepare_cached(include_str!("sql/content/unreferenced.sql"))?;
-    let mut rows = query.query([now.saturating_sub(GRACE_MILLIS)])?;
+    let mut query = conn
+        .prepare_cached(include_str!("sql/content/unreferenced.sql"))
+        .at("content/unreferenced.sql")?;
+    let mut rows = query
+        .query([now.saturating_sub(GRACE_MILLIS)])
+        .at("content/unreferenced.sql")?;
     let mut selected = Vec::new();
     let mut bytes = 0u64;
-    while let Some(row) = rows.next()? {
-        let size: u64 = row.get(1)?;
+    while let Some(row) = rows.next().at("content/unreferenced.sql")? {
+        let size: u64 = row.get(1).at("content/unreferenced.sql")?;
         if !selected.is_empty() && bytes.saturating_add(size) > BATCH_BYTES {
             break;
         }
-        selected.push(row.get::<_, String>(0)?);
+        selected.push(row.get::<_, String>(0).at("content/unreferenced.sql")?);
         bytes = bytes.saturating_add(size);
         if bytes >= BATCH_BYTES {
             break;
         }
     }
-    let mut delete = conn.prepare_cached(include_str!("sql/content/delete_unreferenced.sql"))?;
+    let mut delete = conn
+        .prepare_cached(include_str!("sql/content/delete_unreferenced.sql"))
+        .at("content/delete_unreferenced.sql")?;
     let mut removed = 0;
     for id in selected {
-        removed += delete.execute([id])?;
+        removed += delete.execute([id]).at("content/delete_unreferenced.sql")?;
     }
     Ok(removed)
 }
 
 pub(crate) fn migrate(conn: &Stamped<'_>, collections: bool) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/items_by_rowid.sql"))?;
-    let mut rows = select.query([])?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let original: String = row.get(1)?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/items_by_rowid.sql"))
+        .at("migrations/items_by_rowid.sql")?;
+    let mut rows = select.query([]).at("migrations/items_by_rowid.sql")?;
+    while let Some(row) = rows.next().at("migrations/items_by_rowid.sql")? {
+        let id: String = row.get(0).at("migrations/items_by_rowid.sql")?;
+        let original: String = row.get(1).at("migrations/items_by_rowid.sql")?;
         let mut value: serde_json::Value = crate::read::from_body(&original)?;
         if let Some(output) = value
             .pointer_mut("/kind/output")
@@ -606,7 +634,8 @@ pub(crate) fn migrate(conn: &Stamped<'_>, collections: bool) -> Result<()> {
             conn.execute(
                 include_str!("sql/migrations/set_item_body.sql"),
                 params![id, normalized],
-            )?;
+            )
+            .at("migrations/set_item_body.sql")?;
         }
         own(conn.conn, &item)?;
     }
@@ -621,11 +650,14 @@ pub(crate) fn store_source(conn: &Stamped<'_>, value: &str) -> Result<ContentRef
     }
     let source = ContentRef::from_text(value);
     let exists: bool = conn
-        .prepare_cached(include_str!("sql/content/exists.sql"))?
-        .query_row([source.id.as_str()], |row| row.get(0))?;
+        .prepare_cached(include_str!("sql/content/exists.sql"))
+        .at("content/exists.sql")?
+        .query_row([source.id.as_str()], |row| row.get(0))
+        .at("content/exists.sql")?;
     if !exists {
         let totals = diff_totals(value);
-        conn.prepare_cached(include_str!("sql/content/insert.sql"))?
+        conn.prepare_cached(include_str!("sql/content/insert.sql"))
+            .at("content/insert.sql")?
             .execute(params![
                 source.id.as_str(),
                 source.bytes,
@@ -633,19 +665,24 @@ pub(crate) fn store_source(conn: &Stamped<'_>, value: &str) -> Result<ContentRef
                 totals.added,
                 totals.removed,
                 conn.now
-            ])?;
-        let mut insert = conn.prepare_cached(include_str!("sql/content/insert_chunk.sql"))?;
+            ])
+            .at("content/insert.sql")?;
+        let mut insert = conn
+            .prepare_cached(include_str!("sql/content/insert_chunk.sql"))
+            .at("content/insert_chunk.sql")?;
         let mut start = 0;
         while start < value.len() {
             let mut end = (start + CHUNK_BYTES).min(value.len());
             while !value.is_char_boundary(end) {
                 end -= 1;
             }
-            insert.execute(params![
-                source.id.as_str(),
-                start as u64,
-                &value.as_bytes()[start..end]
-            ])?;
+            insert
+                .execute(params![
+                    source.id.as_str(),
+                    start as u64,
+                    &value.as_bytes()[start..end]
+                ])
+                .at("content/insert_chunk.sql")?;
             start = end;
         }
     }

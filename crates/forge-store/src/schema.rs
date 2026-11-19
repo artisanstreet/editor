@@ -51,12 +51,8 @@ pub enum MigrationFailure {
     Content(#[from] ContentError),
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for MigrationFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
+    #[error("SQLite failed")]
+    Sql(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

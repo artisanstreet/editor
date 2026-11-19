@@ -1,4 +1,5 @@
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use crate::writer::{Durability, Job, Writer};
 use artisan_api::Item;
@@ -29,12 +30,12 @@ pub(crate) enum IndexState {
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareIndexError {
     #[error("read which recall index the database holds")]
-    State(#[source] rusqlite::Error),
+    State(#[source] StorageError),
     #[error("start rebuilding the recall index at version {version}")]
     Reset {
         version: i64,
         #[source]
-        source: rusqlite::Error,
+        source: StorageError,
     },
 }
 
@@ -60,20 +61,18 @@ pub enum BuildIndexError {
         #[source]
         source: StorageError,
     },
+    #[error("begin or commit the batch's write transaction")]
+    Transaction(#[from] StorageError),
 }
 
-impl From<StorageError> for BuildIndexError {
-    fn from(source: StorageError) -> Self {
-        Self::State(source)
-    }
-}
-
-pub(crate) fn index_state(conn: &Connection) -> rusqlite::Result<IndexState> {
-    let present: bool = conn.query_row(
-        include_str!("../sql/recall/has_index_version.sql"),
-        [],
-        |row| row.get(0),
-    )?;
+pub(crate) fn index_state(conn: &Connection) -> Result<IndexState, StorageError> {
+    let present: bool = conn
+        .query_row(
+            include_str!("../sql/recall/has_index_version.sql"),
+            [],
+            |row| row.get(0),
+        )
+        .at("recall/has_index_version.sql")?;
     if !present {
         return Ok(IndexState::Stale { built: None });
     }
@@ -81,14 +80,16 @@ pub(crate) fn index_state(conn: &Connection) -> rusqlite::Result<IndexState> {
         .query_row(include_str!("../sql/recall/index_version.sql"), [], |row| {
             row.get(0)
         })
-        .optional()?;
+        .optional()
+        .at("recall/index_version.sql")?;
     if built != Some(INDEX_VERSION) {
         return Ok(IndexState::Stale { built });
     }
-    let after: Option<i64> =
-        conn.query_row(include_str!("../sql/recall/index_state.sql"), [], |row| {
+    let after: Option<i64> = conn
+        .query_row(include_str!("../sql/recall/index_state.sql"), [], |row| {
             row.get(0)
-        })?;
+        })
+        .at("recall/index_state.sql")?;
     Ok(after.map_or(IndexState::Built, |after| IndexState::Building { after }))
 }
 
@@ -104,15 +105,20 @@ pub(crate) fn prepare_index(conn: &mut Connection) -> Result<IndexState, Prepare
                 version: INDEX_VERSION,
                 source,
             };
-            let tx = conn.transaction().map_err(reset)?;
+            let tx = conn
+                .transaction()
+                .at("begin a transaction")
+                .map_err(reset)?;
             tx.execute_batch(include_str!("../sql/recall/rebuild.sql"))
+                .at("recall/rebuild.sql")
                 .map_err(reset)?;
             tx.execute(
                 include_str!("../sql/recall/set_index_version.sql"),
                 [INDEX_VERSION],
             )
+            .at("recall/set_index_version.sql")
             .map_err(reset)?;
-            tx.commit().map_err(reset)?;
+            tx.commit().at("commit").map_err(reset)?;
             Ok(IndexState::Building { after: 0 })
         }
         current @ (IndexState::Building { .. } | IndexState::Built) => Ok(current),
@@ -127,20 +133,20 @@ pub(crate) enum Batch {
 }
 
 pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
-    let after = match index_state(conn).map_err(StorageError::from)? {
+    let after = match index_state(conn).map_err(BuildIndexError::State)? {
         IndexState::Building { after } => after,
         IndexState::Built | IndexState::Stale { .. } => return Ok(Batch::Abandoned),
     };
-    let read = |source: rusqlite::Error| BuildIndexError::Items {
-        after,
-        source: source.into(),
-    };
+    let read = |source| BuildIndexError::Items { after, source };
     let rows: Vec<(i64, String)> = conn
         .prepare_cached(include_str!("../sql/recall/items.sql"))
+        .at("recall/items.sql")
         .map_err(read)?
         .query_map([after, BATCH_ITEMS], |row| Ok((row.get(0)?, row.get(1)?)))
+        .at("recall/items.sql")
         .map_err(read)?
         .collect::<rusqlite::Result<_>>()
+        .at("recall/items.sql")
         .map_err(read)?;
     let (mut items, mut skipped) = (0_u64, 0_u64);
     let mut through = after;
@@ -172,16 +178,15 @@ pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
             }
         }
     }
-    let advance = |source: rusqlite::Error| BuildIndexError::Advance {
-        through,
-        source: source.into(),
-    };
+    let advance = |source| BuildIndexError::Advance { through, source };
     if i64::try_from(rows.len()).is_ok_and(|count| count < BATCH_ITEMS) {
         conn.execute(include_str!("../sql/recall/finish_index.sql"), [])
+            .at("recall/finish_index.sql")
             .map_err(advance)?;
         return Ok(Batch::Finished { items, skipped });
     }
     conn.execute(include_str!("../sql/recall/advance_index.sql"), [through])
+        .at("recall/advance_index.sql")
         .map_err(advance)?;
     Ok(Batch::Indexed { items, skipped })
 }

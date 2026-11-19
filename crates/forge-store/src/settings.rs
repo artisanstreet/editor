@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::writer::WriteFailure;
 use crate::{Store, read};
@@ -24,12 +25,6 @@ pub enum SettingFailure {
 
 impl From<StorageError> for SettingFailure {
     fn from(error: StorageError) -> Self {
-        Self::Write(error.into())
-    }
-}
-
-impl From<rusqlite::Error> for SettingFailure {
-    fn from(error: rusqlite::Error) -> Self {
         Self::Write(error.into())
     }
 }
@@ -296,7 +291,8 @@ impl Store {
             tx.execute(
                 include_str!("sql/settings/save_prompt_version.sql"),
                 params![i64::try_from(version).unwrap_or(i64::MAX), text, tx.now()],
-            )?;
+            )
+            .at("settings/save_prompt_version.sql")?;
             tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
             tx.save_setting("global_prompt_version".into(), serde_json::json!(version))?;
             Ok(Ok(version))
@@ -358,7 +354,8 @@ impl Store {
             tx.execute(
                 include_str!("sql/settings/set_draft.sql"),
                 params![scope, read::to_body(&current.body)?, current.revision],
-            )?;
+            )
+            .at("settings/set_draft.sql")?;
             Ok(artisan_api::DraftWriteResult {
                 saved: true,
                 current,
@@ -402,7 +399,7 @@ impl Store {
     pub async fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
         let read_key = key.to_owned();
         let key = key.to_owned();
-        self.read(move |conn| Ok(crate::secrets::secret(conn, &read_key)?))
+        self.read(move |conn| crate::secrets::secret(conn, &read_key))
             .await
             .map_err(|cause| ReadSecretError {
                 key,
@@ -413,14 +410,12 @@ impl Store {
     pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<(), SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
-        self.write_acknowledged(move |tx| {
-            Ok(crate::secrets::set_secret(tx, &key, value.as_deref())?)
-        })
-        .await
-        .map_err(|cause| SetSecretError {
-            key: saved,
-            cause: Box::new(cause),
-        })
+        self.write_acknowledged(move |tx| crate::secrets::set_secret(tx, &key, value.as_deref()))
+            .await
+            .map_err(|cause| SetSecretError {
+                key: saved,
+                cause: Box::new(cause),
+            })
     }
 
     pub async fn secret_or_insert(
@@ -430,7 +425,7 @@ impl Store {
     ) -> Result<String, SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
-        self.write_acknowledged(move |tx| Ok(crate::secrets::secret_or_insert(tx, &key, &value)?))
+        self.write_acknowledged(move |tx| crate::secrets::secret_or_insert(tx, &key, &value))
             .await
             .map_err(|cause| SetSecretError {
                 key: saved,
@@ -460,11 +455,13 @@ impl McpSecret {
 }
 
 fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<(), StorageError> {
-    tx.prepare_cached(include_str!("sql/mcp/forget.sql"))?
+    tx.prepare_cached(include_str!("sql/mcp/forget.sql"))
+        .at("mcp/forget.sql")?
         .execute(params![
             McpSecret::Tokens.key(server),
             McpSecret::Client.key(server)
-        ])?;
+        ])
+        .at("mcp/forget.sql")?;
     Ok(())
 }
 

@@ -20,8 +20,12 @@ pub enum StorageError {
     ReadSlot(#[source] tokio::sync::AcquireError),
     #[error("the store's blocking task stopped")]
     Task(#[source] tokio::task::JoinError),
-    #[error("SQLite failed")]
-    Sql(#[source] Box<rusqlite::Error>),
+    #[error("SQLite failed at {step}")]
+    Sql {
+        step: &'static str,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
     #[error("decode a stored {kind}")]
     Decode {
         kind: &'static str,
@@ -34,12 +38,6 @@ pub enum StorageError {
         #[source]
         source: serde_json::Error,
     },
-}
-
-impl From<rusqlite::Error> for StorageError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Sql(Box::new(error))
-    }
 }
 
 impl StorageError {
@@ -55,6 +53,19 @@ impl StorageError {
             kind: std::any::type_name::<T>(),
             source,
         }
+    }
+}
+
+pub(crate) trait AtStep<T> {
+    fn at(self, step: &'static str) -> Result<T, StorageError>;
+}
+
+impl<T> AtStep<T> for rusqlite::Result<T> {
+    fn at(self, step: &'static str) -> Result<T, StorageError> {
+        self.map_err(|source| StorageError::Sql {
+            step,
+            source: Box::new(source),
+        })
     }
 }
 

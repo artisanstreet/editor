@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::{Store, coordination::Record};
 use artisan_api::{Project, ProjectId, Run, Thread, ThreadCursor, ThreadId};
@@ -73,34 +74,40 @@ impl Store {
     ) -> Result<FilePage, FileActivityError> {
         self.read(move |conn| {
             let limit = limit.clamp(1, 200) as usize;
-            let mut statement = conn.prepare(include_str!("sql/coordination/files.sql"))?;
-            let rows = statement.query_map(
-                params![
-                    project.map(|id| id.to_string()),
-                    crate::read::to_body(&paths)?,
-                    contains,
-                    cursor.as_ref().map(|c| c.row_id),
-                    cursor.as_ref().map(|c| &c.line),
-                    limit + 1
-                ],
-                |row| {
-                    Ok((
-                        FileCursor {
-                            row_id: row.get(0)?,
-                            line: row.get(1)?,
-                        },
-                        FileActivity {
-                            thread: ThreadId::from(row.get::<_, String>(2)?),
-                            title: row.get(3)?,
-                            item: artisan_api::ItemId::from(row.get::<_, String>(4)?),
-                            operation: row.get(5)?,
-                            path: row.get(6)?,
-                            created_at: row.get(7)?,
-                        },
-                    ))
-                },
-            )?;
-            let mut entries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut statement = conn
+                .prepare(include_str!("sql/coordination/files.sql"))
+                .at("coordination/files.sql")?;
+            let rows = statement
+                .query_map(
+                    params![
+                        project.map(|id| id.to_string()),
+                        crate::read::to_body(&paths)?,
+                        contains,
+                        cursor.as_ref().map(|c| c.row_id),
+                        cursor.as_ref().map(|c| &c.line),
+                        limit + 1
+                    ],
+                    |row| {
+                        Ok((
+                            FileCursor {
+                                row_id: row.get(0)?,
+                                line: row.get(1)?,
+                            },
+                            FileActivity {
+                                thread: ThreadId::from(row.get::<_, String>(2)?),
+                                title: row.get(3)?,
+                                item: artisan_api::ItemId::from(row.get::<_, String>(4)?),
+                                operation: row.get(5)?,
+                                path: row.get(6)?,
+                                created_at: row.get(7)?,
+                            },
+                        ))
+                    },
+                )
+                .at("coordination/files.sql")?;
+            let mut entries = rows
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .at("coordination/files.sql")?;
             let next_cursor = if entries.len() > limit {
                 entries.truncate(limit);
                 entries
@@ -124,36 +131,41 @@ impl Store {
     pub async fn discover_workers(&self, query: Query) -> Result<Page, DiscoverWorkersError> {
         self.read(move |conn| {
             let limit = query.limit.clamp(1, 200) as usize;
-            let mut statement = conn.prepare(include_str!("sql/coordination/discovery.sql"))?;
-            let rows = statement.query_map(
-                params![
-                    query.project.map(|p| p.to_string()),
-                    query.parent.map(|p| p.to_string()),
-                    query.include_agents,
-                    query.active,
-                    crate::read::to_body(&query.live_threads)?,
-                    query.archived,
-                    query.title,
-                    query.target,
-                    query.cursor.as_ref().map(|c| c.activity_seq),
-                    query.cursor.as_ref().map(|c| c.id.as_str()),
-                    query.worktree,
-                    query.unread,
-                    limit + 1
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, bool>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )?;
+            let mut statement = conn
+                .prepare(include_str!("sql/coordination/discovery.sql"))
+                .at("coordination/discovery.sql")?;
+            let rows = statement
+                .query_map(
+                    params![
+                        query.project.map(|p| p.to_string()),
+                        query.parent.map(|p| p.to_string()),
+                        query.include_agents,
+                        query.active,
+                        crate::read::to_body(&query.live_threads)?,
+                        query.archived,
+                        query.title,
+                        query.target,
+                        query.cursor.as_ref().map(|c| c.activity_seq),
+                        query.cursor.as_ref().map(|c| c.id.as_str()),
+                        query.worktree,
+                        query.unread,
+                        limit + 1
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, bool>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .at("coordination/discovery.sql")?;
             let mut workers = rows
                 .map(|row| {
-                    let (thread, project, run, awaiting_user, work) = row?;
+                    let (thread, project, run, awaiting_user, work) =
+                        row.at("coordination/discovery.sql")?;
                     Ok(Worker {
                         thread: crate::read::from_body(&thread)?,
                         project: crate::read::from_body(&project)?,

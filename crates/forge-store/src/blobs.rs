@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::writer::InputFailure;
 use crate::{Inner, SendRejected, Store};
@@ -81,12 +82,6 @@ pub enum BlobFailure {
     KeptImages(#[source] crate::retained::RetainedError),
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for BlobFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
 }
 
 fn io(step: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> BlobFailure {
@@ -343,7 +338,7 @@ impl Store {
         let inner = std::sync::Arc::clone(&self.inner);
         let (seen, candidates) = tokio::task::spawn_blocking(move || {
             let (seen, mut referenced) = inner.with_reader(|conn| {
-                let snapshot = conn.unchecked_transaction()?;
+                let snapshot = conn.unchecked_transaction().at("begin a read snapshot")?;
                 let seen = crate::read::max_seq(&snapshot)?;
                 Ok::<_, BlobFailure>((seen, referenced_since(&snapshot, 0)?))
             })?;
@@ -393,9 +388,14 @@ fn referenced_since(
     seq: artisan_api::Seq,
 ) -> Result<HashSet<String>, StorageError> {
     let mut hashes = HashSet::new();
-    let mut statement = conn.prepare_cached(include_str!("sql/blobs/referenced.sql"))?;
-    for hash in statement.query_map([seq], |row| row.get::<_, Option<String>>(0))? {
-        if let Some(hash) = hash?
+    let mut statement = conn
+        .prepare_cached(include_str!("sql/blobs/referenced.sql"))
+        .at("blobs/referenced.sql")?;
+    for hash in statement
+        .query_map([seq], |row| row.get::<_, Option<String>>(0))
+        .at("blobs/referenced.sql")?
+    {
+        if let Some(hash) = hash.at("blobs/referenced.sql")?
             && BlobHash(hash.clone()).is_valid()
         {
             hashes.insert(hash);

@@ -1,4 +1,5 @@
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use crate::read::{self, tag, to_body, to_value};
 use crate::{
@@ -45,12 +46,6 @@ pub enum WriteFailure {
     Storage(#[from] StorageError),
 }
 
-impl From<rusqlite::Error> for WriteFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum InputFailure {
     #[error("the message was refused")]
@@ -77,12 +72,6 @@ impl From<ContentError> for InputFailure {
     }
 }
 
-impl From<rusqlite::Error> for InputFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Write(error.into())
-    }
-}
-
 impl From<SendRejected> for InputFailure {
     fn from(rejected: SendRejected) -> Self {
         Self::Rejected(rejected)
@@ -95,12 +84,6 @@ pub enum UpdateThreadFailure {
     InvalidConfig,
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for UpdateThreadFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
 }
 
 pub(crate) fn valid_config(config: &artisan_api::EngineConfig) -> bool {
@@ -165,7 +148,8 @@ impl Writer {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
         let durability = Durability::Background;
-        conn.pragma_update(None, "synchronous", durability.synchronous())?;
+        conn.pragma_update(None, "synchronous", durability.synchronous())
+            .at("set the commit durability")?;
         Ok(Self {
             conn,
             durability,
@@ -195,13 +179,13 @@ impl Writer {
         if self.durability != durability {
             self.conn
                 .pragma_update(None, "synchronous", durability.synchronous())
-                .map_err(StorageError::from)?;
+                .at("set the commit durability")?;
             self.durability = durability;
         }
         let sql = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StorageError::from)?;
+            .at("begin a write transaction")?;
         let seq = read::max_seq(&sql)?;
         let mut tx = Tx {
             sql,
@@ -214,7 +198,7 @@ impl Writer {
         let result = job(&mut tx)?;
         let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
         events.sort_by_key(|envelope| envelope.seq);
-        sql.commit().map_err(StorageError::from)?;
+        sql.commit().at("commit")?;
         self.commits.note();
         self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
@@ -467,12 +451,14 @@ impl Tx<'_> {
         }
         project.seq = self.next_seq();
         self.sql
-            .prepare_cached(include_str!("sql/state/save_project.sql"))?
+            .prepare_cached(include_str!("sql/state/save_project.sql"))
+            .at("state/save_project.sql")?
             .execute(params![
                 project.id.as_str(),
                 project.seq,
                 to_body(&project)?
-            ])?;
+            ])
+            .at("state/save_project.sql")?;
         self.emit(
             project.seq,
             Event::Project {
@@ -506,8 +492,10 @@ impl Tx<'_> {
             thread.activity_at = thread.updated_at;
         }
         self.sql
-            .prepare_cached(include_str!("sql/state/save_thread.sql"))?
-            .execute(params![thread.id.as_str(), thread.seq, to_body(&thread)?])?;
+            .prepare_cached(include_str!("sql/state/save_thread.sql"))
+            .at("state/save_thread.sql")?
+            .execute(params![thread.id.as_str(), thread.seq, to_body(&thread)?])
+            .at("state/save_thread.sql")?;
         self.emit(
             thread.seq,
             Event::Thread {
@@ -520,8 +508,10 @@ impl Tx<'_> {
     pub(crate) fn set_native_id(&self, id: &ItemId, native_id: Option<&str>) -> Result<()> {
         if let Some(native_id) = native_id {
             self.sql
-                .prepare_cached(include_str!("sql/items/set_native_id.sql"))?
-                .execute(params![id.as_str(), native_id])?;
+                .prepare_cached(include_str!("sql/items/set_native_id.sql"))
+                .at("items/set_native_id.sql")?
+                .execute(params![id.as_str(), native_id])
+                .at("items/set_native_id.sql")?;
         }
         Ok(())
     }
@@ -540,11 +530,14 @@ impl Tx<'_> {
                 return Ok(old);
             }
         } else {
-            let exists: bool = self.sql.query_row(
-                include_str!("sql/state/thread_exists.sql"),
-                [item.thread_id.as_str()],
-                |row| row.get(0),
-            )?;
+            let exists: bool = self
+                .sql
+                .query_row(
+                    include_str!("sql/state/thread_exists.sql"),
+                    [item.thread_id.as_str()],
+                    |row| row.get(0),
+                )
+                .at("state/thread_exists.sql")?;
             if !exists {
                 return Err(WriteFailure::ThreadNotFound {
                     thread: item.thread_id,
@@ -573,7 +566,8 @@ impl Tx<'_> {
         };
         let outline = read::outline_entry(self, &item)?;
         self.sql
-            .prepare_cached(include_str!("sql/items/save.sql"))?
+            .prepare_cached(include_str!("sql/items/save.sql"))
+            .at("items/save.sql")?
             .execute(params![
                 item.id.as_str(),
                 item.thread_id.as_str(),
@@ -587,7 +581,8 @@ impl Tx<'_> {
                 item.parent_id.as_ref().map(ItemId::as_str),
                 item.folds_into_work(),
                 outline,
-            ])?;
+            ])
+            .at("items/save.sql")?;
         crate::content::own(self, &item)?;
         crate::recall::index(self, &item)?;
         self.emit(item.seq, Event::Item { item: item.clone() });
@@ -639,10 +634,12 @@ impl Tx<'_> {
         }
         self.save_thread(thread)?;
         if let Some(draft) = draft {
-            self.sql.execute(
-                include_str!("sql/settings/clear_draft.sql"),
-                params![draft.scope, draft.revision],
-            )?;
+            self.sql
+                .execute(
+                    include_str!("sql/settings/clear_draft.sql"),
+                    params![draft.scope, draft.revision],
+                )
+                .at("settings/clear_draft.sql")?;
         }
         Ok(())
     }
@@ -672,14 +669,16 @@ impl Tx<'_> {
         }
         run.seq = self.next_seq();
         self.sql
-            .prepare_cached(include_str!("sql/runs/save.sql"))?
+            .prepare_cached(include_str!("sql/runs/save.sql"))
+            .at("runs/save.sql")?
             .execute(params![
                 run.id.as_str(),
                 run.thread_id.as_str(),
                 run.seq,
                 tag(&run.status()),
                 to_body(&run)?,
-            ])?;
+            ])
+            .at("runs/save.sql")?;
         self.emit(run.seq, Event::Run { run: run.clone() });
         Ok(run)
     }
@@ -748,8 +747,9 @@ impl Tx<'_> {
             .transpose()?
             .map_or(0, |old| old.len());
         if body.len() > old_bytes {
-            let stored: u64 =
-                self.query_row(include_str!("sql/settings/bytes.sql"), [], |row| row.get(0))?;
+            let stored: u64 = self
+                .query_row(include_str!("sql/settings/bytes.sql"), [], |row| row.get(0))
+                .at("settings/bytes.sql")?;
             let bytes = (stored + body.len() as u64).saturating_sub(old_bytes as u64);
             if bytes > SETTINGS_BYTES {
                 return Err(WriteFailure::SettingsFull { key, bytes });
@@ -757,8 +757,10 @@ impl Tx<'_> {
         }
         let seq = self.next_seq();
         self.sql
-            .prepare_cached(include_str!("sql/settings/save.sql"))?
-            .execute(params![key, seq, body])?;
+            .prepare_cached(include_str!("sql/settings/save.sql"))
+            .at("settings/save.sql")?
+            .execute(params![key, seq, body])
+            .at("settings/save.sql")?;
         if value == serde_json::Value::Bool(false) {
             for continuation in [Continuation::Overloaded, Continuation::UsageLimit] {
                 if crate::park_setting(continuation) == Some(key.as_str()) {
@@ -776,7 +778,12 @@ impl Tx<'_> {
     ) -> Result<(), WriteFailure> {
         let scope = threads.map(|threads| to_body(&threads)).transpose()?;
         let ended_at = self.now();
-        let runs: Vec<Run> = read::many(self, include_str!("sql/recovery/runs.sql"), [&scope])?;
+        let runs: Vec<Run> = read::many(
+            self,
+            "recovery/runs.sql",
+            include_str!("sql/recovery/runs.sql"),
+            [&scope],
+        )?;
         let interrupted = runs.len();
         let mut continued = 0;
         for mut run in runs {
@@ -787,7 +794,12 @@ impl Tx<'_> {
                 continued += 1;
             }
         }
-        let items: Vec<Item> = read::items(self, include_str!("sql/recovery/items.sql"), [&scope])?;
+        let items: Vec<Item> = read::items(
+            self,
+            "recovery/items.sql",
+            include_str!("sql/recovery/items.sql"),
+            [&scope],
+        )?;
         let mut cancelled = 0;
         for mut item in items {
             if matches!(
@@ -846,11 +858,13 @@ impl Tx<'_> {
         if thread.archived {
             return Ok(false);
         }
-        let pending: bool = self.query_row(
-            include_str!("sql/items/has_running_input.sql"),
-            [run.thread_id.as_str()],
-            |row| row.get(0),
-        )?;
+        let pending: bool = self
+            .query_row(
+                include_str!("sql/items/has_running_input.sql"),
+                [run.thread_id.as_str()],
+                |row| row.get(0),
+            )
+            .at("items/has_running_input.sql")?;
         if pending {
             return Ok(false);
         }
@@ -871,8 +885,10 @@ impl Tx<'_> {
         continuation: Continuation,
     ) -> Result<()> {
         self.sql
-            .prepare_cached(include_str!("sql/continues/request.sql"))?
-            .execute(params![thread.as_str(), self.seq, tag(&continuation)])?;
+            .prepare_cached(include_str!("sql/continues/request.sql"))
+            .at("continues/request.sql")?
+            .execute(params![thread.as_str(), self.seq, tag(&continuation)])
+            .at("continues/request.sql")?;
         Ok(())
     }
 
@@ -881,13 +897,15 @@ impl Tx<'_> {
             return Ok(false);
         }
         self.sql
-            .prepare_cached(include_str!("sql/continues/park.sql"))?
+            .prepare_cached(include_str!("sql/continues/park.sql"))
+            .at("continues/park.sql")?
             .execute(params![
                 run.thread_id.as_str(),
                 self.seq,
                 tag(&park.continuation),
                 park.due_at
-            ])?;
+            ])
+            .at("continues/park.sql")?;
         self.set_parked(&run.thread_id, Some(park.due_at))?;
         Ok(true)
     }
@@ -895,8 +913,10 @@ impl Tx<'_> {
     pub(crate) fn unpark(&mut self, thread: &ThreadId) -> Result<bool> {
         let dropped = self
             .sql
-            .prepare_cached(include_str!("sql/continues/unpark.sql"))?
-            .execute([thread.as_str()])?;
+            .prepare_cached(include_str!("sql/continues/unpark.sql"))
+            .at("continues/unpark.sql")?
+            .execute([thread.as_str()])
+            .at("continues/unpark.sql")?;
         self.set_parked(thread, None)?;
         Ok(dropped > 0)
     }
@@ -904,9 +924,12 @@ impl Tx<'_> {
     fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
         let threads: Vec<String> = self
             .sql
-            .prepare_cached(include_str!("sql/continues/parked_for.sql"))?
-            .query_map([tag(&continuation)], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            .prepare_cached(include_str!("sql/continues/parked_for.sql"))
+            .at("continues/parked_for.sql")?
+            .query_map([tag(&continuation)], |row| row.get(0))
+            .at("continues/parked_for.sql")?
+            .collect::<rusqlite::Result<_>>()
+            .at("continues/parked_for.sql")?;
         for thread in threads {
             self.unpark(&ThreadId(thread))?;
         }
@@ -931,6 +954,7 @@ impl Tx<'_> {
     ) -> Result<usize> {
         let recent: Vec<Run> = read::many(
             self,
+            "runs/chain.sql",
             include_str!("sql/runs/chain.sql"),
             params![thread.as_str(), limit],
         )?;
@@ -943,9 +967,11 @@ impl Tx<'_> {
     pub(crate) fn take_continue(&mut self, thread: &ThreadId) -> Result<Option<Continuation>> {
         let reason: Option<String> = self
             .sql
-            .prepare_cached(include_str!("sql/continues/take.sql"))?
+            .prepare_cached(include_str!("sql/continues/take.sql"))
+            .at("continues/take.sql")?
             .query_row([thread.as_str()], |row| row.get(0))
-            .optional()?;
+            .optional()
+            .at("continues/take.sql")?;
         self.set_parked(thread, None)?;
         reason.map(read::untag).transpose()
     }

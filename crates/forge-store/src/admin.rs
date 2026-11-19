@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use crate::{BUSY_TIMEOUT, DataLock, Device, Environment, PairCodeHash, recall, schema};
 use artisan_api::{DeviceId, Timestamp, WallClock};
@@ -26,8 +27,14 @@ pub enum AdminError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageVersionError {
-    #[error("open {} to read its schema", path.display())]
+    #[error("open {} to read its storage version", path.display())]
     Open {
+        path: PathBuf,
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    #[error("read the schema version of {}", path.display())]
+    Schema {
         path: PathBuf,
         #[source]
         source: Box<rusqlite::Error>,
@@ -36,7 +43,7 @@ pub enum StorageVersionError {
     RecallIndex {
         path: PathBuf,
         #[source]
-        source: Box<rusqlite::Error>,
+        source: Box<StorageError>,
     },
 }
 
@@ -129,14 +136,14 @@ impl Admin {
     pub fn secret(&self, key: &str) -> Result<Option<String>, ReadSecretError> {
         crate::secrets::secret(&self.conn, key).map_err(|source| ReadSecretError {
             key: key.to_owned(),
-            cause: Box::new(source.into()),
+            cause: Box::new(source),
         })
     }
 
     pub fn secret_or_insert(&self, key: &str, value: &str) -> Result<String, SaveSecretError> {
         crate::secrets::secret_or_insert(&self.conn, key, value).map_err(|source| SaveSecretError {
             key: key.to_owned(),
-            cause: Box::new(source.into()),
+            cause: Box::new(source),
         })
     }
 
@@ -152,9 +159,12 @@ impl Admin {
         expires_at: Timestamp,
     ) -> Result<(), PairCodeError> {
         let saved = || -> Result<(), StorageError> {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .at("begin a transaction")?;
             crate::pairing::add_pair_code(&tx, code, expires_at, self.clock.now())?;
-            tx.commit()?;
+            tx.commit().at("commit")?;
             Ok(())
         };
         saved().map_err(|cause| PairCodeError {
@@ -177,9 +187,11 @@ impl Admin {
                 })?
                 .collect()
         };
-        listed().map_err(|source| DevicesError {
-            cause: Box::new(source.into()),
-        })
+        listed()
+            .at("pairing/devices.sql")
+            .map_err(|source| DevicesError {
+                cause: Box::new(source),
+            })
     }
 
     pub fn revoke_device(&self, id: &str) -> Result<Option<Device>, RevokeError> {
@@ -205,7 +217,8 @@ impl Admin {
         };
         self.conn
             .execute(include_str!("sql/pairing/revoke.sql"), [device.id.as_str()])
-            .map_err(|source| storage(source.into()))?;
+            .at("pairing/revoke.sql")
+            .map_err(storage)?;
         crate::pairing::announce_device_change(&self.database, self.clock.now()).map_err(
             |source| RevokeError::Announce {
                 id: id.to_owned(),
@@ -234,7 +247,10 @@ pub fn storage_version(dir: &Path) -> Result<Option<StorageVersion>, StorageVers
     conn.busy_timeout(BUSY_TIMEOUT).map_err(opened)?;
     let schema = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(opened)?;
+        .map_err(|source| StorageVersionError::Schema {
+            path: path.clone(),
+            source: Box::new(source),
+        })?;
     let recall_index = match recall::index_state(&conn) {
         Ok(recall::IndexState::Stale { built }) => built,
         Ok(recall::IndexState::Building { .. } | recall::IndexState::Built) => {

@@ -30,6 +30,7 @@ mod text_search;
 mod threads;
 mod writer;
 
+use crate::error::AtStep as _;
 use artisan_api::{
     BlobHash, DeviceId, Envelope, Event, Item, ItemId, ItemKind, Project, ProjectId, Run, RunId,
     Seq, Status, Thread, ThreadId, Timestamp,
@@ -565,7 +566,8 @@ fn stored_version(connections: &Connections, database: &Path) -> Result<usize, O
     open_database(connections, database)
         .map_err(prepare)?
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|source| prepare(source.into()))
+        .at("read the schema version")
+        .map_err(prepare)
 }
 
 fn writer_connection(
@@ -576,11 +578,11 @@ fn writer_connection(
         database: database.to_owned(),
         source,
     };
-    let sql = |source: rusqlite::Error| prepare(source.into());
     let conn = open_database(connections, database).map_err(prepare)?;
     let mode: String = conn
         .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-        .map_err(sql)?;
+        .at("switch to write-ahead logging")
+        .map_err(prepare)?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(OpenStoreError::Wal {
             database: database.to_owned(),
@@ -588,9 +590,11 @@ fn writer_connection(
         });
     }
     conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
-        .map_err(sql)?;
+        .at("size the writer's page cache")
+        .map_err(prepare)?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
-        .map_err(sql)?;
+        .at("set the checkpoint backstop")
+        .map_err(prepare)?;
     Ok(conn)
 }
 
@@ -605,11 +609,15 @@ fn upgrade(
     })?;
     let progress = |source| OpenStoreError::Database {
         database: database.to_owned(),
-        source: StorageError::from(source),
+        source,
     };
-    progress::watch(conn, progress::Step::RecallIndex, upgrade.every).map_err(progress)?;
+    progress::watch(conn, progress::Step::RecallIndex, upgrade.every)
+        .at("watch the recall index preparation")
+        .map_err(progress)?;
     let prepared = recall::prepare_index(conn);
-    progress::unwatch(conn).map_err(progress)?;
+    progress::unwatch(conn)
+        .at("stop watching the recall index preparation")
+        .map_err(progress)?;
     if let Err(error) = prepared {
         tracing::warn!(
             database = %database.display(),
@@ -1038,10 +1046,14 @@ impl Store {
 
     pub async fn running_threads(&self) -> Result<Vec<ThreadId>, RunningThreadsError> {
         self.read(|conn| {
-            let mut statement = conn.prepare(include_str!("sql/recovery/threads.sql"))?;
-            Ok(statement
-                .query_map([], |row| Ok(ThreadId::from(row.get::<_, String>(0)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
+            let mut statement = conn
+                .prepare(include_str!("sql/recovery/threads.sql"))
+                .at("recovery/threads.sql")?;
+            statement
+                .query_map([], |row| Ok(ThreadId::from(row.get::<_, String>(0)?)))
+                .at("recovery/threads.sql")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .at("recovery/threads.sql")
         })
         .await
         .map_err(|cause| RunningThreadsError {

@@ -1,4 +1,5 @@
 use crate::Store;
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{DeviceId, Timestamp};
 use base64::Engine as _;
@@ -97,31 +98,36 @@ impl Devices {
     }
 
     fn refresh(&mut self) -> Result<Vec<DeviceId>> {
-        let data_version: i64 =
-            self.conn
-                .query_row(include_str!("sql/pairing/data_version.sql"), [], |row| {
-                    row.get(0)
-                })?;
+        let data_version: i64 = self
+            .conn
+            .query_row(include_str!("sql/pairing/data_version.sql"), [], |row| {
+                row.get(0)
+            })
+            .at("pairing/data_version.sql")?;
         if self
             .seen
             .is_some_and(|seen| seen.data_version == data_version)
         {
             return Ok(Vec::new());
         }
-        let revision: i64 =
-            self.conn
-                .query_row(include_str!("sql/pairing/revision.sql"), [], |row| {
-                    row.get(0)
-                })?;
+        let revision: i64 = self
+            .conn
+            .query_row(include_str!("sql/pairing/revision.sql"), [], |row| {
+                row.get(0)
+            })
+            .at("pairing/revision.sql")?;
         if let Some(seen) = self.seen.as_mut().filter(|seen| seen.revision == revision) {
             seen.data_version = data_version;
             return Ok(Vec::new());
         }
         let keys = self
             .conn
-            .prepare_cached(include_str!("sql/pairing/keys.sql"))?
-            .query_map([], |row| Ok((row.get(0)?, DeviceId(row.get(1)?))))?
-            .collect::<rusqlite::Result<HashMap<String, DeviceId>>>()?;
+            .prepare_cached(include_str!("sql/pairing/keys.sql"))
+            .at("pairing/keys.sql")?
+            .query_map([], |row| Ok((row.get(0)?, DeviceId(row.get(1)?))))
+            .at("pairing/keys.sql")?
+            .collect::<rusqlite::Result<HashMap<String, DeviceId>>>()
+            .at("pairing/keys.sql")?;
         let gone = self
             .keys
             .values()
@@ -310,23 +316,28 @@ impl Store {
     ) -> Result<Option<DeviceId>, PairDeviceError> {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
-            if tx.execute(
-                include_str!("sql/pairing/redeem_code.sql"),
-                params![code.hex(), tx.now()],
-            )? == 0
+            if tx
+                .execute(
+                    include_str!("sql/pairing/redeem_code.sql"),
+                    params![code.hex(), tx.now()],
+                )
+                .at("pairing/redeem_code.sql")?
+                == 0
             {
                 return Ok(None);
             }
-            let id: String = tx.query_row(
-                include_str!("sql/pairing/authorize.sql"),
-                params![
-                    DeviceId::new().as_str(),
-                    name,
-                    certificate.as_str(),
-                    tx.now()
-                ],
-                |row| row.get(0),
-            )?;
+            let id: String = tx
+                .query_row(
+                    include_str!("sql/pairing/authorize.sql"),
+                    params![
+                        DeviceId::new().as_str(),
+                        name,
+                        certificate.as_str(),
+                        tx.now()
+                    ],
+                    |row| row.get(0),
+                )
+                .at("pairing/authorize.sql")?;
             Ok(Some(DeviceId(id)))
         })
         .await
@@ -343,16 +354,18 @@ impl Store {
     ) -> Result<DeviceId, AddDeviceError> {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
-            let id: String = tx.query_row(
-                include_str!("sql/pairing/authorize.sql"),
-                params![
-                    DeviceId::new().as_str(),
-                    name,
-                    certificate.as_str(),
-                    tx.now()
-                ],
-                |row| row.get(0),
-            )?;
+            let id: String = tx
+                .query_row(
+                    include_str!("sql/pairing/authorize.sql"),
+                    params![
+                        DeviceId::new().as_str(),
+                        name,
+                        certificate.as_str(),
+                        tx.now()
+                    ],
+                    |row| row.get(0),
+                )
+                .at("pairing/authorize.sql")?;
             Ok(DeviceId(id))
         })
         .await
@@ -366,7 +379,10 @@ impl Store {
         let key = id.clone();
         let revoked = self
             .write_acknowledged(move |tx| {
-                Ok(tx.execute(include_str!("sql/pairing/revoke.sql"), [key.as_str()])? > 0)
+                Ok(tx
+                    .execute(include_str!("sql/pairing/revoke.sql"), [key.as_str()])
+                    .at("pairing/revoke.sql")?
+                    > 0)
             })
             .await
             .map_err(|cause| RevokeDeviceError {
@@ -398,7 +414,8 @@ impl Store {
             tx.execute(
                 include_str!("sql/pairing/touch.sql"),
                 params![id.as_str(), tx.now()],
-            )?;
+            )
+            .at("pairing/touch.sql")?;
             Ok(())
         })
         .await
@@ -445,17 +462,22 @@ pub(crate) fn add_pair_code(
     expires_at: Timestamp,
     now: Timestamp,
 ) -> Result<()> {
-    conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))?
-        .execute([now])?;
-    conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))?
-        .execute(params![code.hex(), expires_at])?;
+    conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))
+        .at("pairing/expire_codes.sql")?
+        .execute([now])
+        .at("pairing/expire_codes.sql")?;
+    conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))
+        .at("pairing/add_code.sql")?
+        .execute(params![code.hex(), expires_at])
+        .at("pairing/add_code.sql")?;
     Ok(())
 }
 
 pub(crate) fn pair_code_pending(conn: &Connection, code: &PairCodeHash) -> Result<bool> {
-    Ok(conn.query_row(
+    conn.query_row(
         include_str!("sql/pairing/code_pending.sql"),
         [code.hex()],
         |row| row.get(0),
-    )?)
+    )
+    .at("pairing/code_pending.sql")
 }

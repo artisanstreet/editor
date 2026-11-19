@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::writer::Tx;
 use crate::{Store, read};
@@ -98,15 +99,19 @@ fn still_removable(
     }
     let ids = serde_json::to_string(family).map_err(StorageError::encode::<[ThreadId]>)?;
     let eligible = conn
-        .prepare_cached(ELIGIBLE)?
-        .query_map(params![cutoff, ids], |row| row.get::<_, String>(0))?
+        .prepare_cached(ELIGIBLE)
+        .at("retention/eligible.sql")?
+        .query_map(params![cutoff, ids], |row| row.get::<_, String>(0))
+        .at("retention/eligible.sql")?
         .count();
     if eligible != family.len() {
         return Ok(false);
     }
     let joined: bool = conn
-        .prepare_cached(JOINED)?
-        .query_row(params![seq, ids], |row| row.get(0))?;
+        .prepare_cached(JOINED)
+        .at("retention/joined.sql")?
+        .query_row(params![seq, ids], |row| row.get(0))
+        .at("retention/joined.sql")?;
     Ok(!joined)
 }
 
@@ -120,12 +125,18 @@ impl Tx<'_> {
             .map(str::trim)
             .filter(|sql| !sql.is_empty())
         {
-            self.sql.prepare_cached(statement)?.execute([id.as_str()])?;
+            self.sql
+                .prepare_cached(statement)
+                .at("retention/remove.sql")?
+                .execute([id.as_str()])
+                .at("retention/remove.sql")?;
         }
         let seq = self.next_seq();
         self.sql
-            .prepare_cached(TOMBSTONE)?
-            .execute(params![id.as_str(), seq])?;
+            .prepare_cached(TOMBSTONE)
+            .at("retention/tombstone.sql")?
+            .execute(params![id.as_str(), seq])
+            .at("retention/tombstone.sql")?;
         self.emit(
             seq,
             Event::ThreadRemoved {
@@ -138,7 +149,7 @@ impl Tx<'_> {
 
 fn plan(conn: &Connection, cutoff: Timestamp) -> Result<Plan> {
     let seq = read::max_seq(conn)?;
-    let mut statement = conn.prepare_cached(THREADS)?;
+    let mut statement = conn.prepare_cached(THREADS).at("retention/threads.sql")?;
     let candidates = statement
         .query_map([cutoff], |row| {
             Ok((
@@ -148,8 +159,10 @@ fn plan(conn: &Connection, cutoff: Timestamp) -> Result<Plan> {
                     inactive: row.get(2)?,
                 },
             ))
-        })?
-        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        })
+        .at("retention/threads.sql")?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()
+        .at("retention/threads.sql")?;
     Ok(Plan {
         seq,
         families: families(&candidates),

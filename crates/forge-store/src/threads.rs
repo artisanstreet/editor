@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{Staged, StorageError, operation_error};
 use crate::writer::{UpdateThreadFailure, WriteFailure};
 use crate::{CreateThreadError, Snapshot, Store, read};
@@ -24,12 +25,6 @@ pub enum CreateProjectFailure {
     NameTooLong { bytes: usize },
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for CreateProjectFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
 }
 
 operation_error!(CreateProjectError(CreateProjectFailure), "create project {project}", project: ProjectId);
@@ -79,10 +74,11 @@ impl Store {
                 return Err(CreateProjectFailure::NameTooLong { bytes: name.len() });
             }
             if read::project(tx, &request.id)?.is_none() {
-                let live: usize =
-                    tx.query_row(include_str!("sql/state/live_projects.sql"), [], |row| {
+                let live: usize = tx
+                    .query_row(include_str!("sql/state/live_projects.sql"), [], |row| {
                         row.get(0)
-                    })?;
+                    })
+                    .at("state/live_projects.sql")?;
                 if live >= MAX_LIVE_PROJECTS {
                     return Err(CreateProjectFailure::TooMany {
                         limit: MAX_LIVE_PROJECTS,
@@ -176,9 +172,9 @@ impl Store {
         query: artisan_api::ThreadsQuery,
     ) -> Result<artisan_api::ThreadsPage, ThreadsPageError> {
         self.read(move |conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.unchecked_transaction().at("begin a read snapshot")?;
             let page = read::threads_page(&tx, &query)?;
-            tx.commit()?;
+            tx.commit().at("end the read snapshot")?;
             Ok(page)
         })
         .await
@@ -242,9 +238,9 @@ impl Store {
     pub async fn state(&self) -> Result<Snapshot, StateError> {
         let head = self.head();
         self.read(move |conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.unchecked_transaction().at("begin a read snapshot")?;
             let snapshot = snapshot(&tx, head)?;
-            tx.commit()?;
+            tx.commit().at("end the read snapshot")?;
             Ok(snapshot)
         })
         .await
@@ -341,11 +337,16 @@ impl Store {
 
     pub async fn thread_titles(&self) -> Result<Vec<(ThreadId, String)>, ThreadTitlesError> {
         self.read(move |conn| {
-            let mut statement = conn.prepare_cached(include_str!("sql/state/titles.sql"))?;
-            let rows = statement.query_map([], |row| {
-                Ok((ThreadId::from(row.get::<_, String>(0)?), row.get(1)?))
-            })?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            let mut statement = conn
+                .prepare_cached(include_str!("sql/state/titles.sql"))
+                .at("state/titles.sql")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((ThreadId::from(row.get::<_, String>(0)?), row.get(1)?))
+                })
+                .at("state/titles.sql")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .at("state/titles.sql")
         })
         .await
         .map_err(|cause| ThreadTitlesError {
@@ -359,6 +360,7 @@ impl Store {
         self.read(move |conn| {
             read::many(
                 conn,
+                "state/agent_threads.sql",
                 include_str!("sql/state/agent_threads.sql"),
                 [parent.as_str()],
             )
@@ -371,11 +373,18 @@ impl Store {
     }
 
     pub async fn working_agents(&self) -> Result<Vec<artisan_api::Item>, WorkingAgentsError> {
-        self.read(|conn| read::items(conn, include_str!("sql/state/working_agents.sql"), []))
-            .await
-            .map_err(|cause| WorkingAgentsError {
-                cause: Box::new(cause),
-            })
+        self.read(|conn| {
+            read::items(
+                conn,
+                "state/working_agents.sql",
+                include_str!("sql/state/working_agents.sql"),
+                [],
+            )
+        })
+        .await
+        .map_err(|cause| WorkingAgentsError {
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn last_reply(&self, thread: &ThreadId) -> Result<Option<String>, LastReplyError> {
@@ -384,6 +393,7 @@ impl Store {
         self.read(move |conn| {
             let item = read::items(
                 conn,
+                "state/last_reply.sql",
                 include_str!("sql/state/last_reply.sql"),
                 [id.as_str()],
             )?
@@ -406,11 +416,12 @@ impl Store {
         let id = thread.clone();
         let thread = thread.clone();
         self.read(move |conn| {
-            Ok(conn.query_row(
+            conn.query_row(
                 include_str!("sql/items/awaits_user.sql"),
                 [id.as_str()],
                 |row| row.get(0),
-            )?)
+            )
+            .at("items/awaits_user.sql")
         })
         .await
         .map_err(|cause| AwaitsUserError {
@@ -425,13 +436,20 @@ fn encoded_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, Storage
 }
 
 fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageError> {
-    let projects: Vec<Project> = read::many(conn, include_str!("sql/state/projects.sql"), [])?;
+    let projects: Vec<Project> = read::many(
+        conn,
+        "state/projects.sql",
+        include_str!("sql/state/projects.sql"),
+        [],
+    )?;
     let mut settings = serde_json::Map::new();
-    let mut statement = conn.prepare(include_str!("sql/state/settings.sql"))?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let value: String = row.get(1)?;
+    let mut statement = conn
+        .prepare(include_str!("sql/state/settings.sql"))
+        .at("state/settings.sql")?;
+    let mut rows = statement.query([]).at("state/settings.sql")?;
+    while let Some(row) = rows.next().at("state/settings.sql")? {
+        let key: String = row.get(0).at("state/settings.sql")?;
+        let value: String = row.get(1).at("state/settings.sql")?;
         settings.insert(key, read::from_body(&value)?);
     }
     drop(rows);
@@ -458,10 +476,16 @@ fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageE
     )?;
     let pinned: Vec<Thread> = read::many(
         conn,
+        "state/pinned_threads.sql",
         include_str!("sql/state/pinned_threads.sql"),
         rusqlite::params![ids, PINNED_THREADS],
     )?;
-    let live: Vec<Run> = read::many(conn, include_str!("sql/state/live_runs.sql"), [LIVE_RUNS])?;
+    let live: Vec<Run> = read::many(
+        conn,
+        "state/live_runs.sql",
+        include_str!("sql/state/live_runs.sql"),
+        [LIVE_RUNS],
+    )?;
     let mut used = encoded_len(&projects)?
         .saturating_add(encoded_len(&settings)?)
         .saturating_add(encoded_len(&pinned)?)

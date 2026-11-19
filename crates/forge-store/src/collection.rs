@@ -1,4 +1,5 @@
 use crate::content::{ContentError, Damage, to_usize};
+use crate::error::AtStep as _;
 use artisan_api::{CollectionQuery, CollectionRange, CollectionRef, ContentId, ContentRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -100,12 +101,26 @@ fn check_dependencies(
                 content: child.clone(),
             });
         }
-        let exists: bool = conn.query_row(CONTENT_EXISTS, [child.as_str()], |row| row.get(0))?;
+        let exists: bool = conn
+            .query_row(CONTENT_EXISTS, [child.as_str()], |row| row.get(0))
+            .at("content/exists.sql")?;
         if !exists {
             return Err(ContentError::MissingDependency {
                 content: child.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+fn record_dependencies(
+    conn: &Connection,
+    parent: &ContentId,
+    dependencies: &BTreeSet<ContentId>,
+) -> Result<()> {
+    for child in dependencies {
+        conn.execute(INSERT_DEPENDENCY, params![parent.as_str(), child.as_str()])
+            .at("content/insert_dependency.sql")?;
     }
     Ok(())
 }
@@ -128,22 +143,32 @@ fn store<T: Serialize>(
         return Err(ContentError::CollectionTooLarge { bytes });
     }
     check_dependencies(conn, &source.id, dependencies)?;
-    let inserted = conn.execute(
-        INSERT_CONTENT,
-        params![source.id.as_str(), source.bytes, source.lines, conn.now],
-    )? != 0;
-    let indexed = conn.execute(
-        INSERT_COLLECTION,
-        params![
-            source.id.as_str(),
-            records.len() as u64,
-            authored_bytes,
-            source.bytes.saturating_add(nested_structural_bytes)
-        ],
-    )? != 0;
+    let inserted = conn
+        .execute(
+            INSERT_CONTENT,
+            params![source.id.as_str(), source.bytes, source.lines, conn.now],
+        )
+        .at("collection/insert_content.sql")?
+        != 0;
+    let indexed = conn
+        .execute(
+            INSERT_COLLECTION,
+            params![
+                source.id.as_str(),
+                records.len() as u64,
+                authored_bytes,
+                source.bytes.saturating_add(nested_structural_bytes)
+            ],
+        )
+        .at("collection/insert.sql")?
+        != 0;
     if inserted || indexed {
-        let mut insert_record = conn.prepare_cached(INSERT_RECORD)?;
-        let mut insert_chunk = conn.prepare_cached(INSERT_CHUNK)?;
+        let mut insert_record = conn
+            .prepare_cached(INSERT_RECORD)
+            .at("collection/insert_record.sql")?;
+        let mut insert_chunk = conn
+            .prepare_cached(INSERT_CHUNK)
+            .at("content/insert_chunk.sql")?;
         let mut buffer = String::with_capacity(if inserted {
             crate::content::CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
         } else {
@@ -156,14 +181,16 @@ fn store<T: Serialize>(
             let end = position + encoded.len() as u64;
             if indexed {
                 let (key, label) = record_key(&encoded)?;
-                insert_record.execute(params![
-                    source.id.as_str(),
-                    ordinal as u64,
-                    position,
-                    end,
-                    key,
-                    label
-                ])?;
+                insert_record
+                    .execute(params![
+                        source.id.as_str(),
+                        ordinal as u64,
+                        position,
+                        end,
+                        key,
+                        label
+                    ])
+                    .at("collection/insert_record.sql")?;
             }
             position = end + 1;
             if !inserted {
@@ -176,29 +203,30 @@ fn store<T: Serialize>(
                 while !buffer.is_char_boundary(boundary) {
                     boundary -= 1;
                 }
-                insert_chunk.execute(params![
-                    source.id.as_str(),
-                    chunk_start,
-                    &buffer.as_bytes()[..boundary]
-                ])?;
+                insert_chunk
+                    .execute(params![
+                        source.id.as_str(),
+                        chunk_start,
+                        &buffer.as_bytes()[..boundary]
+                    ])
+                    .at("content/insert_chunk.sql")?;
                 buffer.drain(..boundary);
                 chunk_start += boundary as u64;
             }
         }
         if !buffer.is_empty() {
-            insert_chunk.execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])?;
+            insert_chunk
+                .execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])
+                .at("content/insert_chunk.sql")?;
         }
     }
-    let known: u64 = conn.query_row(RECORD_COUNT, [source.id.as_str()], |row| row.get(0))?;
+    let known: u64 = conn
+        .query_row(RECORD_COUNT, [source.id.as_str()], |row| row.get(0))
+        .at("collection/count.sql")?;
     if known != records.len() as u64 {
         return Err(damaged(&source.id, Damage::DescriptorMismatch));
     }
-    for child in dependencies {
-        conn.execute(
-            INSERT_DEPENDENCY,
-            params![source.id.as_str(), child.as_str()],
-        )?;
-    }
+    record_dependencies(conn, &source.id, dependencies)?;
     Ok(CollectionRef {
         source,
         count: records.len() as u64,
@@ -231,7 +259,8 @@ pub(crate) fn range<T: DeserializeOwned>(
                 ))
             },
         )
-        .optional()?
+        .optional()
+        .at("collection/header.sql")?
     else {
         return Ok(None);
     };
@@ -242,15 +271,19 @@ pub(crate) fn range<T: DeserializeOwned>(
             total,
         });
     }
-    let mut select = conn.prepare_cached(include_str!("sql/collection/records.sql"))?;
-    let mut rows = select.query(params![id.as_str(), query.offset, limit])?;
+    let mut select = conn
+        .prepare_cached(include_str!("sql/collection/records.sql"))
+        .at("collection/records.sql")?;
+    let mut rows = select
+        .query(params![id.as_str(), query.offset, limit])
+        .at("collection/records.sql")?;
     let mut records = Vec::new();
     let mut loaded_bytes = 0usize;
     let mut byte_limited = false;
-    while let Some(row) = rows.next()? {
-        let ordinal: u64 = row.get(0)?;
-        let start: u64 = row.get(1)?;
-        let end: u64 = row.get(2)?;
+    while let Some(row) = rows.next().at("collection/records.sql")? {
+        let ordinal: u64 = row.get(0).at("collection/records.sql")?;
+        let start: u64 = row.get(1).at("collection/records.sql")?;
+        let end: u64 = row.get(2).at("collection/records.sql")?;
         if !(ordinal == query.offset + records.len() as u64 && end >= start && end <= bytes) {
             return Err(damaged(id, Damage::RecordIndex));
         }
@@ -325,11 +358,13 @@ fn validate_answer(
             }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
-                let mut exists =
-                    conn.prepare_cached(include_str!("sql/collection/key_exists.sql"))?;
+                let mut exists = conn
+                    .prepare_cached(include_str!("sql/collection/key_exists.sql"))
+                    .at("collection/key_exists.sql")?;
                 for id in ids {
                     let known: bool = exists
-                        .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))?;
+                        .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))
+                        .at("collection/key_exists.sql")?;
                     if !known {
                         return Err(AnswerRefused::UnknownChoice.into());
                     }
@@ -364,14 +399,19 @@ pub(crate) fn answer_text(
     };
     let mut labels = String::new();
     let mut duplicate_counts = std::collections::HashMap::<String, u64>::new();
-    let mut option = conn.prepare_cached(include_str!("sql/collection/record_by_key.sql"))?;
-    let mut count = conn.prepare_cached(include_str!("sql/collection/label_count.sql"))?;
+    let mut option = conn
+        .prepare_cached(include_str!("sql/collection/record_by_key.sql"))
+        .at("collection/record_by_key.sql")?;
+    let mut count = conn
+        .prepare_cached(include_str!("sql/collection/label_count.sql"))
+        .at("collection/label_count.sql")?;
     for id in ids {
         let (index, label): (u64, String) = option
             .query_row(params![reference.source.id.as_str(), id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .optional()?
+            .optional()
+            .at("collection/label_count.sql")?
             .ok_or(AnswerRefused::UnknownChoice)?;
         let duplicates = if let Some(value) = duplicate_counts.get(&label) {
             *value
@@ -379,7 +419,8 @@ pub(crate) fn answer_text(
             let value: u64 = count
                 .query_row(params![reference.source.id.as_str(), label], |row| {
                     row.get(0)
-                })?;
+                })
+                .at("collection/label_count.sql")?;
             duplicate_counts.insert(label.clone(), value);
             value
         };
@@ -510,7 +551,8 @@ fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
                 ))
             },
         )
-        .optional()?
+        .optional()
+        .at("collection/metrics.sql")?
         .ok_or_else(|| missing(&reference.source.id))?;
     if !(reference.count == value.0
         && reference.source.bytes == value.1
@@ -670,7 +712,8 @@ pub(crate) fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<M
             [source.id.as_str()],
             |row| row.get::<_, u64>(0),
         )
-        .optional()?
+        .optional()
+        .at("collection/count.sql")?
     else {
         return Err(missing(&source.id));
     };

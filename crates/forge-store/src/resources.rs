@@ -1,4 +1,5 @@
 use crate::Store;
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ThreadId};
 use sha2::{Digest, Sha256};
@@ -120,11 +121,12 @@ impl Store {
         let collected = async {
             let threads = self
                 .read(|conn| {
-                    Ok::<_, StorageError>(
-                        conn.prepare_cached(include_str!("sql/state/thread_ids.sql"))?
-                            .query_map([], |row| row.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<HashSet<_>>>()?,
-                    )
+                    conn.prepare_cached(include_str!("sql/state/thread_ids.sql"))
+                        .at("state/thread_ids.sql")?
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .at("state/thread_ids.sql")?
+                        .collect::<rusqlite::Result<HashSet<_>>>()
+                        .at("state/thread_ids.sql")
                 })
                 .await?;
             tokio::task::spawn_blocking(move || gc(&dir, &threads))

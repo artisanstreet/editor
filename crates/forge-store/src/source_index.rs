@@ -1,4 +1,5 @@
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use artisan_api::{
     ContentId, ContentRef, SourceIndexFormat, SourceIndexHeader, SourceIndexQuery,
@@ -48,12 +49,6 @@ pub enum SourceIndexError {
     Storage(#[from] StorageError),
 }
 
-impl From<rusqlite::Error> for SourceIndexError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
-}
-
 fn header(
     conn: &Connection,
     id: &ContentId,
@@ -90,6 +85,7 @@ fn header(
         },
     )
     .optional()
+    .at("sources/index_header.sql")
     .map_err(Into::into)
 }
 pub(crate) struct PreparedIndex {
@@ -121,7 +117,8 @@ pub(crate) fn prepare(
                 lines: row.get(1)?,
             })
         })
-        .optional()?
+        .optional()
+        .at("content/size.sql")?
     else {
         return Ok(Prepared::Missing);
     };
@@ -209,11 +206,13 @@ pub(crate) enum Staging {
 }
 
 fn source_present(conn: &Connection, source: &ContentRef) -> Result<bool> {
-    Ok(conn.query_row(
-        include_str!("sql/sources/present.sql"),
-        params![source.id.as_str(), source.bytes, source.lines],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .query_row(
+            include_str!("sql/sources/present.sql"),
+            params![source.id.as_str(), source.bytes, source.lines],
+            |row| row.get(0),
+        )
+        .at("sources/present.sql")?)
 }
 
 pub(crate) fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Result<Staging> {
@@ -223,23 +222,27 @@ pub(crate) fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -
     if !source_present(conn, &prepared.source)? {
         return Ok(Staging::Gone);
     }
-    let mut insert = conn.prepare_cached(include_str!("sql/sources/stage_leaf.sql"))?;
+    let mut insert = conn
+        .prepare_cached(include_str!("sql/sources/stage_leaf.sql"))
+        .at("sources/stage_leaf.sql")?;
     for leaf in prepared
         .leaves
         .iter()
         .skip(batch * LEAVES_PER_WRITE)
         .take(LEAVES_PER_WRITE)
     {
-        insert.execute(params![
-            prepared.source.id.as_str(),
-            artisan_api::SOURCE_INDEX_VERSION,
-            leaf.ordinal,
-            leaf.source_start,
-            leaf.source_end,
-            leaf.metadata_start,
-            leaf.metadata_end,
-            prepared.format.as_str()
-        ])?;
+        insert
+            .execute(params![
+                prepared.source.id.as_str(),
+                artisan_api::SOURCE_INDEX_VERSION,
+                leaf.ordinal,
+                leaf.source_start,
+                leaf.source_end,
+                leaf.metadata_start,
+                leaf.metadata_end,
+                prepared.format.as_str()
+            ])
+            .at("sources/stage_leaf.sql")?;
     }
     Ok(Staging::Staged)
 }
@@ -270,7 +273,8 @@ pub(crate) fn publish(
     conn.execute(
         include_str!("sql/content/insert_dependency.sql"),
         params![prepared.source.id.as_str(), metadata_ref.id.as_str()],
-    )?;
+    )
+    .at("content/insert_dependency.sql")?;
     conn.execute(
         include_str!("sql/sources/insert_index.sql"),
         params![
@@ -280,7 +284,8 @@ pub(crate) fn publish(
             prepared.leaves.len() as u64,
             prepared.format.as_str()
         ],
-    )?;
+    )
+    .at("sources/insert_index.sql")?;
     header(conn, &prepared.source.id, prepared.format)
 }
 pub(crate) fn range(
@@ -305,7 +310,9 @@ pub(crate) fn range(
             leaves: index.leaves,
         });
     }
-    let mut select = conn.prepare_cached(include_str!("sql/sources/leaves.sql"))?;
+    let mut select = conn
+        .prepare_cached(include_str!("sql/sources/leaves.sql"))
+        .at("sources/leaves.sql")?;
     let leaves = select
         .query_map(
             params![
@@ -324,8 +331,10 @@ pub(crate) fn range(
                     metadata_end: row.get(4)?,
                 })
             },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        )
+        .at("sources/leaves.sql")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .at("sources/leaves.sql")?;
     let end = start + leaves.len() as u64;
     if end != start.saturating_add(u64::from(limit)).min(index.leaves) {
         return Err(SourceIndexError::TopologyGap {

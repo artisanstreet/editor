@@ -1,3 +1,4 @@
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::{Store, read};
 use artisan_api::{ItemId, ProjectId, ThreadId, Timestamp};
@@ -86,12 +87,6 @@ pub enum CoordinationFailure {
     TransitionInvalid,
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-impl From<rusqlite::Error> for CoordinationFailure {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error.into())
-    }
 }
 
 fn require(condition: bool, failure: CoordinationFailure) -> Result<()> {
@@ -435,7 +430,8 @@ fn get(conn: &Connection, id: &str) -> Result<Option<Record>> {
     conn.query_row(include_str!("sql/coordination/get.sql"), [id], |row| {
         row.get::<_, String>(0)
     })
-    .optional()?
+    .optional()
+    .at("coordination/get.sql")?
     .map(|body| Ok(read::from_body(&body)?))
     .transpose()
 }
@@ -456,7 +452,8 @@ fn save(conn: &Connection, record: &Record) -> Result<()> {
             record.updated_at,
             read::to_body(record)?
         ],
-    )?;
+    )
+    .at("coordination/save.sql")?;
     conn.execute(
         include_str!("sql/coordination/event.sql"),
         params![
@@ -467,7 +464,8 @@ fn save(conn: &Connection, record: &Record) -> Result<()> {
             record.revision,
             record.updated_at
         ],
-    )?;
+    )
+    .at("coordination/event.sql")?;
     Ok(())
 }
 
@@ -480,12 +478,17 @@ fn validate_dependencies(
         dependencies.len() <= 64,
         CoordinationFailure::TooManyDependencies,
     )?;
-    let mut statement = conn.prepare(include_str!("sql/coordination/dependencies.sql"))?;
+    let mut statement = conn
+        .prepare(include_str!("sql/coordination/dependencies.sql"))
+        .at("coordination/dependencies.sql")?;
     let mut graph = BTreeMap::new();
-    for row in statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (owner, body) = row?;
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .at("coordination/dependencies.sql")?
+    {
+        let (owner, body) = row.at("coordination/dependencies.sql")?;
         let record: Record = read::from_body(&body)?;
         if let Content::Work { dependencies, .. } = record.content {
             graph.insert(ThreadId::from(owner), dependencies);
@@ -527,27 +530,36 @@ impl Store {
 
     pub async fn coordination_list(&self, query: Query) -> Result<Page, CoordinationListError> {
         self.read(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let event_cursor =
-                tx.query_row(include_str!("sql/coordination/head.sql"), [], |row| {
+            let tx = conn.unchecked_transaction().at("begin a read snapshot")?;
+            let event_cursor = tx
+                .query_row(include_str!("sql/coordination/head.sql"), [], |row| {
                     row.get(0)
-                })?;
+                })
+                .at("coordination/head.sql")?;
             let limit = query.limit.clamp(1, 200) as usize;
-            let mut statement = tx.prepare(include_str!("sql/coordination/list.sql"))?;
-            let rows = statement.query_map(
-                params![
-                    query.project.map(|id| id.to_string()),
-                    query.kind,
-                    query.owner.map(|id| id.to_string()),
-                    query.recipient.map(|id| id.to_string()),
-                    query.cursor.as_ref().map(|c| c.updated_at),
-                    query.cursor.as_ref().map(|c| &c.id),
-                    limit + 1
-                ],
-                |row| row.get::<_, String>(0),
-            )?;
+            let mut statement = tx
+                .prepare(include_str!("sql/coordination/list.sql"))
+                .at("coordination/list.sql")?;
+            let rows = statement
+                .query_map(
+                    params![
+                        query.project.map(|id| id.to_string()),
+                        query.kind,
+                        query.owner.map(|id| id.to_string()),
+                        query.recipient.map(|id| id.to_string()),
+                        query.cursor.as_ref().map(|c| c.updated_at),
+                        query.cursor.as_ref().map(|c| &c.id),
+                        limit + 1
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .at("coordination/list.sql")?;
             let mut records = rows
-                .map(|row| Ok(read::from_body::<Record>(&row?)?))
+                .map(|row| {
+                    Ok(read::from_body::<Record>(
+                        &row.at("coordination/list.sql")?,
+                    )?)
+                })
                 .collect::<Result<Vec<_>>>()?;
             let next_cursor = if records.len() > limit {
                 records.truncate(limit);
@@ -883,8 +895,10 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<Change>, CoordinationChangesError> {
         self.read(move |conn| {
-            let mut statement = conn.prepare(include_str!("sql/coordination/events.sql"))?;
-            Ok(statement
+            let mut statement = conn
+                .prepare(include_str!("sql/coordination/events.sql"))
+                .at("coordination/events.sql")?;
+            statement
                 .query_map(
                     params![after, project.map(|id| id.to_string()), limit.clamp(1, 200)],
                     |row| {
@@ -898,8 +912,10 @@ impl Store {
                             created_at: row.get(6)?,
                         })
                     },
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
+                )
+                .at("coordination/events.sql")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .at("coordination/events.sql")
         })
         .await
         .map_err(|cause| CoordinationChangesError {
@@ -910,10 +926,13 @@ impl Store {
 
     pub async fn coordination_watches(&self) -> Result<Vec<Record>, CoordinationWatchesError> {
         self.read(move |conn| {
-            let mut statement = conn.prepare(include_str!("sql/coordination/watches.sql"))?;
+            let mut statement = conn
+                .prepare(include_str!("sql/coordination/watches.sql"))
+                .at("coordination/watches.sql")?;
             statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .map(|row| read::from_body(&row?))
+                .query_map([], |row| row.get::<_, String>(0))
+                .at("coordination/watches.sql")?
+                .map(|row| read::from_body(&row.at("coordination/watches.sql")?))
                 .collect()
         })
         .await
@@ -927,10 +946,13 @@ impl Store {
         deferred: Vec<String>,
     ) -> Result<Vec<Record>, CoordinationReceiptsError> {
         self.read(move |conn| {
-            let mut statement = conn.prepare(include_str!("sql/coordination/receipts.sql"))?;
+            let mut statement = conn
+                .prepare(include_str!("sql/coordination/receipts.sql"))
+                .at("coordination/receipts.sql")?;
             statement
-                .query_map([read::to_body(&deferred)?], |row| row.get::<_, String>(0))?
-                .map(|row| read::from_body(&row?))
+                .query_map([read::to_body(&deferred)?], |row| row.get::<_, String>(0))
+                .at("coordination/receipts.sql")?
+                .map(|row| read::from_body(&row.at("coordination/receipts.sql")?))
                 .collect()
         })
         .await

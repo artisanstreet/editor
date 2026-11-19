@@ -1,4 +1,5 @@
 use crate::Store;
+use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ProjectId, Seq, TextHit, TextSearchQuery, ThreadId, Timestamp};
 use folded::Folded;
@@ -63,37 +64,51 @@ pub(crate) fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Ve
     let limit = query.limit.unwrap_or(DEFAULT_HITS).clamp(1, MAX_HITS) as usize;
     let candidate = memchr::memmem::Finder::new(wanted.as_bytes());
     let scan_rows = i64::try_from(SCAN_ROWS).expect("invariant: the scan bound fits in i64");
-    let (mut rows, values) = match indexed_phrase(&wanted) {
+    let (step, mut rows, values) = match indexed_phrase(&wanted) {
         Some(phrase) => (
-            conn.prepare_cached(include_str!("sql/search/messages_indexed.sql"))?,
+            "search/messages_indexed.sql",
+            conn.prepare_cached(include_str!("sql/search/messages_indexed.sql"))
+                .at("search/messages_indexed.sql")?,
             vec![
                 rusqlite::types::Value::Text(phrase),
                 rusqlite::types::Value::Integer(scan_rows),
             ],
         ),
         None => (
-            conn.prepare_cached(include_str!("sql/search/messages_scan.sql"))?,
+            "search/messages_scan.sql",
+            conn.prepare_cached(include_str!("sql/search/messages_scan.sql"))
+                .at("search/messages_scan.sql")?,
             vec![rusqlite::types::Value::Integer(scan_rows)],
         ),
     };
     let mut per_thread: HashMap<ThreadId, usize> = HashMap::new();
     let mut hits = Vec::new();
     let mut scanned_bytes = 0;
-    let mut scan = rows.query(rusqlite::params_from_iter(values))?;
-    while let Some(row) = scan.next()? {
+    let mut scan = rows.query(rusqlite::params_from_iter(values)).at(step)?;
+    while let Some(row) = scan.next().at(step)? {
         if scanned_bytes >= SCAN_BYTES {
             break;
         }
-        let thread_id = ThreadId::from(row.get::<_, String>(0)?);
+        let thread_id = ThreadId::from(row.get::<_, String>(0).at(step)?);
         if per_thread.get(&thread_id).copied().unwrap_or(0) >= HITS_PER_THREAD {
             continue;
         }
-        let folded = row.get_ref(7)?.as_bytes().map_err(rusqlite::Error::from)?;
+        let folded = row
+            .get_ref(7)
+            .at(step)?
+            .as_bytes()
+            .map_err(rusqlite::Error::from)
+            .at(step)?;
         scanned_bytes += folded.len();
         if candidate.find(folded).is_none() {
             continue;
         }
-        let text = row.get_ref(6)?.as_str().map_err(rusqlite::Error::from)?;
+        let text = row
+            .get_ref(6)
+            .at(step)?
+            .as_str()
+            .map_err(rusqlite::Error::from)
+            .at(step)?;
         let Some(std::ops::Range { start, end }) = Folded::new(text).find(&wanted) else {
             continue;
         };
@@ -102,12 +117,12 @@ pub(crate) fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Ve
         let length = narrow(text.len());
         *per_thread.entry(thread_id.clone()).or_default() += 1;
         hits.push(TextHit {
-            thread_title: row.get(4)?,
-            project_id: ProjectId::from(row.get::<_, String>(5)?),
+            thread_title: row.get(4).at(step)?,
+            project_id: ProjectId::from(row.get::<_, String>(5).at(step)?),
             thread_id,
-            item_id: ItemId::from(row.get::<_, String>(1)?),
-            position: row.get::<_, Seq>(3)?,
-            created_at: row.get::<_, Timestamp>(2)?,
+            item_id: ItemId::from(row.get::<_, String>(1).at(step)?),
+            position: row.get::<_, Seq>(3).at(step)?,
+            created_at: row.get::<_, Timestamp>(2).at(step)?,
             snippet,
             matched,
             offset: (narrow(start), narrow(end)),

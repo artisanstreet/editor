@@ -1,4 +1,5 @@
 use crate::Store;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use crate::writer::Tx;
 use artisan_api::DatabaseRollback;
@@ -19,28 +20,30 @@ impl Tx<'_> {
                 rollback.set_aside,
                 rollback.at
             ],
-        )?;
+        )
+        .at("rollbacks/record.sql")?;
         Ok(())
     }
 }
 
 pub(crate) fn current(conn: &Connection) -> Result<Option<DatabaseRollback>, StorageError> {
-    Ok(conn
-        .query_row(include_str!("sql/rollbacks/current.sql"), [], |row| {
-            Ok(DatabaseRollback {
-                found: row.get(0)?,
-                restored: row.get(1)?,
-                set_aside: row.get(2)?,
-                at: row.get(3)?,
-            })
+    conn.query_row(include_str!("sql/rollbacks/current.sql"), [], |row| {
+        Ok(DatabaseRollback {
+            found: row.get(0)?,
+            restored: row.get(1)?,
+            set_aside: row.get(2)?,
+            at: row.get(3)?,
         })
-        .optional()?)
+    })
+    .optional()
+    .at("rollbacks/current.sql")
 }
 
 impl Store {
     pub async fn dismiss_rollback(&self) -> Result<(), DismissRollbackError> {
         self.write_acknowledged(|tx| {
-            tx.execute(include_str!("sql/rollbacks/dismiss.sql"), [])?;
+            tx.execute(include_str!("sql/rollbacks/dismiss.sql"), [])
+                .at("rollbacks/dismiss.sql")?;
             Ok::<_, StorageError>(())
         })
         .await

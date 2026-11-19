@@ -1,5 +1,6 @@
 use crate::Store;
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use artisan_api::{
     ContentQuery, EngineId, FileOp, Item, ItemId, ItemKind, ProjectId, Status, TextContent,
     ThreadId, Timestamp, ToolKind,
@@ -30,12 +31,6 @@ crate::error::operation_error!(RecallTouchingError(ContentError), "find the item
 
 impl From<crate::StorageError> for GrepFailure {
     fn from(error: crate::StorageError) -> Self {
-        Self::Content(error.into())
-    }
-}
-
-impl From<rusqlite::Error> for GrepFailure {
-    fn from(error: rusqlite::Error) -> Self {
         Self::Content(error.into())
     }
 }
@@ -243,11 +238,14 @@ fn artisan_call(item: &Item) -> bool {
 
 pub(crate) fn index(conn: &Connection, item: &Item) -> Result<()> {
     let rowid: i64 = conn
-        .prepare_cached(include_str!("sql/recall/rowid.sql"))?
-        .query_row([item.id.as_str()], |row| row.get(0))?;
+        .prepare_cached(include_str!("sql/recall/rowid.sql"))
+        .at("recall/rowid.sql")?
+        .query_row([item.id.as_str()], |row| row.get(0))
+        .at("recall/rowid.sql")?;
     let next = searchable(conn, item)?;
     let previous = conn
-        .prepare_cached(include_str!("sql/recall/indexed.sql"))?
+        .prepare_cached(include_str!("sql/recall/indexed.sql"))
+        .at("recall/indexed.sql")?
         .query_row([rowid], |row| {
             Ok((
                 Searchable {
@@ -258,19 +256,26 @@ pub(crate) fn index(conn: &Connection, item: &Item) -> Result<()> {
                 row.get::<_, String>(3)?,
             ))
         })
-        .optional()?;
+        .optional()
+        .at("recall/indexed.sql")?;
     if previous.as_ref().map(|(searchable, _)| searchable) == Some(&next) {
         return Ok(());
     }
     if let Some((previous, folded)) = &previous {
-        conn.prepare_cached(include_str!("sql/recall/unindex.sql"))?
-            .execute(params![rowid, previous.text, previous.paths])?;
-        conn.prepare_cached(include_str!("sql/search/unindex.sql"))?
-            .execute(params![rowid, folded])?;
+        conn.prepare_cached(include_str!("sql/recall/unindex.sql"))
+            .at("recall/unindex.sql")?
+            .execute(params![rowid, previous.text, previous.paths])
+            .at("recall/unindex.sql")?;
+        conn.prepare_cached(include_str!("sql/search/unindex.sql"))
+            .at("search/unindex.sql")?
+            .execute(params![rowid, folded])
+            .at("search/unindex.sql")?;
     }
     if next.is_empty() {
-        conn.prepare_cached(include_str!("sql/recall/delete_text.sql"))?
-            .execute([rowid])?;
+        conn.prepare_cached(include_str!("sql/recall/delete_text.sql"))
+            .at("recall/delete_text.sql")?
+            .execute([rowid])
+            .at("recall/delete_text.sql")?;
         return Ok(());
     }
     let kind = RecallKind::of(&item.kind);
@@ -279,7 +284,8 @@ pub(crate) fn index(conn: &Connection, item: &Item) -> Result<()> {
     } else {
         String::new()
     };
-    conn.prepare_cached(include_str!("sql/recall/save_text.sql"))?
+    conn.prepare_cached(include_str!("sql/recall/save_text.sql"))
+        .at("recall/save_text.sql")?
         .execute(params![
             rowid,
             item.thread_id.as_str(),
@@ -290,11 +296,16 @@ pub(crate) fn index(conn: &Connection, item: &Item) -> Result<()> {
             next.output,
             next.paths,
             folded,
-        ])?;
-    conn.prepare_cached(include_str!("sql/recall/index.sql"))?
-        .execute(params![rowid, next.text, next.paths])?;
-    conn.prepare_cached(include_str!("sql/search/index.sql"))?
-        .execute(params![rowid, folded])?;
+        ])
+        .at("recall/save_text.sql")?;
+    conn.prepare_cached(include_str!("sql/recall/index.sql"))
+        .at("recall/index.sql")?
+        .execute(params![rowid, next.text, next.paths])
+        .at("recall/index.sql")?;
+    conn.prepare_cached(include_str!("sql/search/index.sql"))
+        .at("search/index.sql")?
+        .execute(params![rowid, folded])
+        .at("search/index.sql")?;
     Ok(())
 }
 
@@ -746,12 +757,14 @@ fn grep_rows(
         .replace("__OUTPUT__", output)
         .replace("__SCOPE__", &filter)
         .replace("__LIMIT__", &(GREP_SCAN_ROWS + 1).to_string());
-    let mut statement = conn.prepare(&sql)?;
-    let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+    let mut statement = conn.prepare(&sql).at("recall/grep.sql")?;
+    let mut rows = statement
+        .query(rusqlite::params_from_iter(values))
+        .at("recall/grep.sql")?;
     let mut matches = Vec::new();
     let mut scanned = 0;
     let mut last = None;
-    while let Some(row) = rows.next()? {
+    while let Some(row) = rows.next().at("recall/grep.sql")? {
         scanned += 1;
         if scanned > GREP_SCAN_ROWS {
             return Ok(GrepPage {
@@ -759,16 +772,19 @@ fn grep_rows(
                 next: last.map(|row| GrepCursor::Before { row }),
             });
         }
-        let rowid: i64 = row.get(0)?;
+        let rowid: i64 = row.get(0).at("recall/grep.sql")?;
         last = Some(rowid);
-        let thread_id = ThreadId::from(row.get::<_, String>(1)?);
-        let thread_title: Option<String> = row.get(2)?;
-        let item_id = ItemId::from(row.get::<_, String>(3)?);
-        let kind: RecallKind = row.get(4)?;
-        let created_at: Timestamp = row.get(7)?;
+        let thread_id = ThreadId::from(row.get::<_, String>(1).at("recall/grep.sql")?);
+        let thread_title: Option<String> = row.get(2).at("recall/grep.sql")?;
+        let item_id = ItemId::from(row.get::<_, String>(3).at("recall/grep.sql")?);
+        let kind: RecallKind = row.get(4).at("recall/grep.sql")?;
+        let created_at: Timestamp = row.get(7).at("recall/grep.sql")?;
         for (field, body) in [
-            (GrepField::Text, row.get::<_, String>(5)?),
-            (GrepField::Output, row.get(6)?),
+            (
+                GrepField::Text,
+                row.get::<_, String>(5).at("recall/grep.sql")?,
+            ),
+            (GrepField::Output, row.get(6).at("recall/grep.sql")?),
         ] {
             if !regex.is_match(&body) {
                 continue;
@@ -854,15 +870,21 @@ fn text_hits(
         rusqlite::types::Value::Integer(i64::from(offset)),
         rusqlite::types::Value::Text(query.trim().to_owned()),
     ];
-    let sql = if let Some(fts) = fts_query(query) {
+    let (step, sql) = if let Some(fts) = fts_query(query) {
         values[0] = rusqlite::types::Value::Text(fts);
-        include_str!("sql/recall/text_indexed.sql").replace("__SCOPE__", &filter)
+        (
+            "recall/text_indexed.sql",
+            include_str!("sql/recall/text_indexed.sql").replace("__SCOPE__", &filter),
+        )
     } else {
         values[0] = rusqlite::types::Value::Text(query.trim().to_owned());
-        include_str!("sql/recall/text_scan.sql").replace("__SCOPE__", &filter)
+        (
+            "recall/text_scan.sql",
+            include_str!("sql/recall/text_scan.sql").replace("__SCOPE__", &filter),
+        )
     };
     values.extend(scope_values);
-    read_hits(conn, &sql, &values)
+    read_hits(conn, step, &sql, &values)
 }
 
 fn output_hits(
@@ -884,7 +906,7 @@ fn output_hits(
     let sql = include_str!("sql/recall/output.sql")
         .replace("__TEXT__", text.condition)
         .replace("__SCOPE__", &filter);
-    read_hits(conn, &sql, &values)
+    read_hits(conn, "recall/output.sql", &sql, &values)
 }
 
 fn search_rows(
@@ -930,10 +952,11 @@ fn search_rows(
 
 fn read_hits(
     conn: &Connection,
+    step: &'static str,
     sql: &str,
     values: &[rusqlite::types::Value],
 ) -> Result<Vec<SearchHit>> {
-    let mut statement = conn.prepare(sql)?;
+    let mut statement = conn.prepare(sql).at(step)?;
     let hits = statement
         .query_map(rusqlite::params_from_iter(values), |row| {
             Ok(SearchHit {
@@ -944,8 +967,10 @@ fn read_hits(
                 created_at: row.get(4)?,
                 snippet: row.get(5)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .at(step)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .at(step)?;
     Ok(hits)
 }
 
@@ -976,7 +1001,7 @@ fn touching_rows(
     let sql = include_str!("sql/recall/touching.sql")
         .replace("__PATHS__", condition)
         .replace("__SCOPE__", &filter);
-    let mut statement = conn.prepare(&sql)?;
+    let mut statement = conn.prepare(&sql).at("recall/touching.sql")?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(values), |row| {
             Ok((
@@ -986,8 +1011,10 @@ fn touching_rows(
                 row.get::<_, String>(3)?,
                 row.get::<_, Timestamp>(4)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .at("recall/touching.sql")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .at("recall/touching.sql")?;
     let mut touches = Vec::new();
     for (thread, title, item, paths, created_at) in rows {
         for line in paths.lines() {
