@@ -153,22 +153,45 @@ mod tests {
             lock.lock().unwrap();
             let mut command = instance.command(action);
             let mut child = command
-                .stdout(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            std::thread::sleep(Duration::from_millis(250));
-            let blocked = child.try_wait().unwrap().is_none();
-            let unchanged = std::fs::read(instance.data.join("forge.pid")).ok() == first
-                && instance.listening() == first.is_some();
-            drop(lock);
-            let output = child.wait_with_output().unwrap();
-            assert!(blocked, "{action} must wait for the lifecycle owner");
+            let (said, lines) = std::sync::mpsc::channel();
+            let reader = std::io::BufReader::new(child.stderr.take().unwrap());
+            let relay = std::thread::spawn(move || {
+                for line in std::io::BufRead::lines(reader) {
+                    if said.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let deadline = std::time::Instant::now() + test_support::wait::LIVENESS;
+            loop {
+                let line = lines
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|error| {
+                        panic!("{action} never says it waits for the lifecycle owner: {error}")
+                    });
+                if line.contains("Waiting for another ae") {
+                    break;
+                }
+            }
             assert!(
-                unchanged,
+                child.try_wait().unwrap().is_none(),
+                "{action} must wait for the lifecycle owner"
+            );
+            assert_eq!(
+                std::fs::read(instance.data.join("forge.pid")).ok(),
+                first,
                 "{action} must preserve the running instance while waiting"
             );
-            assert!(output.status.success(), "{action}: {}", stderr(&output));
+            assert_eq!(instance.listening(), first.is_some());
+            drop(lock);
+            let status = child.wait().unwrap();
+            relay.join().unwrap();
+            let rest: Vec<String> = lines.try_iter().collect();
+            assert!(status.success(), "{action}: {}", rest.join("\n"));
         }
         assert!(
             !instance.listening(),

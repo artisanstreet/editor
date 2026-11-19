@@ -454,7 +454,14 @@ fn operation_lock() -> Result<std::fs::File, OperationLockError> {
         .write(true)
         .open(&path)
         .map_err(lock)?;
-    file.lock().map_err(lock)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            crate::ui::info("Waiting for another ae to finish starting or stopping Forge");
+            file.lock().map_err(lock)?;
+        }
+        Err(std::fs::TryLockError::Error(source)) => return Err(lock(source)),
+    }
     Ok(file)
 }
 
