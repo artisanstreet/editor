@@ -317,3 +317,20 @@ async fn a_stored_plan_keeps_its_steps_in_both_read_tools() {
     let text = whole["structuredContent"]["text"].as_str().unwrap();
     assert!(text.contains("step number 119\n"), "{text}");
 }
+
+#[tokio::test]
+async fn a_legacy_tool_name_refuses_a_mistyped_limit_instead_of_using_the_default() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .call(
+            0,
+            "threads_touching",
+            json!({"paths":["src/a.rs"],"limit":"5"}),
+        )
+        .await;
+    assert_eq!(response["isError"], true, "{response}");
+    let message = response["structuredContent"]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("read limit"), "{message}");
+}

@@ -348,17 +348,15 @@ pub(crate) async fn all_records(
 }
 
 fn string(args: &Value, key: &'static str) -> Result<String> {
-    Ok(args
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(CoordinationError::Missing { field: key })?
-        .to_owned())
+    field(args, key, None)
 }
 
 fn revision(args: &Value) -> Result<u64> {
-    args.get("revision")
-        .and_then(Value::as_u64)
-        .ok_or(CoordinationError::Missing { field: "revision" })
+    field(args, "revision", None)
+}
+
+fn optional<T: serde::de::DeserializeOwned>(args: &Value, name: &'static str) -> Result<Option<T>> {
+    field(args, name, Some(Value::Null))
 }
 
 async fn send(
@@ -428,14 +426,10 @@ async fn publish_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
             state: field(&args, "state", None)?,
             resources: field(&args, "resources", Some(json!([])))?,
             dependencies: field(&args, "dependencies", Some(json!([])))?,
-            summary: args
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+            summary: optional::<String>(&args, "summary")?.unwrap_or_default(),
             evidence: field(&args, "evidence", Some(json!([])))?,
         };
-        json!({"record":store.coordination_put(caller.clone(),None,content,args.get("revision").and_then(Value::as_u64)).await.map_err(forge("publish the work"))?})
+        json!({"record":store.coordination_put(caller.clone(),None,content,optional::<u64>(&args, "revision")?).await.map_err(forge("publish the work"))?})
     };
     Ok(value)
 }
@@ -443,10 +437,8 @@ async fn publish_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
 async fn get_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let thread = args
-            .get("thread")
-            .and_then(Value::as_str)
-            .map_or_else(|| caller.clone(), ThreadId::from);
+        let thread =
+            optional::<String>(&args, "thread")?.map_or_else(|| caller.clone(), ThreadId::from);
         let record = store
             .coordination_get(format!("work:{thread}"))
             .await
@@ -486,10 +478,7 @@ async fn get_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Res
 async fn claim_resources(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let seconds = args
-            .get("lifetime_seconds")
-            .and_then(Value::as_u64)
-            .unwrap_or(3600);
+        let seconds = optional::<u64>(&args, "lifetime_seconds")?.unwrap_or(3600);
         if !(1..=86400).contains(&seconds) {
             return Err(CoordinationError::Lifetime { seconds });
         }
@@ -529,9 +518,8 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
     let store = hub.store();
     let value = {
         let incoming = name == "list_coordination_messages"
-            && args
-                .get("direction")
-                .and_then(Value::as_str)
+            && optional::<String>(&args, "direction")?
+                .as_deref()
                 .unwrap_or("incoming")
                 == "incoming";
         let project = match name {
@@ -539,10 +527,8 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
             _ => awareness::project_scope(
                 hub,
                 caller,
-                args.get("scope").and_then(Value::as_str),
-                args.get("project")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                optional::<String>(&args, "scope")?.as_deref(),
+                optional::<String>(&args, "project")?,
             )
             .await
             .map_err(CoordinationError::Discovery)?,
@@ -558,23 +544,15 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
             ),
             owner: match name {
                 "list_coordination_messages" if !incoming => Some(caller.clone()),
-                _ => args
-                    .get("owner")
-                    .and_then(Value::as_str)
-                    .map(ThreadId::from),
+                _ => optional::<String>(&args, "owner")?.map(ThreadId::from),
             },
             recipient: incoming.then(|| caller.clone()),
-            cursor: args
-                .get("cursor")
-                .and_then(Value::as_str)
+            cursor: optional::<String>(&args, "cursor")?
+                .as_deref()
                 .map(serde_json::from_str)
                 .transpose()
                 .map_err(CoordinationError::Cursor)?,
-            limit: args
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(30)
-                .clamp(1, 200) as u32,
+            limit: optional::<u64>(&args, "limit")?.unwrap_or(30).clamp(1, 200) as u32,
         };
         let resources: Vec<Resource> = field(&args, "resources", Some(json!([])))?;
         let resources = resources
@@ -641,11 +619,7 @@ async fn transition(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Re
                 outcome: "cancelled by subscriber".to_owned(),
             },
             _ => {
-                let seconds = args.get("lifetime_seconds").and_then(Value::as_u64).ok_or(
-                    CoordinationError::Missing {
-                        field: "lifetime_seconds",
-                    },
-                )?;
+                let seconds: u64 = field(&args, "lifetime_seconds", None)?;
                 if !(1..=86400).contains(&seconds) {
                     return Err(CoordinationError::Lifetime { seconds });
                 }
@@ -679,9 +653,9 @@ async fn request_handoff(hub: &Hub, caller: &ThreadId, _name: &str, args: Value)
 
 async fn send_message(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let value = {
-        let record = match args.get("id").and_then(Value::as_str) {
+        let record = match optional::<String>(&args, "id")? {
             Some(id) => hub
-                .deliver_coordination_message(caller, id.to_owned())
+                .deliver_coordination_message(caller, id)
                 .await
                 .map_err(forge("deliver the coordination message"))?,
             None => {
@@ -704,7 +678,7 @@ async fn send_message(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
 
 async fn acknowledge(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let value = {
-        json!({"record":hub.acknowledge_coordination(caller,string(&args,"id")?,revision(&args)?,field(&args, "state", None)?,args.get("reply").and_then(Value::as_str).map(str::to_owned)).await.map_err(forge("acknowledge the coordination message"))?})
+        json!({"record":hub.acknowledge_coordination(caller,string(&args,"id")?,revision(&args)?,field(&args, "state", None)?,optional::<String>(&args, "reply")?).await.map_err(forge("acknowledge the coordination message"))?})
     };
     Ok(value)
 }
@@ -712,7 +686,7 @@ async fn acknowledge(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> 
 async fn watch(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        json!({"record":store.coordination_put(caller.clone(),None,Content::Watch { target:ThreadId::from(string(&args,"thread")?),state:WatchState::Pending,after_revision:args.get("after_revision").and_then(Value::as_u64).unwrap_or(0),outcome:None },None).await.map_err(forge("record the watch"))?})
+        json!({"record":store.coordination_put(caller.clone(),None,Content::Watch { target:ThreadId::from(string(&args,"thread")?),state:WatchState::Pending,after_revision:optional::<u64>(&args, "after_revision")?.unwrap_or(0),outcome:None },None).await.map_err(forge("record the watch"))?})
     };
     Ok(value)
 }
@@ -721,13 +695,8 @@ async fn wait(hub: &Hub, _caller: &ThreadId, _name: &str, args: Value) -> Result
     let store = hub.store();
     let value = {
         let target = ThreadId::from(string(&args, "thread")?);
-        let after = args
-            .get("after_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let timeout = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
+        let after = optional::<u64>(&args, "after_revision")?.unwrap_or(0);
+        let timeout = optional::<u64>(&args, "timeout_seconds")?
             .unwrap_or(20)
             .min(30);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
@@ -753,17 +722,12 @@ async fn wait(hub: &Hub, _caller: &ThreadId, _name: &str, args: Value) -> Result
 async fn events(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let after = args
-            .get("after")
-            .and_then(Value::as_u64)
-            .ok_or(CoordinationError::Missing { field: "after" })?;
+        let after: u64 = field(&args, "after", None)?;
         let project = awareness::project_scope(
             hub,
             caller,
-            args.get("scope").and_then(Value::as_str),
-            args.get("project")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            optional::<String>(&args, "scope")?.as_deref(),
+            optional::<String>(&args, "project")?,
         )
         .await
         .map_err(CoordinationError::Discovery)?;
@@ -771,8 +735,7 @@ async fn events(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Resul
             .coordination_changes(
                 after,
                 project,
-                args.get("limit")
-                    .and_then(Value::as_u64)
+                optional::<u64>(&args, "limit")?
                     .unwrap_or(100)
                     .clamp(1, 200) as u32,
             )

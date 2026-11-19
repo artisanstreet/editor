@@ -16,6 +16,12 @@ use std::collections::BTreeMap;
 pub enum AwarenessError {
     #[error("read the arguments")]
     Arguments(#[source] serde_json::Error),
+    #[error("read {field}")]
+    Argument {
+        field: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("{field} is required")]
     Missing { field: &'static str },
     #[error("{step}")]
@@ -79,6 +85,7 @@ impl AwarenessError {
             Self::Path { source, .. } | Self::Resource(source) => forge::coordination(source, self),
             Self::Records(error) => error.failure(),
             Self::Arguments(_)
+            | Self::Argument { .. }
             | Self::Missing { .. }
             | Self::CallerMissing { .. }
             | Self::Scope { .. }
@@ -102,6 +109,20 @@ fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> Awareness
         step,
         source: Box::new(source.into()),
     }
+}
+
+fn optional<T: serde::de::DeserializeOwned>(
+    args: &Value,
+    field: &'static str,
+) -> Result<Option<T>, AwarenessError> {
+    args.get(field).cloned().map_or(Ok(None), |value| {
+        serde_json::from_value::<Option<T>>(value)
+            .map_err(|source| AwarenessError::Argument { field, source })
+    })
+}
+
+fn required(args: &Value, field: &'static str) -> Result<String, AwarenessError> {
+    optional(args, field)?.ok_or(AwarenessError::Missing { field })
 }
 
 fn normalized(path: &str) -> Result<String, AwarenessError> {
@@ -616,42 +637,32 @@ async fn read_item(
     _raw_name: &str,
     arguments: Value,
 ) -> Result<Option<Value>> {
-    let id = ItemId::from(
-        arguments
-            .get("item")
-            .and_then(Value::as_str)
-            .ok_or(AwarenessError::Missing { field: "item" })?,
-    );
+    let id = ItemId::from(required(&arguments, "item")?);
     let item = hub
         .store()
         .item(&id)
         .await
         .map_err(forge("load the item"))?
         .ok_or_else(|| AwarenessError::ItemMissing { item: id.clone() })?;
-    if let Some(thread) = arguments.get("thread").and_then(Value::as_str)
+    if let Some(thread) = optional::<String>(&arguments, "thread")?
         && thread != item.thread_id.as_str()
     {
         return Err(AwarenessError::ItemElsewhere {
             item: id,
             owner: item.thread_id,
-            thread: thread.to_owned(),
+            thread,
         });
     }
-    let output = arguments
-        .get("include_output")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let output = optional(&arguments, "include_output")?.unwrap_or(false);
     let rendered = crate::transcript::render_item(hub.store(), &item, output)
         .await
         .map_err(|source| AwarenessError::Render {
             item: item.id.clone(),
             source,
         })?;
-    let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    let limit = arguments
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(16000)
+    let offset = optional(&arguments, "offset")?.unwrap_or(0);
+    let limit = optional(&arguments, "limit")?
+        .unwrap_or(16000_u64)
         .clamp(1, 64000);
     let total = rendered.len();
     let slice = rendered
@@ -740,11 +751,8 @@ async fn get_worker(
         "get_agent" => "agent",
         _ => "thread",
     };
-    let target = arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(AwarenessError::Missing { field: key })?;
-    let target = resolve_agent(hub, target).await?;
+    let target = required(&arguments, key)?;
+    let target = resolve_agent(hub, &target).await?;
     let page = hub
         .store()
         .discover_workers(discovery::Query {
@@ -811,7 +819,7 @@ async fn find_files(
     arguments: Value,
 ) -> Result<Option<Value>> {
     let mut args = arguments;
-    if let Some(path) = args.get("path").and_then(Value::as_str).map(str::to_owned) {
+    if let Some(path) = optional::<String>(&args, "path")? {
         args["paths"] = json!([path]);
     }
     let paths: Vec<String> = serde_json::from_value(
@@ -826,25 +834,18 @@ async fn find_files(
     let project = project_scope(
         hub,
         caller,
-        args.get("scope").and_then(Value::as_str),
-        args.get("project")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        optional::<String>(&args, "scope")?.as_deref(),
+        optional(&args, "project")?,
     )
     .await?;
-    let contains = args
-        .get("match_mode")
-        .and_then(Value::as_str)
+    let contains = optional::<String>(&args, "match_mode")?
+        .as_deref()
         .unwrap_or(match raw_name {
             "threads_touching" => "contains",
             _ => "exact",
         })
         == "contains";
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(30)
-        .clamp(1, 200) as u32;
+    let limit = optional(&args, "limit")?.unwrap_or(30_u64).clamp(1, 200) as u32;
     let paths = paths
         .into_iter()
         .map(|path| {
@@ -861,8 +862,8 @@ async fn find_files(
             project.clone(),
             paths,
             contains,
-            args.get("cursor")
-                .and_then(Value::as_str)
+            optional::<String>(&args, "cursor")?
+                .as_deref()
                 .map(serde_json::from_str)
                 .transpose()
                 .map_err(AwarenessError::Cursor)?,
