@@ -845,7 +845,10 @@ impl Hub {
                 ClearGoalError::refused(thread_id, ClearGoalRefusal::NoSession { engine })
             })?;
         let lease = self.engines().lease(engine);
-        let turn = run::prepare(
+        let run::Prepared {
+            turn,
+            gateway: _gateway,
+        } = run::prepare(
             self,
             thread,
             Some(session),

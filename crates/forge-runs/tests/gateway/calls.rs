@@ -69,3 +69,51 @@ async fn a_call_whose_caller_went_away_is_no_longer_offered() {
     );
     fixture.hub.shutdown();
 }
+
+type ActingDuringTheRun = (String, Option<ThreadId>);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() {
+    let hub_slot: Arc<std::sync::OnceLock<Hub>> = Arc::new(std::sync::OnceLock::new());
+    let during: Arc<Mutex<Option<ActingDuringTheRun>>> = Arc::new(Mutex::new(None));
+    let fixture = fixture(Arc::new({
+        let hub_slot = Arc::clone(&hub_slot);
+        let during = Arc::clone(&during);
+        move |turn, _io| {
+            let url = turn
+                .launch
+                .gateway_mcp
+                .first()
+                .map(|(_, url)| url.clone())
+                .expect("the run gets the gateway");
+            let token = url.rsplit('/').next().expect("a token").to_owned();
+            let acting = hub_slot
+                .get()
+                .expect("the hub is set before the run")
+                .gateway_thread(&token);
+            *during.lock().unwrap() = Some((token, acting));
+            Box::pin(async { Outcome::done() })
+        }
+    }))
+    .await;
+    fixture
+        .hub
+        .set_gateway("http://127.0.0.1:9/mcp/".to_owned(), false);
+    hub_slot.set(fixture.hub.clone()).expect("set once");
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("look around"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    let (token, acting) = during.lock().unwrap().clone().expect("the run started");
+    assert_eq!(acting, Some(fixture.thread_id.clone()));
+    assert_eq!(
+        fixture.hub.gateway_thread(&token),
+        None,
+        "a finished run's gateway address still acts for its thread"
+    );
+    fixture.hub.shutdown();
+}

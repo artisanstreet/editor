@@ -421,7 +421,10 @@ async fn summarize(
     thread.config.engine = engine;
     thread.config.model = model;
     let lease = hub.engines().lease(engine);
-    let mut turn = crate::run::prepare(
+    let crate::run::Prepared {
+        mut turn,
+        gateway: _gateway,
+    } = crate::run::prepare(
         hub,
         &thread,
         source

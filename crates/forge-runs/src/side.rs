@@ -327,7 +327,10 @@ impl Hub {
         }
         let engine = thread.config.engine;
         let lease = self.engines().lease(engine);
-        let turn = crate::run::prepare(
+        let crate::run::Prepared {
+            turn,
+            gateway: _gateway,
+        } = crate::run::prepare(
             self,
             thread,
             None,
@@ -404,7 +407,10 @@ impl Hub {
             return Ok(());
         };
         let lease = self.engines().lease(engine);
-        let turn = crate::run::prepare(
+        let crate::run::Prepared {
+            turn,
+            gateway: _gateway,
+        } = crate::run::prepare(
             self,
             thread,
             Some(session),
@@ -543,7 +549,10 @@ impl Hub {
             return Ok(None);
         };
         let lease = self.engines().lease(engine);
-        let turn = crate::run::prepare(
+        let crate::run::Prepared {
+            turn,
+            gateway: _gateway,
+        } = crate::run::prepare(
             self,
             &thread,
             Some(session),

@@ -6,7 +6,8 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
     fixture
         .hub
         .set_gateway("http://127.0.0.1:9/mcp/".to_owned(), false);
-    let servers = fixture.hub.gateway_servers(&fixture.thread_id).await;
+    let pass = fixture.hub.gateway_pass(&fixture.thread_id).await;
+    let servers = pass.servers().to_vec();
     let token = servers[0].1.rsplit('/').next().unwrap().to_owned();
     assert_eq!(
         fixture.hub.gateway_thread(&token),
@@ -28,6 +29,6 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
     }
 
     assert_eq!(fixture.hub.gateway_thread(&token), None);
-    let reissued = fixture.hub.gateway_servers(&fixture.thread_id).await;
-    assert_ne!(reissued[0].1, servers[0].1);
+    let reissued = fixture.hub.gateway_pass(&fixture.thread_id).await;
+    assert_ne!(reissued.servers()[0].1, servers[0].1);
 }

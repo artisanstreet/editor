@@ -656,7 +656,7 @@ async fn execute(
         }
         let initial_ids: Vec<_> = pending.iter().map(|item| item.id.clone()).collect();
         let initial_ack = input.id.clone();
-        let turn = prepare_on(
+        let prepared = prepare_on(
             hub,
             thread,
             run.session_id.clone(),
@@ -668,9 +668,16 @@ async fn execute(
             transport,
         )
         .await?;
-        Ok::<_, ExecuteError>((turn, initial_ids, initial_ack))
+        Ok::<_, ExecuteError>((prepared, initial_ids, initial_ack))
     };
-    let (turn, initial_ids, initial_ack) = tokio::select! {
+    let (
+        Prepared {
+            turn,
+            gateway: _gateway,
+        },
+        initial_ids,
+        initial_ack,
+    ) = tokio::select! {
         biased;
         () = cancel.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
         () = hub.inner.shutdown.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
@@ -1003,13 +1010,18 @@ async fn announce_unsandboxed(
     }
 }
 
+pub(crate) struct Prepared {
+    pub(crate) turn: Turn,
+    pub(crate) gateway: crate::gateway::GatewayPass,
+}
+
 pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
     session_id: Option<String>,
     input: UserInput,
     binary: Option<PathBuf>,
-) -> Result<Turn, PrepareError> {
+) -> Result<Prepared, PrepareError> {
     let transport = claude_transport(hub, thread.config.engine).await?;
     prepare_on(hub, thread, session_id, input, binary, transport).await
 }
@@ -1041,7 +1053,7 @@ async fn prepare_on(
     input: UserInput,
     binary: Option<PathBuf>,
     transport: Option<ClaudeTransport>,
-) -> Result<Turn, PrepareError> {
+) -> Result<Prepared, PrepareError> {
     let engine = thread.config.engine;
     let engines = hub.engines();
     let binary = binary.ok_or(PrepareError::NotInstalled { engine })?;
@@ -1080,8 +1092,9 @@ async fn prepare_on(
     launch
         .env
         .splice(0..0, engines.launch_env_for_binary(engine, &binary));
-    for (name, url) in hub.gateway_servers(&thread.id).await {
-        forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
+    let gateway = hub.gateway_pass(&thread.id).await;
+    for (name, url) in gateway.servers() {
+        forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
     launch.tool_caches = Some(hub.sandbox_tool_caches(&thread.project_id));
@@ -1117,17 +1130,20 @@ async fn prepare_on(
             config = resolution.effective;
         }
     }
-    Ok(Turn {
-        thread_id: thread.id.clone(),
-        engine,
-        binary,
-        home: engines.home(engine),
-        cwd,
-        config,
-        session_id,
-        input,
-        launch,
-        trace_dir: Some(forge_engines::trace::folder(hub.data_dir())),
+    Ok(Prepared {
+        turn: Turn {
+            thread_id: thread.id.clone(),
+            engine,
+            binary,
+            home: engines.home(engine),
+            cwd,
+            config,
+            session_id,
+            input,
+            launch,
+            trace_dir: Some(forge_engines::trace::folder(hub.data_dir())),
+        },
+        gateway,
     })
 }
 
