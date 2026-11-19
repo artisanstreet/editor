@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -80,16 +81,35 @@ pub enum InitializeError {
 #[error("the Codex app-server has ended")]
 pub struct Ended;
 
-#[derive(Debug, thiserror::Error)]
-#[error("Artisan fell more than {} MiB behind run {run}'s Codex output, so the run was detached", RUN_BACKLOG_BYTES / (1024 * 1024))]
-pub struct Overloaded {
-    run: u64,
-}
-
 #[derive(Default)]
 struct Backlog {
     bytes: AtomicUsize,
-    overloaded: AtomicBool,
+    drained: Notify,
+}
+
+impl Backlog {
+    fn full(&self) -> bool {
+        self.bytes.load(Ordering::Acquire) > RUN_BACKLOG_BYTES
+    }
+
+    fn take(&self, line: &str) {
+        let before = self.bytes.fetch_sub(line.len(), Ordering::AcqRel);
+        if before > RUN_BACKLOG_BYTES && before - line.len() <= RUN_BACKLOG_BYTES {
+            self.drained.notify_one();
+        }
+    }
+
+    async fn until_drained(&self) {
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if !self.full() {
+                return;
+            }
+            drained.await;
+        }
+    }
 }
 
 static SERVERS: LazyLock<tokio::sync::Mutex<Vec<Arc<Server>>>> =
@@ -393,17 +413,10 @@ pub(super) struct Attachment {
 }
 
 impl Attachment {
-    pub(super) async fn next_line(&mut self) -> Result<Option<String>, Overloaded> {
-        match self.lines.recv().await {
-            Some(line) => {
-                self.backlog.bytes.fetch_sub(line.len(), Ordering::AcqRel);
-                Ok(Some(line))
-            }
-            None if self.backlog.overloaded.load(Ordering::Acquire) => {
-                Err(Overloaded { run: self.run })
-            }
-            None => Ok(None),
-        }
+    pub(super) async fn next_line(&mut self) -> Option<String> {
+        let line = self.lines.recv().await?;
+        self.backlog.take(&line);
+        Some(line)
     }
 
     pub(super) fn send(&self, message: Value) -> Result<(), Ended> {
@@ -537,8 +550,10 @@ impl Actor {
         let mut sweep = tokio::time::interval(SWEEP);
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let ended = loop {
+            let behind = self.behind();
             tokio::select! {
-                line = self.process.next_line() => match line {
+                () = until_drained(behind.as_deref()), if behind.is_some() => {}
+                line = self.process.next_line(), if behind.is_none() => match line {
                     Ok(Some(line)) => {
                         self.route(line);
                         self.flush();
@@ -573,6 +588,13 @@ impl Actor {
             }
         };
         self.end(&ended).await;
+    }
+
+    fn behind(&self) -> Option<Arc<Backlog>> {
+        self.runs
+            .values()
+            .find(|attached| attached.backlog.full())
+            .map(|attached| Arc::clone(&attached.backlog))
     }
 
     fn write(&self, message: Value) {
@@ -912,48 +934,27 @@ impl Actor {
         }
     }
 
-    fn deliver_all(&mut self, line: &str) {
+    fn deliver_all(&self, line: &str) {
         let runs: Vec<u64> = self.runs.keys().copied().collect();
         for run in runs {
             self.deliver(run, line.to_owned());
         }
     }
 
-    fn deliver(&mut self, run: u64, line: String) {
+    fn deliver(&self, run: u64, line: String) {
         let Some(attached) = self.runs.get(&run) else {
             return;
         };
-        let queued = attached
-            .backlog
-            .bytes
-            .fetch_add(line.len(), Ordering::AcqRel)
-            + line.len();
-        if queued > RUN_BACKLOG_BYTES {
-            attached.backlog.overloaded.store(true, Ordering::Release);
-            tracing::warn!(
-                run,
-                queued,
-                "detaching a Codex run whose output Artisan could not keep up with"
-            );
-            self.overloaded(run);
-            return;
+        let bytes = line.len();
+        attached.backlog.bytes.fetch_add(bytes, Ordering::AcqRel);
+        if attached.lines.send(line).is_err() {
+            attached.backlog.bytes.fetch_sub(bytes, Ordering::AcqRel);
         }
-        let _run_detached = attached.lines.send(line);
     }
+}
 
-    fn overloaded(&mut self, run: u64) {
-        self.runs.remove(&run);
-        let threads: Vec<String> = self
-            .owners
-            .iter()
-            .filter(|(_, owner)| **owner == run)
-            .map(|(thread, _)| thread.clone())
-            .collect();
-        for thread in threads {
-            self.owners.remove(&thread);
-            if self.server.loaded().contains_key(&thread) {
-                self.unsubscribe(&thread);
-            }
-        }
+async fn until_drained(behind: Option<&Backlog>) {
+    if let Some(backlog) = behind {
+        backlog.until_drained().await;
     }
 }

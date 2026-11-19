@@ -70,6 +70,10 @@ impl Fixture {
     fn input(&self) -> String {
         read(&self.root.join("input"))
     }
+
+    fn flooded_mib(&self) -> usize {
+        read(&self.root.join("spawns-flooded")).parse().unwrap_or(0)
+    }
 }
 
 fn read(path: &Path) -> String {
@@ -258,17 +262,17 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
     let (_, events) = run(fixture.turn("hello", None)).await;
     let thread = session(&events);
     let other = tokio::spawn(run(fixture.turn("slow", None)));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !fixture
-            .input()
-            .lines()
-            .any(|line| line.contains("\"text\":\"slow\""))
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the other turn starts before retiring its server");
+    test_support::wait::eventually(
+        "the other turn to start before its server retires",
+        std::time::Duration::from_secs(5),
+        || async {
+            fixture
+                .input()
+                .lines()
+                .any(|line| line.contains("\"text\":\"slow\""))
+        },
+    )
+    .await;
     let config = fixture.root.join("home/.codex/config.toml");
     std::fs::write(&config, "# changed launch\n").unwrap();
     let (outcome, events) = run(fixture.turn("again", Some(&thread))).await;

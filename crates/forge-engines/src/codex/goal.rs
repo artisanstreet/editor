@@ -18,12 +18,6 @@ pub enum CallError {
     },
     #[error("Codex exited while waiting for {method}: {ended}")]
     Exited { method: String, ended: String },
-    #[error("read Codex output while waiting for {method}")]
-    Overloaded {
-        method: String,
-        #[source]
-        source: server::Overloaded,
-    },
     #[error("decode Codex output while waiting for {method}")]
     Decode {
         method: String,
@@ -95,14 +89,7 @@ pub(super) async fn call(
         json!({ "id": id, "method": method, "params": params }),
     )?;
     loop {
-        let line = conn
-            .next_line()
-            .await
-            .map_err(|source| CallError::Overloaded {
-                method: method.to_owned(),
-                source,
-            })?;
-        let Some(line) = line else {
+        let Some(line) = conn.next_line().await else {
             return Err(CallError::Exited {
                 method: method.to_owned(),
                 ended: conn.ended(),

@@ -45,8 +45,6 @@ pub enum SideQueryError {
     Interrupted { fork: String },
     #[error("Codex exited during the side query: {ended}")]
     Exited { ended: String },
-    #[error("read Codex output during the side query")]
-    Overloaded(#[source] server::Overloaded),
     #[error("decode Codex output during the side query")]
     Decode(#[source] serde_json::Error),
 }
@@ -66,7 +64,6 @@ impl SideQueryError {
             | Self::Failed { .. }
             | Self::Interrupted { .. }
             | Self::Exited { .. }
-            | Self::Overloaded(_)
             | Self::Decode(_) => false,
         }
     }
@@ -304,12 +301,7 @@ impl Fork<'_> {
     }
 
     async fn next(&mut self) -> Result<Frame, SideQueryError> {
-        let line = self
-            .conn
-            .next_line()
-            .await
-            .map_err(SideQueryError::Overloaded)?;
-        let Some(line) = line else {
+        let Some(line) = self.conn.next_line().await else {
             return Err(SideQueryError::Exited {
                 ended: self.conn.ended(),
             });

@@ -36,13 +36,12 @@ async fn run_steering(turn: Turn, steers: &[&str]) -> (crate::Outcome, Vec<Engin
 }
 
 async fn until_codex_read(fixture: &Fixture, needle: &str) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !fixture.input().contains(needle) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_elapsed| panic!("Codex reads {needle}"));
+    test_support::wait::eventually(
+        &format!("Codex to read {needle}"),
+        Duration::from_secs(5),
+        || async { fixture.input().contains(needle) },
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -136,47 +135,43 @@ async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
 }
 
 #[tokio::test]
-async fn a_run_that_falls_too_far_behind_codex_is_detached_while_others_carry_on() {
+async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply() {
     let fixture = Fixture::new();
-    let mut flooded = crate::codex::server::attach(&fixture.turn("flood", None))
-        .await
-        .unwrap();
-    flooded
-        .send(serde_json::json!({ "id": 1, "method": "thread/start", "params": {} }))
-        .unwrap();
-    let thread = loop {
-        let line = flooded.next_line().await.unwrap().expect("Codex answers");
-        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
-        if frame["id"] == 1 {
-            break frame["result"]["thread"]["id"].as_str().unwrap().to_owned();
+    let (_inputs, inbox) = mpsc::channel(8);
+    let (events, mut received) = mpsc::channel(1);
+    let harness = tokio::spawn(crate::codex::CodexHarness.run(
+        fixture.turn("flood", None),
+        RunIo {
+            inbox,
+            events,
+            cancel: CancellationToken::new(),
+        },
+    ));
+    let mut streamed = loop {
+        let event = received.recv().await.expect("the turn streams its reply");
+        if let EngineEvent::Live { text, .. } = &event {
+            break text.len();
         }
     };
-    flooded
-        .send(serde_json::json!({
-            "id": 2,
-            "method": "turn/start",
-            "params": { "threadId": thread, "input": [{ "type": "text", "text": "flood" }] },
-        }))
-        .unwrap();
-    until_codex_read(&fixture, "\"text\":\"flood\"").await;
-    let (outcome, _) = run(fixture.turn("hello", None)).await;
+    let taken_before_the_reader_blocked = 3;
+    let unread_limit = 32;
+    test_support::wait::eventually(
+        "Codex to write 32 MiB that nobody has read",
+        Duration::from_secs(20),
+        || async { fixture.flooded_mib() >= taken_before_the_reader_blocked + unread_limit },
+    )
+    .await;
+
+    while let Some(event) = received.recv().await {
+        if let EngineEvent::Live { text, .. } = &event {
+            streamed += text.len();
+        }
+    }
+    let outcome = harness.await.unwrap();
     assert_eq!(
         outcome.status(),
         artisan_api::RunStatus::Done,
         "{outcome:?}"
     );
-    let ended = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            match flooded.next_line().await {
-                Ok(Some(_)) => {}
-                other => break other,
-            }
-        }
-    })
-    .await
-    .expect("the run that stopped reading is detached instead of buffering forever");
-    assert!(
-        matches!(ended, Err(crate::codex::Overloaded { .. })),
-        "{ended:?}"
-    );
+    assert_eq!(streamed, 48 * 1024 * 1024, "every delta reaches the run");
 }

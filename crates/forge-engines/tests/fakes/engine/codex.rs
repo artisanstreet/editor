@@ -210,11 +210,15 @@ impl AppServer {
             "jam" => std::thread::sleep(Duration::from_secs(30)),
             "flood" => {
                 let delta = "x".repeat(1024 * 1024);
-                for _ in 0..48 {
+                let mut flooded = OsString::from(self.config.spawns.as_os_str());
+                flooded.push("-flooded");
+                for written in 1..=48 {
                     emit_json(&json!({
                         "method": "item/agentMessage/delta",
                         "params": { "threadId": thread, "turnId": turn, "itemId": format!("msg-{turn}"), "delta": delta },
                     }));
+                    std::fs::write(&flooded, written.to_string())
+                        .expect("the fake records how much it wrote");
                 }
                 completed(&thread, &turn, "completed");
             }
