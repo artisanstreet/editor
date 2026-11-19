@@ -13,6 +13,5 @@ pub fn pop_sign(secret: &[u8; 32], nonce: &[u8; 32], jti: &str) -> [u8; 64] {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/pop/unit.rs"]
 mod tests;

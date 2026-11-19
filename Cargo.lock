@@ -549,6 +549,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "tracing",
  "x25519-dalek",
  "zeroize",
 ]

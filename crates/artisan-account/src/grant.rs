@@ -8,7 +8,7 @@ pub const AUD_RELAY: &str = "ast-relay";
 const SKEW_S: i64 = 60;
 
 #[must_use]
-pub fn is_valid_id(value: &str) -> bool {
+pub(crate) fn is_valid_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 128 {
         return false;
@@ -179,7 +179,7 @@ pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
     Ok(key)
 }
 
-pub fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
+pub(crate) fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
     if claims.v != crate::PROTOCOL_VERSION {
         return Err(GrantError::of(GrantErrorKind::Version));
     }
@@ -305,7 +305,7 @@ pub enum UnverifiedGrantError {
     NoKid,
 }
 
-pub fn unverified_part<T: serde::de::DeserializeOwned>(
+pub(crate) fn unverified_part<T: serde::de::DeserializeOwned>(
     compact: &str,
     index: usize,
 ) -> Result<T, UnverifiedGrantError> {
@@ -339,17 +339,9 @@ pub fn unverified_kid(compact: &str) -> Result<String, UnverifiedGrantError> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::too_many_lines,
-    reason = "test fixtures; failures fail the test"
-)]
 #[path = "../tests/grant/unit.rs"]
 mod tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/grant/core_fixture.rs"]
 mod core_fixture_tests;

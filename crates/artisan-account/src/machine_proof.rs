@@ -1,9 +1,9 @@
 use base64::Engine as _;
 use sha2::Digest as _;
 
-pub const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
+pub(crate) const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
 
-pub const MIN_NONCE_BYTES: usize = 12;
+pub(crate) const MIN_NONCE_BYTES: usize = 12;
 
 #[cfg(test)]
 pub(crate) const EMPTY_BODY_HASH: &str =
@@ -28,6 +28,7 @@ pub fn canonical_request(
     )
 }
 
+#[derive(Debug)]
 pub struct MachineProof<'a> {
     pub public: &'a [u8; 32],
     pub body: &'a [u8],
@@ -98,6 +99,5 @@ pub fn verify_machine_proof(proof: &MachineProof<'_>) -> Result<(), MachineProof
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/machine_proof/unit.rs"]
 mod tests;

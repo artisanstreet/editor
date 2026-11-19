@@ -153,8 +153,23 @@ fn bind_verify(ed_public: &[u8; 32], role: u8, handshake_hash: &[u8], signature:
 }
 
 pub struct InitiatorConfirm {
-    pub jwt: Vec<u8>,
+    jwt: Vec<u8>,
     signature: [u8; 64],
+}
+
+impl InitiatorConfirm {
+    #[must_use]
+    pub fn jwt(&self) -> &[u8] {
+        &self.jwt
+    }
+}
+
+impl std::fmt::Debug for InitiatorConfirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InitiatorConfirm")
+            .field("jwt_bytes", &self.jwt.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +224,15 @@ pub struct NoiseChannel {
     state: State,
     channel: String,
     expected_peer_static: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for NoiseChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoiseChannel")
+            .field("channel", &self.channel)
+            .field("phase", &self.phase())
+            .finish_non_exhaustive()
+    }
 }
 
 impl NoiseChannel {
@@ -530,10 +554,5 @@ impl NoiseChannel {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::too_many_lines,
-    reason = "test fixtures; failures fail the test"
-)]
 #[path = "../tests/account/noise.rs"]
 mod tests;

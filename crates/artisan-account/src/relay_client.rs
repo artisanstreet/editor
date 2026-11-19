@@ -190,14 +190,14 @@ pub enum SocketError {
     PeerClosed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RelayDialContext {
     pub relay_base_url: String,
     pub core: CoreSessionClient,
     pub session: SessionToken,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RelayClient {
     route: Arc<Route>,
     unary: Arc<tokio::sync::Mutex<Option<Conn>>>,
@@ -390,6 +390,7 @@ enum Liveness {
     Ended,
 }
 
+#[derive(Debug)]
 pub struct RelayEventStream {
     conn: Conn,
     stream_id: String,
@@ -470,6 +471,7 @@ impl RelayEventStream {
     }
 }
 
+#[derive(Debug)]
 struct Route {
     relay_base: String,
     account: String,
@@ -547,8 +549,8 @@ impl Route {
         };
         let mut conn = Conn {
             socket,
-            noise: NoiseChannel::initiator(&random()?, None, ctx).map_err(OpenFailure::Noise)?,
             channel,
+            noise: NoiseChannel::initiator(&random()?, None, ctx).map_err(OpenFailure::Noise)?,
             send_seq: 0,
             recv_seq: 0,
             pending: VecDeque::new(),
@@ -606,6 +608,7 @@ async fn admit(
     }
 }
 
+#[derive(Debug)]
 struct Conn {
     socket: Socket,
     channel: String,
@@ -763,6 +766,7 @@ impl Conn {
 type WsConnection =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+#[derive(Debug)]
 struct Socket {
     out: mpsc::UnboundedSender<String>,
     frames: mpsc::UnboundedReceiver<Result<ServerFrame, SocketError>>,
@@ -973,10 +977,5 @@ fn random<const N: usize>() -> Result<[u8; N], OpenFailure> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test setup; failures fail the test"
-)]
 #[path = "../tests/account/relay_client.rs"]
 mod tests;

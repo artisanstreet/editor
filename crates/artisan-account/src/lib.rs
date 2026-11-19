@@ -1,19 +1,3 @@
-#![expect(
-    clippy::inconsistent_struct_constructor,
-    clippy::partial_pub_fields,
-    clippy::renamed_function_params,
-    clippy::unused_result_ok,
-    let_underscore_drop,
-    missing_debug_implementations,
-    unreachable_pub,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::allow_attributes,
-    clippy::assertions_on_result_states,
-    unused_qualifications,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
 pub mod browser;
 mod enrollment;
 mod frames;

@@ -335,7 +335,7 @@ async fn a_heartbeating_event_stream_that_falls_silent_ends_instead_of_hanging()
         .enumerate()
         {
             let sealed = forge.seal(&serde_json::to_vec(&event).unwrap()).unwrap();
-            let frame = ServerFrame::Data(crate::frames::DataFrame {
+            let frame = ServerFrame::Data(DataFrame {
                 v: 1,
                 channel: channel.to_owned(),
                 seq: u64::try_from(seq).unwrap(),

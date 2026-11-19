@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MagicRequest {
+pub(crate) struct MagicRequest {
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "displayName")]
@@ -22,7 +22,7 @@ pub struct MagicRequestResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MagicStatusRequest {
+pub(crate) struct MagicStatusRequest {
     #[serde(rename = "requestId")]
     pub request_id: String,
     #[serde(rename = "requestSecret")]
@@ -40,7 +40,7 @@ pub struct MagicStatusResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MagicFinalizeRequest {
+pub(crate) struct MagicFinalizeRequest {
     #[serde(rename = "requestId")]
     pub request_id: String,
     #[serde(rename = "requestSecret")]
@@ -55,14 +55,14 @@ pub struct MagicFinalizeRequest {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DesktopRedeemRequest {
+pub(crate) struct DesktopRedeemRequest {
     pub code: String,
     pub verifier: String,
 }
 
 impl std::fmt::Debug for DesktopRedeemRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("DesktopRedeemRequest(redacted)")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DesktopRedeemRequest(redacted)")
     }
 }
 
@@ -75,6 +75,5 @@ pub struct MagicFinalizeResponse {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/signin/unit.rs"]
 mod tests;

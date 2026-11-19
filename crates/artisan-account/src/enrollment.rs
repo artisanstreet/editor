@@ -17,9 +17,8 @@ pub struct MachineKeypair {
 }
 
 impl std::fmt::Debug for MachineKeypair {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MachineKeypair")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineKeypair")
             .field("secret", &"redacted")
             .field("public", &self.public_b64u())
             .finish()

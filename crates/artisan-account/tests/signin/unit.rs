@@ -26,7 +26,8 @@ fn status_and_finalize_reads_tolerate_future_fields() {
 #[test]
 fn secret_is_required_to_finalize() {
     let raw = serde_json::json!({"requestId": "logreq_1"});
-    assert!(serde_json::from_value::<MagicFinalizeRequest>(raw).is_err());
+    serde_json::from_value::<MagicFinalizeRequest>(raw)
+        .expect_err("a finalize request without its secret is refused");
 }
 
 #[test]

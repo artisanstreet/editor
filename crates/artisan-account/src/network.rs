@@ -21,8 +21,8 @@ impl SessionToken {
 }
 
 impl std::fmt::Debug for SessionToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SessionToken(redacted)")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionToken(redacted)")
     }
 }
 
@@ -166,8 +166,8 @@ pub struct GrantToken {
 }
 
 impl std::fmt::Debug for GrantToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GrantToken(redacted)")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GrantToken(redacted)")
     }
 }
 
@@ -370,26 +370,24 @@ impl CoreSessionClient {
     }
 
     pub async fn revoke_current(&self, session: &SessionToken) -> Result<(), NetworkError> {
-        let _: serde_json::Value = self
-            .post(
-                "/v1/sessions/current/revoke",
-                &serde_json::json!({}),
-                Some(session),
-                "sign out",
-            )
-            .await?;
+        self.post::<_, serde::de::IgnoredAny>(
+            "/v1/sessions/current/revoke",
+            &serde_json::json!({}),
+            Some(session),
+            "sign out",
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn revoke_all_sessions(&self, session: &SessionToken) -> Result<(), NetworkError> {
-        let _: serde_json::Value = self
-            .post(
-                "/v1/sessions/revoke-all",
-                &serde_json::json!({}),
-                Some(session),
-                "sign out everywhere",
-            )
-            .await?;
+        self.post::<_, serde::de::IgnoredAny>(
+            "/v1/sessions/revoke-all",
+            &serde_json::json!({}),
+            Some(session),
+            "sign out everywhere",
+        )
+        .await?;
         Ok(())
     }
 
@@ -414,14 +412,13 @@ impl CoreSessionClient {
         session: &SessionToken,
         machine_id: &str,
     ) -> Result<(), NetworkError> {
-        let _: serde_json::Value = self
-            .post(
-                &format!("/v1/machines/{machine_id}/revoke"),
-                &serde_json::json!({}),
-                Some(session),
-                "remove the Forge",
-            )
-            .await?;
+        self.post::<_, serde::de::IgnoredAny>(
+            &format!("/v1/machines/{machine_id}/revoke"),
+            &serde_json::json!({}),
+            Some(session),
+            "remove the Forge",
+        )
+        .await?;
         Ok(())
     }
 

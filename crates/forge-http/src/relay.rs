@@ -792,7 +792,7 @@ async fn handle_channel_bytes(
     match &channel.grant {
         Grant::Awaiting => {
             let confirm = channel.noise.receive_initiator_confirm(raw)?;
-            let jwt = String::from_utf8(confirm.jwt.clone()).map_err(|source| {
+            let jwt = String::from_utf8(confirm.jwt().to_vec()).map_err(|source| {
                 ChannelError::GrantText {
                     channel: channel_name(),
                     source: source.utf8_error(),

@@ -12,10 +12,10 @@ fn core_issued_grant_verifies_byte_exact() {
     let token = fixture["grant"].as_str().unwrap();
     let jwks_key = fixture["jwks"]["keys"][0].clone();
     let fixture_kid = jwks_key["kid"].as_str().unwrap().to_owned();
-    assert_eq!(crate::grant::unverified_kid(token).unwrap(), fixture_kid);
+    assert_eq!(unverified_kid(token).unwrap(), fixture_kid);
     let issuer = {
         use base64::Engine as _;
-        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        let raw = URL_SAFE_NO_PAD
             .decode(jwks_key["x"].as_str().unwrap().as_bytes())
             .unwrap();
         <[u8; 32]>::try_from(raw).unwrap()
@@ -23,9 +23,7 @@ fn core_issued_grant_verifies_byte_exact() {
     let payload_bytes = {
         use base64::Engine as _;
         let part = token.split('.').nth(1).unwrap();
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(part.as_bytes())
-            .unwrap()
+        URL_SAFE_NO_PAD.decode(part.as_bytes()).unwrap()
     };
     let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
     let fixture_iat = payload["iat"].as_i64().unwrap();
@@ -52,7 +50,7 @@ fn core_issued_grant_verifies_byte_exact() {
     assert_eq!(claims.rev, None);
     let cnf = cnf_public_key(&claims).unwrap();
     assert_eq!(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cnf),
+        URL_SAFE_NO_PAD.encode(cnf),
         expected["cnf"]["jwk"]["jwk"]["x"].as_str().unwrap()
     );
 }
@@ -70,14 +68,10 @@ fn fixture_machine_proof_verifies_with_the_enrolled_key() {
     );
     let token = fixture["grant"].as_str().unwrap();
     let payload = token.split('.').nth(1).unwrap();
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.as_bytes())
-        .unwrap();
+    let payload = URL_SAFE_NO_PAD.decode(payload.as_bytes()).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
     let cnf_x = payload["cnf"]["jwk"]["x"].as_str().unwrap();
-    let public = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cnf_x.as_bytes())
-        .unwrap();
+    let public = URL_SAFE_NO_PAD.decode(cnf_x.as_bytes()).unwrap();
     let public = <[u8; 32]>::try_from(public).unwrap();
     let request = crate::machine_proof::MachineProof {
         public: &public,

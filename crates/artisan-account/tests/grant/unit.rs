@@ -44,7 +44,7 @@ fn params() -> VerifyParams {
 fn compact(claims: &GrantClaims, key: &ed25519_dalek::SigningKey) -> String {
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
-    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    let header = URL_SAFE_NO_PAD
         .encode(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1", "typ": "JWT"}).to_string());
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(claims).unwrap());
     let input = format!("{header}.{payload}");
@@ -81,7 +81,8 @@ fn tampered_payload_fails_the_signature() {
 fn strict_reads_reject_unknown_top_level_claims() {
     let mut value = serde_json::to_value(claims()).unwrap();
     value["unknown_future"] = serde_json::json!("nope");
-    assert!(serde_json::from_value::<GrantClaims>(value).is_err());
+    serde_json::from_value::<GrantClaims>(value)
+        .expect_err("an unknown top-level claim is refused");
 }
 
 #[test]
@@ -132,10 +133,9 @@ fn legacy_relay_scopes_do_not_parse() {
     ] {
         let mut value = serde_json::to_value(claims()).unwrap();
         value["scope"] = serde_json::json!([legacy]);
-        assert!(
-            serde_json::from_value::<GrantClaims>(value).is_err(),
-            "{legacy} must not parse"
-        );
+        let Err(_) = serde_json::from_value::<GrantClaims>(value) else {
+            panic!("{legacy} must not parse");
+        };
     }
 }
 
@@ -165,7 +165,7 @@ fn kid_selects_the_verifying_key() {
     let key = signing_key();
     let token = compact(&claims(), &key);
     assert_eq!(unverified_kid(&token).unwrap(), "test-key-1");
-    assert!(unverified_kid("bad.token").is_err());
+    unverified_kid("bad.token").expect_err("a token without a readable header has no kid");
 }
 
 #[test]

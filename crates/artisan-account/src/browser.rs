@@ -102,9 +102,8 @@ pub struct Handoff {
 }
 
 impl std::fmt::Debug for Handoff {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Handoff")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handoff")
             .field("verifier", &"redacted")
             .field("challenge", &self.challenge)
             .field("state", &self.state)
@@ -215,7 +214,12 @@ pub async fn receive(
         let arrival = match read_get_target(&mut stream).await {
             Ok(target) => arrival(&target, state),
             Err(RequestError::NotGet) => Arrival::Unrelated,
-            Err(RequestError::Read(_) | RequestError::TooLarge { .. } | RequestError::TimedOut) => {
+            Err(
+                error @ (RequestError::Read(_)
+                | RequestError::TooLarge { .. }
+                | RequestError::TimedOut),
+            ) => {
+                tracing::debug!(%error, "skipped an unreadable sign-in callback connection");
                 continue;
             }
         };
@@ -229,12 +233,18 @@ pub async fn receive(
                 done_location(auth_origin, &arrival)
             ),
         };
-        stream.write_all(response.as_bytes()).await.ok();
-        stream.shutdown().await.ok();
+        if let Err(error) = answer(&mut stream, &response).await {
+            tracing::warn!(%error, "the browser did not receive the sign-in callback page");
+        }
         if !matches!(arrival, Arrival::Unrelated) {
             return Ok(arrival);
         }
     }
+}
+
+async fn answer(stream: &mut tokio::net::TcpStream, response: &str) -> io::Result<()> {
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
 }
 
 #[derive(Debug, thiserror::Error)]

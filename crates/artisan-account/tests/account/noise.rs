@@ -52,7 +52,7 @@ fn open_pair() -> (NoiseChannel, NoiseChannel) {
     let (mut init, mut resp) = shaken();
     let c1 = init.emit_initiator_confirm(&CNF_INIT, GRANT_JWT).unwrap();
     let parsed = resp.receive_initiator_confirm(&c1).unwrap();
-    assert_eq!(parsed.jwt, GRANT_JWT, "grant travels in the confirm");
+    assert_eq!(parsed.jwt(), GRANT_JWT, "grant travels in the confirm");
     resp.accept_initiator_confirm(&cnf_public(&CNF_INIT), &parsed)
         .unwrap();
     let c2 = resp.emit_responder_confirm(&CNF_RESP).unwrap();
@@ -163,6 +163,10 @@ fn binding_signatures_separate_roles_and_transcripts() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one byte-exact vector replay, handshake to data, read top to bottom"
+)]
 fn relay_vectors_reproduce_byte_exact() {
     let path = std::env::var("NOISE_FIXTURE_PATH").map_or_else(
         |_unset| {
@@ -253,7 +257,7 @@ fn relay_vectors_reproduce_byte_exact() {
         now_sec: 2_000_000_000,
     };
     let claims = crate::grant::parse_and_verify_jwt(
-        std::str::from_utf8(&parsed.jwt).unwrap(),
+        std::str::from_utf8(parsed.jwt()).unwrap(),
         &issuer,
         &params,
     )
