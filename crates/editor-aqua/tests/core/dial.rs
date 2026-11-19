@@ -1,5 +1,5 @@
 use editor_aqua::core::{Core, EditorFiles, HostConfig, HostId, HostKind, Services};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 const ACCOUNT: &str = "acct_dial";
@@ -83,7 +83,11 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
 }
 
 #[cfg(unix)]
-async fn pair_server() -> (String, String, Arc<std::sync::atomic::AtomicUsize>) {
+async fn pair_server() -> (
+    String,
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
     use artisan_api::tls::Identity;
     use base64::Engine as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -110,9 +114,9 @@ async fn pair_server() -> (String, String, Arc<std::sync::atomic::AtomicUsize>) 
                 .expect("the test identity encodes its key"),
         )
         .expect("the test TLS config accepts the identity");
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    let pairings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = Arc::clone(&pairings);
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let pairings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&pairings);
     tokio::spawn(async move {
         loop {
             let (socket, _) = listener
