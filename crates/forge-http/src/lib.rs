@@ -99,7 +99,7 @@ pub enum StartError {
         source: std::io::Error,
     },
     #[error(transparent)]
-    Lock(#[from] LockDataDirError),
+    Lock(#[from] LockDataError),
     #[error("open the generation lock {}", path.display())]
     OpenGenerationLock {
         path: PathBuf,
@@ -178,7 +178,7 @@ pub struct Server {
     shutdown: CancellationToken,
     drain: CancellationToken,
     tasks: TaskTracker,
-    _lock: std::fs::File,
+    _lock: HeldLock,
 }
 
 pub async fn start(config: ServeConfig) -> Result<Server, StartError> {
@@ -242,17 +242,18 @@ async fn start_mode(
         path: config.data_dir.clone(),
         source,
     })?;
-    let lock = if registry.is_some() {
-        lock_generation_dir(&config.data_dir)?
+    let (lock, store) = if registry.is_some() {
+        let lock = lock_generation_dir(&config.data_dir)?;
+        (
+            HeldLock::Generation { _shared: lock },
+            Store::join_in(&config.data_dir, environment),
+        )
     } else {
-        lock_data_dir(&config.data_dir)?
+        let lock = lock_data_dir(&config.data_dir)?;
+        let store = Store::open_restoring_in(&config.data_dir, &lock, environment);
+        (HeldLock::Data { _exclusive: lock }, store)
     };
-    let store = if registry.is_some() {
-        Store::join_in(&config.data_dir, environment)
-    } else {
-        Store::open_restoring_in(&config.data_dir, &lock, environment)
-    }
-    .map_err(|source| StartError::Store {
+    let store = store.map_err(|source| StartError::Store {
         dir: config.data_dir.clone(),
         source: Box::new(source),
     })?;
@@ -734,37 +735,16 @@ fn new_code(now: Timestamp) -> Result<(String, Timestamp), InviteError> {
     Ok((code, now + PAIR_CODE_LIFETIME_MS))
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum LockDataDirError {
-    #[error("open the data folder lock {}", path.display())]
-    Open {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("another Forge is using {}", dir.display())]
-    Locked {
-        dir: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+pub use forge_store::{DataLock, LockDataError};
+
+#[derive(Debug)]
+enum HeldLock {
+    Generation { _shared: std::fs::File },
+    Data { _exclusive: DataLock },
 }
 
-pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File, LockDataDirError> {
-    use fs2::FileExt;
-    let path = dir.join("forge.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(|source| LockDataDirError::Open { path, source })?;
-    file.try_lock_exclusive()
-        .map_err(|source| LockDataDirError::Locked {
-            dir: dir.to_owned(),
-            source,
-        })?;
-    Ok(file)
+pub fn lock_data_dir(dir: &Path) -> Result<DataLock, LockDataError> {
+    DataLock::acquire(dir)
 }
 
 fn lock_generation_dir(dir: &Path) -> Result<std::fs::File, StartError> {

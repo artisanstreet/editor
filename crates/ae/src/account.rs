@@ -327,7 +327,7 @@ pub(crate) enum SyncError {
     #[error("restart Forge to sync the account config")]
     Restart(#[source] RestartError),
     #[error(transparent)]
-    Lock(#[from] forge_http::LockDataDirError),
+    Lock(#[from] forge_http::LockDataError),
     #[error("open the Forge store in {}", data.display())]
     Store {
         data: PathBuf,

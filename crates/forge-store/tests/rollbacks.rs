@@ -102,7 +102,7 @@ async fn ae_and_other_openers_refuse_a_newer_database_and_leave_it_alone() {
 async fn forge_rolls_back_a_newer_database_and_reports_it_until_dismissed() {
     let dir = tempfile::tempdir().expect("create the data folder");
     upgraded_by_a_newer_forge(dir.path()).await;
-    let lock = std::fs::File::create(dir.path().join("forge.lock")).expect("hold the data lock");
+    let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
 
     let store = Store::open_restoring(dir.path(), &lock).expect("Forge rolls back");
     assert_eq!(titles(&store).await, ["Before the upgrade"]);

@@ -145,6 +145,12 @@ pub(crate) enum StopError {
     TimedOut { pid: u32 },
     #[error("clear what the stopped Forge left")]
     Clear(#[source] RemoveError),
+    #[error("check whether Forge (pid {pid}) let go of its data folder")]
+    Release {
+        pid: u32,
+        #[source]
+        source: forge_http::LockDataError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -552,11 +558,11 @@ fn stop_process(pid: u32, data: &Path) -> Result<(), StopError> {
         sys::run("kill", &["-TERM", &pid.to_string()])
             .map_err(|source| StopError::Signal { pid, source })?;
     }
-    let stopped = wait_stopped(pid, data, STOP_DEADLINE);
+    let stopped = wait_stopped(pid, data, STOP_DEADLINE)?;
     if !stopped && cfg!(windows) {
         sys::run("taskkill.exe", &["/PID", &pid.to_string(), "/T", "/F"])
             .map_err(|source| StopError::Force { pid, source })?;
-        if !wait_stopped(pid, data, FORCE_DEADLINE) {
+        if !wait_stopped(pid, data, FORCE_DEADLINE)? {
             return Err(StopError::Survived { pid });
         }
     } else if !stopped {
@@ -566,14 +572,25 @@ fn stop_process(pid: u32, data: &Path) -> Result<(), StopError> {
     sys::remove(&data.join(STOP_FILE)).map_err(StopError::Clear)
 }
 
-fn wait_stopped(pid: u32, data: &Path, deadline: Duration) -> bool {
+fn data_released(pid: u32, data: &Path) -> Result<bool, StopError> {
+    match forge_http::lock_data_dir(data) {
+        Ok(_released) => Ok(true),
+        Err(forge_http::LockDataError::Held { .. }) => Ok(false),
+        Err(
+            source @ (forge_http::LockDataError::Open { .. }
+            | forge_http::LockDataError::Lock { .. }),
+        ) => Err(StopError::Release { pid, source }),
+    }
+}
+
+fn wait_stopped(pid: u32, data: &Path, deadline: Duration) -> Result<bool, StopError> {
     let started = Instant::now();
     loop {
-        if !process_exists(pid) && forge_http::lock_data_dir(data).is_ok() {
-            return true;
+        if !process_exists(pid) && data_released(pid, data)? {
+            return Ok(true);
         }
         if started.elapsed() >= deadline {
-            return false;
+            return Ok(false);
         }
         std::thread::sleep(POLL);
     }

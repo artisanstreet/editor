@@ -414,7 +414,7 @@ async fn text_a_message_no_longer_uses_is_collected_a_day_later_on_forges_clock(
     let dir = tempfile::tempdir().unwrap();
     let now = Arc::new(AtomicI64::new(artisan_api::now()));
     let reading = Arc::clone(&now);
-    let lock = std::fs::File::create(dir.path().join("forge.lock")).unwrap();
+    let lock = forge_store::DataLock::acquire(dir.path()).unwrap();
     let store = Store::open_restoring_in(
         dir.path(),
         &lock,

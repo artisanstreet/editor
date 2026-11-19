@@ -294,7 +294,7 @@ pub enum BindingError {
     #[error("retire the unused registry entries")]
     Retire(#[source] RegistryFileError),
     #[error(transparent)]
-    DataLock(#[from] crate::LockDataDirError),
+    DataLock(#[from] crate::LockDataError),
     #[error("migrate the store in {}", dir.display())]
     Store {
         dir: PathBuf,

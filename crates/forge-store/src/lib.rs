@@ -3,6 +3,7 @@ mod blobs;
 mod collection;
 mod content;
 pub mod coordination;
+mod data_lock;
 pub mod discovery;
 mod encoded;
 mod environment;
@@ -49,6 +50,7 @@ pub use collection::{AnswerRefused, MAX_COLLECTION_BYTES};
 pub use content::{
     ContentError, Damage, MAX_FIELD_BYTES, MAX_FIELD_ENTRIES, MAX_ITEM_BYTES, MAX_SOURCE_BYTES,
 };
+pub use data_lock::{DataLock, LockDataError};
 pub use environment::{Connections, Environment};
 pub use error::StorageError;
 pub use feed::Subscription;
@@ -600,15 +602,16 @@ impl Store {
         )
     }
 
-    pub fn open_restoring(dir: &Path, data_lock: &std::fs::File) -> Result<Self, OpenStoreError> {
+    pub fn open_restoring(dir: &Path, data_lock: &DataLock) -> Result<Self, OpenStoreError> {
         Self::open_restoring_in(dir, data_lock, Environment::system())
     }
 
     pub fn open_restoring_in(
         dir: &Path,
-        _data_lock: &std::fs::File,
+        data_lock: &DataLock,
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
+        data_lock.guards(dir);
         let (database, blob_dir) = Self::prepare(dir)?;
         let rolled_back = match schema::roll_back(&database).map_err(|source| {
             OpenStoreError::RollBack {
