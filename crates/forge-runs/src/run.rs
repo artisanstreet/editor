@@ -91,6 +91,24 @@ enum Cleanup {
 }
 
 impl Ending {
+    fn unconfirmed(self) -> Self {
+        match self {
+            Self::Stopped(Cleanup::Confirmed | Cleanup::Unconfirmed) => {
+                Self::Stopped(Cleanup::Unconfirmed)
+            }
+            Self::Stopped(Cleanup::Failed(error)) => {
+                Self::Stopped(Cleanup::Failed(format!("{error}\n\n{STOP_UNCONFIRMED}")))
+            }
+            Self::Finished(Outcome::Failed(mut failure)) => {
+                failure.message = format!("{}\n\n{STOP_UNCONFIRMED}", failure.message);
+                Self::Finished(Outcome::Failed(failure))
+            }
+            Self::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused) => {
+                Self::Finished(Outcome::failed(STOP_UNCONFIRMED))
+            }
+        }
+    }
+
     fn failed_cleanup(self, error: String) -> Self {
         match self {
             Self::Stopped(_) => Self::Stopped(Cleanup::Failed(error)),
@@ -639,10 +657,7 @@ async fn execute(
                     }
                 }
                 () = &mut deadline => {
-                    ending = match ending {
-                        Ending::Stopped(_) => Ending::Stopped(Cleanup::Unconfirmed),
-                        Ending::Finished(_) => Ending::Finished(Outcome::failed(STOP_UNCONFIRMED)),
-                    };
+                    ending = ending.unconfirmed();
                     break;
                 }
             }
@@ -1713,3 +1728,7 @@ fn new_item(
         kind,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/run/ending.rs"]
+mod tests;
