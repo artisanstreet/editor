@@ -15,7 +15,7 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     #[must_use]
-    pub const fn code(self) -> artisan_api::ErrorCode {
+    pub(crate) const fn code(self) -> artisan_api::ErrorCode {
         match self {
             Self::NotFound => artisan_api::ErrorCode::NotFound,
             Self::Conflict => artisan_api::ErrorCode::Conflict,
@@ -127,7 +127,7 @@ pub const fn update_thread(failure: &UpdateThreadFailure) -> ErrorClass {
 }
 
 #[must_use]
-pub const fn create_thread(error: &CreateThreadError) -> ErrorClass {
+pub(crate) const fn create_thread(error: &CreateThreadError) -> ErrorClass {
     match error {
         CreateThreadError::ProjectNotFound { .. } | CreateThreadError::ParentNotFound { .. } => {
             ErrorClass::NotFound

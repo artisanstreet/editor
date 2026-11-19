@@ -236,7 +236,7 @@ pub(super) fn spawn_backend(
         })
 }
 
-pub(super) fn spawn_gateway(
+fn spawn_gateway(
     binary: &Path,
     data: &Path,
     log: &Destination,

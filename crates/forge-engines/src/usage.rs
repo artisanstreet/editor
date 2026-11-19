@@ -28,7 +28,7 @@ pub(crate) enum ReadUsageError {
     OpenCode(#[source] ReadOpenCodeUsageError),
 }
 
-pub async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
+async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
     let read = match engine {
         EngineId::Claude => read_claude(binary, home)
             .await
@@ -84,7 +84,7 @@ impl Slot {
 
 impl UsageCache {
     #[must_use]
-    pub fn new(ttl: Duration) -> Self {
+    pub(crate) fn new(ttl: Duration) -> Self {
         let slots = EngineId::ALL
             .into_iter()
             .map(|engine| (engine, Slot::default()))
@@ -93,11 +93,11 @@ impl UsageCache {
     }
 
     #[must_use]
-    pub fn cached(&self, engine: EngineId) -> Option<UsageLimits> {
+    pub(crate) fn cached(&self, engine: EngineId) -> Option<UsageLimits> {
         self.slots.get(&engine)?.last().good.clone()
     }
 
-    pub async fn read(
+    pub(crate) async fn read(
         &self,
         engine: EngineId,
         binary: &Path,
@@ -128,7 +128,7 @@ impl UsageCache {
     }
 
     #[must_use]
-    pub fn due_at(&self, engine: EngineId) -> Instant {
+    pub(crate) fn due_at(&self, engine: EngineId) -> Instant {
         self.slots
             .get(&engine)
             .expect("invariant: the usage cache has a slot for every engine")
@@ -139,7 +139,7 @@ impl UsageCache {
             })
     }
 
-    pub fn unreadable(&self, engine: EngineId) {
+    pub(crate) fn unreadable(&self, engine: EngineId) {
         self.slots
             .get(&engine)
             .expect("invariant: the usage cache has a slot for every engine")
@@ -147,7 +147,7 @@ impl UsageCache {
             .attempt = Some((Instant::now(), true));
     }
 
-    pub fn invalidate(&self, engine: EngineId) {
+    pub(crate) fn invalidate(&self, engine: EngineId) {
         if let Some(slot) = self.slots.get(&engine) {
             let mut last = slot.last();
             slot.generation.fetch_add(1, Ordering::Release);
@@ -609,7 +609,7 @@ fn spend_by_model(models: &[Value]) -> Vec<SpendLine> {
 }
 
 #[must_use]
-pub const fn has_usage_reader(engine: EngineId) -> bool {
+pub(crate) const fn has_usage_reader(engine: EngineId) -> bool {
     matches!(
         engine,
         EngineId::Claude | EngineId::Codex | EngineId::OpenCode

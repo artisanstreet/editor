@@ -30,10 +30,10 @@ pub(crate) struct Program<'a> {
 
 #[derive(Debug, thiserror::Error)]
 #[error("the engine is not installed")]
-pub struct NotInstalled;
+pub(crate) struct NotInstalled;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ListModelsError {
+pub(crate) enum ListModelsError {
     #[error("read the Claude model cache")]
     ClaudeCache(#[source] tokio::task::JoinError),
     #[error("neither the published nor the cached Claude catalog is available")]
@@ -116,7 +116,7 @@ fn command(program: &Program<'_>) -> Result<tokio::process::Command, NotInstalle
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RunError {
+pub(crate) enum RunError {
     #[error(transparent)]
     NotInstalled(NotInstalled),
     #[error("run `{args}`")]

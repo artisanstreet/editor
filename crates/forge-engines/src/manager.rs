@@ -202,10 +202,10 @@ pub enum CheckUpdateError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("list {} models", engine.display_name())]
-pub struct RefreshModelsError {
-    pub engine: EngineId,
+pub(crate) struct RefreshModelsError {
+    engine: EngineId,
     #[source]
-    pub source: Arc<catalog::ListModelsError>,
+    source: Arc<catalog::ListModelsError>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -699,7 +699,7 @@ impl Engines {
         self.finish(engine, result).await
     }
 
-    pub async fn refresh_models(
+    async fn refresh_models(
         &self,
         engine: EngineId,
     ) -> Result<Arc<[Model]>, RefreshModelsError> {

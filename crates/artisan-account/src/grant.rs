@@ -179,7 +179,7 @@ pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
     Ok(key)
 }
 
-pub(crate) fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
+fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
     if claims.v != crate::PROTOCOL_VERSION {
         return Err(GrantError::of(GrantErrorKind::Version));
     }

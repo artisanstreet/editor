@@ -122,7 +122,7 @@ pub enum ComposerAction {
 
 pub type Dispatch = Rc<dyn Fn(ComposerAction)>;
 
-pub(crate) fn rows(count: usize) -> f32 {
+fn rows(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 

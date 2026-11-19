@@ -156,7 +156,7 @@ impl<T> Delivery<T> {
         }
         self.front.as_ref().map(|item| item.sequence)
     }
-    pub fn admitted(&self) -> usize {
+    pub(crate) fn admitted(&self) -> usize {
         usize::from(self.front.is_some()) + self.receiver.len()
     }
     pub fn drain_one(&mut self) -> Option<T> {

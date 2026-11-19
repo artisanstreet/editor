@@ -19,7 +19,7 @@ pub struct SourceIds {
 }
 
 pub struct InspectorOwner {
-    pub(crate) inspector: Inspector,
+    inspector: Inspector,
     terminal: Rc<RefCell<TerminalDialog>>,
     source: SourceView,
     command: SourceView,

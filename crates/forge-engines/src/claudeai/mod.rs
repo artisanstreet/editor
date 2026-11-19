@@ -112,7 +112,7 @@ impl Harness for ClaudeAiHarness {
     }
 }
 
-pub async fn run(turn: Turn, io: RunIo) -> Outcome {
+pub(crate) async fn run(turn: Turn, io: RunIo) -> Outcome {
     let session = match Session::load(&turn.home) {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -206,7 +206,7 @@ enum Read {
     Cancelled,
 }
 
-pub async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
+pub(crate) async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
     let sandbox = match crate::sandbox::Sandbox::for_turn(&turn) {
         Ok(sandbox) => sandbox,
         Err(error) => return Outcome::failed(diagnostics::chain(&error)),
@@ -219,7 +219,7 @@ pub async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
     drive_with(&runtime, backend, turn, io).await
 }
 
-pub async fn drive_with(
+async fn drive_with(
     runtime: &Runtime,
     backend: &dyn Backend,
     turn: Turn,

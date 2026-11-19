@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 
 pub(crate) const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 pub(crate) const NPM_REGISTRY: &str = "https://registry.npmjs.org";
-pub(crate) const OPENCODE_REPOSITORY: &str = "artisanstreet/opencode";
+const OPENCODE_REPOSITORY: &str = "artisanstreet/opencode";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Spec {
@@ -69,7 +69,7 @@ pub(crate) enum Platform {
 }
 
 impl Platform {
-    pub(crate) fn current() -> Self {
+    fn current() -> Self {
         let musl = cfg!(target_os = "linux")
             && ["/lib/ld-musl-x86_64.so.1", "/lib/ld-musl-aarch64.so.1"]
                 .iter()
@@ -103,7 +103,7 @@ const fn single(feed: Feed, entry: &'static str) -> Option<Artifact> {
 }
 
 #[expect(clippy::too_many_lines, reason = "one entry per engine and platform")]
-pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
+const fn spec(engine: EngineId, platform: Platform) -> Spec {
     use Platform as P;
     match engine {
         EngineId::Claude => Spec {

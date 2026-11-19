@@ -219,7 +219,7 @@ impl Drop for PreparedLease {
 
 pub struct StoredLeaf {
     pub(crate) descriptor: SourceLeafDescriptor,
-    pub(crate) source: Arc<str>,
+    source: Arc<str>,
     pub(crate) context: artisan_markdown_index::LeafContext,
     pub(crate) table_continues: bool,
     pub(crate) content: IndexedLeafContent,

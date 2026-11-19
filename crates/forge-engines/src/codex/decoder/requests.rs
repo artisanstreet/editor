@@ -573,7 +573,7 @@ impl Decoder {
         out.push(self.event(&key));
     }
 
-    pub(super) fn reply(&mut self, rpc: Value, result: Value) {
+    fn reply(&mut self, rpc: Value, result: Value) {
         self.rpc.reply(rpc, result);
     }
 

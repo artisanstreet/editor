@@ -128,10 +128,10 @@ impl Effects {
 }
 
 pub struct Core {
-    pub(crate) files: EditorFiles,
-    pub(crate) identity: Option<Identity>,
+    files: EditorFiles,
+    identity: Option<Identity>,
     pub(crate) settings: Settings,
-    pub(crate) device_name: String,
+    device_name: String,
     hosts: HashMap<HostId, HostData>,
     hosts_file: HostsFile,
     relay_configs: HashMap<HostId, HostConfig>,

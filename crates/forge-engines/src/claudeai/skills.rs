@@ -14,7 +14,7 @@ const MAX_SKILL_BYTES: u64 = 256 * 1024;
 const MAX_FILES: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Skill {
+pub(crate) struct Skill {
     pub name: String,
     pub description: String,
     pub folder: PathBuf,

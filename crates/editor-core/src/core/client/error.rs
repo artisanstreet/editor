@@ -203,7 +203,7 @@ pub enum ForgeFault {
 
 impl ForgeFault {
     #[must_use]
-    pub const fn of(failure: &Failure) -> Self {
+    pub(crate) const fn of(failure: &Failure) -> Self {
         match failure {
             Failure::Auth(_) => Self::Unauthorized,
             Failure::Legacy { code } => Self::of_code(*code),
@@ -298,7 +298,7 @@ impl CallFailure {
 
 impl ResponseError {
     #[must_use]
-    pub const fn refused(&self) -> Option<&Failure> {
+    const fn refused(&self) -> Option<&Failure> {
         match self {
             Self::Refused { error, .. } => Some(&error.failure),
             Self::Unexplained { .. } | Self::Unreadable { .. } => None,
@@ -306,7 +306,7 @@ impl ResponseError {
     }
 
     #[must_use]
-    pub const fn fault(&self) -> ForgeFault {
+    pub(crate) const fn fault(&self) -> ForgeFault {
         match self {
             Self::Refused { error, .. } if !error.failure.is_legacy() => {
                 ForgeFault::of(&error.failure)

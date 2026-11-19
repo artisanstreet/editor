@@ -429,7 +429,7 @@ pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
     Ok(text)
 }
 
-pub(crate) fn diff_totals(diff: &str) -> EditTotals {
+fn diff_totals(diff: &str) -> EditTotals {
     let mut totals = EditTotals::default();
     let mut in_hunk = false;
     for line in diff.lines() {

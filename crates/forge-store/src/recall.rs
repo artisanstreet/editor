@@ -90,7 +90,7 @@ fn text_of(conn: &Connection, text: &TextContent) -> Result<String> {
     }
 }
 
-pub(crate) fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
+fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
     let mut found = Searchable::default();
     if artisan_call(item) {
         return Ok(found);

@@ -219,11 +219,11 @@ impl Layout {
         }
     }
 
-    pub(crate) fn engine_dir(&self, engine: EngineId) -> PathBuf {
+    fn engine_dir(&self, engine: EngineId) -> PathBuf {
         self.root.join(engine.as_str())
     }
 
-    pub(crate) fn versions(&self, engine: EngineId) -> PathBuf {
+    fn versions(&self, engine: EngineId) -> PathBuf {
         self.engine_dir(engine).join("versions")
     }
 
@@ -570,7 +570,7 @@ pub(crate) async fn latest_version(
 }
 
 const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
-pub(crate) const MAX_LISTED_VERSIONS: usize = 40;
+const MAX_LISTED_VERSIONS: usize = 40;
 
 pub(crate) async fn published_versions(
     http: &reqwest::Client,
@@ -617,7 +617,7 @@ async fn release_versions(
     Ok(tagged_versions(&get_json(http, &url).await?))
 }
 
-pub(crate) fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
+fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
     let mut versions: Vec<String> = releases
         .as_array()
         .into_iter()
@@ -635,7 +635,7 @@ pub(crate) fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
 
 const RELEASE_TAG: &str = "artisan-v";
 
-pub(crate) fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
+fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
     let on_channel = |version: &str| match version.split_once('-') {
         None => channel == "latest",
         Some((_, suffix)) => {

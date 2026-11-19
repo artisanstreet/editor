@@ -131,7 +131,7 @@ pub enum MaterializeError {
     },
 }
 
-pub fn materialize(
+pub(crate) fn materialize(
     engine: EngineId,
     home: &Path,
     c: &Customisation,
@@ -726,7 +726,7 @@ fn opencode_servers(servers: &[McpServer]) -> Map<String, Value> {
         .collect()
 }
 
-pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
+fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
     let index = launch
         .env
         .iter()

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
-pub const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -131,7 +131,7 @@ pub struct EngineProcess {
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
-pub fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
+pub(crate) fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
     spawn_in(
         turn,
         args,
@@ -341,7 +341,7 @@ fn spawn_command(
 }
 
 impl EngineProcess {
-    pub async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
+    pub(crate) async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(SendError::StdinClosed {
                 program: self.program.clone(),
@@ -356,17 +356,17 @@ impl EngineProcess {
         })
     }
 
-    pub fn close_stdin(&mut self, why: &str) {
+    pub(crate) fn close_stdin(&mut self, why: &str) {
         self.trace
             .record(Kind::Note, &format!("closing stdin: {why}"));
         self.stdin = None;
     }
 
-    pub fn note(&self, text: &str) {
+    pub(crate) fn note(&self, text: &str) {
         self.trace.record(Kind::Note, text);
     }
 
-    pub async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
+    pub(crate) async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
             loop {
                 let available = self
@@ -422,7 +422,7 @@ impl EngineProcess {
     }
 
     #[must_use]
-    pub fn stderr_tail(&self) -> String {
+    pub(crate) fn stderr_tail(&self) -> String {
         self.stderr_tail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -430,7 +430,7 @@ impl EngineProcess {
             .to_owned()
     }
 
-    pub async fn kill(&mut self) {
+    pub(crate) async fn kill(&mut self) {
         self.trace.record(Kind::Note, "killing the process");
         self.child.shutdown();
         if let Err(failure) = self.child.wait().await {
@@ -439,7 +439,7 @@ impl EngineProcess {
         }
     }
 
-    pub async fn wait(&mut self) -> Option<i32> {
+    pub(crate) async fn wait(&mut self) -> Option<i32> {
         let status = self.child.wait().await;
         self.child.shutdown();
         self.trace

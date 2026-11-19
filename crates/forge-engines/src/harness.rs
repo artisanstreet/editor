@@ -92,7 +92,7 @@ pub enum EngineEvent {
 
 impl EngineEvent {
     #[must_use]
-    pub fn background_wait(engine: EngineId, waiting: bool) -> Self {
+    pub(crate) fn background_wait(engine: EngineId, waiting: bool) -> Self {
         let name = match engine {
             EngineId::Claude => "Claude",
             EngineId::Codex => "Codex",
@@ -178,7 +178,7 @@ impl Outcome {
     }
 
     #[must_use]
-    pub const fn status(&self) -> RunStatus {
+    pub(crate) const fn status(&self) -> RunStatus {
         self.run_outcome().status()
     }
 

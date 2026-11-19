@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const TAKE_WITHIN: Duration = crate::wait::LIVENESS;
-pub const BARRIER: &str = "test-barrier";
+pub(crate) const BARRIER: &str = "test-barrier";
 
 pub struct HeldRequest {
     method: Method,
@@ -288,7 +288,7 @@ impl StubForge {
         seq
     }
 
-    pub fn publish_barrier(&self) -> Seq {
+    pub(crate) fn publish_barrier(&self) -> Seq {
         let seq = self.log().state.head + 1;
         self.publish(Event::Setting {
             key: BARRIER.into(),
@@ -308,7 +308,7 @@ impl StubForge {
     }
 
     #[track_caller]
-    pub fn take_where(&self, what: &str, matches: impl Fn(&HeldRequest) -> bool) -> HeldRequest {
+    fn take_where(&self, what: &str, matches: impl Fn(&HeldRequest) -> bool) -> HeldRequest {
         let deadline = Instant::now() + TAKE_WITHIN;
         let mut requests = self.held();
         loop {

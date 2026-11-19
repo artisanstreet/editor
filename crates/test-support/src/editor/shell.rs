@@ -31,7 +31,7 @@ impl ThreadShell {
         Self::open_with_clock(host, thread, motion, clock, |_, _| {})
     }
 
-    pub fn open_with(
+    fn open_with(
         host: &str,
         thread: &str,
         motion: Motion,

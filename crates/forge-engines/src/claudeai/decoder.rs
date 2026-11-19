@@ -116,44 +116,44 @@ impl ClaudeAiDecoder {
     }
 
     #[must_use]
-    pub const fn waiting_on_caller(&self) -> bool {
+    pub(crate) const fn waiting_on_caller(&self) -> bool {
         !self.calls.is_empty()
     }
 
     #[must_use]
-    pub const fn stop(&self) -> Option<&Stop> {
+    pub(crate) const fn stop(&self) -> Option<&Stop> {
         self.stop.as_ref()
     }
 
     #[must_use]
-    pub const fn broken(&self) -> bool {
+    pub(crate) const fn broken(&self) -> bool {
         self.broken.is_some()
     }
 
-    pub const fn take_protocol_error(&mut self) -> Option<ProtocolError> {
+    pub(crate) const fn take_protocol_error(&mut self) -> Option<ProtocolError> {
         self.broken.take()
     }
 
-    pub const fn take_failure(&mut self) -> Option<Refusal> {
+    pub(crate) const fn take_failure(&mut self) -> Option<Refusal> {
         self.failure.take()
     }
 
-    pub const fn take_connector(&mut self) -> Option<String> {
+    pub(crate) const fn take_connector(&mut self) -> Option<String> {
         self.connector.take()
     }
 
     #[must_use]
-    pub const fn connector_started(&self) -> bool {
+    pub(crate) const fn connector_started(&self) -> bool {
         self.connector.is_some()
     }
 
-    pub fn take_calls(&mut self, out: &mut Vec<EngineEvent>) -> Vec<Call> {
+    pub(crate) fn take_calls(&mut self, out: &mut Vec<EngineEvent>) -> Vec<Call> {
         self.settle(out);
         std::mem::take(&mut self.calls)
     }
 
     #[must_use]
-    pub fn leaf(&self) -> Option<&str> {
+    pub(crate) fn leaf(&self) -> Option<&str> {
         if self.saved {
             self.uuid.as_deref()
         } else {

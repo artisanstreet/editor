@@ -101,7 +101,7 @@ const WEBP_QUALITY: f32 = 85.0;
 
 const EXTENSION: &str = "webp";
 
-pub(crate) fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
+fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
     hash.is_valid().then(|| {
         dir.join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
@@ -183,7 +183,7 @@ pub(crate) fn input_images(
     Ok((paths, bytes))
 }
 
-pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
+fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
@@ -458,11 +458,11 @@ fn remove_unreferenced(candidates: Vec<Candidate>, referenced: &HashSet<String>)
     removed
 }
 
-pub(crate) fn is_webp(bytes: &[u8]) -> bool {
+fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
-pub(crate) fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());

@@ -221,12 +221,12 @@ async fn grant(headers: HeaderMap) -> Response {
 }
 
 #[must_use]
-pub fn account_url() -> &'static str {
+pub(crate) fn account_url() -> &'static str {
     &ACCOUNTS.url
 }
 
 #[must_use]
-pub fn machine(id: &str, label: &str) -> MachineEntry {
+pub(crate) fn machine(id: &str, label: &str) -> MachineEntry {
     MachineEntry {
         id: id.to_owned(),
         label: label.to_owned(),
@@ -242,7 +242,7 @@ pub fn machine(id: &str, label: &str) -> MachineEntry {
 }
 
 #[must_use]
-pub fn open_account(machines: Vec<MachineEntry>) -> AccountProfile {
+pub(crate) fn open_account(machines: Vec<MachineEntry>) -> AccountProfile {
     let account_id = format!(
         "acct_test{:020}",
         NEXT_ACCOUNT.fetch_add(1, Ordering::Relaxed)
@@ -268,7 +268,7 @@ pub fn open_account(machines: Vec<MachineEntry>) -> AccountProfile {
     profile
 }
 
-pub fn add_machine(account_id: &str, entry: MachineEntry, client: ForgeClient) {
+pub(crate) fn add_machine(account_id: &str, entry: MachineEntry, client: ForgeClient) {
     let mut sessions = sessions();
     let session = sessions
         .get_mut(account_id)
@@ -317,7 +317,7 @@ impl DialRelay for StubRelay {
     }
 }
 
-pub struct ScriptedAe<F>(pub F);
+pub struct ScriptedAe<F>(pub(crate) F);
 
 impl<F> ScriptedAe<F>
 where
@@ -344,7 +344,7 @@ where
     }
 }
 
-pub fn unenrolled_ae(args: &[&str]) -> Result<String, AeError> {
+pub(crate) fn unenrolled_ae(args: &[&str]) -> Result<String, AeError> {
     match args {
         ["account", .., "status", "--json"] => {
             Ok(r#"{"enrolled":false,"status":"none"}"#.to_owned())

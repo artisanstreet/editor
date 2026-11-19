@@ -58,7 +58,7 @@ struct SearchResult {
 }
 
 pub struct Palette {
-    pub(crate) query: String,
+    query: String,
     highlighted: usize,
     entries: Vec<Entry>,
     search_error: Option<SearchProblem>,

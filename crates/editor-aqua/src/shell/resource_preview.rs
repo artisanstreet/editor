@@ -146,7 +146,7 @@ type PreviewSource = (
 pub struct ResourcePreview {
     pub(crate) path: String,
     target_line: usize,
-    pub(crate) content: Option<Result<PreviewText, PreviewError>>,
+    content: Option<Result<PreviewText, PreviewError>>,
     delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
     request: Option<tokio_util::task::AbortOnDropHandle<()>>,
     source: Option<(crate::core::HostId, crate::core::HostInstance)>,

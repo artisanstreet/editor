@@ -41,7 +41,7 @@ fn file_safe(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-pub(crate) fn snapshot_path(
+fn snapshot_path(
     dir: &Path,
     thread: &ThreadId,
     item: &ItemId,
@@ -78,7 +78,7 @@ pub fn keep(target: &Path, bytes: &[u8]) -> Result<bool> {
     }
 }
 
-pub(crate) fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
+fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),

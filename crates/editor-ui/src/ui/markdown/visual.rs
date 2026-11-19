@@ -440,7 +440,7 @@ impl<'a> BodyContext<'a> {
     }
 
     #[must_use]
-    pub const fn with_tone(self, tone: BodyTone) -> Self {
+    pub(crate) const fn with_tone(self, tone: BodyTone) -> Self {
         Self { tone, ..self }
     }
 }

@@ -1,9 +1,9 @@
 use base64::Engine as _;
 use sha2::Digest as _;
 
-pub(crate) const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
+const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
 
-pub(crate) const MIN_NONCE_BYTES: usize = 12;
+const MIN_NONCE_BYTES: usize = 12;
 
 #[cfg(test)]
 pub(crate) const EMPTY_BODY_HASH: &str =

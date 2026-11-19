@@ -22,7 +22,7 @@ const TOOL_CACHES: [(&str, &str); 8] = [
 const MAVEN_REPOSITORY: &str = "maven";
 
 #[derive(Clone, Debug)]
-pub enum Sandbox {
+pub(crate) enum Sandbox {
     Open,
     Confined(Arc<Confined>),
 }
@@ -72,7 +72,7 @@ pub(crate) mod guard {
 pub(crate) use guard::GuardError;
 
 #[derive(Debug)]
-pub struct Confined {
+pub(crate) struct Confined {
     temporary: tempfile::TempDir,
     ruleset: Ruleset,
     redirects: Vec<(String, OsString)>,

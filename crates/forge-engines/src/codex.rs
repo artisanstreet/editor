@@ -17,7 +17,7 @@ mod side;
 #[path = "../tests/codex/unit.rs"]
 mod tests;
 
-pub use decoder::DecodeError;
+pub(crate) use decoder::DecodeError;
 pub use goal::{CallError, ClearGoalError};
 pub use server::{AttachError, Ended, InitializeError, Overloaded, ReleaseError, StartError};
 pub use side::SideQueryError;

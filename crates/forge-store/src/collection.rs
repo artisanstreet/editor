@@ -110,7 +110,7 @@ fn check_dependencies(
     Ok(())
 }
 
-pub(crate) fn store<T: Serialize>(
+fn store<T: Serialize>(
     conn: &Connection,
     records: &[T],
     dependencies: &BTreeSet<ContentId>,
@@ -312,7 +312,7 @@ pub(crate) fn range<T: DeserializeOwned>(
     }))
 }
 
-pub(crate) fn validate_answer(
+fn validate_answer(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: Option<&artisan_api::QuestionAnswer>,
@@ -495,7 +495,7 @@ pub(crate) struct Metrics {
     pub authored: u64,
     pub structural: u64,
 }
-pub(crate) fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
+fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
     if !reference.source.id.is_valid() {
         return Err(ContentError::InvalidIdentity {
             content: reference.source.id.clone(),

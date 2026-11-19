@@ -54,7 +54,7 @@ impl From<rusqlite::Error> for SourceIndexError {
     }
 }
 
-pub(crate) fn header(
+fn header(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
@@ -200,7 +200,7 @@ pub(crate) fn prepare(
         leaves,
     }))
 }
-pub(crate) const LEAVES_PER_WRITE: usize = 2048;
+const LEAVES_PER_WRITE: usize = 2048;
 
 pub(crate) enum Staging {
     Published,

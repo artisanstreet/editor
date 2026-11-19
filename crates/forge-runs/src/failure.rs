@@ -221,7 +221,7 @@ fn send_rejected(rejected: &SendRejected) -> Failure {
 }
 
 #[must_use]
-pub fn input(failure: &InputFailure) -> Failure {
+fn input(failure: &InputFailure) -> Failure {
     match failure {
         InputFailure::Rejected(rejected) => send_rejected(rejected),
         InputFailure::Write(write) => self::write(write),
@@ -290,7 +290,7 @@ pub fn draft(scope: &str, failure: &SettingFailure) -> Failure {
 }
 
 #[must_use]
-pub fn update_thread(thread: &ThreadId, failure: &UpdateThreadFailure) -> Failure {
+fn update_thread(thread: &ThreadId, failure: &UpdateThreadFailure) -> Failure {
     match failure {
         UpdateThreadFailure::InvalidConfig => Failure::Thread(ThreadFailure::InvalidConfig {
             thread: thread.clone(),
@@ -438,7 +438,7 @@ pub fn blob(failure: &BlobFailure) -> Failure {
 
 impl PeerError {
     #[must_use]
-    pub fn wire(&self) -> Failure {
+    fn wire(&self) -> Failure {
         match self {
             Self::Rejected { failure, .. } => failure.wire(),
             Self::Client { .. } | Self::Send { .. } | Self::Decode { .. } => Failure::Internal,

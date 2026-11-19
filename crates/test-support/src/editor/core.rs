@@ -18,7 +18,7 @@ pub fn test_core_with_clock(directory: &Path, clock: Clock) -> Core {
     test_core_with(directory, clock, Ae::new(ScriptedAe(unenrolled_ae)))
 }
 
-pub fn test_core_with(directory: &Path, clock: Clock, ae: Ae) -> Core {
+fn test_core_with(directory: &Path, clock: Clock, ae: Ae) -> Core {
     let files = EditorFiles {
         dir: directory.to_owned(),
     };
@@ -48,7 +48,7 @@ pub fn test_core_with(directory: &Path, clock: Clock, ae: Ae) -> Core {
     }
 }
 
-pub fn sign_in(files: &EditorFiles) -> Vec<HostId> {
+fn sign_in(files: &EditorFiles) -> Vec<HostId> {
     let saved = files.hosts().expect("read the test's saved hosts");
     let identity = files.identity().expect("open the test Editor's identity");
     let profile = open_account(Vec::new());

@@ -47,12 +47,12 @@ pub struct SecureUrl(Box<Url>);
 
 impl SecureUrl {
     #[must_use]
-    pub const fn url(&self) -> &Url {
+    const fn url(&self) -> &Url {
         &self.0
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -526,7 +526,7 @@ struct AuthorizationMetadata {
     code_challenge_methods_supported: Option<Vec<String>>,
 }
 
-pub async fn discover(
+async fn discover(
     http: &Http,
     server: &str,
     server_url: &Url,

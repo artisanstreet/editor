@@ -40,7 +40,7 @@ pub(crate) fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
 #[derive(Debug, thiserror::Error)]
 #[error("Usage: /{keyword} <prompt>")]
 pub struct MissingPrompt {
-    pub keyword: &'static str,
+    keyword: &'static str,
 }
 
 pub fn normalize_command(engine: EngineId, text: &str) -> Result<Option<String>, MissingPrompt> {

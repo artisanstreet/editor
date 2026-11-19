@@ -37,7 +37,7 @@ pub enum SaveSessionError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UpdateSessionError {
+pub(crate) enum UpdateSessionError {
     #[error("reading the claude.ai session to update it")]
     Load(#[source] LoadSessionError),
     #[error("writing the updated claude.ai session")]
@@ -47,24 +47,24 @@ pub enum UpdateSessionError {
 #[derive(Debug, thiserror::Error)]
 #[error("removing the claude.ai session {path}")]
 pub struct RemoveSessionError {
-    pub path: PathBuf,
+    path: PathBuf,
     #[source]
-    pub source: std::io::Error,
+    source: std::io::Error,
 }
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    pub cookies: Vec<(String, String)>,
-    pub user_agent: String,
-    pub org_uuid: String,
+    pub(crate) cookies: Vec<(String, String)>,
+    pub(crate) user_agent: String,
+    pub(crate) org_uuid: String,
     #[serde(default)]
-    pub account: Option<String>,
+    pub(crate) account: Option<String>,
     #[serde(default)]
-    pub needs_renewal: bool,
+    pub(crate) needs_renewal: bool,
     #[serde(default)]
-    pub expired: Option<String>,
+    pub(crate) expired: Option<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -87,7 +87,7 @@ impl std::fmt::Debug for Session {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CookieChange {
+pub(crate) enum CookieChange {
     Set(String, String),
     Remove(String),
 }
@@ -106,7 +106,7 @@ impl Session {
     }
 
     #[must_use]
-    pub fn cookie_header(&self) -> String {
+    pub(crate) fn cookie_header(&self) -> String {
         self.cookies
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
@@ -139,7 +139,7 @@ impl Session {
     }
 
     #[must_use]
-    pub fn status(&self) -> ClaudeAiState {
+    pub(crate) fn status(&self) -> ClaudeAiState {
         let account = self.account.clone();
         self.expired.clone().map_or_else(
             || {
@@ -153,7 +153,7 @@ impl Session {
         )
     }
 
-    pub fn load(home: &Path) -> Result<Option<Self>, LoadSessionError> {
+    pub(crate) fn load(home: &Path) -> Result<Option<Self>, LoadSessionError> {
         let path = Self::path(home);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -183,7 +183,7 @@ impl Session {
             .map_err(|source| SaveSessionError::Write { path, source })
     }
 
-    pub fn update(home: &Path, change: impl FnOnce(&mut Self)) -> Result<(), UpdateSessionError> {
+    pub(crate) fn update(home: &Path, change: impl FnOnce(&mut Self)) -> Result<(), UpdateSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -198,7 +198,7 @@ impl Session {
         session.write(home).map_err(UpdateSessionError::Save)
     }
 
-    pub fn remove(home: &Path) -> Result<(), RemoveSessionError> {
+    pub(crate) fn remove(home: &Path) -> Result<(), RemoveSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -211,7 +211,7 @@ impl Session {
         }
     }
 
-    pub fn apply(&mut self, changes: &[CookieChange]) {
+    pub(crate) fn apply(&mut self, changes: &[CookieChange]) {
         for change in changes {
             match change {
                 CookieChange::Set(name, value) => {
@@ -228,7 +228,7 @@ impl Session {
 }
 
 #[must_use]
-pub fn cookie_change(header: &str, now: chrono::DateTime<chrono::Utc>) -> Option<CookieChange> {
+pub(super) fn cookie_change(header: &str, now: chrono::DateTime<chrono::Utc>) -> Option<CookieChange> {
     let mut parts = header.split(';');
     let (name, value) = parts.next()?.trim().split_once('=')?;
     let name = name.trim();

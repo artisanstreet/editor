@@ -55,7 +55,7 @@ enum MainTurn {
     clippy::struct_excessive_bools,
     reason = "independent facts about the session, not one state in disguise"
 )]
-pub struct ClaudeDecoder {
+pub(crate) struct ClaudeDecoder {
     reasoning_summary: crate::reasoning::Summary,
     session: Option<String>,
     model: Option<String>,
@@ -183,7 +183,7 @@ enum AsksOn {
 }
 
 impl ClaudeDecoder {
-    pub fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+    pub(crate) fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
         let frame: Value = serde_json::from_str(line).map_err(DecodeError::Json)?;
         if !frame.is_object() {
             return Err(DecodeError::NotObject);
@@ -241,7 +241,7 @@ impl ClaudeDecoder {
         Ok(out)
     }
 
-    pub fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
+    pub(crate) fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
         let events = crate::retained::settle(self, events);
         self.retire_settled();
@@ -373,15 +373,15 @@ impl ClaudeDecoder {
         vec![tool.event()]
     }
 
-    pub fn take_replies(&mut self) -> Vec<Value> {
+    pub(crate) fn take_replies(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.replies)
     }
 
-    pub fn expect_replay(&mut self, steer: Option<ItemId>) {
+    pub(crate) fn expect_replay(&mut self, steer: Option<ItemId>) {
         self.replays.push_back(steer);
     }
 
-    pub fn title_request(&mut self, text: &str) -> Value {
+    pub(crate) fn title_request(&mut self, text: &str) -> Value {
         self.title_pending = true;
         json!({
             "type": "control_request",
@@ -391,17 +391,17 @@ impl ClaudeDecoder {
     }
 
     #[must_use]
-    pub fn awaiting_input(&self) -> bool {
+    pub(crate) fn awaiting_input(&self) -> bool {
         !self.replays.is_empty() || self.title_pending
     }
 
     #[must_use]
-    pub const fn background_running(&self) -> bool {
+    pub(crate) const fn background_running(&self) -> bool {
         self.background > 0
     }
 
     #[must_use]
-    pub fn background_summary(&self) -> String {
+    pub(crate) fn background_summary(&self) -> String {
         format!(
             "{} background task(s); agents waiting on their own work: {:?}",
             self.background, self.waiting_agents
@@ -409,33 +409,33 @@ impl ClaudeDecoder {
     }
 
     #[must_use]
-    pub const fn in_turn(&self) -> bool {
+    pub(crate) const fn in_turn(&self) -> bool {
         matches!(self.turn, MainTurn::Active { .. })
     }
 
-    pub fn take_result_seen(&mut self) -> bool {
+    pub(crate) fn take_result_seen(&mut self) -> bool {
         std::mem::take(&mut self.result_seen)
     }
 
     #[must_use]
-    pub fn session(&self) -> Option<&str> {
+    pub(crate) fn session(&self) -> Option<&str> {
         self.session.as_deref()
     }
 
-    pub const fn finish_title(&mut self) {
+    pub(crate) const fn finish_title(&mut self) {
         self.title_pending = false;
     }
 
     #[must_use]
-    pub const fn titled(&self) -> bool {
+    pub(crate) const fn titled(&self) -> bool {
         self.titled
     }
 
-    pub const fn take_outcome(&mut self) -> Option<Outcome> {
+    pub(crate) const fn take_outcome(&mut self) -> Option<Outcome> {
         self.outcome.take()
     }
 
-    pub fn finish(&mut self) -> Vec<EngineEvent> {
+    pub(crate) fn finish(&mut self) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         self.settle_open_texts(Status::Cancelled, &mut out);
         let mut open: Vec<&mut Tool> = self

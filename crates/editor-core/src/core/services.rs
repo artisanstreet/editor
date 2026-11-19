@@ -29,7 +29,7 @@ pub trait DialRelay: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct HostedRelay {
-    pub url: String,
+    url: String,
 }
 
 impl DialRelay for HostedRelay {

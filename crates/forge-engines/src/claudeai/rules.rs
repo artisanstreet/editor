@@ -14,14 +14,14 @@ const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 const MAX_SHELL_DEPTH: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verdict {
+pub(crate) enum Verdict {
     Allow,
     Ask,
     Deny(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Grammar {
+pub(crate) enum Grammar {
     #[cfg_attr(not(windows), default)]
     Posix,
     #[cfg_attr(windows, default)]
@@ -111,7 +111,7 @@ impl Rules {
     }
 
     #[must_use]
-    pub fn load_for(home: &Path, cwd: &Path, grammar: Grammar) -> Self {
+    pub(crate) fn load_for(home: &Path, cwd: &Path, grammar: Grammar) -> Self {
         let mut project: Vec<_> = cwd.ancestors().take_while(|dir| *dir != home).collect();
         if let Some(root) = project.iter().position(|dir| dir.join(".git").exists()) {
             project.truncate(root + 1);
@@ -210,17 +210,17 @@ impl Rules {
     }
 
     #[must_use]
-    pub fn broken(&self) -> Option<&LoadSettingsError> {
+    pub(crate) fn broken(&self) -> Option<&LoadSettingsError> {
         self.broken.first().map(AsRef::as_ref)
     }
 
     #[must_use]
-    pub const fn accept_edits(&self) -> bool {
+    pub(crate) const fn accept_edits(&self) -> bool {
         self.accept_edits
     }
 
     #[must_use]
-    pub fn verdict(&self, call: &Call) -> Option<Verdict> {
+    pub(crate) fn verdict(&self, call: &Call) -> Option<Verdict> {
         let facts = self.facts(call);
         if let Some(rule) = self.deny.iter().find(|rule| rule.touches(&facts)) {
             return Some(Verdict::Deny(format!(
@@ -258,7 +258,7 @@ impl Rules {
     }
 
     #[must_use]
-    pub fn protects(&self, call: &Call) -> bool {
+    pub(crate) fn protects(&self, call: &Call) -> bool {
         changes_files(&call.name)
             && call_path(call)
                 .is_some_and(|raw| self.candidates(raw).iter().any(|path| self.protected(path)))
@@ -282,7 +282,7 @@ impl Rules {
     }
 
     #[must_use]
-    pub fn inside_root(&self, call: &Call) -> bool {
+    pub(crate) fn inside_root(&self, call: &Call) -> bool {
         if self.root.as_os_str().is_empty() {
             return false;
         }
@@ -295,7 +295,7 @@ impl Rules {
     }
 
     #[must_use]
-    pub fn hides(&self, tool: &str, path: &Path) -> bool {
+    pub(crate) fn hides(&self, tool: &str, path: &Path) -> bool {
         let mut rules = self
             .deny
             .iter()

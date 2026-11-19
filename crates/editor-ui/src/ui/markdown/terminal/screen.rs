@@ -6,8 +6,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::parser::{Params, Parser, Perform};
 use super::style::{TerminalLine, TerminalRun, TerminalStyle};
 
-pub(super) const DEFAULT_MAX_LINES: usize = 5_000;
-pub(super) const MAX_LINE_CHARS: usize = 4_096;
+const DEFAULT_MAX_LINES: usize = 5_000;
+const MAX_LINE_CHARS: usize = 4_096;
 const MAX_RETAINED_CELLS: usize = 128 * 1024;
 const MAX_COMBINING_PER_CELL: usize = 8;
 const MAX_CURSOR_ROW: usize = 500;

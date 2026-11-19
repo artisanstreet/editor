@@ -3,7 +3,7 @@ use crate::runtime::{PeerError, RegistryFileError};
 use artisan_api::{EngineId, ItemId, ThreadId};
 
 #[derive(Debug, thiserror::Error)]
-pub enum InputError {
+pub(crate) enum InputError {
     #[error(transparent)]
     Text(#[from] forge_store::ResolveTextError),
     #[error(transparent)]
@@ -59,7 +59,7 @@ pub enum SendError {
 
 impl SendError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::ThreadNotFound { .. } => ErrorClass::NotFound,
             Self::Command { .. } => ErrorClass::BadRequest,
@@ -193,7 +193,7 @@ pub enum UpdateError {
 
 impl UpdateError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::Store(store) => error::update_thread(&store.cause),
             Self::Peer { source, .. } => source.class(),
@@ -255,7 +255,7 @@ pub enum ClearGoalError {
 
 impl ClearGoalError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::ThreadNotFound { .. } => ErrorClass::NotFound,
             Self::Refused { .. } => ErrorClass::Conflict,

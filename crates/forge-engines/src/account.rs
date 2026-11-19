@@ -95,7 +95,7 @@ pub(crate) async fn run_short(
     ))
 }
 
-pub async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
+async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
     let args: &[&str] = match engine {
         EngineId::Claude => &["auth", "status"],
         EngineId::Codex => &["login", "status"],
@@ -548,7 +548,7 @@ pub struct SignIn {
 
 impl SignIn {
     #[must_use]
-    pub fn new(engine: EngineId, home: PathBuf) -> Arc<Self> {
+    pub(crate) fn new(engine: EngineId, home: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             engine,
             home,
@@ -565,12 +565,12 @@ impl SignIn {
     }
 
     #[must_use]
-    pub fn state(&self) -> SignInState {
+    pub(crate) fn state(&self) -> SignInState {
         self.state.borrow().clone()
     }
 
     #[must_use]
-    pub fn subscribe(&self) -> watch::Receiver<SignInState> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<SignInState> {
         self.state.subscribe()
     }
 
@@ -605,7 +605,7 @@ impl SignIn {
         }
     }
 
-    pub async fn check(self: &Arc<Self>, binary: &Path) {
+    pub(crate) async fn check(self: &Arc<Self>, binary: &Path) {
         {
             let mut inner = self.lock();
             inner.binary = Some(binary.to_owned());
@@ -639,7 +639,7 @@ impl SignIn {
         self.handle_if_generation(&Event::Checked(probe), Some(generation));
     }
 
-    pub fn login(self: &Arc<Self>, binary: &Path) {
+    fn login(self: &Arc<Self>, binary: &Path) {
         self.lock().binary = Some(binary.to_owned());
         self.handle(&Event::Login);
     }
@@ -648,7 +648,7 @@ impl SignIn {
         clippy::significant_drop_tightening,
         reason = "`stdin` borrows from the guard and is written until the end"
     )]
-    pub async fn submit_code(&self, code: &str) -> Result<(), SubmitCodeError> {
+    pub(crate) async fn submit_code(&self, code: &str) -> Result<(), SubmitCodeError> {
         let engine = self.engine;
         let stdin = self
             .lock()
@@ -667,11 +667,11 @@ impl SignIn {
         Ok(())
     }
 
-    pub fn cancel_login(self: &Arc<Self>) {
+    pub(crate) fn cancel_login(self: &Arc<Self>) {
         self.handle(&Event::Cancel);
     }
 
-    pub fn logout(self: &Arc<Self>, binary: &Path) {
+    fn logout(self: &Arc<Self>, binary: &Path) {
         self.lock().binary = Some(binary.to_owned());
         self.handle(&Event::Logout);
     }

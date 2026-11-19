@@ -223,7 +223,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-pub(super) const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const MAX_WARM_THREADS: usize = 8;
 const MAX_TOOLS: usize = 256;
 const MAX_NAME: usize = 64;
@@ -239,7 +239,7 @@ const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 const MIN_SECRET_CHARS: usize = 4;
 
 #[derive(Debug, Default)]
-pub struct Servers {
+pub(crate) struct Servers {
     clients: Vec<Arc<Client>>,
     tools: Vec<Tool>,
     names: HashMap<String, usize>,
@@ -249,7 +249,7 @@ pub struct Servers {
 }
 
 #[derive(Debug)]
-pub struct Client {
+pub(crate) struct Client {
     server: String,
     listed: Vec<Listed>,
     transport: Transport,
@@ -263,24 +263,24 @@ struct Listed {
 }
 
 #[derive(Clone, Debug)]
-pub struct Tool {
-    pub(crate) name: String,
-    pub(crate) server: String,
-    pub(crate) raw: String,
-    pub(crate) description: String,
-    pub(crate) schema: Value,
+pub(crate) struct Tool {
+    name: String,
+    server: String,
+    raw: String,
+    description: String,
+    schema: Value,
     client: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Image {
+pub(crate) struct Image {
     pub mime: String,
     pub data: Vec<u8>,
 }
 
 impl Image {
     #[must_use]
-    pub fn extension(&self) -> &'static str {
+    pub(crate) fn extension(&self) -> &'static str {
         match self.mime.as_str() {
             "image/jpeg" => "jpg",
             "image/gif" => "gif",
@@ -312,7 +312,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Servers {
-    pub async fn connect(servers: &[McpServer], cwd: &Path, sandbox: &Sandbox) -> Self {
+    pub(crate) async fn connect(servers: &[McpServer], cwd: &Path, sandbox: &Sandbox) -> Self {
         let thread = THREAD.try_with(Clone::clone).ok();
         let mut seen = HashSet::new();
         let servers: Vec<&McpServer> = servers
@@ -437,12 +437,12 @@ impl Servers {
     }
 
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 
     #[must_use]
-    pub fn offered(&self) -> Vec<(&str, usize)> {
+    pub(crate) fn offered(&self) -> Vec<(&str, usize)> {
         self.clients
             .iter()
             .enumerate()
@@ -458,12 +458,12 @@ impl Servers {
     }
 
     #[must_use]
-    pub fn failures(&self) -> &[(String, String)] {
+    pub(crate) fn failures(&self) -> &[(String, String)] {
         &self.failures
     }
 
     #[must_use]
-    pub fn definitions(&self) -> Vec<Value> {
+    pub(crate) fn definitions(&self) -> Vec<Value> {
         self.tools
             .iter()
             .map(|tool| {
@@ -477,22 +477,22 @@ impl Servers {
     }
 
     #[must_use]
-    pub fn find(&self, name: &str) -> Option<(&Client, &Tool)> {
+    pub(crate) fn find(&self, name: &str) -> Option<(&Client, &Tool)> {
         let tool = &self.tools[*self.names.get(name)?];
         Some((self.clients[tool.client].as_ref(), tool))
     }
 
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<(&str, &str)> {
+    pub(crate) fn lookup(&self, name: &str) -> Option<(&str, &str)> {
         self.find(name)
             .map(|(_, tool)| (tool.server.as_str(), tool.raw.as_str()))
     }
 
-    pub fn take_images(&self) -> Vec<Image> {
+    pub(crate) fn take_images(&self) -> Vec<Image> {
         std::mem::take(&mut *lock(&self.images))
     }
 
-    pub async fn call(
+    pub(crate) async fn call(
         &self,
         client: &Client,
         tool: &Tool,
@@ -709,7 +709,7 @@ async fn list_tools(
 }
 
 #[must_use]
-pub(super) fn prefixed_name(server: &str, tool: &str) -> String {
+fn prefixed_name(server: &str, tool: &str) -> String {
     format!("mcp__{}__{}", component(server), component(tool))
 }
 

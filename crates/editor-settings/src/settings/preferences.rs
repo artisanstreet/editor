@@ -11,8 +11,8 @@ pub struct SettingKey {
 
 #[derive(Clone, Debug)]
 pub struct SettingRequest {
-    pub target: SettingKey,
-    pub value: Value,
+    pub(crate) target: SettingKey,
+    pub(crate) value: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

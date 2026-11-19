@@ -377,7 +377,7 @@ pub struct ModelCustomization {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelCustomizationSet {
+pub(crate) struct ModelCustomizationSet {
     version: u32,
     rules: Vec<ModelCustomization>,
 }

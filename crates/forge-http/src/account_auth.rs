@@ -2,7 +2,7 @@ use artisan_account::{GrantClaims, Scope, VerifyParams, is_account_id, is_machin
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub(crate) const JWKS_TTL: Duration = Duration::from_mins(10);
+const JWKS_TTL: Duration = Duration::from_mins(10);
 
 #[derive(Clone, Debug)]
 struct CachedJwks {

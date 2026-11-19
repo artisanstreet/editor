@@ -12,34 +12,34 @@ use super::session::{LoadSessionError, Session, cookie_change};
 use super::session_writer::{SessionChange, SessionWriter};
 use crate::process::MAX_LINE_BYTES;
 
-pub const HOST: &str = "https://claude.ai";
+const HOST: &str = "https://claude.ai";
 
 const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(MAX_LINE_BYTES).unwrap();
 
 const MAX_QUOTED: usize = 300;
 
 #[derive(Clone, Debug, serde::Serialize)]
-pub struct Request {
-    pub prompt: String,
-    pub model: String,
-    pub thinking_mode: String,
-    pub effort: Option<String>,
+pub(crate) struct Request {
+    pub(crate) prompt: String,
+    pub(crate) model: String,
+    pub(crate) thinking_mode: String,
+    pub(crate) effort: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Value>,
+    pub(crate) tools: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tool_states: Vec<Value>,
+    pub(crate) tool_states: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
+    pub(crate) files: Vec<String>,
     #[serde(
         rename = "parent_message_uuid",
         skip_serializing_if = "Option::is_none"
     )]
-    pub parent: Option<String>,
+    pub(crate) parent: Option<String>,
 }
 
 impl Request {
     #[must_use]
-    pub fn body(&self) -> Value {
+    fn body(&self) -> Value {
         let mut body = json!({
             "prompt": self.prompt,
             "model": self.model,
@@ -262,7 +262,7 @@ pub enum RequestError {
     },
 }
 
-pub trait Refused: std::error::Error {
+pub(crate) trait Refused: std::error::Error {
     fn refusal(&self) -> Option<&Refusal>;
 }
 
@@ -298,17 +298,17 @@ pub enum OpenTransportError {
 #[derive(Debug, thiserror::Error)]
 #[error("building the claude.ai client for {home}")]
 pub struct BuildClientError {
-    pub home: PathBuf,
+    home: PathBuf,
     #[source]
-    pub source: reqwest::Error,
+    source: reqwest::Error,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("renaming claude.ai conversation {conversation}")]
 pub struct RenameConversationError {
-    pub conversation: String,
+    conversation: String,
     #[source]
-    pub source: RequestError,
+    source: RequestError,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -331,9 +331,9 @@ impl Refused for CreateConversationError {
 #[derive(Debug, thiserror::Error)]
 #[error("asking claude.ai to continue conversation {conversation}")]
 pub struct CompleteError {
-    pub conversation: String,
+    pub(crate) conversation: String,
     #[source]
-    pub source: RequestError,
+    pub(crate) source: RequestError,
 }
 
 impl Refused for CompleteError {
@@ -389,7 +389,7 @@ impl Refused for StreamError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UploadError {
+pub(crate) enum UploadError {
     #[error("reading {path} to upload it to claude.ai")]
     Read {
         path: PathBuf,
@@ -424,9 +424,9 @@ impl Refused for UploadError {
 #[derive(Debug, thiserror::Error)]
 #[error("stopping claude.ai's completion in conversation {conversation}")]
 pub struct StopError {
-    pub conversation: String,
+    pub(crate) conversation: String,
     #[source]
-    pub source: RequestError,
+    pub(crate) source: RequestError,
 }
 
 impl Refused for StopError {
@@ -436,7 +436,7 @@ impl Refused for StopError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeleteConversationError {
+pub(crate) enum DeleteConversationError {
     #[error("reaching claude.ai to delete conversation {conversation}")]
     Unreachable {
         conversation: String,
@@ -458,9 +458,9 @@ pub enum DeleteConversationError {
     },
 }
 
-pub type Events = BoxStream<'static, Result<Value, StreamError>>;
+pub(crate) type Events = BoxStream<'static, Result<Value, StreamError>>;
 
-pub trait Backend: Send + Sync {
+pub(crate) trait Backend: Send + Sync {
     fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>>;
     fn complete<'a>(
         &'a self,
@@ -504,14 +504,14 @@ async fn multipart(path: &Path, boundary: &str) -> std::io::Result<Vec<u8>> {
 const READ_SLACK: usize = 32;
 
 #[derive(Debug)]
-pub struct Transport {
+pub(crate) struct Transport {
     client: reqwest::Client,
     session: Mutex<Session>,
     writer: SessionWriter,
 }
 
 impl Transport {
-    pub fn open(home: &Path) -> Result<Self, OpenTransportError> {
+    pub(crate) fn open(home: &Path) -> Result<Self, OpenTransportError> {
         let session = Session::load(home)
             .map_err(|source| OpenTransportError::Load {
                 home: home.to_owned(),
@@ -523,7 +523,7 @@ impl Transport {
         Self::new(home, session).map_err(OpenTransportError::Client)
     }
 
-    pub fn new(home: &Path, session: Session) -> Result<Self, BuildClientError> {
+    pub(crate) fn new(home: &Path, session: Session) -> Result<Self, BuildClientError> {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(120))
@@ -540,7 +540,7 @@ impl Transport {
     }
 
     #[must_use]
-    pub fn session(&self) -> Session {
+    pub(crate) fn session(&self) -> Session {
         self.session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -657,14 +657,14 @@ impl Transport {
         self.writer.submit(change);
     }
 
-    pub async fn get(&self, path: &str) -> Result<Value, RequestError> {
+    pub(crate) async fn get(&self, path: &str) -> Result<Value, RequestError> {
         let response = self
             .send(reqwest::Method::GET, path, |request| request)
             .await?;
         Self::json(reqwest::Method::GET, path, response).await
     }
 
-    pub async fn rename_conversation(
+    pub(crate) async fn rename_conversation(
         &self,
         conversation: &str,
         title: &str,

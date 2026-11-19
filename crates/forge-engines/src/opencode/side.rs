@@ -46,7 +46,7 @@ pub enum SideQueryError {
 
 impl SideQueryError {
     #[must_use]
-    pub const fn exceeds_context(&self) -> bool {
+    pub(crate) const fn exceeds_context(&self) -> bool {
         match self {
             Self::ContextLimit { .. } => true,
             Self::Cancelled

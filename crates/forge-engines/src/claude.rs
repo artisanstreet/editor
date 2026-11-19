@@ -1,9 +1,9 @@
 mod decoder;
 mod door;
 mod side;
-pub mod tools;
+pub(crate) mod tools;
 
-pub use decoder::{ClaudeDecoder, DecodeError};
+pub(crate) use decoder::{ClaudeDecoder, DecodeError};
 use door::{Door, Ending, Session};
 pub use side::SideQueryError;
 

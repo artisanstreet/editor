@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub enum CallError {
+pub(crate) enum CallError {
     #[error("start the RPC probe")]
     Spawn(#[source] SpawnError),
     #[error("send {method}")]
@@ -149,7 +149,7 @@ impl std::error::Error for RpcError {}
 
 #[derive(Default)]
 pub(crate) struct State {
-    pub(crate) next_id: u64,
+    next_id: u64,
     requests: std::collections::HashMap<u64, String>,
     pub(crate) outbox: Vec<Value>,
     pub(crate) responses: Vec<Response>,
@@ -167,7 +167,7 @@ impl State {
         self.outbox.push(message);
         id
     }
-    pub(crate) fn sent(&mut self, message: &Value) {
+    fn sent(&mut self, message: &Value) {
         if let (Some(id), Some(method)) = (message["id"].as_u64(), message["method"].as_str()) {
             self.next_id = self.next_id.max(id);
             self.requests.insert(id, method.to_owned());

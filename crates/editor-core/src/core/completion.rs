@@ -63,7 +63,7 @@ impl CompletionSlot {
         self.running.is_some()
     }
 
-    pub fn current(&self) -> Option<&CompletionKey> {
+    fn current(&self) -> Option<&CompletionKey> {
         self.running.as_ref().map(|running| &running.key)
     }
 

@@ -18,7 +18,7 @@ const MAX_KEPT_SHELLS: usize = 64;
 static LAST_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Default)]
-pub struct Shells {
+pub(crate) struct Shells {
     shells: Mutex<HashMap<String, Arc<Shell>>>,
     turn: CancellationToken,
 }
@@ -92,7 +92,7 @@ enum Ended {
 }
 
 impl Shells {
-    pub fn start(&self, command: &str, cwd: &Path, sandbox: &Sandbox) -> Result<String, String> {
+    pub(crate) fn start(&self, command: &str, cwd: &Path, sandbox: &Sandbox) -> Result<String, String> {
         let mut shells = self
             .shells
             .lock()
@@ -160,7 +160,7 @@ impl Shells {
         Ok(id)
     }
 
-    pub fn read(&self, id: &str) -> Result<String, String> {
+    pub(crate) fn read(&self, id: &str) -> Result<String, String> {
         let shell = self.find(id)?;
         let mut state = shell.lock();
         let mut out = String::new();
@@ -191,7 +191,7 @@ impl Shells {
         Ok(out)
     }
 
-    pub fn kill(&self, id: &str) -> Result<String, String> {
+    pub(crate) fn kill(&self, id: &str) -> Result<String, String> {
         let shell = self.find(id)?;
         if shell.cancel.is_cancelled() {
             return Ok(format!("Shell {id} was already stopped."));

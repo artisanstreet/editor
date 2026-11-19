@@ -10,7 +10,7 @@ use serde_json::Value;
     clippy::expect_used,
     reason = "validate_input has checked every field read here"
 )]
-pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
+pub(crate) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     validate_input(name, input)?;
     let text = |field: &str| {
         str_at(input, field)
@@ -157,7 +157,7 @@ fn workflow_name(input: &Value) -> Option<String> {
     Some(name.to_owned())
 }
 
-pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
+pub(crate) fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Claude tool omitted its name".into());
     }
@@ -239,7 +239,7 @@ fn diff(old: &str, new: &str) -> String {
     clippy::expect_used,
     reason = "callers run validate_input first, which checks these fields"
 )]
-pub fn todo_steps(input: &Value) -> Vec<PlanStep> {
+pub(crate) fn todo_steps(input: &Value) -> Vec<PlanStep> {
     input["todos"]
         .as_array()
         .into_iter()

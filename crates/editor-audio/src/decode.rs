@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) const CHUNK_FRAMES: usize = 2048;
+const CHUNK_FRAMES: usize = 2048;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
 #[derive(Debug)]
@@ -113,7 +113,7 @@ fn describe(error: rodio::decoder::DecoderError) -> String {
     }
 }
 
-pub(crate) const fn sanitize(sample: f32) -> f32 {
+const fn sanitize(sample: f32) -> f32 {
     if sample.is_finite() {
         sample.clamp(-1.0, 1.0)
     } else {
@@ -121,7 +121,7 @@ pub(crate) const fn sanitize(sample: f32) -> f32 {
     }
 }
 
-pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
+fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
     if channels <= 2 {
         out.extend(frames.iter().copied().map(sanitize));
         return;

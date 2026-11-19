@@ -31,22 +31,22 @@ const MAX_REDIRECTS: usize = 10;
 
 #[derive(Clone, Debug)]
 pub struct Call {
-    pub id: String,
-    pub name: String,
-    pub input: Value,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) input: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Plan {
+pub(crate) enum Plan {
     Run,
     Ask(ApprovalRequest),
     Refuse(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Answer {
-    pub text: String,
-    pub is_error: bool,
+pub(crate) struct Answer {
+    pub(crate) text: String,
+    pub(crate) is_error: bool,
 }
 
 impl Answer {
@@ -66,16 +66,16 @@ impl Answer {
 }
 
 #[derive(Debug)]
-pub struct Runtime {
-    pub skills: Vec<skills::Skill>,
-    pub mcp: mcp::Servers,
-    pub shells: shells::Shells,
-    pub rules: Rules,
-    pub sandbox: Sandbox,
+pub(crate) struct Runtime {
+    pub(crate) skills: Vec<skills::Skill>,
+    pub(crate) mcp: mcp::Servers,
+    pub(crate) shells: shells::Shells,
+    pub(crate) rules: Rules,
+    pub(crate) sandbox: Sandbox,
 }
 
 impl Runtime {
-    pub async fn build(home: &Path, cwd: &Path, servers: &[McpServer], sandbox: Sandbox) -> Self {
+    pub(crate) async fn build(home: &Path, cwd: &Path, servers: &[McpServer], sandbox: Sandbox) -> Self {
         let mut servers = servers.to_vec();
         for project in mcp::project_servers(cwd) {
             if !servers.iter().any(|known| known.name == project.name) {
@@ -93,7 +93,7 @@ impl Runtime {
 }
 
 #[derive(Debug, Default)]
-pub struct Allowed {
+pub(crate) struct Allowed {
     file_changes: bool,
     commands: HashSet<String>,
     tools: HashSet<String>,
@@ -101,7 +101,7 @@ pub struct Allowed {
 }
 
 impl Allowed {
-    pub fn remember(&mut self, call: &Call, decision: Decision) {
+    pub(crate) fn remember(&mut self, call: &Call, decision: Decision) {
         if decision != Decision::AllowAlways {
             return;
         }
@@ -498,7 +498,7 @@ pub(super) fn item_key(call: &Call) -> String {
 }
 
 #[must_use]
-pub(super) fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
     match call.name.as_str() {
         "TodoWrite" => match crate::claude::tools::validate_input("TodoWrite", &call.input) {
             Ok(()) => ItemKind::Plan {

@@ -71,14 +71,14 @@ impl Command {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{message}")]
 pub struct RemoteFailure {
-    pub class: ErrorClass,
-    pub message: String,
+    pub(crate) class: ErrorClass,
+    pub(crate) message: String,
     #[serde(
         default,
         deserialize_with = "typed_failure",
         skip_serializing_if = "Option::is_none"
     )]
-    pub failure: Option<artisan_api::Failure>,
+    pub(crate) failure: Option<artisan_api::Failure>,
 }
 
 fn typed_failure<'de, D: serde::Deserializer<'de>>(
@@ -94,7 +94,7 @@ fn typed_failure<'de, D: serde::Deserializer<'de>>(
 
 impl RemoteFailure {
     #[must_use]
-    pub fn wire(&self) -> artisan_api::Failure {
+    pub(crate) fn wire(&self) -> artisan_api::Failure {
         self.failure
             .clone()
             .unwrap_or_else(|| artisan_api::Failure::Legacy {
