@@ -6,7 +6,7 @@ version = 2
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained; only the vendored syntect uses it, to load its packed syntax and theme dumps" },
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; file-rotate depends on it, so replacing the editor-ui and forge-engines uses would not drop it" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; editor-ui formats local times with it and forge-engines parses provider dates with it" },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; only rav1d uses it, through aqua-avif" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; only serde_yaml_ng uses it, which forge-engines reads skill frontmatter with" },
 ]
