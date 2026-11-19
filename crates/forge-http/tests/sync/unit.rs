@@ -125,7 +125,7 @@ async fn report(
     machine_proof_ok(&headers);
     if stub
         .refused_reports
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |refused| refused.checked_sub(1),
