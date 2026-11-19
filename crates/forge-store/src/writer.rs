@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
 pub const SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_MESSAGE_TEXT_BYTES: u64 = 32 * 1024 * 1024;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
@@ -613,7 +614,7 @@ impl Tx<'_> {
             return Ok((existing, false));
         }
         if let artisan_api::ItemKind::UserMessage { text, images, .. } = &new.kind {
-            if text.byte_len() > 32 * 1024 * 1024 {
+            if text.byte_len() > MAX_MESSAGE_TEXT_BYTES {
                 return Err(SendRejected::TextTooLarge {
                     bytes: text.byte_len(),
                 }

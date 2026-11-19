@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_MESSAGE_IMAGES: usize = 128;
+pub const MAX_MESSAGE_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;
 
 const GC_MIN_AGE: Duration = Duration::from_hours(1);
 
@@ -139,7 +142,7 @@ pub fn name_files(dir: &Path) -> Result<usize, BlobFileError> {
 }
 
 pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64), InputFailure> {
-    if hashes.len() > 128 {
+    if hashes.len() > MAX_MESSAGE_IMAGES {
         return Err(SendRejected::TooManyImages {
             count: hashes.len(),
         }
@@ -170,7 +173,7 @@ pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u6
             .into());
         }
         bytes = bytes.saturating_add(metadata.len());
-        if bytes > 128 * 1024 * 1024 {
+        if bytes > MAX_MESSAGE_IMAGE_BYTES {
             return Err(SendRejected::ImagesTooLarge { bytes }.into());
         }
         paths.push(file);
@@ -196,7 +199,7 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         .set_limits(limits)
         .map_err(|_decode_error| BlobRejected::NotWebp)?;
     let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 16_777_216 {
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err(BlobRejected::NotWebp.into());
     }
     let hash = BlobHash(hex::encode(Sha256::digest(bytes)));
@@ -471,7 +474,7 @@ pub fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
     reader.limits(limits);
     let decoder = reader.into_decoder().map_err(BlobFailure::Image)?;
     let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 16_777_216 {
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err(BlobFailure::TooManyPixels { width, height });
     }
     if is_webp(&bytes) {

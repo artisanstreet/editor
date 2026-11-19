@@ -12,6 +12,7 @@ type Result<T, E = StorageError> = std::result::Result<T, E>;
 const DEFAULT_PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
 pub const WAITING_ITEMS: usize = 1000;
+pub const MAX_SEARCH_BYTES: usize = 256;
 
 pub fn to_body<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(StorageError::encode::<T>)
@@ -920,7 +921,7 @@ pub fn threads_page(
         ),
     };
     let search = query.query.as_deref().unwrap_or("").trim();
-    if search.len() > 256 {
+    if search.len() > MAX_SEARCH_BYTES {
         return Err(ThreadsPageFailure::SearchTooLong {
             bytes: search.len(),
         });

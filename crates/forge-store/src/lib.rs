@@ -59,10 +59,13 @@ use writer::{Durability, Job, Tx, Writer};
 
 pub use blobs::{
     BlobFailure, BlobFileError, BlobRejected, BlobUpload, CollectBlobsError, InputImagesError,
-    MAX_BLOB_BYTES, PutBlobError, PutImageError,
+    MAX_BLOB_BYTES, MAX_IMAGE_PIXELS, MAX_MESSAGE_IMAGE_BYTES, MAX_MESSAGE_IMAGES, PutBlobError,
+    PutImageError,
 };
-pub use collection::AnswerRefused;
-pub use content::{ContentError, Damage};
+pub use collection::{AnswerRefused, MAX_COLLECTION_BYTES};
+pub use content::{
+    ContentError, Damage, MAX_FIELD_BYTES, MAX_FIELD_ENTRIES, MAX_ITEM_BYTES, MAX_SOURCE_BYTES,
+};
 pub use error::StorageError;
 pub use feed::Subscription;
 pub use items::{
@@ -80,7 +83,7 @@ pub use pairing::{
     AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,
     PairCodeHash, PairDeviceError, RevokeDeviceError, TouchDeviceError,
 };
-pub use read::{ThreadsPageFailure, WAITING_ITEMS};
+pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
     GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
     RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor, SearchHit,
@@ -98,7 +101,7 @@ pub use settings::{
     SetMcpSecretError, SetModelConfigError, SetModelGroupError, SetSecretError, SetSettingError,
     SetSkillEnabledError, SettingFailure,
 };
-pub use source_index::SourceIndexError;
+pub use source_index::{MAX_INDEX_BYTES, SourceIndexError};
 pub use sources::{
     CollectContentError, CollectionRangeError, ContentRangeError, ResolveTextError,
     SourceIndexPageError,
@@ -112,7 +115,9 @@ pub use threads::{
     SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError, UpdateThreadError,
     UpsertRunError, WorkingAgentsError,
 };
-pub use writer::{InputFailure, SETTINGS_BYTES, UpdateThreadFailure, WriteFailure};
+pub use writer::{
+    InputFailure, MAX_MESSAGE_TEXT_BYTES, SETTINGS_BYTES, UpdateThreadFailure, WriteFailure,
+};
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 

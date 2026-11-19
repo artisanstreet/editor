@@ -5,7 +5,7 @@ use artisan_api::{
     SourceIndexRange, SourceLeafDescriptor, TextContent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
 
 type Result<T, E = SourceIndexError> = std::result::Result<T, E>;
 
@@ -170,7 +170,7 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
     for (ordinal, record) in records.enumerate() {
         let record = record?;
         let json = crate::read::to_body(&record)?;
-        if metadata.len().saturating_add(json.len() + 1) > MAX_METADATA_BYTES {
+        if metadata.len().saturating_add(json.len() + 1) > MAX_INDEX_BYTES {
             return Err(SourceIndexError::MetadataTooLarge {
                 source_id: id.clone(),
             });

@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 
 pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 pub const CHUNK_BYTES: usize = 32 * 1024;
-const MAX_ITEM_BYTES: usize = 512 * 1024;
+pub const MAX_ITEM_BYTES: usize = 512 * 1024;
+pub const MAX_FIELD_BYTES: usize = 4096;
+pub const MAX_FIELD_ENTRIES: usize = 256;
 const GRACE_MILLIS: i64 = 24 * 60 * 60 * 1000;
 
 type Result<T, E = ContentError> = std::result::Result<T, E>;
@@ -208,7 +210,7 @@ pub fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
                     | "summary"
             ) =>
         {
-            if text.len() > 4096 {
+            if text.len() > MAX_FIELD_BYTES {
                 return Err(ContentError::FieldTooLong {
                     key: key.to_owned(),
                     bytes: text.len(),
@@ -216,7 +218,7 @@ pub fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
             }
         }
         Value::Array(values) => {
-            if values.len() > 256 {
+            if values.len() > MAX_FIELD_ENTRIES {
                 return Err(ContentError::TooManyEntries {
                     key: key.to_owned(),
                     entries: values.len(),

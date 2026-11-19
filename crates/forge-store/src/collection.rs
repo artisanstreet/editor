@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
-const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
 
 type Result<T, E = ContentError> = std::result::Result<T, E>;
 
