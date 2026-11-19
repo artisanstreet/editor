@@ -142,7 +142,7 @@ fn rendered(
     let states = editor_aqua::frame::inbox::states(
         sidebar,
         core,
-        editor_aqua::ui::theme::ArtisanTheme::resolved(),
+        &editor_aqua::ui::theme::ArtisanTheme::resolved(),
         &emit,
     );
     let app = test_support::editor::ui::mounted(

@@ -75,7 +75,7 @@ impl LinkFailureDialog {
         self.events.borrow_mut().clear();
     }
 
-    pub fn mount(&mut self, ui: &mut UiApp, theme: ArtisanTheme) {
+    pub fn mount(&mut self, ui: &mut UiApp, theme: &ArtisanTheme) {
         let Some(failure) = &self.failure else {
             return;
         };
@@ -88,7 +88,7 @@ impl LinkFailureDialog {
         let dismiss = Rc::clone(&self.events);
         let dialog = Dialog::new(
             "link-failure",
-            theme,
+            *theme,
             "Couldn't open the link",
             content(theme, failure, Rc::clone(&self.events)),
         )
@@ -102,7 +102,7 @@ impl LinkFailureDialog {
 }
 
 fn content(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     failure: &LinkFailure,
     events: Rc<RefCell<VecDeque<Event>>>,
 ) -> Element {
@@ -125,7 +125,7 @@ fn content(
                 .build(),
         )
         .child(
-            Button::text(COPY, theme, ButtonTone::Primary, "Copy link")
+            Button::text(COPY, *theme, ButtonTone::Primary, "Copy link")
                 .on_activate(move |_| events.borrow_mut().push_back(Event::Copy))
                 .build(),
         )

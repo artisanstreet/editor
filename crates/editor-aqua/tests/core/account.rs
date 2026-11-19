@@ -46,11 +46,12 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
             seen.send(serde_json::from_slice::<serde_json::Value>(&body).unwrap())
                 .unwrap();
             let (status, body) = replies.recv_timeout(Duration::from_secs(5)).unwrap();
-            let _ = write!(
+            write!(
                 stream,
                 "HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
-            );
+            )
+            .expect("the test server writes its reply");
         }
     });
     let directory = tempfile::tempdir().unwrap();

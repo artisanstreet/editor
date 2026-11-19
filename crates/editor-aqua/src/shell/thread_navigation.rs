@@ -146,11 +146,11 @@ fn pop(presence: f32) -> aqua_core::Transform2D {
         .then(aqua_core::Transform2D::translate(centre, centre))
 }
 
-pub(crate) fn jump_to_latest(theme: ArtisanTheme, presence: f32, dispatch: Dispatch) -> Element {
+pub(crate) fn jump_to_latest(theme: &ArtisanTheme, presence: f32, dispatch: Dispatch) -> Element {
     let size = IconButtonSize::Md;
     let button = IconButton::new(
         "jump-latest",
-        theme,
+        *theme,
         editor_assets::AssetId::TABLER_CHEVRON_DOWN,
         "Jump to latest",
         size,
@@ -409,12 +409,12 @@ impl ThreadNavigation {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: Instant,
         dispatch: Dispatch,
     ) -> Option<Element> {
         self.context = Some(BuildContext {
-            theme,
+            theme: *theme,
             dispatch: std::rc::Rc::clone(&dispatch),
         });
         self.build_with(conversation, core, viewport, now, theme, dispatch)
@@ -437,7 +437,7 @@ impl ThreadNavigation {
             core,
             viewport,
             now,
-            context.theme,
+            &context.theme,
             context.dispatch,
         );
         match (element, mounted) {
@@ -462,7 +462,7 @@ impl ThreadNavigation {
         core: &Core,
         viewport: CollectionViewport,
         now: Instant,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         dispatch: Dispatch,
     ) -> Option<Element> {
         let scope = conversation
@@ -494,7 +494,7 @@ impl ThreadNavigation {
             markers,
             Some(markers[active].position),
             state.cursor,
-            theme,
+            *theme,
             progress,
             dispatch,
         );

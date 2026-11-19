@@ -21,7 +21,7 @@ fn a_link_the_browser_cannot_open_offers_its_url_to_copy() {
         URL.into(),
         &std::io::Error::other("no browser is registered"),
     );
-    failure.mount(&mut ui, ArtisanTheme::resolved());
+    failure.mount(&mut ui, &ArtisanTheme::resolved());
     ui.build_frame().unwrap();
     let texts = painted_texts(&ui);
     for wanted in [

@@ -11,7 +11,7 @@ impl RootViews {
         workspace: &mut crate::shell::workspace::Workspace,
         core: &crate::core::Core,
         ui: &mut UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         width: f32,
         reduced_motion: bool,
         swift: bool,
@@ -174,7 +174,7 @@ impl RootViews {
                 .get_or_insert_with(|| Rc::new(Cell::new(true))),
         );
         let style = (
-            theme,
+            *theme,
             reduced_motion,
             swift,
             media_resources.scale.to_bits(),
@@ -209,7 +209,7 @@ impl RootViews {
                 scope.clone(),
                 Rc::clone(&workspace.markdown),
                 Rc::clone(&workspace.status_shimmers),
-                theme,
+                *theme,
                 reduced_motion,
                 now,
                 workspace.selections.source_allocator(),
@@ -353,7 +353,7 @@ impl RootViews {
                 notice = notice.action(
                     crate::ui::kit::Button::text(
                         "retry-thread",
-                        theme,
+                        *theme,
                         crate::ui::kit::ButtonTone::Neutral,
                         "Try again",
                     )
@@ -378,7 +378,7 @@ impl RootViews {
             let scope = scope.clone();
             let retry = crate::ui::kit::Button::text(
                 "retry-thread-controls",
-                theme,
+                *theme,
                 crate::ui::kit::ButtonTone::Neutral,
                 "Try again",
             )

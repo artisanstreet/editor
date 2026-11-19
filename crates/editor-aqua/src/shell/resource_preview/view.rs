@@ -142,7 +142,7 @@ impl ViewState {
     pub(crate) fn content(
         &self,
         preview: &ResourcePreview,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport_height: f32,
         emit: Rc<dyn Fn(Action)>,
     ) -> Result<Element, UnpreparedError> {
@@ -152,7 +152,7 @@ impl ViewState {
         let mut body = UiBox::new().layout("column").spaced(Space::S12).child(
             Button::text(
                 "resource-copy-path",
-                theme,
+                *theme,
                 ButtonTone::Neutral,
                 "Copy path",
             )
@@ -171,9 +171,14 @@ impl ViewState {
                 body = body.child(
                     crate::ui::page::notice(&theme, failure(error))
                         .action(
-                            Button::text("resource-retry", theme, ButtonTone::Neutral, "Try again")
-                                .on_activate(move |_| retry(Action::Retry { generation }))
-                                .build(),
+                            Button::text(
+                                "resource-retry",
+                                *theme,
+                                ButtonTone::Neutral,
+                                "Try again",
+                            )
+                            .on_activate(move |_| retry(Action::Retry { generation }))
+                            .build(),
                         )
                         .build(),
                 );
@@ -186,7 +191,7 @@ impl ViewState {
                     .child(
                         Button::text(
                             "resource-copy-text",
-                            theme,
+                            *theme,
                             ButtonTone::Neutral,
                             "Copy file",
                         )
@@ -219,14 +224,14 @@ impl ViewState {
     fn dialog(
         &self,
         preview: &ResourcePreview,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport_height: f32,
         emit: Rc<dyn Fn(Action)>,
     ) -> Result<Dialog, UnpreparedError> {
         let content = self.content(preview, theme, viewport_height, Rc::clone(&emit))?;
         let generation = self.generation;
         Ok(
-            Dialog::new("resource-preview", theme, preview.path.clone(), content)
+            Dialog::new("resource-preview", *theme, preview.path.clone(), content)
                 .max_width(1100.0)
                 .on_dismiss(move |_| emit(Action::Dismiss { generation })),
         )

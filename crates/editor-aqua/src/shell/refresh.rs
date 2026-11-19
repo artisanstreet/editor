@@ -18,10 +18,8 @@ impl Refresh {
             (Self::Sidebar, Self::Sidebar) => Self::Sidebar,
             (Self::SidebarFrame, Self::Sidebar | Self::SidebarFrame)
             | (Self::Sidebar, Self::SidebarFrame) => Self::SidebarFrame,
-            (Self::FrameSections, _)
-            | (_, Self::FrameSections)
-            | (Self::SidebarFrame, _)
-            | (_, Self::SidebarFrame) => Self::FrameSections,
+            (Self::FrameSections | Self::SidebarFrame, _)
+            | (_, Self::FrameSections | Self::SidebarFrame) => Self::FrameSections,
             (Self::Transcript, Self::Transcript) => Self::Transcript,
             _ => Self::Sections,
         }

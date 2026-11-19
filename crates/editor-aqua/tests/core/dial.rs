@@ -56,7 +56,9 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
     let services = Services::scripted(
         CORE_URL,
         Arc::new(move |_| {
-            let _ = blocked.lock().unwrap().recv();
+            match blocked.lock().unwrap().recv() {
+                Ok(()) | Err(mpsc::RecvError) => {}
+            }
             Err(editor_aqua::core::ae::AeError::Failed {
                 command: "account status".to_owned(),
                 detail: "released".to_owned(),
@@ -137,9 +139,18 @@ async fn pair_server() -> (String, String, Arc<std::sync::atomic::AtomicUsize>) 
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            let _ = socket.write_all(head.as_bytes()).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.shutdown().await;
+            socket
+                .write_all(head.as_bytes())
+                .await
+                .expect("the test Forge writes its reply");
+            socket
+                .write_all(body)
+                .await
+                .expect("the test Forge writes its reply");
+            socket
+                .shutdown()
+                .await
+                .expect("the test Forge writes its reply");
         }
     });
     (address, encoded, pairings)

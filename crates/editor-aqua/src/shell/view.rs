@@ -27,7 +27,7 @@ pub(crate) struct WorkspaceElements {
 }
 
 pub fn settings_dialog(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
     sidebar: Element,
     page: Element,
@@ -35,7 +35,7 @@ pub fn settings_dialog(
 ) -> crate::ui::dialog::Dialog {
     let dimensions = layout::settings_layout(viewport);
     let panel = settings_panel(theme, viewport, sidebar, page, std::rc::Rc::clone(&dismiss));
-    crate::ui::dialog::Dialog::new("settings-dialog", theme, "Settings", panel)
+    crate::ui::dialog::Dialog::new("settings-dialog", *theme, "Settings", panel)
         .bare()
         .soft_backdrop()
         .max_width(dimensions.size.width)
@@ -43,7 +43,7 @@ pub fn settings_dialog(
 }
 
 pub fn settings_panel(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
     sidebar: Element,
     page: Element,
@@ -53,7 +53,7 @@ pub fn settings_panel(
     let close = std::rc::Rc::clone(&dismiss);
     let close = IconButton::new(
         "settings-close",
-        theme,
+        *theme,
         editor_assets::AssetId::TABLER_X,
         "Close settings",
         IconButtonSize::Md,

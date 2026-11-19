@@ -33,7 +33,7 @@ impl WordmarkLoader {
 
     pub(crate) fn build(
         &mut self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: Instant,
         reduced_motion: bool,
         key: &'static str,
@@ -159,7 +159,7 @@ pub struct ConnectionPresenter {
 
 fn command_button(
     key: &'static str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     tone: ButtonTone,
     label: impl Into<String>,
     commands: &Commands,
@@ -168,7 +168,7 @@ fn command_button(
 ) -> Button {
     let commands = Rc::clone(commands);
     let (host, instance) = identity.clone();
-    Button::text(key, theme, tone, label)
+    Button::text(key, *theme, tone, label)
         .debug_selector(key)
         .on_activate(move |_| {
             commands
@@ -194,7 +194,7 @@ impl ConnectionPresenter {
         }
     }
 
-    pub fn waiting(&mut self, theme: ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
+    pub fn waiting(&mut self, theme: &ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
         self.mark
             .build(theme, now, reduced_motion, "forge-connecting")
     }
@@ -227,7 +227,7 @@ impl ConnectionPresenter {
     pub fn build(
         &mut self,
         host: &HostData,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: Instant,
         reduced_motion: bool,
     ) -> Option<Element> {

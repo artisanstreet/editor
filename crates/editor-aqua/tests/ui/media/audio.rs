@@ -27,8 +27,8 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
     .owned_by(&[7], 1);
     let assets = AudioAssets::new();
     let (sender, receiver) = mpsc::channel();
-    assets.set_test_waker(Arc::new(move || {
-        let _ = sender.send(());
+    assets.set_test_waker(Arc::new(move || match sender.send(()) {
+        Ok(()) | Err(mpsc::SendError(())) => {}
     }));
     let noop = Arc::new(|| {});
     let source = MediaSource::from("recording.wav".to_owned());

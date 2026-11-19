@@ -511,7 +511,7 @@ impl Workspace {
     pub(crate) fn sync_composer_tooltip(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         now: std::time::Instant,
     ) -> bool {
         use crate::composer::view::PopupKind;
@@ -553,7 +553,7 @@ impl Workspace {
         }
         if self.composer_tooltip.is_none() {
             if let (Some(content), Some(node), Some(factory)) =
-                (shown, node, owner.tooltip_surface_factory(&theme))
+                (shown, node, owner.tooltip_surface_factory(theme))
             {
                 let surface = factory.surface;
                 match crate::ui::hover_tooltip::TooltipHost::open(
@@ -660,7 +660,7 @@ impl Workspace {
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         assets: &aqua::images::ImageAssets,
         now: f64,
     ) -> bool {
@@ -708,7 +708,7 @@ impl Workspace {
             let content = match kind {
                 PopupKind::Model => {
                     match owner.model_menu(
-                        &theme,
+                        theme,
                         host,
                         viewport,
                         crate::shell::wheel::kept_offset(ui, crate::ui::scroll::MODEL_MENU).y,
@@ -725,7 +725,7 @@ impl Workspace {
                 PopupKind::Project => {
                     let composer = owner.controller.borrow();
                     Some(view::project_menu(
-                        &theme,
+                        theme,
                         host,
                         &composer.picker,
                         composer.project(host).as_ref(),
@@ -738,7 +738,7 @@ impl Workspace {
                         .and_then(|node| ui.tree().rect(node))
                         .map_or(viewport.w, |rect| rect.w);
                     owner.mention_menu(
-                        &theme,
+                        theme,
                         viewport,
                         width,
                         crate::shell::wheel::kept_offset(ui, view::MENTION_SCROLL).y,
@@ -780,7 +780,7 @@ impl Workspace {
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         viewport_height: f32,
         reduced_motion: bool,
         now: aqua::Instant,
@@ -789,7 +789,7 @@ impl Workspace {
         let elements = self.inspector.build(
             core,
             ui,
-            theme,
+            *theme,
             viewport_height,
             reduced_motion,
             now,
@@ -802,7 +802,7 @@ impl Workspace {
     pub(crate) fn sync_terminal_dialog(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) {
         if self.terminal_dismissed.replace(false) {
             self.inspector.close_terminal(ui);
@@ -816,7 +816,7 @@ impl Workspace {
         };
         if let Some(dialog) = &self.terminal_dialog {
             if dialog.is_open(ui) {
-                dialog.set_theme(theme);
+                dialog.set_theme(*theme);
                 if let Err(error) = dialog.refresh_content(ui, content) {
                     tracing::warn!(%error, "could not refresh terminal dialog");
                 }
@@ -831,7 +831,7 @@ impl Workspace {
         let dismissed = Rc::clone(&self.terminal_dismissed);
         let dialog = crate::ui::dialog::Dialog::new(
             "inspector-terminal-dialog",
-            theme,
+            *theme,
             "Terminal output",
             content,
         )
@@ -1123,7 +1123,7 @@ impl Workspace {
     fn question_source_view(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         document: aqua_text::document::SelectionDocumentId,
         selection: aqua_text::document::SelectionSourceId,
     ) -> Result<Option<aqua_ui::element::Element>, aqua_text::document::SelectionSourceError> {
@@ -1173,7 +1173,7 @@ impl Workspace {
         };
         let actions = Rc::clone(&self.question_source_actions);
         service
-            .render(ui, content, &theme, move |action| {
+            .render(ui, content, theme, move |action| {
                 actions.borrow_mut().push_back(action)
             })
             .map(Some)
@@ -1206,7 +1206,7 @@ impl Workspace {
     pub(crate) fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         reduced_motion: bool,
     ) -> Result<
         (
@@ -1255,7 +1255,7 @@ impl Workspace {
                 let actions = Rc::clone(&self.question_option_detail_actions);
                 Some(
                     service
-                        .render(ui, content, &theme, move |action| {
+                        .render(ui, content, theme, move |action| {
                             actions.borrow_mut().push_back((identity.clone(), action));
                         })
                         .map_err(|source| BuildError::Selection {
@@ -1278,7 +1278,7 @@ impl Workspace {
         let options = crate::conversation::questions::stored_options(
             &self.conversation.question_pages,
             &composer.questionnaire,
-            theme,
+            *theme,
             options_document,
             options_source,
             stored_detail,
@@ -1304,7 +1304,7 @@ impl Workspace {
             .question_pages
             .current_question(&composer.questionnaire);
         let questionnaires = crate::composer::view::questionnaire(
-            &theme,
+            theme,
             &composer.questionnaire,
             question,
             options,
@@ -1313,7 +1313,7 @@ impl Workspace {
             &emit,
         );
         let attachments = crate::composer::view::attachments(
-            &theme,
+            theme,
             &composer,
             std::time::Instant::now(),
             reduced_motion,
@@ -1428,7 +1428,7 @@ impl Workspace {
     pub(crate) fn sidebar_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         viewport: aqua_core::Size,
         visible: bool,
         reduced_motion: bool,
@@ -1443,12 +1443,12 @@ impl Workspace {
         crate::sidebar::view::build(
             sidebar,
             core,
-            &theme,
+            theme,
             viewport,
             visible,
             reduced_motion,
             now,
-            sidebar.thread_visual_factory(&theme, reduced_motion),
+            sidebar.thread_visual_factory(theme, reduced_motion),
             &self.sidebar_emit(settings),
         )
     }
@@ -1710,15 +1710,15 @@ impl Workspace {
     pub(crate) fn marketplace_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
-        crate::marketplace::view::build(&self.marketplace, core, &theme, self.marketplace_emit())
+        crate::marketplace::view::build(&self.marketplace, core, theme, self.marketplace_emit())
     }
 
     pub(crate) fn settings_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         build: &crate::settings::about::BuildInfo,
         viewport: aqua_core::Size,
         visible: bool,
@@ -1726,7 +1726,7 @@ impl Workspace {
         crate::settings::view::build(
             &self.settings,
             core,
-            &theme,
+            theme,
             build,
             viewport,
             visible,

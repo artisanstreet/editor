@@ -64,7 +64,7 @@ fn an_empty_file_says_it_is_empty_instead_of_an_inverted_range() {
     assert!(!state.prepare(&preview, &mut app).unwrap());
     assert_eq!(state.pending_jump(), None);
     let content = state
-        .content(&preview, ArtisanTheme::resolved(), 600.0, Rc::new(|_| {}))
+        .content(&preview, &ArtisanTheme::resolved(), 600.0, Rc::new(|_| {}))
         .unwrap();
     app.mount(|_| content).unwrap();
     app.set_viewport(800.0, 600.0, 1.0);
@@ -106,7 +106,7 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     let dialog = state
         .dialog(
             &preview,
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             900.0,
             Rc::new(move |action| sink.borrow_mut().push(action)),
         )
@@ -157,7 +157,7 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     state.release(&mut app);
     assert!(
         state
-            .dialog(&preview, ArtisanTheme::resolved(), 900.0, Rc::new(|_| {}))
+            .dialog(&preview, &ArtisanTheme::resolved(), 900.0, Rc::new(|_| {}))
             .is_err()
     );
 }
@@ -188,12 +188,12 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     let emit: Rc<dyn Fn(Action)> = Rc::new(|_| {});
     let theme = ArtisanTheme::resolved();
     let dialog = state
-        .dialog(&preview, theme, 700.0, Rc::clone(&emit))
+        .dialog(&preview, &theme, 700.0, Rc::clone(&emit))
         .unwrap();
     let host = DialogHost::open(&mut app, owner, dialog).unwrap();
     assert!(app.focus_key("resource-copy-text"));
     let focused = app.tree().focused();
-    let content = state.content(&preview, theme, 700.0, emit).unwrap();
+    let content = state.content(&preview, &theme, 700.0, emit).unwrap();
     host.refresh_content(&mut app, content).unwrap();
     assert!(host.is_open(&app));
     assert_eq!(app.tree().focused(), focused);
@@ -218,7 +218,7 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
     assert_eq!(state.pending_jump(), Some(50));
     assert!(!state.sync_jump(&mut app));
     let content = state
-        .content(&preview, ArtisanTheme::resolved(), 400.0, Rc::new(|_| {}))
+        .content(&preview, &ArtisanTheme::resolved(), 400.0, Rc::new(|_| {}))
         .unwrap();
     app.mount(|_| content).unwrap();
     app.set_viewport(600.0, 400.0, 1.0);
@@ -274,7 +274,7 @@ fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection()
     let content = state
         .content(
             &preview,
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             600.0,
             Rc::new(move |action| sink.borrow_mut().push(action)),
         )

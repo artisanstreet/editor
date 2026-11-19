@@ -18,10 +18,11 @@ pub(crate) const ACTIVE: &str = "artisan-active-thread-tab";
 pub(crate) const SHEET: &str = "artisan-thread-sheet";
 
 pub(crate) fn surface(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     motion: Rc<RefCell<motion::Motion>>,
     reduced: bool,
 ) -> Element {
+    let theme = *theme;
     let geometry = Rc::new(Cell::new(None));
     let measured = Rc::clone(&geometry);
     let targeting = Rc::clone(&motion);

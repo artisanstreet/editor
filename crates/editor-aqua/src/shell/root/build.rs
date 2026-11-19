@@ -82,7 +82,7 @@ impl RootViews {
         let mut connection_held = false;
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
-            Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
+            Screen::Marketplace => workspace.marketplace_view(&shell.core, &theme),
             Screen::Usage => workspace.usage_view(&shell.core, &theme),
             Screen::Thread { .. } => {
                 workspace.conversation.sync_screen(&mut shell.core);
@@ -94,7 +94,7 @@ impl RootViews {
                         workspace,
                         &shell.core,
                         ui,
-                        theme,
+                        &theme,
                         card_width,
                         reduced,
                         shell.preferences.streaming == crate::ui::preferences::StreamingMode::Swift,
@@ -112,7 +112,7 @@ impl RootViews {
                             )));
                     }
                     connection_held = true;
-                    view::centered_conversation(self.connection.waiting(theme, now, reduced))
+                    view::centered_conversation(self.connection.waiting(&theme, now, reduced))
                 }
             }
             Screen::NewThread { host, .. } => {
@@ -125,11 +125,11 @@ impl RootViews {
                     .core
                     .host(host)
                     .ok_or_else(|| BuildError::HostGone { host: host.clone() })?;
-                if let Some(status) = self.connection.build(host, theme, now, reduced) {
+                if let Some(status) = self.connection.build(host, &theme, now, reduced) {
                     view::centered_conversation(status)
                 } else {
                     let (questionnaires, attachments) =
-                        workspace.composer_content(ui, theme, reduced)?;
+                        workspace.composer_content(ui, &theme, reduced)?;
                     view::new_conversation(
                         workspace,
                         &shell.core,
@@ -232,7 +232,7 @@ impl RootViews {
                         source,
                     })?;
                 let content = state
-                    .content(preview, theme, viewport.height, emit)
+                    .content(preview, &theme, viewport.height, emit)
                     .map_err(BuildError::ResourcePreview)?;
                 self.resource_content = Some((content, preview.path.clone()));
             }
@@ -244,17 +244,17 @@ impl RootViews {
             let settings_layout = layout::settings_layout(viewport);
             let nav = workspace.sidebar_view(
                 &shell.core,
-                theme,
+                &theme,
                 aqua_core::Size::new(settings_layout.size.width, settings_layout.size.height),
                 true,
                 reduced,
                 now,
                 true,
             );
-            let page = workspace.settings_view(&shell.core, theme, &shell.build, size, true);
+            let page = workspace.settings_view(&shell.core, &theme, &shell.build, size, true);
             let dismissed = Rc::clone(&self.settings_dismissed);
             let panel = view::settings_panel(
-                theme,
+                &theme,
                 viewport,
                 nav,
                 page,
@@ -377,7 +377,7 @@ impl RootViews {
                     .inspector_panel(
                         &shell.core,
                         ui,
-                        theme,
+                        &theme,
                         crate::frame::overview::panel_height(viewport.height),
                         reduced,
                         self.ui_now,
@@ -387,7 +387,7 @@ impl RootViews {
             }
         };
         aqua_core::checkpoint::reach();
-        let titlebar = shell.titlebar.workspace(theme, window, strip, None, None);
+        let titlebar = shell.titlebar.workspace(&theme, window, strip, None, None);
         let image_preview = self.image_preview.as_ref().map(|preview| {
             let events = Rc::clone(&self.preview_actions);
             preview.view.view(
@@ -493,7 +493,7 @@ impl RootViews {
         })();
         self.mount_palette(shell, ui);
         self.mount_resource(shell, ui);
-        self.link_failure.mount(ui, shell.preferences.theme());
+        self.link_failure.mount(ui, &shell.preferences.theme());
         if self.sync_image_preview(shell, ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_preview");
             self.conversation_invalidated.set(true);

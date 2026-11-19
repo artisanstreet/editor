@@ -244,7 +244,7 @@ impl Entry {
                 emit,
             },
         );
-        card::screen(theme, titlebar.entry(*theme, window), card)
+        card::screen(theme, titlebar.entry(theme, window), card)
     }
 
     pub(crate) fn sync_editors(&self, ui: &mut aqua::UiApp) {

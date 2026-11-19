@@ -37,9 +37,12 @@ fn pending_preview(core: &Core, config: &HostConfig) -> ResourcePreview {
 
 fn wait_for_result(preview: &ResourcePreview) {
     let (sender, receiver) = mpsc::channel();
-    preview.wake_mailbox().unwrap().set_waker(Arc::new(move || {
-        let _ = sender.send(());
-    }));
+    preview
+        .wake_mailbox()
+        .unwrap()
+        .set_waker(Arc::new(move || match sender.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
     receiver.recv_timeout(Duration::from_secs(15)).unwrap();
 }
 
@@ -98,7 +101,7 @@ fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
     for rebuilt in [0, 100, 300] {
         let now = opened + Duration::from_millis(rebuilt);
         presenter.hold(Some(waiting.clone()));
-        let _mark = presenter.waiting(theme, now, false);
+        let _mark = presenter.waiting(&theme, now, false);
         assert_eq!(
             presenter.deadline(now, false),
             Some(reveal),
@@ -112,7 +115,7 @@ fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
         HostId("gone".into()),
         ThreadId::from("another"),
     )));
-    let _mark = presenter.waiting(theme, later, false);
+    let _mark = presenter.waiting(&theme, later, false);
     assert_eq!(
         presenter.deadline(later, false),
         Some(later + Duration::from_millis(500))

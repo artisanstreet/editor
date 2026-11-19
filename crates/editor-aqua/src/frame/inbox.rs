@@ -129,7 +129,7 @@ pub(crate) fn view(
                 .build(),
         );
     }
-    column = column.children(states(sidebar, core, theme, &emit));
+    column = column.children(states(sidebar, core, &theme, &emit));
     Aqua::Box()
         .layout("column")
         .styles([Aqua::Style()
@@ -143,19 +143,19 @@ pub(crate) fn view(
 
 fn button(
     key: &str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     label: &str,
     action: ViewAction,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let emit = Rc::clone(emit);
-    Button::text(key, theme, ButtonTone::Neutral, label)
+    Button::text(key, *theme, ButtonTone::Neutral, label)
         .size(ButtonSize::Sm)
         .on_activate(move |_| emit(action.clone()))
         .build()
 }
 
-fn guidance(theme: ArtisanTheme, text: String, action: Option<Element>) -> Element {
+fn guidance(theme: &ArtisanTheme, text: String, action: Option<Element>) -> Element {
     aqua_ui::element::Box::new()
         .layout("column")
         .spaced(Space::S8)
@@ -168,7 +168,7 @@ fn guidance(theme: ArtisanTheme, text: String, action: Option<Element>) -> Eleme
 pub fn states(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Vec<Element> {
     let mut states = Vec::new();

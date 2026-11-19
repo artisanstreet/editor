@@ -892,12 +892,12 @@ fn markdown_edits_keep_equal_funnel_state_and_changed_models_reset_it() {
     }));
     let reveal = owners.presenters().next().unwrap().2.funnel_reveals("item");
     assert_eq!(reveal.len(), 1);
-    let _ = render(&mut owners, &mut app, &updated);
+    drop(render(&mut owners, &mut app, &updated));
     assert_eq!(
         owners.presenters().next().unwrap().2.funnel_reveals("item"),
         reveal
     );
-    let _ = render(&mut owners, &mut app, &changed);
+    drop(render(&mut owners, &mut app, &changed));
     assert!(
         owners
             .presenters()

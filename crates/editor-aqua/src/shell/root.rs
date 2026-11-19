@@ -256,7 +256,7 @@ impl SectionViews for RootViews {
             workspace,
             &shell.core,
             ui,
-            theme,
+            &theme,
             width,
             reduced,
             swift,

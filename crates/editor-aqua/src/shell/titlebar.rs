@@ -44,7 +44,7 @@ impl Titlebar {
         self.changed.replace(false)
     }
 
-    pub(crate) fn entry(&self, theme: ArtisanTheme, window: &ObservedWindowState) -> Element {
+    pub(crate) fn entry(&self, theme: &ArtisanTheme, window: &ObservedWindowState) -> Element {
         let content = UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
@@ -58,7 +58,7 @@ impl Titlebar {
 
     pub(crate) fn workspace(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         window: &ObservedWindowState,
         header: Vec<Element>,
         meter: Option<Element>,
@@ -188,7 +188,7 @@ impl Titlebar {
             .build()
     }
 
-    fn controls(&self, theme: ArtisanTheme, window: &ObservedWindowState) -> Element {
+    fn controls(&self, theme: &ArtisanTheme, window: &ObservedWindowState) -> Element {
         let stroke = crate::measure::narrow(1.0 / window.scale_factor);
         UiBox::new()
             .layout("row")
@@ -202,7 +202,7 @@ impl Titlebar {
 
     fn button(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         control: CaptionControl,
         maximized: bool,
         stroke: f32,
@@ -216,7 +216,7 @@ impl Titlebar {
         let actions = Rc::clone(&self.actions);
         let hovered = Rc::clone(&self.hovered);
         let changed = Rc::clone(&self.changed);
-        CaptionButton::new(selector, theme, caption, label)
+        CaptionButton::new(selector, *theme, caption, label)
             .stroke(stroke)
             .lit(self.hovered.get() == Some(control))
             .on_activate(move |event| {

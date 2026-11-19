@@ -333,8 +333,8 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     let mut other = sessions
         .open(id.clone(), first, target.scope(), client.clone())
         .unwrap();
-    let _ = old.session.as_mut().unwrap().drain_events();
-    let _ = other.drain_events();
+    drop(old.session.as_mut().unwrap().drain_events());
+    drop(other.drain_events());
     old.editor.borrow_mut().set_text("old draft");
     old.edited();
     assert!(

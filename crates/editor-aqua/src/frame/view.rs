@@ -63,7 +63,7 @@ pub(crate) fn body(
             UiBox::new()
                 .layout("column")
                 .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-                .child(crate::frame::seam::surface(*theme, seam, reduced))
+                .child(crate::frame::seam::surface(theme, seam, reduced))
                 .child(titlebar)
                 .child(
                     UiBox::new()

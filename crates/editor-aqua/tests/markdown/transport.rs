@@ -141,9 +141,12 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let provider = core.source_provider(&config.id, instance).unwrap();
     let mut owner = StoredOwner::default();
     let (wake, received) = mpsc::channel();
-    owner.wake_mailbox().unwrap().set_waker(Arc::new(move || {
-        let _ = wake.send(());
-    }));
+    owner
+        .wake_mailbox()
+        .unwrap()
+        .set_waker(Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
     assert!(matches!(
         owner.ensure(
             "row",
@@ -313,8 +316,8 @@ fn stored_conversation_transaction(
         .borrow()
         .wake_mailbox()
         .expect("the stored conversation has a wake mailbox")
-        .set_waker(Arc::new(move || {
-            let _ = wake.send(());
+        .set_waker(Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
         }));
     let key = BodyKey {
         item: item.id.clone(),

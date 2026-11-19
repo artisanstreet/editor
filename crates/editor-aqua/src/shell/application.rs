@@ -494,12 +494,12 @@ impl<V: SectionViews> ShellApplication<V> {
                     workspace.sync_marketplace_ui(self.ui.ui_mut());
                     workspace.sync_editor_ui(self.ui.ui_mut(), settings_visible);
                     workspace
-                        .sync_terminal_dialog(self.ui.ui_mut(), self.shell.preferences.theme());
+                        .sync_terminal_dialog(self.ui.ui_mut(), &self.shell.preferences.theme());
                     workspace.inspector.reveal_tail(self.ui.ui_mut());
                     if workspace.sync_composer_popups(
                         &self.shell.core,
                         self.ui.ui_mut(),
-                        self.shell.preferences.theme(),
+                        &self.shell.preferences.theme(),
                         &assets,
                         ctx.now().as_secs_f64(),
                     ) {
@@ -608,7 +608,7 @@ impl<V: SectionViews> ShellApplication<V> {
         id: AquaWindowId,
         reason: FrameReason,
     ) {
-        let card = failure_card(message, self.shell.preferences.theme());
+        let card = failure_card(message, &self.shell.preferences.theme());
         let shown = if self.mounted {
             self.ui.ui_mut().refresh(vec![card])
         } else {
@@ -781,7 +781,7 @@ impl<V: SectionViews> ShellApplication<V> {
             workspace.sync_editor_ui(self.ui.ui_mut(), settings_visible);
             if workspace.sync_composer_tooltip(
                 self.ui.ui_mut(),
-                self.shell.preferences.theme(),
+                &self.shell.preferences.theme(),
                 std::time::Instant::now(),
             ) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
@@ -990,7 +990,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 Some(ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL);
         }
         if let Some(workspace) = self.shell.entry.workspace_mut() {
-            if workspace.sync_composer_tooltip(self.ui.ui_mut(), theme, std::time::Instant::now()) {
+            if workspace.sync_composer_tooltip(self.ui.ui_mut(), &theme, std::time::Instant::now())
+            {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
             refresh |= causes.note(
@@ -1329,7 +1330,7 @@ fn fit_launch_to_display(ctx: &mut AppCtx<'_>, id: AquaWindowId) {
     }
 }
 
-fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element {
+fn failure_card(message: &str, theme: &crate::ui::theme::ArtisanTheme) -> Element {
     use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, pane::sheet};
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};

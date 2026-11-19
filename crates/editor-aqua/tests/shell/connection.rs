@@ -28,9 +28,9 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     let mut presenter = ConnectionPresenter::default();
     let start = Instant::now();
     let host = core.host(&config.id).unwrap();
-    assert!(presenter.build(host, theme, start, true).is_some());
+    assert!(presenter.build(host, &theme, start, true).is_some());
     let status = presenter
-        .build(host, theme, start + Duration::from_secs(6), true)
+        .build(host, &theme, start + Duration::from_secs(6), true)
         .expect("an offline Forge has a status");
     let mut app = test_support::editor::ui::mounted(900.0, 700.0, status);
     let texts = test_support::editor::ui::painted_texts(&app);
