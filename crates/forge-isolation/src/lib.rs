@@ -80,7 +80,7 @@ impl EngineTree {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) const fn group(&self) -> Option<&linux::RunGroup> {
+    const fn group(&self) -> Option<&linux::RunGroup> {
         self.group.as_ref()
     }
 

@@ -179,7 +179,7 @@ fn remember(layout: &Layout) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-pub fn run_owner(folder_name: &str) -> Option<u32> {
+fn run_owner(folder_name: &str) -> Option<u32> {
     folder_name
         .strip_prefix(RUN_PREFIX)?
         .split_once('-')
@@ -382,7 +382,7 @@ pub enum EndRunError {
     },
 }
 
-pub fn populated(events: &str) -> Option<bool> {
+fn populated(events: &str) -> Option<bool> {
     events
         .lines()
         .find_map(|line| line.strip_prefix("populated "))
@@ -401,7 +401,7 @@ impl RunGroup {
         }
     }
 
-    pub fn create_in(engines: &Path) -> Result<Self, RunGroupError> {
+    fn create_in(engines: &Path) -> Result<Self, RunGroupError> {
         let run = RUNS.fetch_add(1, Ordering::Relaxed);
         let folder = engines.join(format!("{RUN_PREFIX}{}-{run}", std::process::id()));
         let created = match std::fs::create_dir(&folder) {
@@ -427,11 +427,6 @@ impl RunGroup {
         Ok(Self { folder, procs })
     }
 
-    #[must_use]
-    pub fn folder(&self) -> &Path {
-        &self.folder
-    }
-
     pub(crate) fn kill_switch(&self) -> CString {
         CString::new(self.folder.join("cgroup.kill").as_os_str().as_bytes()).expect(
             "invariant: a cgroup folder named without NUL bytes has a kill file named without them",
@@ -442,7 +437,7 @@ impl RunGroup {
         self.procs.clone()
     }
 
-    pub fn end(&self) -> Result<(), EndRunError> {
+    pub(crate) fn end(&self) -> Result<(), EndRunError> {
         let kill = self.folder.join("cgroup.kill");
         std::fs::write(&kill, b"1").map_err(|source| EndRunError::Kill { path: kill, source })?;
         self.wait_empty(EMPTY_WITHIN)?;
