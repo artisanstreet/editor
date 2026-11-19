@@ -77,8 +77,11 @@ async fn summarized_against(
         forge_engines::Engines::new(&data),
         data.clone(),
         Arc::new(move |_| Arc::clone(&harness)),
-        crate::disk::Probe::system(),
-        crate::sandbox::Host::Enforced(crate::tests::FULL_COVERAGE),
+        crate::Surroundings {
+            disk: crate::disk::Probe::system(),
+            sandbox: crate::sandbox::Host::Enforced(crate::tests::FULL_COVERAGE),
+            stop_deadline: crate::STOP_DEADLINE,
+        },
         None,
     );
     let project = hub

@@ -793,7 +793,7 @@ async fn execute(
         announce_stop(hub, run, items, pending, &stop).await;
     }
     if !adapter_finished {
-        let deadline = tokio::time::sleep(Duration::from_secs(45));
+        let deadline = tokio::time::sleep(hub.inner.stop_deadline);
         tokio::pin!(deadline);
         loop {
             tokio::select! {

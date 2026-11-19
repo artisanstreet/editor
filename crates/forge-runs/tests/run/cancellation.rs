@@ -113,13 +113,16 @@ async fn a_stop_the_engine_fails_to_clean_up_stays_a_continuable_stop() {
 async fn a_stop_the_engine_never_confirms_stays_a_stop_that_says_so() {
     let ready = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
-    let fixture = fixture(Arc::new(move |_, _io| {
-        let ready = Arc::clone(&script_ready);
-        Box::pin(async move {
-            ready.notify_one();
-            std::future::pending().await
-        })
-    }))
+    let fixture = fixture_stopping_within(
+        Arc::new(move |_, _io| {
+            let ready = Arc::clone(&script_ready);
+            Box::pin(async move {
+                ready.notify_one();
+                std::future::pending().await
+            })
+        }),
+        Duration::from_millis(200),
+    )
     .await;
     fixture
         .hub
@@ -132,7 +135,7 @@ async fn a_stop_the_engine_never_confirms_stays_a_stop_that_says_so() {
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     test_support::wait::eventually(
         "the stop deadline to end the run",
-        Duration::from_secs(120),
+        test_support::wait::LIVENESS,
         || async { !fixture.hub.is_live(&fixture.thread_id) },
     )
     .await;

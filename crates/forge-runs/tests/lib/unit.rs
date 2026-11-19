@@ -155,8 +155,11 @@ async fn fixture_with_parts(
     fixture_in(
         engine,
         harness_for,
-        disk,
-        sandbox::Host::Enforced(FULL_COVERAGE),
+        Surroundings {
+            disk,
+            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
+            stop_deadline: STOP_DEADLINE,
+        },
         false,
     )
     .await
@@ -174,8 +177,26 @@ async fn fixture_on_host(script: Script, host: sandbox::Host) -> Fixture {
     fixture_in(
         EngineId::Claude,
         Arc::new(move |_| Arc::clone(&harness)),
-        disk::Probe::system(),
-        host,
+        Surroundings {
+            disk: disk::Probe::system(),
+            sandbox: host,
+            stop_deadline: STOP_DEADLINE,
+        },
+        false,
+    )
+    .await
+}
+
+async fn fixture_stopping_within(script: Script, stop_deadline: Duration) -> Fixture {
+    let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
+    fixture_in(
+        EngineId::Claude,
+        Arc::new(move |_| Arc::clone(&harness)),
+        Surroundings {
+            disk: disk::Probe::system(),
+            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
+            stop_deadline,
+        },
         false,
     )
     .await
@@ -186,8 +207,11 @@ async fn fixture_in_generation(script: Script) -> Fixture {
     fixture_in(
         EngineId::Claude,
         Arc::new(move |_| Arc::clone(&harness)),
-        disk::Probe::system(),
-        sandbox::Host::Enforced(FULL_COVERAGE),
+        Surroundings {
+            disk: disk::Probe::system(),
+            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
+            stop_deadline: STOP_DEADLINE,
+        },
         true,
     )
     .await
@@ -196,8 +220,7 @@ async fn fixture_in_generation(script: Script) -> Fixture {
 async fn fixture_in(
     engine: EngineId,
     harness_for: HarnessFor,
-    disk: disk::Probe,
-    host: sandbox::Host,
+    surroundings: Surroundings,
     managed: bool,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
@@ -234,8 +257,7 @@ async fn fixture_in(
         engines,
         data.clone(),
         harness_for,
-        disk,
-        host,
+        surroundings,
         generation,
     );
     let project = hub

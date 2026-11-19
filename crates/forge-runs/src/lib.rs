@@ -104,7 +104,26 @@ struct Inner {
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
     disk: disk::Probe,
     sandbox: sandbox::Host,
+    stop_deadline: std::time::Duration,
 }
+
+struct Surroundings {
+    disk: disk::Probe,
+    sandbox: sandbox::Host,
+    stop_deadline: std::time::Duration,
+}
+
+impl Surroundings {
+    fn system() -> Self {
+        Self {
+            disk: disk::Probe::system(),
+            sandbox: forge_isolation::support().into(),
+            stop_deadline: STOP_DEADLINE,
+        }
+    }
+}
+
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 
 const RUN_CAPACITY: usize = 8;
 
@@ -223,8 +242,7 @@ impl Hub {
             engines,
             data_dir,
             harness_for,
-            disk::Probe::system(),
-            forge_isolation::support().into(),
+            Surroundings::system(),
             None,
         )
     }
@@ -241,8 +259,7 @@ impl Hub {
             engines,
             data_dir,
             harness_for,
-            disk::Probe::system(),
-            forge_isolation::support().into(),
+            Surroundings::system(),
             Some(generation),
         )
     }
@@ -256,10 +273,14 @@ impl Hub {
         engines: Engines,
         data_dir: PathBuf,
         harness_for: HarnessFor,
-        disk: disk::Probe,
-        sandbox: sandbox::Host,
+        surroundings: Surroundings,
         generation: Option<runtime::Generation>,
     ) -> Self {
+        let Surroundings {
+            disk,
+            sandbox,
+            stop_deadline,
+        } = surroundings;
         let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
         let mcp = Mcp::new(store.clone());
         let hub = Self {
@@ -287,6 +308,7 @@ impl Hub {
                 approvals: Mutex::new(HashMap::new()),
                 disk,
                 sandbox,
+                stop_deadline,
             }),
         };
         hub.forward_engine_status();
