@@ -38,6 +38,8 @@ pub(crate) enum ListModelsError {
     ClaudeCache(#[source] tokio::task::JoinError),
     #[error("neither the published nor the cached Claude catalog is available")]
     NoClaudeCatalog,
+    #[error("the published Claude catalog is unavailable and the cached one can't be read")]
+    ClaudeCacheUnreadable(#[source] ReadCacheError),
     #[error(transparent)]
     NotInstalled(NotInstalled),
     #[error("ask codex app-server for its models")]
@@ -48,6 +50,8 @@ pub(crate) enum ListModelsError {
     CodexTimedOut,
     #[error("read the Codex model cache")]
     CodexCache(#[source] tokio::task::JoinError),
+    #[error("read the models.dev cache")]
+    ModelsDevCache(#[source] tokio::task::JoinError),
     #[error("ask OpenCode for its models")]
     OpenCodeRun(#[source] RunError),
     #[error("parse OpenCode model.list")]
@@ -160,7 +164,34 @@ async fn run(program: &Program<'_>, args: &[&str]) -> Result<String, RunError> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-fn read_json_file(path: &Path) -> Option<Value> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadCacheError {
+    #[error("read the model cache {}", path.display())]
+    Read {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the model cache {} exceeds {limit} bytes", path.display())]
+    TooLarge {
+        path: std::path::PathBuf,
+        limit: usize,
+    },
+    #[error("parse the model cache {}", path.display())]
+    Decode {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("list the model cache folder {}", path.display())]
+    List {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn read_json_file(path: &Path) -> Result<Option<Value>, ReadCacheError> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
     let read = std::fs::File::open(path).and_then(|file| {
@@ -169,23 +200,33 @@ fn read_json_file(path: &Path) -> Option<Value> {
     });
     match read {
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            tracing::debug!(path = %path.display(), %error, "skipped an unreadable model cache");
-            return None;
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ReadCacheError::Read {
+                path: path.to_owned(),
+                source,
+            });
         }
     }
     if bytes.len() > MAX_OUTPUT_BYTES {
-        tracing::warn!(path = %path.display(), "model cache exceeds byte budget");
-        return None;
+        return Err(ReadCacheError::TooLarge {
+            path: path.to_owned(),
+            limit: MAX_OUTPUT_BYTES,
+        });
     }
-    match serde_json::from_slice(&bytes) {
-        Ok(value) => Some(value),
-        Err(error) => {
-            tracing::debug!(path = %path.display(), %error, "skipped a model cache that isn't JSON");
-            None
-        }
-    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| ReadCacheError::Decode {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn skipped_cache(error: &ReadCacheError) {
+    tracing::warn!(
+        error = diagnostics::chain(error),
+        "a model cache was skipped"
+    );
 }
 
 fn readable_name(raw: &str) -> String {
@@ -262,9 +303,20 @@ async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing, ListMode
     let served = tokio::task::spawn_blocking(move || claude_served_cache(&directory))
         .await
         .map_err(ListModelsError::ClaudeCache)?;
+    let (served, unreadable) = match served {
+        Ok(served) => (served, None),
+        Err(error) => {
+            skipped_cache(&error);
+            (None, Some(error))
+        }
+    };
     let listing = merge_claude(published.as_ref(), served.as_ref());
     if listing.models.is_empty() {
-        return Err(ListModelsError::NoClaudeCatalog);
+        return Err(
+            unreadable.map_or(ListModelsError::NoClaudeCatalog, |error| {
+                ListModelsError::ClaudeCacheUnreadable(error)
+            }),
+        );
     }
     Ok(listing)
 }
@@ -343,28 +395,39 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>, Cla
         .collect())
 }
 
-fn claude_served_cache(dir: &Path) -> Option<Value> {
+fn claude_served_cache(dir: &Path) -> Result<Option<Value>, ReadCacheError> {
     let mut newest: Option<(u64, Value)> = None;
     let mut matched = 0;
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            tracing::debug!(directory = %dir.display(), %error, "the Claude catalog cache can't be listed");
-            return None;
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ReadCacheError::List {
+                path: dir.to_owned(),
+                source,
+            });
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|source| ReadCacheError::List {
+            path: dir.to_owned(),
+            source,
+        })?;
         if !entry.file_name().to_string_lossy().ends_with("-cc.json") {
             continue;
         }
         matched += 1;
         if matched > 256 {
             tracing::warn!(directory = %dir.display(), "too many cached Claude catalogs");
-            return None;
+            return Ok(None);
         }
-        let Some(value) = read_json_file(&entry.path()) else {
-            continue;
+        let value = match read_json_file(&entry.path()) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(error) => {
+                skipped_cache(&error);
+                continue;
+            }
         };
         if claude_served_models(&value).is_empty() {
             continue;
@@ -374,7 +437,7 @@ fn claude_served_cache(dir: &Path) -> Option<Value> {
             newest = Some((fetched, value));
         }
     }
-    newest.map(|(_, value)| value)
+    Ok(newest.map(|(_, value)| value))
 }
 
 fn claude_served_models(value: &Value) -> Vec<&Value> {
@@ -683,7 +746,11 @@ async fn codex(program: &Program<'_>) -> Result<Listing, ListModelsError> {
     let path = program.home.join(".codex/models_cache.json");
     let windows = tokio::task::spawn_blocking(move || codex_context_windows(&path))
         .await
-        .map_err(ListModelsError::CodexCache)?;
+        .map_err(ListModelsError::CodexCache)?
+        .unwrap_or_else(|error| {
+            skipped_cache(&error);
+            Vec::new()
+        });
     Ok(codex_listing(&rows, &windows))
 }
 
@@ -830,11 +897,11 @@ fn codex_speeds(row: &Value) -> Vec<Speed> {
     tiers
 }
 
-fn codex_context_windows(path: &Path) -> Vec<(String, u64, u64)> {
-    let Some(value) = read_json_file(path) else {
-        return Vec::new();
+fn codex_context_windows(path: &Path) -> Result<Vec<(String, u64, u64)>, ReadCacheError> {
+    let Some(value) = read_json_file(path)? else {
+        return Ok(Vec::new());
     };
-    value
+    Ok(value
         .get("models")
         .and_then(Value::as_array)
         .into_iter()
@@ -850,7 +917,7 @@ fn codex_context_windows(path: &Path) -> Vec<(String, u64, u64)> {
                     .or_else(|| model.get("context_window").and_then(Value::as_u64))?,
             ))
         })
-        .collect()
+        .collect())
 }
 
 const MODELS_DEV: &str = "https://models.dev/api.json";
@@ -881,7 +948,7 @@ async fn opencode(
             None
         }
     };
-    let digest = models_dev(http, program.home).await;
+    let digest = models_dev(http, program.home).await?;
     let listing = opencode_listing(&models, gateways.as_ref(), digest.as_ref());
     if listing.models.is_empty() {
         return Err(ListModelsError::OpenCodeEmpty);
@@ -1113,7 +1180,7 @@ fn lab_name(lab: &str, digest: Option<&Value>) -> String {
         )
 }
 
-async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
+async fn models_dev(http: &reqwest::Client, home: &Path) -> Result<Option<Value>, ListModelsError> {
     let path = home.join("cache/models-dev.json");
     let cached = {
         let path = path.clone();
@@ -1122,16 +1189,19 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|modified| modified.elapsed().ok());
-            read_json_file(&path).map(|digest| (digest, age))
+            read_json_file(&path).map(|digest| digest.map(|digest| (digest, age)))
         })
         .await
-        .ok()
-        .flatten()
+        .map_err(ListModelsError::ModelsDevCache)?
+        .unwrap_or_else(|error| {
+            skipped_cache(&error);
+            None
+        })
     };
     if let Some((digest, Some(age))) = &cached
         && *age < MODELS_DEV_FRESH
     {
-        return Some(digest.clone());
+        return Ok(Some(digest.clone()));
     }
     let fetched = fetch_catalog(
         http,
@@ -1154,11 +1224,11 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
                     tracing::debug!(%error, "models.dev digest not cached");
                 }
             });
-            Some(digest)
+            Ok(Some(digest))
         }
         Err(error) => {
             tracing::debug!(error = diagnostics::chain(&error), "models.dev unavailable");
-            cached.map(|(digest, _)| digest)
+            Ok(cached.map(|(digest, _)| digest))
         }
     }
 }

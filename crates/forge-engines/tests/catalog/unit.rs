@@ -66,7 +66,7 @@ fn codex_cache_retains_base_and_extended_window() {
     )
     .unwrap();
     assert_eq!(
-        codex_context_windows(&path),
+        codex_context_windows(&path).unwrap(),
         [
             ("extended".to_owned(), 272_000, 1_000_000),
             ("standard".to_owned(), 400_000, 400_000),
@@ -118,7 +118,23 @@ fn oversized_cached_catalogs_are_not_loaded() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("catalog.json");
     std::fs::write(&path, "x".repeat(MAX_OUTPUT_BYTES + 1)).unwrap();
-    assert!(read_json_file(&path).is_none());
+    assert!(matches!(
+        read_json_file(&path),
+        Err(ReadCacheError::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn a_corrupt_model_cache_is_an_error_not_an_absent_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.json");
+    assert!(matches!(read_json_file(&missing), Ok(None)));
+    let corrupt = directory.path().join("models_cache.json");
+    std::fs::write(&corrupt, "{\"models\": [").unwrap();
+    assert!(matches!(
+        codex_context_windows(&corrupt),
+        Err(ReadCacheError::Decode { path, .. }) if path == corrupt
+    ));
 }
 
 fn recording(path: &str) -> String {
