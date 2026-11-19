@@ -778,9 +778,9 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (loaded, sending, failed, body) = session.read(|state| {
+        let (presentable, sending, failed, body) = session.read(|state| {
             (
-                state.is_loaded(),
+                state.presentable(),
                 state.sending(),
                 state.send_failed(),
                 state.body().clone(),
@@ -826,7 +826,7 @@ impl Composer {
         self.editor
             .borrow_mut()
             .set_disabled(holding || self.questionnaire.sending.is_some());
-        if loaded
+        if presentable
             && self.restore_revision.take() == Some(self.edit_revision)
             && body != serde_json::Value::Null
         {

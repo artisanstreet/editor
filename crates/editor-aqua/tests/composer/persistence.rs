@@ -646,6 +646,127 @@ fn hand_over_pasted_image(lease: &DraftLease, client: ForgeClient) {
     }
 }
 
+async fn wait_for_session(
+    session: &DraftHandle,
+    until: impl Fn(&editor_aqua::composer::draft_session::DraftSession) -> bool,
+) {
+    let mut changed = session.subscribe();
+    while !session.read(&until) {
+        changed.changed().await.unwrap();
+    }
+}
+
+fn connect_host(core: &mut Core, listener: &TcpListener, pin: &str, name: &str) -> HostId {
+    let address = listener.local_addr().unwrap().to_string();
+    let host = HostId(name.into());
+    test_support::editor::core::connect_client(
+        core,
+        &HostConfig {
+            id: host.clone(),
+            name: "Forge".into(),
+            address: address.clone(),
+            fingerprint: pin.to_owned(),
+            kind: HostKind::Local,
+        },
+        ForgeClient::new(&address, pin, &Identity::generate(name).unwrap()).unwrap(),
+    );
+    host
+}
+
+#[test]
+fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable",
+    ) {
+        return;
+    }
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "recovering");
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let scope = target.scope();
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), DraftSession::is_loaded).await;
+        composer.sync(&core);
+        composer
+            .editor
+            .borrow_mut()
+            .set_text("written before closing");
+        composer.edited();
+        drop(composer);
+        drop(sessions);
+        let (socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("PUT /drafts/"), "{route}");
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(socket);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        composer.sync(&core);
+        assert_eq!(
+            composer.editor.borrow().text(),
+            "written before closing",
+            "the draft kept on this device is shown before Forge answers"
+        );
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond_status(
+            &mut socket,
+            "500 Internal Server Error",
+            json!({"error": {"code": "internal", "message": "Forge is restarting"}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), DraftSession::halted).await;
+        composer.sync(&core);
+
+        let typed = format!("{} and after reopening", composer.editor.borrow().text());
+        composer.editor.borrow_mut().set_text(&typed);
+        composer.edited();
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("PUT /drafts/"), "{route}");
+        assert_eq!(
+            body["body"]["text"], "written before closing and after reopening",
+            "typing after reopening adds to the kept draft instead of replacing it"
+        );
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), |state| !state.pending()).await;
+        assert_eq!(spool.take(&host, &scope).unwrap(), None);
+    });
+}
+
 #[test]
 fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
     use editor_aqua::composer::draft_session::DraftSession;

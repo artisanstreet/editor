@@ -359,6 +359,11 @@ impl DraftSession {
             .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded))
     }
 
+    pub fn presentable(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded) || !draft.body.is_null())
+    }
+
     pub fn conflict(&self) -> bool {
         self.draft()
             .is_some_and(|draft| matches!(draft.halt, Halt::Conflict { .. }))
