@@ -298,7 +298,7 @@ async fn cargo_builds_inside_auto_with_its_registry_in_the_sandbox() {
     std::fs::create_dir_all(folders.project.join("src")).unwrap();
     std::fs::write(
         folders.project.join("Cargo.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )
     .unwrap();
     std::fs::write(folders.project.join("src/main.rs"), "fn main() {}\n").unwrap();
