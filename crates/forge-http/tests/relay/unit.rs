@@ -570,3 +570,24 @@ async fn a_quiet_tunneled_stream_still_sends_a_heartbeat_the_editor_can_time() {
     }
     beating.abort();
 }
+
+#[tokio::test]
+async fn a_tunneled_call_with_a_broken_bytes_body_is_refused_with_the_reason() {
+    let request = artisan_api::TunnelRequest {
+        id: "r1".into(),
+        method: "POST".into(),
+        path: "/blobs".into(),
+        body: Some(serde_json::json!({ "$bytes": { "content_type": "image/png" } })),
+    };
+
+    let response = dispatch_request(&request, &axum::Router::new(), &claims(1_700_000_100)).await;
+
+    assert_eq!(response.status, 400);
+    assert!(
+        response
+            .body
+            .to_string()
+            .contains("without a content type and base64url bytes"),
+        "{response:?}"
+    );
+}

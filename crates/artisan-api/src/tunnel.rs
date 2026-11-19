@@ -31,22 +31,22 @@ pub fn request_body_bytes(
                     use base64::Engine as _;
                     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
                         .decode(envelope.b64u.as_bytes())
-                        .map_err(|_decode| BodyDecodeError::InvalidBase64)?;
+                        .map_err(BodyDecodeError::InvalidBase64)?;
                     Ok((envelope.content_type, raw))
                 }
-                Err(_malformed) => Err(BodyDecodeError::MalformedEnvelope),
+                Err(source) => Err(BodyDecodeError::MalformedEnvelope(source)),
             }
         }
         _ => Ok(("application/json".into(), body_json_bytes(body))),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum BodyDecodeError {
     #[error("invalid base64url in a $bytes envelope or chunk")]
-    InvalidBase64,
+    InvalidBase64(#[source] base64::DecodeError),
     #[error("a $bytes envelope without a content type and base64url bytes")]
-    MalformedEnvelope,
+    MalformedEnvelope(#[source] serde_json::Error),
 }
 
 fn body_json_bytes(body: Option<&serde_json::Value>) -> Vec<u8> {
@@ -148,7 +148,7 @@ pub(crate) fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDec
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(chunk.bytes_b64u.as_bytes())
-        .map_err(|_decode| BodyDecodeError::InvalidBase64)
+        .map_err(BodyDecodeError::InvalidBase64)
 }
 
 #[cfg(test)]

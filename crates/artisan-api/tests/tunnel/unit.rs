@@ -34,20 +34,20 @@ fn corrupt_envelopes_fail_loudly() {
         total_bytes: 3,
         bytes_b64u: "!!!not-base64!!!".into(),
     };
-    assert_eq!(
-        decode_chunk_bytes(&bad).unwrap_err(),
-        BodyDecodeError::InvalidBase64
-    );
+    assert!(matches!(
+        decode_chunk_bytes(&bad),
+        Err(BodyDecodeError::InvalidBase64(_))
+    ));
     let body = serde_json::json!({"$bytes": {"content_type": "image/webp", "b64u": "%%%"}});
-    assert_eq!(
-        request_body_bytes(Some(&body)).unwrap_err(),
-        BodyDecodeError::InvalidBase64
-    );
+    assert!(matches!(
+        request_body_bytes(Some(&body)),
+        Err(BodyDecodeError::InvalidBase64(_))
+    ));
     let body = serde_json::json!({"$bytes": {"b64u": "aGk"}});
-    assert_eq!(
-        request_body_bytes(Some(&body)).unwrap_err(),
-        BodyDecodeError::MalformedEnvelope
-    );
+    assert!(matches!(
+        request_body_bytes(Some(&body)),
+        Err(BodyDecodeError::MalformedEnvelope(_))
+    ));
     let body = serde_json::json!({"$bytes": {"content_type": "image/webp", "b64u": "aGk"}});
     assert_eq!(
         request_body_bytes(Some(&body)).unwrap(),

@@ -889,12 +889,17 @@ async fn dispatch_app_bytes(
     connection: &mut Connection,
     sink: &mut WsSink,
 ) -> Result<(), ChannelError> {
-    let request: Result<artisan_api::TunnelRequest, _> = serde_json::from_slice(plaintext);
-    let Ok(request) = request else {
-        let response =
-            artisan_api::TunnelResponse::error("?", 400, "tunneled call is not a request");
-        send_response(name, &response, &mut connection.channels, sink).await?;
-        return Ok(());
+    let request = match serde_json::from_slice::<artisan_api::TunnelRequest>(plaintext) {
+        Ok(request) => request,
+        Err(error) => {
+            let response = artisan_api::TunnelResponse::error(
+                "?",
+                400,
+                &format!("tunneled call is not a request: {error}"),
+            );
+            send_response(name, &response, &mut connection.channels, sink).await?;
+            return Ok(());
+        }
     };
     match request.method.as_str() {
         artisan_api::METHOD_SUBSCRIBE => {
@@ -1202,16 +1207,30 @@ async fn dispatch_request(
             "subscribe to /events with SUBSCRIBE on its own channel",
         );
     }
-    let Ok((content_type, bytes)) = artisan_api::request_body_bytes(request.body.as_ref()) else {
-        return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled body");
+    let (content_type, bytes) = match artisan_api::request_body_bytes(request.body.as_ref()) {
+        Ok(body) => body,
+        Err(error) => {
+            return artisan_api::TunnelResponse::error(
+                &request.id,
+                400,
+                &format!("bad tunneled body: {}", diagnostics::chain(&error)),
+            );
+        }
     };
     let http_request = axum::http::Request::builder()
         .method(method)
         .uri(&request.path)
         .header("content-type", content_type)
         .body(axum::body::Body::from(bytes));
-    let Ok(mut http_request) = http_request else {
-        return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled call");
+    let mut http_request = match http_request {
+        Ok(http_request) => http_request,
+        Err(error) => {
+            return artisan_api::TunnelResponse::error(
+                &request.id,
+                400,
+                &format!("bad tunneled call: {}", diagnostics::chain(&error)),
+            );
+        }
     };
     http_request
         .extensions_mut()
