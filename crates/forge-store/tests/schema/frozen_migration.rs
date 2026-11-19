@@ -4,7 +4,7 @@ use serde_json::json;
 #[test]
 fn a_finished_edit_in_a_shape_today_does_not_read_still_folds_into_its_work() {
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 21, Upgrade::of(&crate::Environment::system())).unwrap();
+    migrate_to(&mut conn, 21, &Upgrade::of(&crate::Environment::system())).unwrap();
     let edit = json!({
         "id": "renamed",
         "thread_id": "t",
@@ -29,7 +29,7 @@ fn a_finished_edit_in_a_shape_today_does_not_read_still_folds_into_its_work() {
     )
     .unwrap();
 
-    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
+    migrate(&mut conn, &Upgrade::of(&crate::Environment::system())).unwrap();
 
     let work: bool = conn
         .query_row(include_str!("item_work.sql"), ["renamed"], |row| row.get(0))

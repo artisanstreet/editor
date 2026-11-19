@@ -364,13 +364,24 @@ fn binding(
     if registry.peers().map_err(BindingError::Peers)?.is_empty() {
         registry.retire_unused().map_err(BindingError::Retire)?;
         let exclusive = crate::lock_data_dir(&config.data_dir)?;
+        let system = forge_store::Environment::system();
+        let environment = forge_store::Environment {
+            progress: system.progress.clone().with_heartbeat(|| {
+                if let Err(error) = process::extend_start() {
+                    tracing::warn!(
+                        error = %diagnostics::chain(&error),
+                        "systemd may stop Forge for starting too slowly"
+                    );
+                }
+            }),
+            ..system
+        };
         drop(
-            forge_store::Store::open_restoring(&config.data_dir, &exclusive).map_err(|source| {
-                BindingError::Store {
+            forge_store::Store::open_restoring_in(&config.data_dir, &exclusive, environment)
+                .map_err(|source| BindingError::Store {
                     dir: config.data_dir.clone(),
                     source: Box::new(source),
-                }
-            })?,
+                })?,
         );
     }
     let address = config.listen;

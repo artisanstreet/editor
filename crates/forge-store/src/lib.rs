@@ -72,6 +72,7 @@ pub use pairing::{
     AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,
     PairCodeHash, PairDeviceError, RevokeDeviceError, TouchDeviceError,
 };
+pub use progress::Progress;
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
     GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, PrepareIndexError,
@@ -649,7 +650,7 @@ fn writer_connection(
 fn upgrade(
     conn: &mut Connection,
     database: &Path,
-    upgrade: schema::Upgrade,
+    upgrade: &schema::Upgrade,
 ) -> Result<(), OpenStoreError> {
     schema::migrate(conn, upgrade).map_err(|source| OpenStoreError::Migrate {
         database: database.to_owned(),
@@ -659,7 +660,7 @@ fn upgrade(
         database: database.to_owned(),
         source,
     };
-    progress::watch(conn, progress::Step::RecallIndex, upgrade.every)
+    progress::watch(conn, progress::Step::RecallIndex, &upgrade.pace)
         .at("watch the recall index preparation")
         .map_err(progress)?;
     let prepared = recall::prepare_index(conn);
@@ -753,15 +754,12 @@ impl Store {
     ) -> Result<Self, OpenStoreError> {
         data_lock.guards(dir);
         let (database, blob_dir) = Self::prepare(dir)?;
-        match schema::roll_back(
-            &database,
-            environment.clock.now(),
-            environment.progress_every,
-        )
-        .map_err(|source| OpenStoreError::RollBack {
-            database: database.clone(),
-            source: Box::new(source),
-        })? {
+        match schema::roll_back(&database, environment.clock.now(), &environment.progress).map_err(
+            |source| OpenStoreError::RollBack {
+                database: database.clone(),
+                source: Box::new(source),
+            },
+        )? {
             schema::Rollback::Current => {}
             schema::Rollback::Restored {
                 found,
@@ -858,7 +856,7 @@ impl Store {
                     .pragma_query_value(None, "user_version", |row| row.get(0))
                     .at("read the schema version before upgrading")
                     .map_err(prepare)?;
-                upgrade(&mut conn, &database, upgrading)?;
+                upgrade(&mut conn, &database, &upgrading)?;
                 Opened::Upgraded { from }
             }
             Opening::Join => Opened::Joined,

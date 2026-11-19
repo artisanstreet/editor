@@ -2189,6 +2189,7 @@ dependencies = [
  "clap",
  "dhat",
  "diagnostics",
+ "flate2",
  "forge-http",
  "forge-isolation",
  "forge-runs",

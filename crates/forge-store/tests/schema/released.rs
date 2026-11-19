@@ -145,7 +145,7 @@ async fn the_last_released_database_opens_with_its_threads_and_can_go_back_to_th
         &database,
         RELEASED_SCHEMA,
         1,
-        std::time::Duration::from_secs(5),
+        &crate::Progress::every(std::time::Duration::from_secs(5)),
     )
     .expect("go back to the release")
     {
@@ -178,7 +178,7 @@ async fn an_upgrade_interrupted_after_schema_19_finishes_and_finds_its_messages(
         migrate_to(
             &mut conn,
             stopped,
-            crate::schema::Upgrade::of(&crate::Environment::system()),
+            &crate::schema::Upgrade::of(&crate::Environment::system()),
         )
         .unwrap_or_else(|error| panic!("today's Forge upgrades to schema {stopped}: {error:#?}"));
         drop(conn);

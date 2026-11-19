@@ -1,9 +1,9 @@
-use crate::progress::{self, Step};
+use crate::progress::{self, Progress, Step};
 use crate::retained::{self, RetainedError};
 use artisan_api::{DatabaseRollback, Timestamp};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 #[cfg(test)]
 #[path = "../../tests/schema/backup.rs"]
@@ -228,7 +228,7 @@ fn file_database(conn: &Connection) -> Option<PathBuf> {
 pub(super) fn before_migrating(
     conn: &mut Connection,
     version: usize,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<(), BackupError> {
     let Some(database) = file_database(conn) else {
         return Ok(());
@@ -256,7 +256,7 @@ pub(super) fn before_migrating(
         Some(_) | None => {}
     }
     if version > 0 {
-        back_up(conn, &database, version, every)?;
+        back_up(conn, &database, version, pace)?;
     }
     retained::begin_attempt(&database, version).map_err(|source| BackupError::Begin {
         from: version,
@@ -268,7 +268,7 @@ fn back_up(
     conn: &mut Connection,
     database: &Path,
     version: usize,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<(), BackupError> {
     let backup = retained::backup(database, version);
     let partial = retained::partial(&backup);
@@ -302,7 +302,7 @@ fn back_up(
         version,
         source: Box::new(source),
     };
-    progress::watch(conn, Step::Backup { version }, every).map_err(progress)?;
+    progress::watch(conn, Step::Backup { version }, pace).map_err(progress)?;
     let copied = copy_into(conn, target);
     progress::unwatch(conn).map_err(progress)?;
     if let Err(source) = copied {
@@ -330,14 +330,14 @@ fn back_up(
         backup: backup.clone(),
         source,
     };
-    retained::record_images(&partial, &backup, every).map_err(keep)?;
+    retained::record_images(&partial, &backup, pace).map_err(keep)?;
     retained::publish(&partial, &backup).map_err(keep)
 }
 
 pub(super) fn after_migrating(
     conn: &Connection,
     now: SystemTime,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<(), FinishUpgradeError> {
     let Some(database) = file_database(conn) else {
         return Ok(());
@@ -350,7 +350,7 @@ pub(super) fn after_migrating(
         database: database.clone(),
         source,
     })?;
-    retained::record_missing_images(&database, every).map_err(|source| FinishUpgradeError::Images {
+    retained::record_missing_images(&database, pace).map_err(|source| FinishUpgradeError::Images {
         database: database.clone(),
         source,
     })
@@ -360,7 +360,7 @@ pub(crate) fn roll_back(
     database: &Path,
     supported: usize,
     at: Timestamp,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<Rollback, RollbackError> {
     if !database.is_file() {
         return Ok(Rollback::Current);
@@ -402,7 +402,7 @@ pub(crate) fn roll_back(
             PathBuf::from(notice.set_aside)
         }
         Some(_) | None => {
-            let aside = set_aside(&mut conn, database, found, every)?;
+            let aside = set_aside(&mut conn, database, found, pace)?;
             let notice = DatabaseRollback {
                 found: u32::try_from(found).expect("invariant: schema versions fit in u32"),
                 restored: u32::try_from(restored).expect("invariant: schema versions fit in u32"),
@@ -447,7 +447,7 @@ fn set_aside(
     conn: &mut Connection,
     database: &Path,
     found: usize,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<PathBuf, RollbackError> {
     let aside = (0..usize::MAX)
         .map(|attempt| retained::aside(database, found, attempt))
@@ -463,7 +463,7 @@ fn set_aside(
     let target = unicode(&partial).ok_or_else(|| RollbackError::NotUnicode {
         database: database.to_owned(),
     })?;
-    progress::watch(conn, Step::SetAside { found }, every).map_err(failed)?;
+    progress::watch(conn, Step::SetAside { found }, pace).map_err(failed)?;
     let copied = copy_into(conn, target);
     progress::unwatch(conn).map_err(failed)?;
     copied.map_err(failed)?;
@@ -477,7 +477,7 @@ fn set_aside(
         aside: aside.clone(),
         source,
     };
-    retained::record_images(&partial, &aside, every).map_err(keep)?;
+    retained::record_images(&partial, &aside, pace).map_err(keep)?;
     retained::publish(&partial, &aside).map_err(keep)?;
     Ok(aside)
 }

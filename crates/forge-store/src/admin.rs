@@ -281,7 +281,7 @@ pub fn roll_back_for(
             &dir.join(DATABASE),
             supported,
             environment.clock.now(),
-            environment.progress_every,
+            &environment.progress,
         )? {
             schema::Rollback::Current => RolledBack::Current,
             schema::Rollback::Restored {

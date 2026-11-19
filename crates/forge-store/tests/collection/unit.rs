@@ -4,7 +4,7 @@ fn database() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     crate::schema::migrate(
         &mut conn,
-        crate::schema::Upgrade::of(&crate::Environment::system()),
+        &crate::schema::Upgrade::of(&crate::Environment::system()),
     )
     .unwrap();
     conn

@@ -282,3 +282,58 @@ async fn a_backend_that_dies_is_replaced_before_anyone_connects() {
     assert_eq!(serving.backend.id, restarted.id);
     upgrade::stop(&running.data).await.unwrap();
 }
+
+#[test]
+fn a_start_that_upgrades_the_database_keeps_asking_systemd_for_more_time() {
+    use std::io::Read as _;
+    const RELEASED_DATABASE: &[u8] =
+        include_bytes!("../../forge-store/tests/fixtures/released/schema-26.sqlite3.gz");
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let mut released = Vec::new();
+    flate2::read::GzDecoder::new(RELEASED_DATABASE)
+        .read_to_end(&mut released)
+        .unwrap();
+    std::fs::write(data.join("forge.sqlite3"), released).unwrap();
+    let socket = directory.path().join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+    manager
+        .set_read_timeout(Some(test_support::wait::LIVENESS))
+        .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .arg("--data")
+        .arg(&data)
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--log")
+        .arg(directory.path().join("forge.log"))
+        .env("NOTIFY_SOCKET", &socket)
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _running = Running { child, data };
+
+    let mut message = [0_u8; 512];
+    let received = manager.recv(&mut message).unwrap_or_else(|error| {
+        panic!(
+            "Forge said nothing to systemd while upgrading: {error}: {}",
+            std::fs::read_to_string(directory.path().join("forge.log")).unwrap()
+        )
+    });
+
+    let said = std::str::from_utf8(&message[..received]).unwrap();
+    let extension: u64 = said
+        .lines()
+        .find_map(|line| line.strip_prefix("EXTEND_TIMEOUT_USEC="))
+        .unwrap_or_else(|| panic!("the first word to systemd asks for more time: {said:?}"))
+        .parse()
+        .unwrap();
+    assert!(
+        extension >= 60_000_000,
+        "each heartbeat buys at least a minute: {said:?}"
+    );
+}

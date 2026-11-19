@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const OPERATIONS_PER_CHECK: i32 = 10_000;
@@ -24,9 +25,44 @@ impl std::fmt::Display for Step {
     }
 }
 
-pub(crate) fn watch(conn: &mut Connection, step: Step, every: Duration) -> rusqlite::Result<()> {
+#[derive(Clone)]
+pub struct Progress {
+    every: Duration,
+    heartbeat: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Progress {
+    #[must_use]
+    pub fn every(every: Duration) -> Self {
+        Self {
+            every,
+            heartbeat: Arc::new(|| {}),
+        }
+    }
+
+    #[must_use]
+    pub fn with_heartbeat(self, heartbeat: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            heartbeat: Arc::new(heartbeat),
+            ..self
+        }
+    }
+}
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Progress")
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn watch(conn: &mut Connection, step: Step, pace: &Progress) -> rusqlite::Result<()> {
+    (pace.heartbeat)();
     let started = Instant::now();
     let mut reported = started;
+    let every = pace.every;
+    let heartbeat = Arc::clone(&pace.heartbeat);
     conn.progress_handler(
         OPERATIONS_PER_CHECK,
         Some(move || {
@@ -36,6 +72,7 @@ pub(crate) fn watch(conn: &mut Connection, step: Step, every: Duration) -> rusql
                     elapsed_s = started.elapsed().as_secs(),
                     "still {step} before Forge serves"
                 );
+                heartbeat();
             }
             false
         }),

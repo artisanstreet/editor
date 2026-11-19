@@ -1,20 +1,23 @@
 use super::*;
 use crate::schema::{MIGRATIONS, Upgrade, apply, migrate_to};
 use rusqlite::config::DbConfig;
+use std::time::Duration;
 
-const EVERY: Duration = Duration::from_secs(5);
+fn every() -> Progress {
+    Progress::every(Duration::from_secs(5))
+}
 
 fn upgrade() -> Upgrade {
     Upgrade::of(&crate::Environment::system())
 }
 
 fn back_to(database: &Path, supported: usize) -> Result<Rollback, RollbackError> {
-    roll_back(database, supported, 1, EVERY)
+    roll_back(database, supported, 1, &every())
 }
 
 fn interrupted_upgrade(database: &Path, from: usize, committed: usize) {
     let mut conn = open(database);
-    before_migrating(&mut conn, from, EVERY).expect("the newer Forge backs up the release");
+    before_migrating(&mut conn, from, &every()).expect("the newer Forge backs up the release");
     for (index, steps) in MIGRATIONS.iter().enumerate().take(committed).skip(from) {
         apply(&mut conn, index + 1, steps, 1).expect("a migration commits");
     }
@@ -58,15 +61,15 @@ fn reinstalling_the_previous_forge_restores_its_data_and_sets_newer_data_aside()
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, previous, upgrade()).expect("previous Forge creates its database");
+        migrate_to(&mut conn, previous, &upgrade()).expect("previous Forge creates its database");
         remember(&conn, "before upgrade");
     }
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len(), upgrade()).expect("newer Forge upgrades");
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade()).expect("newer Forge upgrades");
         remember(&conn, "after upgrade");
     }
-    match roll_back(&database, previous, 1, EVERY).expect("roll back") {
+    match roll_back(&database, previous, 1, &every()).expect("roll back") {
         Rollback::Restored {
             found,
             restored,
@@ -81,7 +84,8 @@ fn reinstalling_the_previous_forge_restores_its_data_and_sets_newer_data_aside()
     assert_eq!(version(&database), previous);
     assert_eq!(keys(&database), ["before upgrade"]);
     let mut conn = open(&database);
-    migrate_to(&mut conn, previous, upgrade()).expect("previous Forge opens its restored database");
+    migrate_to(&mut conn, previous, &upgrade())
+        .expect("previous Forge opens its restored database");
     assert_eq!(
         back_to(&database, previous).expect("second start"),
         Rollback::Current
@@ -94,7 +98,7 @@ fn a_newer_database_without_a_backup_is_refused_and_left_untouched() {
     let database = dir.path().join("forge.sqlite3");
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len(), upgrade())
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade())
             .expect("newer Forge creates its database");
         remember(&conn, "newer");
     }
@@ -111,14 +115,14 @@ fn a_newer_database_with_its_log_still_on_disk_is_rolled_back_keeping_the_logged
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, previous, upgrade()).expect("previous Forge creates its database");
+        migrate_to(&mut conn, previous, &upgrade()).expect("previous Forge creates its database");
         remember(&conn, "before upgrade");
     }
     let mut crashed = open(&database);
     crashed
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .expect("leave the log unchecked on close, as a crash does");
-    migrate_to(&mut crashed, MIGRATIONS.len(), upgrade()).expect("newer Forge upgrades");
+    migrate_to(&mut crashed, MIGRATIONS.len(), &upgrade()).expect("newer Forge upgrades");
     remember(&crashed, "only in the log");
     drop(crashed);
     assert!(
@@ -148,13 +152,13 @@ fn an_upgrade_interrupted_after_any_committed_migration_still_goes_back_to_where
         let database = dir.path().join("forge.sqlite3");
         {
             let mut conn = open(&database);
-            migrate_to(&mut conn, released, upgrade()).expect("the release creates its database");
+            migrate_to(&mut conn, released, &upgrade()).expect("the release creates its database");
             remember(&conn, "released");
         }
         interrupted_upgrade(&database, released, committed);
         {
             let mut conn = open(&database);
-            migrate_to(&mut conn, MIGRATIONS.len(), upgrade())
+            migrate_to(&mut conn, MIGRATIONS.len(), &upgrade())
                 .expect("the newer Forge finishes the upgrade after a restart");
             remember(&conn, "upgraded");
         }
@@ -178,17 +182,17 @@ fn an_older_release_two_upgrades_back_still_gets_its_database() {
     let oldest = MIGRATIONS.len() - 2;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, oldest, upgrade()).expect("the oldest release creates its database");
+        migrate_to(&mut conn, oldest, &upgrade()).expect("the oldest release creates its database");
         remember(&conn, "oldest");
     }
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, oldest + 1, upgrade()).expect("the next release upgrades");
+        migrate_to(&mut conn, oldest + 1, &upgrade()).expect("the next release upgrades");
         remember(&conn, "next");
     }
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len(), upgrade()).expect("today's Forge upgrades");
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade()).expect("today's Forge upgrades");
         remember(&conn, "today");
     }
 
@@ -211,12 +215,12 @@ fn a_release_between_two_backups_restores_the_older_one_and_upgrades_it_itself()
     let oldest = MIGRATIONS.len() - 3;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, oldest, upgrade()).expect("the oldest release creates its database");
+        migrate_to(&mut conn, oldest, &upgrade()).expect("the oldest release creates its database");
         remember(&conn, "oldest");
     }
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len(), upgrade()).expect("today's Forge upgrades");
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade()).expect("today's Forge upgrades");
         remember(&conn, "today");
     }
 
@@ -225,7 +229,7 @@ fn a_release_between_two_backups_restores_the_older_one_and_upgrades_it_itself()
         Rollback::Current => panic!("nothing was restored"),
     }
     let mut conn = open(&database);
-    migrate_to(&mut conn, oldest + 1, upgrade()).expect("that release upgrades the older backup");
+    migrate_to(&mut conn, oldest + 1, &upgrade()).expect("that release upgrades the older backup");
     assert_eq!(keys(&database), ["oldest"]);
 }
 
@@ -236,11 +240,11 @@ fn a_rollback_cut_short_after_restoring_is_still_reported_by_the_next_forge() {
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, previous, upgrade()).expect("previous Forge creates its database");
+        migrate_to(&mut conn, previous, &upgrade()).expect("previous Forge creates its database");
     }
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len(), upgrade()).expect("newer Forge upgrades");
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade()).expect("newer Forge upgrades");
     }
 
     let Rollback::Restored { aside, .. } = back_to(&database, previous).expect("roll back") else {
@@ -261,20 +265,25 @@ fn a_rollback_cut_short_after_restoring_is_still_reported_by_the_next_forge() {
 }
 
 #[test]
-fn a_long_backup_keeps_writing_to_the_log_so_ae_sees_forge_working() {
+fn a_long_backup_keeps_telling_the_log_and_systemd_that_forge_is_working() {
     let dir = tempfile::tempdir().expect("data dir");
     let database = dir.path().join("forge.sqlite3");
     let previous = MIGRATIONS.len() - 1;
     let mut conn = open(&database);
-    migrate_to(&mut conn, previous, upgrade()).expect("previous Forge creates its database");
+    migrate_to(&mut conn, previous, &upgrade()).expect("previous Forge creates its database");
     let settings = conn.transaction().expect("begin writing settings");
     for key in 0..5000 {
         remember(&settings, &format!("setting {key}"));
     }
     settings.commit().expect("commit the settings");
+    let beats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counting = std::sync::Arc::clone(&beats);
+    let pace = Progress::every(Duration::ZERO).with_heartbeat(move || {
+        counting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
 
     let (logged, _capturing) = test_support::logs::capture();
-    before_migrating(&mut conn, previous, Duration::ZERO).expect("back up before upgrading");
+    before_migrating(&mut conn, previous, &pace).expect("back up before upgrading");
 
     assert!(
         logged
@@ -282,5 +291,9 @@ fn a_long_backup_keeps_writing_to_the_log_so_ae_sees_forge_working() {
             .contains(&format!("still backing up schema {previous}")),
         "{}",
         logged.text()
+    );
+    assert!(
+        beats.load(std::sync::atomic::Ordering::SeqCst) > 1,
+        "the heartbeat fires while the backup runs, not only when it starts"
     );
 }

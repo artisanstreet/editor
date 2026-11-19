@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 #[test]
 fn remembered_model_configs_keep_full_access() {
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 23, Upgrade::of(&crate::Environment::system())).unwrap();
+    migrate_to(&mut conn, 23, &Upgrade::of(&crate::Environment::system())).unwrap();
     let configs = json!({
         "claude-opus-5-5": {"engine":"claude","model":"claude-opus-5-5","effort":"medium",
             "access":"full","approvals":"never","options":{"permission_mode":"bypassPermissions"}},
@@ -16,8 +16,8 @@ fn remembered_model_configs_keep_full_access() {
         [configs.to_string()],
     )
     .unwrap();
-    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
-    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
+    migrate(&mut conn, &Upgrade::of(&crate::Environment::system())).unwrap();
+    migrate(&mut conn, &Upgrade::of(&crate::Environment::system())).unwrap();
     let (seq, value): (i64, String) = conn
         .query_row(include_str!("model/model_configs.sql"), [], |row| {
             Ok((row.get(0)?, row.get(1)?))

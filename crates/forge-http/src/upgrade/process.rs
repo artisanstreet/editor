@@ -343,6 +343,84 @@ fn terminate_child(child: &mut Child) -> Result<(), TerminateError> {
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ExtendStartError {
+    #[error("open a socket to tell the service manager Forge is still starting")]
+    Socket(#[source] std::io::Error),
+    #[error("name the service manager's abstract socket {socket:?}")]
+    Abstract {
+        socket: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("tell the service manager at {socket:?} that Forge is still starting")]
+    Send {
+        socket: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+const START_EXTENSION: Duration = Duration::from_secs(300);
+
+pub(super) fn extend_start() -> Result<(), ExtendStartError> {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(());
+    };
+    let message = format!(
+        "EXTEND_TIMEOUT_USEC={}\nSTATUS=Preparing the database",
+        START_EXTENSION.as_micros()
+    );
+    let sender = std::os::unix::net::UnixDatagram::unbound().map_err(ExtendStartError::Socket)?;
+    let named = socket.to_string_lossy().into_owned();
+    let sent = match socket.as_encoded_bytes().strip_prefix(b"@") {
+        Some(name) => abstract_address(name)
+            .map_err(|source| ExtendStartError::Abstract {
+                socket: named.clone(),
+                source,
+            })
+            .and_then(|address| {
+                sender
+                    .send_to_addr(message.as_bytes(), &address)
+                    .map_err(|source| ExtendStartError::Send {
+                        socket: named.clone(),
+                        source,
+                    })
+            })?,
+        None => sender
+            .send_to(message.as_bytes(), Path::new(&socket))
+            .map_err(|source| ExtendStartError::Send {
+                socket: named.clone(),
+                source,
+            })?,
+    };
+    if sent == message.len() {
+        Ok(())
+    } else {
+        Err(ExtendStartError::Send {
+            socket: named,
+            source: std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!("sent {sent} of {} bytes", message.len()),
+            ),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn abstract_address(name: &[u8]) -> std::io::Result<std::os::unix::net::SocketAddr> {
+    use std::os::linux::net::SocketAddrExt as _;
+    std::os::unix::net::SocketAddr::from_abstract_name(name)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn abstract_address(_name: &[u8]) -> std::io::Result<std::os::unix::net::SocketAddr> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "abstract sockets exist only on Linux",
+    ))
+}
+
 pub(super) fn notify(pid: u32) -> Result<(), NotifyError> {
     if std::env::var_os("NOTIFY_SOCKET").is_none() {
         return Ok(());

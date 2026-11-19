@@ -19,7 +19,7 @@ fn found(conn: &Connection, query: &str) -> Vec<(String, String)> {
 #[test]
 fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
     let mut conn = Connection::open_in_memory().expect("open the database");
-    migrate_to(&mut conn, 29, Upgrade::of(&crate::Environment::system()))
+    migrate_to(&mut conn, 29, &Upgrade::of(&crate::Environment::system()))
         .expect("migrate to the schema before folded text");
     conn.execute(
         include_str!("insert_thread.sql"),
@@ -44,7 +44,7 @@ fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
             .expect("index the message the old way");
     }
 
-    migrate(&mut conn, Upgrade::of(&crate::Environment::system()))
+    migrate(&mut conn, &Upgrade::of(&crate::Environment::system()))
         .expect("migrate to today's schema");
     crate::recall::prepare_index(&mut conn).expect("start rebuilding the recall index");
     while !matches!(

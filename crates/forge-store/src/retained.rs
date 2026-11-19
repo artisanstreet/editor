@@ -1,4 +1,4 @@
-use crate::progress::{self, Step};
+use crate::progress::{self, Progress, Step};
 use artisan_api::{BlobHash, DatabaseRollback};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
@@ -286,7 +286,7 @@ pub(crate) fn publish(partial: &Path, kept: &Path) -> Result<(), RetainedError> 
 pub(crate) fn record_images(
     reading: &Path,
     kept: &Path,
-    every: Duration,
+    pace: &Progress,
 ) -> Result<(), RetainedError> {
     let opened = |source| RetainedError::OpenKept {
         database: reading.to_owned(),
@@ -301,7 +301,7 @@ pub(crate) fn record_images(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(opened)?;
-    progress::watch(&mut conn, Step::ListImages, every).map_err(scanned)?;
+    progress::watch(&mut conn, Step::ListImages, pace).map_err(scanned)?;
     let hashes = image_hashes(&conn).map_err(scanned);
     progress::unwatch(&mut conn).map_err(scanned)?;
     let mut text = String::new();
@@ -332,12 +332,12 @@ fn image_hashes(conn: &Connection) -> rusqlite::Result<std::collections::BTreeSe
     Ok(hashes)
 }
 
-pub(crate) fn record_missing_images(database: &Path, every: Duration) -> Result<(), RetainedError> {
+pub(crate) fn record_missing_images(database: &Path, pace: &Progress) -> Result<(), RetainedError> {
     for retained in list(database)? {
         if manifest(&retained.path).is_file() {
             continue;
         }
-        match record_images(&retained.path, &retained.path, every) {
+        match record_images(&retained.path, &retained.path, pace) {
             Ok(()) => {}
             Err(error @ (RetainedError::OpenKept { .. } | RetainedError::ScanKept { .. })) => {
                 tracing::warn!(

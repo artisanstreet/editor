@@ -1,3 +1,4 @@
+use crate::progress::Progress;
 use artisan_api::WallClock;
 use rusqlite::Connection;
 use std::path::Path;
@@ -38,7 +39,7 @@ impl std::fmt::Debug for Connections {
 pub struct Environment {
     pub connections: Connections,
     pub clock: WallClock,
-    pub progress_every: Duration,
+    pub progress: Progress,
 }
 
 impl Environment {
@@ -47,7 +48,7 @@ impl Environment {
         Self {
             connections: Connections::system(),
             clock: WallClock::system(),
-            progress_every: PROGRESS_EVERY,
+            progress: Progress::every(PROGRESS_EVERY),
         }
     }
 }

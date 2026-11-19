@@ -10,11 +10,11 @@ mod frozen;
 pub(crate) use backup::Rollback;
 pub use backup::{BackupError, FinishUpgradeError, RollbackError};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Upgrade {
     pub(crate) at: artisan_api::Timestamp,
     pub(crate) now: SystemTime,
-    pub(crate) every: Duration,
+    pub(crate) pace: crate::progress::Progress,
 }
 
 impl Upgrade {
@@ -24,7 +24,7 @@ impl Upgrade {
         Self {
             at,
             now: SystemTime::UNIX_EPOCH + Duration::from_millis(millis),
-            every: environment.progress_every,
+            pace: environment.progress.clone(),
         }
     }
 }
@@ -302,28 +302,28 @@ const COLLECTIONS: &str = include_str!("sql/migrations/v14.sql");
 
 const SOURCE_INDEXES: &str = include_str!("sql/migrations/v15.sql");
 
-pub(crate) fn migrate(conn: &mut Connection, upgrade: Upgrade) -> Result<(), SchemaError> {
+pub(crate) fn migrate(conn: &mut Connection, upgrade: &Upgrade) -> Result<(), SchemaError> {
     migrate_to(conn, MIGRATIONS.len(), upgrade)
 }
 
 pub(crate) fn roll_back(
     database: &Path,
     at: artisan_api::Timestamp,
-    every: Duration,
+    pace: &crate::progress::Progress,
 ) -> Result<Rollback, RollbackError> {
-    backup::roll_back(database, MIGRATIONS.len(), at, every)
+    backup::roll_back(database, MIGRATIONS.len(), at, pace)
 }
 
 pub(crate) fn roll_back_to(
     database: &Path,
     supported: usize,
     at: artisan_api::Timestamp,
-    every: Duration,
+    pace: &crate::progress::Progress,
 ) -> Result<Rollback, RollbackError> {
-    backup::roll_back(database, supported, at, every)
+    backup::roll_back(database, supported, at, pace)
 }
 
-fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<(), SchemaError> {
+fn migrate_to(conn: &mut Connection, target: usize, upgrade: &Upgrade) -> Result<(), SchemaError> {
     let version: usize = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(SchemaError::Version)?;
@@ -334,7 +334,7 @@ fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<
         });
     }
     if version < target {
-        backup::before_migrating(conn, version, upgrade.every)
+        backup::before_migrating(conn, version, &upgrade.pace)
             .map_err(|source| SchemaError::Backup { version, source })?;
     }
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
@@ -347,7 +347,7 @@ fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<
         crate::progress::watch(
             conn,
             crate::progress::Step::Migration { next },
-            upgrade.every,
+            &upgrade.pace,
         )
         .map_err(progress)?;
         let applied = apply(conn, next, steps, upgrade.at);
@@ -357,7 +357,7 @@ fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<
             source,
         })?;
     }
-    backup::after_migrating(conn, upgrade.now, upgrade.every).map_err(|source| {
+    backup::after_migrating(conn, upgrade.now, &upgrade.pace).map_err(|source| {
         SchemaError::Finish {
             version: target,
             source,
