@@ -18,6 +18,7 @@ use tokio::sync::Notify;
 const TRANSCRIPT: &str = "transcript.jsonl";
 const LAUNCHES: &str = "launches";
 const LOG: &str = "replay.log";
+const CHECK: &str = test_support::transcript::CHECK;
 const IDS: [&str; 2] = ["/id", "/request_id"];
 const REPLY_IDS: [&str; 2] = ["/id", "/response/request_id"];
 const KINDS: [&str; 7] = [
@@ -91,23 +92,31 @@ enum Ending {
 }
 
 pub(crate) fn run() -> ExitCode {
+    if std::env::args().skip(1).eq([CHECK]) {
+        return match transcript() {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(failure) => fail(&failure, |_| {}),
+        };
+    }
     match replay() {
         Ok(Ending::Finished) => ExitCode::SUCCESS,
         Ok(Ending::Died { code }) => {
             log(&format!("died with {code}"));
             ExitCode::from(code)
         }
-        Err(failure) => {
-            let mut stderr = std::io::stderr().lock();
-            let mut cause: Option<&dyn std::error::Error> = Some(&failure);
-            while let Some(error) = cause {
-                writeln!(stderr, "{error}").expect("the replaying engine writes to stderr");
-                log(&format!("failed: {error}"));
-                cause = error.source();
-            }
-            ExitCode::from(3)
-        }
+        Err(failure) => fail(&failure, |error| log(&format!("failed: {error}"))),
     }
+}
+
+fn fail(failure: &ReplayError, mut record: impl FnMut(&dyn std::error::Error)) -> ExitCode {
+    let mut stderr = std::io::stderr().lock();
+    let mut cause: Option<&dyn std::error::Error> = Some(failure);
+    while let Some(error) = cause {
+        writeln!(stderr, "{error}").expect("the replaying engine writes to stderr");
+        record(error);
+        cause = error.source();
+    }
+    ExitCode::from(3)
 }
 
 fn log(text: &str) {
@@ -115,14 +124,12 @@ fn log(text: &str) {
     append(&exe.with_file_name(LOG), &format!("{text}\n"));
 }
 
-fn replay() -> Result<Ending, ReplayError> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    log(&format!("started with {args:?}"));
-    let protocol = Protocol::of(&args).ok_or(ReplayError::NotATurn { args })?;
+fn transcript() -> Result<(PathBuf, Transcript), ReplayError> {
     let exe = std::env::current_exe().expect("the replaying engine knows its own path");
     let dir = exe
         .parent()
-        .expect("the replaying engine lives in a folder");
+        .expect("the replaying engine lives in a folder")
+        .to_path_buf();
     let path = dir.join(TRANSCRIPT);
     let text = std::fs::read_to_string(&path).map_err(|source| ReplayError::Read {
         path: path.clone(),
@@ -130,7 +137,15 @@ fn replay() -> Result<Ending, ReplayError> {
     })?;
     let transcript =
         Transcript::parse(&text).map_err(|source| ReplayError::Parse { path, source })?;
-    let launch = next_launch(dir)?;
+    Ok((dir, transcript))
+}
+
+fn replay() -> Result<Ending, ReplayError> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    log(&format!("started with {args:?}"));
+    let protocol = Protocol::of(&args).ok_or(ReplayError::NotATurn { args })?;
+    let (dir, transcript) = transcript()?;
+    let launch = next_launch(&dir)?;
     log(&format!("replaying launch {launch}"));
     let steps = transcript.launch(launch).ok_or(ReplayError::NoLaunch {
         launch,

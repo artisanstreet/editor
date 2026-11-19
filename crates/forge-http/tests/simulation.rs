@@ -73,7 +73,7 @@ impl Drop for Reproduce {
             writeln!(
                 std::io::stderr(),
                 "simulation seed {seed} failed\n\
-                 replay it with: SIMULATION_SEED={seed} cargo nextest run -p forge-http --test simulation --example replay_engine\n\
+                 replay it with: cargo build -p forge-http --example replay_engine && SIMULATION_SEED={seed} cargo nextest run -p forge-http --test simulation\n\
                  actions: {actions:#?}\n\
                  what the replaying engine saw:\n{engine}",
                 seed = self.seed,

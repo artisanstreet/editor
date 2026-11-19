@@ -60,7 +60,8 @@ required-features = ["transcript"]
 [dev-dependencies]
 futures.workspace = true
 serde.workspace = true
-test-support = { path = ".", features = ["sse", "net", "tokio", "transcript"] }
+tempfile.workspace = true
+test-support = { path = ".", features = ["sse", "net", "tokio", "transcript", "replay"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]

@@ -30,6 +30,45 @@ fn replayer(example: &str) -> PathBuf {
     replayer
 }
 
+#[cfg(unix)]
+fn install_executable(from: &Path, to: &Path) {
+    let copied = std::process::Command::new("cp")
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap_or_else(|error| panic!("run cp to install the replaying engine: {error}"));
+    assert!(
+        copied.success(),
+        "cp {} {} failed with {copied}",
+        from.display(),
+        to.display()
+    );
+}
+
+#[cfg(not(unix))]
+fn install_executable(from: &Path, to: &Path) {
+    std::fs::copy(from, to).unwrap_or_else(|error| {
+        panic!(
+            "install the replaying engine {} at {}: {error}",
+            from.display(),
+            to.display()
+        )
+    });
+}
+
+fn reads_transcript(entry: &Path, example: &str) {
+    let checked = std::process::Command::new(entry)
+        .arg(crate::transcript::CHECK)
+        .env_remove("ARTISAN_FAKE")
+        .output()
+        .unwrap_or_else(|error| panic!("run the replaying engine {}: {error}", entry.display()));
+    assert!(
+        checked.status.success(),
+        "the replaying engine built from the `{example}` example can't read this test's transcript, so it is older than the test: {}\nrebuild it with `cargo build --example {example}` in the test's package; `cargo test` doesn't relink the copy in target/<profile>/examples",
+        String::from_utf8_lossy(&checked.stderr).trim()
+    );
+}
+
 #[must_use]
 fn transcript(engine: EngineId, case: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -70,9 +109,10 @@ impl ReplayingEngine {
             .expect("the engine entry sits in a folder")
             .to_path_buf();
         std::fs::create_dir_all(&folder).expect("create the replayed engine's folder");
-        std::fs::copy(replayer(example), &entry).expect("install the replaying engine");
+        install_executable(&replayer(example), &entry);
         std::fs::write(folder.join("transcript.jsonl"), text).expect("write the transcript");
         std::fs::write(engine_dir.join("current"), version).expect("select the replayed version");
+        reads_transcript(&entry, example);
         Self { folder }
     }
 
