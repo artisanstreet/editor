@@ -96,7 +96,7 @@ async fn run(turn: &Turn, folders: &Folders) -> Vec<String> {
 async fn run_script(turn: &Turn, script: &str, args: &[String]) -> Vec<String> {
     let mut command = vec!["-c".to_owned(), script.to_owned(), "sh".to_owned()];
     command.extend_from_slice(args);
-    let mut process = spawn(turn, &command).unwrap();
+    let mut process = spawn(turn, &command).await.unwrap();
     let mut lines = Vec::new();
     while let Some(line) = tokio::time::timeout(test_support::wait::LIVENESS, process.next_line())
         .await

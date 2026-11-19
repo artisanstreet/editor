@@ -182,16 +182,32 @@ pub struct EngineProcess {
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
-pub(crate) fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
+pub(crate) async fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
     spawn_in(
         turn,
         args,
         &turn.cwd,
         &format!("{}-{}", turn.engine, turn.thread_id),
     )
+    .await
 }
 
-pub(crate) fn spawn_in(
+pub(crate) async fn spawn_in(
+    turn: &Turn,
+    args: &[String],
+    cwd: &std::path::Path,
+    name: &str,
+) -> Result<EngineProcess, SpawnError> {
+    let turn = turn.clone();
+    let args = args.to_vec();
+    let cwd = cwd.to_path_buf();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || spawn_now(&turn, &args, &cwd, &name))
+        .await
+        .expect("invariant: preparing and starting an engine process does not panic")
+}
+
+fn spawn_now(
     turn: &Turn,
     args: &[String],
     cwd: &std::path::Path,
@@ -241,7 +257,7 @@ pub(crate) fn spawn_in(
                 |started| started.trace,
             )
         });
-    let sandbox = Sandbox::for_turn(turn).map_err(|source| SpawnError::Sandbox {
+    let sandbox = Sandbox::build(turn).map_err(|source| SpawnError::Sandbox {
         engine: turn.engine,
         thread: turn.thread_id.clone(),
         source: Box::new(source),
@@ -256,9 +272,7 @@ pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError>
 #[derive(Debug)]
 pub(crate) struct OwnedChild {
     child: Box<dyn ChildWrapper>,
-    armed: bool,
-    tree: forge_isolation::EngineTree,
-    sandbox: Sandbox,
+    teardown: Option<Teardown>,
 }
 impl std::ops::Deref for OwnedChild {
     type Target = dyn ChildWrapper;
@@ -272,19 +286,61 @@ impl std::ops::DerefMut for OwnedChild {
     }
 }
 impl OwnedChild {
-    pub(crate) fn shutdown(&mut self) {
-        if self.armed {
-            if let Err(error) = self.child.start_kill() {
-                tracing::debug!(%error, "the engine process had already exited when it was dropped");
-            }
-            self.armed = false;
-            end_tree(&self.tree, &self.sandbox);
+    fn start_kill(&mut self) {
+        if let Err(error) = self.child.start_kill() {
+            tracing::debug!(%error, "the engine process had already exited when it was ended");
+        }
+    }
+
+    pub(crate) async fn end(&mut self) {
+        if let Some(teardown) = self.teardown.take() {
+            self.start_kill();
+            tokio::task::spawn_blocking(move || teardown.run())
+                .await
+                .expect("invariant: ending an engine's process tree does not panic");
         }
     }
 }
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        self.shutdown();
+        if let Some(teardown) = self.teardown.take() {
+            self.start_kill();
+            teardown.detach();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Teardown {
+    tree: forge_isolation::EngineTree,
+    sandbox: Sandbox,
+}
+
+impl Teardown {
+    fn run(self) {
+        end_tree(&self.tree, &self.sandbox);
+    }
+
+    fn detach(self) {
+        let (handing, handed) = std::sync::mpsc::channel::<Self>();
+        let reaper = std::thread::Builder::new()
+            .name("engine-teardown".to_owned())
+            .spawn(move || {
+                if let Ok(teardown) = handed.recv() {
+                    teardown.run();
+                }
+            });
+        match reaper {
+            Ok(_detached) => {
+                if let Err(std::sync::mpsc::SendError(teardown)) = handing.send(self) {
+                    teardown.run();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no thread to end an engine's process tree on; ending it here");
+                self.run();
+            }
+        }
     }
 }
 
@@ -323,13 +379,11 @@ pub(crate) fn owned_command(
             }
             Ok(OwnedChild {
                 child,
-                armed: true,
-                tree,
-                sandbox,
+                teardown: Some(Teardown { tree, sandbox }),
             })
         }
         Err(source) => {
-            end_tree(&tree, &sandbox);
+            Teardown { tree, sandbox }.detach();
             Err(SpawnError::Start { program, source })
         }
     }
@@ -500,7 +554,7 @@ impl EngineProcess {
 
     pub(crate) async fn kill(&mut self) {
         self.trace.record(Kind::Note, "killing the process");
-        self.child.shutdown();
+        self.child.end().await;
         if let Err(failure) = self.child.wait().await {
             let error: &dyn std::error::Error = &failure;
             tracing::debug!(program = %self.program.display(), error, "couldn't reap a killed engine process");
@@ -515,7 +569,7 @@ impl EngineProcess {
 
     pub(crate) async fn wait(&mut self) -> Exit {
         let status = self.child.wait().await;
-        self.child.shutdown();
+        self.child.end().await;
         self.trace
             .record(Kind::Note, &format!("exited: {status:?}"));
         match status {
@@ -567,7 +621,7 @@ pub async fn probe(
                 program: program.clone(),
                 source,
             })?;
-        process.child.shutdown();
+        process.child.end().await;
         if let Some(stderr) = process.stderr_task.take()
             && let Err(failure) = stderr.await
         {

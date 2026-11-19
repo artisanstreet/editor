@@ -303,7 +303,7 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
         .ok_or_else(|| SetTitleError::NoSession {
             thread: turn.thread_id.clone(),
         })?;
-    let (mut server, password) = prepare(&turn).map_err(SetTitleError::Server)?;
+    let (mut server, password) = prepare(&turn).await.map_err(SetTitleError::Server)?;
     let result = async {
         let api = connect(&mut server, password)
             .await
@@ -338,10 +338,10 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
     result
 }
 
-fn prepare(turn: &Turn) -> Result<(EngineProcess, String), ServerError> {
+async fn prepare(turn: &Turn) -> Result<(EngineProcess, String), ServerError> {
     let password = password()?;
     let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
-    let server = spawn(turn, &password, &config_dir)?;
+    let server = spawn(turn, &password, &config_dir).await?;
     Ok((server, password))
 }
 
@@ -353,7 +353,7 @@ async fn connect(server: &mut EngineProcess, password: String) -> Result<Api, Se
 }
 
 async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, StderrWritten) {
-    let (mut server, password) = match prepare(turn) {
+    let (mut server, password) = match prepare(turn).await {
         Ok(prepared) => prepared,
         Err(source) => return (Err(RunError::Server(source)), StderrWritten::default()),
     };
@@ -372,7 +372,11 @@ async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, StderrW
     (result, server.stderr())
 }
 
-fn spawn(turn: &Turn, password: &str, config_dir: &Path) -> Result<EngineProcess, ServerError> {
+async fn spawn(
+    turn: &Turn,
+    password: &str,
+    config_dir: &Path,
+) -> Result<EngineProcess, ServerError> {
     let mut launch = turn.clone();
     let mut env = turn.launch.env.clone();
     env.extend(
@@ -387,7 +391,9 @@ fn spawn(turn: &Turn, password: &str, config_dir: &Path) -> Result<EngineProcess
     );
     launch.launch.env = env;
     let args = ["serve", "--hostname", "127.0.0.1", "--port", "0"].map(str::to_owned);
-    process::spawn(&launch, &args).map_err(ServerError::Spawn)
+    process::spawn(&launch, &args)
+        .await
+        .map_err(ServerError::Spawn)
 }
 
 async fn ready(server: &mut EngineProcess) -> Result<String, ServerError> {

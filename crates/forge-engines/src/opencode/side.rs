@@ -84,7 +84,7 @@ async fn query(
     cancel: CancellationToken,
     compact: bool,
 ) -> Result<SideReply, SideQueryError> {
-    let (mut server, password) = prepare(&turn).map_err(SideQueryError::Server)?;
+    let (mut server, password) = prepare(&turn).await.map_err(SideQueryError::Server)?;
     let mut api = None;
     let mut fork = None;
     let call = |step: &'static str| move |source| SideQueryError::Api { step, source };

@@ -95,16 +95,19 @@ async fn context(backend: &dyn Backend, turn: &Turn) -> Result<SummaryContext, S
                 session: session.clone(),
             })?;
         let sandbox = crate::sandbox::Sandbox::for_turn(turn)
+            .await
             .map_err(|source| SideQueryError::Sandbox(Box::new(source)))?;
         let runtime = mcp::for_thread(
             turn.thread_id.as_str(),
             Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
         )
         .await;
+        let tools = tools::definitions(&runtime);
+        runtime.release().await;
         return Ok(SummaryContext {
             conversation: conversation.to_owned(),
             parent: Some(parent.to_owned()),
-            tools: tools::definitions(&runtime),
+            tools,
             owned: false,
         });
     }

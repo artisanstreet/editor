@@ -57,7 +57,7 @@ async fn traced_child() {
     let script = format!(
         "echo \"token $SYNTHETIC_SERVICE_TOKEN\" >&2; echo 'login {SHORT_PASSWORD} rejected; pw9x is another word' >&2; echo \"{{\\\"token\\\":\\\"$SYNTHETIC_SERVICE_TOKEN\\\"}}\""
     );
-    let mut process = spawn(&turn, &["-c".into(), script]).unwrap();
+    let mut process = spawn(&turn, &["-c".into(), script]).await.unwrap();
     let line = process.next_line().await.unwrap();
     assert!(
         line.as_deref()

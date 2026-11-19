@@ -25,6 +25,7 @@ async fn engine_stderr_stays_out_of_the_logs() {
             "echo 'Authorization: Bearer engine-secret' >&2".into(),
         ],
     )
+    .await
     .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), process.finish())
         .await

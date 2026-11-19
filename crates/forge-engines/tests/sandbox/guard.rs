@@ -60,7 +60,9 @@ fn turn(engine: EngineId, home: &Path, permissions: Permissions) -> Turn {
 }
 
 async fn run(turn: &Turn, script: &str) -> Vec<String> {
-    let mut process = spawn(turn, &["-c".to_owned(), script.to_owned()]).unwrap();
+    let mut process = spawn(turn, &["-c".to_owned(), script.to_owned()])
+        .await
+        .unwrap();
     let mut lines = Vec::new();
     while let Some(line) = tokio::time::timeout(test_support::wait::LIVENESS, process.next_line())
         .await
@@ -207,6 +209,7 @@ async fn a_full_access_run_between_two_plants_of_a_live_auto_run_still_gets_the_
             r#"read _; printf '{"hooks":"planted"}' > .claude/settings.json; echo done"#.to_owned(),
         ],
     )
+    .await
     .unwrap();
 
     let between = run(
@@ -429,6 +432,7 @@ async fn a_hook_replanted_while_another_auto_run_is_live_never_becomes_trusted()
             "echo planting; while :; do echo evil > .claude/hooks/evil.sh; done".to_owned(),
         ],
     )
+    .await
     .unwrap();
     assert_eq!(
         tokio::time::timeout(test_support::wait::LIVENESS, planter.next_line())

@@ -182,7 +182,14 @@ pub enum SandboxError {
 }
 
 impl Sandbox {
-    pub(crate) fn for_turn(turn: &Turn) -> Result<Self, SandboxError> {
+    pub(crate) async fn for_turn(turn: &Turn) -> Result<Self, SandboxError> {
+        let turn = turn.clone();
+        tokio::task::spawn_blocking(move || Self::build(&turn))
+            .await
+            .expect("invariant: building a sandbox does not panic")
+    }
+
+    pub(crate) fn build(turn: &Turn) -> Result<Self, SandboxError> {
         match (turn.config.permissions, forge_isolation::support()) {
             (Permissions::Full, _) | (Permissions::Auto, Support::Unavailable(_)) => Ok(Self::Open),
             (Permissions::Auto, Support::Enforced(landlock)) => {

@@ -261,6 +261,7 @@ impl Server {
             &turn.home,
             "codex-server",
         )
+        .await
         .map_err(StartError::Spawn)?;
         match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process)).await {
             Err(_elapsed) => {

@@ -56,6 +56,7 @@ async fn oversized_engine_line_is_a_protocol_error() {
             format!("head -c {} /dev/zero; printf '\\n'", MAX_LINE_BYTES + 1),
         ],
     )
+    .await
     .unwrap();
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), process.next_line())
         .await

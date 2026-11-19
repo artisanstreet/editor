@@ -95,6 +95,12 @@ impl Runtime {
             sandbox,
         }
     }
+
+    pub(crate) async fn release(self) {
+        tokio::task::spawn_blocking(move || drop(self))
+            .await
+            .expect("invariant: releasing a claude.ai run's tools does not panic");
+    }
 }
 
 #[derive(Debug, Default)]

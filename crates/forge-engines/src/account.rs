@@ -920,7 +920,7 @@ impl SignIn {
                 status = child.wait() => break status.map_err(|source| LoginError::Wait { engine, source })?,
             }
         };
-        child.shutdown();
+        child.end().await;
         if status.success() {
             return Ok(());
         }

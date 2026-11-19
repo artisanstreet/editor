@@ -256,7 +256,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
 
     while !next.is_empty() && !io.cancel.is_cancelled() {
         let args = launch_args(&turn.config, session.as_deref(), &turn.launch.readable);
-        let mut engine = match process::spawn(&turn, &args) {
+        let mut engine = match process::spawn(&turn, &args).await {
             Ok(engine) => engine,
             Err(failure) => {
                 let error: &dyn std::error::Error = &failure;

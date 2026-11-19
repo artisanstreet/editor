@@ -203,7 +203,7 @@ enum Read {
 }
 
 pub(crate) async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
-    let sandbox = match crate::sandbox::Sandbox::for_turn(&turn) {
+    let sandbox = match crate::sandbox::Sandbox::for_turn(&turn).await {
         Ok(sandbox) => sandbox,
         Err(error) => return Outcome::failed(diagnostics::chain(&error)),
     };
@@ -212,7 +212,9 @@ pub(crate) async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outco
         Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
     )
     .await;
-    drive_with(&runtime, backend, turn, io).await
+    let outcome = drive_with(&runtime, backend, turn, io).await;
+    runtime.release().await;
+    outcome
 }
 
 async fn drive_with(runtime: &Runtime, backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {

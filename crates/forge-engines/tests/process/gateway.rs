@@ -48,7 +48,9 @@ async fn claude_reaches_the_gateway_through_its_own_environment_not_a_shared_fil
     let home = tempfile::tempdir().unwrap();
     let turn = claude_turn(home.path(), artisan_api::Permissions::Full);
     let script = r#"printf '%s\n' "$#" "$@" "$ARTISAN_GATEWAY_ARTISAN"; grep -rl gateway-token . || echo "no file holds it""#;
-    let process = spawn(&turn, &["-c".into(), script.into(), "sh".into()]).unwrap();
+    let process = spawn(&turn, &["-c".into(), script.into(), "sh".into()])
+        .await
+        .unwrap();
     let lines = lines(process).await;
     let count: usize = lines[0].parse().unwrap();
     let args = &lines[1..=count];
@@ -91,20 +93,22 @@ async fn a_sandboxed_run_cannot_read_another_runs_gateway_credential() {
         &holder,
         &["-c".into(), "echo $$; read _".into(), "sh".into()],
     )
+    .await
     .unwrap();
     let holder_pid = line(&mut holder).await;
     let mut reader = claude_turn(&home, artisan_api::Permissions::Auto);
     reader.launch = crate::Launch::default();
     let probe = r#"tr '\0' '\n' < "/proc/$1/environ" 2>&1 | grep -c gateway-token; grep -rl gateway-token . ; echo done"#;
-    let read = |permissions| {
+    let read = async |permissions| {
         let mut reader = reader.clone();
         reader.config.permissions = permissions;
         let process = spawn(
             &reader,
             &["-c".into(), probe.into(), "sh".into(), holder_pid.clone()],
         )
+        .await
         .unwrap();
-        lines(process)
+        lines(process).await
     };
     let unconfined = read(artisan_api::Permissions::Full).await;
     let sandboxed = read(artisan_api::Permissions::Auto).await;

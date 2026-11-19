@@ -96,6 +96,7 @@ async fn query(
         &turn,
         &side_args(&turn.config, session.as_deref(), &turn.launch.readable),
     )
+    .await
     .map_err(SideQueryError::Spawn)?;
     let send_error = |step: &'static str| move |source| SideQueryError::Send { step, source };
     engine
