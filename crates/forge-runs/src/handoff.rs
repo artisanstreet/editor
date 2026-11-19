@@ -578,13 +578,13 @@ fn bounded(text: &str, budget: usize) -> String {
 impl crate::run::Compaction<'_> {
     async fn start(&mut self) -> Result<(), ContextError> {
         self.store(Status::Running, None).await?;
-        self.persisted();
+        self.stored(Status::Running);
         Ok(())
     }
 
     async fn finish(&mut self, summary: &str) -> Result<(), ContextError> {
         self.store(Status::Done, Some(summary)).await?;
-        self.settled();
+        self.stored(Status::Done);
         Ok(())
     }
 

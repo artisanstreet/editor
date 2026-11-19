@@ -1207,11 +1207,49 @@ async fn artisan_title(
     Ok((!names.is_empty()).then(|| names.join(", ")))
 }
 
-struct Tracked {
-    id: ItemId,
-    parent: Option<ItemId>,
-    status: Status,
-    persisted: bool,
+enum Tracked {
+    Named {
+        id: ItemId,
+    },
+    Stored {
+        id: ItemId,
+        parent: Option<ItemId>,
+        status: Status,
+    },
+}
+
+impl Tracked {
+    const fn id(&self) -> &ItemId {
+        match self {
+            Self::Named { id } | Self::Stored { id, .. } => id,
+        }
+    }
+
+    const fn status(&self) -> Option<Status> {
+        match self {
+            Self::Named { .. } => None,
+            Self::Stored { status, .. } => Some(*status),
+        }
+    }
+
+    fn stored_parent(&self) -> Option<&ItemId> {
+        match self {
+            Self::Named { .. } => None,
+            Self::Stored { parent, .. } => parent.as_ref(),
+        }
+    }
+
+    fn store(&mut self, parent: Option<ItemId>, status: Status) {
+        let id = self.id().clone();
+        *self = Self::Stored { id, parent, status };
+    }
+
+    fn open(&self) -> Option<&ItemId> {
+        match self {
+            Self::Stored { id, status, .. } if !status.is_terminal() => Some(id),
+            Self::Named { .. } | Self::Stored { .. } => None,
+        }
+    }
 }
 
 pub(crate) struct Compaction<'a> {
@@ -1243,15 +1281,9 @@ impl Compaction<'_> {
         self.cancel.clone()
     }
 
-    pub(crate) fn persisted(&mut self) {
+    pub(crate) fn stored(&mut self, status: Status) {
         if let Some(tracked) = self.work.by_key.get_mut(crate::handoff::COMPACTION_KEY) {
-            tracked.persisted = true;
-        }
-    }
-
-    pub(crate) fn settled(&mut self) {
-        if let Some(tracked) = self.work.by_key.get_mut(crate::handoff::COMPACTION_KEY) {
-            tracked.status = Status::Done;
+            tracked.store(None, status);
         }
     }
 }
@@ -1269,13 +1301,8 @@ impl Work {
     fn id(&mut self, key: &str) -> ItemId {
         self.by_key
             .entry(key.to_owned())
-            .or_insert_with(|| Tracked {
-                id: ItemId::new(),
-                parent: None,
-                status: Status::Running,
-                persisted: false,
-            })
-            .id
+            .or_insert_with(|| Tracked::Named { id: ItemId::new() })
+            .id()
             .clone()
     }
 }
@@ -1287,10 +1314,10 @@ async fn identify(
     key: &str,
 ) -> Result<ItemId, ApplyError> {
     if let Some(tracked) = items.by_key.get(key) {
-        return Ok(tracked.id.clone());
+        return Ok(tracked.id().clone());
     }
     if let Some(tracked) = items.settled.take(key) {
-        let id = tracked.id.clone();
+        let id = tracked.id().clone();
         items.by_key.insert(key.to_owned(), tracked);
         return Ok(id);
     }
@@ -1301,11 +1328,10 @@ async fn identify(
     {
         items.by_key.insert(
             key.to_owned(),
-            Tracked {
+            Tracked::Stored {
                 id: found.id.clone(),
                 parent: found.parent_id,
                 status: found.status,
-                persisted: true,
             },
         );
         return Ok(found.id);
@@ -1320,7 +1346,7 @@ async fn known_item(
     key: &str,
 ) -> Result<Option<ItemId>, ApplyError> {
     if let Some(tracked) = items.by_key.get(key) {
-        return Ok(Some(tracked.id.clone()));
+        return Ok(Some(tracked.id().clone()));
     }
     let Some(found) = store.item_by_native(&run.thread_id, None, key).await? else {
         return Ok(None);
@@ -1331,11 +1357,10 @@ async fn known_item(
         .unwrap_or(found);
     items.by_key.insert(
         key.to_owned(),
-        Tracked {
+        Tracked::Stored {
             id: item.id.clone(),
             parent: item.parent_id.clone(),
             status: item.status,
-            persisted: true,
         },
     );
     Ok(Some(item.id))
@@ -1348,7 +1373,8 @@ async fn stored_parent(
     key: &str,
 ) -> Result<Option<ItemId>, ApplyError> {
     match items.by_key.get(key) {
-        Some(tracked) => Ok(tracked.persisted.then(|| tracked.id.clone())),
+        Some(Tracked::Stored { id, .. }) => Ok(Some(id.clone())),
+        Some(Tracked::Named { .. }) => Ok(None),
         None => known_item(store, run, items, key).await,
     }
 }
@@ -1449,12 +1475,15 @@ async fn apply(
                     run.id
                 )
             });
-            if tracked.persisted
+            if let Tracked::Stored {
+                status: tracked_status,
+                ..
+            } = tracked
                 && let Some(item) = store.set_item_status(id, status).await?
             {
-                let asked = (tracked.status == Status::AwaitingUser)
+                let asked = (*tracked_status == Status::AwaitingUser)
                     != (item.status == Status::AwaitingUser);
-                tracked.status = item.status;
+                *tracked_status = item.status;
                 if asked {
                     hub.agent_attention(&thread_id).await;
                 }
@@ -1615,11 +1644,15 @@ async fn apply_item(
         && items
             .by_key
             .get(&key)
-            .is_some_and(|tracked| tracked.status.is_terminal())
+            .and_then(Tracked::status)
+            .is_some_and(Status::is_terminal)
         && let Some(item) = store.reopen_agent(&id, &run.id).await?
-        && let Some(tracked) = items.by_key.get_mut(&key)
+        && let Some(Tracked::Stored {
+            status: tracked_status,
+            ..
+        }) = items.by_key.get_mut(&key)
     {
-        tracked.status = item.status;
+        *tracked_status = item.status;
     }
     let tracked = items.by_key.get_mut(&key).unwrap_or_else(|| {
         unreachable!(
@@ -1627,10 +1660,9 @@ async fn apply_item(
             run.id
         )
     });
-    let first = !tracked.persisted;
-    tracked.parent = parent_id.clone().or_else(|| tracked.parent.clone());
-    tracked.persisted = true;
-    if first && tracked.parent.is_none() {
+    let before = tracked.status();
+    let parent_id = parent_id.or_else(|| tracked.stored_parent().cloned());
+    if before.is_none() && parent_id.is_none() {
         hub.clear_live(
             &thread_id,
             LiveTarget::Reasoning {
@@ -1647,7 +1679,7 @@ async fn apply_item(
         Vec::new()
     };
     let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
-    if status.is_terminal() && !tracked.status.is_terminal() {
+    if status.is_terminal() && !before.is_some_and(Status::is_terminal) {
         items.weighed.finished(&kind, status);
     }
     hub.snapshot_resources(&thread_id, &id, shown).await;
@@ -1656,14 +1688,14 @@ async fn apply_item(
             id.clone(),
             &thread_id,
             Some(&run.id),
-            tracked.parent.clone(),
+            parent_id.clone(),
             Some(key.clone()),
             status,
             kind,
         ))
         .await?;
-    let asked = (tracked.status == Status::AwaitingUser) != (saved.status == Status::AwaitingUser);
-    tracked.status = saved.status;
+    let asked = (before == Some(Status::AwaitingUser)) != (saved.status == Status::AwaitingUser);
+    tracked.store(parent_id, saved.status);
     if saved.status.is_terminal() && !matches!(saved.kind, ItemKind::Agent { .. }) {
         items.settle(&key);
     }
@@ -1694,8 +1726,8 @@ fn open_items(items: &Work) -> Vec<ItemId> {
     items
         .by_key
         .values()
-        .filter(|item| item.persisted && !item.status.is_terminal())
-        .map(|item| item.id.clone())
+        .filter_map(Tracked::open)
+        .cloned()
         .collect()
 }
 
