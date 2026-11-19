@@ -16,6 +16,7 @@ struct Fixture {
     root: PathBuf,
     env: Vec<(String, String)>,
     slow_gate: std::fs::File,
+    _jam_gate: std::fs::File,
 }
 
 impl Fixture {
@@ -29,10 +30,13 @@ impl Fixture {
         let path = |name: &str| root.join(name).to_string_lossy().into_owned();
         let slow_gate = std::fs::File::create(root.join("slow-gate")).unwrap();
         slow_gate.lock().unwrap();
+        let jam_gate = std::fs::File::create(root.join("jam-gate")).unwrap();
+        jam_gate.lock().unwrap();
         let env = [
             ("ARTISAN_TEST_SPAWNS".to_owned(), path("spawns")),
             ("ARTISAN_TEST_INPUT".to_owned(), path("input")),
             ("ARTISAN_TEST_SLOW_GATE".to_owned(), path("slow-gate")),
+            ("ARTISAN_TEST_JAM_GATE".to_owned(), path("jam-gate")),
         ]
         .into_iter()
         .chain(
@@ -45,6 +49,7 @@ impl Fixture {
             root,
             env,
             slow_gate,
+            _jam_gate: jam_gate,
         }
     }
 

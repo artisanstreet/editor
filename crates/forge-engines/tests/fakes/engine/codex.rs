@@ -15,6 +15,7 @@ struct Config {
     start_delay: Option<Duration>,
     interrupt_delay: Option<Duration>,
     slow_gate: Option<PathBuf>,
+    jam_gate: Option<PathBuf>,
 }
 
 impl Config {
@@ -41,6 +42,7 @@ impl Config {
             start_delay: millis("ARTISAN_TEST_START_DELAY_MS"),
             interrupt_delay: millis("ARTISAN_TEST_INTERRUPT_DELAY_MS"),
             slow_gate: std::env::var_os("ARTISAN_TEST_SLOW_GATE").map(PathBuf::from),
+            jam_gate: std::env::var_os("ARTISAN_TEST_JAM_GATE").map(PathBuf::from),
         }
     }
 
@@ -207,7 +209,16 @@ impl AppServer {
         respond(id, &json!({ "turn": { "id": turn } }));
         self.exit_on_resume = text == "then exit on resume";
         match text.as_str() {
-            "jam" => std::thread::sleep(Duration::from_secs(30)),
+            "jam" => {
+                let jam_gate = self
+                    .config
+                    .jam_gate
+                    .as_deref()
+                    .expect("a jammed turn waits at ARTISAN_TEST_JAM_GATE");
+                File::open(jam_gate)
+                    .and_then(|gate| gate.lock_shared())
+                    .expect("the test opens the jammed turn's gate");
+            }
             "flood" => {
                 let delta = "x".repeat(1024 * 1024);
                 let mut flooded = OsString::from(self.config.spawns.as_os_str());
