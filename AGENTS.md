@@ -1,6 +1,6 @@
 # Engineering policy
 
-These rules apply to every change in this repository, whoever makes it. `plan.md` sequences the work that brings the existing code in line with them; `findings.md` records why.
+These rules apply to every change in this repository, whoever makes it.
 
 ## Errors
 
@@ -11,7 +11,7 @@ Every error belongs to exactly one of two classes.
    - Each variant names the step that failed, carries the ids involved (thread, run, host, path) as fields, and keeps the underlying error as `#[source]`. Logging the error prints the whole chain; nobody should ever need to add logging afterwards to learn what happened.
    - Callers decide what to do by matching variants (retry, show the user, give up), never by inspecting strings.
    - Errors that cross the Forge HTTP boundary are serde-tagged enums, so the Editor receives typed failures.
-   - `anyhow` is not used. It is being removed crate by crate (`plan.md` phase 2) and then banned.
+   - `anyhow` is not used; `deny.toml` bans it.
 2. **Illegal states are unrepresentable.**
    - Model state as enums whose variants carry only the data valid in that state. No status field beside loose `Option`s and flags, no sentinels, no public fields that carry invariants, no stringly-typed kinds or ids, no raw JSON past the boundary that received it.
    - Normalize messy input into these types where it enters (HTTP, engine output, files, settings) and nowhere else.
