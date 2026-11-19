@@ -968,21 +968,6 @@ fn skill_metadata_in(text: &str, folder: Option<&str>) -> Option<(String, String
     Some((name, field("description").unwrap_or_default()))
 }
 
-#[cfg(test)]
-fn frontmatter_name(text: &str) -> Option<String> {
-    skill_metadata(text).map(|(name, _)| name)
-}
-
-#[cfg(test)]
-fn frontmatter_field(text: &str, key: &str) -> Option<String> {
-    frontmatter(text)?
-        .get(key.trim_end_matches(':'))?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(all(test, unix))]
 #[path = "../tests/customise/unit.rs"]
 mod tests;

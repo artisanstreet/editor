@@ -1,4 +1,17 @@
 use super::*;
+fn frontmatter_name(text: &str) -> Option<String> {
+    skill_metadata(text).map(|(name, _)| name)
+}
+
+fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+    frontmatter(text)?
+        .get(key.trim_end_matches(':'))?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[test]
 fn yaml_frontmatter_understands_multiline_and_quoted_values() {
     let text = "---\nname: 'review'\ndescription: >\n  First line\n  second line\n---\nbody";
