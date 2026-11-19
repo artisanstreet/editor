@@ -594,6 +594,7 @@ impl DraftSession {
                 .snapshot()
                 .map_or(Value::Null, |snapshot| snapshot.body.clone());
             draft.edits.settle();
+            draft.adopting.clear();
             draft.halt = Halt::Clear;
             if let Send::Outgoing(_) = draft.send {
                 draft.send = Send::Idle;

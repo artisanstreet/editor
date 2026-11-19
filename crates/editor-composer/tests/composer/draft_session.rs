@@ -1,5 +1,50 @@
 use super::*;
-use artisan_api::DraftSnapshot;
+use artisan_api::{DraftSnapshot, DraftWriteResult};
+use serde_json::json;
+
+fn in_conflict() -> DraftSession {
+    let mut state = DraftSession::new("new".into());
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
+    state.loaded(Ok(DraftSnapshot::default()));
+    state.queue(json!({"text": "mine"}));
+    let Some(Operation::Write { request, edited }) = state.next_operation() else {
+        panic!("expected the typed draft to be written");
+    };
+    state.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: false,
+            current: DraftSnapshot {
+                revision: 3,
+                body: json!({"text": "theirs"}),
+            },
+        }),
+    );
+    assert!(state.conflict());
+    state
+}
+
+#[test]
+fn choosing_the_other_clients_draft_drops_images_still_uploading_for_mine() {
+    let mut state = in_conflict();
+    state.adopt(PendingUpload::kept(vec![1, 2, 3]));
+    let uploads = state.next_uploads();
+    let [(key, _)] = uploads.as_slice() else {
+        panic!("expected the pasted image to start uploading");
+    };
+    state.use_remote();
+    assert_eq!(
+        state.adopted(*key, Ok(BlobHash("d".repeat(64)))),
+        None,
+        "the image belongs to the discarded draft"
+    );
+    assert_eq!(state.body(), &json!({"text": "theirs"}));
+    assert!(
+        !state.pending(),
+        "nothing from the discarded draft is saved over the one the user chose"
+    );
+}
 
 #[test]
 fn a_failed_upload_restarts_only_once_its_failure_is_cleared() {
