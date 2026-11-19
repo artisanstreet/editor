@@ -1,7 +1,11 @@
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tracing_subscriber::fmt::time::{FormatTime as _, SystemTime};
+
+const RETRY_SHARE: u64 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {
@@ -57,6 +61,12 @@ pub enum RotateError {
         #[source]
         source: std::io::Error,
     },
+    #[error("look for the log archive {path}")]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("remove the oldest log archive {path}")]
     Drop {
         path: PathBuf,
@@ -79,12 +89,19 @@ pub enum RotateError {
 }
 
 #[derive(Debug)]
+enum Rotation {
+    Working,
+    Failing { appended: u64, reported: String },
+}
+
+#[derive(Debug)]
 pub struct Writer {
     path: PathBuf,
     lock_path: PathBuf,
     lock: File,
     file: File,
     limit: Limit,
+    rotation: Rotation,
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
@@ -135,6 +152,7 @@ pub fn open(path: &Path, limit: Limit) -> Result<Writer, OpenLogError> {
         lock,
         file,
         limit,
+        rotation: Rotation::Working,
     })
 }
 
@@ -185,15 +203,11 @@ impl Writer {
     }
 
     fn shift(&self) -> Result<(), RotateError> {
-        let oldest = match self.limit.archives {
-            0 => self.path.clone(),
-            archives => archive(&self.path, archives),
+        let last = match self.free_archive()? {
+            Some(number) => number,
+            None => self.drop_oldest()?,
         };
-        absent_is_fine(std::fs::remove_file(&oldest)).map_err(|source| RotateError::Drop {
-            path: oldest,
-            source,
-        })?;
-        (1..=self.limit.archives).rev().try_for_each(|number| {
+        (1..=last).rev().try_for_each(|number| {
             let from = match number {
                 1 => self.path.clone(),
                 newer => archive(&self.path, newer - 1),
@@ -206,12 +220,89 @@ impl Writer {
             })
         })
     }
+
+    fn drop_oldest(&self) -> Result<usize, RotateError> {
+        let oldest = match self.limit.archives {
+            0 => self.path.clone(),
+            archives => archive(&self.path, archives),
+        };
+        absent_is_fine(std::fs::remove_file(&oldest)).map_err(|source| RotateError::Drop {
+            path: oldest,
+            source,
+        })?;
+        Ok(self.limit.archives)
+    }
+
+    fn retry_due(&self) -> bool {
+        match self.rotation {
+            Rotation::Working => true,
+            Rotation::Failing { appended, .. } => appended >= retry_after(self.limit),
+        }
+    }
+
+    fn failed(&mut self, error: &RotateError) -> std::io::Result<()> {
+        let failure = crate::chain(error);
+        let known =
+            matches!(&self.rotation, Rotation::Failing { reported, .. } if *reported == failure);
+        let line = (!known).then(|| report_line(&failure));
+        self.rotation = Rotation::Failing {
+            appended: 0,
+            reported: failure,
+        };
+        match line {
+            Some(line) => self.file.write_all(line.as_bytes()),
+            None => Ok(()),
+        }
+    }
+
+    fn free_archive(&self) -> Result<Option<usize>, RotateError> {
+        for number in 1..=self.limit.archives {
+            let path = archive(&self.path, number);
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Some(number));
+                }
+                Err(source) => return Err(RotateError::Inspect { path, source }),
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn report_line(failure: &str) -> String {
+    let mut line = String::new();
+    SystemTime
+        .format_time(&mut tracing_subscriber::fmt::format::Writer::new(&mut line))
+        .expect("invariant: formatting a timestamp into a String cannot fail");
+    writeln!(
+        line,
+        " ERROR {}: rotating the log failed, so it keeps growing until a rotation succeeds: {failure}",
+        module_path!(),
+    )
+    .expect("invariant: formatting into a String cannot fail");
+    line
+}
+
+fn retry_after(limit: Limit) -> u64 {
+    (limit.bytes / RETRY_SHARE).max(1)
 }
 
 impl Write for Writer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.rotate_if_full().map_err(std::io::Error::other)?;
-        self.file.write(buf)
+        if self.retry_due() {
+            match self.rotate_if_full() {
+                Ok(()) => self.rotation = Rotation::Working,
+                Err(error) => self.failed(&error)?,
+            }
+        }
+        let written = self.file.write(buf)?;
+        if let Rotation::Failing { appended, .. } = &mut self.rotation {
+            *appended = appended.saturating_add(
+                u64::try_from(written).expect("invariant: a write's length fits in u64"),
+            );
+        }
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

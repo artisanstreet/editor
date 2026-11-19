@@ -85,3 +85,73 @@ fn rotation_keeps_the_newest_archives_and_drops_older_ones() {
         "the oldest lines left with the oldest archive"
     );
 }
+
+#[test]
+fn a_rotation_that_cannot_happen_keeps_logging_reports_once_and_rotates_once_it_can() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("forge.log");
+    let blocker = dir.path().join("forge.log.1");
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("in the way"), "").unwrap();
+    let limit = Limit {
+        bytes: 32,
+        archives: 1,
+    };
+    let mut writer = open(&path, limit).unwrap();
+    let written: Vec<String> = (0..40)
+        .map(|line| format!("line {line:02} of the log"))
+        .collect();
+    for line in &written {
+        writer.write_all(format!("{line}\n").as_bytes()).unwrap();
+    }
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let logged: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("line "))
+        .collect();
+    assert_eq!(logged, written, "every line still lands in the log");
+    let reports: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("rotating the log failed"))
+        .collect();
+    assert_eq!(reports.len(), 1, "{text}");
+    assert!(
+        reports[0].contains(&blocker.display().to_string()),
+        "the report names what is in the way: {}",
+        reports[0]
+    );
+
+    std::fs::remove_dir_all(&blocker).unwrap();
+    writer.write_all(b"after the way cleared\n").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "after the way cleared\n",
+        "the log rotates again once it can"
+    );
+    assert_eq!(std::fs::read_to_string(&blocker).unwrap(), text);
+}
+
+#[test]
+fn a_rotation_after_a_half_finished_one_fills_the_gap_instead_of_dropping_an_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("forge.log");
+    std::fs::write(&path, "the full log\n").unwrap();
+    std::fs::write(dir.path().join("forge.log.2"), "older\n").unwrap();
+    std::fs::write(dir.path().join("forge.log.3"), "oldest\n").unwrap();
+    let limit = Limit {
+        bytes: 8,
+        archives: 3,
+    };
+
+    open(&path, limit).unwrap().write_all(b"new\n").unwrap();
+
+    let archived = |number: usize| {
+        std::fs::read_to_string(dir.path().join(format!("forge.log.{number}"))).unwrap()
+    };
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+    assert_eq!(archived(1), "the full log\n");
+    assert_eq!(archived(2), "older\n");
+    assert_eq!(archived(3), "oldest\n");
+}
