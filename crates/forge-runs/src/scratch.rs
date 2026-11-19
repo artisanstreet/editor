@@ -99,6 +99,13 @@ impl Hub {
         self.data_dir().join("scratch")
     }
 
+    pub(crate) fn sandbox_tool_caches(&self, project: &ProjectId) -> PathBuf {
+        self.data_dir()
+            .join("sandbox")
+            .join(project.as_str())
+            .join("caches")
+    }
+
     pub async fn ensure_scratch_project(&self) -> Result<(), EnsureScratchProjectError> {
         let root = self.scratch_root();
         if inside_work_tree(self.data_dir()) {

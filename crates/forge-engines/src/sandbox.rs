@@ -1,28 +1,25 @@
 use crate::Turn;
 use artisan_api::{EngineId, Permissions, ThreadId};
 use forge_isolation::{Ruleset, RulesetError, Support};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const TEMPORARY_FOLDER_VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
 const RUN_TEMPORARY_PREFIX: &str = "artisan-run-";
 const SHARED_TEMPORARY: [&str; 2] = ["/tmp", "/dev/shm"];
-const SHARED_CACHES: [&str; 2] = [".npm", ".local/share/pnpm"];
 const GIT_POINTER_BYTES: u64 = 64 * 1024;
-const TOOL_CACHES: [(&str, &str); 6] = [
-    (".cargo", "registry"),
-    (".cargo", "git"),
-    (".rustup", "tmp"),
-    (".bun", "install/cache"),
-    (".gradle", "caches"),
-    (".m2", "repository"),
+const TOOL_CACHES: [(&str, &str); 8] = [
+    ("XDG_CACHE_HOME", "cache"),
+    ("CARGO_HOME", "cargo"),
+    ("npm_config_cache", "npm"),
+    ("npm_config_store_dir", "pnpm-store"),
+    ("pnpm_config_store_dir", "pnpm-store"),
+    ("BUN_INSTALL_CACHE_DIR", "bun"),
+    ("GRADLE_USER_HOME", "gradle"),
+    ("GOMODCACHE", "go-mod"),
 ];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Writable {
-    Existing(PathBuf),
-    InToolHome { tool_home: PathBuf, cache: PathBuf },
-}
+const MAVEN_REPOSITORY: &str = "maven";
 
 #[derive(Clone, Debug)]
 pub enum Sandbox {
@@ -34,6 +31,7 @@ pub enum Sandbox {
 pub struct Confined {
     temporary: tempfile::TempDir,
     ruleset: Ruleset,
+    redirects: Vec<(String, OsString)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +40,14 @@ pub enum SandboxError {
     Temporary {
         engine: EngineId,
         thread: ThreadId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create the tool caches {} of {engine} thread {thread}'s sandbox", path.display())]
+    ToolCaches {
+        engine: EngineId,
+        thread: ThreadId,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
@@ -67,6 +73,21 @@ impl Sandbox {
                         thread: turn.thread_id.clone(),
                         source,
                     })?;
+                let caches = turn.launch.tool_caches.as_deref();
+                let folders = caches.into_iter().flat_map(|caches| {
+                    cache_folders(caches).chain(std::iter::once(caches.to_path_buf()))
+                });
+                for folder in folders {
+                    std::fs::create_dir_all(&folder).map_err(|source| {
+                        SandboxError::ToolCaches {
+                            engine: turn.engine,
+                            thread: turn.thread_id.clone(),
+                            path: folder.clone(),
+                            source,
+                        }
+                    })?;
+                }
+                let redirects = caches.map_or_else(Vec::new, |caches| redirects(turn, caches));
                 let mut roots = writable_roots(turn);
                 roots.push(temporary.path().to_path_buf());
                 let ruleset = landlock
@@ -76,7 +97,11 @@ impl Sandbox {
                         thread: turn.thread_id.clone(),
                         source,
                     })?;
-                Ok(Self::Confined(Arc::new(Confined { temporary, ruleset })))
+                Ok(Self::Confined(Arc::new(Confined {
+                    temporary,
+                    ruleset,
+                    redirects,
+                })))
             }
         }
     }
@@ -97,6 +122,7 @@ impl Sandbox {
             for variable in TEMPORARY_FOLDER_VARIABLES {
                 command.env(variable, confined.temporary.path());
             }
+            command.envs(confined.redirects.iter().map(|(key, value)| (key, value)));
         }
     }
 }
@@ -109,13 +135,8 @@ pub(crate) const fn forge_confines(permissions: Permissions, support: Support) -
 }
 
 fn launch_variable(turn: &Turn, name: &str) -> Option<PathBuf> {
-    turn.launch
-        .env
-        .iter()
-        .rev()
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| PathBuf::from(value))
-        .or_else(|| std::env::var_os(name).map(PathBuf::from))
+    launch_value(turn, name)
+        .map(PathBuf::from)
         .filter(|path| path.is_absolute())
 }
 
@@ -124,66 +145,68 @@ fn reachable_sockets(turn: &Turn) -> Vec<PathBuf> {
 }
 
 fn writable_roots(turn: &Turn) -> Vec<PathBuf> {
-    let variable = |name: &str| launch_variable(turn, name);
     let codex_home = turn
         .launch
         .env
         .iter()
         .filter(|(key, _)| key == "CODEX_HOME")
         .map(|(_, value)| PathBuf::from(value));
-    let caches = tool_caches(
-        variable("HOME").as_deref(),
-        variable("XDG_CACHE_HOME"),
-        variable("TMPDIR"),
-    )
-    .into_iter()
-    .filter_map(ready);
+    let temporary = SHARED_TEMPORARY
+        .into_iter()
+        .map(PathBuf::from)
+        .chain(launch_variable(turn, "TMPDIR"));
     [turn.cwd.clone(), turn.home.clone()]
         .into_iter()
         .chain(codex_home)
         .chain(shared_git_folder(&turn.cwd))
-        .chain(caches)
+        .chain(temporary)
+        .chain(turn.launch.tool_caches.clone())
         .collect()
 }
 
-fn tool_caches(
-    home: Option<&Path>,
-    cache_home: Option<PathBuf>,
-    temporary: Option<PathBuf>,
-) -> Vec<Writable> {
-    let shared = SHARED_TEMPORARY
+fn redirects(turn: &Turn, caches: &Path) -> Vec<(String, OsString)> {
+    let engine_owned = |variable: &str| turn.launch.env.iter().any(|(key, _)| key == variable);
+    let maven = std::iter::once((
+        "MAVEN_OPTS".to_owned(),
+        maven_options(
+            launch_value(turn, "MAVEN_OPTS"),
+            &caches.join(MAVEN_REPOSITORY),
+        ),
+    ));
+    TOOL_CACHES
         .into_iter()
-        .map(PathBuf::from)
-        .chain(temporary)
-        .chain(cache_home.or_else(|| home.map(|home| home.join(".cache"))))
-        .chain(
-            home.into_iter()
-                .flat_map(|home| SHARED_CACHES.map(|cache| home.join(cache))),
-        )
-        .map(Writable::Existing);
-    let tools = home.into_iter().flat_map(|home| {
-        TOOL_CACHES.map(|(tool, cache)| Writable::InToolHome {
-            tool_home: home.join(tool),
-            cache: home.join(tool).join(cache),
-        })
-    });
-    shared.chain(tools).collect()
+        .filter(|(variable, _)| !engine_owned(variable))
+        .map(|(variable, folder)| (variable.to_owned(), caches.join(folder).into_os_string()))
+        .chain(maven)
+        .collect()
 }
 
-fn ready(writable: Writable) -> Option<PathBuf> {
-    match writable {
-        Writable::Existing(path) => Some(path),
-        Writable::InToolHome { tool_home, cache } if tool_home.is_dir() => {
-            match std::fs::create_dir_all(&cache) {
-                Ok(()) => Some(cache),
-                Err(error) => {
-                    tracing::warn!(path = %cache.display(), %error, "the sandbox can't create a tool cache; the engine can't write it");
-                    None
-                }
-            }
-        }
-        Writable::InToolHome { .. } => None,
+fn cache_folders(caches: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    TOOL_CACHES
+        .into_iter()
+        .map(|(_, folder)| folder)
+        .chain(std::iter::once(MAVEN_REPOSITORY))
+        .map(|folder| caches.join(folder))
+}
+
+fn maven_options(inherited: Option<OsString>, repository: &Path) -> OsString {
+    let mut options = inherited.unwrap_or_default();
+    if !options.is_empty() {
+        options.push(" ");
     }
+    options.push("-Dmaven.repo.local=");
+    options.push(repository);
+    options
+}
+
+fn launch_value(turn: &Turn, name: &str) -> Option<OsString> {
+    turn.launch
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| OsString::from(value))
+        .or_else(|| std::env::var_os(name))
 }
 
 fn shared_git_folder(project: &Path) -> Option<PathBuf> {

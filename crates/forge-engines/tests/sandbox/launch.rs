@@ -9,8 +9,11 @@ const SCRIPT: &str = r#"
 echo inside > made
 echo state > "$2/state"
 echo scratch > "$TMPDIR/scratch" && echo "temporary $TMPDIR"
-echo cached > "$3/.cache/tool/entry"
-echo crate > "$3/.cargo/registry/entry"
+echo cached > "$XDG_CACHE_HOME/entry"
+mkdir -p "$CARGO_HOME/registry" && echo crate > "$CARGO_HOME/registry/entry"
+echo planted > "$3/.cache/tool/entry"
+mkdir -p "$3/.cargo/registry/src/dep" && echo planted > "$3/.cargo/registry/src/dep/build.rs"
+echo planted > "$3/.local/share/pnpm/git"
 echo escaped > "$1/escaped"
 echo hijacked >> "$3/.bashrc"
 echo configured > "$3/.config/tool"
@@ -23,6 +26,7 @@ struct Folders {
     engine_home: PathBuf,
     user_home: PathBuf,
     outside: PathBuf,
+    caches: PathBuf,
 }
 
 fn folders() -> Folders {
@@ -39,13 +43,15 @@ fn folders() -> Folders {
     };
     let user_home = folder("user");
     std::fs::create_dir_all(user_home.join(".cache").join("tool")).expect("a cache");
-    std::fs::create_dir_all(user_home.join(".cargo")).expect("a cargo home");
+    std::fs::create_dir_all(user_home.join(".cargo").join("registry")).expect("a cargo home");
+    std::fs::create_dir_all(user_home.join(".local/share/pnpm")).expect("a pnpm home");
     std::fs::create_dir_all(user_home.join(".config")).expect("a config folder");
     std::fs::write(user_home.join(".bashrc"), "kept\n").expect("a shell rc file");
     Folders {
         project: folder("project"),
         engine_home: folder("engine"),
         outside: folder("outside"),
+        caches: base.path().join("caches"),
         user_home,
         _base: base,
     }
@@ -64,13 +70,8 @@ fn turn(permissions: Permissions, folders: &Folders) -> Turn {
         session_id: None,
         input: UserInput::default(),
         launch: Launch {
-            env: vec![
-                ("HOME".to_owned(), folders.user_home.display().to_string()),
-                (
-                    "XDG_CACHE_HOME".to_owned(),
-                    folders.user_home.join(".cache").display().to_string(),
-                ),
-            ],
+            env: vec![("HOME".to_owned(), folders.user_home.display().to_string())],
+            tool_caches: Some(folders.caches.clone()),
             ..Launch::default()
         },
         trace_dir: None,
@@ -118,27 +119,28 @@ async fn an_auto_engine_writes_its_folders_and_tool_caches_but_not_the_users_fil
     assert!(folders.project.join("made").exists(), "{lines:?}");
     assert!(folders.engine_home.join("state").exists(), "{lines:?}");
     assert!(
-        folders
-            .user_home
-            .join(".cache")
-            .join("tool")
-            .join("entry")
-            .exists(),
-        "a tool writes its cache"
+        folders.caches.join("cache").join("entry").exists(),
+        "a tool writes its cache: {lines:?}"
     );
     assert!(
         folders
-            .user_home
-            .join(".cargo")
+            .caches
+            .join("cargo")
             .join("registry")
             .join("entry")
             .exists(),
-        "cargo fetches into a registry Forge made for it"
+        "cargo fetches into the project's sandbox registry: {lines:?}"
     );
-    assert!(
-        !folders.user_home.join(".gradle").exists(),
-        "no cache is made for a tool that isn't installed"
-    );
+    for planted in [
+        ".cache/tool/entry",
+        ".cargo/registry/src/dep/build.rs",
+        ".local/share/pnpm/git",
+    ] {
+        assert!(
+            !folders.user_home.join(planted).exists(),
+            "an Auto engine planted ~/{planted}, which runs outside the sandbox"
+        );
+    }
     assert!(
         !folders.outside.join("escaped").exists(),
         "an Auto engine wrote outside its folders"
@@ -281,4 +283,100 @@ async fn a_linked_worktree_lets_git_write_its_shared_folder() {
         objects.join("planted").exists(),
         "git can't write the repository's shared folder from a worktree: {lines:?}"
     );
+}
+
+#[tokio::test]
+async fn cargo_builds_inside_auto_with_its_registry_in_the_sandbox() {
+    if !sandboxed() {
+        return;
+    }
+    let Some(cargo) = std::env::var_os("CARGO").map(PathBuf::from) else {
+        eprintln!("SKIPPED: no cargo binary to build with");
+        return;
+    };
+    let folders = folders();
+    std::fs::create_dir_all(folders.project.join("src")).unwrap();
+    std::fs::write(
+        folders.project.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(folders.project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let mut turn = turn(Permissions::Auto, &folders);
+    turn.launch.env.extend([
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            folders.project.join("target").display().to_string(),
+        ),
+        ("RUSTC_WRAPPER".to_owned(), String::new()),
+        (
+            "RUSTC".to_owned(),
+            cargo.with_file_name("rustc").display().to_string(),
+        ),
+    ]);
+    let lines = run_script(
+        &turn,
+        r#"cd "$1" && "$2" build --offline --quiet 2>&1 && echo "built in $CARGO_HOME"; echo done"#,
+        &[
+            folders.project.display().to_string(),
+            cargo.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(
+        lines.contains(&format!(
+            "built in {}",
+            folders.caches.join("cargo").display()
+        )),
+        "cargo build failed inside Auto: {lines:?}"
+    );
+    assert!(
+        folders.project.join("target/debug/app").exists(),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn pnpm_installs_inside_auto_with_its_store_in_the_sandbox() {
+    if !sandboxed() {
+        return;
+    }
+    let Some(pnpm) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|folder| folder.join("pnpm"))
+        .find(|candidate| candidate.is_file())
+    else {
+        eprintln!("SKIPPED: pnpm isn't installed");
+        return;
+    };
+    let folders = folders();
+    std::fs::write(
+        folders.project.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"lib":"file:lib.tgz"}}"#,
+    )
+    .unwrap();
+    let turn = turn(Permissions::Auto, &folders);
+    let lines = run_script(
+        &turn,
+        r#"cd "$1" && mkdir -p lib/package && printf '{"name":"lib","version":"1.0.0"}' > lib/package/package.json && tar -czf lib.tgz -C lib package && "$2" install --offline 2>&1 && echo installed; echo done"#,
+        &[
+            folders.project.display().to_string(),
+            pnpm.display().to_string(),
+        ],
+    )
+    .await;
+    assert!(
+        lines.iter().any(|line| line == "installed"),
+        "pnpm install failed inside Auto: {lines:?}"
+    );
+    assert!(
+        folders
+            .project
+            .join("node_modules/lib/package.json")
+            .exists(),
+        "{lines:?}"
+    );
+    let stored = std::fs::read_dir(folders.caches.join("pnpm-store"))
+        .unwrap()
+        .count();
+    assert!(stored > 0, "pnpm didn't use the sandbox's store: {lines:?}");
 }

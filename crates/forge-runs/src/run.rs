@@ -994,6 +994,7 @@ async fn prepare_on(
         forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
+    launch.tool_caches = Some(hub.sandbox_tool_caches(&thread.project_id));
     let mut config = thread.config.clone();
     match transport.and_then(ClaudeTransport::option) {
         Some(option) => {
