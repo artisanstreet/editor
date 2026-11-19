@@ -21,7 +21,7 @@ echo done
 
 fn sandboxed() -> bool {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        test_support::skipped(format_args!(
+        test_support::sandbox_missing(format_args!(
             "this kernel can't enforce the sandbox ({reason:?})"
         ));
         return false;
@@ -250,7 +250,7 @@ fn founding_forge() -> bool {
     if in_forge_subgroup && started_by_systemd {
         return true;
     }
-    test_support::skipped(format_args!(
+    test_support::sandbox_missing(format_args!(
         "run this test as the main process of a systemd unit with Delegate=yes and DelegateSubgroup=forge"
     ));
     false

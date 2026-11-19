@@ -16,6 +16,16 @@ mkdir "$2/folder"
 exit 0
 "#;
 
+const SANDBOX_REQUIRED: &str = "ARTISAN_SANDBOX_REQUIRED";
+
+fn guaranteed_abi() -> Option<i32> {
+    std::env::var(SANDBOX_REQUIRED).ok().map(|abi| {
+        abi.parse().unwrap_or_else(|error| {
+            panic!("{SANDBOX_REQUIRED}={abi} isn't a Landlock ABI: {error}")
+        })
+    })
+}
+
 #[expect(
     clippy::print_stderr,
     reason = "a test the kernel can't run says so instead of passing silently"
@@ -24,12 +34,36 @@ fn landlock() -> Option<Landlock> {
     match support() {
         Support::Enforced(landlock) => Some(landlock),
         Support::Unavailable(reason) => {
+            assert!(
+                guaranteed_abi().is_none(),
+                "{SANDBOX_REQUIRED} is set, but this kernel can't enforce the sandbox ({reason:?})"
+            );
             eprintln!(
                 "SKIPPED: this kernel can't enforce the sandbox ({reason:?}), so a sandboxed child can't be exercised here"
             );
             None
         }
     }
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a test the kernel can't run says so instead of passing silently"
+)]
+fn lacks(landlock: Landlock, needed: i32, what: &str) -> bool {
+    if landlock.abi() >= needed {
+        return false;
+    }
+    assert!(
+        guaranteed_abi().is_none_or(|guaranteed| guaranteed < needed),
+        "{SANDBOX_REQUIRED} promises Landlock ABI {needed}, but the kernel has ABI {}",
+        landlock.abi()
+    );
+    eprintln!(
+        "SKIPPED: Landlock ABI {} can't {what}, and Forge reports that",
+        landlock.abi()
+    );
+    true
 }
 
 fn run(allowed: &Path, outside: &Path, sandbox: Option<&forge_isolation::Ruleset>) -> String {
@@ -115,21 +149,13 @@ fn each_landlock_abi_reports_what_it_leaves_open() {
     }
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "a check the kernel can't make says so instead of passing silently"
-)]
 #[test]
 fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
     let Some(landlock) = landlock() else {
         return;
     };
     let own = tempfile::tempdir().unwrap();
-    if landlock.coverage().truncation == Reach::Open {
-        eprintln!(
-            "SKIPPED: Landlock ABI {} can't block truncation, and Forge reports that",
-            landlock.abi()
-        );
+    if lacks(landlock, 3, "block truncation") {
         return;
     }
     let allowed = tempfile::tempdir().unwrap();
@@ -154,21 +180,13 @@ fn a_sandboxed_child_cannot_truncate_files_outside_when_the_kernel_says_so() {
     );
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "a check the kernel can't make says so instead of passing silently"
-)]
 #[test]
 fn a_sandboxed_child_signals_its_own_children_but_not_processes_outside() {
     let Some(landlock) = landlock() else {
         return;
     };
     let own = tempfile::tempdir().unwrap();
-    if landlock.coverage().signals == Reach::Open {
-        eprintln!(
-            "SKIPPED: Landlock ABI {} can't scope signals, and Forge reports that",
-            landlock.abi()
-        );
+    if lacks(landlock, 6, "scope signals") {
         return;
     }
     let mut bystander = Command::new("sleep").arg("600").spawn().unwrap();
@@ -301,10 +319,6 @@ fn connect_as_the_sandboxed_child(socket: &std::ffi::OsStr) {
     );
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "a check the kernel can't make says so instead of passing silently"
-)]
 #[test]
 fn a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_scopes_socket_files()
  {
@@ -315,11 +329,7 @@ fn a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_
     let Some(landlock) = landlock() else {
         return;
     };
-    if landlock.coverage().socket_files == Reach::Open {
-        eprintln!(
-            "SKIPPED: Landlock ABI {} can't scope socket files, and Forge reports that",
-            landlock.abi()
-        );
+    if lacks(landlock, 9, "scope socket files") {
         return;
     }
     let writable = tempfile::tempdir().unwrap();

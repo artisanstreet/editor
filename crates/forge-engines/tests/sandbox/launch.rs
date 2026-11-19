@@ -112,7 +112,7 @@ async fn run_script(turn: &Turn, script: &str, args: &[String]) -> Vec<String> {
 #[tokio::test]
 async fn an_auto_engine_writes_its_folders_and_tool_caches_but_not_the_users_files() {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        test_support::skipped(format_args!(
+        test_support::sandbox_missing(format_args!(
             "this kernel can't enforce the sandbox ({reason:?})"
         ));
         return;
@@ -222,7 +222,7 @@ async fn written(folders: &Folders, targets: &[&Path]) -> Vec<String> {
 
 fn sandboxed() -> bool {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        test_support::skipped(format_args!(
+        test_support::sandbox_missing(format_args!(
             "this kernel can't enforce the sandbox ({reason:?})"
         ));
         return false;

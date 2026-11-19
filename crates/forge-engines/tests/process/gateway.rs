@@ -80,7 +80,7 @@ async fn claude_reaches_the_gateway_through_its_own_environment_not_a_shared_fil
 #[tokio::test]
 async fn a_sandboxed_run_cannot_read_another_runs_gateway_credential() {
     if let forge_isolation::Support::Unavailable(reason) = forge_isolation::support() {
-        test_support::skipped(format_args!(
+        test_support::sandbox_missing(format_args!(
             "this kernel can't enforce the sandbox ({reason:?})"
         ));
         return;
