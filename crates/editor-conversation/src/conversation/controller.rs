@@ -99,6 +99,11 @@ enum Completion {
         request: AnswerRequest,
         result: Result<(), CallError>,
     },
+    ReplyTail {
+        origin: Origin,
+        reply: super::announce::StoredReply,
+        result: Result<artisan_api::ContentRange, editor_core::client::RangeError>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +152,7 @@ pub struct Conversation {
     scroll: Vec<ScrollAction>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
+    pub(crate) reply_tail: Option<super::announce::ReplyTail>,
     clock: editor_core::Clock,
 }
 
@@ -229,6 +235,7 @@ impl Conversation {
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
+            reply_tail: None,
             clock: core.clock().clone(),
         }
     }
@@ -445,6 +452,7 @@ impl Conversation {
         self.park();
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
+        self.reply_tail = None;
         self.work_task = None;
         self.agent_task = None;
         self.abandon_answers();
@@ -691,6 +699,54 @@ impl Conversation {
             }
             self.runs.clear();
         }
+        self.follow_reply_tail(core);
+    }
+
+    fn follow_reply_tail(&mut self, core: &Core) {
+        let wanted = self
+            .view
+            .as_ref()
+            .and_then(|view| super::announce::finished_stored_reply(view, artisan_api::now()));
+        let Some(reply) = wanted else {
+            self.reply_tail = None;
+            return;
+        };
+        if self
+            .reply_tail
+            .as_ref()
+            .is_some_and(|tail| *tail.reply() == reply)
+        {
+            return;
+        }
+        self.reply_tail = None;
+        let (Some((host, _)), Some(instance)) = (&self.open, self.host_instance) else {
+            return;
+        };
+        let (offset, limit) = reply.tail_query();
+        let Some(read) = core
+            .source_provider(host, instance)
+            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit))
+        else {
+            return;
+        };
+        let origin = Origin {
+            host: host.clone(),
+            instance,
+            generation: self.generation,
+        };
+        let sender = self.delivery.sender();
+        let reading = reply.clone();
+        let task = AbortOnDropHandle::new(runtime().spawn(async move {
+            let result = read.await;
+            sender
+                .offer(Completion::ReplyTail {
+                    origin,
+                    reply: reading,
+                    result,
+                })
+                .await;
+        }));
+        self.reply_tail = Some(super::announce::ReplyTail::Reading { reply, _task: task });
     }
 
     fn retain_row_heights(&mut self) {
@@ -1402,9 +1458,10 @@ impl Conversation {
                     .pending
                     .as_ref()
                     .is_some_and(|pending| &pending.origin == origin),
-                Completion::Work { .. } | Completion::Agent { .. } | Completion::Answer { .. } => {
-                    false
-                }
+                Completion::Work { .. }
+                | Completion::Agent { .. }
+                | Completion::Answer { .. }
+                | Completion::ReplyTail { .. } => false,
             };
             if committing {
                 self.commit(core);
@@ -1552,11 +1609,30 @@ impl Conversation {
                     }
                     self.rebuild(core);
                 }
+                Completion::ReplyTail {
+                    origin,
+                    reply,
+                    result,
+                } if self.accepts(core, &origin)
+                    && matches!(
+                        &self.reply_tail,
+                        Some(super::announce::ReplyTail::Reading { reply: reading, .. }) if *reading == reply
+                    ) =>
+                {
+                    let (_, thread) = self
+                        .open
+                        .as_ref()
+                        .expect("invariant: an accepted completion belongs to the open thread");
+                    self.reply_tail =
+                        Some(super::announce::ReplyTail::settle(thread, reply, result));
+                    changed = true;
+                }
                 Completion::Held { .. }
                 | Completion::Page { .. }
                 | Completion::Work { .. }
                 | Completion::Agent { .. }
-                | Completion::Answer { .. } => {}
+                | Completion::Answer { .. }
+                | Completion::ReplyTail { .. } => {}
             }
         }
         changed
