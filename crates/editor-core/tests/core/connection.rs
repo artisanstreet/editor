@@ -6,6 +6,7 @@ use editor_core::connection::{self, ConnectionStatus, Deadlines, SessionError, U
 use futures::StreamExt as _;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use test_support::editor::forge::TlsServer;
 use test_support::wait::within;
@@ -69,7 +70,7 @@ struct Follower {
     updates: tokio::sync::mpsc::Receiver<Update>,
     retry: Arc<tokio::sync::Notify>,
     _server: TlsServer,
-    _observe: tokio::sync::watch::Sender<Option<artisan_api::ThreadId>>,
+    observe: tokio::sync::watch::Sender<Option<artisan_api::ThreadId>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -90,7 +91,7 @@ impl Follower {
             updates,
             retry,
             _server: server,
-            _observe: observe,
+            observe,
             task,
         }
     }
@@ -214,6 +215,48 @@ fn only_a_connection_that_was_lost_reports_reconnecting() {
             follower.status().await,
             ConnectionStatus::Reconnecting { attempt: 1 },
             "a dropped stream reconnects as a reconnection"
+        );
+    });
+}
+
+#[test]
+fn opening_another_thread_after_a_recovered_drop_does_not_report_a_lost_connection() {
+    current_thread(Duration::from_secs(20), async {
+        let opened = Arc::new(AtomicUsize::new(0));
+        let mut follower = Follower::start(
+            axum::Router::new().route(
+                "/events",
+                axum::routing::get(move || {
+                    let first = opened.fetch_add(1, Ordering::SeqCst) == 0;
+                    async move {
+                        if first {
+                            hello_then_close().await
+                        } else {
+                            hello_then_silence().await
+                        }
+                    }
+                }),
+            ),
+            Deadlines::FORGE,
+        )
+        .await;
+        assert_eq!(follower.status().await, ConnectionStatus::Connecting);
+        assert_eq!(follower.status().await, ConnectionStatus::Live);
+        assert_eq!(follower.offline().await.0, 1);
+        follower.retry.notify_one();
+        assert_eq!(
+            follower.status().await,
+            ConnectionStatus::Reconnecting { attempt: 1 }
+        );
+        assert_eq!(follower.status().await, ConnectionStatus::Live);
+        follower
+            .observe
+            .send(Some(artisan_api::ThreadId::from("thread-b")))
+            .expect("the connection observes the thread");
+        assert_eq!(
+            follower.status().await,
+            ConnectionStatus::Live,
+            "following another thread on a healthy stream is not a reconnection"
         );
     });
 }

@@ -6,7 +6,7 @@ use crate::core::runtime::runtime;
 use artisan_api::{Envelope, Event, Seq, ThreadId};
 use futures::StreamExt as _;
 use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
@@ -167,14 +167,10 @@ pub async fn run(
 ) {
     let budget = Arc::new(tokio::sync::Semaphore::new(EVENT_BUDGET));
     let mut cursor = Cursor::default();
-    let mut attempt = 0_u32;
+    let mut opening = Opening::Fresh;
     loop {
-        let connecting = match attempt {
-            0 => ConnectionStatus::Connecting,
-            attempt => ConnectionStatus::Reconnecting { attempt },
-        };
-        if (cursor.since.is_none() || attempt > 0)
-            && !updates.deliver(Update::Status(connecting)).await
+        if let Some(status) = opening.status()
+            && !updates.deliver(Update::Status(status)).await
         {
             return;
         }
@@ -195,24 +191,32 @@ pub async fn run(
         let (reason, fault) = match result {
             Ok(End::Reset) => {
                 cursor.since = None;
-                attempt = 0;
+                opening = Opening::Fresh;
                 continue;
             }
-            Ok(End::Observation) => continue,
+            Ok(End::Observation) => {
+                opening = Opening::Observed {
+                    failures: opening.failures(),
+                };
+                continue;
+            }
             Ok(End::Dropped) => return,
             Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
             Err(error) => (::diagnostics::chain(&error), error.fault()),
         };
-        if cursor
+        let failures_before = if cursor
             .live_since
             .is_some_and(|live| live.elapsed() >= HEALTHY_STREAM)
         {
-            attempt = 0;
-        }
-        attempt = attempt.saturating_add(1);
+            0
+        } else {
+            opening.failures()
+        };
+        let attempt = NonZeroU32::MIN.saturating_add(failures_before);
+        opening = Opening::Failed { attempt };
         if !updates
             .deliver(Update::Status(ConnectionStatus::Offline {
-                attempt,
+                attempt: attempt.get(),
                 reason,
                 fault,
             }))
@@ -221,9 +225,35 @@ pub async fn run(
             return;
         }
         tokio::select! {
-            () = tokio::time::sleep(backoff(attempt)) => {},
+            () = tokio::time::sleep(backoff(attempt.get())) => {},
             () = retry.notified() => {},
             _ = observed.changed() => {},
+        }
+    }
+}
+
+enum Opening {
+    Fresh,
+    Observed { failures: u32 },
+    Failed { attempt: NonZeroU32 },
+}
+
+impl Opening {
+    fn status(&self) -> Option<ConnectionStatus> {
+        match self {
+            Self::Fresh => Some(ConnectionStatus::Connecting),
+            Self::Observed { .. } => None,
+            Self::Failed { attempt } => Some(ConnectionStatus::Reconnecting {
+                attempt: attempt.get(),
+            }),
+        }
+    }
+
+    fn failures(&self) -> u32 {
+        match self {
+            Self::Fresh => 0,
+            Self::Observed { failures } => *failures,
+            Self::Failed { attempt } => attempt.get(),
         }
     }
 }
