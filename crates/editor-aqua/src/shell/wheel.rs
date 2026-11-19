@@ -135,7 +135,7 @@ impl WheelGlides {
         }
     }
 
-    pub fn offer(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<Surface> {
+    pub fn offer(&mut self, ui: &UiApp, input: &InputEvent) -> Option<Surface> {
         let InputEvent::Scroll { at, delta } = input else {
             return None;
         };

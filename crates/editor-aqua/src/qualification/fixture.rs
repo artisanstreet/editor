@@ -1738,6 +1738,9 @@ fn canonical(value: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Array(values) => {
             serde_json::Value::Array(values.into_iter().map(canonical).collect())
         }
-        value => value,
+        value @ serde_json::Value::Null
+        | value @ serde_json::Value::Bool(_)
+        | value @ serde_json::Value::Number(_)
+        | value @ serde_json::Value::String(_) => value,
     }
 }

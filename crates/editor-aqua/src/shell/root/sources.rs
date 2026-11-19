@@ -145,11 +145,8 @@ impl RootViews {
             .and_then(|view| view.item(&id))
             .is_some_and(|item| {
                 item.seq == revision
-                    && match &item.kind {
-                        artisan_api::ItemKind::UserMessage { images, .. } => images.contains(hash),
-                        artisan_api::ItemKind::Image { blob, .. } => blob == hash,
-                        _ => false,
-                    }
+                    && (matches!(&item.kind, artisan_api::ItemKind::UserMessage { images, .. } if images.contains(hash))
+                        || matches!(&item.kind, artisan_api::ItemKind::Image { blob, .. } if blob == hash))
             });
         if !current {
             return false;

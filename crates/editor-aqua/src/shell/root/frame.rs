@@ -168,11 +168,12 @@ impl RootViews {
                             && painted.bounds.h > 0.0
                             && !painted.bounds.intersect(clip).is_empty()
                         {
-                            let item = match painted.snapshot.row.semantic() {
-                                crate::conversation::fold::Row::Text { id, .. } => {
-                                    Some(id.to_string())
-                                }
-                                _ => None,
+                            let item = if let crate::conversation::fold::Row::Text { id, .. } =
+                                painted.snapshot.row.semantic()
+                            {
+                                Some(id.to_string())
+                            } else {
+                                None
                             };
                             self.qualification_paint.record(
                                 painted.serial,

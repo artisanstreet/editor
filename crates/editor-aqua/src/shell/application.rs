@@ -335,7 +335,7 @@ impl<V: SectionViews> ShellApplication<V> {
         self
     }
 
-    fn start_notifications(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) -> bool {
+    fn start_notifications(&mut self, ctx: &AppCtx<'_>, id: AquaWindowId) -> bool {
         if !self.notifications_enabled || std::mem::replace(&mut self.notifications_started, true) {
             return false;
         }
@@ -1103,7 +1103,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                 }
             }
-            _ => {}
+            WindowEvent::CloseRequested(_)
+            | WindowEvent::Occluded(..)
+            | WindowEvent::RedrawRequested(_)
+            | WindowEvent::Destroyed(_) => {}
         }
     }
     fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, input: &InputEvent) {

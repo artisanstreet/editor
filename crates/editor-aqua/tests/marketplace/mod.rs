@@ -310,7 +310,11 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         let text = app.tree().get(control).unwrap().children[0];
         let text_color = |app: &aqua::UiApp| match &app.tree().get(text).unwrap().kind {
             aqua_ui::tree::NodeKind::Text(text) => text.text_style.gpui_source_color,
-            _ => panic!("control label is not text"),
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => panic!("control label is not text"),
         };
         let muted = ArtisanTheme::resolved()
             .colors
@@ -467,7 +471,13 @@ fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks()
             selected: true,
             ..
         } => Some(item.name().to_owned()),
-        _ => None,
+        Entry::Hero
+        | Entry::Notices
+        | Entry::Found(_)
+        | Entry::Group(_)
+        | Entry::SearchFailed(_)
+        | Entry::Empty(_)
+        | Entry::Item { .. } => None,
     });
     assert_eq!(painted.as_deref(), Some("pdf-c"));
     assert!(matches!(

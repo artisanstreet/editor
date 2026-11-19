@@ -80,11 +80,12 @@ impl RootViews {
     }
 
     pub(super) fn account(&mut self, shell: &Shell) -> Option<crate::ui::chrome::account::Account> {
-        let url = match shell.core.account().phase() {
-            crate::core::AccountPhase::Authenticated { profile, .. } => {
-                profile.avatar_url.as_deref()
-            }
-            _ => None,
+        let url = if let crate::core::AccountPhase::Authenticated { profile, .. } =
+            shell.core.account().phase()
+        {
+            profile.avatar_url.as_deref()
+        } else {
+            None
         };
         self.avatar.want(url, std::time::Instant::now());
         self.account_snapshot(shell)

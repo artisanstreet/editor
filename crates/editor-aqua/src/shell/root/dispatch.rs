@@ -137,7 +137,12 @@ impl RootViews {
                         }
                     }
                 }
-                action => action,
+                action @ ConversationAction::Link(..)
+                | action @ ConversationAction::Color(..)
+                | action @ ConversationAction::Copy(..)
+                | action @ ConversationAction::RetryControls(_)
+                | action @ ConversationAction::RetryThread(_)
+                | action @ ConversationAction::Blob(..) => action,
             };
             match action {
                 ConversationAction::Media(_, _, _, _) | ConversationAction::Source(_) => continue,

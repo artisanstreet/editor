@@ -113,7 +113,11 @@ fn a_failure_shows_its_reason_and_offers_another_try() {
         .into_iter()
         .filter_map(|node| match &app.tree().get(node)?.kind {
             aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
-            _ => None,
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
         })
         .collect();
     assert!(
@@ -178,7 +182,11 @@ fn texts(app: &UiApp) -> Vec<String> {
         .into_iter()
         .filter_map(|node| match &app.tree().get(node)?.kind {
             aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
-            _ => None,
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
         })
         .collect()
 }

@@ -53,9 +53,12 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
     let run = app
         .scene()
         .ordered()
-        .find_map(|(_, item)| match item {
-            DisplayItem::Text { run, .. } => Some(run.clone()),
-            _ => None,
+        .find_map(|(_, item)| {
+            if let DisplayItem::Text { run, .. } = item {
+                Some(run.clone())
+            } else {
+                None
+            }
         })
         .unwrap();
     let registry = runs.lock();

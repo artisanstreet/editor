@@ -266,7 +266,12 @@ impl Invalidation {
             refresh.merge(cause.refresh())
         }) {
             Refresh::None => Refresh::Workspace,
-            refresh => refresh,
+            refresh @ Refresh::Sidebar
+            | refresh @ Refresh::SidebarFrame
+            | refresh @ Refresh::Transcript
+            | refresh @ Refresh::Sections
+            | refresh @ Refresh::FrameSections
+            | refresh @ Refresh::Workspace => refresh,
         }
     }
 

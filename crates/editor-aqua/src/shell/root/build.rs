@@ -51,7 +51,11 @@ impl RootViews {
         }
         let screen = match shell.core.workspace_screen() {
             Screen::Settings(_) => Screen::Home,
-            screen => screen.clone(),
+            screen @ Screen::Home
+            | screen @ Screen::Thread { .. }
+            | screen @ Screen::NewThread { .. }
+            | screen @ Screen::Marketplace
+            | screen @ Screen::Usage => screen.clone(),
         };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let size = aqua_core::Size::new(viewport.width, viewport.height);
@@ -66,7 +70,9 @@ impl RootViews {
         let route = match &screen {
             Screen::NewThread { .. } => Route::NewThread(workspace.new_thread_posting()),
             Screen::Thread { thread, .. } => Route::Thread { thread, sent },
-            _ => Route::Elsewhere,
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => {
+                Route::Elsewhere
+            }
         };
         self.composer_glide.follow(route, lift, now, reduced);
         let sky = view::Sky {
@@ -154,14 +160,22 @@ impl RootViews {
                 self.composer_glide.sky_setting(now).then_some(&sky),
                 center,
             ),
-            _ => center,
+            Screen::Home
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => center,
         };
         let connection_lost = match &screen {
             Screen::Thread { host, .. } => shell
                 .core
                 .host(host)
                 .and_then(|host| crate::shell::connection::lost(&host.status)),
-            _ => None,
+            Screen::Home
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => None,
         };
         aqua_core::checkpoint::reach();
         if !matches!(screen, Screen::Thread { .. }) {
@@ -265,13 +279,17 @@ impl RootViews {
                     .view
                     .as_ref()?
                     .item(id)
-                    .and_then(|item| match &item.kind {
-                        artisan_api::ItemKind::Agent {
-                            context_used,
+                    .and_then(|item| {
+                        if let artisan_api::ItemKind::Agent {
+                            context_used: Some(context_used),
                             model,
                             ..
-                        } => Some((*context_used.as_ref()?, model.clone())),
-                        _ => None,
+                        } = &item.kind
+                        {
+                            Some((*context_used, model.clone()))
+                        } else {
+                            None
+                        }
                     })
             });
             crate::shell::context_meter::reading(host, &scope.thread, agent)

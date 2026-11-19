@@ -52,18 +52,7 @@ impl Entry {
         let mut effects = Vec::new();
         let mut changed = false;
         for action in std::mem::take(&mut *self.actions.borrow_mut()) {
-            match &action {
-                crate::settings::view::ViewAction::OpenUrl(url) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url.clone()),
-                ),
-                crate::settings::view::ViewAction::OpenNotices => {
-                    effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenNotices);
-                }
-                crate::settings::view::ViewAction::CopyText(text) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::CopyText(text.clone()),
-                ),
-                _ => {}
-            }
+            effects.extend(crate::shell::workspace::SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.controller, core, action);
         }
         changed |= self.dispatch_sign_in(core, &mut effects);
@@ -122,7 +111,14 @@ impl Entry {
                         AccountPhase::EmailApproved {
                             rejected: Some(_), ..
                         } => core.account_mut().clear_rejection(),
-                        _ => {}
+                        AccountPhase::SignedOut
+                        | AccountPhase::Restoring
+                        | AccountPhase::Requesting
+                        | AccountPhase::Browser { .. }
+                        | AccountPhase::Pending { .. }
+                        | AccountPhase::EmailApproved { .. }
+                        | AccountPhase::Finalizing { .. }
+                        | AccountPhase::Authenticated { .. } => {}
                     }
                 }
                 Event::Open(link) => effects.push(
@@ -211,7 +207,9 @@ impl Entry {
                 EditorEvent::PresentationChanged => {
                     settings(crate::settings::view::ViewAction::AccountPresentationChanged);
                 }
-                _ => {}
+                EditorEvent::SelectionChanged { .. }
+                | EditorEvent::List(_)
+                | EditorEvent::PastedFiles { .. } => {}
             })
             .element_with_notice_keyed(
                 key,
@@ -313,7 +311,11 @@ impl Entry {
                     });
                 }
             }
-            _ => self.landed = true,
+            Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => self.landed = true,
         }
     }
 
@@ -333,7 +335,7 @@ impl Entry {
         self.controller.core_event(core, event);
         let ready = match core.entry_gate() {
             EntryGate::Ready { account_id } => Some(account_id),
-            _ => None,
+            EntryGate::Restoring | EntryGate::SignedOut => None,
         };
         if self.workspace.as_ref().map(|(account, _)| account) != ready
             && let Some((_, workspace)) = &mut self.workspace

@@ -48,7 +48,12 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .iter()
         .filter_map(|entry| match entry {
             Entry::Project { id, .. } => Some(id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(projects, vec![a, b, scratch]);
@@ -56,7 +61,13 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .iter()
         .filter_map(|entry| match entry {
             Entry::Thread(row, ThreadLayout::Grouped) => Some(row.id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(threads, vec![a1.id, a2.id, b1.id, b2.id, scratch1.id]);
@@ -71,7 +82,13 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .skip_while(|entry| !matches!(entry, Entry::History))
         .filter_map(|entry| match entry {
             Entry::Thread(row, ThreadLayout::Standalone) => Some(row.id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(history_entries, vec![history.id]);

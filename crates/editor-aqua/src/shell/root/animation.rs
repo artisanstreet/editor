@@ -18,7 +18,11 @@ impl RootViews {
                 .core
                 .host(host)
                 .is_some_and(|host| host.is_working(thread)),
-            _ => false,
+            Screen::Home
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => false,
         };
         if !working {
             self.work_clock = None;

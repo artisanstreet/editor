@@ -269,7 +269,7 @@ impl PaletteView {
                     Key::Named(NamedKey::Escape) => Action::Dismiss,
                     Key::Named(NamedKey::Up) => Action::Up,
                     Key::Named(NamedKey::Down) => Action::Down,
-                    _ => return InputResponse::default(),
+                    Key::Char(_) | Key::Named(_) => return InputResponse::default(),
                 };
                 callback(action);
                 InputResponse {

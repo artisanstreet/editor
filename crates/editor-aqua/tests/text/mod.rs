@@ -871,9 +871,12 @@ fn mounted_mentions_paint_as_glyphs_and_follow_atomic_undo() {
     let glyph = runtime
         .scene()
         .ordered()
-        .find_map(|(_, item)| match item {
-            DisplayItem::GpuiSvg { bounds, .. } => Some(*bounds),
-            _ => None,
+        .find_map(|(_, item)| {
+            if let DisplayItem::GpuiSvg { bounds, .. } = item {
+                Some(*bounds)
+            } else {
+                None
+            }
         })
         .unwrap();
     let expected_tint = theme

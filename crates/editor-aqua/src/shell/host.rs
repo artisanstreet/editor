@@ -478,7 +478,14 @@ pub fn event_cause(
             (true, false) => Some(Cause::ListedThreads),
             (false, _) | (true, true) => Some(Cause::OpenThread),
         },
-        _ => Some(Cause::HostState),
+        CoreEvent::ScreenChanged
+        | CoreEvent::HostsChanged
+        | CoreEvent::SettingsChanged
+        | CoreEvent::AccessChanged
+        | CoreEvent::McpSignInChanged
+        | CoreEvent::OpenUrl(_)
+        | CoreEvent::Account(_)
+        | CoreEvent::Host { .. } => Some(Cause::HostState),
     }
 }
 

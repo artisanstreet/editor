@@ -113,7 +113,7 @@ impl NativeNotifications {
     }
 
     pub(crate) fn apply(
-        &mut self,
+        &self,
         effects: NotificationEffects,
         shell: &Shell,
         ctx: &mut AppCtx<'_>,

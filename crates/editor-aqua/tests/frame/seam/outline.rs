@@ -22,7 +22,9 @@ fn the_outline_does_not_cross_the_tab_opening() {
                         );
                         to
                     }
-                    _ => from,
+                    PathCommand::Quadratic { .. }
+                    | PathCommand::Cubic { .. }
+                    | PathCommand::Close => from,
                 };
             }
         }
@@ -38,7 +40,11 @@ fn insets_keep_the_same_width_around_convex_and_concave_corners() {
             .into_iter()
             .filter_map(|command| match command {
                 PathCommand::Arc { radii, sweep, .. } => Some((radii.x, sweep)),
-                _ => None,
+                PathCommand::Move(_)
+                | PathCommand::Line(_)
+                | PathCommand::Quadratic { .. }
+                | PathCommand::Cubic { .. }
+                | PathCommand::Close => None,
             })
             .collect::<Vec<_>>();
         let cap = editor_aqua::frame::strip::RADIUS.px();
@@ -77,7 +83,9 @@ fn moving_lips_only_rasterize_the_top_of_the_sheet() {
                         PathCommand::Move(to)
                         | PathCommand::Line(to)
                         | PathCommand::Arc { to, .. } => Some(to.y),
-                        _ => None,
+                        PathCommand::Quadratic { .. }
+                        | PathCommand::Cubic { .. }
+                        | PathCommand::Close => None,
                     })
                     .fold(f32::NEG_INFINITY, f32::max);
                 assert_eq!(max_y, body.y + 1.0);

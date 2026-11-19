@@ -659,7 +659,7 @@ fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: FeedbackSlot
     let reveal = feedback.reveal;
     let shown = match feedback.current {
         Feedback::None => feedback.last,
-        current => current,
+        current @ Feedback::Error(_) | current @ Feedback::Success(_) => current,
     };
     let (message, color) = match shown {
         Feedback::None => (String::new(), theme.colors.text),

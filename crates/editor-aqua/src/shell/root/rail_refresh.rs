@@ -65,7 +65,7 @@ impl Rail<'_> {
 impl RootViews {
     pub(super) fn refresh_navigation(
         &mut self,
-        shell: &mut Shell,
+        shell: &Shell,
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,

@@ -11,11 +11,12 @@ fn sweeps(app: &mut UiApp) -> Vec<(u64, Duration, Duration)> {
     app.tree_mut()
         .emit_scene()
         .into_iter()
-        .filter_map(|(_, item)| match item {
-            DisplayItem::PushGpuiTextShimmer(shimmer) => {
+        .filter_map(|(_, item)| {
+            if let DisplayItem::PushGpuiTextShimmer(shimmer) = item {
                 Some((shimmer.key, shimmer.duration, shimmer.delay))
+            } else {
+                None
             }
-            _ => None,
         })
         .collect()
 }

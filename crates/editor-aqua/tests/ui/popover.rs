@@ -100,7 +100,13 @@ fn live_content_refresh_survives_entrance_and_exit_frames() {
             aqua_ui::tree::NodeKind::Box(content) => {
                 (content.paint().opacity, content.paint().transform)
             }
-            _ => (node.paint().opacity, node.paint().transform),
+            aqua_ui::tree::NodeKind::Text(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => {
+                (node.paint().opacity, node.paint().transform)
+            }
         }
     };
     let before = frame(&app);

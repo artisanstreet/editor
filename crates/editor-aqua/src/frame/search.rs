@@ -240,14 +240,14 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
     root.child(scope).build().with_key(OVERLAY).on_input(
         InputKind::KeyDown,
         EventPhase::Bubble,
-        move |event| match &event.input {
-            RoutedInput::Native(InputEvent::KeyDown(key))
-                if key.key == Pressed::Named(NamedKey::Escape) =>
+        move |event| {
+            if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input
+                && key.key == Pressed::Named(NamedKey::Escape)
             {
                 escape(Event::Search(false));
-                InputResponse::handled()
+                return InputResponse::handled();
             }
-            _ => InputResponse::default(),
+            InputResponse::default()
         },
     )
 }

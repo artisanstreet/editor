@@ -27,7 +27,7 @@ impl RootViews {
     pub(super) fn sync_context(
         &mut self,
         shell: &Shell,
-        ui: &mut UiApp,
+        ui: &UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
@@ -140,8 +140,8 @@ impl RootViews {
     }
 
     pub(super) fn sync_edges(
-        &mut self,
-        shell: &mut Shell,
+        &self,
+        shell: &Shell,
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,

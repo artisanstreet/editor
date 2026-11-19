@@ -290,6 +290,6 @@ fn gradient_slice(
                 ],
             }
         }
-        solid => solid,
+        solid @ aqua_core::GpuiBackground::Solid(_) => solid,
     }
 }

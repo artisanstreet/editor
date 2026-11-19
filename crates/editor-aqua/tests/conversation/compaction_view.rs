@@ -42,9 +42,12 @@ fn scopes(app: &mut UiApp) -> Vec<GpuiTextShimmer> {
     app.tree_mut()
         .emit_scene()
         .into_iter()
-        .filter_map(|(_, item)| match item {
-            DisplayItem::PushGpuiTextShimmer(shimmer) => Some(shimmer),
-            _ => None,
+        .filter_map(|(_, item)| {
+            if let DisplayItem::PushGpuiTextShimmer(shimmer) = item {
+                Some(shimmer)
+            } else {
+                None
+            }
         })
         .collect()
 }

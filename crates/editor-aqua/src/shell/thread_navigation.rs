@@ -222,7 +222,7 @@ fn step(event: &KeyEvent) -> Option<Step> {
         Key::Named(NamedKey::Home) => Some(Step::First),
         Key::Named(NamedKey::End) => Some(Step::Last),
         Key::Named(NamedKey::Enter) => Some(Step::Jump),
-        _ => None,
+        Key::Char(_) | Key::Named(_) => None,
     }
 }
 

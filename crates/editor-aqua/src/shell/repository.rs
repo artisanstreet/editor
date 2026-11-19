@@ -33,7 +33,9 @@ impl RepositoryContext {
         let (host_id, thread, project) = match core.screen() {
             Screen::Thread { host, thread } => (Some(host.clone()), Some(thread.clone()), None),
             Screen::NewThread { host, project } => (Some(host.clone()), None, project.clone()),
-            _ => (None, None, None),
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => {
+                (None, None, None)
+            }
         };
         let Some(host) = host_id.as_ref().and_then(|id| core.host(id)) else {
             self.selected = None;

@@ -199,7 +199,7 @@ impl ConnectionPresenter {
             .build(theme, now, reduced_motion, "forge-connecting")
     }
 
-    pub fn dispatch(&mut self, core: &mut Core) {
+    pub fn dispatch(&self, core: &mut Core) {
         for (id, instance, command) in std::mem::take(&mut *self.commands.borrow_mut()) {
             if self.host.as_ref() != Some(&(id.clone(), instance)) {
                 continue;

@@ -22,6 +22,76 @@ pub enum SettingsPlatformEffect {
     CopyText(String),
 }
 
+impl SettingsPlatformEffect {
+    pub(crate) fn of(action: &crate::settings::view::ViewAction) -> Option<Self> {
+        use crate::settings::view::ViewAction;
+        match action {
+            ViewAction::OpenUrl(url) => Some(Self::OpenUrl(url.clone())),
+            ViewAction::OpenNotices => Some(Self::OpenNotices),
+            ViewAction::CopyText(text) => Some(Self::CopyText(text.clone())),
+            ViewAction::Navigate(_)
+            | ViewAction::EngineEdited
+            | ViewAction::EnginePresentationChanged
+            | ViewAction::EngineAction(..)
+            | ViewAction::EngineVersions(_)
+            | ViewAction::EngineUse(..)
+            | ViewAction::EngineCode(_)
+            | ViewAction::ClaudeTransport(..)
+            | ViewAction::ClaudeSignIn
+            | ViewAction::AccountEdited
+            | ViewAction::AccountPresentationChanged
+            | ViewAction::AccountRequestLink
+            | ViewAction::AccountFinish
+            | ViewAction::AccountDismiss
+            | ViewAction::AccountRefresh
+            | ViewAction::AccountSignOut
+            | ViewAction::AccountSignOutEverywhere
+            | ViewAction::ForgeOpen(_)
+            | ViewAction::ForgeConnect(_)
+            | ViewAction::ForgeRemove(_)
+            | ViewAction::ForgeEnroll
+            | ViewAction::ForgeConfirm
+            | ViewAction::ForgeRefresh
+            | ViewAction::ForgeClaim
+            | ViewAction::RetentionMenu(_)
+            | ViewAction::SetRetention(..)
+            | ViewAction::ArchiveLatest
+            | ViewAction::ArchiveOlder
+            | ViewAction::Unarchive(_)
+            | ViewAction::McpOpen(_)
+            | ViewAction::McpRemove(_)
+            | ViewAction::McpSave
+            | ViewAction::McpCancel
+            | ViewAction::McpEdited
+            | ViewAction::McpPresentationChanged
+            | ViewAction::McpSignIn(_)
+            | ViewAction::McpCancelSignIn(_)
+            | ViewAction::McpSignOut(_)
+            | ViewAction::PromptChanged
+            | ViewAction::PromptPresentationChanged
+            | ViewAction::SavePrompt
+            | ViewAction::LoadLatestPrompt
+            | ViewAction::RetryPrompt
+            | ViewAction::ResolvePrompt(_)
+            | ViewAction::FontMenu(_)
+            | ViewAction::SetFont(_)
+            | ViewAction::SetDarkMode(_)
+            | ViewAction::SetOutlineText(_)
+            | ViewAction::SetShowAllModels(_)
+            | ViewAction::SetHideBadModelOptions(_)
+            | ViewAction::StreamingMenu(_)
+            | ViewAction::SetStreaming(_)
+            | ViewAction::SetFrameRate(_)
+            | ViewAction::SetVsync(_)
+            | ViewAction::SetNotifications(_)
+            | ViewAction::ReloadSettings
+            | ViewAction::SetHostSetting(..)
+            | ViewAction::RetryHostSetting(_)
+            | ViewAction::DismissHostSetting(_) => None,
+        }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct QuestionSourceIdentity {
     host: crate::core::HostId,
@@ -260,7 +330,12 @@ impl Workspace {
                                 Screen::Thread { host, thread } if window_active && host == id => {
                                     Some(thread)
                                 }
-                                _ => None,
+                                Screen::Home
+                                | Screen::Thread { .. }
+                                | Screen::NewThread { .. }
+                                | Screen::Settings(_)
+                                | Screen::Marketplace
+                                | Screen::Usage => None,
                             };
                             let enabled = core
                                 .settings()
@@ -282,11 +357,22 @@ impl Workspace {
                             self.notifications.sync_connection(host);
                             effects.badge = Some(Self::attention(core));
                         }
-                        _ => {}
+                        HostEvent::ImagesChanged
+                        | HostEvent::EngineInstall { .. }
+                        | HostEvent::ThreadSummaryChanged { .. }
+                        | HostEvent::WslDistro { .. }
+                        | HostEvent::Item(_)
+                        | HostEvent::Live { .. }
+                        | HostEvent::EditorCall { .. } => {}
                     }
                 }
             }
-            _ => {}
+            CoreEvent::ScreenChanged
+            | CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_) => {}
         }
         if matches!(
             event,
@@ -325,7 +411,12 @@ impl Workspace {
             {
                 self.repository_pending = true;
             }
-            _ => {}
+            CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => {}
         }
         effects
     }
@@ -342,7 +433,11 @@ impl Workspace {
                         });
                     }
                 }
-                _ => self.start_pending = false,
+                Screen::Thread { .. }
+                | Screen::NewThread { .. }
+                | Screen::Settings(_)
+                | Screen::Marketplace
+                | Screen::Usage => self.start_pending = false,
             }
         }
         if self.repository_pending {
@@ -806,7 +901,7 @@ impl Workspace {
                     project: project.clone(),
                 })
             }
-            _ => return,
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => return,
         };
         let identity = target.map(|target| {
             let instance = core
@@ -848,7 +943,7 @@ impl Workspace {
         }
     }
 
-    fn take_composer_actions(&mut self) -> VecDeque<crate::composer::view::ComposerAction> {
+    fn take_composer_actions(&self) -> VecDeque<crate::composer::view::ComposerAction> {
         std::mem::take(&mut *self.composer_actions.borrow_mut())
     }
 
@@ -930,7 +1025,11 @@ impl Workspace {
                         }
                     }
                 }
-                effect => self.composer_effects.push(effect),
+                effect @ ComposerEffect::OpenImage(_)
+                | effect @ ComposerEffect::CloseNote
+                | effect @ ComposerEffect::RetryThreadSettings => {
+                    self.composer_effects.push(effect)
+                }
             }
         }
     }
@@ -1439,37 +1538,17 @@ impl Workspace {
         }
         let home = std::mem::take(&mut *self.home_actions.borrow_mut());
         for action in home {
-            match &action {
-                crate::settings::view::ViewAction::OpenUrl(url) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenUrl(url.clone())),
-                crate::settings::view::ViewAction::OpenNotices => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenNotices),
-                crate::settings::view::ViewAction::CopyText(text) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::CopyText(text.clone())),
-                _ => {}
-            }
+            self.settings_platform_effects
+                .extend(SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.home, core, action);
         }
         let settings = std::mem::take(&mut *self.settings_actions.borrow_mut());
         for action in settings {
-            match &action {
-                crate::settings::view::ViewAction::SetDarkMode(dark) => {
-                    self.theme_transition = Some(*dark);
-                }
-                crate::settings::view::ViewAction::OpenUrl(url) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenUrl(url.clone())),
-                crate::settings::view::ViewAction::OpenNotices => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenNotices),
-                crate::settings::view::ViewAction::CopyText(text) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::CopyText(text.clone())),
-                _ => {}
+            if let crate::settings::view::ViewAction::SetDarkMode(dark) = &action {
+                self.theme_transition = Some(*dark);
             }
+            self.settings_platform_effects
+                .extend(SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.settings, core, action);
         }
         changed

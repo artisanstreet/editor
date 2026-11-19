@@ -210,7 +210,7 @@ impl RootViews {
                 shell.open_palette(ctx, window);
                 return true;
             }
-            _ => {}
+            aqua_core::Key::Char(_) | aqua_core::Key::Named(_) => {}
         }
         palette_changed
     }

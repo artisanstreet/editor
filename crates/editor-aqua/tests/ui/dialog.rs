@@ -84,7 +84,12 @@ fn family_of(app: &UiApp, key: &str) -> Vec<FontFamily> {
                 NodeKind::Text(text) if record.key == Some(key) => {
                     Some(text.effective_text_style().families)
                 }
-                _ => None,
+                NodeKind::Box(_)
+                | NodeKind::Text(_)
+                | NodeKind::Media(_)
+                | NodeKind::Scroll(_)
+                | NodeKind::Canvas(_)
+                | NodeKind::Viewport3D(_) => None,
             }
         })
         .unwrap()

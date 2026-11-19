@@ -262,7 +262,13 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
                 .1
         );
         let deadline = owner.tooltip_deadline().unwrap();
-        assert!(!owner.advance_tooltip(deadline - std::time::Duration::from_millis(1)));
+        assert!(
+            !owner.advance_tooltip(
+                deadline
+                    .checked_sub(std::time::Duration::from_millis(1))
+                    .unwrap()
+            )
+        );
         assert!(owner.advance_tooltip(deadline));
         let tooltip = owner
             .tooltip_presentation(

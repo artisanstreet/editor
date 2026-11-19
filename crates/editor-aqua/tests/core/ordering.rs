@@ -567,7 +567,13 @@ fn observer_mutations_dispatch_before_next_transition_and_nested_drain_is_deferr
             core.drain_with(|_, _| nested = true);
         }
         CoreEvent::SettingsChanged => events.push("settings"),
-        _ => {}
+        CoreEvent::ScreenChanged
+        | CoreEvent::HostsChanged
+        | CoreEvent::AccessChanged
+        | CoreEvent::McpSignInChanged
+        | CoreEvent::OpenUrl(_)
+        | CoreEvent::Account(_)
+        | CoreEvent::Host { .. } => {}
     });
     assert!(!nested);
     assert_eq!(events, ["host-first", "settings"]);
@@ -610,7 +616,13 @@ fn observer_effect_follows_sibling_effects_from_the_same_transition() {
             ..
         } => events.push("host"),
         CoreEvent::SettingsChanged => events.push("settings"),
-        _ => {}
+        CoreEvent::ScreenChanged
+        | CoreEvent::HostsChanged
+        | CoreEvent::AccessChanged
+        | CoreEvent::McpSignInChanged
+        | CoreEvent::OpenUrl(_)
+        | CoreEvent::Account(_)
+        | CoreEvent::Host { .. } => {}
     });
     assert_eq!(events, ["thread", "host", "settings"]);
 }
@@ -643,7 +655,13 @@ fn observer_cross_domain_effects_follow_existing_siblings_and_see_final_state() 
             events.push("host");
         }
         CoreEvent::SettingsChanged => events.push("settings"),
-        _ => {}
+        CoreEvent::ScreenChanged
+        | CoreEvent::HostsChanged
+        | CoreEvent::AccessChanged
+        | CoreEvent::McpSignInChanged
+        | CoreEvent::OpenUrl(_)
+        | CoreEvent::Account(_)
+        | CoreEvent::Host { .. } => {}
     });
     assert_eq!(events, ["thread", "host", "host", "settings"]);
 }

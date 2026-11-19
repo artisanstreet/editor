@@ -116,7 +116,11 @@ fn completed_image_invalidates_retained_loading_row() {
             .into_iter()
             .any(|node| match &app.tree().get(node).unwrap().kind {
                 NodeKind::Text(text) => text.text().contains("Loading image"),
-                _ => false,
+                NodeKind::Box(_)
+                | NodeKind::Media(_)
+                | NodeKind::Scroll(_)
+                | NodeKind::Canvas(_)
+                | NodeKind::Viewport3D(_) => false,
             })
     };
     let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
@@ -171,7 +175,11 @@ fn completed_image_invalidates_retained_loading_row() {
             .into_iter()
             .any(|node| match &app.tree().get(node).unwrap().kind {
                 NodeKind::Media(media) => media.image.is_some(),
-                _ => false,
+                NodeKind::Box(_)
+                | NodeKind::Text(_)
+                | NodeKind::Scroll(_)
+                | NodeKind::Canvas(_)
+                | NodeKind::Viewport3D(_) => false,
             }),
         "the rebuilt row must mount the Ready image"
     );
