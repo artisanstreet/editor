@@ -1,8 +1,8 @@
-use super::attachment::PendingUpload;
+use super::attachment::{PendingUpload, ReadImageError};
 use super::draft_session::{
     AdoptImageError, DraftSession, Operation, PostMessageError, SAVE_DELAY, Submission,
 };
-use super::spool::DraftSpool;
+use super::spool::{DraftSpool, KeepSpooledDraftError};
 use artisan_api::{BlobHash, ItemId, ThreadId};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use serde_json::Value;
@@ -43,6 +43,14 @@ struct Inner {
 }
 
 pub const MAX_OPEN_DRAFTS: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+enum KeepLocallyError {
+    #[error("read an image that Forge has not acknowledged")]
+    Image(#[source] ReadImageError),
+    #[error("write the draft to this device")]
+    Spool(#[source] KeepSpooledDraftError),
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -283,9 +291,21 @@ impl DraftSessions {
         }
         let mut state = DraftSession::new(scope.clone());
         let recovered = match self.spool.as_ref().map(|spool| spool.take(&host, &scope)) {
-            Some(Ok(Some(body))) => {
-                tracing::info!(host = %host, %scope, "recovered a draft kept locally at shutdown");
-                state.recover(body);
+            Some(Ok(Some(spooled))) => {
+                tracing::info!(
+                    host = %host,
+                    %scope,
+                    images = spooled.images.len(),
+                    "recovered a draft kept locally at shutdown"
+                );
+                state.recover(
+                    spooled.body,
+                    spooled
+                        .images
+                        .into_iter()
+                        .map(PendingUpload::kept)
+                        .collect(),
+                );
                 true
             }
             Some(Ok(None)) | None => false,
@@ -353,17 +373,28 @@ impl DraftHandle {
     }
 
     fn keep_locally(&self) -> bool {
-        let (pending, scope, body) = self.read(|state| {
+        let (pending, scope, body, images) = self.read(|state| {
             (
                 state.pending(),
                 state.scope().to_owned(),
                 state.body().clone(),
+                state.unacknowledged_images(),
             )
         });
         let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
             return false;
         };
-        match spool.keep(&self.0.host, &scope, &body) {
+        let kept = images
+            .iter()
+            .map(PendingUpload::bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(KeepLocallyError::Image)
+            .and_then(|images| {
+                spool
+                    .keep(&self.0.host, &scope, &body, &images)
+                    .map_err(KeepLocallyError::Spool)
+            });
+        match kept {
             Ok(()) => {
                 tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
                 true
@@ -400,26 +431,34 @@ impl DraftHandle {
     }
 
     pub fn adopt_image(&self, upload: PendingUpload) {
-        self.mutate(|shared| shared.state.adopting());
-        let session = self.clone();
-        let span = tracing::info_span!("adopt_image", host = %session.0.host);
-        runtime().spawn(
-            async move {
-                let cancelled = session.0.cancelled.clone();
-                let result = tokio::select! {
-                    biased;
-                    () = cancelled.cancelled() => Err(AdoptImageError::Closed),
-                    result = upload.upload() => result.map_err(AdoptImageError::from),
-                };
-                session.mutate(|shared| {
-                    if let Some(hash) = shared.state.adopted(result) {
-                        shared.emit(&SessionEvent::ImageAdopted(hash));
-                    }
-                });
-                session.flush();
-            }
-            .instrument(span),
-        );
+        self.mutate(|shared| shared.state.adopt(upload));
+        self.start_uploads();
+    }
+
+    fn start_uploads(&self) {
+        let uploads = self.0.shared().state.next_uploads();
+        for (key, upload) in uploads {
+            let session = self.clone();
+            let span = tracing::info_span!("adopt_image", host = %session.0.host);
+            runtime().spawn(
+                async move {
+                    let cancelled = session.0.cancelled.clone();
+                    let client = session.0.client.clone();
+                    let result = tokio::select! {
+                        biased;
+                        () = cancelled.cancelled() => Err(AdoptImageError::Closed),
+                        result = upload.upload(client) => result.map_err(AdoptImageError::from),
+                    };
+                    session.mutate(|shared| {
+                        if let Some(hash) = shared.state.adopted(key, result) {
+                            shared.emit(&SessionEvent::ImageAdopted(hash));
+                        }
+                    });
+                    session.flush();
+                }
+                .instrument(span),
+            );
+        }
     }
 
     fn remove(&self) {
@@ -505,6 +544,7 @@ impl DraftHandle {
     }
 
     fn pump(&self) {
+        self.start_uploads();
         let operation = self.0.shared().state.next_operation();
         let Some(operation) = operation else {
             return;

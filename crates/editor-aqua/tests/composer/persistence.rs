@@ -625,6 +625,166 @@ fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
     });
 }
 
+fn pasted_png() -> Vec<u8> {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([30, 90, 200, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+fn hand_over_pasted_image(lease: &DraftLease, client: ForgeClient) {
+    use editor_aqua::composer::attachment::{Attachments, Source};
+
+    let mut attachments = Attachments::new(client);
+    assert!(attachments.add(Source::Bytes(pasted_png()), "pasted.png".into()));
+    let uploads = attachments.take_unfinished();
+    assert_eq!(uploads.len(), 1);
+    drop(attachments);
+    for upload in uploads {
+        lease.adopt_image(upload);
+    }
+}
+
+#[test]
+fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
+    use editor_aqua::composer::draft_session::DraftSession;
+
+    let (_directory, core, config, _client) = fixture();
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::default();
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        let mut changed = lease.subscribe();
+        hand_over_pasted_image(&lease, client);
+        let (mut socket, route, _) = request_bytes(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        respond_status(
+            &mut socket,
+            "500 Internal Server Error",
+            json!({"error": {"code": "internal", "message": "Forge went away"}}),
+        )
+        .await;
+        drop(socket);
+        while !lease.read(DraftSession::halted) {
+            changed.changed().await.unwrap();
+        }
+        assert!(
+            lease.read(DraftSession::pending),
+            "the image is still waiting for Forge after its upload failed"
+        );
+
+        lease.retry();
+        let (mut socket, route, webp) = request_bytes(&listener, &acceptor).await;
+        assert_eq!(
+            route, "PUT /blobs HTTP/1.1",
+            "Try again uploads the image again"
+        );
+        assert_eq!(&webp[8..12], b"WEBP");
+        let hash = "b".repeat(64);
+        respond(&mut socket, json!({"hash": hash, "bytes": webp.len()})).await;
+        drop(socket);
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(body["body"]["images"], json!([hash]));
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        while lease.read(DraftSession::pending) {
+            changed.changed().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_takes_it() {
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_takes_it",
+    ) {
+        return;
+    }
+    let (directory, core, config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        hand_over_pasted_image(&lease, client.clone());
+        let (socket, route, _) = request_bytes(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        drop(lease);
+        drop(sessions);
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(socket);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client)
+            .unwrap();
+        let mut changed = lease.subscribe();
+        let hash = "c".repeat(64);
+        for _ in 0..2 {
+            let (mut socket, route, body) = request_bytes(&listener, &acceptor).await;
+            match route.as_str() {
+                "GET /drafts/new HTTP/1.1" => {
+                    respond(&mut socket, json!({"revision": 0, "body": null})).await;
+                }
+                "PUT /blobs HTTP/1.1" => {
+                    assert_eq!(&body[8..12], b"WEBP", "the kept image is uploaded again");
+                    respond(&mut socket, json!({"hash": hash, "bytes": body.len()})).await;
+                }
+                route => panic!("unexpected request {route}"),
+            }
+        }
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(
+            body["body"]["images"],
+            json!([hash]),
+            "the image pasted before closing is part of the draft after restarting"
+        );
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        while lease.read(DraftSession::pending) {
+            changed.changed().await.unwrap();
+        }
+        assert_eq!(spool.take(&config.id, "new").unwrap(), None);
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("drafts"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing is left on this device once Forge has the draft"
+        );
+    });
+}
+
 #[test]
 fn an_image_still_uploading_when_leaving_the_draft_is_kept() {
     use editor_aqua::composer::attachment::{Attachments, Source};

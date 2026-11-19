@@ -1,4 +1,4 @@
-use super::attachment::UploadImageError;
+use super::attachment::{PendingUpload, UploadImageError};
 use super::controller::DraftBody;
 use artisan_api::{
     BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ItemId, SendMessage,
@@ -142,6 +142,23 @@ enum Send {
     Accepted(ThreadId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AdoptionKey(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Upload {
+    Queued,
+    Running,
+    Failed,
+}
+
+#[derive(Debug)]
+struct Adoption {
+    key: AdoptionKey,
+    image: PendingUpload,
+    upload: Upload,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Edits {
     latest: u64,
@@ -174,7 +191,8 @@ struct Draft {
     body: Value,
     remote: Remote,
     edits: Edits,
-    adopting: usize,
+    adopting: Vec<Adoption>,
+    next_adoption: u64,
     request: Request,
     halt: Halt,
     send: Send,
@@ -279,6 +297,19 @@ impl Draft {
         };
     }
 
+    fn adopt(&mut self, image: PendingUpload) {
+        let key = AdoptionKey(self.next_adoption);
+        self.next_adoption = self
+            .next_adoption
+            .checked_add(1)
+            .expect("invariant: a draft adopts fewer than u64::MAX images");
+        self.adopting.push(Adoption {
+            key,
+            image,
+            upload: Upload::Queued,
+        });
+    }
+
     fn finish(&mut self, scope: &str, expected: Request) {
         assert_eq!(
             self.request, expected,
@@ -299,7 +330,8 @@ impl DraftSession {
                     latest: 0,
                     saved: 0,
                 },
-                adopting: 0,
+                adopting: Vec::new(),
+                next_adoption: 0,
                 request: Request::Idle,
                 halt: Halt::Clear,
                 send: Send::Idle,
@@ -352,45 +384,97 @@ impl DraftSession {
             draft.request == Request::Idle
                 && !draft.edits.unsaved()
                 && draft.outgoing().is_none()
-                && draft.adopting == 0
+                && draft.adopting.is_empty()
         })
     }
 
     pub fn pending(&self) -> bool {
         self.draft().is_some_and(|draft| {
-            draft.edits.unsaved() || draft.outgoing().is_some() || draft.adopting > 0
+            draft.edits.unsaved() || draft.outgoing().is_some() || !draft.adopting.is_empty()
         })
     }
 
-    pub(crate) fn recover(&mut self, body: Value) {
-        if let State::Open(draft) = &mut self.state
-            && !body.is_null()
-        {
+    pub(crate) fn recover(&mut self, body: Value, images: Vec<PendingUpload>) {
+        let State::Open(draft) = &mut self.state else {
+            unreachable!(
+                "invariant: draft {} is recovered as it opens, before it can be removed",
+                self.scope
+            );
+        };
+        if !body.is_null() {
             draft.body = body;
             draft.edits.edit();
         }
+        for image in images {
+            draft.adopt(image);
+        }
     }
 
-    pub(crate) fn adopting(&mut self) {
+    pub(crate) fn adopt(&mut self, image: PendingUpload) {
         if let State::Open(draft) = &mut self.state {
-            draft.adopting += 1;
+            draft.adopt(image);
         }
+    }
+
+    pub(crate) fn next_uploads(&mut self) -> Vec<(AdoptionKey, PendingUpload)> {
+        let State::Open(draft) = &mut self.state else {
+            return Vec::new();
+        };
+        let halted = draft.halted();
+        draft
+            .adopting
+            .iter_mut()
+            .filter(|adoption| match adoption.upload {
+                Upload::Queued => true,
+                Upload::Failed => !halted,
+                Upload::Running => false,
+            })
+            .map(|adoption| {
+                adoption.upload = Upload::Running;
+                (adoption.key, adoption.image.clone())
+            })
+            .collect()
+    }
+
+    pub(crate) fn unacknowledged_images(&self) -> Vec<PendingUpload> {
+        self.draft().map_or_else(Vec::new, |draft| {
+            draft
+                .adopting
+                .iter()
+                .map(|adoption| adoption.image.clone())
+                .collect()
+        })
     }
 
     pub(crate) fn adopted(
         &mut self,
+        key: AdoptionKey,
         result: Result<BlobHash, AdoptImageError>,
     ) -> Option<BlobHash> {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
-        draft.adopting = draft
+        let Some(index) = draft
             .adopting
-            .checked_sub(1)
-            .expect("invariant: an adopted upload was counted when it started");
+            .iter()
+            .position(|adoption| adoption.key == key)
+        else {
+            tracing::info!(scope = %self.scope, "an image upload finished after its draft version was discarded");
+            return None;
+        };
+        assert_eq!(
+            draft.adopting[index].upload,
+            Upload::Running,
+            "invariant: draft {} finished an image upload it started",
+            self.scope
+        );
         let hash = match result {
-            Ok(hash) => hash,
+            Ok(hash) => {
+                draft.adopting.remove(index);
+                hash
+            }
             Err(source) => {
+                draft.adopting[index].upload = Upload::Failed;
                 let failure = DraftFailure::Upload {
                     scope: self.scope.clone(),
                     source,
@@ -677,3 +761,7 @@ impl DraftSession {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/draft_session.rs"]
+mod tests;

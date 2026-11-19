@@ -31,6 +31,9 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "ti
 webp.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 editor-composer = { path = ".", features = ["test-support"] }

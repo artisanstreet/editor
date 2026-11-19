@@ -166,14 +166,23 @@ pub struct Attachment {
     task: Option<tokio::task::AbortHandle>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PendingUpload {
     origin: Arc<Source>,
-    client: ForgeClient,
 }
 
 impl PendingUpload {
-    pub(crate) async fn upload(self) -> Result<BlobHash, UploadImageError> {
+    pub(crate) fn kept(bytes: Vec<u8>) -> Self {
+        Self {
+            origin: Arc::new(Source::Bytes(bytes)),
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> Result<Vec<u8>, ReadImageError> {
+        self.origin.read()
+    }
+
+    pub(crate) async fn upload(self, client: ForgeClient) -> Result<BlobHash, UploadImageError> {
         let origin = self.origin;
         let webp = tokio::task::spawn_blocking(move || {
             let bytes = origin.read()?;
@@ -182,7 +191,7 @@ impl PendingUpload {
         .await
         .map_err(UploadImageError::Task)?
         .map_err(UploadImageError::Prepare)?;
-        self.client
+        client
             .put_blob(webp)
             .await
             .map(|blob| blob.hash)
@@ -352,10 +361,7 @@ impl Attachments {
             .iter_mut()
             .filter(|item| matches!(item.state, State::Encoding | State::Uploading))
             .filter_map(|item| item.origin.take())
-            .map(|origin| PendingUpload {
-                origin,
-                client: self.client.clone(),
-            })
+            .map(|origin| PendingUpload { origin })
             .collect()
     }
     #[expect(
