@@ -76,7 +76,16 @@ pub struct Options {
     pub scale: f64,
     pub focused: bool,
     pub out_dir: PathBuf,
-    pub latency: Option<std::time::Duration>,
+    pub latency: Option<Duration>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("surface", &self.surface)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct Session {
@@ -120,7 +129,7 @@ impl Session {
             headless: true,
             ..AquaConfig::default()
         };
-        config.window.title = "Artisan Editor".to_owned();
+        "Artisan Editor".clone_into(&mut config.window.title);
         let mut aqua = Aqua::new(config).map_err(|message| SessionError::Start { message })?;
         let (scenario, mut core) =
             Scenario::start(&options.fixture, options.latency).map_err(SessionError::Scenario)?;
@@ -129,7 +138,7 @@ impl Session {
                 .screen(&options.route)
                 .map_err(SessionError::Screen)?,
         );
-        let resources = ShellResources::for_runtime(&aqua, options.scale as f32)
+        let resources = ShellResources::for_runtime(&aqua, crate::measure::narrow(options.scale))
             .ok_or(SessionError::Layout {
                 scale: options.scale,
             })?
@@ -220,7 +229,7 @@ impl Session {
                 .shell
                 .core
                 .host(&self.scenario.host)
-                .is_some_and(|host| host.is_live())
+                .is_some_and(editor_core::HostData::is_live)
                 && !self.app.shell.core.test_startup_pending();
             let pixels = self.surface.read().map_err(SessionError::Surface)?.rgba;
             if ready && previous.as_ref() == Some(&pixels) {

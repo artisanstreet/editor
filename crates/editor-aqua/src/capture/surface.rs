@@ -47,17 +47,38 @@ pub struct Surface {
     device: OffscreenBackend,
     lowering: Lowering,
     latest: Option<SurfacePixels>,
-    pub width: u32,
-    pub height: u32,
-    pub scale: f32,
-    pub adapter: String,
-    pub backend: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) scale: f32,
+    pub(crate) adapter: String,
+    pub(crate) backend: String,
+}
+
+impl std::fmt::Debug for Surface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Surface")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("scale", &self.scale)
+            .field("adapter", &self.adapter)
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct Pixels {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pixels")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Pixels {
@@ -93,7 +114,7 @@ impl Pixels {
 }
 
 pub fn physical(logical: f64, scale: f64) -> u32 {
-    (logical * scale).round().max(1.0) as u32
+    crate::measure::saturate_pixels((logical * scale).round().max(1.0))
 }
 
 impl Surface {
@@ -117,7 +138,7 @@ impl Surface {
             latest: None,
             width,
             height,
-            scale: scale as f32,
+            scale: crate::measure::narrow(scale),
             adapter: "WARP".to_owned(),
             backend: "D3D11".to_owned(),
         })
@@ -150,8 +171,8 @@ impl Surface {
     ) -> Result<(), SurfaceError> {
         self.lowering.at(now);
         let size = aqua_core::Size::new(
-            self.width as f32 / self.scale,
-            self.height as f32 / self.scale,
+            crate::measure::exact(self.width) / self.scale,
+            crate::measure::exact(self.height) / self.scale,
         );
         let lowered = self
             .lowering
@@ -177,7 +198,7 @@ impl Surface {
         Ok(())
     }
 
-    pub fn read(&mut self) -> Result<Pixels, SurfaceError> {
+    pub fn read(&self) -> Result<Pixels, SurfaceError> {
         let pixels = self.latest.clone().ok_or(SurfaceError::NothingDrawn)?;
         let expected = self.width as usize * self.height as usize * 4;
         if pixels.rgba8.len() != expected {

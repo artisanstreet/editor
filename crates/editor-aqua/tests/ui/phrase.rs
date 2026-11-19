@@ -64,9 +64,12 @@ fn work_clock_rolls_on_the_render_thread_without_requesting_application_animatio
         render
             .scene()
             .ordered()
-            .filter_map(|(_, item)| match item {
-                DisplayItem::PushTransform(transform) => Some(transform.ty),
-                _ => None,
+            .filter_map(|(_, item)| {
+                if let DisplayItem::PushTransform(transform) = item {
+                    Some(transform.ty)
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>()
     };
@@ -294,6 +297,10 @@ impl PhraseStage {
         });
     }
 
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "the walker tracks only masks, opacity, transforms and text; every other display item leaves the painted phrase unchanged"
+    )]
     fn painted(&self) -> Vec<PaintedText> {
         use aqua_core::DisplayItem;
         let mut windows = Vec::new();

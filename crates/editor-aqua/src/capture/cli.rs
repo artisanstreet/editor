@@ -4,7 +4,7 @@ use super::{
     scenario::{Route, RouteError},
     session::{Options, SessionError, run_script},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
@@ -93,11 +93,11 @@ fn number(name: &'static str, default: f64) -> Result<f64, CliError> {
     clippy::print_stdout,
     reason = "the capture CLI tells its caller which host and account it serves on stdout"
 )]
-fn serve(fixture: PathBuf, editor_dir: PathBuf) -> Result<(), CliError> {
+fn serve(fixture: &Path, editor_dir: &Path) -> Result<(), CliError> {
     use std::io::{Read, Write};
     let root = tempfile::tempdir().map_err(CliError::ServeDirectory)?;
     let mut scenario =
-        Scenario::serve(&fixture, root.path(), &editor_dir).map_err(CliError::Serve)?;
+        Scenario::serve(fixture, root.path(), editor_dir).map_err(CliError::Serve)?;
     println!("serving {}", editor_dir.display());
     println!("host {}", crate::qualification::sign_in::MACHINE_ID);
     println!("account {}", crate::qualification::sign_in::ACCOUNT_ID);
@@ -112,7 +112,7 @@ fn serve(fixture: PathBuf, editor_dir: PathBuf) -> Result<(), CliError> {
 
 pub(crate) fn run_from_environment() -> Result<bool, CliError> {
     if let Some(editor_dir) = variable("ARTISAN_AQUA_SERVE_EDITOR_DIR")? {
-        serve(fixture("serve")?, PathBuf::from(editor_dir))?;
+        serve(&fixture("serve")?, Path::new(&editor_dir))?;
         return Ok(true);
     }
     let Some(script) = variable("ARTISAN_EDITOR_SCRIPT")? else {

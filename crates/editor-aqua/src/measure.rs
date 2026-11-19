@@ -73,3 +73,25 @@ pub(crate) const fn saturate_tick(value: f64) -> u32 {
 pub(crate) const fn channel(value: f32) -> u8 {
     value as u8
 }
+
+#[cfg(feature = "capture")]
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts saturate, so a negative or NaN pixel extent becomes 0"
+)]
+pub(crate) const fn saturate_pixels(value: f64) -> u32 {
+    value as u32
+}
+
+#[cfg(feature = "capture")]
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts saturate after rounding, so a negative or NaN duration becomes 0 ms"
+)]
+pub(crate) fn whole_millis(value: f32) -> u64 {
+    value.round() as u64
+}

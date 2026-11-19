@@ -112,24 +112,28 @@ fn settings_page(name: &str) -> Result<SettingsPage, RouteError> {
 }
 
 pub(crate) struct Scenario {
-    pub host: HostId,
-    pub fixture: Fixture,
+    pub(crate) host: HostId,
+    pub(crate) fixture: Fixture,
     forge: Option<ForgeServer>,
     _directory: Option<tempfile::TempDir>,
 }
 
 impl Scenario {
-    pub fn start(
+    pub(crate) fn start(
         fixture_path: &Path,
         latency: Option<Duration>,
     ) -> Result<(Self, Core), ScenarioError> {
         let directory = tempfile::tempdir().map_err(ScenarioError::Directory)?;
         let editor_dir = directory.path().join("editor");
-        let (mut scenario, files) =
-            Self::launch(fixture_path, directory.path(), &editor_dir, latency)?;
-        scenario._directory = Some(directory);
+        let (scenario, files) = Self::launch(fixture_path, directory.path(), &editor_dir, latency)?;
         let core = Core::for_tests(files).map_err(ScenarioError::Core)?;
-        Ok((scenario, core))
+        Ok((
+            Self {
+                _directory: Some(directory),
+                ..scenario
+            },
+            core,
+        ))
     }
 
     pub(crate) fn serve(
@@ -208,7 +212,7 @@ impl Scenario {
         ))
     }
 
-    pub fn screen(&self, route: &Route) -> Result<Screen, NoThread> {
+    pub(crate) fn screen(&self, route: &Route) -> Result<Screen, NoThread> {
         Ok(match route {
             Route::Thread(thread) => {
                 let thread = match thread {
@@ -238,13 +242,13 @@ impl Scenario {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        if let Some(server) = self.forge.take() {
-            if let Err(error) = crate::core::runtime::runtime().block_on(server.shutdown()) {
-                tracing::warn!(
-                    error = %::diagnostics::chain(&error),
-                    "could not stop the capture Forge"
-                );
-            }
+        if let Some(server) = self.forge.take()
+            && let Err(error) = crate::core::runtime::runtime().block_on(server.shutdown())
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not stop the capture Forge"
+            );
         }
     }
 }

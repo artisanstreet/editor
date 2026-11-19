@@ -133,7 +133,7 @@ pub fn launch() -> Result<(), LaunchError> {
     match aqua::prelude::handle_launch() {
         aqua::prelude::Launch::Handled => return Ok(()),
         aqua::prelude::Launch::Cold(activation) => {
-            crate::shell::native_notifications::record_cold_launch(activation.response)
+            crate::shell::native_notifications::record_cold_launch(activation.response);
         }
         aqua::prelude::Launch::Ordinary => {}
     }

@@ -89,7 +89,7 @@ fn parse_step(line: &str) -> Result<Step, StepError> {
     Ok(match command {
         "wait" => match numbers()?.as_slice() {
             [ms] if (0.0..=3_600_000.0).contains(ms) => {
-                Step::Wait(Duration::from_millis(ms.round() as u64))
+                Step::Wait(Duration::from_millis(crate::measure::whole_millis(*ms)))
             }
             _ => return arguments("<milliseconds>"),
         },
@@ -105,7 +105,7 @@ fn parse_step(line: &str) -> Result<Step, StepError> {
         "settle" => match numbers()?.as_slice() {
             [] => Step::Settle(DEFAULT_SETTLE),
             [ms] if (1.0..=3_600_000.0).contains(ms) => {
-                Step::Settle(Duration::from_millis(ms.round() as u64))
+                Step::Settle(Duration::from_millis(crate::measure::whole_millis(*ms)))
             }
             _ => return arguments("an optional <timeout milliseconds>"),
         },
@@ -142,12 +142,13 @@ const MODIFIER_PREFIXES: [(&str, Modifiers); 8] = [
 pub fn parse_keystroke(text: &str) -> Result<Keystroke, StepError> {
     let mut modifiers = Modifiers::NONE;
     let mut rest = text;
-    while let Some((prefix, flag)) = MODIFIER_PREFIXES
-        .iter()
-        .find(|(prefix, _)| rest.len() > prefix.len() && rest.starts_with(prefix))
-    {
+    while let Some((remainder, flag)) = MODIFIER_PREFIXES.iter().find_map(|(prefix, flag)| {
+        rest.strip_prefix(prefix)
+            .filter(|remainder| !remainder.is_empty())
+            .map(|remainder| (remainder, flag))
+    }) {
         modifiers = modifiers.union(*flag);
-        rest = &rest[prefix.len()..];
+        rest = remainder;
     }
     Ok(Keystroke {
         key: parse_key(rest).ok_or_else(|| StepError::Key {
@@ -204,6 +205,6 @@ pub fn types_text(keystroke: &Keystroke) -> Option<char> {
         {
             Some(character)
         }
-        _ => None,
+        Key::Char(_) | Key::Named(_) => None,
     }
 }

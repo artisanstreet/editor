@@ -28,17 +28,22 @@ impl NotificationCenter {
 
     #[expect(
         clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
         reason = "the non-Windows stub keeps the Windows notification center's method signatures"
     )]
-    fn withdraw(&self, _tag: &str) -> Result<(), NotificationError> {
+    fn withdraw(&mut self, _tag: &str) -> Result<(), NotificationError> {
         Err(NotificationError::Unsupported)
     }
 
     #[expect(
         clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
         reason = "the non-Windows stub keeps the Windows notification center's method signatures"
     )]
-    fn show(&self, _notification: aqua::prelude::Notification) -> Result<(), NotificationError> {
+    fn show(
+        &mut self,
+        _notification: aqua::prelude::Notification,
+    ) -> Result<(), NotificationError> {
         Err(NotificationError::Unsupported)
     }
 }
@@ -120,7 +125,7 @@ impl NativeNotifications {
     }
 
     pub(crate) fn apply(
-        &self,
+        &mut self,
         effects: NotificationEffects,
         shell: &Shell,
         ctx: &mut AppCtx<'_>,

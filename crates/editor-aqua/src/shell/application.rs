@@ -330,7 +330,7 @@ impl<V: SectionViews> ShellApplication<V> {
     pub fn tap_render(
         &mut self,
     ) -> std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>> {
-        self.render_tap.get_or_insert_with(Default::default).clone()
+        std::rc::Rc::clone(self.render_tap.get_or_insert_with(Default::default))
     }
 
     pub(crate) fn fitting_launch_to_display(mut self) -> Self {

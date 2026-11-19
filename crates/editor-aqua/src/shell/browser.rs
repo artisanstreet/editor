@@ -193,7 +193,7 @@ mod native {
         })
     }
 
-    pub fn resolve(preferred: Option<&str>) -> Option<Browser> {
+    pub(super) fn resolve(preferred: Option<&str>) -> Option<Browser> {
         let default = present(CURRENT_USER.open(CHOICE), CHOICE)
             .and_then(|choice| present(choice.get_string("ProgId"), CHOICE));
         let mut browsers = installed();

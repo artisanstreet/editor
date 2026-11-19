@@ -22,6 +22,7 @@ pub struct CaptureRecord {
     pub sha256: String,
 }
 
+#[derive(Debug)]
 pub struct Context<'a> {
     pub name: &'a str,
     pub route: &'a str,
@@ -36,8 +37,8 @@ impl CaptureRecord {
             name: context.name.to_owned(),
             implementation: "Aqua".to_owned(),
             route: context.route.to_owned(),
-            logical_width: context.logical.0.round() as u32,
-            logical_height: context.logical.1.round() as u32,
+            logical_width: crate::measure::saturate_pixels(context.logical.0.round()),
+            logical_height: crate::measure::saturate_pixels(context.logical.1.round()),
             width: pixels.width,
             height: pixels.height,
             scale_bits: context.surface.scale.to_bits(),
