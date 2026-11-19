@@ -252,6 +252,40 @@ pub enum InstallAppError {
     Address(#[from] AddressError),
     #[error(transparent)]
     Integrate(#[from] IntegrateEditorError),
+    #[error("the install failed and {outcome}")]
+    PutBack {
+        #[source]
+        failed: Box<Self>,
+        outcome: PutBack,
+    },
+}
+
+#[derive(Debug)]
+pub enum PutBack {
+    Restored,
+    Restarted,
+    NotRestored(String),
+    NotRestarted(Box<StartError>),
+}
+
+impl std::fmt::Display for PutBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Restored => f.write_str("the previous version is back in place"),
+            Self::Restarted => f.write_str("the previous Forge is back in place and running"),
+            Self::NotRestored(problems) => {
+                write!(
+                    f,
+                    "putting the previous version back also failed: {problems}"
+                )
+            }
+            Self::NotRestarted(error) => write!(
+                f,
+                "the previous Forge is back in place but didn't start: {}",
+                diagnostics::chain(error)
+            ),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1279,11 +1313,21 @@ fn put_in_place(
     let upgraded = app == App::Forge && upgrade_forge_online(incoming, progress)?;
     #[cfg(not(unix))]
     let upgraded = false;
-    match app {
+    write_beside(incoming, "LICENSE.md", LICENSE)?;
+    if let Some(notices) = crate::bundle::notices(app) {
+        let path = incoming.join("NOTICES.txt");
+        notices
+            .write(&path)
+            .map_err(|source| InstallAppError::Notices { path, source })?;
+    }
+    write_beside(incoming, ORIGIN_FILE, &origin.record())?;
+    write_beside(incoming, "version", &format!("{version}\n"))?;
+    let stopped = match app {
         App::Forge if !upgraded => {
             progress.message("Stopping Forge");
             service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
             service::stop()?;
+            Stopped::Forge
         }
         App::Editor => {
             if platform::close_processes(std::slice::from_ref(&binary))
@@ -1292,20 +1336,88 @@ fn put_in_place(
             {
                 progress.message("Closed the running Editor");
             }
+            Stopped::Nothing
         }
-        App::Forge | App::Ae => {}
+        App::Forge | App::Ae => Stopped::Nothing,
+    };
+    let replaced = match replace(dir, incoming) {
+        Ok(replaced) => replaced,
+        Err(failed) => {
+            let previous = match failed {
+                ReplaceError::Restore { .. } => Previous::Broken,
+                ReplaceError::Read { .. }
+                | ReplaceError::NoAside { .. }
+                | ReplaceError::Aside { .. }
+                | ReplaceError::Place { .. } => Previous::InPlace,
+            };
+            return Err(put_back(stopped, failed.into(), previous, progress));
+        }
+    };
+    match finish(app, version, upgraded, progress) {
+        Ok(message) => {
+            replaced.keep();
+            Ok(message)
+        }
+        Err(failed) if upgraded => {
+            replaced.keep();
+            Err(failed)
+        }
+        Err(failed) => {
+            progress.message("Putting the previous version back");
+            match replaced.undo() {
+                Ok(()) => Err(put_back(stopped, failed, Previous::InPlace, progress)),
+                Err(problems) => Err(InstallAppError::PutBack {
+                    failed: Box::new(failed),
+                    outcome: PutBack::NotRestored(problems),
+                }),
+            }
+        }
     }
-    replace(dir, incoming)?;
-    write_beside(dir, "LICENSE.md", LICENSE)?;
-    if let Some(notices) = crate::bundle::notices(app) {
-        let path = dir.join("NOTICES.txt");
-        notices
-            .write(&path)
-            .map_err(|source| InstallAppError::Notices { path, source })?;
+}
+
+#[derive(Clone, Copy)]
+enum Stopped {
+    Forge,
+    Nothing,
+}
+
+#[derive(Clone, Copy)]
+enum Previous {
+    InPlace,
+    Broken,
+}
+
+fn put_back(
+    stopped: Stopped,
+    failed: InstallAppError,
+    previous: Previous,
+    progress: &ui::Progress,
+) -> InstallAppError {
+    let outcome = match (previous, stopped) {
+        (Previous::Broken, _) => return failed,
+        (Previous::InPlace, Stopped::Nothing) => PutBack::Restored,
+        (Previous::InPlace, Stopped::Forge) => {
+            progress.message("Starting the previous Forge again");
+            match service::start() {
+                Ok(_) => PutBack::Restarted,
+                Err(error) => PutBack::NotRestarted(Box::new(error)),
+            }
+        }
+    };
+    InstallAppError::PutBack {
+        failed: Box::new(failed),
+        outcome,
     }
-    write_beside(dir, ORIGIN_FILE, &origin.record())?;
+}
+
+fn finish(
+    app: App,
+    version: &str,
+    upgraded: bool,
+    progress: &ui::Progress,
+) -> Result<String, InstallAppError> {
     platform::register_uninstall(app, version)?;
-    let message = match app {
+    Ok(match app {
         App::Ae => platform::add_to_path()?.map_or_else(
             || format!("ae {version} installed, on PATH"),
             |hint| format!("ae {version} installed. {hint}"),
@@ -1325,9 +1437,7 @@ fn put_in_place(
             platform::integrate_editor()?;
             format!("Editor {version} installed")
         }
-    };
-    write_beside(dir, "version", &format!("{version}\n"))?;
-    Ok(message)
+    })
 }
 
 fn write_beside(dir: &Path, name: &str, contents: &str) -> Result<(), InstallAppError> {
@@ -1365,13 +1475,41 @@ pub enum ReplaceError {
     },
 }
 
+#[derive(Debug)]
 struct Swap {
     target: PathBuf,
     aside: Option<PathBuf>,
     placed: bool,
 }
 
-fn replace(dir: &Path, incoming: &Path) -> Result<(), ReplaceError> {
+#[derive(Debug)]
+#[must_use]
+struct Replaced {
+    swaps: Vec<Swap>,
+}
+
+impl Replaced {
+    fn keep(self) {
+        for swap in self.swaps {
+            if let Some(aside) = swap.aside {
+                discard(&aside);
+            }
+        }
+    }
+
+    fn undo(self) -> Result<(), String> {
+        let problems = restore(self.swaps, &|from: &Path, to: &Path| {
+            std::fs::rename(from, to)
+        });
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("; "))
+        }
+    }
+}
+
+fn replace(dir: &Path, incoming: &Path) -> Result<Replaced, ReplaceError> {
     replace_with(dir, incoming, |from, to| std::fs::rename(from, to))
 }
 
@@ -1379,7 +1517,7 @@ fn replace_with(
     dir: &Path,
     incoming: &Path,
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
-) -> Result<(), ReplaceError> {
+) -> Result<Replaced, ReplaceError> {
     let read = |source| ReplaceError::Read {
         path: incoming.to_owned(),
         source,
@@ -1395,12 +1533,7 @@ fn replace_with(
             return Err(roll_back(swaps, error, &rename));
         }
     }
-    for swap in swaps {
-        if let Some(aside) = swap.aside {
-            discard(&aside);
-        }
-    }
-    Ok(())
+    Ok(Replaced { swaps })
 }
 
 fn swap_in(
@@ -1446,11 +1579,7 @@ fn swap_in(
     Ok(())
 }
 
-fn roll_back(
-    swaps: Vec<Swap>,
-    failed: ReplaceError,
-    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
-) -> ReplaceError {
+fn restore(swaps: Vec<Swap>, rename: &impl Fn(&Path, &Path) -> io::Result<()>) -> Vec<String> {
     let mut problems = Vec::new();
     for swap in swaps.into_iter().rev() {
         if swap.placed
@@ -1469,6 +1598,15 @@ fn roll_back(
             ));
         }
     }
+    problems
+}
+
+fn roll_back(
+    swaps: Vec<Swap>,
+    failed: ReplaceError,
+    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> ReplaceError {
+    let problems = restore(swaps, rename);
     if problems.is_empty() {
         failed
     } else {

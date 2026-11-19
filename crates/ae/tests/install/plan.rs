@@ -143,7 +143,7 @@ fn a_replacement_that_fails_halfway_puts_every_old_file_back() {
 fn a_replacement_puts_every_new_file_in_place_and_drops_the_old_ones() {
     let (_root, dir, incoming) = installed_dir();
 
-    replace(&dir, &incoming).unwrap();
+    replace(&dir, &incoming).unwrap().keep();
 
     assert_eq!(
         std::fs::read_to_string(dir.join("forge")).unwrap(),
