@@ -1,5 +1,9 @@
 use crate::{
-    desktop::*,
+    desktop::{
+        Button, CaptureError, ClipboardError, CursorError, Desktop, DisplayError, Input,
+        InputError, LaunchError, Point, ProcessesError, Rect, WindowChange, WindowError, WindowId,
+        WindowInfo,
+    },
     frame::Frame,
     steps::{Key, Named},
 };
@@ -12,13 +16,60 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::*,
-        Graphics::Gdi::*,
-        System::{
-            DataExchange::*, Diagnostics::ToolHelp::*, Memory::*,
-            SystemInformation::GetTickCount64, Threading::*,
+        Foundation::{
+            CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
         },
-        UI::{HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC,
+            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors,
+            GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFOEXW,
+            ReleaseDC, SRCCOPY, SelectObject,
+        },
+        System::{
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard, SetClipboardData,
+            },
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+            SystemInformation::GetTickCount64,
+            Threading::{
+                OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
+        },
+        UI::{
+            HiDpi::{
+                DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                SetThreadDpiAwarenessContext,
+            },
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS,
+                KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+                MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+                MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+                MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+                MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_APPS, VK_BACK,
+                VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME,
+                VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PAUSE, VK_PRIOR,
+                VK_RETURN, VK_RIGHT, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+                VkKeyScanW,
+            },
+            WindowsAndMessaging::{
+                CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows,
+                GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
+                GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_MESSAGE,
+                IsIconic, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
+                PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SW_MAXIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER,
+                SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+                UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WM_CLOSE,
+            },
+        },
     },
     core::{PCWSTR, PWSTR},
 };
@@ -28,7 +79,7 @@ static LAST_INPUT: AtomicU64 = AtomicU64::new(0);
 static HOOKS: OnceLock<Result<(), Arc<HookError>>> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
-pub enum HookError {
+pub(crate) enum HookError {
     #[error("start the user input thread")]
     Thread(#[source] std::io::Error),
     #[error("install the {hook} hook")]
@@ -42,7 +93,7 @@ pub enum HookError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StartError {
+pub(crate) enum StartError {
     #[error(
         "set ARTISAN_COMPUTER_DISPLAY to the virtual monitor device name, such as \\\\.\\DISPLAY3, before starting Forge"
     )]
@@ -52,7 +103,7 @@ pub enum StartError {
     #[error("watch for the user's own input")]
     Hooks(#[source] Arc<HookError>),
 }
-const MARKER: usize = 0x41525443;
+const MARKER: usize = 0x4152_5443;
 fn physical_input() {
     LAST_INPUT.store(unsafe { GetTickCount64() }, Ordering::SeqCst);
     ACTIVITY.fetch_add(1, Ordering::SeqCst);
@@ -75,6 +126,13 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     unsafe { CallNextHookEx(None, code, w, l) }
 }
+fn release(what: &'static str, result: windows::core::Result<()>) {
+    if let Err(error) = result
+        && error.code().is_err()
+    {
+        tracing::debug!("release {what}: {error}");
+    }
+}
 fn hooks() -> Result<(), Arc<HookError>> {
     let result = HOOKS.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -85,7 +143,7 @@ fn hooks() -> Result<(), Arc<HookError>> {
                 let mouse = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0) {
                     Ok(h) => h,
                     Err(source) => {
-                        let _ = tx.send(Err(HookError::Install {
+                        let _requester_gave_up = tx.send(Err(HookError::Install {
                             hook: "mouse",
                             source,
                         }));
@@ -95,22 +153,22 @@ fn hooks() -> Result<(), Arc<HookError>> {
                 let key = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), None, 0) {
                     Ok(h) => h,
                     Err(source) => {
-                        let _ = UnhookWindowsHookEx(mouse);
-                        let _ = tx.send(Err(HookError::Install {
+                        release("the mouse hook", UnhookWindowsHookEx(mouse));
+                        let _requester_gave_up = tx.send(Err(HookError::Install {
                             hook: "keyboard",
                             source,
                         }));
                         return;
                     }
                 };
-                let _ = tx.send(Ok(()));
+                let _requester_gave_up = tx.send(Ok(()));
                 let mut message = MSG::default();
-                while GetMessageW(&mut message, None, 0, 0).0 > 0 {
-                    let _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
+                while GetMessageW(&raw mut message, None, 0, 0).0 > 0 {
+                    let _produced_a_character = TranslateMessage(&raw const message);
+                    DispatchMessageW(&raw const message);
                 }
-                let _ = UnhookWindowsHookEx(key);
-                let _ = UnhookWindowsHookEx(mouse);
+                release("the keyboard hook", UnhookWindowsHookEx(key));
+                release("the mouse hook", UnhookWindowsHookEx(mouse));
             })
         {
             return Err(Arc::new(HookError::Thread(error)));
@@ -138,12 +196,20 @@ fn rect(r: RECT) -> Rect {
     Rect {
         x: r.left,
         y: r.top,
-        width: (r.right - r.left).max(0) as u32,
-        height: (r.bottom - r.top).max(0) as u32,
+        width: (r.right - r.left).max(0).cast_unsigned(),
+        height: (r.bottom - r.top).max(0).cast_unsigned(),
     }
 }
+const PATH_UNITS: u32 = 32768;
+fn struct_size<T>() -> u32 {
+    u32::try_from(size_of::<T>()).expect("invariant: Win32 structs are far smaller than 4 GiB")
+}
+fn absolute(offset: i32, extent: i32) -> i32 {
+    let scaled = (i64::from(offset) * 65535 / i64::from(extent - 1)).clamp(0, 65535);
+    i32::try_from(scaled).expect("invariant: clamped to the absolute input range")
+}
 fn hwnd(id: WindowId) -> HWND {
-    HWND(id as usize as *mut _)
+    HWND(usize::try_from(id).expect("invariant: window ids are pointer-sized handles") as *mut _)
 }
 fn window_id(window: HWND) -> WindowId {
     window.0 as usize as u64
@@ -160,7 +226,7 @@ unsafe extern "system" fn monitor_callback(
     data: LPARAM,
 ) -> windows::core::BOOL {
     let mut info = MONITORINFOEXW::default();
-    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    info.monitorInfo.cbSize = struct_size::<MONITORINFOEXW>();
     if unsafe { GetMonitorInfoW(monitor, &raw mut info.monitorInfo) }.as_bool() {
         let end = info
             .szDevice
@@ -190,11 +256,11 @@ fn monitors() -> Result<Vec<Monitor>, DisplayError> {
     .map_err(DisplayError::Monitors)?;
     Ok(list)
 }
-pub struct WindowsDesktop {
+pub(crate) struct WindowsDesktop {
     display: String,
 }
 impl WindowsDesktop {
-    pub fn new() -> Result<Self, StartError> {
+    pub(crate) fn new() -> Result<Self, StartError> {
         let display =
             std::env::var("ARTISAN_COMPUTER_DISPLAY").map_err(StartError::Unconfigured)?;
         let desktop = Self { display };
@@ -208,30 +274,33 @@ unsafe extern "system" fn window_callback(window: HWND, data: LPARAM) -> windows
         return true.into();
     }
     let mut bounds = RECT::default();
-    if unsafe { GetWindowRect(window, &mut bounds) }.is_err() {
+    if unsafe { GetWindowRect(window, &raw mut bounds) }.is_err() {
         return true.into();
     }
-    let mut title =
-        vec![0; (unsafe { GetWindowTextLengthW(window) }.max(0) as usize + 1).min(32768)];
-    let length = unsafe { GetWindowTextW(window, &mut title) }.max(0) as usize;
+    let mut title = vec![
+        0;
+        (usize::try_from(unsafe { GetWindowTextLengthW(window) }).unwrap_or(0) + 1)
+            .min(32768)
+    ];
+    let length = usize::try_from(unsafe { GetWindowTextW(window, &mut title) }).unwrap_or(0);
     let mut pid = 0;
     unsafe {
-        GetWindowThreadProcessId(window, Some(&mut pid));
+        GetWindowThreadProcessId(window, Some(&raw mut pid));
     }
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         .ok()
         .map(|handle| {
-            let mut path = vec![0; 32768];
-            let mut length = path.len() as u32;
+            let mut length = PATH_UNITS;
+            let mut path = vec![0; PATH_UNITS as usize];
             let result = unsafe {
                 QueryFullProcessImageNameW(
                     handle,
                     PROCESS_NAME_WIN32,
                     PWSTR(path.as_mut_ptr()),
-                    &mut length,
+                    &raw mut length,
                 )
             };
-            let _ = unsafe { CloseHandle(handle) };
+            release("the process handle", unsafe { CloseHandle(handle) });
             if result.is_ok() {
                 String::from_utf16_lossy(&path[..length as usize])
                     .rsplit('\\')
@@ -266,10 +335,10 @@ impl Drop for Capture {
                 SelectObject(self.memory, self.previous);
             }
             if !self.bitmap.is_invalid() {
-                let _ = DeleteObject(self.bitmap.into());
+                release("the capture bitmap", DeleteObject(self.bitmap.into()).ok());
             }
             if !self.memory.is_invalid() {
-                let _ = DeleteDC(self.memory);
+                release("the capture memory context", DeleteDC(self.memory).ok());
             }
             ReleaseDC(None, self.screen);
         }
@@ -304,15 +373,17 @@ impl Clipboard {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = unsafe { DestroyWindow(window) };
+        release("the clipboard owner window", unsafe {
+            DestroyWindow(window)
+        });
         Err(ClipboardError::Busy)
     }
 }
 impl Drop for Clipboard {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseClipboard();
-            let _ = DestroyWindow(self.0);
+            release("the clipboard", CloseClipboard());
+            release("the clipboard owner window", DestroyWindow(self.0));
         }
     }
 }
@@ -371,9 +442,9 @@ impl Desktop for WindowsDesktop {
             }
             let info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: area.width as i32,
-                    biHeight: -(area.height as i32),
+                    biSize: struct_size::<BITMAPINFOHEADER>(),
+                    biWidth: area.width.cast_signed(),
+                    biHeight: -area.height.cast_signed(),
                     biPlanes: 1,
                     biBitCount: 32,
                     biCompression: BI_RGB.0,
@@ -382,9 +453,15 @@ impl Desktop for WindowsDesktop {
                 ..Default::default()
             };
             let mut pixels = std::ptr::null_mut();
-            capture.bitmap =
-                CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut pixels, None, 0)
-                    .map_err(system("CreateDIBSection"))?;
+            capture.bitmap = CreateDIBSection(
+                Some(screen),
+                &raw const info,
+                DIB_RGB_COLORS,
+                &raw mut pixels,
+                None,
+                0,
+            )
+            .map_err(system("CreateDIBSection"))?;
             capture.previous = SelectObject(capture.memory, capture.bitmap.into());
             if capture.previous.is_invalid() {
                 return Err(failed("SelectObject"));
@@ -393,8 +470,8 @@ impl Desktop for WindowsDesktop {
                 capture.memory,
                 0,
                 0,
-                area.width as i32,
-                area.height as i32,
+                area.width.cast_signed(),
+                area.height.cast_signed(),
                 Some(screen),
                 area.x,
                 area.y,
@@ -419,7 +496,7 @@ impl Desktop for WindowsDesktop {
     fn cursor(&self) -> Result<Point, CursorError> {
         let _dpi = Dpi::enter();
         let mut p = POINT::default();
-        unsafe { GetCursorPos(&mut p) }.map_err(CursorError::System)?;
+        unsafe { GetCursorPos(&raw mut p) }.map_err(CursorError::System)?;
         Ok(Point { x: p.x, y: p.y })
     }
     fn send(&self, input: &Input) -> Result<(), InputError> {
@@ -461,8 +538,8 @@ impl Desktop for WindowsDesktop {
                 vec![mouse(
                     MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     0,
-                    ((i64::from(p.x - x) * 65535) / i64::from(width - 1)) as i32,
-                    ((i64::from(p.y - y) * 65535) / i64::from(height - 1)) as i32,
+                    absolute(p.x - x, width),
+                    absolute(p.y - y, height),
                 )]
             }
             Input::Button { button, down } => vec![mouse(
@@ -481,10 +558,10 @@ impl Desktop for WindowsDesktop {
             Input::Wheel { dx, dy } => {
                 let mut events = Vec::new();
                 if dy != 0 {
-                    events.push(mouse(MOUSEEVENTF_WHEEL, (-dy * 120) as u32, 0, 0));
+                    events.push(mouse(MOUSEEVENTF_WHEEL, (-dy * 120).cast_unsigned(), 0, 0));
                 }
                 if dx != 0 {
-                    events.push(mouse(MOUSEEVENTF_HWHEEL, (dx * 120) as u32, 0, 0));
+                    events.push(mouse(MOUSEEVENTF_HWHEEL, (dx * 120).cast_unsigned(), 0, 0));
                 }
                 events
             }
@@ -513,7 +590,7 @@ impl Desktop for WindowsDesktop {
                     .collect()
             }
         };
-        if unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) } as usize
+        if unsafe { SendInput(&events, struct_size::<INPUT>().cast_signed()) } as usize
             != events.len()
         {
             return Err(InputError::Rejected { input: *input });
@@ -538,9 +615,11 @@ impl Desktop for WindowsDesktop {
     fn window_rect(&self, id: WindowId) -> Result<Rect, WindowError> {
         let _dpi = Dpi::enter();
         let mut bounds = RECT::default();
-        unsafe { GetWindowRect(hwnd(id), &mut bounds) }.map_err(|source| WindowError::System {
-            step: "read the window bounds",
-            source,
+        unsafe { GetWindowRect(hwnd(id), &raw mut bounds) }.map_err(|source| {
+            WindowError::System {
+                step: "read the window bounds",
+                source,
+            }
         })?;
         Ok(rect(bounds))
     }
@@ -566,7 +645,7 @@ impl Desktop for WindowsDesktop {
             match change {
                 WindowChange::Focus => {
                     if IsIconic(window).as_bool() {
-                        let _ = ShowWindow(window, SW_RESTORE);
+                        let _was_visible = ShowWindow(window, SW_RESTORE);
                     }
                     if !SetForegroundWindow(window).as_bool() {
                         return Err(WindowError::FocusRefused { window: id });
@@ -578,17 +657,17 @@ impl Desktop for WindowsDesktop {
                     source,
                 })?,
                 WindowChange::Maximize => {
-                    let _ = ShowWindow(window, SW_MAXIMIZE);
+                    let _was_visible = ShowWindow(window, SW_MAXIMIZE);
                 }
                 WindowChange::Place(r) => {
-                    let _ = ShowWindow(window, SW_RESTORE);
+                    let _was_visible = ShowWindow(window, SW_RESTORE);
                     SetWindowPos(
                         window,
                         None,
                         r.x,
                         r.y,
-                        r.width as i32,
-                        r.height as i32,
+                        r.width.cast_signed(),
+                        r.height.cast_signed(),
                         SWP_NOACTIVATE | SWP_NOZORDER,
                     )
                     .map_err(|source| WindowError::System {
@@ -621,7 +700,9 @@ impl Desktop for WindowsDesktop {
         })?;
         let pid = child.id();
         std::thread::spawn(move || {
-            let _ = child.wait();
+            if let Err(error) = child.wait() {
+                tracing::debug!("reap launched process {pid}: {error}");
+            }
         });
         Ok(pid)
     }
@@ -630,16 +711,16 @@ impl Desktop for WindowsDesktop {
             let snapshot =
                 CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(ProcessesError::System)?;
             let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                dwSize: struct_size::<PROCESSENTRY32W>(),
                 ..Default::default()
             };
             let mut list = Vec::new();
-            let mut next = Process32FirstW(snapshot, &mut entry);
+            let mut next = Process32FirstW(snapshot, &raw mut entry);
             while next.is_ok() {
                 list.push((entry.th32ProcessID, entry.th32ParentProcessID));
-                next = Process32NextW(snapshot, &mut entry);
+                next = Process32NextW(snapshot, &raw mut entry);
             }
-            let _ = CloseHandle(snapshot);
+            release("the process snapshot", CloseHandle(snapshot));
             Ok(list)
         }
     }
@@ -662,7 +743,7 @@ impl Desktop for WindowsDesktop {
             let slice = std::slice::from_raw_parts(ptr, length);
             let end = slice.iter().position(|u| *u == 0).unwrap_or(length);
             let text = String::from_utf16_lossy(&slice[..end]);
-            let _ = GlobalUnlock(global);
+            release("the clipboard text", GlobalUnlock(global));
             Ok(Some(text))
         }
     }
@@ -681,15 +762,21 @@ impl Desktop for WindowsDesktop {
             })?;
             let ptr = GlobalLock(memory).cast::<u16>();
             if ptr.is_null() {
-                let _ = GlobalFree(Some(memory));
+                release(
+                    "the new clipboard text",
+                    GlobalFree(Some(memory)).map(|_| ()),
+                );
                 return Err(ClipboardError::Lock);
             }
             std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
-            let _ = GlobalUnlock(memory);
+            release("the new clipboard text", GlobalUnlock(memory));
             if let Err(error) = EmptyClipboard()
                 .and_then(|()| SetClipboardData(13, Some(HANDLE(memory.0))).map(|_| ()))
             {
-                let _ = GlobalFree(Some(memory));
+                release(
+                    "the new clipboard text",
+                    GlobalFree(Some(memory)).map(|_| ()),
+                );
                 return Err(ClipboardError::System {
                     step: "replace the clipboard text",
                     source: error,
@@ -700,7 +787,11 @@ impl Desktop for WindowsDesktop {
     }
 }
 fn virtual_key(key: Key) -> Result<VIRTUAL_KEY, InputError> {
-    use Named::*;
+    use Named::{
+        Alt, Backspace, CapsLock, Ctrl, Delete, Down, End, Enter, Escape, F, Home, Insert, Left,
+        Menu, NumLock, PageDown, PageUp, Pause, PrintScreen, Right, ScrollLock, Shift, Space,
+        Super, Tab, Up,
+    };
     Ok(match key {
         Key::Char(c) => {
             if !c.is_ascii() {
@@ -710,7 +801,7 @@ fn virtual_key(key: Key) -> Result<VIRTUAL_KEY, InputError> {
             if scan == -1 {
                 return Err(InputError::Unavailable { key: c });
             }
-            VIRTUAL_KEY((scan as u16) & 0xff)
+            VIRTUAL_KEY(scan.cast_unsigned() & 0xff)
         }
         Key::Named(key) => match key {
             Ctrl => VK_CONTROL,

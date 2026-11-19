@@ -18,7 +18,10 @@ use std::{
 #[path = "stop.rs"]
 mod stop_tests;
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fault a test switches on"
+)]
 struct Fake {
     events: Mutex<Vec<Input>>,
     sent: tokio::sync::watch::Sender<usize>,
@@ -62,17 +65,17 @@ impl Desktop for Fake {
     fn user_display(&self) -> Result<Rect, DisplayError> {
         Ok(area())
     }
-    fn capture(&self, r: Rect) -> Result<Frame, CaptureError> {
+    fn capture(&self, area: Rect) -> Result<Frame, CaptureError> {
         if self.captures.fetch_add(1, Ordering::SeqCst) >= self.capture_limit {
             return Err(CaptureError::Failed {
-                area: r,
+                area,
                 step: "BitBlt",
             });
         }
         Ok(Frame::new(
-            r.width,
-            r.height,
-            vec![[0; 3]; r.width as usize * r.height as usize],
+            area.width,
+            area.height,
+            vec![[0; 3]; area.width as usize * area.height as usize],
         )
         .unwrap())
     }
@@ -151,7 +154,7 @@ fn rejects_malformed_or_oversized_batches_before_execution() {
     ] {
         assert!(steps::parse(&value).is_err(), "accepted {value}");
     }
-    assert!(steps::parse(&json!(vec![json!({"type":"x"}); 257])).is_err());
+    steps::parse(&json!(vec![json!({"type":"x"}); 257])).unwrap_err();
     assert_eq!(steps::key("Return").unwrap(), Key::Named(Named::Enter));
     assert_eq!(steps::key("F24").unwrap(), Key::Named(Named::F(24)));
 }
@@ -159,7 +162,7 @@ fn rejects_malformed_or_oversized_batches_before_execution() {
 fn bad_later_coordinate_does_not_execute_earlier_steps() {
     let desktop = Fake::default();
     let steps = steps::parse(&json!([{"type":"must not type"},{"click":[800,1]}])).unwrap();
-    assert!(run(&desktop, View::new(area()), &steps).is_err());
+    run(&desktop, View::new(area()), &steps).unwrap_err();
     assert!(desktop.events.lock().unwrap().is_empty());
 }
 #[test]
@@ -221,7 +224,7 @@ fn active_user_or_foreign_focus_prevents_typing() {
             ..Default::default()
         },
     ] {
-        assert!(run(&desktop, View::new(area()), &[Step::Type("x".into())]).is_err());
+        run(&desktop, View::new(area()), &[Step::Type("x".into())]).unwrap_err();
         assert!(
             !desktop
                 .events
@@ -247,7 +250,7 @@ fn scales_coordinates_including_negative_monitor_origins() {
         .point(at(view.width.get() - 1, view.height.get() - 1))
         .unwrap();
     assert!(rect.contains(point));
-    assert!(view.point(at(view.width.get(), 0)).is_err());
+    view.point(at(view.width.get(), 0)).unwrap_err();
 }
 #[test]
 fn points_off_the_screenshot_cannot_be_built() {
@@ -302,8 +305,8 @@ fn frames_keep_their_size_and_pixels_together() {
     assert_eq!(image.crop(2, 0, 1, 2), None);
     assert_eq!(image.crop(0, 2, 2, 1), None);
     assert_eq!(image.crop(0, 0, 0, 2), None);
-    assert!(Frame::new(2, 2, vec![[0; 3]; 3]).is_err());
-    assert!(Frame::new(0, 2, Vec::new()).is_err());
+    Frame::new(2, 2, vec![[0; 3]; 3]).unwrap_err();
+    Frame::new(0, 2, Vec::new()).unwrap_err();
 }
 
 #[test]

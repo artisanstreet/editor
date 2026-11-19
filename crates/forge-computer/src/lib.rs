@@ -1,28 +1,3 @@
-#![expect(
-    clippy::let_underscore_untyped,
-    clippy::literal_string_with_formatting_args,
-    clippy::renamed_function_params,
-    missing_debug_implementations,
-    unreachable_pub,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::allow_attributes,
-    clippy::allow_attributes_without_reason,
-    clippy::assertions_on_result_states,
-    clippy::borrow_as_ptr,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::enum_glob_use,
-    clippy::let_underscore_must_use,
-    clippy::undocumented_unsafe_blocks,
-    clippy::unreadable_literal,
-    clippy::wildcard_imports,
-    let_underscore_drop,
-    unused_qualifications,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
 pub mod desktop;
 pub mod frame;
 mod operations;
@@ -30,7 +5,7 @@ pub mod runner;
 pub mod steps;
 mod tools;
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(unsafe_code, reason = "the Windows desktop drives Win32 directly")]
 mod windows;
 
 use artisan_api::{Envelope, Event, ThreadId};
@@ -179,8 +154,22 @@ pub struct ComputerMcp {
     session: Arc<Mutex<Session>>,
     paused: Arc<AtomicBool>,
 }
+impl std::fmt::Debug for ComputerMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputerMcp")
+            .field("paused", &self.paused.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl ComputerMcp {
-    pub fn for_host(hub: &Hub) -> Option<Self> {
+    pub fn for_host(
+        #[cfg_attr(
+            not(windows),
+            expect(unused_variables, reason = "only Windows has a desktop to drive")
+        )]
+        hub: &Hub,
+    ) -> Option<Self> {
         #[cfg(windows)]
         {
             match windows::WindowsDesktop::new() {
@@ -193,7 +182,6 @@ impl ComputerMcp {
         }
         #[cfg(not(windows))]
         {
-            let _ = hub;
             None
         }
     }
@@ -357,7 +345,7 @@ impl ToolSet for ComputerMcp {
     fn tools(&self) -> Vec<Tool> {
         tools::list()
     }
-    async fn call(&self, caller: &ThreadId, name: &str, args: Value) -> Result<Vec<Content>> {
+    async fn call(&self, caller: &ThreadId, name: &str, arguments: Value) -> Result<Vec<Content>> {
         let stop = self
             .hub
             .run_cancellation(caller)
@@ -372,7 +360,7 @@ impl ToolSet for ComputerMcp {
                     name,
                     format!(
                         "Computer use paused: {}. Allow to resume.",
-                        string(&args, "reason")?
+                        string(&arguments, "reason")?
                     ),
                 )
                 .await
@@ -399,13 +387,18 @@ impl ToolSet for ComputerMcp {
                 "User resumed computer use. Take a fresh screenshot.".into(),
             )]);
         }
-        if name == "windows" && args["include_user"].as_bool() == Some(true)
-            || name == "window" && args["action"] == "bring_here"
+        if name == "windows" && arguments["include_user"].as_bool() == Some(true)
+            || name == "window" && arguments["action"] == "bring_here"
             || name == "clipboard"
             || name == "launch"
         {
             self.hub
-                .ask_approval_on("computer", caller, name, format!("Computer {name}: {args}"))
+                .ask_approval_on(
+                    "computer",
+                    caller,
+                    name,
+                    format!("Computer {name}: {arguments}"),
+                )
                 .await
                 .map_err(|source| ComputerError::Approval {
                     tool: name.to_owned(),
@@ -421,8 +414,9 @@ impl ToolSet for ComputerMcp {
         let caller = caller.clone();
         let tool = name.to_owned();
         let worker_halt = Arc::clone(&halt);
-        let mut worker =
-            tokio::task::spawn_blocking(move || this.execute(&caller, &tool, &args, &worker_halt));
+        let mut worker = tokio::task::spawn_blocking(move || {
+            this.execute(&caller, &tool, &arguments, &worker_halt)
+        });
         let joined = tokio::select! {
             joined = &mut worker => joined,
             why = self.halted(&stop, &mut settings) => {

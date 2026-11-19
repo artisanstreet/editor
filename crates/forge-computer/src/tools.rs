@@ -1,6 +1,6 @@
 use forge_mcp::Tool;
 use serde_json::{Value, json};
-pub fn list() -> Vec<Tool> {
+pub(crate) fn list() -> Vec<Tool> {
     vec![
         tool(
             "screenshot",
@@ -16,6 +16,10 @@ pub fn list() -> Vec<Tool> {
             &["x", "y", "width", "height"],
             true,
         ),
+        #[expect(
+            clippy::literal_string_with_formatting_args,
+            reason = "the input description shows the model JSON-like step shapes in braces"
+        )]
         tool(
             "input",
             "Run up to 256 steps in order. Coordinates [x,y] use the last full screenshot. Steps: move:[x,y], click:[x,y] with optional button/count; down/up:[x,y] or true; drag:[[x,y],...] with optional button; scroll:[x,y] with dx/dy wheel notches (positive down/right); key:'ctrl+s'; key_down/key_up:'Shift'; type:'Unicode text'; wait:{ms:100} or {until:'changed'|'settled',timeout_ms:3000}. One action per step. Held keys/buttons release at batch end. Physical input interrupts and pauses. Completed step count is returned; never blindly retry.",
