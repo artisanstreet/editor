@@ -19,7 +19,8 @@ fn found(conn: &Connection, query: &str) -> Vec<(String, String)> {
 #[test]
 fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
     let mut conn = Connection::open_in_memory().expect("open the database");
-    migrate_to(&mut conn, 29).expect("migrate to the schema before folded text");
+    migrate_to(&mut conn, 29, Upgrade::of(&crate::Environment::system()))
+        .expect("migrate to the schema before folded text");
     conn.execute(
         include_str!("insert_thread.sql"),
         rusqlite::params!["t", json!({"title": "Old", "project_id": "p"}).to_string()],
@@ -43,7 +44,8 @@ fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
             .expect("index the message the old way");
     }
 
-    migrate(&mut conn).expect("migrate to today's schema");
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system()))
+        .expect("migrate to today's schema");
     crate::recall::refresh_index(&mut conn).expect("rebuild the recall index");
 
     assert_eq!(

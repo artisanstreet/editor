@@ -2,7 +2,11 @@ use super::*;
 use artisan_api::{PlanStep, StepStatus, TextContent};
 fn database() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
-    crate::schema::migrate(&mut conn).unwrap();
+    crate::schema::migrate(
+        &mut conn,
+        crate::schema::Upgrade::of(&crate::Environment::system()),
+    )
+    .unwrap();
     conn
 }
 fn steps(count: usize) -> Vec<PlanStep> {
@@ -17,10 +21,10 @@ fn steps(count: usize) -> Vec<PlanStep> {
 fn five_thousand_records_use_indexed_bounded_ranges_and_keep_order() {
     let conn = database();
     let original = steps(5000);
-    let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &original, &BTreeSet::new(), 0, 0).unwrap();
     assert_eq!(reference.count, 5000);
     assert!(serde_json::to_string(&reference).unwrap().len() < 256);
-    let duplicate = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
+    let duplicate = store(&stamped(&conn), &original, &BTreeSet::new(), 0, 0).unwrap();
     assert_eq!(reference, duplicate);
     assert_eq!(
         conn.query_row(include_str!("content_rows.sql"), [], |row| row
@@ -93,7 +97,7 @@ fn byte_budget_bounds_a_page_even_when_count_limit_is_not_reached() {
             status: StepStatus::Pending,
         })
         .collect();
-    let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &original, &BTreeSet::new(), 0, 0).unwrap();
     let page = range::<PlanStep>(&conn, &reference.source.id, CollectionQuery::default())
         .unwrap()
         .unwrap();
@@ -110,7 +114,7 @@ fn byte_budget_bounds_a_page_even_when_count_limit_is_not_reached() {
 fn nested_sources_survive_item_updates_then_collect_after_parent_grace() {
     let conn = database();
     let mut text = TextContent::Inline("a large step\n".repeat(3000));
-    crate::content::normalize_text(&conn, &mut text).unwrap();
+    crate::content::normalize_text(&stamped(&conn), &mut text).unwrap();
     let TextContent::Stored(child_source) = &text else {
         panic!("large text must be stored")
     };
@@ -118,7 +122,7 @@ fn nested_sources_survive_item_updates_then_collect_after_parent_grace() {
     let child = child_source.id.clone();
     let dependencies = BTreeSet::from([child]);
     let parent = store(
-        &conn,
+        &stamped(&conn),
         &[PlanStep {
             text,
             status: StepStatus::Pending,
@@ -157,7 +161,7 @@ fn rollback_and_missing_index_cannot_publish_partial_collections() {
     let mut conn = database();
     {
         let tx = conn.transaction().unwrap();
-        store(&tx, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
+        store(&stamped(&tx), &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
     }
     assert_eq!(
         conn.query_row(include_str!("content_rows.sql"), [], |row| row
@@ -171,7 +175,7 @@ fn rollback_and_missing_index_cannot_publish_partial_collections() {
             .unwrap(),
         0
     );
-    let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
     conn.execute(
         include_str!("drop_record_4000.sql"),
         [reference.source.id.as_str()],
@@ -197,7 +201,7 @@ fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
             description: None,
         })
         .collect::<Vec<_>>();
-    let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &options, &BTreeSet::new(), 0, 0).unwrap();
     let question = artisan_api::Question {
         id: "question".into(),
         header: None,
@@ -254,7 +258,7 @@ fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
             .into(),
         ),
     };
-    normalize_item(&conn, &mut kind).unwrap();
+    normalize_item(&stamped(&conn), &mut kind).unwrap();
     let artisan_api::ItemKind::Question {
         answers: Some(artisan_api::Collection::Inline(answers)),
         ..
@@ -294,7 +298,7 @@ fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
         questions: vec![].into(),
         answers: Some(vec![None; 5000].into()),
     };
-    normalize_item(&conn, &mut kind).unwrap();
+    normalize_item(&stamped(&conn), &mut kind).unwrap();
     let artisan_api::ItemKind::Question {
         answers: Some(artisan_api::Collection::Stored(answers)),
         ..
@@ -318,7 +322,7 @@ fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
 #[test]
 fn missing_final_index_record_cannot_return_a_short_successful_page() {
     let conn = database();
-    let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
     conn.execute(
         include_str!("drop_record_4999.sql"),
         [reference.source.id.as_str()],
@@ -344,7 +348,7 @@ fn canonical_answer_display_is_derived_once_and_free_text_stays_literal() {
             description: None,
         })
         .collect::<Vec<_>>();
-    let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
+    let reference = store(&stamped(&conn), &options, &BTreeSet::new(), 0, 0).unwrap();
     let mut kind = artisan_api::ItemKind::Question {
         blocking: false,
         questions: vec![artisan_api::Question {
@@ -416,8 +420,14 @@ fn duplicate_opaque_record_keys_roll_back_with_the_item_transaction() {
             label: "Choice".into(),
             description: None,
         };
-        store(&tx, &[duplicate.clone(), duplicate], &BTreeSet::new(), 0, 0)
-            .expect_err("duplicate option ids are refused");
+        store(
+            &stamped(&tx),
+            &[duplicate.clone(), duplicate],
+            &BTreeSet::new(),
+            0,
+            0,
+        )
+        .expect_err("duplicate option ids are refused");
     }
     assert_eq!(
         conn.query_row(include_str!("content_rows.sql"), [], |row| row
@@ -431,4 +441,11 @@ fn duplicate_opaque_record_keys_roll_back_with_the_item_transaction() {
             .unwrap(),
         0
     );
+}
+
+fn stamped(conn: &Connection) -> crate::content::Stamped<'_> {
+    crate::content::Stamped {
+        conn,
+        now: artisan_api::now(),
+    }
 }

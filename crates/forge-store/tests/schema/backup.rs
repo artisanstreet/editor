@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::{MIGRATIONS, migrate_to};
+use crate::schema::{MIGRATIONS, Upgrade, migrate_to};
 use rusqlite::config::DbConfig;
 
 fn open(path: &Path) -> Connection {
@@ -40,13 +40,23 @@ fn reinstalling_the_previous_forge_restores_its_data_and_sets_newer_data_aside()
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, previous).expect("previous Forge creates its database");
+        migrate_to(
+            &mut conn,
+            previous,
+            Upgrade::of(&crate::Environment::system()),
+        )
+        .expect("previous Forge creates its database");
         remember(&conn, "before upgrade");
     }
     std::fs::write(dir.path().join("forge.sqlite3.schema-1"), "stale").expect("older backup");
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len()).expect("newer Forge upgrades");
+        migrate_to(
+            &mut conn,
+            MIGRATIONS.len(),
+            Upgrade::of(&crate::Environment::system()),
+        )
+        .expect("newer Forge upgrades");
         remember(&conn, "after upgrade");
     }
     assert!(
@@ -68,7 +78,12 @@ fn reinstalling_the_previous_forge_restores_its_data_and_sets_newer_data_aside()
     assert_eq!(version(&database), previous);
     assert_eq!(keys(&database), ["before upgrade"]);
     let mut conn = open(&database);
-    migrate_to(&mut conn, previous).expect("previous Forge opens its restored database");
+    migrate_to(
+        &mut conn,
+        previous,
+        Upgrade::of(&crate::Environment::system()),
+    )
+    .expect("previous Forge opens its restored database");
     assert_eq!(
         roll_back(&database, previous).expect("second start"),
         Rollback::Current
@@ -81,7 +96,12 @@ fn a_newer_database_without_a_backup_is_refused_and_left_untouched() {
     let database = dir.path().join("forge.sqlite3");
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, MIGRATIONS.len()).expect("newer Forge creates its database");
+        migrate_to(
+            &mut conn,
+            MIGRATIONS.len(),
+            Upgrade::of(&crate::Environment::system()),
+        )
+        .expect("newer Forge creates its database");
         remember(&conn, "newer");
     }
     let error = roll_back(&database, MIGRATIONS.len() - 1).expect_err("no backup");
@@ -97,14 +117,24 @@ fn a_newer_database_with_its_log_still_on_disk_is_rolled_back_keeping_the_logged
     let previous = MIGRATIONS.len() - 1;
     {
         let mut conn = open(&database);
-        migrate_to(&mut conn, previous).expect("previous Forge creates its database");
+        migrate_to(
+            &mut conn,
+            previous,
+            Upgrade::of(&crate::Environment::system()),
+        )
+        .expect("previous Forge creates its database");
         remember(&conn, "before upgrade");
     }
     let mut crashed = open(&database);
     crashed
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .expect("leave the log unchecked on close, as a crash does");
-    migrate_to(&mut crashed, MIGRATIONS.len()).expect("newer Forge upgrades");
+    migrate_to(
+        &mut crashed,
+        MIGRATIONS.len(),
+        Upgrade::of(&crate::Environment::system()),
+    )
+    .expect("newer Forge upgrades");
     remember(&crashed, "only in the log");
     drop(crashed);
     assert!(

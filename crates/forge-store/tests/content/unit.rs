@@ -1,12 +1,16 @@
 use super::*;
 fn database() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
-    crate::schema::migrate(&mut conn).unwrap();
+    crate::schema::migrate(
+        &mut conn,
+        crate::schema::Upgrade::of(&crate::Environment::system()),
+    )
+    .unwrap();
     conn
 }
 fn stored(conn: &Connection, text: &str) -> ContentRef {
     let mut value = TextContent::Inline(text.to_owned());
-    normalize_text(conn, &mut value).unwrap();
+    normalize_text(&stamped(conn), &mut value).unwrap();
     let TextContent::Stored(source) = value else {
         panic!("large payload was not externalized")
     };
@@ -136,14 +140,14 @@ fn unknown_and_inconsistent_references_are_rejected_and_chunk_gaps_are_errors() 
     let conn = database();
     let source = stored(&conn, &"abcd".repeat(25000));
     let mut known = TextContent::Stored(source.clone());
-    normalize_text(&conn, &mut known).unwrap();
+    normalize_text(&stamped(&conn), &mut known).unwrap();
     let mut wrong_length = source.clone();
     wrong_length.bytes += 1;
-    normalize_text(&conn, &mut TextContent::Stored(wrong_length))
+    normalize_text(&stamped(&conn), &mut TextContent::Stored(wrong_length))
         .expect_err("a reference with the wrong length is refused");
     let mut unknown = source.clone();
     unknown.id = ContentId("f".repeat(64));
-    normalize_text(&conn, &mut TextContent::Stored(unknown))
+    normalize_text(&stamped(&conn), &mut TextContent::Stored(unknown))
         .expect_err("a reference to unknown content is refused");
     conn.execute(include_str!("drop_second_chunk.sql"), [source.id.as_str()])
         .unwrap();
@@ -172,4 +176,11 @@ fn collection_batches_are_bounded_and_make_progress_on_a_large_source() {
     assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
     assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
     assert_eq!(collect(&conn, i64::MAX).unwrap(), 0);
+}
+
+fn stamped(conn: &Connection) -> Stamped<'_> {
+    Stamped {
+        conn,
+        now: artisan_api::now(),
+    }
 }

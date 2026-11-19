@@ -115,7 +115,25 @@ fn damaged(content: &ContentId, damage: Damage) -> ContentError {
     }
 }
 
-pub(crate) fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) -> Result<()> {
+#[derive(Clone, Copy)]
+pub(crate) struct Stamped<'c> {
+    pub(crate) conn: &'c Connection,
+    pub(crate) now: artisan_api::Timestamp,
+}
+
+impl std::ops::Deref for Stamped<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn
+    }
+}
+
+pub(crate) fn normalize(
+    conn: &Stamped<'_>,
+    item: &mut Item,
+    previous: Option<&Item>,
+) -> Result<()> {
     let mut bytes = 0u64;
     item.kind.try_visit_texts_mut(|text| {
         bytes = bytes.saturating_add(text.byte_len());
@@ -125,7 +143,11 @@ pub(crate) fn normalize(conn: &Connection, item: &mut Item, previous: Option<&It
         normalize_text(conn, text)
     })?;
     crate::collection::normalize_item(conn, &mut item.kind)?;
-    crate::collection::derive_answer_text(conn, &mut item.kind, previous.map(|item| &item.kind))?;
+    crate::collection::derive_answer_text(
+        conn.conn,
+        &mut item.kind,
+        previous.map(|item| &item.kind),
+    )?;
     if let artisan_api::ItemKind::Question {
         answer_text: Some(text),
         ..
@@ -238,7 +260,7 @@ pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<
     Ok(())
 }
 
-pub(crate) fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
+pub(crate) fn normalize_text(conn: &Stamped<'_>, text: &mut TextContent) -> Result<()> {
     match text {
         TextContent::Inline(value) if value.len() > artisan_api::INLINE_TEXT_BYTES => {
             let source = store_source(conn, value)?;
@@ -553,7 +575,7 @@ pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize, StorageError
     Ok(removed)
 }
 
-pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
+pub(crate) fn migrate(conn: &Stamped<'_>, collections: bool) -> Result<()> {
     let mut select = conn.prepare(include_str!("sql/migrations/items_by_rowid.sql"))?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
@@ -602,12 +624,12 @@ pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
                 params![id, normalized],
             )?;
         }
-        own(conn, &item)?;
+        own(conn.conn, &item)?;
     }
     Ok(())
 }
 
-pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
+pub(crate) fn store_source(conn: &Stamped<'_>, value: &str) -> Result<ContentRef> {
     if value.len() as u64 > MAX_SOURCE_BYTES {
         return Err(ContentError::TextTooLarge {
             bytes: value.len() as u64,
@@ -626,7 +648,7 @@ pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef>
                 source.lines,
                 totals.added,
                 totals.removed,
-                artisan_api::now()
+                conn.now
             ])?;
         let mut insert = conn.prepare_cached(include_str!("sql/content/insert_chunk.sql"))?;
         let mut start = 0;

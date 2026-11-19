@@ -430,6 +430,13 @@ impl Tx<'_> {
         self.clock.now()
     }
 
+    pub(crate) fn stamped(&self) -> crate::content::Stamped<'_> {
+        crate::content::Stamped {
+            conn: &self.sql,
+            now: self.now(),
+        }
+    }
+
     pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
     }
@@ -520,7 +527,7 @@ impl Tx<'_> {
         mut item: Item,
         old: Option<Item>,
     ) -> Result<Item, WriteFailure> {
-        crate::content::normalize(self, &mut item, old.as_ref())?;
+        crate::content::normalize(&self.stamped(), &mut item, old.as_ref())?;
         let new = old.is_none();
         if let Some(old) = old {
             item.seq = old.seq;
@@ -590,7 +597,7 @@ impl Tx<'_> {
         blob_dir: &std::path::Path,
     ) -> Result<(Item, bool), InputFailure> {
         new.kind
-            .try_visit_texts_mut(|text| crate::content::normalize_text(self, text))?;
+            .try_visit_texts_mut(|text| crate::content::normalize_text(&self.stamped(), text))?;
         if let Some(existing) = read::item(self, &new.id)? {
             let same = existing.thread_id == new.thread_id
                 && matches!((&existing.kind, &new.kind),

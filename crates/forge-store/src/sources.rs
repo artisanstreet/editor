@@ -113,7 +113,7 @@ impl Store {
         }
         self.write(move |tx| {
             let _permit = permit;
-            source_index::publish(tx, &prepared)
+            source_index::publish(&tx.stamped(), &prepared)
         })
         .await
         .map(|published| published.is_some())
@@ -147,7 +147,7 @@ impl Store {
     }
 
     pub async fn gc_content(&self) -> Result<usize, CollectContentError> {
-        self.write(|tx| content::collect(tx, artisan_api::now()))
+        self.write(|tx| content::collect(tx, tx.now()))
             .await
             .map_err(|cause| CollectContentError {
                 cause: Box::new(cause),

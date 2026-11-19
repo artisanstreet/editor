@@ -111,7 +111,7 @@ fn check_dependencies(
 }
 
 fn store<T: Serialize>(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     records: &[T],
     dependencies: &BTreeSet<ContentId>,
     authored_bytes: u64,
@@ -130,12 +130,7 @@ fn store<T: Serialize>(
     check_dependencies(conn, &source.id, dependencies)?;
     let inserted = conn.execute(
         INSERT_CONTENT,
-        params![
-            source.id.as_str(),
-            source.bytes,
-            source.lines,
-            artisan_api::now()
-        ],
+        params![source.id.as_str(), source.bytes, source.lines, conn.now],
     )? != 0;
     let indexed = conn.execute(
         INSERT_COLLECTION,
@@ -537,9 +532,13 @@ fn dependency(text: &artisan_api::TextContent, ids: &mut BTreeSet<ContentId>) ->
     text.byte_len()
 }
 fn normalize<T: Serialize>(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     collection: &mut artisan_api::Collection<T>,
-    mut record_metrics: impl FnMut(&Connection, &mut T, &mut BTreeSet<ContentId>) -> Result<Metrics>,
+    mut record_metrics: impl FnMut(
+        &crate::content::Stamped<'_>,
+        &mut T,
+        &mut BTreeSet<ContentId>,
+    ) -> Result<Metrics>,
 ) -> Result<Metrics> {
     let records = match collection {
         artisan_api::Collection::Inline(records) => records,
@@ -579,7 +578,7 @@ fn normalize<T: Serialize>(
     Ok(total)
 }
 fn normalize_options(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     options: &mut artisan_api::Collection<artisan_api::QuestionOption>,
 ) -> Result<Metrics> {
     normalize(conn, options, |_, option, ids| {
@@ -592,7 +591,10 @@ fn normalize_options(
         })
     })
 }
-pub(crate) fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub(crate) fn normalize_item(
+    conn: &crate::content::Stamped<'_>,
+    kind: &mut artisan_api::ItemKind,
+) -> Result<()> {
     use artisan_api::{ItemKind, ToolKind};
     match kind {
         ItemKind::Plan { steps, .. } => {

@@ -5,7 +5,7 @@ fn persisted_settings_and_old_question_answers_upgrade_once_without_new_revision
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.sqlite");
     let mut conn = Connection::open(&path).unwrap();
-    migrate_to(&mut conn, 9).unwrap();
+    migrate_to(&mut conn, 9, Upgrade::of(&crate::Environment::system())).unwrap();
     let codex = json!({"engine":"codex","model":null,"effort":null,"options":{"service_tier":"priority","unrelated":42}});
     let cursor = json!({"engine":"cursor","model":null,"effort":null,"options":{"fast":true}});
     let opencode =
@@ -28,10 +28,10 @@ fn persisted_settings_and_old_question_answers_upgrade_once_without_new_revision
     let question = json!({"id":"q","thread_id":"t","position":1,"seq":20,"run_id":null,"parent_id":null,"status":"done","created_at":1,"updated_at":1,"kind":{"type":"question","blocking":false,"questions":[{"id":"q","header":null,"text":"Pick","multi_select":false,"options":[{"label":"Same","description":null},{"label":"Same","description":null}]}],"answers":[["Same"]]}});
     conn.execute(include_str!("insert_question.sql"), [question.to_string()])
         .unwrap();
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     drop(conn);
     let mut conn = Connection::open(&path).unwrap();
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     let body: String = conn
         .query_row(include_str!("thread_t_body.sql"), [], |row| row.get(0))
         .unwrap();

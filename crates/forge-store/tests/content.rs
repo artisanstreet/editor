@@ -405,3 +405,74 @@ async fn a_compaction_summary_between_4_kib_and_the_inline_limit_is_accepted() {
     };
     assert_eq!(store.resolve_text(&kept).await.unwrap(), summary);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_a_message_no_longer_uses_is_collected_a_day_later_on_forges_clock() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicI64::new(artisan_api::now()));
+    let reading = Arc::clone(&now);
+    let lock = std::fs::File::create(dir.path().join("forge.lock")).unwrap();
+    let store = Store::open_restoring_in(
+        dir.path(),
+        &lock,
+        forge_store::Environment {
+            clock: artisan_api::WallClock::new(move || reading.load(Ordering::SeqCst)),
+            ..forge_store::Environment::system()
+        },
+    )
+    .unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/collected".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let reply = |text: String| NewItem {
+        id: ItemId::from("reply"),
+        thread_id: thread.id.clone(),
+        run_id: None,
+        parent_id: None,
+        native_id: None,
+        status: Status::Running,
+        kind: ItemKind::AssistantMessage {
+            text: text.into(),
+            phase: Phase::Final,
+        },
+    };
+    let long = store
+        .upsert_item(reply("a long draft\n".repeat(4096)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        long.kind,
+        ItemKind::AssistantMessage {
+            text: TextContent::Stored(_),
+            ..
+        }
+    ));
+    store.upsert_item(reply("short".into())).await.unwrap();
+
+    assert_eq!(store.gc_content().await.unwrap(), 0, "kept for a day");
+    now.fetch_add(DAY_MILLIS + 60_000, Ordering::SeqCst);
+    assert_eq!(
+        store.gc_content().await.unwrap(),
+        1,
+        "collected once Forge's clock passes the day"
+    );
+}

@@ -4,7 +4,7 @@ use serde_json::json;
 #[test]
 fn activity_backfill_uses_source_events_and_preserves_revisions() {
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 11).unwrap();
+    migrate_to(&mut conn, 11, Upgrade::of(&crate::Environment::system())).unwrap();
     for (id, activity) in [
         ("edited-input", 20),
         ("delivered-input", 30),
@@ -40,7 +40,7 @@ fn activity_backfill_uses_source_events_and_preserves_revisions() {
         [json!({"started_at":600,"ended_at":650}).to_string()],
     )
     .unwrap();
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     for (id, expected) in [
         ("edited-input", 200),
         ("delivered-input", 300),
@@ -55,7 +55,7 @@ fn activity_backfill_uses_source_events_and_preserves_revisions() {
             .unwrap();
         assert_eq!((seq, activity_at, updated_at), (99, expected, 9999), "{id}");
     }
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     assert_eq!(
         conn.pragma_query_value::<usize, _>(None, "user_version", |row| row.get(0))
             .unwrap(),

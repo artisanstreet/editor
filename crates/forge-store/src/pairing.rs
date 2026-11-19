@@ -141,8 +141,8 @@ pub(crate) fn device_signal(database: &Path) -> PathBuf {
     database.with_file_name("devices.changed")
 }
 
-pub(crate) fn announce_device_change(database: &Path) -> std::io::Result<()> {
-    std::fs::write(device_signal(database), artisan_api::now().to_string())
+pub(crate) fn announce_device_change(database: &Path, now: Timestamp) -> std::io::Result<()> {
+    std::fs::write(device_signal(database), now.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -376,7 +376,8 @@ impl Store {
         if revoked {
             let _no_subscribers = self.inner.revocations.send(id.clone());
             let database = self.inner.database.clone();
-            tokio::task::spawn_blocking(move || announce_device_change(&database))
+            let now = self.now();
+            tokio::task::spawn_blocking(move || announce_device_change(&database, now))
                 .await
                 .map_err(|source| RevokeDeviceError {
                     device: id.clone(),

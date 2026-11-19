@@ -545,8 +545,12 @@ fn stored_version(connections: &Connections, database: &Path) -> Result<usize, O
         .map_err(|source| prepare(source.into()))
 }
 
-fn upgrade(conn: &mut Connection, database: &Path) -> Result<(), OpenStoreError> {
-    schema::migrate(conn).map_err(|source| OpenStoreError::Migrate {
+fn upgrade(
+    conn: &mut Connection,
+    database: &Path,
+    upgrade: schema::Upgrade,
+) -> Result<(), OpenStoreError> {
+    schema::migrate(conn, upgrade).map_err(|source| OpenStoreError::Migrate {
         database: database.to_owned(),
         source,
     })?;
@@ -702,6 +706,7 @@ impl Store {
         opening: Opening,
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
+        let upgrading = schema::Upgrade::of(&environment);
         let Environment { connections, clock } = environment;
         let recover = matches!(opening, Opening::Upgrade(_));
         let prepare = |source| OpenStoreError::Database {
@@ -721,7 +726,7 @@ impl Store {
         conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
             .map_err(sql)?;
         if recover {
-            upgrade(&mut conn, &database)?;
+            upgrade(&mut conn, &database, upgrading)?;
         }
 
         let events = feed::Feed::new(CHANGES);

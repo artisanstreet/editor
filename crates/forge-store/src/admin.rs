@@ -1,6 +1,6 @@
 use crate::error::StorageError;
 use crate::{BUSY_TIMEOUT, Device, PairCodeHash, schema};
-use artisan_api::{DeviceId, Timestamp};
+use artisan_api::{DeviceId, Timestamp, WallClock};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
@@ -52,6 +52,7 @@ crate::error::operation_error!(DevicesError(StorageError), "list the paired devi
 pub struct Admin {
     conn: Connection,
     database: PathBuf,
+    clock: WallClock,
 }
 
 impl Admin {
@@ -65,6 +66,7 @@ impl Admin {
         Ok(Self {
             conn,
             database: path,
+            clock: WallClock::system(),
         })
     }
 
@@ -78,6 +80,7 @@ impl Admin {
         Ok(Self {
             conn,
             database: path,
+            clock: WallClock::system(),
         })
     }
 
@@ -108,7 +111,7 @@ impl Admin {
     ) -> Result<(), PairCodeError> {
         let saved = || -> Result<(), StorageError> {
             let tx = self.conn.unchecked_transaction()?;
-            crate::pairing::add_pair_code(&tx, code, expires_at, artisan_api::now())?;
+            crate::pairing::add_pair_code(&tx, code, expires_at, self.clock.now())?;
             tx.commit()?;
             Ok(())
         };
@@ -161,13 +164,13 @@ impl Admin {
         self.conn
             .execute(include_str!("sql/pairing/revoke.sql"), [device.id.as_str()])
             .map_err(|source| storage(source.into()))?;
-        crate::pairing::announce_device_change(&self.database).map_err(|source| {
-            RevokeError::Announce {
+        crate::pairing::announce_device_change(&self.database, self.clock.now()).map_err(
+            |source| RevokeError::Announce {
                 id: id.to_owned(),
                 path: crate::pairing::device_signal(&self.database),
                 source,
-            }
-        })?;
+            },
+        )?;
         Ok(Some(device))
     }
 }

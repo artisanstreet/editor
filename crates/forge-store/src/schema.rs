@@ -8,6 +8,19 @@ mod backup;
 pub(crate) use backup::Rollback;
 pub use backup::{BackupError, RollbackError};
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Upgrade {
+    pub(crate) at: artisan_api::Timestamp,
+}
+
+impl Upgrade {
+    pub(crate) fn of(environment: &crate::Environment) -> Self {
+        Self {
+            at: environment.clock.now(),
+        }
+    }
+}
+
 type Result<T, E = MigrationFailure> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +82,7 @@ mod released_tests;
 enum Step {
     Sql(&'static str),
     Rust(fn(&Connection) -> Result<()>),
+    Stamped(fn(&crate::content::Stamped<'_>) -> Result<()>),
 }
 
 const MIGRATIONS: &[&[Step]] = &[
@@ -89,9 +103,9 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(include_str!("sql/migrations/v12.sql"))],
     &[
         Step::Sql(include_str!("sql/migrations/v13.sql")),
-        Step::Rust(migrate_sources),
+        Step::Stamped(migrate_sources),
     ],
-    &[Step::Sql(COLLECTIONS), Step::Rust(migrate_collections)],
+    &[Step::Sql(COLLECTIONS), Step::Stamped(migrate_collections)],
     &[Step::Sql(SOURCE_INDEXES)],
     &[Step::Sql(include_str!("sql/migrations/v16.sql"))],
     &[
@@ -257,15 +271,15 @@ const COLLECTIONS: &str = include_str!("sql/migrations/v14.sql");
 
 const SOURCE_INDEXES: &str = include_str!("sql/migrations/v15.sql");
 
-pub(crate) fn migrate(conn: &mut Connection) -> Result<(), SchemaError> {
-    migrate_to(conn, MIGRATIONS.len())
+pub(crate) fn migrate(conn: &mut Connection, upgrade: Upgrade) -> Result<(), SchemaError> {
+    migrate_to(conn, MIGRATIONS.len(), upgrade)
 }
 
 pub(crate) fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
     backup::roll_back(database, MIGRATIONS.len())
 }
 
-fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), SchemaError> {
+fn migrate_to(conn: &mut Connection, target: usize, upgrade: Upgrade) -> Result<(), SchemaError> {
     let version: usize = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(SchemaError::Version)?;
@@ -282,7 +296,7 @@ fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), SchemaError> {
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;
         tracing::info!("upgrading the database to schema {next} of {target}");
-        apply(conn, next, steps).map_err(|source| SchemaError::Step {
+        apply(conn, next, steps, upgrade.at).map_err(|source| SchemaError::Step {
             migration: next,
             source,
         })?;
@@ -290,12 +304,18 @@ fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), SchemaError> {
     Ok(())
 }
 
-fn apply(conn: &mut Connection, next: usize, steps: &[Step]) -> Result<()> {
+fn apply(
+    conn: &mut Connection,
+    next: usize,
+    steps: &[Step],
+    now: artisan_api::Timestamp,
+) -> Result<()> {
     let tx = conn.transaction()?;
     for step in steps {
         match step {
             Step::Sql(sql) => tx.execute_batch(sql)?,
             Step::Rust(translate) => translate(&tx)?,
+            Step::Stamped(translate) => translate(&crate::content::Stamped { conn: &tx, now })?,
         }
     }
     tx.pragma_update(None, "user_version", next)?;
@@ -336,11 +356,11 @@ fn backfill_outline(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_sources(conn: &Connection) -> Result<()> {
+fn migrate_sources(conn: &crate::content::Stamped<'_>) -> Result<()> {
     Ok(crate::content::migrate(conn, false)?)
 }
 
-fn migrate_collections(conn: &Connection) -> Result<()> {
+fn migrate_collections(conn: &crate::content::Stamped<'_>) -> Result<()> {
     Ok(crate::content::migrate(conn, true)?)
 }
 

@@ -25,7 +25,7 @@ fn item(id: &str, parent: Option<&str>, status: Status, kind: ItemKind) -> Item 
 #[test]
 fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 15).unwrap();
+    migrate_to(&mut conn, 15, Upgrade::of(&crate::Environment::system())).unwrap();
     let rows = [
         item(
             "input",
@@ -61,7 +61,7 @@ fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
         )
         .unwrap();
     }
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     assert_eq!(
         crate::read::pending_threads(&conn, 8, &[], artisan_api::now()).unwrap(),
         [ThreadId("t".into())]
@@ -92,7 +92,7 @@ fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
 fn repeated_compaction_items_collapse_to_one_per_compaction() {
     use serde_json::json;
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 17).unwrap();
+    migrate_to(&mut conn, 17, Upgrade::of(&crate::Environment::system())).unwrap();
     let compaction = |id: &str, run: &str, position: i64, before: Option<u64>| {
         let body = json!({"id":id,"thread_id":"t","position":position,"seq":position,
             "run_id":run,"parent_id":null,"status":"done","created_at":1,"updated_at":1,
@@ -110,7 +110,7 @@ fn repeated_compaction_items_collapse_to_one_per_compaction() {
     compaction("interrupted-1", "r2", 4, None);
     compaction("interrupted-2", "r2", 5, None);
     compaction("other-run", "r3", 6, Some(500_000));
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     let page = crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
     let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(ids, ["boundary", "interrupted-1", "other-run"]);
@@ -120,7 +120,7 @@ fn repeated_compaction_items_collapse_to_one_per_compaction() {
 fn stored_approvals_move_onto_their_items_and_agent_messages_name_their_agent() {
     use serde_json::json;
     let mut conn = Connection::open_in_memory().unwrap();
-    migrate_to(&mut conn, 16).unwrap();
+    migrate_to(&mut conn, 16, Upgrade::of(&crate::Environment::system())).unwrap();
     let row = |id: &str, position: i64, status: &str, kind: serde_json::Value| {
         json!({"id":id,"thread_id":"t","position":position,"seq":position,"run_id":null,
             "parent_id":null,"status":status,"created_at":1,"updated_at":1,"kind":kind})
@@ -175,7 +175,7 @@ fn stored_approvals_move_onto_their_items_and_agent_messages_name_their_agent() 
         )
         .unwrap();
     }
-    migrate(&mut conn).unwrap();
+    migrate(&mut conn, Upgrade::of(&crate::Environment::system())).unwrap();
     let page = crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
     let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(ids, ["tool", "orphan", "agent", "sent"]);

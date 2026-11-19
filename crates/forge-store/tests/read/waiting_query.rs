@@ -1,7 +1,11 @@
 #[test]
 fn waiting_query_uses_its_ordered_partial_index_with_one_hundred_thousand_historical_items() {
     let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    crate::schema::migrate(&mut conn).unwrap();
+    crate::schema::migrate(
+        &mut conn,
+        crate::schema::Upgrade::of(&crate::Environment::system()),
+    )
+    .unwrap();
     conn.execute_batch(include_str!("historical_items.sql"))
         .unwrap();
     conn.execute(include_str!("waiting_items.sql"), []).unwrap();

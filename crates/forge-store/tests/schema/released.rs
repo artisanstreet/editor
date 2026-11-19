@@ -168,9 +168,12 @@ async fn an_upgrade_interrupted_after_schema_19_finishes_and_finds_its_messages(
         unpack(INTERRUPTED, &database);
         assert_eq!(version(&database), INTERRUPTED_SCHEMA);
         let mut conn = Connection::open(&database).expect("open the interrupted database");
-        migrate_to(&mut conn, stopped).unwrap_or_else(|error| {
-            panic!("today's Forge upgrades to schema {stopped}: {error:#?}")
-        });
+        migrate_to(
+            &mut conn,
+            stopped,
+            crate::schema::Upgrade::of(&crate::Environment::system()),
+        )
+        .unwrap_or_else(|error| panic!("today's Forge upgrades to schema {stopped}: {error:#?}"));
         drop(conn);
 
         let store = crate::Store::open(dir.path()).unwrap_or_else(|error| {

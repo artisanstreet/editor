@@ -252,7 +252,7 @@ impl PreparedIndex {
 }
 
 pub(crate) fn publish(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     prepared: &PreparedIndex,
 ) -> Result<Option<SourceIndexHeader>> {
     if let Some(existing) = header(conn, &prepared.source.id, prepared.format)? {
