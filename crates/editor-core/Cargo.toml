@@ -9,9 +9,6 @@ version.workspace = true
 test = false
 doctest = false
 
-[features]
-test-support = []
-
 [dependencies]
 aqua = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }

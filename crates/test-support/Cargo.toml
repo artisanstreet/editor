@@ -36,7 +36,7 @@ axum = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 editor-aqua = { workspace = true, optional = true, features = ["test-support"] }
 editor-conversation = { workspace = true, optional = true, features = ["test-support"] }
-editor-core = { workspace = true, optional = true, features = ["test-support"] }
+editor-core = { workspace = true, optional = true }
 editor-ui = { workspace = true, optional = true, features = ["test-support"] }
 forge-engines = { workspace = true, optional = true }
 forge-runs = { workspace = true, optional = true }

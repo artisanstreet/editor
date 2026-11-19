@@ -10,7 +10,7 @@ doctest = false
 
 [features]
 qualification = ["test-support"]
-test-support = ["editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support"]
+test-support = ["editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support"]
 
 [dependencies]
 aqua = { workspace = true }

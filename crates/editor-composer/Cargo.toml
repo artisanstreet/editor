@@ -9,7 +9,7 @@ version.workspace = true
 doctest = false
 
 [features]
-test-support = ["editor-core/test-support", "editor-ui/test-support"]
+test-support = ["editor-ui/test-support"]
 
 [dependencies]
 aqua = { workspace = true }

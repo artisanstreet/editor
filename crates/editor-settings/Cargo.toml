@@ -10,7 +10,7 @@ test = false
 doctest = false
 
 [features]
-test-support = ["editor-core/test-support", "editor-ui/test-support"]
+test-support = ["editor-ui/test-support"]
 
 [dependencies]
 diagnostics.workspace = true

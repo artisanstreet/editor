@@ -226,7 +226,10 @@ impl Editor {
         self.aqua
             .dispatch_frame_completed(&mut self.app, self.id, self.sequence);
         let tally = take_tally();
-        let refreshes = tally.event("section_refresh") + tally.event("transcript_subtree");
+        let refreshes = ["section_refresh", "transcript_subtree"]
+            .iter()
+            .filter_map(|event| tally.events.get(event))
+            .sum::<u32>();
         Frame {
             reasons: tally.reasons,
             rebuilds: u64::from(tally.rebuilds),

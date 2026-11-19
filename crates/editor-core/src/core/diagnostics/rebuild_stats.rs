@@ -4,45 +4,43 @@ use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub rebuilds: u32,
+    pub reasons: BTreeMap<&'static str, u32>,
+    pub events: BTreeMap<&'static str, u32>,
+}
+
+impl Tally {
+    fn count(counts: &mut BTreeMap<&'static str, u32>, key: &'static str) {
+        let count = counts.entry(key).or_default();
+        *count = count.saturating_add(1);
+    }
+}
+
 #[derive(Debug, Default)]
-pub struct RebuildStats {
-    window_start: Option<Duration>,
-    events: BTreeMap<&'static str, u32>,
-    rebuilds: u32,
-    reasons: BTreeMap<&'static str, u32>,
+struct Window {
+    start: Option<Duration>,
     spans: BTreeMap<&'static str, (u32, Duration, Duration)>,
 }
 
-impl RebuildStats {
-    fn event(&mut self, now: Duration, kind: &'static str) -> Option<String> {
-        *self.events.entry(kind).or_default() += 1;
-        self.roll(now)
-    }
-
-    fn rebuild(&mut self, now: Duration, reasons: &[&'static str]) -> Option<String> {
-        self.rebuilds += 1;
-        for reason in reasons {
-            *self.reasons.entry(reason).or_default() += 1;
-        }
-        self.roll(now)
-    }
-
-    fn span(&mut self, now: Duration, name: &'static str, took: Duration) -> Option<String> {
+impl Window {
+    fn span(&mut self, name: &'static str, took: Duration) {
         let entry = self.spans.entry(name).or_default();
         entry.0 += 1;
         entry.1 += took;
         entry.2 = entry.2.max(took);
-        self.roll(now)
     }
 
     fn roll(&mut self, now: Duration) -> Option<String> {
-        let start = *self.window_start.get_or_insert(now);
+        let start = *self.start.get_or_insert(now);
         (now.saturating_sub(start) >= WINDOW).then(|| {
+            let tally = take_tally();
             let report = format!(
                 "rebuilds={} reasons={:?} events={:?} spans={}",
-                self.rebuilds,
-                self.reasons,
-                self.events,
+                tally.rebuilds,
+                tally.reasons,
+                tally.events,
                 self.spans
                     .iter()
                     .map(|(name, (count, total, max))| format!(
@@ -54,7 +52,7 @@ impl RebuildStats {
                     .join(" ")
             );
             *self = Self {
-                window_start: Some(now),
+                start: Some(now),
                 ..Self::default()
             };
             report
@@ -62,36 +60,15 @@ impl RebuildStats {
     }
 }
 
-#[cfg(feature = "test-support")]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Tally {
-    pub rebuilds: u32,
-    pub reasons: BTreeMap<&'static str, u32>,
-    pub events: BTreeMap<&'static str, u32>,
-}
-
-#[cfg(feature = "test-support")]
-impl Tally {
-    #[must_use]
-    pub fn event(&self, kind: &str) -> u32 {
-        self.events.get(kind).copied().unwrap_or(0)
-    }
-}
-
-#[cfg(feature = "test-support")]
 thread_local! {
     static TALLY: RefCell<Tally> = RefCell::new(Tally::default());
+    static NOTES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    static WINDOW_STATS: RefCell<Window> = RefCell::new(Window::default());
+    static ORIGIN: Instant = Instant::now();
 }
 
-#[cfg(feature = "test-support")]
 pub fn take_tally() -> Tally {
     TALLY.with(|tally| std::mem::take(&mut *tally.borrow_mut()))
-}
-
-thread_local! {
-    static NOTES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
-    static STATS: RefCell<RebuildStats> = RefCell::new(RebuildStats::default());
-    static ORIGIN: Instant = Instant::now();
 }
 
 fn enabled() -> bool {
@@ -106,14 +83,23 @@ fn now() -> Duration {
     ORIGIN.with(Instant::elapsed)
 }
 
-pub fn record_event(kind: &'static str) {
-    #[cfg(feature = "test-support")]
-    TALLY.with(|tally| *tally.borrow_mut().events.entry(kind).or_default() += 1);
-    if enabled()
-        && let Some(report) = STATS.with(|stats| stats.borrow_mut().event(now(), kind))
-    {
+fn report_window(record: impl FnOnce(&mut Window)) {
+    if !enabled() {
+        return;
+    }
+    let report = WINDOW_STATS.with(|window| {
+        let mut window = window.borrow_mut();
+        record(&mut window);
+        window.roll(now())
+    });
+    if let Some(report) = report {
         tracing::info!(target: "rebuild_stats", "{report}");
     }
+}
+
+pub fn record_event(kind: &'static str) {
+    TALLY.with(|tally| Tally::count(&mut tally.borrow_mut().events, kind));
+    report_window(|_| {});
 }
 
 #[derive(Debug)]
@@ -127,27 +113,20 @@ impl Drop for Span {
     fn drop(&mut self) {
         if let Some(start) = self.1 {
             let took = start.elapsed();
-            if let Some(report) = STATS.with(|stats| stats.borrow_mut().span(now(), self.0, took)) {
-                tracing::info!(target: "rebuild_stats", "{report}");
-            }
+            report_window(|window| window.span(self.0, took));
         }
     }
 }
 
 pub fn record_rebuild(reasons: &[&'static str]) {
-    #[cfg(feature = "test-support")]
     TALLY.with(|tally| {
         let mut tally = tally.borrow_mut();
-        tally.rebuilds += 1;
+        tally.rebuilds = tally.rebuilds.saturating_add(1);
         for reason in reasons {
-            *tally.reasons.entry(reason).or_default() += 1;
+            Tally::count(&mut tally.reasons, reason);
         }
     });
-    if enabled()
-        && let Some(report) = STATS.with(|stats| stats.borrow_mut().rebuild(now(), reasons))
-    {
-        tracing::info!(target: "rebuild_stats", "{report}");
-    }
+    report_window(|_| {});
 }
 
 pub fn note(name: &'static str, changed: bool) -> bool {
