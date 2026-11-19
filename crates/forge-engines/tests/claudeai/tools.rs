@@ -27,7 +27,7 @@ fn runtime() -> Runtime {
         mcp: mcp::Servers::default(),
         shells: shells::Shells::default(),
         rules: Rules::default(),
-        sandbox: crate::sandbox::Sandbox::Open,
+        sandbox: Sandbox::Open,
     }
 }
 
@@ -351,12 +351,8 @@ async fn a_stop_ends_the_command_and_what_it_started() {
     assert_eq!(answer.text, "The command was stopped.");
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "test helper takes owned JSON literals"
-)]
-fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
-    project_rules_in(home, project, &permissions, Grammar::default())
+fn project_rules(home: &Path, project: &Path, permissions: &Value) -> Rules {
+    project_rules_in(home, project, permissions, Grammar::default())
 }
 
 fn project_rules_in(home: &Path, project: &Path, permissions: &Value, grammar: Grammar) -> Rules {
@@ -377,7 +373,7 @@ fn a_compound_command_is_not_allowed_by_a_rule_for_its_first_part() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "allow": ["Bash(npm run test:*)"] }),
+        &json!({ "allow": ["Bash(npm run test:*)"] }),
     );
     let allowed = Allowed::default();
     let fine = call("Bash", json!({ "command": "npm run test -- --ci" }));
@@ -429,7 +425,7 @@ fn always_allowing_a_command_does_not_skip_an_ask_rule() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "ask": ["Bash(git push:*)"] }),
+        &json!({ "ask": ["Bash(git push:*)"] }),
     );
     let push = call("Bash", json!({ "command": "git push --force" }));
     let mut allowed = Allowed::default();
@@ -448,7 +444,7 @@ async fn a_search_never_shows_a_denied_file() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "deny": ["Read(.env)", "Read(secrets/**)"] }),
+        &json!({ "deny": ["Read(.env)", "Read(secrets/**)"] }),
     );
     std::fs::create_dir_all(project.path().join("secrets")).expect("secrets");
     std::fs::write(project.path().join(".env"), "TOKEN=hunter2\n").expect("env");
@@ -488,7 +484,7 @@ fn accept_edits_asks_for_a_change_outside_the_project() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "defaultMode": "acceptEdits" }),
+        &json!({ "defaultMode": "acceptEdits" }),
     );
     let allowed = Allowed::default();
     let inside = call(
@@ -519,7 +515,7 @@ fn a_change_to_permission_settings_always_asks_short_of_full_access() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "defaultMode": "acceptEdits", "allow": ["Edit", "Write"] }),
+        &json!({ "defaultMode": "acceptEdits", "allow": ["Edit", "Write"] }),
     );
     let mut allowed = Allowed::default();
     allowed.remember(
@@ -585,7 +581,7 @@ fn web_fetch_asks_per_site_under_auto() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "allow": ["WebFetch(domain:other.example)"] }),
+        &json!({ "allow": ["WebFetch(domain:other.example)"] }),
     );
     assert_eq!(
         plan(&other, Permissions::Auto, &Allowed::default(), &rules),
@@ -753,7 +749,7 @@ async fn a_redirect_to_a_denied_domain_is_not_followed() {
     let rules = project_rules(
         home.path(),
         project.path(),
-        json!({ "deny": ["WebFetch(domain:denied.example)"] }),
+        &json!({ "deny": ["WebFetch(domain:denied.example)"] }),
     );
     let url = serve(
         b"HTTP/1.1 302 Found\r\nLocation: http://denied.example/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

@@ -9,7 +9,7 @@ use crate::{EngineEvent, LiveKind};
 use super::tools::Call;
 use super::transport::Refusal;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ClaudeAiDecoder {
     message: Option<String>,
     uuid: Option<String>,

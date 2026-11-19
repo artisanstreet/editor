@@ -1,5 +1,7 @@
 use super::*;
-use crate::customise::{materialize, publish_copy};
+use crate::customise::materialize;
+#[cfg(unix)]
+use crate::customise::publish_copy;
 
 fn skill(folder: &Path, name: &str, body: &str) {
     fs::create_dir_all(folder).unwrap();

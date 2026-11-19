@@ -1,12 +1,12 @@
 use super::*;
 
 fn skill(dir: &Path, name: &str) {
-    fs::create_dir_all(dir.join(name)).unwrap();
+    fs::create_dir_all(dir.join(name)).expect("a skill folder");
     fs::write(
         dir.join(name).join("SKILL.md"),
         format!("---\nname: {name}\n---\nbody"),
     )
-    .unwrap();
+    .expect("a skill file");
 }
 
 fn listing(dir: &Path, root: &Path) -> Vec<String> {
@@ -34,7 +34,6 @@ fn listing(dir: &Path, root: &Path) -> Vec<String> {
     out
 }
 
-#[cfg(unix)]
 #[test]
 fn materialize_writes_prompt_links_skills_and_passes_mcp() {
     let root = tempfile::tempdir().unwrap();

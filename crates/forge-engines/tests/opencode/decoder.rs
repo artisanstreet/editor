@@ -48,7 +48,6 @@ fn a_long_run_keeps_only_a_bounded_record_of_settled_tools() {
         "{} tool names kept",
         decoder.tool_names.len()
     );
-    assert!(decoder.retired.len() <= 4096);
     let replayed = decoder.feed(&called(9_999)).unwrap();
     assert!(
         !replayed

@@ -21,7 +21,9 @@ echo done
 
 fn sandboxed() -> bool {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
+        test_support::skipped(format_args!(
+            "this kernel can't enforce the sandbox ({reason:?})"
+        ));
         return false;
     }
     true

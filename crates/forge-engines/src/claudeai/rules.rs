@@ -54,7 +54,7 @@ pub enum ReadRefusal {
     Unsettled(#[source] Arc<LoadSettingsError>),
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Rules {
     grammar: Grammar,
     broken: Vec<Arc<LoadSettingsError>>,
@@ -67,14 +67,14 @@ pub struct Rules {
     root: PathBuf,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Rule {
     tool: String,
     spec: Spec,
     written: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum Spec {
     Any,
     Exact(Vec<String>),
@@ -388,14 +388,14 @@ fn push(
 }
 
 #[must_use]
-pub fn url_host(url: &str) -> Option<String> {
+pub(super) fn url_host(url: &str) -> Option<String> {
     let url = reqwest::Url::parse(url.trim()).ok()?;
     let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
     (!host.is_empty()).then_some(host)
 }
 
 #[must_use]
-pub fn changes_files(tool: &str) -> bool {
+pub(super) fn changes_files(tool: &str) -> bool {
     matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
 }
 
@@ -665,7 +665,11 @@ fn absolute(rest: &str) -> (PathBuf, &str, bool) {
         if let (Some(drive), Some('/')) = (chars.next(), chars.next())
             && drive.is_ascii_alphabetic()
         {
-            return (PathBuf::from(format!("{drive}:\\")), &rest[2..], true);
+            return (
+                PathBuf::from(format!("{drive}:\\")),
+                rest.split_at(2).1,
+                true,
+            );
         }
     }
     (PathBuf::from("/"), rest, true)
@@ -1031,7 +1035,8 @@ impl Lexer<'_> {
 
     fn opaque(&mut self, end: usize) {
         let text: String = self.chars[self.at..=end].iter().collect();
-        if text[1..].contains("$(") || text.contains('`') || text[1..].contains("<(") {
+        let (_, after_first) = text.split_at(text.chars().next().map_or(0, char::len_utf8));
+        if after_first.contains("$(") || text.contains('`') || after_first.contains("<(") {
             self.out.complete = false;
         }
         self.word.push_str(&text);
@@ -1153,7 +1158,6 @@ impl Lexer<'_> {
         None
     }
 
-    #[allow(clippy::missing_const_for_fn, reason = "mutates the parser state")]
     fn unreadable(&mut self) {
         self.out.complete = false;
         self.at = self.chars.len();
@@ -1351,11 +1355,12 @@ fn nested(words: &[String], depth: usize, out: &mut Shell) -> bool {
 
 fn shell_script(form: &[String]) -> Option<&str> {
     let flag = form.iter().skip(1).position(|word| {
-        word.len() > 1
-            && word.starts_with('-')
-            && !word.starts_with("--")
-            && word[1..].chars().all(|c| c.is_ascii_alphabetic())
-            && word.contains('c')
+        word.strip_prefix('-').is_some_and(|flags| {
+            !flags.is_empty()
+                && !flags.starts_with('-')
+                && flags.chars().all(|c| c.is_ascii_alphabetic())
+                && flags.contains('c')
+        })
     })? + 1;
     form[flag + 1..]
         .iter()

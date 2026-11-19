@@ -4,8 +4,8 @@ fn invalid_native_metadata_is_never_adoptable() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");
     let native = home.join(".claude/skills/broken");
-    std::fs::create_dir_all(&native).unwrap();
-    std::fs::write(
+    fs::create_dir_all(&native).unwrap();
+    fs::write(
         native.join("SKILL.md"),
         "---\nname: [not a scalar]\ndescription: bad\n---\n",
     )
@@ -17,7 +17,8 @@ fn invalid_native_metadata_is_never_adoptable() {
     let homes = [(EngineId::Claude, Some(home))];
     assert!(skill_catalog(&homes, &customisation).unwrap().is_empty());
     let digest = measure(&native).unwrap().0;
-    assert!(adopt_skill(&homes, &customisation, &discovered_id("broken", &digest)).is_err());
+    adopt_skill(&homes, &customisation, &discovered_id("broken", &digest))
+        .expect_err("a broken discovered skill is not adopted");
     assert!(!customisation.skills_dir.exists());
     assert!(native.is_dir());
 }

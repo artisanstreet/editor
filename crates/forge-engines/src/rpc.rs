@@ -35,7 +35,7 @@ pub enum CallError {
     Closed { method: String, stderr: String },
 }
 
-pub struct Session {
+pub(crate) struct Session {
     process: EngineProcess,
     next_id: u64,
 }
@@ -123,11 +123,11 @@ impl Session {
     }
 }
 
-pub const INVALID_PARAMS: i64 = -32602;
-pub const METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const INVALID_PARAMS: i64 = -32602;
+pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug)]
-pub struct Response {
+pub(crate) struct Response {
     pub id: u64,
     pub method: String,
     pub result: Result<Value, RpcError>,
@@ -140,22 +140,22 @@ pub struct RpcError {
 }
 
 impl std::fmt::Display for RpcError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
 impl std::error::Error for RpcError {}
 
 #[derive(Default)]
-pub struct State {
-    pub next_id: u64,
+pub(crate) struct State {
+    pub(crate) next_id: u64,
     requests: std::collections::HashMap<u64, String>,
-    pub outbox: Vec<Value>,
-    pub responses: Vec<Response>,
+    pub(crate) outbox: Vec<Value>,
+    pub(crate) responses: Vec<Response>,
 }
 impl State {
-    pub fn request(&mut self, method: &str, params: Value) -> u64 {
+    pub(crate) fn request(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         let mut fields = serde_json::Map::new();
@@ -167,17 +167,17 @@ impl State {
         self.outbox.push(message);
         id
     }
-    pub fn sent(&mut self, message: &Value) {
+    pub(crate) fn sent(&mut self, message: &Value) {
         if let (Some(id), Some(method)) = (message["id"].as_u64(), message["method"].as_str()) {
             self.next_id = self.next_id.max(id);
             self.requests.insert(id, method.to_owned());
         }
     }
-    pub fn reply(&mut self, rpc: Value, result: Value) {
+    pub(crate) fn reply(&mut self, rpc: Value, result: Value) {
         self.answer(rpc, "result", result);
     }
 
-    pub fn reply_error(&mut self, rpc: Value, code: i64, message: &str) {
+    pub(crate) fn reply_error(&mut self, rpc: Value, code: i64, message: &str) {
         self.answer(rpc, "error", json!({ "code": code, "message": message }));
     }
 
@@ -188,7 +188,7 @@ impl State {
         self.outbox.push(Value::Object(message));
     }
 
-    pub fn respond(
+    pub(crate) fn respond(
         &mut self,
         id: &Value,
         result: Option<Value>,

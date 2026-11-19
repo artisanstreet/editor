@@ -60,11 +60,11 @@ pub async fn capabilities(transport: &Transport) -> Result<Capabilities, Capabil
         })
         .map(str::to_owned);
     Ok(Capabilities {
-        chat: organization.is_some(),
-        client_tools: true,
         org_uuid,
         account,
         rate_limit_tier,
+        chat: organization.is_some(),
+        client_tools: true,
     })
 }
 

@@ -46,7 +46,7 @@ async fn an_uploaded_image_is_one_form_part_around_its_exact_bytes() {
     let path = dir.path().join(name);
     let image: Vec<u8> = (0..=255).cycle().take(300_000).collect();
     std::fs::write(&path, &image).unwrap();
-    let body = super::multipart(&path, "edge").await.unwrap();
+    let body = multipart(&path, "edge").await.unwrap();
     let head = b"--edge\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot one.png\"\r\nContent-Type: image/png\r\n\r\n";
     let tail = b"\r\n--edge--\r\n";
     assert_eq!(&body[..head.len()], head);

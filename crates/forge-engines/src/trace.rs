@@ -12,7 +12,7 @@ const RETAINED_AGE: std::time::Duration = std::time::Duration::from_hours(7 * 24
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const RECORD_OVERHEAD_BYTES: usize = 128;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum Kind {
     Out,
     In,
@@ -80,6 +80,12 @@ impl Record {
 #[derive(Clone, Default)]
 pub struct Secrets(Arc<[String]>);
 
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Secrets").field(&self.0.len()).finish()
+    }
+}
+
 const MIN_SECRET_BYTES: usize = 8;
 const SECRET_ENV_MARKERS: [&str; 7] = [
     "KEY",
@@ -123,7 +129,11 @@ impl Secrets {
             .filter(|secret| secret.len() >= MIN_SECRET_BYTES)
             .flat_map(|secret| {
                 let escaped = serde_json::Value::from(secret).to_string();
-                let escaped = escaped[1..escaped.len() - 1].to_owned();
+                let escaped = escaped
+                    .strip_prefix('"')
+                    .and_then(|quoted| quoted.strip_suffix('"'))
+                    .expect("invariant: a JSON string is quoted")
+                    .to_owned();
                 [secret.to_owned(), escaped]
             })
             .collect();
@@ -186,6 +196,7 @@ fn frame_end(bytes: &[u8]) -> usize {
         .map_or(0, |newline| newline + 1)
 }
 
+#[derive(Debug)]
 struct Sink {
     secrets: Secrets,
     sender: SyncSender<Record>,
@@ -193,11 +204,12 @@ struct Sink {
     dropped: Arc<AtomicUsize>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Trace {
     sink: Option<Arc<Sink>>,
 }
 
+#[derive(Debug)]
 pub struct Started {
     pub trace: Trace,
     pub writer: std::thread::JoinHandle<()>,
@@ -248,6 +260,7 @@ pub fn folder(data_dir: &Path) -> PathBuf {
     data_dir.join("traces")
 }
 
+#[derive(Debug)]
 struct Listed {
     path: PathBuf,
     bytes: u64,
@@ -415,6 +428,7 @@ impl Trace {
     }
 }
 
+#[derive(Debug)]
 pub struct Stream {
     trace: Trace,
     kind: Kind,

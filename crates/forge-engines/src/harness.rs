@@ -92,11 +92,11 @@ pub enum EngineEvent {
 
 impl EngineEvent {
     #[must_use]
-    pub fn background_wait(engine: artisan_api::EngineId, waiting: bool) -> Self {
+    pub fn background_wait(engine: EngineId, waiting: bool) -> Self {
         let name = match engine {
-            artisan_api::EngineId::Claude => "Claude",
-            artisan_api::EngineId::Codex => "Codex",
-            artisan_api::EngineId::OpenCode => "OpenCode",
+            EngineId::Claude => "Claude",
+            EngineId::Codex => "Codex",
+            EngineId::OpenCode => "OpenCode",
         };
         Self::Live {
             target: LiveKind::Status,
@@ -292,6 +292,7 @@ pub enum ClearGoalError {
     },
 }
 
+#[derive(Debug)]
 pub struct RunIo {
     pub inbox: mpsc::Receiver<Input>,
     pub events: mpsc::Sender<EngineEvent>,
@@ -313,7 +314,7 @@ pub struct SideUsage {
 
 impl RunIo {
     pub async fn emit(&self, event: EngineEvent) {
-        self.events.send(event).await.ok();
+        let _run_ended = self.events.send(event).await;
     }
 }
 
@@ -325,7 +326,7 @@ pub trait Harness: Send + Sync {
         turn: Turn,
         title: String,
     ) -> BoxFuture<'static, Result<(), SetTitleError>> {
-        let _ = (turn, title);
+        drop((turn, title));
         Box::pin(async { Ok(()) })
     }
 
@@ -334,7 +335,7 @@ pub trait Harness: Send + Sync {
         turn: Turn,
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<SideReply, SideQueryError>> {
-        let _ = cancel;
+        drop(cancel);
         let engine = turn.engine;
         Box::pin(async move { Err(SideQueryError::Unsupported { engine }) })
     }

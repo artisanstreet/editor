@@ -25,6 +25,13 @@ enum Reply {
     Ends(Vec<Value>),
     Waits(Vec<Value>),
     Refuses(Refusal),
+    #[cfg_attr(
+        not(unix),
+        expect(
+            dead_code,
+            reason = "only the Unix shell tests build a reply from the request"
+        )
+    )]
     From(Box<dyn FnOnce(&Request) -> Self + Send>),
 }
 
@@ -248,7 +255,7 @@ async fn run_with(
     let mut log = Vec::new();
     while let Some(event) = seen.recv().await {
         for input in user(&event) {
-            inputs.send(input).await.ok();
+            let _peer_gone = inputs.send(input).await;
         }
         log.push(event);
     }
@@ -977,16 +984,14 @@ async fn a_live_turn_reads_a_file_and_reports_it() {
         } = &event
         {
             said.push_str(text.inline().unwrap_or_default());
-        } else if !matches!(
-            event,
-            EngineEvent::Live { .. } | EngineEvent::Session { .. } | EngineEvent::Model { .. }
-        ) {
-            eprintln!("{event:?}");
         }
     }
     let outcome = running.await.expect("the turn");
-    eprintln!("outcome: {outcome:?}\nsaid: {said}");
-    assert_eq!(outcome.status(), RunStatus::Done, "{outcome:?}");
+    assert_eq!(
+        outcome.status(),
+        RunStatus::Done,
+        "{outcome:?}\nsaid: {said}"
+    );
     assert_eq!(accepted, 1, "the message is delivered once");
     assert!(
         said.contains("artisan-live-4417"),
@@ -1383,9 +1388,12 @@ async fn a_background_shell_is_read_and_stopped() {
     )));
 }
 
+#[cfg(unix)]
 fn shell_id(prompt: &str) -> String {
     let at = prompt.find("bash-").expect("a shell id");
-    prompt[at..]
+    prompt
+        .split_at(at)
+        .1
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
@@ -1476,7 +1484,7 @@ async fn a_launch_mcp_server_is_offered_and_its_tool_runs() {
         .await
         .expect("a listener");
     let addr = listener.local_addr().expect("an address");
-    let server = tokio::spawn(super::mcp::fake_server(listener));
+    let server = tokio::spawn(super::mcp::fakes::fake_server(listener));
     let backend = script(vec![
         calls(
             "m1",
@@ -1561,11 +1569,9 @@ async fn compaction_uses_a_temporary_conversation_and_never_runs_tools() {
             json!({ "command": "touch should-not-exist" }),
         )],
     ));
-    assert!(
-        super::side::compact_with(&script, &turn, CancellationToken::new())
-            .await
-            .is_err()
-    );
+    super::side::compact_with(&script, &turn, CancellationToken::new())
+        .await
+        .expect_err("a compaction that fails is reported");
     assert!(!dir.path().join("should-not-exist").exists());
     assert!(script.active.lock().unwrap().is_empty());
     assert_eq!(*script.deleted.lock().unwrap(), vec!["conv-1"]);
@@ -1579,7 +1585,7 @@ async fn an_mcp_image_goes_to_claude_ai_with_the_results() {
         answer("m2", "I see the screen."),
     ]);
     let mut turn = turn(work.path(), None, Permissions::Full);
-    turn.launch.mcp_servers = vec![super::mcp::fake_stdio(
+    turn.launch.mcp_servers = vec![super::mcp::fakes::fake_stdio(
         "computer",
         &[("FAKE_TOOLS", "image")],
     )];
@@ -1809,11 +1815,9 @@ async fn compaction_of_a_source_branch_never_executes_tools_or_deletes_the_sourc
         "bad",
         &[("call", "Bash", json!({"command": "touch should-not-exist"}))],
     )]);
-    assert!(
-        super::side::compact_with(backend.as_ref(), &source, CancellationToken::new())
-            .await
-            .is_err()
-    );
+    super::side::compact_with(backend.as_ref(), &source, CancellationToken::new())
+        .await
+        .expect_err("a compaction whose model calls a tool is refused");
     assert!(!work.path().join("should-not-exist").exists());
     assert!(backend.deleted.lock().unwrap().is_empty());
     assert!(backend.active.lock().unwrap().is_empty());
@@ -1843,13 +1847,11 @@ async fn cancelled_branch_compaction_releases_the_source_completion() {
     .await
     .unwrap();
     cancel.cancel();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), running)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err()
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect_err("the cancelled turn fails");
     assert!(backend.active.lock().unwrap().is_empty());
     assert!(backend.deleted.lock().unwrap().is_empty());
     assert_eq!(*backend.stopped.lock().unwrap(), vec!["source"]);

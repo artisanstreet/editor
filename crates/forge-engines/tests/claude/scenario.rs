@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) fn turn(dir: &Path, scenario: &str, env: &[(&str, &str)]) -> Turn {
     Turn {
-        trace_dir: None,
         thread_id: ThreadId::from("thread"),
         engine: EngineId::Claude,
         binary: fake_engine::binary(),
@@ -22,6 +21,7 @@ pub(super) fn turn(dir: &Path, scenario: &str, env: &[(&str, &str)]) -> Turn {
             ..UserInput::default()
         },
         launch: fake_engine::launch(scenario, env),
+        trace_dir: None,
     }
 }
 

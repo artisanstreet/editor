@@ -145,17 +145,16 @@ fn workflow_name(input: &Value) -> Option<String> {
         return Some(name.to_owned());
     }
     let script = str_at(input, "script")?;
-    let meta = &script[script.find("meta")?..];
-    let rest = meta[meta.find("name")? + 4..]
-        .trim_start()
-        .strip_prefix(':')?
-        .trim_start();
+    let (_, meta) = script.split_once("meta")?;
+    let (_, rest) = meta.split_once("name")?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
     let quote = rest
         .chars()
         .next()
         .filter(|c| matches!(c, '\'' | '"' | '`'))?;
-    let name = &rest[1..];
-    Some(name[..name.find(quote)?].to_owned())
+    let (_, name) = rest.split_at(quote.len_utf8());
+    let (name, _) = name.split_once(quote)?;
+    Some(name.to_owned())
 }
 
 pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {

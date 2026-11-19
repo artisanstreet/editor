@@ -489,7 +489,7 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
                 permissions.set_mode(permissions.mode() | 0o200);
             }
             #[cfg(not(unix))]
-            #[allow(
+            #[expect(
                 clippy::permissions_set_readonly_false,
                 reason = "Windows has no Unix mode bits; clearing readonly is the correct API there"
             )]
@@ -858,13 +858,13 @@ fn read_skill_header(path: &Path) -> io::Result<String> {
                 "skill metadata is unclosed or exceeds 64 KiB",
             ));
         }
-        if header[start..].trim() == "---" {
+        if header.split_at(start).1.trim() == "---" {
             return Ok(header);
         }
     }
 }
 
-pub fn skill_name(text: &str) -> Option<String> {
+pub(crate) fn skill_name(text: &str) -> Option<String> {
     skill_metadata(text).map(|(name, _)| name)
 }
 
@@ -906,7 +906,7 @@ fn frontmatter_field(text: &str, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/customise/unit.rs"]
 mod tests;
 

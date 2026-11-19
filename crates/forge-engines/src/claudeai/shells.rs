@@ -17,25 +17,26 @@ const MAX_KEPT_SHELLS: usize = 64;
 
 static LAST_ID: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Shells {
     shells: Mutex<HashMap<String, Arc<Shell>>>,
     turn: CancellationToken,
 }
 
+#[derive(Debug)]
 struct Shell {
     number: usize,
     state: Mutex<ShellState>,
     cancel: CancellationToken,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ShellState {
     unread: Unread,
     phase: Phase,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 enum Phase {
     #[default]
     Running,
@@ -43,7 +44,7 @@ enum Phase {
     Released(Ended),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Unread {
     chunks: VecDeque<String>,
     bytes: usize,
@@ -83,7 +84,7 @@ impl Unread {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Ended {
     Code(i32),
     WithoutCode,
@@ -169,7 +170,7 @@ impl Shells {
                 out,
                 "[{dropped} bytes of output were dropped before they were read; the newest follows]"
             )
-            .ok();
+            .expect("invariant: writing to a String cannot fail");
         }
         out.push_str(&unread);
         if !out.is_empty() && !out.ends_with('\n') {
@@ -179,7 +180,8 @@ impl Shells {
             Phase::Running => out.push_str("[still running]"),
             Phase::Exited(ended) | Phase::Released(ended) => match ended {
                 Ended::Code(code) => {
-                    write!(out, "[exit code {code}]").ok();
+                    write!(out, "[exit code {code}]")
+                        .expect("invariant: writing to a String cannot fail");
                 }
                 Ended::Stopped => out.push_str("[stopped]"),
                 Ended::WithoutCode => out.push_str("[ended without an exit code]"),
@@ -336,7 +338,13 @@ impl Decoder {
     }
 }
 
-#[allow(clippy::unused_async, reason = "Windows path awaits spawn_blocking")]
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unused_async,
+        reason = "only the Windows path awaits spawn_blocking"
+    )
+)]
 pub(super) async fn legacy_encoding() -> Option<&'static Encoding> {
     #[cfg(windows)]
     {
@@ -377,7 +385,10 @@ fn oem_code_page() -> Option<&'static Encoding> {
     code_page(page)
 }
 
-#[cfg_attr(not(windows), allow(dead_code, reason = "only used on Windows"))]
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only Windows reads code pages")
+)]
 fn code_page(page: u16) -> Option<&'static Encoding> {
     Some(match page {
         866 => encoding_rs::IBM866,

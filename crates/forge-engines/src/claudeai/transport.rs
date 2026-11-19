@@ -101,7 +101,7 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {}
 
 #[must_use]
-pub fn refusal(status: reqwest::StatusCode, challenge_header: bool, body: &str) -> Refusal {
+pub(super) fn refusal(status: reqwest::StatusCode, challenge_header: bool, body: &str) -> Refusal {
     let html = body.trim_start().starts_with('<');
     if challenge_header
         || (html && (body.contains("challenge-platform") || body.contains("Just a moment")))
@@ -222,14 +222,11 @@ fn quote(body: &str, status: reqwest::StatusCode) -> String {
     if body.is_empty() || body.starts_with('<') {
         return status.to_string();
     }
-    let mut end = body.len().min(MAX_QUOTED);
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end < body.len() {
-        format!("{}…", &body[..end])
-    } else {
+    let (quoted, cut) = body.split_at(body.floor_char_boundary(MAX_QUOTED));
+    if cut.is_empty() {
         body.to_owned()
+    } else {
+        format!("{quoted}…")
     }
 }
 
@@ -407,13 +404,19 @@ pub enum UploadError {
     },
     #[error("claude.ai took {path} without naming a file id")]
     NoFileId { path: PathBuf },
+    #[error("drawing a multipart boundary to upload {path}")]
+    Boundary {
+        path: PathBuf,
+        #[source]
+        source: getrandom::Error,
+    },
 }
 
 impl Refused for UploadError {
     fn refusal(&self) -> Option<&Refusal> {
         match self {
             Self::Request { source, .. } => source.refusal(),
-            Self::Read { .. } | Self::NoFileId { .. } => None,
+            Self::Read { .. } | Self::NoFileId { .. } | Self::Boundary { .. } => None,
         }
     }
 }
@@ -500,6 +503,7 @@ async fn multipart(path: &Path, boundary: &str) -> std::io::Result<Vec<u8>> {
 
 const READ_SLACK: usize = 32;
 
+#[derive(Debug)]
 pub struct Transport {
     client: reqwest::Client,
     session: Mutex<Session>,
@@ -746,7 +750,13 @@ impl Backend for Transport {
 
     fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>> {
         Box::pin(async move {
-            let boundary = format!("artisan{:016x}", rand_u64());
+            let boundary = format!(
+                "artisan{:016x}",
+                rand_u64().map_err(|source| UploadError::Boundary {
+                    path: path.to_owned(),
+                    source,
+                })?
+            );
             let body = multipart(path, &boundary)
                 .await
                 .map_err(|source| UploadError::Read {
@@ -836,10 +846,10 @@ impl Backend for Transport {
     }
 }
 
-fn rand_u64() -> u64 {
+fn rand_u64() -> Result<u64, getrandom::Error> {
     let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes).ok();
-    u64::from_le_bytes(bytes)
+    getrandom::fill(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 #[cfg(test)]

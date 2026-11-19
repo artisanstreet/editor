@@ -4,13 +4,13 @@ async fn download_progress_shares_catalog_allocations_and_preserves_prior_snapsh
     let folder = tempfile::tempdir().unwrap();
     let engines = Engines::new(folder.path());
     let engine = EngineId::Codex;
-    lock(&engines.slot(engine).models).listing = Some(CachedListing::from(catalog::Listing {
-        models: vec![artisan_api::Model {
+    lock(&engines.slot(engine).models).listing = Some(CachedListing::from(Listing {
+        models: vec![Model {
             id: "fixture-model1".into(),
-            ..artisan_api::Model::default()
+            ..Model::default()
         }],
         default: Some("fixture-model1".into()),
-        ..catalog::Listing::default()
+        ..Listing::default()
     }));
     *lock(&engines.slot(engine).versions) = vec![PublishedVersion {
         version: "1.0.0".into(),
@@ -51,7 +51,7 @@ async fn download_progress_shares_catalog_allocations_and_preserves_prior_snapsh
     assert!(Arc::ptr_eq(&before.versions, &progress.versions));
     assert!(matches!(
         progress_install,
-        artisan_api::InstallState::Downloading { received: 100, .. }
+        InstallState::Downloading { received: 100, .. }
     ));
     engines.reconcile_install(engine);
     assert!(before.versions[0].installed);

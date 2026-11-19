@@ -356,12 +356,12 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>, ReadSkillsError> {
             budget.admit(name.len() + description.len() + folder.as_os_str().len())?;
             let id = first_party_id(&folder_name);
             skills.push(Managed {
-                enabled: !c.disabled_skills.contains(&id),
-                id,
+                id: id.clone(),
                 name,
                 description,
                 origin: SkillOrigin::FirstParty,
                 folder,
+                enabled: !c.disabled_skills.contains(&id),
                 shadowed: false,
             });
         }
@@ -392,15 +392,15 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>, ReadSkillsError> {
             budget.admit(name.len() + description.len() + entry.path().as_os_str().len())?;
             let id = user_id(&folder_name);
             users.push(Managed {
-                enabled: !c.disabled_skills.contains(&id),
-                shadowed: skills
-                    .iter()
-                    .any(|skill: &Managed| skill.folder.file_name() == Some(folder_name.as_ref())),
-                id,
+                id: id.clone(),
                 name,
                 description,
                 origin: SkillOrigin::User,
                 folder: entry.path(),
+                enabled: !c.disabled_skills.contains(&id),
+                shadowed: skills
+                    .iter()
+                    .any(|skill: &Managed| skill.folder.file_name() == Some(folder_name.as_ref())),
             });
         }
     }
@@ -869,7 +869,10 @@ fn discovered_entries(
 }
 
 fn discovered_id(folder_name: &str, digest: &str) -> String {
-    format!("discovered.{folder_name}.{}", &digest[..12])
+    format!(
+        "discovered.{folder_name}.{}",
+        digest.split_at(digest.floor_char_boundary(12)).0
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1346,7 +1349,9 @@ fn move_folder(from: &Path, to: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
             if let Err(error) = copy_dir(from, to) {
-                fs::remove_dir_all(to).ok();
+                if let Err(cleanup) = fs::remove_dir_all(to) {
+                    tracing::warn!(%cleanup, path = %to.display(), "a partial skill copy was left behind");
+                }
                 return Err(error);
             }
             if let Err(error) = fs::remove_dir_all(from) {
@@ -1359,7 +1364,9 @@ fn move_folder(from: &Path, to: &Path) -> io::Result<()> {
                         ),
                     ));
                 }
-                fs::remove_dir_all(to).ok();
+                if let Err(cleanup) = fs::remove_dir_all(to) {
+                    tracing::warn!(%cleanup, path = %to.display(), "a restored skill's copy was left behind");
+                }
                 return Err(io::Error::new(
                     error.kind(),
                     format!("{error}; original source restored"),

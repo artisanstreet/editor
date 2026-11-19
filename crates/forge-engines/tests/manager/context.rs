@@ -72,7 +72,7 @@ app_server model1
     let owner = engines.clone();
     let (started, waiting) = tokio::sync::oneshot::channel();
     let second = tokio::spawn(async move {
-        started.send(()).ok();
+        let _peer_gone = started.send(());
         owner.refresh_models(EngineId::Codex).await.unwrap()
     });
     waiting.await.unwrap();
@@ -187,11 +187,11 @@ async fn present_install_reconciles_a_failed_update_without_another_download() {
     );
     assert!(matches!(
         engines.status(EngineId::Codex).install,
-        artisan_api::InstallState::Failed { .. }
+        InstallState::Failed { .. }
     ));
     assert_eq!(engines.install(EngineId::Codex).await.unwrap(), "1.0.0");
     assert!(matches!(
         engines.status(EngineId::Codex).install,
-        artisan_api::InstallState::Installed { .. }
+        InstallState::Installed { .. }
     ));
 }

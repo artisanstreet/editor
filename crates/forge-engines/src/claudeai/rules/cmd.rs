@@ -206,10 +206,9 @@ fn simple(mut words: Vec<String>, depth: usize, out: &mut Shell) {
         return;
     };
     if let Some(at) = first.find(COMMAND_DELIMITERS) {
-        let rest = first[at + 1..]
-            .trim_start_matches(COMMAND_DELIMITERS)
-            .to_owned();
-        let program = first[..at].to_owned();
+        let (program, delimited) = first.split_at(at);
+        let rest = delimited.trim_start_matches(COMMAND_DELIMITERS).to_owned();
+        let program = program.to_owned();
         words[0] = program;
         if !rest.is_empty() {
             words.insert(1, rest);
@@ -221,7 +220,7 @@ fn simple(mut words: Vec<String>, depth: usize, out: &mut Shell) {
     }
     if let Some(at) = program.find(INTERNAL_COMMAND_ENDS).filter(|at| *at > 0) {
         let mut alias = words.clone();
-        program[..at].clone_into(&mut alias[0]);
+        program.split_at(at).0.clone_into(&mut alias[0]);
         out.aliases.push(alias);
     }
     let lowered = program_name(&program).to_ascii_lowercase();
@@ -257,7 +256,7 @@ fn cmd_script(words: &[String]) -> Option<String> {
         let lowered = word.to_ascii_lowercase();
         lowered.starts_with("/c") || lowered.starts_with("/k")
     })? + 1;
-    let inline = &words[at][2..];
+    let (_, inline) = words[at].split_at(2);
     let mut script: Vec<&str> = Vec::new();
     if !inline.is_empty() {
         script.push(inline);

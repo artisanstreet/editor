@@ -35,7 +35,7 @@ pub(crate) mod guard {
     use artisan_api::EngineId;
     use std::path::Path;
 
-    pub type GuardError = std::convert::Infallible;
+    pub(crate) type GuardError = std::convert::Infallible;
 
     #[derive(Debug)]
     pub(crate) struct Exposure;
@@ -69,7 +69,7 @@ pub(crate) mod guard {
     }
 }
 
-pub use guard::GuardError;
+pub(crate) use guard::GuardError;
 
 #[derive(Debug)]
 pub struct Confined {

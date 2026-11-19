@@ -21,7 +21,7 @@ pub struct Skill {
 }
 
 #[must_use]
-pub fn discover(home: &Path, cwd: &Path) -> Vec<Skill> {
+pub(super) fn discover(home: &Path, cwd: &Path) -> Vec<Skill> {
     discover_with(home, cwd, user_home().as_deref())
 }
 
@@ -105,7 +105,7 @@ fn in_root(root: &Path) -> Vec<Skill> {
 }
 
 #[must_use]
-pub fn definition() -> Value {
+pub(super) fn definition() -> Value {
     json!({
         "name": "Skill",
         "description": "Loads a skill's full instructions, when the task matches its description. Skills carry procedures and reference files the user installed.",
@@ -121,21 +121,22 @@ pub fn definition() -> Value {
 }
 
 #[must_use]
-pub fn listing(skills: &[Skill]) -> String {
+pub(super) fn listing(skills: &[Skill]) -> String {
     let mut text = String::new();
     for skill in skills {
         let name = escape_framing(&skill.name);
         let description = escape_framing(skill.description.trim());
         if description.is_empty() {
-            writeln!(text, "- {name}").ok();
+            writeln!(text, "- {name}").expect("invariant: writing to a String cannot fail");
         } else {
-            writeln!(text, "- {name}: {description}").ok();
+            writeln!(text, "- {name}: {description}")
+                .expect("invariant: writing to a String cannot fail");
         }
     }
     text
 }
 
-pub fn load(skills: &[Skill], name: &str) -> Result<String, String> {
+pub(super) fn load(skills: &[Skill], name: &str) -> Result<String, String> {
     let name = name.trim();
     let Some(skill) = skills.iter().find(|skill| skill.name == name).or_else(|| {
         skills
@@ -175,7 +176,7 @@ pub fn load(skills: &[Skill], name: &str) -> Result<String, String> {
     if !files.is_empty() {
         out.push_str("Files bundled with this skill:\n");
         for file in &files {
-            writeln!(out, "  {file}").ok();
+            writeln!(out, "  {file}").expect("invariant: writing to a String cannot fail");
         }
         out.push_str("Read them with Read, with paths under the base directory.\n");
     }
@@ -229,7 +230,7 @@ fn read_header(path: &Path) -> std::io::Result<String> {
                 "skill metadata is unclosed",
             ));
         }
-        if header[start..].trim() == "---" {
+        if header.split_at(start).1.trim() == "---" {
             return Ok(header);
         }
     }

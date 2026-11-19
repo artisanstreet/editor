@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-pub fn content_text(content: &Value) -> Option<String> {
+pub(crate) fn content_text(content: &Value) -> Option<String> {
     match content {
         Value::String(text) => Some(text.clone()),
         Value::Array(parts) => {

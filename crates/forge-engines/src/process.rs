@@ -91,6 +91,7 @@ pub enum ProbeError {
     },
 }
 
+#[derive(Debug)]
 pub(crate) struct StdinWriter {
     program: PathBuf,
     stdin: ChildStdin,
@@ -117,6 +118,7 @@ impl StdinWriter {
     }
 }
 
+#[derive(Debug)]
 pub struct EngineProcess {
     program: PathBuf,
     child: OwnedChild,
@@ -187,12 +189,11 @@ pub(crate) fn spawn_in(
                 |started| started.trace,
             )
         });
-    let sandbox =
-        crate::sandbox::Sandbox::for_turn(turn).map_err(|source| SpawnError::Sandbox {
-            engine: turn.engine,
-            thread: turn.thread_id.clone(),
-            source: Box::new(source),
-        })?;
+    let sandbox = Sandbox::for_turn(turn).map_err(|source| SpawnError::Sandbox {
+        engine: turn.engine,
+        thread: turn.thread_id.clone(),
+        source: Box::new(source),
+    })?;
     spawn_command(command, trace, sandbox)
 }
 
@@ -200,6 +201,7 @@ pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError>
     spawn_command(command, Trace::default(), Sandbox::Open)
 }
 
+#[derive(Debug)]
 pub(crate) struct OwnedChild {
     child: Box<dyn ChildWrapper>,
     armed: bool,
@@ -219,7 +221,9 @@ impl std::ops::DerefMut for OwnedChild {
 impl OwnedChild {
     pub(crate) fn shutdown(&mut self) {
         if self.armed {
-            self.child.start_kill().ok();
+            if let Err(error) = self.child.start_kill() {
+                tracing::debug!(%error, "the engine process had already exited when it was dropped");
+            }
             self.armed = false;
         }
     }

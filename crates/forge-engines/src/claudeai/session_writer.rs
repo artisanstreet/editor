@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
 
-pub enum SessionChange {
+#[derive(Debug)]
+pub(super) enum SessionChange {
     Cookies(Vec<CookieChange>),
     NeedsRenewal,
     Expired(String),
@@ -19,19 +20,21 @@ impl SessionChange {
     }
 }
 
+#[derive(Debug)]
 enum Queue {
     Idle,
     Writing(Vec<SessionChange>),
 }
 
-pub struct SessionWriter {
+#[derive(Debug)]
+pub(super) struct SessionWriter {
     home: PathBuf,
     queue: Arc<Mutex<Queue>>,
     writing: Arc<watch::Sender<bool>>,
 }
 
 impl SessionWriter {
-    pub fn new(home: &Path) -> Self {
+    pub(super) fn new(home: &Path) -> Self {
         Self {
             home: home.to_owned(),
             queue: Arc::new(Mutex::new(Queue::Idle)),
@@ -39,7 +42,7 @@ impl SessionWriter {
         }
     }
 
-    pub fn submit(&self, change: SessionChange) {
+    pub(super) fn submit(&self, change: SessionChange) {
         let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *queue {
             Queue::Writing(pending) => pending.push(change),
@@ -58,8 +61,8 @@ impl SessionWriter {
         }
     }
 
-    #[cfg(test)]
-    pub async fn flushed(&self) {
+    #[cfg(all(test, unix))]
+    pub(super) async fn flushed(&self) {
         let mut writing = self.writing.subscribe();
         writing
             .wait_for(|writing| !*writing)

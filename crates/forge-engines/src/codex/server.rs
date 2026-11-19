@@ -315,7 +315,7 @@ impl Server {
     fn retire(&self) {
         if !self.retired.swap(true, Ordering::Relaxed) {
             tracing::info!("retiring a Codex app-server; it ends once its runs have");
-            self.commands.send(Command::Check).ok();
+            let _server_stopped = self.commands.send(Command::Check);
         }
     }
 
@@ -391,7 +391,7 @@ pub(super) struct Attachment {
 }
 
 impl Attachment {
-    pub async fn next_line(&mut self) -> Result<Option<String>, Overloaded> {
+    pub(super) async fn next_line(&mut self) -> Result<Option<String>, Overloaded> {
         match self.lines.recv().await {
             Some(line) => {
                 self.backlog.bytes.fetch_sub(line.len(), Ordering::AcqRel);
@@ -404,7 +404,7 @@ impl Attachment {
         }
     }
 
-    pub fn send(&self, message: Value) -> Result<(), Ended> {
+    pub(super) fn send(&self, message: Value) -> Result<(), Ended> {
         self.server
             .commands
             .send(Command::Send {
@@ -414,7 +414,7 @@ impl Attachment {
             .map_err(|_unsent| Ended)
     }
 
-    pub fn ended(&self) -> String {
+    pub(super) fn ended(&self) -> String {
         self.server
             .ended
             .lock()
@@ -422,17 +422,14 @@ impl Attachment {
             .clone()
     }
 
-    pub fn retire(&self) {
+    pub(super) fn retire(&self) {
         self.server.retire();
     }
 }
 
 impl Drop for Attachment {
     fn drop(&mut self) {
-        self.server
-            .commands
-            .send(Command::Detach { run: self.run })
-            .ok();
+        let _server_stopped = self.server.commands.send(Command::Detach { run: self.run });
     }
 }
 
@@ -646,9 +643,9 @@ impl Actor {
             }
             Command::Release { thread, reply } => {
                 if self.owners.contains_key(&thread) {
-                    reply.send(Err(ReleaseError::StillAttached)).ok();
+                    let _requester_gone = reply.send(Err(ReleaseError::StillAttached));
                 } else if !self.server.loaded().contains_key(&thread) {
-                    reply.send(Ok(())).ok();
+                    let _requester_gone = reply.send(Ok(()));
                 } else {
                     let id = self.next_id;
                     self.releasing.insert(
@@ -700,7 +697,7 @@ impl Actor {
             .collect();
         for id in ids {
             if let Some(release) = self.releasing.remove(&id) {
-                release.reply.send(Ok(())).ok();
+                let _requester_gone = release.reply.send(Ok(()));
             }
         }
     }
@@ -745,12 +742,9 @@ impl Actor {
                 } else if frame.get("error").is_some()
                     && let Some(release) = self.releasing.remove(&id)
                 {
-                    release
-                        .reply
-                        .send(Err(ReleaseError::Refused {
-                            response: line.to_owned(),
-                        }))
-                        .ok();
+                    let _requester_gone = release.reply.send(Err(ReleaseError::Refused {
+                        response: line.to_owned(),
+                    }));
                 }
             }
             return;
@@ -936,7 +930,7 @@ impl Actor {
             self.overloaded(run);
             return;
         }
-        attached.lines.send(line).ok();
+        let _run_detached = attached.lines.send(line);
     }
 
     fn overloaded(&mut self, run: u64) {

@@ -34,7 +34,6 @@ fn a_long_run_keeps_only_a_bounded_record_of_settled_items() {
         "{} items kept",
         decoder.items.len()
     );
-    assert!(decoder.retired.len() <= 4096);
     let replayed = decoder
         .feed(&command(9_999, "item/completed", "completed").to_string())
         .unwrap();

@@ -4,14 +4,14 @@ use std::collections::{HashSet, VecDeque};
 
 const RETIRED_IDS: usize = 4096;
 
-#[derive(Default)]
-pub struct Retired {
+#[derive(Debug, Default)]
+pub(crate) struct Retired {
     order: VecDeque<String>,
     ids: HashSet<String>,
 }
 
 impl Retired {
-    pub fn insert(&mut self, id: String) {
+    pub(crate) fn insert(&mut self, id: String) {
         if !self.ids.insert(id.clone()) {
             return;
         }
@@ -23,20 +23,16 @@ impl Retired {
         }
     }
 
-    pub fn contains(&self, id: &str) -> bool {
+    pub(crate) fn contains(&self, id: &str) -> bool {
         self.ids.contains(id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.ids.len()
     }
 }
 
-pub trait Retains {
+pub(crate) trait Retains {
     fn retained(&mut self, key: &str) -> Option<&mut ItemKind>;
 }
 
-pub fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
+pub(crate) fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
     for event in &events {
         let (EngineEvent::Item { key, status, .. } | EngineEvent::Status { key, status }) = event
         else {
@@ -53,3 +49,7 @@ pub fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<Engin
     }
     events
 }
+
+#[cfg(test)]
+#[path = "../tests/retained/unit.rs"]
+mod tests;

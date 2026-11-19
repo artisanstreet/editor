@@ -27,6 +27,7 @@ const SETTLED_INPUT_GRACE: Duration = Duration::from_secs(30);
 const SETTLED_INPUT_GRACE: Duration = Duration::from_millis(300);
 const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 
+#[derive(Debug)]
 pub struct ClaudeHarness;
 
 impl Harness for ClaudeHarness {
@@ -54,14 +55,11 @@ impl Harness for ClaudeHarness {
     fn compact(
         &self,
         turn: Turn,
-        cancel: tokio_util::sync::CancellationToken,
+        cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
         let native = turn.session_id.as_deref().map_or_else(
             || {
-                turn.config
-                    .options
-                    .get("transport")
-                    .and_then(serde_json::Value::as_str)
+                turn.config.options.get("transport").and_then(Value::as_str)
                     == Some(CLAUDE_AI_TRANSPORT)
             },
             |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
@@ -386,7 +384,7 @@ async fn reap(
     reason = "one select loop; each arm is one event source"
 )]
 async fn drive(
-    thread: &artisan_api::ThreadId,
+    thread: &ThreadId,
     engine: &mut EngineProcess,
     decoder: &mut ClaudeDecoder,
     io: &mut RunIo,
@@ -686,7 +684,7 @@ fn transcript_title(turn: &Turn, session: &str) -> Option<String> {
     title_from_transcript(&path)
 }
 
-fn config_dir(turn: &Turn) -> std::path::PathBuf {
+fn config_dir(turn: &Turn) -> PathBuf {
     turn.launch
         .env
         .iter()

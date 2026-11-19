@@ -23,7 +23,7 @@ pub enum ReadFileError {
     },
 }
 
-pub fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ReadFileError> {
+pub(super) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ReadFileError> {
     let file = match open(path) {
         Ok(file) => file,
         Err(_) if path.is_dir() => {

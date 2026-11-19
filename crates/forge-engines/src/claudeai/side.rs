@@ -98,7 +98,7 @@ async fn context(backend: &dyn Backend, turn: &Turn) -> Result<SummaryContext, S
             .map_err(|source| SideQueryError::Sandbox(Box::new(source)))?;
         let runtime = mcp::for_thread(
             turn.thread_id.as_str(),
-            tools::Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
+            Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
         )
         .await;
         return Ok(SummaryContext {

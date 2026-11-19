@@ -168,7 +168,7 @@ fn async_questions_are_answered_as_a_message() {
     insta::assert_debug_snapshot!(replay("async-questions"));
 }
 
-fn turn_end(case: &str) -> crate::Outcome {
+fn turn_end(case: &str) -> Outcome {
     replay(case)
         .into_iter()
         .rev()
@@ -219,7 +219,6 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
         .options
         .insert("context_window".to_owned(), json!(1_000_000));
     let mut turn = crate::Turn {
-        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -229,6 +228,7 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
         session_id: None,
         input: crate::UserInput::default(),
         launch: crate::Launch::default(),
+        trace_dir: None,
     };
     let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
     assert_eq!(params["serviceTier"], "priority");
@@ -256,7 +256,6 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
 #[test]
 fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     let mut turn = crate::Turn {
-        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -266,6 +265,7 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
         session_id: None,
         input: crate::UserInput::default(),
         launch: crate::Launch::default(),
+        trace_dir: None,
     };
     let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
     assert_eq!(
@@ -313,7 +313,6 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
 #[test]
 fn inside_forges_sandbox_auto_keeps_the_reviewer_but_not_codexs_own_sandbox() {
     let turn = crate::Turn {
-        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -323,6 +322,7 @@ fn inside_forges_sandbox_auto_keeps_the_reviewer_but_not_codexs_own_sandbox() {
         session_id: None,
         input: crate::UserInput::default(),
         launch: crate::Launch::default(),
+        trace_dir: None,
     };
     let (_, params) = super::thread_params(&turn, super::ProjectGuard::Forge);
     assert_eq!(
@@ -414,7 +414,7 @@ fn a_goal_is_shown_only_when_one_was_set() {
 fn a_turn_completed_that_is_not_terminal_fails_instead_of_finishing() {
     use serde_json::json;
     for status in ["inProgress", "paused"] {
-        let mut decoder = super::decoder::Decoder::default();
+        let mut decoder = Decoder::default();
         let request = decoder.request("thread/start", json!({}));
         decoder
             .feed(&json!({ "id": request, "result": { "thread": { "id": "root" }, "turn": { "id": "turn-1" } } }).to_string())
@@ -437,7 +437,7 @@ fn a_turn_completed_that_is_not_terminal_fails_instead_of_finishing() {
 #[test]
 fn reversed_child_arrival_keeps_explicit_spawn_ownership() {
     use serde_json::json;
-    let mut decoder = super::decoder::Decoder::default();
+    let mut decoder = Decoder::default();
     let request = decoder.request("thread/start", json!({}));
     decoder
         .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
@@ -452,8 +452,8 @@ fn reversed_child_arrival_keeps_explicit_spawn_ownership() {
         "unbound child content waits for explicit relation"
     );
     let after = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "spawn-b", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "inProgress", "agentsStates": {}, "receiverThreadIds": ["child-b"] } } }).to_string()).unwrap();
-    assert!(after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-b")));
-    assert!(!after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-a")));
+    assert!(after.iter().any(|event| matches!(event, EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-b")));
+    assert!(!after.iter().any(|event| matches!(event, EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-a")));
 }
 
 #[test]
@@ -483,19 +483,19 @@ fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
 fn waits_and_sleeps_become_rows() {
     use artisan_api::{AgentAction, ItemKind, ToolKind};
     use serde_json::json;
-    let mut decoder = super::decoder::Decoder::default();
+    let mut decoder = Decoder::default();
     let request = decoder.request("thread/start", json!({}));
     decoder
         .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
         .unwrap();
     let wait = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "wait-1", "type": "collabAgentToolCall", "tool": "wait", "status": "completed", "receiverThreadIds": [], "agentsStates": { "child-b": { "message": null }, "child-a": { "message": null } } } } }).to_string()).unwrap();
     assert!(wait.iter().any(|event| matches!(event,
-        crate::EngineEvent::Item { key, status: artisan_api::Status::Done, kind: ItemKind::Tool {
+        EngineEvent::Item { key, status: artisan_api::Status::Done, kind: ItemKind::Tool {
             tool: ToolKind::Agents { action: AgentAction::Wait, addresses, .. }, ..
         }, .. } if key == "wait-1" && addresses == &["child-a", "child-b"])));
     let sleep = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "sleep-1", "type": "sleep", "durationMs": 30000 } } }).to_string()).unwrap();
     assert!(sleep.iter().any(|event| matches!(event,
-        crate::EngineEvent::Item { kind: ItemKind::Tool {
+        EngineEvent::Item { kind: ItemKind::Tool {
             tool: ToolKind::Other { name, .. }, title: Some(title), ..
         }, .. } if name == "sleep" && title == "30 s")));
 }
@@ -504,7 +504,7 @@ fn waits_and_sleeps_become_rows() {
 fn a_question_without_options_is_asked_in_own_words() {
     use artisan_api::ItemKind;
     use serde_json::json;
-    let mut decoder = super::decoder::Decoder::default();
+    let mut decoder = Decoder::default();
     let request = decoder.request("thread/start", json!({}));
     decoder
         .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
@@ -535,7 +535,7 @@ fn a_question_without_options_is_asked_in_own_words() {
 fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
     use artisan_api::{ItemKind, Status};
     use serde_json::json;
-    let mut decoder = super::decoder::Decoder::default();
+    let mut decoder = Decoder::default();
     let request = decoder.request("thread/start", json!({}));
     decoder
         .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())

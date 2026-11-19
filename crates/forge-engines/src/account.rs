@@ -12,7 +12,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(15);
 const LOGIN_OUTPUT_CAP: usize = 64 * 1024;
 
-pub fn engine_command(
+pub(crate) fn engine_command(
     engine: EngineId,
     binary: &Path,
     home: &Path,
@@ -40,7 +40,7 @@ pub fn engine_command(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RunShortError {
+pub(crate) enum RunShortError {
     #[error("restore the configuration of {} before running it", engine.display_name())]
     Guard {
         engine: EngineId,
@@ -68,7 +68,7 @@ pub enum RunShortError {
     },
 }
 
-pub async fn run_short(
+pub(crate) async fn run_short(
     engine: EngineId,
     binary: &Path,
     home: &Path,
@@ -138,10 +138,9 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
     } else if success {
         let account = text.lines().find_map(|line| {
             let line = line.trim();
-            let lower = line.to_lowercase();
-            let at = lower.find("logged in as ")?;
-            Some(line[at + "logged in as ".len()..].trim().to_owned())
-                .filter(|account| !account.is_empty())
+            let at = line.to_ascii_lowercase().find("logged in as ")?;
+            let (_, account) = line.split_at(at + "logged in as ".len());
+            Some(account.trim().to_owned()).filter(|account| !account.is_empty())
         });
         return SignInState::SignedIn { account };
     }
@@ -189,7 +188,7 @@ struct Connection {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum OpenCodeConnectionsError {
+pub(crate) enum OpenCodeConnectionsError {
     #[error("list OpenCode's integrations")]
     Run(#[source] RunShortError),
     #[error("OpenCode could not list its integrations: {stderr}")]
@@ -307,13 +306,13 @@ async fn opencode_logout(binary: &Path, home: &Path) -> Result<(), OpenCodeLogou
 
 #[derive(Debug, thiserror::Error)]
 #[error("{} signs in per provider; use its interactive CLI sign-in", engine.display_name())]
-pub struct NoDeviceLogin {
+pub(crate) struct NoDeviceLogin {
     pub engine: EngineId,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("{} signs out per provider; use its interactive CLI", engine.display_name())]
-pub struct NoLogout {
+pub(crate) struct NoLogout {
     pub engine: EngineId,
 }
 
@@ -371,7 +370,7 @@ impl vte::Perform for TerminalText {
     }
 }
 
-pub fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut parser = vte::Parser::new();
     let mut plain = TerminalText::default();
     parser.advance(&mut plain, text.as_bytes());
@@ -417,6 +416,7 @@ enum State {
     },
 }
 
+#[derive(Debug)]
 struct Machine {
     state: State,
 }
@@ -522,11 +522,13 @@ fn public_state(state: &State, engine: EngineId) -> SignInState {
     }
 }
 
+#[derive(Debug)]
 struct LiveLogin {
     stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
     cancel: CancellationToken,
 }
 
+#[derive(Debug)]
 struct Inner {
     machine: Machine,
     generation: u64,
@@ -536,6 +538,7 @@ struct Inner {
     login: Option<LiveLogin>,
 }
 
+#[derive(Debug)]
 pub struct SignIn {
     engine: EngineId,
     home: PathBuf,
@@ -902,12 +905,11 @@ impl SignIn {
                     let plain = std::mem::take(&mut terminal_text.text);
                     output.push_str(&plain);
                     if output.len() > LOGIN_OUTPUT_CAP {
-                        let mut cut = output.len() - LOGIN_OUTPUT_CAP;
-                        while !output.is_char_boundary(cut) { cut += 1; }
+                        let cut = output.ceil_char_boundary(output.len() - LOGIN_OUTPUT_CAP);
                         output.drain(..cut);
                         scan_start = scan_start.saturating_sub(cut);
                     }
-                    let found = parse_login_output(&output[scan_start..]);
+                    let found = parse_login_output(output.split_at(output.floor_char_boundary(scan_start)).1);
                     scan_start = output.rfind('\n').map_or(0, |index| index + 1);
                     let found = (found.0.or_else(|| shown.0.clone()), found.1.or_else(|| shown.1.clone()));
                     if found != shown {
@@ -922,19 +924,16 @@ impl SignIn {
         if status.success() {
             return Ok(());
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
+        let _drained_or_timed_out = tokio::time::timeout(Duration::from_secs(1), async {
             while let Some(chunk) = received.recv().await {
                 terminal_parser.advance(&mut terminal_text, chunk.as_bytes());
                 let plain = std::mem::take(&mut terminal_text.text);
-                let mut take = (LOGIN_OUTPUT_CAP - output.len()).min(plain.len());
-                while !plain.is_char_boundary(take) {
-                    take -= 1;
-                }
-                output.push_str(&plain[..take]);
+                let (kept, _) =
+                    plain.split_at(plain.floor_char_boundary(LOGIN_OUTPUT_CAP - output.len()));
+                output.push_str(kept);
             }
         })
-        .await
-        .ok();
+        .await;
         Err(LoginError::Failed {
             engine,
             detail: last_line(&strip_ansi(&output)).to_owned(),

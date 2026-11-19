@@ -1,29 +1,3 @@
-#![expect(
-    clippy::allow_attributes,
-    clippy::inconsistent_struct_constructor,
-    clippy::iter_over_hash_type,
-    clippy::let_underscore_untyped,
-    clippy::partial_pub_fields,
-    clippy::renamed_function_params,
-    clippy::string_slice,
-    clippy::struct_field_names,
-    clippy::unused_result_ok,
-    elided_lifetimes_in_paths,
-    let_underscore_drop,
-    missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::assertions_on_result_states,
-    clippy::exit,
-    clippy::print_stderr,
-    clippy::wildcard_imports,
-    dead_code,
-    unused_imports,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
 mod account;
 mod catalog;
 pub mod claude;
@@ -74,7 +48,10 @@ pub use customise::{
     RecoverSkillError,
 };
 pub use engines::host_entry;
-pub use harness::*;
+pub use harness::{
+    ClearGoalError, EngineEvent, Failure, Harness, Input, Launch, LiveKind, Outcome, Retry, RunIo,
+    SetTitleError, SideQueryError, SideReply, SideUsage, Turn, UserInput,
+};
 pub use manager::{BinaryLease, EngineChange, Engines};
 pub use manager::{
     CheckUpdateError, ClaudeAiSignInError, InstallError, ListVersionsError, NoBuild, NotInstalled,

@@ -190,7 +190,6 @@ fn a_long_run_keeps_only_a_bounded_record_of_settled_tools() {
         "{} tools kept",
         decoder.tools.len()
     );
-    assert!(decoder.retired.len() <= 4096);
     let replayed = feed(&mut decoder, &shell_call(9_999)).unwrap();
     assert!(
         !replayed

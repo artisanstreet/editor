@@ -4,17 +4,12 @@ const GATEWAY: &str = "https://127.0.0.1:4100/mcp/artisan/gateway-token-01234567
 
 fn claude_turn(home: &std::path::Path, permissions: artisan_api::Permissions) -> Turn {
     let mut launch = crate::Launch::default();
-    crate::with_gateway_mcp(
-        artisan_api::EngineId::Claude,
-        &mut launch,
-        "artisan",
-        GATEWAY,
-    );
-    let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
+    crate::with_gateway_mcp(EngineId::Claude, &mut launch, "artisan", GATEWAY);
+    let mut config = artisan_api::EngineConfig::new(EngineId::Claude);
     config.permissions = permissions;
     Turn {
-        thread_id: artisan_api::ThreadId::from("gateway"),
-        engine: artisan_api::EngineId::Claude,
+        thread_id: ThreadId::from("gateway"),
+        engine: EngineId::Claude,
         binary: "/bin/sh".into(),
         home: home.into(),
         cwd: home.into(),
@@ -83,7 +78,9 @@ async fn claude_reaches_the_gateway_through_its_own_environment_not_a_shared_fil
 #[tokio::test]
 async fn a_sandboxed_run_cannot_read_another_runs_gateway_credential() {
     if let forge_isolation::Support::Unavailable(reason) = forge_isolation::support() {
-        eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
+        test_support::skipped(format_args!(
+            "this kernel can't enforce the sandbox ({reason:?})"
+        ));
         return;
     }
     let base = tempfile::tempdir().unwrap();

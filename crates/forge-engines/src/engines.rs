@@ -1,12 +1,12 @@
 use artisan_api::EngineId;
 use std::cmp::Ordering;
 
-pub const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
-pub const NPM_REGISTRY: &str = "https://registry.npmjs.org";
-pub const OPENCODE_REPOSITORY: &str = "artisanstreet/opencode";
+pub(crate) const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
+pub(crate) const NPM_REGISTRY: &str = "https://registry.npmjs.org";
+pub(crate) const OPENCODE_REPOSITORY: &str = "artisanstreet/opencode";
 
 #[derive(Clone, Copy, Debug)]
-pub struct Spec {
+pub(crate) struct Spec {
     pub artifact: Option<Artifact>,
     pub minimum: Option<&'static str>,
     pub device_login: Option<&'static [&'static str]>,
@@ -17,7 +17,7 @@ pub struct Spec {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Artifact {
+pub(crate) struct Artifact {
     pub feed: Feed,
     pub archive: Archive,
     pub strip: &'static str,
@@ -26,7 +26,7 @@ pub struct Artifact {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Feed {
+pub(crate) enum Feed {
     Claude {
         platform: &'static str,
         binary: &'static str,
@@ -43,20 +43,20 @@ pub enum Feed {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Archive {
+pub(crate) enum Archive {
     Binary,
     TarGz,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModelSource {
+pub(crate) enum ModelSource {
     ClaudeCatalog,
     CodexAppServer,
     OpenCodeCli,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Platform {
+pub(crate) enum Platform {
     LinuxX64,
     LinuxX64Musl,
     LinuxArm64,
@@ -69,7 +69,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    pub fn current() -> Self {
+    pub(crate) fn current() -> Self {
         let musl = cfg!(target_os = "linux")
             && ["/lib/ld-musl-x86_64.so.1", "/lib/ld-musl-aarch64.so.1"]
                 .iter()
@@ -103,7 +103,7 @@ const fn single(feed: Feed, entry: &'static str) -> Option<Artifact> {
 }
 
 #[expect(clippy::too_many_lines, reason = "one entry per engine and platform")]
-pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
+pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
     use Platform as P;
     match engine {
         EngineId::Claude => Spec {
@@ -274,7 +274,7 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
     }
 }
 
-pub fn host_spec(engine: EngineId) -> Spec {
+pub(crate) fn host_spec(engine: EngineId) -> Spec {
     spec(engine, Platform::current())
 }
 
@@ -283,7 +283,7 @@ pub fn host_entry(engine: EngineId) -> Option<&'static str> {
     host_spec(engine).artifact.map(|artifact| artifact.entry)
 }
 
-pub fn compare_versions(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
     let parse = |value: &str| {
         value
             .strip_prefix("0.0.0-beta-")
@@ -299,13 +299,13 @@ pub fn compare_versions(left: &str, right: &str) -> Ordering {
     }
 }
 
-pub fn meets_minimum(engine: EngineId, version: &str) -> bool {
+pub(crate) fn meets_minimum(engine: EngineId, version: &str) -> bool {
     host_spec(engine)
         .minimum
         .is_none_or(|minimum| compare_versions(version, minimum) != Ordering::Less)
 }
 
-pub fn environment(
+pub(crate) fn environment(
     engine: EngineId,
     binary: Option<&std::path::Path>,
     home: &std::path::Path,

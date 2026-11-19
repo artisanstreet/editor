@@ -2,7 +2,7 @@ use super::tools::{questions, todo_steps, tool_kind, validate_input};
 use crate::{EngineEvent, LiveKind, Outcome, Retry};
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, MessageDirection,
-    NoticeKind, Output, Phase, RunStatus, Status, Timestamp, ToolKind, Usage,
+    NoticeKind, Output, Phase, Status, Timestamp, ToolKind, Usage,
 };
 use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
@@ -41,7 +41,7 @@ struct BackgroundTask {
     parent_task_id: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 enum MainTurn {
     #[default]
     Idle,
@@ -50,7 +50,7 @@ enum MainTurn {
     },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent facts about the session, not one state in disguise"
@@ -85,7 +85,7 @@ pub struct ClaudeDecoder {
     worked_this_turn: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Message {
     parent: Option<String>,
     blocks: u64,
@@ -93,6 +93,7 @@ struct Message {
     worked: bool,
 }
 
+#[derive(Debug)]
 struct Said {
     key: String,
     text: String,
@@ -114,6 +115,7 @@ impl Said {
     }
 }
 
+#[derive(Debug)]
 struct Tool {
     key: String,
     parent: Option<String>,
@@ -122,6 +124,7 @@ struct Tool {
     background: bool,
 }
 
+#[derive(Debug)]
 struct Pending {
     request_id: String,
     input: Value,
@@ -173,7 +176,7 @@ impl Ask {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum AsksOn {
     Operation,
     Gate,
@@ -1540,7 +1543,7 @@ pub(super) fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field).and_then(Value::as_str)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct LimitReached {
     resets_at: Option<Timestamp>,
 }

@@ -1,17 +1,17 @@
 use crate::{EngineEvent, LiveKind};
 use std::path::Path;
 
-pub fn read(provider: &str, case: &str) -> String {
+pub(crate) fn read(provider: &str, case: &str) -> String {
     read_path(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/{provider}/{case}.jsonl")),
     )
 }
-pub fn read_path(path: &Path) -> String {
+pub(crate) fn read_path(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
-pub fn merge_live(previous: &mut EngineEvent, current: &EngineEvent) -> bool {
+pub(crate) fn merge_live(previous: &mut EngineEvent, current: &EngineEvent) -> bool {
     if let EngineEvent::Live {
         target,
         text,

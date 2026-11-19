@@ -3,8 +3,8 @@ use pulldown_cmark::{Event, Parser};
 const MAX_RAW_BYTES: usize = 16 * 1024;
 const MAX_LABEL_CHARS: usize = 200;
 
-#[derive(Default)]
-pub struct Summary {
+#[derive(Debug, Default)]
+pub(crate) struct Summary {
     raw: String,
     shown: String,
 }
@@ -29,18 +29,14 @@ impl Summary {
                     self.raw.clear();
                 }
                 if first_clause {
-                    let mut take = (MAX_RAW_BYTES - self.raw.len()).min(text.len());
-                    while !text.is_char_boundary(take) {
-                        take -= 1;
-                    }
-                    self.raw.push_str(&text[..take]);
+                    let (kept, _) =
+                        text.split_at(text.floor_char_boundary(MAX_RAW_BYTES - self.raw.len()));
+                    self.raw.push_str(kept);
                 } else if text.len() > MAX_RAW_BYTES {
-                    let mut start = text.len() - MAX_RAW_BYTES;
-                    while !text.is_char_boundary(start) {
-                        start += 1;
-                    }
+                    let (_, kept) =
+                        text.split_at(text.ceil_char_boundary(text.len() - MAX_RAW_BYTES));
                     self.raw.clear();
-                    self.raw.push_str(&text[start..]);
+                    self.raw.push_str(kept);
                 } else {
                     self.raw.push_str(&text);
                 }
@@ -81,11 +77,8 @@ impl Summary {
 )]
 fn plain(markdown: &str) -> String {
     let mut text = String::new();
-    let mut end = markdown.len().min(2048);
-    while !markdown.is_char_boundary(end) {
-        end -= 1;
-    }
-    for event in Parser::new(&markdown[..end]) {
+    let (bounded, _) = markdown.split_at(markdown.floor_char_boundary(2048));
+    for event in Parser::new(bounded) {
         match event {
             Event::Text(value) | Event::Code(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak => text.push(' '),
@@ -106,7 +99,7 @@ fn clause_end(line: &str, first_clause: bool) -> Option<usize> {
             words += 1;
             in_word = true;
         }
-        let remainder = &line[index + character.len_utf8()..];
+        let (_, remainder) = line.split_at(index + character.len_utf8());
         if !(remainder.is_empty() || remainder.starts_with(char::is_whitespace)) {
             return None;
         }
@@ -125,7 +118,7 @@ fn label(raw: &str, first_clause: bool) -> String {
     let line = if first_clause {
         raw.lines()
             .filter(|line| !line.trim().starts_with("```") && !line.trim().starts_with("~~~"))
-            .map(|line| plain(clause_end(line, true).map_or(line, |end| &line[..end])))
+            .map(|line| plain(clause_end(line, true).map_or(line, |end| line.split_at(end).0)))
             .find(|line| !line.is_empty())
             .unwrap_or_default()
     } else {
@@ -142,7 +135,9 @@ fn label(raw: &str, first_clause: bool) -> String {
         })
     };
     let cut = clause_end(&line, first_clause);
-    let line = cut.map_or(line.as_str(), |index| &line[..index]).trim();
+    let line = cut
+        .map_or(line.as_str(), |index| line.split_at(index).0)
+        .trim();
     let mut label = line.chars().take(MAX_LABEL_CHARS).collect::<String>();
     if line.chars().nth(MAX_LABEL_CHARS).is_some() {
         label.pop();

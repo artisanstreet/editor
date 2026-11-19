@@ -20,7 +20,7 @@ const UNPACK_LIMITS: Limits = Limits {
 const PROGRESS_STEP_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug)]
-pub enum Event {
+pub(crate) enum Event {
     Loaded { version: Option<String> },
     Start { version: String },
     Progress { received: u64, total: Option<u64> },
@@ -31,7 +31,7 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
+pub(crate) enum State {
     Absent {},
     Installed {
         version: String,
@@ -53,7 +53,8 @@ pub enum State {
     },
 }
 
-pub struct Machine {
+#[derive(Debug)]
+pub(crate) struct Machine {
     state: State,
 }
 
@@ -164,13 +165,13 @@ impl Machine {
     }
 }
 
-pub const fn machine() -> Machine {
+pub(crate) const fn machine() -> Machine {
     Machine {
         state: State::Absent {},
     }
 }
 
-pub fn view(state: &State) -> InstallState {
+pub(crate) fn view(state: &State) -> InstallState {
     match state {
         State::Absent {} => InstallState::Absent,
         State::Downloading {
@@ -199,7 +200,7 @@ pub fn view(state: &State) -> InstallState {
     }
 }
 
-pub const fn settled(state: &State) -> bool {
+pub(crate) const fn settled(state: &State) -> bool {
     matches!(
         state,
         State::Absent {} | State::Installed { .. } | State::Failed { .. }
@@ -207,48 +208,48 @@ pub const fn settled(state: &State) -> bool {
 }
 
 #[derive(Clone, Debug)]
-pub struct Layout {
+pub(crate) struct Layout {
     root: PathBuf,
 }
 
 impl Layout {
-    pub fn new(data_dir: &Path) -> Self {
+    pub(crate) fn new(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join("engines"),
         }
     }
 
-    pub fn engine_dir(&self, engine: EngineId) -> PathBuf {
+    pub(crate) fn engine_dir(&self, engine: EngineId) -> PathBuf {
         self.root.join(engine.as_str())
     }
 
-    pub fn versions(&self, engine: EngineId) -> PathBuf {
+    pub(crate) fn versions(&self, engine: EngineId) -> PathBuf {
         self.engine_dir(engine).join("versions")
     }
 
-    pub fn version_dir(&self, engine: EngineId, version: &str) -> PathBuf {
+    pub(crate) fn version_dir(&self, engine: EngineId, version: &str) -> PathBuf {
         self.versions(engine).join(version)
     }
 
-    pub fn home(&self, engine: EngineId) -> PathBuf {
+    pub(crate) fn home(&self, engine: EngineId) -> PathBuf {
         self.engine_dir(engine).join("home")
     }
 
-    pub fn current(&self, engine: EngineId) -> Option<String> {
+    pub(crate) fn current(&self, engine: EngineId) -> Option<String> {
         read_pointer(&self.engine_dir(engine).join("current"))
     }
 
-    pub fn previous(&self, engine: EngineId) -> Option<String> {
+    pub(crate) fn previous(&self, engine: EngineId) -> Option<String> {
         read_pointer(&self.engine_dir(engine).join("previous"))
     }
 
-    pub fn executable(&self, engine: EngineId, version: &str) -> Option<PathBuf> {
+    pub(crate) fn executable(&self, engine: EngineId, version: &str) -> Option<PathBuf> {
         let entry = host_spec(engine).artifact?.entry;
         let path = self.version_dir(engine, version).join(entry);
         path.is_file().then_some(path)
     }
 
-    pub fn binary(&self, engine: EngineId) -> Option<PathBuf> {
+    pub(crate) fn binary(&self, engine: EngineId) -> Option<PathBuf> {
         self.executable(engine, &self.current(engine)?)
     }
 }
@@ -266,7 +267,7 @@ pub struct UnusableVersion {
     pub version: String,
 }
 
-pub fn check_version(version: &str) -> Result<(), UnusableVersion> {
+pub(crate) fn check_version(version: &str) -> Result<(), UnusableVersion> {
     let usable = !version.is_empty()
         && version.len() <= 64
         && !version.starts_with('.')
@@ -310,7 +311,7 @@ fn write_pointer(path: &Path, version: &str) -> Result<(), SwitchError> {
     })
 }
 
-pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<(), SwitchError> {
+pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<(), SwitchError> {
     let dir = layout.engine_dir(engine);
     let current = layout.current(engine);
     if current.as_deref() != Some(version) {
@@ -324,7 +325,7 @@ pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<(), Sw
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UsageLockError {
+pub(crate) enum UsageLockError {
     #[error("engine home {} has no parent", home.display())]
     NoParent { home: PathBuf },
     #[error("create {}", path.display())]
@@ -341,7 +342,7 @@ pub enum UsageLockError {
     },
 }
 
-pub fn usage_lock(home: &Path) -> Result<fs::File, UsageLockError> {
+pub(crate) fn usage_lock(home: &Path) -> Result<fs::File, UsageLockError> {
     let dir = home.parent().ok_or_else(|| UsageLockError::NoParent {
         home: home.to_owned(),
     })?;
@@ -359,7 +360,7 @@ pub fn usage_lock(home: &Path) -> Result<fs::File, UsageLockError> {
         .map_err(|source| UsageLockError::Open { path, source })
 }
 
-pub fn prune(layout: &Layout, engine: EngineId) {
+pub(crate) fn prune(layout: &Layout, engine: EngineId) {
     let Ok(usage) = usage_lock(&layout.home(engine)) else {
         return;
     };
@@ -415,7 +416,7 @@ pub enum LockError {
     Task(#[source] tokio::task::JoinError),
 }
 
-pub async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File, LockError> {
+pub(crate) async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File, LockError> {
     let dir = layout.engine_dir(engine);
     tokio::task::spawn_blocking(move || {
         fs::create_dir_all(dir.join("versions")).map_err(|source| LockError::Create {
@@ -440,14 +441,14 @@ pub async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File, LockErr
 }
 
 #[derive(Clone, Debug)]
-pub struct Resolved {
+pub(crate) struct Resolved {
     pub version: String,
     pub url: String,
     pub digest: Expected,
 }
 
 #[derive(Clone, Debug)]
-pub enum Expected {
+pub(crate) enum Expected {
     Sha256 { hex: String, size: u64 },
     Sha512(Vec<u8>),
 }
@@ -527,7 +528,7 @@ pub enum LatestVersionError {
     Unusable(#[source] UnusableVersion),
 }
 
-pub async fn latest_version(
+pub(crate) async fn latest_version(
     http: &reqwest::Client,
     feed: Feed,
 ) -> Result<String, LatestVersionError> {
@@ -569,9 +570,9 @@ pub async fn latest_version(
 }
 
 const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
-pub const MAX_LISTED_VERSIONS: usize = 40;
+pub(crate) const MAX_LISTED_VERSIONS: usize = 40;
 
-pub async fn published_versions(
+pub(crate) async fn published_versions(
     http: &reqwest::Client,
     feed: Feed,
 ) -> Result<Vec<String>, GetError> {
@@ -616,7 +617,7 @@ async fn release_versions(
     Ok(tagged_versions(&get_json(http, &url).await?))
 }
 
-pub fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
+pub(crate) fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
     let mut versions: Vec<String> = releases
         .as_array()
         .into_iter()
@@ -634,7 +635,7 @@ pub fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
 
 const RELEASE_TAG: &str = "artisan-v";
 
-pub fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
+pub(crate) fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
     let on_channel = |version: &str| match version.split_once('-') {
         None => channel == "latest",
         Some((_, suffix)) => {
@@ -740,7 +741,7 @@ async fn get_manifest(
         })
 }
 
-pub async fn resolve(
+pub(crate) async fn resolve(
     http: &reqwest::Client,
     feed: Feed,
     version: &str,
@@ -922,7 +923,7 @@ enum PlaceStep {
     Switch(SwitchError),
 }
 
-pub async fn fetch(
+pub(crate) async fn fetch(
     layout: &Layout,
     http: &reqwest::Client,
     engine: EngineId,

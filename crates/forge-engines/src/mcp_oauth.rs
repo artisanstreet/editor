@@ -58,8 +58,8 @@ impl SecureUrl {
 }
 
 impl std::fmt::Display for SecureUrl {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0.as_str())
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_str())
     }
 }
 
@@ -146,8 +146,10 @@ impl Discovery {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Client {
-    client_id: String,
-    client_secret: Option<Secret>,
+    #[serde(rename = "client_id")]
+    id: String,
+    #[serde(rename = "client_secret")]
+    secret: Option<Secret>,
     redirect_uri: String,
     issuer: SecureUrl,
     resource: SecureUrl,
@@ -163,7 +165,7 @@ impl Client {
 
     #[must_use]
     pub fn client_id(&self) -> &str {
-        &self.client_id
+        &self.id
     }
 }
 
@@ -203,8 +205,8 @@ impl Pkce {
     pub fn new() -> Result<Self, getrandom::Error> {
         let verifier = Secret::new(random(32)?);
         Ok(Self {
+            verifier: verifier.clone(),
             challenge: s256_challenge(verifier.expose()),
-            verifier,
             state: random(24)?,
         })
     }
@@ -614,6 +616,8 @@ pub async fn discover(
         .or(scopes)
         .filter(|scope| !scope.trim().is_empty());
     Ok(Some(Discovery {
+        issuer,
+        resource,
         authorization_endpoint: endpoint(
             "authorization_endpoint",
             metadata.authorization_endpoint,
@@ -623,8 +627,6 @@ pub async fn discover(
             .registration_endpoint
             .map(|registration| endpoint("registration_endpoint", registration))
             .transpose()?,
-        issuer,
-        resource,
         scope,
     }))
 }
@@ -799,8 +801,8 @@ pub async fn register(
         });
     }
     Ok(Client {
-        client_id: answer.client_id,
-        client_secret: answer
+        id: answer.client_id,
+        secret: answer
             .client_secret
             .filter(|secret| !secret.is_empty())
             .map(Secret::new),
@@ -817,7 +819,7 @@ pub fn authorize_url(discovery: &Discovery, client: &Client, pkce: &Pkce) -> Str
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", &client.client_id)
+            .append_pair("client_id", &client.id)
             .append_pair("redirect_uri", &client.redirect_uri)
             .append_pair("code_challenge", &pkce.challenge)
             .append_pair("code_challenge_method", "S256")
@@ -930,11 +932,11 @@ pub async fn exchange(
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", client.redirect_uri.as_str()),
-        ("client_id", client.client_id.as_str()),
+        ("client_id", client.id.as_str()),
         ("code_verifier", verifier),
         ("resource", discovery.resource.as_str()),
     ];
-    if let Some(secret) = &client.client_secret {
+    if let Some(secret) = &client.secret {
         form.push(("client_secret", secret.expose()));
     }
     tokens(http, server, discovery, &form, None, now).await
@@ -951,10 +953,10 @@ pub async fn refresh(
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token.expose()),
-        ("client_id", client.client_id.as_str()),
+        ("client_id", client.id.as_str()),
         ("resource", discovery.resource.as_str()),
     ];
-    if let Some(secret) = &client.client_secret {
+    if let Some(secret) = &client.secret {
         form.push(("client_secret", secret.expose()));
     }
     tokens(http, server, discovery, &form, Some(refresh_token), now).await

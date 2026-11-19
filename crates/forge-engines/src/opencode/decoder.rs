@@ -45,7 +45,7 @@ const BUILTIN_TOOLS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reply {
+pub(super) struct Reply {
     pub method: Method,
     pub path: String,
     pub body: Option<Value>,
@@ -65,7 +65,7 @@ pub enum DecodeError {
     EmptyId,
 }
 
-pub enum Answered {
+pub(super) enum Answered {
     Reply {
         reply: Reply,
         events: Vec<EngineEvent>,
@@ -75,12 +75,12 @@ pub enum Answered {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Method {
+pub(super) enum Method {
     Post,
     Delete,
 }
 
-pub enum TurnFailure {
+pub(super) enum TurnFailure {
     ContextLimit(String),
     Failed(String),
 }
@@ -96,7 +96,7 @@ impl TurnFailure {
     }
 
     #[must_use]
-    pub fn into_message(self) -> String {
+    pub(super) fn into_message(self) -> String {
         match self {
             Self::ContextLimit(message) | Self::Failed(message) => message,
         }
@@ -113,7 +113,7 @@ pub(super) fn exceeds_context(error: &Value) -> bool {
 }
 
 #[derive(Default)]
-pub struct Decoder {
+pub(super) struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     root: Option<String>,
     sessions: HashMap<String, Option<String>>,
@@ -125,7 +125,7 @@ pub struct Decoder {
     awaiting_settle: HashSet<String>,
     shells: HashMap<String, String>,
     step_texts: HashMap<String, Vec<(String, String)>>,
-    open_texts: HashSet<String>,
+    open_texts: std::collections::BTreeSet<String>,
     compactions: HashMap<String, usize>,
     steers: HashMap<String, ItemId>,
     admitted: HashSet<String>,
@@ -137,7 +137,7 @@ pub struct Decoder {
     model: Option<String>,
     title: Option<String>,
     step_error: Option<String>,
-    pub error: Option<TurnFailure>,
+    pub(crate) error: Option<TurnFailure>,
     cancelled: bool,
     goals: HashMap<String, Goal>,
     awaiting_goal: Option<GoalChange>,
@@ -175,12 +175,14 @@ impl GoalStatus {
     }
 }
 
+#[derive(Debug)]
 struct Tool {
     session: String,
     status: Status,
     kind: ItemKind,
 }
 
+#[derive(Debug)]
 enum Pending {
     Permission {
         session: String,
@@ -193,13 +195,14 @@ enum Pending {
     },
 }
 
+#[derive(Debug)]
 struct FormField {
     key: String,
     kind: FieldKind,
     values: HashMap<String, String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum FieldKind {
     Text,
     Choice,
@@ -210,7 +213,7 @@ enum FieldKind {
 }
 
 impl Decoder {
-    pub fn new(root: Option<String>) -> Self {
+    pub(super) fn new(root: Option<String>) -> Self {
         let mut decoder = Self::default();
         if let Some(root) = root {
             decoder.follow_root(root);
@@ -219,16 +222,16 @@ impl Decoder {
     }
 
     #[cfg(test)]
-    pub const fn has_root(&self) -> bool {
+    pub(super) const fn has_root(&self) -> bool {
         self.root.is_some()
     }
 
-    pub fn follow_root(&mut self, session: String) {
+    pub(super) fn follow_root(&mut self, session: String) {
         self.sessions.insert(session.clone(), None);
         self.root = Some(session);
     }
 
-    pub fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
+    pub(super) fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
         self.admitted.insert(message.to_owned());
         match steer {
             Some(id) if self.delivered.contains(message) => vec![EngineEvent::InputAccepted { id }],
@@ -240,7 +243,7 @@ impl Decoder {
         }
     }
 
-    pub fn idle(&self) -> bool {
+    pub(super) fn idle(&self) -> bool {
         !self.turn_open
             && self.awaiting_goal.is_none()
             && (self.error.is_some()
@@ -293,7 +296,7 @@ impl Decoder {
         }]
     }
 
-    pub fn cancel(&mut self) -> Vec<EngineEvent> {
+    pub(super) fn cancel(&mut self) -> Vec<EngineEvent> {
         self.cancelled = true;
         let mut out = Vec::new();
         for key in std::mem::take(&mut self.open_texts) {
@@ -315,7 +318,7 @@ impl Decoder {
         out
     }
 
-    pub fn feed(&mut self, data: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+    pub(super) fn feed(&mut self, data: &str) -> Result<Vec<EngineEvent>, DecodeError> {
         #[derive(serde::Deserialize)]
         struct Identity<'a> {
             id: &'a str,
@@ -327,8 +330,8 @@ impl Decoder {
         if !event["type"].is_string() {
             return Err(DecodeError::NoType);
         }
-        let identity =
-            <Identity as serde::Deserialize>::deserialize(&event).map_err(DecodeError::Identity)?;
+        let identity = <Identity<'_> as serde::Deserialize>::deserialize(&event)
+            .map_err(DecodeError::Identity)?;
         if identity.id.trim().is_empty() {
             return Err(DecodeError::EmptyId);
         }
@@ -586,7 +589,7 @@ impl Decoder {
         out
     }
 
-    pub fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
+    pub(super) fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
         match self.answer_raw(key, answer) {
             Answered::Reply { reply, events } => {
                 let events = crate::retained::settle(self, events);

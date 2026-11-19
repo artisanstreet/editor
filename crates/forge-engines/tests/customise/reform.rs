@@ -31,7 +31,7 @@ fn codex_mcp_preserves_distinct_names_and_keeps_secrets_out_of_args() {
         name: name.into(),
         command: "tool".into(),
         args: vec![],
-        env: std::collections::BTreeMap::from([("TOKEN".into(), "private".into())]),
+        env: BTreeMap::from([("TOKEN".into(), "private".into())]),
         ..McpServer::default()
     };
     let result = launch(

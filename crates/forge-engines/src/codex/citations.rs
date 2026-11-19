@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub(super) struct Citations {
     streams: HashMap<String, Stream>,
 }
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Stream {
     pending: String,
     delimiter: Option<usize>,

@@ -12,13 +12,13 @@ fn known_native_tools_reject_missing_fields_but_allow_empty_replacement_text() {
         "WebSearch",
         "SendMessage",
     ] {
-        assert!(tool_kind(name, &serde_json::json!({})).is_err(), "{name}");
+        let Err(_) = tool_kind(name, &serde_json::json!({})) else {
+            panic!("{name} without its required input is refused");
+        };
     }
-    assert!(
-        tool_kind(
-            "Edit",
-            &serde_json::json!({"file_path":"file","old_string":"","new_string":""})
-        )
-        .is_ok()
-    );
+    tool_kind(
+        "Edit",
+        &serde_json::json!({"file_path":"file","old_string":"","new_string":""}),
+    )
+    .expect("an edit with empty strings still names its file");
 }

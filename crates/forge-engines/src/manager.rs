@@ -14,7 +14,7 @@ mod accounts;
 
 pub use accounts::NotInstalled;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Engines {
     inner: Arc<Inner>,
 }
@@ -32,6 +32,7 @@ pub enum EngineChange {
     },
 }
 
+#[derive(Debug)]
 struct Inner {
     layout: Layout,
     http: reqwest::Client,
@@ -40,6 +41,7 @@ struct Inner {
     usage: crate::UsageCache,
 }
 
+#[derive(Debug)]
 struct Slot {
     install: Mutex<Machine>,
     models: Mutex<ModelCache>,
@@ -50,7 +52,7 @@ struct Slot {
     commands: Mutex<Arc<[SlashCommand]>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ModelCache {
     discovery: artisan_api::DiscoveryState,
     generation: u64,
@@ -59,7 +61,7 @@ struct ModelCache {
     error: Option<Arc<catalog::ListModelsError>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 struct CachedListing {
     models: Arc<[Model]>,
     default: Option<String>,
@@ -79,6 +81,7 @@ impl Drop for Slot {
     }
 }
 
+#[derive(Debug)]
 pub struct BinaryLease {
     path: PathBuf,
     usage: std::fs::File,
@@ -451,22 +454,19 @@ impl Engines {
     }
 
     fn publish(&self, engine: EngineId) {
-        self.inner
+        let _no_listeners = self
+            .inner
             .statuses
-            .send(EngineChange::Full(self.status(engine)))
-            .ok();
+            .send(EngineChange::Full(self.status(engine)));
     }
 
     fn apply(&self, engine: EngineId, event: &Event) {
         lock(&self.slot(engine).install).handle(event);
         if matches!(event, Event::Progress { .. }) {
-            self.inner
-                .statuses
-                .send(EngineChange::Install {
-                    engine,
-                    install: self.install_state(engine),
-                })
-                .ok();
+            let _no_listeners = self.inner.statuses.send(EngineChange::Install {
+                engine,
+                install: self.install_state(engine),
+            });
         } else {
             self.publish(engine);
         }

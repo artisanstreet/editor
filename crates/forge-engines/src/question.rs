@@ -1,6 +1,6 @@
 use artisan_api::{Collection, Question, QuestionAnswer};
 
-pub fn native_answers(
+pub(crate) fn native_answers(
     questions: &[Question],
     answers: &[Option<QuestionAnswer>],
 ) -> Result<Vec<Option<Vec<String>>>, String> {
@@ -49,7 +49,7 @@ pub fn native_answers(
         .collect()
 }
 
-pub fn native_collection_answers(
+pub(crate) fn native_collection_answers(
     questions: &Collection<Question>,
     answers: &[Option<QuestionAnswer>],
 ) -> Result<Vec<Option<Vec<String>>>, String> {
@@ -61,7 +61,7 @@ pub fn native_collection_answers(
     )
 }
 
-pub fn invalid_answer(key: &str, message: String) -> crate::harness::EngineEvent {
+pub(crate) fn invalid_answer(key: &str, message: String) -> crate::harness::EngineEvent {
     crate::harness::EngineEvent::Item {
         key: format!("answer-error:{key}"),
         parent: None,

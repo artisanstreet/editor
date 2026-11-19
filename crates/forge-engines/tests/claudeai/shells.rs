@@ -51,7 +51,7 @@ async fn gone(pid: &str, what: &str) {
 #[cfg(unix)]
 async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
     let id = shells
-        .start("sleep 30 & echo $!", work, &crate::sandbox::Sandbox::Open)
+        .start("sleep 30 & echo $!", work, &Sandbox::Open)
         .unwrap();
     settled(shells, &id, "the launcher to exit", |state| {
         exited(state) && printed(state, "\n")
@@ -59,7 +59,9 @@ async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
     .await;
     let read = shells.read(&id).unwrap();
     let pid = read.lines().next().unwrap().to_owned();
-    assert!(pid.parse::<u32>().is_ok(), "the grandchild's pid: {read:?}");
+    if let Err(error) = pid.parse::<u32>() {
+        panic!("the grandchild's pid: {read:?}: {error}");
+    }
     assert!(read.ends_with("[exit code 0]"), "{read}");
     assert!(alive(&pid), "the grandchild {pid} runs on");
     (id, pid)
@@ -68,9 +70,7 @@ async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
 #[cfg(unix)]
 fn start_and_kill_past_the_retention_bound(shells: &Shells, work: &Path) {
     for _ in 0..MAX_KEPT_SHELLS {
-        let id = shells
-            .start("sleep 30", work, &crate::sandbox::Sandbox::Open)
-            .unwrap();
+        let id = shells.start("sleep 30", work, &Sandbox::Open).unwrap();
         shells.kill(&id).unwrap();
     }
 }
@@ -84,7 +84,7 @@ async fn a_background_command_runs_and_reports_its_output_and_exit() {
         .start(
             "echo hello; sleep 0.2; echo done; exit 3",
             work.path(),
-            &crate::sandbox::Sandbox::Open,
+            &Sandbox::Open,
         )
         .unwrap();
     settled(&shells, &id, "the first line", |state| {
@@ -109,11 +109,7 @@ async fn killing_a_shell_stops_it_and_says_so() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start(
-            "echo up; sleep 30",
-            work.path(),
-            &crate::sandbox::Sandbox::Open,
-        )
+        .start("echo up; sleep 30", work.path(), &Sandbox::Open)
         .unwrap();
     settled(&shells, &id, "the shell to start", |state| {
         printed(state, "up")
@@ -131,12 +127,12 @@ async fn an_id_from_another_turn_never_reads_this_turns_shell() {
     let work = tempfile::tempdir().unwrap();
     let earlier = Shells::default();
     let old = earlier
-        .start("echo old", work.path(), &crate::sandbox::Sandbox::Open)
+        .start("echo old", work.path(), &Sandbox::Open)
         .unwrap();
     drop(earlier);
     let shells = Shells::default();
     let id = shells
-        .start("echo new", work.path(), &crate::sandbox::Sandbox::Open)
+        .start("echo new", work.path(), &Sandbox::Open)
         .unwrap();
     assert_ne!(id, old, "ids are not reused across turns");
     let error = shells.read(&old).unwrap_err();
@@ -149,11 +145,7 @@ async fn a_shell_that_leaves_a_command_running_still_reports_its_exit() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start(
-            "sleep 30 & echo started",
-            work.path(),
-            &crate::sandbox::Sandbox::Open,
-        )
+        .start("sleep 30 & echo started", work.path(), &Sandbox::Open)
         .unwrap();
     settled(&shells, &id, "the launcher to exit", |state| {
         exited(state) && printed(state, "started")
@@ -173,7 +165,7 @@ async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
         .start(
             "head -c 300000 /dev/zero | tr '\\0' a; echo; echo tail-marker",
             work.path(),
-            &crate::sandbox::Sandbox::Open,
+            &Sandbox::Open,
         )
         .unwrap();
     settled(&shells, &id, "the whole output", |state| {
@@ -184,7 +176,8 @@ async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
     assert!(
         read.contains("tail-marker\n[exit code 0]"),
         "{}",
-        &read[read.len() - 100..]
+        read.split_at(read.ceil_char_boundary(read.len().saturating_sub(100)))
+            .1
     );
     assert!(
         read.starts_with(&format!(
@@ -192,7 +185,7 @@ async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
             300_013 - MAX_OUTPUT_BYTES
         )),
         "{}",
-        &read[..200]
+        read.split_at(read.floor_char_boundary(200)).0
     );
     let again = shells.read(&id).unwrap();
     assert_eq!(again, "[exit code 0]", "the loss is reported once");
@@ -206,17 +199,17 @@ async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished(
     let running: Vec<String> = (0..MAX_RUNNING_SHELLS)
         .map(|_| {
             shells
-                .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+                .start("sleep 30", work.path(), &Sandbox::Open)
                 .unwrap()
         })
         .collect();
     let refused = shells
-        .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+        .start("sleep 30", work.path(), &Sandbox::Open)
         .unwrap_err();
     assert!(refused.contains("KillShell"), "{refused}");
     shells.kill(&running[0]).unwrap();
     let replacement = shells
-        .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+        .start("sleep 30", work.path(), &Sandbox::Open)
         .unwrap();
     for id in running.iter().skip(1).chain([&replacement]) {
         shells.kill(id).unwrap();
@@ -224,7 +217,7 @@ async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished(
     let mut finished = Vec::new();
     for _ in 0..200 {
         let id = shells
-            .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+            .start("sleep 30", work.path(), &Sandbox::Open)
             .unwrap();
         shells.kill(&id).unwrap();
         finished.push(id);
@@ -234,8 +227,12 @@ async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished(
         "{} shells kept",
         shells.shells.lock().unwrap().len()
     );
-    assert!(shells.read(&finished[199]).is_ok());
-    assert!(shells.read(&finished[0]).is_err());
+    shells
+        .read(&finished[199])
+        .expect("the newest finished shell is still readable");
+    shells
+        .read(&finished[0])
+        .expect_err("the oldest finished shell was dropped");
 }
 
 #[cfg(unix)]
@@ -244,11 +241,7 @@ async fn stopping_the_run_ends_what_a_shell_started() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start(
-            "sleep 30 & echo $!; wait",
-            work.path(),
-            &crate::sandbox::Sandbox::Open,
-        )
+        .start("sleep 30 & echo $!; wait", work.path(), &Sandbox::Open)
         .unwrap();
     settled(&shells, &id, "the grandchild's pid", |state| {
         printed(state, "\n")
@@ -260,7 +253,9 @@ async fn stopping_the_run_ends_what_a_shell_started() {
         .trim_end_matches("[still running]")
         .trim()
         .to_owned();
-    assert!(pid.parse::<u32>().is_ok(), "the grandchild's pid: {pid:?}");
+    if let Err(error) = pid.parse::<u32>() {
+        panic!("the grandchild's pid: {pid:?}: {error}");
+    }
     assert!(alive(&pid));
     drop(shells);
     gone(&pid, "the grandchild to end with the run").await;
@@ -275,11 +270,7 @@ async fn commands_a_finished_shell_left_running_count_toward_the_limit() {
         leave_running(&shells, work.path()).await;
     }
     let refused = shells
-        .start(
-            "sleep 30 & echo started",
-            work.path(),
-            &crate::sandbox::Sandbox::Open,
-        )
+        .start("sleep 30 & echo started", work.path(), &Sandbox::Open)
         .unwrap_err();
     assert!(refused.contains("KillShell"), "{refused}");
 }

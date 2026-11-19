@@ -47,13 +47,15 @@ fn folders() -> Folders {
     std::fs::create_dir_all(user_home.join(".local/share/pnpm")).expect("a pnpm home");
     std::fs::create_dir_all(user_home.join(".config")).expect("a config folder");
     std::fs::write(user_home.join(".bashrc"), "kept\n").expect("a shell rc file");
+    let (project, engine_home, outside) = (folder("project"), folder("engine"), folder("outside"));
+    let caches = base.path().join("caches");
     Folders {
-        project: folder("project"),
-        engine_home: folder("engine"),
-        outside: folder("outside"),
-        caches: base.path().join("caches"),
-        user_home,
         _base: base,
+        project,
+        engine_home,
+        user_home,
+        outside,
+        caches,
     }
 }
 
@@ -110,7 +112,9 @@ async fn run_script(turn: &Turn, script: &str, args: &[String]) -> Vec<String> {
 #[tokio::test]
 async fn an_auto_engine_writes_its_folders_and_tool_caches_but_not_the_users_files() {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
+        test_support::skipped(format_args!(
+            "this kernel can't enforce the sandbox ({reason:?})"
+        ));
         return;
     }
     let folders = folders();
@@ -218,7 +222,9 @@ async fn written(folders: &Folders, targets: &[&Path]) -> Vec<String> {
 
 fn sandboxed() -> bool {
     if let Support::Unavailable(reason) = forge_isolation::support() {
-        eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
+        test_support::skipped(format_args!(
+            "this kernel can't enforce the sandbox ({reason:?})"
+        ));
         return false;
     }
     true
@@ -291,7 +297,7 @@ async fn cargo_builds_inside_auto_with_its_registry_in_the_sandbox() {
         return;
     }
     let Some(cargo) = std::env::var_os("CARGO").map(PathBuf::from) else {
-        eprintln!("SKIPPED: no cargo binary to build with");
+        test_support::skipped(format_args!("no cargo binary to build with"));
         return;
     };
     let folders = folders();
@@ -345,7 +351,7 @@ async fn pnpm_installs_inside_auto_with_its_store_in_the_sandbox() {
         .map(|folder| folder.join("pnpm"))
         .find(|candidate| candidate.is_file())
     else {
-        eprintln!("SKIPPED: pnpm isn't installed");
+        test_support::skipped(format_args!("pnpm isn't installed"));
         return;
     };
     let folders = folders();

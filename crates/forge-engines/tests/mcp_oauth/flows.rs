@@ -306,8 +306,8 @@ fn discovery_at(base: &Base) -> Discovery {
 
 fn client_for(discovery: &Discovery) -> Client {
     Client {
-        client_id: "abc".into(),
-        client_secret: None,
+        id: "abc".into(),
+        secret: None,
         redirect_uri: "http://127.0.0.1:33418/callback".into(),
         issuer: discovery.issuer.clone(),
         resource: discovery.resource.clone(),

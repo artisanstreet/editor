@@ -24,3 +24,11 @@ pub mod scenario;
 pub mod sse;
 #[cfg(feature = "transcript")]
 pub mod transcript;
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a test the machine can't run says so instead of passing silently"
+)]
+pub fn skipped(why: std::fmt::Arguments<'_>) {
+    eprintln!("SKIPPED: {why}");
+}

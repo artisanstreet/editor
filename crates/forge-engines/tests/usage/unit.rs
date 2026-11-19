@@ -157,7 +157,7 @@ async fn overlapping_forced_usage_reads_share_the_same_probe() {
     let home = directory.path().to_owned();
     let (started, waiting) = tokio::sync::oneshot::channel();
     let second = tokio::spawn(async move {
-        started.send(()).ok();
+        let _peer_gone = started.send(());
         owner.read(EngineId::Claude, &binary, &home, true).await
     });
     waiting.await.unwrap();

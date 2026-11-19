@@ -8,7 +8,7 @@ fn browsing_catalog_does_not_materialize_engine_homes() {
         first_party: true,
         ..Customisation::default()
     };
-    let _ = skill_catalog(&[(EngineId::Claude, Some(home.clone()))], &settings).unwrap();
+    skill_catalog(&[(EngineId::Claude, Some(home.clone()))], &settings).unwrap();
     assert!(!home.exists());
     assert!(!settings.skills_dir.exists());
 }

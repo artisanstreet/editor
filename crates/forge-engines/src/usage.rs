@@ -19,7 +19,7 @@ const OPENCODE_TIMEOUT: Duration = Duration::from_secs(30);
 const OPENCODE_GO_USAGE: &str = "https://opencode.ai/zen/go/v1/usage";
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadUsageError {
+pub(crate) enum ReadUsageError {
     #[error("read Claude's usage")]
     Claude(#[source] ReadClaudeUsageError),
     #[error("read Codex's rate limits")]
@@ -56,12 +56,13 @@ pub async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<
     }
 }
 
+#[derive(Debug)]
 pub struct UsageCache {
     ttl: Duration,
     slots: HashMap<EngineId, Slot>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Slot {
     reading: tokio::sync::Mutex<()>,
     last: Mutex<Last>,
@@ -69,7 +70,7 @@ struct Slot {
     reads: AtomicU64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Last {
     good: Option<UsageLimits>,
     attempt: Option<(Instant, bool)>,
@@ -156,7 +157,7 @@ impl UsageCache {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadClaudeUsageError {
+pub(crate) enum ReadClaudeUsageError {
     #[error("restore Claude's configuration before asking for usage")]
     Guard(#[source] crate::sandbox::GuardError),
     #[error("run claude /usage")]
@@ -242,7 +243,8 @@ fn parse_claude_usage(text: &str, now: Timestamp) -> Vec<UsageWindow> {
 
 fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
     use chrono::{Datelike, NaiveDate, Utc};
-    let clause = line[line.rfind("resets ")? + "resets ".len()..].trim();
+    let (_, clause) = line.rsplit_once("resets ")?;
+    let clause = clause.trim();
     let (when, zone) = clause.strip_suffix(')')?.rsplit_once('(')?;
     if !matches!(
         zone.trim().to_uppercase().as_str(),
@@ -285,7 +287,7 @@ fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadCodexUsageError {
+pub(crate) enum ReadCodexUsageError {
     #[error("restore Codex's configuration before asking for rate limits")]
     Guard(#[source] crate::sandbox::GuardError),
     #[error("codex rate limits timed out after {}s", CODEX_TIMEOUT.as_secs())]
@@ -372,7 +374,7 @@ fn duration_label(minutes: u64) -> String {
     "neither OpenCode Go limits nor spend could be read: {}",
     diagnostics::chain(go)
 )]
-pub struct ReadOpenCodeUsageError {
+pub(crate) struct ReadOpenCodeUsageError {
     go: Box<ReadGoUsageError>,
     #[source]
     spend: Box<ReadSpendError>,
@@ -409,7 +411,7 @@ async fn read_opencode(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadGoUsageError {
+pub(crate) enum ReadGoUsageError {
     #[error("list OpenCode credentials")]
     Run(#[source] crate::account::RunShortError),
     #[error("listing OpenCode credentials: {stderr}")]
@@ -526,7 +528,7 @@ fn parse_go_usage(body: &Value) -> Vec<UsageWindow> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadSpendError {
+pub(crate) enum ReadSpendError {
     #[error("run opencode stats for {days} days")]
     Run {
         days: &'static str,

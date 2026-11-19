@@ -17,7 +17,7 @@ fn only_the_forks_compaction_is_accepted_and_usage_includes_cache() {
         }
     );
     assert!(crate::is_compaction_summary(&result.text));
-    assert!(compact_event(&json!({ "type": "session.compaction.failed", "data": { "sessionID": "fork", "error": "overflow" }}).to_string(), "fork").is_err());
+    compact_event(&json!({ "type": "session.compaction.failed", "data": { "sessionID": "fork", "error": "overflow" }}).to_string(), "fork").expect_err("a failed compaction is reported");
 }
 
 fn ended_with(error: &Value) -> Option<TurnFailure> {

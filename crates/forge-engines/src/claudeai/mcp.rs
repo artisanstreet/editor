@@ -223,7 +223,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-pub const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+pub(super) const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const MAX_WARM_THREADS: usize = 8;
 const MAX_TOOLS: usize = 256;
 const MAX_NAME: usize = 64;
@@ -238,7 +238,7 @@ const MAX_IMAGES: usize = 8;
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 const MIN_SECRET_CHARS: usize = 4;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Servers {
     clients: Vec<Arc<Client>>,
     tools: Vec<Tool>,
@@ -248,12 +248,14 @@ pub struct Servers {
     warm: Option<(String, u64)>,
 }
 
+#[derive(Debug)]
 pub struct Client {
-    pub server: String,
+    server: String,
     listed: Vec<Listed>,
     transport: Transport,
 }
 
+#[derive(Debug)]
 struct Listed {
     raw: String,
     description: String,
@@ -262,11 +264,11 @@ struct Listed {
 
 #[derive(Clone, Debug)]
 pub struct Tool {
-    pub name: String,
-    pub server: String,
-    pub raw: String,
-    pub description: String,
-    pub schema: Value,
+    pub(crate) name: String,
+    pub(crate) server: String,
+    pub(crate) raw: String,
+    pub(crate) description: String,
+    pub(crate) schema: Value,
     client: usize,
 }
 
@@ -301,7 +303,7 @@ tokio::task_local! {
     static THREAD: String;
 }
 
-pub async fn for_thread<F: Future>(thread: &str, future: F) -> F::Output {
+pub(super) async fn for_thread<F: Future>(thread: &str, future: F) -> F::Output {
     THREAD.scope(thread.to_owned(), future).await
 }
 
@@ -705,7 +707,7 @@ async fn list_tools(
 }
 
 #[must_use]
-pub fn prefixed_name(server: &str, tool: &str) -> String {
+pub(super) fn prefixed_name(server: &str, tool: &str) -> String {
     format!("mcp__{}__{}", component(server), component(tool))
 }
 
@@ -768,8 +770,8 @@ fn hashed_name(name: &str, server: &str, tool: &str, salt: u32) -> String {
     hash.update(tool.as_bytes());
     hash.update(salt.to_le_bytes());
     let digest = hex::encode(&hash.finalize()[..4]);
-    let keep = name.len().min(MAX_NAME - digest.len() - 1);
-    format!("{}_{digest}", &name[..keep])
+    let (kept, _) = name.split_at(name.floor_char_boundary(MAX_NAME - digest.len() - 1));
+    format!("{kept}_{digest}")
 }
 
 struct Rendered {
@@ -965,14 +967,16 @@ impl Expander<'_> {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = rest.find("${") {
-            out.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let Some(end) = after.find('}').filter(|&end| end > 0) else {
-                out.push_str(&rest[start..start + 2]);
+            let (before, opened) = rest.split_at(start);
+            out.push_str(before);
+            let (_, after) = opened.split_at("${".len());
+            let Some((inner, closed)) =
+                after.split_once('}').filter(|(inner, _)| !inner.is_empty())
+            else {
+                out.push_str("${");
                 rest = after;
                 continue;
             };
-            let inner = &after[..end];
             let (name, default) = match inner.split_once(":-") {
                 Some((name, default)) => (name, Some(default)),
                 None => (inner, None),
@@ -989,7 +993,7 @@ impl Expander<'_> {
                     }
                 }
             }
-            rest = &after[end + 1..];
+            rest = closed;
         }
         out.push_str(rest);
         out
@@ -1067,6 +1071,7 @@ fn cancelled(id: u64) -> Value {
     })
 }
 
+#[derive(Debug)]
 enum Transport {
     Stream(Stream),
     Http(Arc<Http>),
@@ -1159,6 +1164,7 @@ impl Transport {
     }
 }
 
+#[derive(Debug)]
 struct Rpc {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, Undelivered>>>>,
@@ -1188,7 +1194,7 @@ impl Rpc {
     fn fail(&self, id: u64, reason: Undelivered) {
         let waiting = lock(&self.pending).remove(&id);
         if let Some(waiting) = waiting {
-            waiting.send(Err(reason)).ok();
+            let _requester_gone = waiting.send(Err(reason));
         }
     }
 
@@ -1196,7 +1202,7 @@ impl Rpc {
         self.alive.store(false, Ordering::SeqCst);
         let pending = std::mem::take(&mut *lock(&self.pending));
         for waiting in pending.into_values() {
-            waiting.send(Err(Undelivered::Closed(reason.clone()))).ok();
+            let _requester_gone = waiting.send(Err(Undelivered::Closed(reason.clone())));
         }
     }
 
@@ -1207,7 +1213,7 @@ impl Rpc {
         let id = message.get("id").and_then(Value::as_u64)?;
         let waiting = lock(&self.pending).remove(&id);
         if let Some(waiting) = waiting {
-            waiting.send(Ok(message)).ok();
+            let _requester_gone = waiting.send(Ok(message));
         }
         None
     }
@@ -1223,7 +1229,7 @@ enum Refused {
     Stopped,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Outbox {
     sender: mpsc::UnboundedSender<Queued>,
     bytes: Arc<AtomicUsize>,
@@ -1291,6 +1297,7 @@ fn answer(rpc: &Rpc, outgoing: &Outbox, message: &Value) -> bool {
     }
 }
 
+#[derive(Debug)]
 struct Stream {
     rpc: Arc<Rpc>,
     outgoing: Outbox,
@@ -1476,6 +1483,7 @@ impl Stream {
     }
 }
 
+#[derive(Debug)]
 struct Pending<'a> {
     stream: &'a Stream,
     id: u64,
@@ -1826,6 +1834,7 @@ fn reach_error(error: &reqwest::Error) -> &'static str {
     }
 }
 
+#[derive(Debug)]
 struct Http {
     client: reqwest::Client,
     url: String,
@@ -2095,7 +2104,7 @@ async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>,
 }
 
 #[must_use]
-pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
+pub(super) fn project_servers(cwd: &Path) -> Vec<McpServer> {
     let mut dirs: Vec<&Path> = cwd.ancestors().collect();
     if let Some(root) = dirs.iter().position(|dir| dir.join(".git").exists()) {
         dirs.truncate(root + 1);
@@ -2178,117 +2187,8 @@ fn from_file(path: &Path) -> Vec<McpServer> {
 }
 
 #[cfg(test)]
-async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, String)> {
-    let mut data = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = match socket.read(&mut buffer).await {
-            Ok(0) | Err(_) => return None,
-            Ok(read) => read,
-        };
-        data.extend_from_slice(&buffer[..read]);
-        let text = String::from_utf8_lossy(&data);
-        if let Some(end) = text.find("\r\n\r\n") {
-            let length = text[..end]
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .map(str::trim)
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            if data.len() >= end + 4 + length {
-                return Some((
-                    text[..end].to_owned(),
-                    text[end + 4..end + 4 + length].to_owned(),
-                ));
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn fake_reply(value: &Value) -> Value {
-    let result = match value["method"].as_str() {
-        Some("initialize") => json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "serverInfo": { "name": "fake", "version": "1" }
-        }),
-        Some("tools/list") => json!({
-            "tools": [{
-                "name": "search",
-                "description": "Find things",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } }
-                }
-            }]
-        }),
-        Some("tools/call") => json!({
-            "content": [{ "type": "text", "text": "found it" }],
-            "isError": false
-        }),
-        _ => json!({}),
-    };
-    json!({ "jsonrpc": "2.0", "id": value["id"], "result": result })
-}
-
-#[cfg(test)]
-pub async fn fake_server(listener: tokio::net::TcpListener) {
-    loop {
-        let Ok((mut socket, _)) = listener.accept().await else {
-            break;
-        };
-        let Some((_, body)) = read_request(&mut socket).await else {
-            break;
-        };
-        let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        if value.get("id").is_none() {
-            socket
-                .write_all(
-                    b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .ok();
-            continue;
-        }
-        let body = fake_reply(&value).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket.write_all(response.as_bytes()).await.ok();
-    }
-}
-
-#[cfg(test)]
-pub fn fake_stdio(name: &str, env: &[(&str, &str)]) -> McpServer {
-    let mut vars: BTreeMap<String, String> = env
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-        .collect();
-    vars.insert("ARTISAN_FAKE_MCP".to_owned(), "1".to_owned());
-    McpServer {
-        name: name.to_owned(),
-        command: std::env::current_exe()
-            .expect("the test binary")
-            .to_string_lossy()
-            .into_owned(),
-        args: [
-            "--exact",
-            "claudeai::mcp::tests::fake_stdio_server",
-            "--nocapture",
-            "--test-threads=1",
-            "--quiet",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
-        env: vars,
-        ..McpServer::default()
-    }
-}
+#[path = "../../tests/claudeai/mcp/fakes.rs"]
+pub(super) mod fakes;
 
 #[cfg(test)]
 #[path = "../../tests/claudeai/mcp/unit.rs"]

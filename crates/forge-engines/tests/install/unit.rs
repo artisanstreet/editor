@@ -32,7 +32,7 @@ async fn serve(files: HashMap<String, Vec<u8>>) -> String {
                     .concat()
                 },
             );
-            socket.write_all(&response).await.ok();
+            let _peer_gone = socket.write_all(&response).await;
         }
     });
     base

@@ -1,6 +1,5 @@
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
 
 fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -376,7 +375,7 @@ pub(super) struct CollabCall {
     pub prompt: Option<String>,
     pub description: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
-    pub agents_states: HashMap<String, AgentState>,
+    pub agents_states: std::collections::BTreeMap<String, AgentState>,
 }
 
 #[derive(Deserialize)]

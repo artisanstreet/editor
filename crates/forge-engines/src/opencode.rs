@@ -215,6 +215,7 @@ pub enum SetTitleError {
     },
 }
 
+#[derive(Debug)]
 pub struct OpenCodeHarness;
 
 impl Harness for OpenCodeHarness {

@@ -104,6 +104,7 @@ pub enum RequestError {
 
 const ACTIVE_WRITER: &str = "already has an active writer";
 
+#[derive(Debug)]
 pub struct CodexHarness;
 
 impl Harness for CodexHarness {
@@ -127,7 +128,7 @@ impl Harness for CodexHarness {
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+    ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
         let thread = turn.thread_id.clone();
         Box::pin(async move {
             side::compact(turn, cancel)
@@ -245,11 +246,13 @@ struct Queued {
     acknowledge: bool,
 }
 
+#[derive(Debug)]
 struct Starting {
     request: u64,
     acknowledges: Vec<ItemId>,
 }
 
+#[derive(Debug)]
 enum Phase {
     Idle,
     Starting(Starting),

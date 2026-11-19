@@ -1,4 +1,4 @@
-use crate::{EngineEvent, Harness, Input, Launch, RunIo, Turn, UserInput};
+use crate::{EngineEvent, Harness, Input, RunIo, Turn, UserInput};
 use artisan_api::{Answer, Decision, EngineConfig, EngineId, Status, ThreadId};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -47,7 +47,6 @@ impl Fixture {
         let mut launch = crate::fake_engine::launch("codex-app-server", &[]);
         launch.env.extend(self.env.iter().cloned());
         Turn {
-            trace_dir: None,
             thread_id: ThreadId::new(),
             engine: EngineId::Codex,
             binary: crate::fake_engine::binary(),
@@ -60,6 +59,7 @@ impl Fixture {
                 ..UserInput::default()
             },
             launch,
+            trace_dir: None,
         }
     }
 

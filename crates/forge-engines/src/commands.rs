@@ -2,7 +2,7 @@ use artisan_api::{EngineId, SlashCommand};
 
 const MAX_COMMANDS: usize = 1024;
 
-pub fn own(engine: EngineId) -> Vec<SlashCommand> {
+pub(crate) fn own(engine: EngineId) -> Vec<SlashCommand> {
     if engine != EngineId::Claude {
         return Vec::new();
     }
@@ -19,7 +19,7 @@ pub fn own(engine: EngineId) -> Vec<SlashCommand> {
     .collect()
 }
 
-pub fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+pub(crate) fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
     let mut seen = std::collections::HashSet::new();
     commands
         .into_iter()

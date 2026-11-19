@@ -300,7 +300,7 @@ fn project_name(cwd: &Path) -> String {
     });
     format!(
         "{}-{}",
-        &name[..MAX_PROJECT_NAME],
+        name.split_at(MAX_PROJECT_NAME).0,
         base36(hash.unsigned_abs())
     )
 }

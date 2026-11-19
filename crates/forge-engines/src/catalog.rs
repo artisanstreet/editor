@@ -16,13 +16,13 @@ const MAX_MODELS: usize = 1024;
 mod speed_tests;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Listing {
+pub(crate) struct Listing {
     pub models: Vec<Model>,
     pub default: Option<String>,
     pub commands: Option<Vec<SlashCommand>>,
 }
 
-pub struct Program<'a> {
+pub(crate) struct Program<'a> {
     pub binary: Option<&'a Path>,
     pub env: &'a [(String, String)],
     pub home: &'a Path,
@@ -56,7 +56,7 @@ pub enum ListModelsError {
     OpenCodeEmpty,
 }
 
-pub async fn list(
+pub(crate) async fn list(
     engine: EngineId,
     program: Program<'_>,
     http: &reqwest::Client,
@@ -182,10 +182,10 @@ fn readable_name(raw: &str) -> String {
         .join(" ")
 }
 
-pub const STANDARD_SPEED: &str = "standard";
+pub(crate) const STANDARD_SPEED: &str = "standard";
 
 #[derive(Debug, thiserror::Error)]
-pub enum FetchCatalogError {
+pub(crate) enum FetchCatalogError {
     #[error("fetch {url}")]
     Request {
         url: &'static str,
@@ -257,7 +257,7 @@ async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing, ListMode
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ClaudeCommandsError {
+pub(crate) enum ClaudeCommandsError {
     #[error(transparent)]
     NotInstalled(NotInstalled),
     #[error("start Claude for its commands")]
@@ -562,7 +562,7 @@ fn claude_speeds(fast_mode: Option<&Value>) -> Vec<Speed> {
     ]
 }
 
-pub const CLAUDE_FAST: &str = "fast";
+pub(crate) const CLAUDE_FAST: &str = "fast";
 
 fn evidence(value: &Value, source: &str, fields: &[&str]) -> artisan_api::ModelEvidence {
     let observed_at = artisan_api::now();

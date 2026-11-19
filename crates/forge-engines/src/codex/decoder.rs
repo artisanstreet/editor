@@ -22,7 +22,7 @@ use super::protocol::{
 use crate::{EngineEvent, LiveKind, Outcome};
 use artisan_api::{
     AgentAction, ErrorKind, FileChange, FileOp, ItemKind, MessageDirection, NoticeKind, Output,
-    Phase, PlanStep, RunStatus, Status, StepStatus, TextContent, ToolKind, Usage,
+    Phase, PlanStep, Status, StepStatus, TextContent, ToolKind, Usage,
 };
 use requests::{Approvals, Questions};
 use serde_json::Value;
@@ -33,10 +33,10 @@ const PLAN_KEY: &str = "plan";
 const DEFERRED_FRAMES: usize = 256;
 const DEFERRED_BYTES: usize = 4 * 1024 * 1024;
 
-pub use crate::rpc::Response;
+pub(super) use crate::rpc::Response;
 
 #[derive(Default)]
-pub struct Decoder {
+pub(super) struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     rpc: crate::rpc::State,
     citations: super::citations::Citations,
@@ -84,39 +84,39 @@ struct StartedThread {
 }
 
 impl Decoder {
-    pub fn request(&mut self, method: &str, params: Value) -> u64 {
+    pub(super) fn request(&mut self, method: &str, params: Value) -> u64 {
         self.rpc.request(method, params)
     }
 
-    pub fn take_outbox(&mut self) -> Vec<Value> {
+    pub(super) fn take_outbox(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.rpc.outbox)
     }
 
-    pub fn take_responses(&mut self) -> Vec<Response> {
+    pub(super) fn take_responses(&mut self) -> Vec<Response> {
         std::mem::take(&mut self.rpc.responses)
     }
 
-    pub const fn take_turn_end(&mut self) -> Option<Outcome> {
+    pub(super) const fn take_turn_end(&mut self) -> Option<Outcome> {
         self.turn_end.take()
     }
 
-    pub fn take_stranded(&mut self) -> bool {
+    pub(super) fn take_stranded(&mut self) -> bool {
         std::mem::take(&mut self.stranded)
     }
 
-    pub fn take_messages(&mut self) -> Vec<String> {
+    pub(super) fn take_messages(&mut self) -> Vec<String> {
         std::mem::take(&mut self.messages)
     }
 
-    pub fn thread(&self) -> Option<&str> {
+    pub(super) fn thread(&self) -> Option<&str> {
         self.root.as_deref()
     }
 
-    pub fn active_turn(&self) -> Option<&str> {
+    pub(super) fn active_turn(&self) -> Option<&str> {
         self.turn.as_deref()
     }
 
-    pub fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+    pub(super) fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
         let frame: Frame = serde_json::from_str(line).map_err(DecodeError::Frame)?;
         let mut out = Vec::new();
         match (frame.method, frame.id) {
@@ -147,7 +147,7 @@ impl Decoder {
         Ok(out)
     }
 
-    pub fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
+    pub(super) fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
         let events = crate::retained::settle(self, events);
         self.retire_settled();
@@ -1304,7 +1304,7 @@ impl Decoder {
         out.push(self.event(key));
     }
 
-    pub fn finish(&mut self) -> Vec<EngineEvent> {
+    pub(super) fn finish(&mut self) -> Vec<EngineEvent> {
         self.approvals.clear();
         self.questions.clear();
         let mut keys: Vec<String> = self

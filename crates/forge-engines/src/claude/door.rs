@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Door {
+pub(super) enum Door {
     Open,
     HeldForReply,
     HeldForBackground,
@@ -8,26 +8,26 @@ pub enum Door {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Session {
+pub(super) struct Session {
     pub in_turn: bool,
     pub awaiting_input: bool,
     pub background: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ending {
+pub(super) enum Ending {
     Replied,
     Cancelled,
 }
 
 impl Door {
     #[must_use]
-    pub const fn takes_input(self) -> bool {
+    pub(super) const fn takes_input(self) -> bool {
         !matches!(self, Self::Closed)
     }
 
     #[must_use]
-    pub const fn after_result(self, session: Session, ending: Ending) -> Self {
+    pub(super) const fn after_result(self, session: Session, ending: Ending) -> Self {
         match (self, ending, session.background, session.awaiting_input) {
             (Self::Closed, ..)
             | (_, Ending::Cancelled, ..)
@@ -38,7 +38,7 @@ impl Door {
     }
 
     #[must_use]
-    pub const fn after_frame(self, session: Session) -> Self {
+    pub(super) const fn after_frame(self, session: Session) -> Self {
         match self {
             Self::Open | Self::Closed => self,
             Self::HeldForReply | Self::HeldForBackground | Self::Settling if session.background => {
@@ -54,7 +54,7 @@ impl Door {
     }
 
     #[must_use]
-    pub const fn after_grace(self, session: Session) -> Self {
+    pub(super) const fn after_grace(self, session: Session) -> Self {
         match self.after_frame(session) {
             Self::Settling if session.awaiting_input => Self::HeldForReply,
             Self::Settling => Self::Closed,

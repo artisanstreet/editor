@@ -65,6 +65,7 @@ impl Answer {
     }
 }
 
+#[derive(Debug)]
 pub struct Runtime {
     pub skills: Vec<skills::Skill>,
     pub mcp: mcp::Servers,
@@ -91,7 +92,7 @@ impl Runtime {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Allowed {
     file_changes: bool,
     commands: HashSet<String>,
@@ -141,7 +142,7 @@ fn web_host(call: &Call) -> Option<String> {
 }
 
 #[must_use]
-pub fn definitions(runtime: &Runtime) -> Vec<Value> {
+pub(super) fn definitions(runtime: &Runtime) -> Vec<Value> {
     let mut tools = vec![
         json!({ "type": "web_search_v0", "name": "web_search" }),
         json!({
@@ -335,7 +336,7 @@ pub fn definitions(runtime: &Runtime) -> Vec<Value> {
 }
 
 #[must_use]
-pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
+pub(super) fn questions(call: &Call) -> Vec<artisan_api::Question> {
     call.input["questions"]
         .as_array()
         .map(|questions| {
@@ -378,7 +379,7 @@ pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
 }
 
 #[must_use]
-pub fn plan(
+pub(super) fn plan(
     call: &Call,
     permissions: Permissions,
     allowed: &Allowed,
@@ -397,7 +398,7 @@ pub fn plan(
         );
         let mut cause: Option<&dyn std::error::Error> = Some(error);
         while let Some(error) = cause {
-            write!(reason, "{error}").ok();
+            write!(reason, "{error}").expect("invariant: writing to a String cannot fail");
             cause = error.source();
             if cause.is_some() {
                 reason.push_str(": ");
@@ -486,7 +487,7 @@ fn mcp_request(name: &str, known: Option<(&str, &str)>) -> ApprovalRequest {
 }
 
 #[must_use]
-pub fn item_key(call: &Call) -> String {
+pub(super) fn item_key(call: &Call) -> String {
     if call.name == "TodoWrite"
         && crate::claude::tools::validate_input("TodoWrite", &call.input).is_ok()
     {
@@ -497,7 +498,7 @@ pub fn item_key(call: &Call) -> String {
 }
 
 #[must_use]
-pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+pub(super) fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
     match call.name.as_str() {
         "TodoWrite" => match crate::claude::tools::validate_input("TodoWrite", &call.input) {
             Ok(()) => ItemKind::Plan {
@@ -543,7 +544,7 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
 }
 
 #[must_use]
-pub fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> ItemKind {
+pub(super) fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> ItemKind {
     let mut item = preview(call, cwd, mcp);
     if let ItemKind::Agent { result, .. } = &mut item {
         *result = Some(reason.to_owned().into());
@@ -553,7 +554,7 @@ pub fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> Ite
 }
 
 #[must_use]
-pub fn approval_card(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+pub(super) fn approval_card(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
     let item = preview(call, cwd, mcp);
     if !matches!(item, ItemKind::Agent { .. }) {
         return item;
@@ -571,7 +572,7 @@ pub fn approval_card(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
 }
 
 #[must_use]
-pub fn agent_kind(call: &Call) -> ItemKind {
+pub(super) fn agent_kind(call: &Call) -> ItemKind {
     ItemKind::Agent {
         engine: None,
         thread: None,
@@ -593,7 +594,7 @@ pub fn agent_kind(call: &Call) -> ItemKind {
     }
 }
 
-pub async fn execute(
+pub(super) async fn execute(
     call: &Call,
     cwd: &Path,
     cancel: &CancellationToken,
@@ -766,7 +767,8 @@ async fn read(call: &Call, cwd: &Path) -> Answer {
         } else {
             line.to_owned()
         };
-        writeln!(out, "{:>6}\t{line}", number + 1).ok();
+        writeln!(out, "{:>6}\t{line}", number + 1)
+            .expect("invariant: writing to a String cannot fail");
     }
     if out.is_empty() {
         return Answer::ok(if total == 0 {
@@ -780,7 +782,8 @@ async fn read(call: &Call, cwd: &Path) -> Answer {
     }
     let shown_to = (offset - 1).saturating_add(limit);
     if usize::try_from(shown_to).is_ok_and(|shown| shown < total) {
-        writeln!(out, "[{total} lines in all; pass offset to read on]").ok();
+        writeln!(out, "[{total} lines in all; pass offset to read on]")
+            .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&out))
 }
@@ -866,7 +869,7 @@ fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
         .max_depth(Some(32))
         .follow_links(false)
         .require_git(false)
-        .sort_by_file_name(std::cmp::Ord::cmp)
+        .sort_by_file_name(Ord::cmp)
         .build()
         .take(MAX_WALKED)
         .filter_map(Result::ok)
@@ -926,7 +929,7 @@ async fn glob(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
             listing,
             "\n[more than {MAX_MATCHES} files; narrow the pattern]"
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&listing))
 }
@@ -973,7 +976,7 @@ async fn grep(call: &Call, cwd: &Path, rules: &Rules, cancel: &CancellationToken
             listing,
             "\n[more than {MAX_MATCHES} matches; narrow the search]"
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&listing))
 }
@@ -1167,7 +1170,7 @@ async fn web_fetch(
             answer,
             "Requested: {prompt}\nAnswer that from the page below."
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     if cut {
         writeln!(
@@ -1175,7 +1178,7 @@ async fn web_fetch(
             "[truncated: the page is more than {} MB; only its start was read]",
             MAX_WEB_BYTES / (1024 * 1024)
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     answer.push('\n');
     answer.push_str(text.trim());
@@ -1267,11 +1270,10 @@ fn decode(bytes: &[u8], charset: Option<&str>, html: bool) -> String {
 fn meta_charset(bytes: &[u8]) -> Option<String> {
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
     let mut rest = head.as_str();
-    while let Some(start) = rest.find("<meta") {
-        let tag = &rest[start..];
-        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
-        if let Some(at) = tag.find("charset=") {
-            let label: String = tag[at + "charset=".len()..]
+    while let Some((_, after)) = rest.split_once("<meta") {
+        let tag = after.split_once('>').map_or(after, |(tag, _)| tag);
+        if let Some((_, value)) = tag.split_once("charset=") {
+            let label: String = value
                 .trim_start_matches(['"', '\'', ' '])
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
@@ -1280,7 +1282,7 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
                 return Some(label);
             }
         }
-        rest = &rest[start + "<meta".len()..];
+        rest = after;
     }
     None
 }
@@ -1553,19 +1555,22 @@ fn strip_blocks(html: &str, tag: &str) -> String {
     let close = format!("</{tag}");
     let mut out = String::with_capacity(html.len());
     let mut at = 0;
-    while let Some(start) = lower[at..].find(&open) {
+    while let Some(start) = lower.split_at(at).1.find(&open) {
         let start = at + start;
-        out.push_str(&html[at..start]);
-        let Some(end) = lower[start..].find(&close) else {
+        out.push_str(
+            html.get(at..start)
+                .expect("invariant: ASCII lowercasing keeps every byte offset"),
+        );
+        let Some(end) = lower.split_at(start).1.find(&close) else {
             return out;
         };
         let end = start + end;
-        let Some(gt) = lower[end..].find('>') else {
+        let Some(gt) = lower.split_at(end).1.find('>') else {
             return out;
         };
         at = end + gt + 1;
     }
-    out.push_str(&html[at..]);
+    out.push_str(html.split_at(at).1);
     out
 }
 
@@ -1573,7 +1578,7 @@ fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
+        out.push_str(rest.split_at(start).0);
         let end = start
             + 1
             + rest.as_bytes()[start + 1..]
@@ -1582,14 +1587,14 @@ fn decode_entities(text: &str) -> String {
                 .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'#')
                 .count();
         let decoded = (rest.as_bytes().get(end) == Some(&b';'))
-            .then(|| entity(&rest[start + 1..end]))
+            .then(|| rest.get(start + 1..end).and_then(entity))
             .flatten();
         if let Some(character) = decoded {
             out.push(character);
-            rest = &rest[end + 1..];
+            rest = rest.split_at(end + 1).1;
         } else {
             out.push('&');
-            rest = &rest[start + 1..];
+            rest = rest.split_at(start + 1).1;
         }
     }
     out.push_str(rest);
@@ -1723,7 +1728,7 @@ async fn bash(
         if !answer.is_empty() && !answer.ends_with('\n') {
             answer.push('\n');
         }
-        write!(answer, "[exit code {code}]").ok();
+        write!(answer, "[exit code {code}]").expect("invariant: writing to a String cannot fail");
     }
     if answer.is_empty() {
         answer.push_str("(no output)");
@@ -1757,7 +1762,8 @@ async fn capped(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     }
     let mut text = shells::Decoder::new(shells::legacy_encoding().await).push(&kept, true);
     if dropped > 0 {
-        write!(text, "\n[{dropped} more bytes of output cut]").ok();
+        write!(text, "\n[{dropped} more bytes of output cut]")
+            .expect("invariant: writing to a String cannot fail");
     }
     text
 }
@@ -1779,11 +1785,8 @@ fn truncate(text: &str) -> String {
     if text.len() <= MAX_OUTPUT_BYTES {
         return text.to_owned();
     }
-    let mut end = MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[output cut]", &text[..end])
+    let (kept, _) = text.split_at(text.floor_char_boundary(MAX_OUTPUT_BYTES));
+    format!("{kept}\n[output cut]")
 }
 
 #[cfg(test)]

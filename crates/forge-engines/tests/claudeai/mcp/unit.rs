@@ -2,6 +2,7 @@ use std::io::{BufRead as _, Write as _};
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+use super::fakes::{fake_reply, fake_server, fake_stdio, read_request};
 use super::*;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake screenshot";
@@ -11,6 +12,11 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake screenshot";
     clippy::too_many_lines,
     clippy::significant_drop_tightening,
     reason = "the whole fake server, one tool per arm, reading stdin to the end"
+)]
+#[expect(
+    clippy::exit,
+    clippy::print_stderr,
+    reason = "a fake MCP server that fails to start says why on stderr and exits like a real one"
 )]
 fn fake_stdio_server() {
     if std::env::var_os("ARTISAN_FAKE_MCP").is_none() {
@@ -208,7 +214,7 @@ async fn clashing_names_reach_their_own_server() {
             fake_stdio("a_b", &[("FAKE_TAG", "two:")]),
         ],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -260,7 +266,7 @@ async fn an_image_waits_for_the_message_once() {
     let servers = Servers::connect(
         &[fake_stdio("shots", &[("FAKE_TOOLS", "image")])],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     let (client, tool) = servers.find("mcp__shots__image").expect("the tool");
@@ -290,7 +296,7 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
             &[("FAKE_TOOLS", "slow"), ("FAKE_LOG", &log.to_string_lossy())],
         )],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -358,7 +364,7 @@ async fn a_server_ping_is_answered_and_not_taken_for_the_reply() {
     let servers = Servers::connect(
         &[fake_stdio("pinger", &[("FAKE_TOOLS", "ping")])],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     let (client, tool) = servers.find("mcp__pinger__ping").expect("the tool");
@@ -373,13 +379,8 @@ async fn a_server_ping_is_answered_and_not_taken_for_the_reply() {
 async fn an_oversized_line_fails_its_call_and_the_server_carries_on() {
     let server = fake_stdio("big", &[("FAKE_TOOLS", "big,echo"), ("FAKE_BIG", "200000")]);
     let resolved = resolve(&server, &|_| None).expect("the config");
-    let stream = Stream::stdio(
-        &resolved,
-        Path::new("."),
-        64 * 1024,
-        &crate::sandbox::Sandbox::Open,
-    )
-    .expect("the server");
+    let stream =
+        Stream::stdio(&resolved, Path::new("."), 64 * 1024, &Sandbox::Open).expect("the server");
     let transport = Transport::Stream(stream);
     let deadline = || Instant::now() + Duration::from_secs(20);
     transport
@@ -485,7 +486,7 @@ async fn a_failed_start_tells_the_model_why_without_the_servers_output() {
             ],
         )],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert_eq!(
@@ -506,7 +507,7 @@ async fn servers_connect_at_once() {
             fake_stdio("two", &[("FAKE_DELAY_MS", "1000")]),
         ],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -532,7 +533,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     for _ in 0..2 {
         let servers = for_thread(
             "thread-warm",
-            Servers::connect(&config, Path::new("."), &crate::sandbox::Sandbox::Open),
+            Servers::connect(&config, Path::new("."), &Sandbox::Open),
         )
         .await;
         let (client, tool) = servers.find("mcp__warm__echo").expect("the tool");
@@ -550,7 +551,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     drop(
         for_thread(
             "thread-warm",
-            Servers::connect(&changed, Path::new("."), &crate::sandbox::Sandbox::Open),
+            Servers::connect(&changed, Path::new("."), &Sandbox::Open),
         )
         .await,
     );
@@ -559,7 +560,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     drop(
         for_thread(
             "thread-other",
-            Servers::connect(&changed, Path::new("."), &crate::sandbox::Sandbox::Open),
+            Servers::connect(&changed, Path::new("."), &Sandbox::Open),
         )
         .await,
     );
@@ -576,7 +577,7 @@ async fn only_the_most_recently_used_threads_keep_servers_warm() {
         drop(
             for_thread(
                 thread,
-                Servers::connect(&config, Path::new("."), &crate::sandbox::Sandbox::Open),
+                Servers::connect(&config, Path::new("."), &Sandbox::Open),
             )
             .await,
         );
@@ -617,21 +618,19 @@ async fn serve_http(listener: tokio::net::TcpListener, fake: Arc<FakeHttp>) {
             let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             let method = value["method"].as_str().unwrap_or_default();
             if method != "initialize" && header("mcp-session-id") != *lock(&fake.session) {
-                socket
+                let _peer_gone = socket
                     .write_all(
                         b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                     )
-                    .await
-                    .ok();
+                    .await;
                 return;
             }
             if value.get("id").is_none() {
-                socket
+                let _peer_gone = socket
                     .write_all(
                         b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                     )
-                    .await
-                    .ok();
+                    .await;
                 return;
             }
             let mut extra = String::new();
@@ -649,23 +648,22 @@ async fn serve_http(listener: tokio::net::TcpListener, fake: Arc<FakeHttp>) {
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{extra}connection: close\r\n\r\n"
                 );
-                socket.write_all(head.as_bytes()).await.ok();
+                let _peer_gone = socket.write_all(head.as_bytes()).await;
                 let ping =
                     json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": {} });
-                socket
+                let _peer_gone = socket
                     .write_all(
                         format!("data: {ping}\n\nevent: message\ndata: {reply}\n\n").as_bytes(),
                     )
-                    .await
-                    .ok();
-                socket.flush().await.ok();
+                    .await;
+                let _peer_gone = socket.flush().await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
             } else {
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
                 );
-                socket.write_all(response.as_bytes()).await.ok();
+                let _peer_gone = socket.write_all(response.as_bytes()).await;
             }
         });
     }
@@ -699,7 +697,7 @@ async fn headers_are_expanded_and_sent_and_a_lost_session_starts_again() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -741,7 +739,7 @@ async fn a_streamed_answer_returns_before_the_stream_closes() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -772,7 +770,7 @@ async fn an_http_server_that_refuses_is_named_with_its_status_only() {
                 "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
-            socket.write_all(response.as_bytes()).await.ok();
+            let _peer_gone = socket.write_all(response.as_bytes()).await;
         }
     }));
     let servers = Servers::connect(
@@ -782,7 +780,7 @@ async fn an_http_server_that_refuses_is_named_with_its_status_only() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert_eq!(
@@ -808,12 +806,11 @@ async fn a_legacy_sse_server_is_connected_and_called() {
                 if head.starts_with("GET") {
                     let (sender, mut events) = mpsc::unbounded_channel::<String>();
                     *lock(&stream) = Some(sender);
-                    socket
+                    let _peer_gone = socket
                         .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\nevent: endpoint\ndata: /messages?session=1\n\n")
-                        .await
-                        .ok();
+                        .await;
                     while let Some(event) = events.recv().await {
-                        socket.write_all(event.as_bytes()).await.ok();
+                        let _peer_gone = socket.write_all(event.as_bytes()).await;
                     }
                     return;
                 }
@@ -821,15 +818,14 @@ async fn a_legacy_sse_server_is_connected_and_called() {
                 if value.get("id").is_some() && value.get("method").is_some() {
                     let event = format!("event: message\ndata: {}\n\n", fake_reply(&value));
                     if let Some(sender) = lock(&stream).as_ref() {
-                        sender.send(event).ok();
+                        let _peer_gone = sender.send(event);
                     }
                 }
-                socket
+                let _peer_gone = socket
                     .write_all(
                         b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                     )
-                    .await
-                    .ok();
+                    .await;
             });
         }
     }));
@@ -841,7 +837,7 @@ async fn a_legacy_sse_server_is_connected_and_called() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -939,7 +935,7 @@ async fn an_http_server_is_connected_listed_and_called() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &crate::sandbox::Sandbox::Open,
+        &Sandbox::Open,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
