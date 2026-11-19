@@ -1,3 +1,4 @@
+mod bidi;
 pub mod editor;
 pub(crate) mod metrics;
 pub mod mount;

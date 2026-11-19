@@ -1255,3 +1255,82 @@ fn prompt_switches_raw_placeholder_paint_to_raw_input_paint() {
     runtime.build_frame().unwrap();
     assert!(runtime.scene().ordered().any(|(_, item)| matches!(item, DisplayItem::PushGpuiSourceTextColor(color) if *color == theme.colors.text.to_reference_text_color())));
 }
+
+#[test]
+fn arrows_collapse_a_right_to_left_selection_to_its_edge_on_screen() {
+    let hebrew = "שלום עולם";
+    let mut editor = Editor::new(hebrew, Mode::Prompt);
+    assert!(editor.set_selection(0..hebrew.len(), false));
+    editor.move_horizontal(false, false, false);
+    assert_eq!(
+        editor.caret(),
+        Some(hebrew.len()),
+        "Left goes to the left edge, which is where Hebrew text ends"
+    );
+    assert!(editor.set_selection(0..hebrew.len(), false));
+    editor.move_horizontal(true, false, false);
+    assert_eq!(
+        editor.caret(),
+        Some(0),
+        "Right goes to where Hebrew text starts"
+    );
+
+    let mixed = "Hello שלום";
+    let mut editor = Editor::new(mixed, Mode::Prompt);
+    assert!(editor.set_selection(6..mixed.len(), false));
+    editor.move_horizontal(false, false, false);
+    assert_eq!(
+        editor.caret(),
+        Some(mixed.len()),
+        "a selection inside a Hebrew run collapses by the run's direction"
+    );
+    assert!(editor.set_selection(3..12, false));
+    editor.move_horizontal(false, false, false);
+    assert_eq!(
+        editor.caret(),
+        Some(3),
+        "a selection spanning Latin and Hebrew collapses by the line's direction"
+    );
+    assert!(editor.set_selection(3..12, false));
+    editor.move_horizontal(true, false, false);
+    assert_eq!(editor.caret(), Some(12));
+}
+
+#[test]
+fn ctrl_arrows_move_by_word_in_the_direction_shown_on_screen() {
+    let hebrew = "שלום עולם";
+    let mut editor = Editor::new(hebrew, Mode::Prompt);
+    assert!(editor.set_selection(hebrew.len()..hebrew.len(), false));
+    editor.move_horizontal(true, true, false);
+    assert_eq!(
+        editor.caret(),
+        Some("שלום ".len()),
+        "Ctrl+Right in Hebrew moves right on screen, back to the previous word"
+    );
+    assert!(editor.set_selection(0..0, false));
+    editor.move_horizontal(false, true, false);
+    assert!(
+        editor.caret().is_some_and(|caret| caret > 0),
+        "Ctrl+Left in Hebrew moves left on screen, on to the next word"
+    );
+
+    let arabic = "مرحبا بالعالم";
+    let mut editor = Editor::new(arabic, Mode::Prompt);
+    assert!(editor.set_selection(arabic.len()..arabic.len(), false));
+    editor.move_horizontal(true, true, true);
+    assert_eq!(
+        editor.selection(),
+        "مرحبا ".len()..arabic.len(),
+        "Shift+Ctrl+Right in Arabic selects the word to the right on screen"
+    );
+
+    let mixed = "Hello שלום world";
+    let mut editor = Editor::new(mixed, Mode::Prompt);
+    assert!(editor.set_selection(mixed.len()..mixed.len(), false));
+    editor.move_horizontal(false, true, false);
+    assert_eq!(
+        editor.caret(),
+        Some("Hello שלום ".len()),
+        "a left-to-right line keeps Ctrl+Left moving back a word"
+    );
+}

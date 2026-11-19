@@ -636,7 +636,7 @@ impl Editor {
             CommandOutcome::Propagate
         }
     }
-    pub fn move_horizontal(&mut self, forward: bool, word: bool, extend: bool) {
+    pub fn move_horizontal(&mut self, right: bool, word: bool, extend: bool) {
         if self.disabled {
             return;
         }
@@ -644,6 +644,11 @@ impl Editor {
             self.selection.start
         } else {
             self.selection.end
+        };
+        let forward = if word {
+            right != super::bidi::paragraph_is_rtl(&self.text, cursor)
+        } else {
+            right
         };
         let target = if word {
             let boundaries = aqua_text::navigation::WordBoundaries::new(&self.text);
@@ -666,10 +671,11 @@ impl Editor {
             self.token_target(target, forward)
         };
         let target = if !word && !extend && !self.selection.is_empty() {
-            if forward {
-                self.selection.end
-            } else {
+            let rtl = super::bidi::selection_is_rtl(&self.text, self.selection.clone(), cursor);
+            if right == rtl {
                 self.selection.start
+            } else {
+                self.selection.end
             }
         } else {
             target
