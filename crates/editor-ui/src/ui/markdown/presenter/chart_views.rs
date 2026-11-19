@@ -1,4 +1,4 @@
-use super::{HeatmapServices, MarkdownPresenter, PresenterError, RetainedRich, enveloped};
+use super::{MarkdownPresenter, PresenterError, RichCall, enveloped};
 use crate::ui::kit::{
     Button, ButtonSize, ButtonTone, Hover, Label, Radius, Space, Spaced, TextRole, live,
 };
@@ -65,13 +65,17 @@ impl MarkdownPresenter {
     pub(super) fn render_heatmap_chart(
         &self,
         spec: &charts::heatmap::Heatmap,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let services = heatmap.ok_or(PresenterError::Unavailable("heatmap services"))?;
         let current_theme = *theme;
         let text: charts::heatmap::TextFactory = Rc::new(
@@ -135,13 +139,17 @@ impl MarkdownPresenter {
     pub(super) fn render_funnel_chart(
         &self,
         spec: &charts::funnel::Funnel,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let current_theme = *theme;
         let text: charts::funnel::TextFactory = Rc::new(
@@ -183,13 +191,17 @@ impl MarkdownPresenter {
     pub(super) fn render_spans_chart(
         &self,
         layout: &Arc<charts::spans::Layout>,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-spans", entry.id);
         self.spans_ids
@@ -306,13 +318,17 @@ impl MarkdownPresenter {
     pub(super) fn render_hierarchy_chart(
         &self,
         spec: &charts::hierarchy::Prepared,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-hierarchy", entry.id);
         self.hierarchy_ids
@@ -486,13 +502,17 @@ impl MarkdownPresenter {
     pub(super) fn render_sankey_chart(
         &self,
         graph: &Arc<charts::sankey::Graph>,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-sankey", entry.id);
         self.sankey_ids
@@ -587,13 +607,17 @@ impl MarkdownPresenter {
         &self,
         style: &Arc<charts::chart::ChartStyle>,
         model: &Arc<charts::chart::model::Model>,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-chart", entry.id);
         self.chart_ids
@@ -729,13 +753,17 @@ impl MarkdownPresenter {
     pub(super) fn render_distribution_chart(
         &self,
         spec: &Arc<charts::distribution::Distribution>,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let shared = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-distribution", entry.id);
         self.distribution_ids
@@ -812,13 +840,17 @@ impl MarkdownPresenter {
     pub(super) fn render_concentration_chart(
         &self,
         spec: &charts::concentration::Concentration,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        heatmap: Option<&HeatmapServices>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            heatmap,
+            ..
+        } = call;
         let services = heatmap.ok_or(PresenterError::Unavailable("chart services"))?;
         let block_id = format!("{id}-rich-{}-concentration", entry.id);
         self.concentration_ids

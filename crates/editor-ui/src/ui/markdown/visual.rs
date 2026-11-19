@@ -403,143 +403,98 @@ pub(crate) fn raw_leaf(
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct BodyContext<'a> {
+    pub theme: &'a ArtisanTheme,
+    pub tone: BodyTone,
+    pub on_link: Option<&'a Rc<dyn Fn(LinkAction)>>,
+    pub on_color: Option<&'a Rc<dyn Fn(ShowCopyMenu)>>,
+    pub scope: Option<&'a ResourceScope>,
+}
+
+impl std::fmt::Debug for BodyContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodyContext")
+            .field("tone", &self.tone)
+            .field("links", &self.on_link.is_some())
+            .field("colors", &self.on_color.is_some())
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> BodyContext<'a> {
+    #[must_use]
+    pub const fn plain(theme: &'a ArtisanTheme, tone: BodyTone) -> Self {
+        Self {
+            theme,
+            tone,
+            on_link: None,
+            on_color: None,
+            scope: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_tone(self, tone: BodyTone) -> Self {
+        Self { tone, ..self }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeafKind {
+    Prose,
+    Heading(u8),
+    TableCell { header: bool },
+}
+
+#[derive(Debug)]
+pub(crate) struct LeafSource {
+    pub(crate) document: SelectionDocumentId,
+    pub(crate) id: SelectionSourceId,
+    pub(crate) order: Vec<u64>,
+    pub(crate) separator: &'static str,
+}
+
+pub(crate) struct Sources<'a> {
+    pub(crate) document: SelectionDocumentId,
+    pub(crate) next_id: &'a mut dyn FnMut(usize) -> SelectionSourceId,
+    pub(crate) collected: &'a mut Vec<SelectionSource>,
+}
+
+impl Sources<'_> {
+    pub(crate) fn leaf(&mut self, order: Vec<u64>, separator: &'static str) -> LeafSource {
+        LeafSource {
+            document: self.document,
+            id: (self.next_id)(self.collected.len()),
+            order,
+            separator,
+        }
+    }
+}
+
 pub(crate) fn interactive_leaf(
     spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        heading,
-        None,
-        Vec::new(),
-    )
-}
-
-pub(super) fn interactive_leaf_with_opacity(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
+    body: BodyContext<'_>,
+    leaf: LeafSource,
+    kind: LeafKind,
     opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
 ) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
+    let BodyContext { theme, tone, .. } = body;
+    let LeafSource {
         document,
-        source_id,
+        id: source_id,
         order,
         separator,
-        on_link,
-        on_color,
-        reference_scope,
-        heading,
-        None,
-        opacity,
-    )
-}
-
-pub(crate) fn interactive_table_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    header: bool,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        None,
-        Some(header),
-        Vec::new(),
-    )
-}
-
-pub(super) fn interactive_table_leaf_with_opacity(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    header: bool,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        None,
-        Some(header),
-        opacity,
-    )
-}
-
-fn interactive_leaf_impl(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
-    table_header: Option<bool>,
-    opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
-) -> Result<ProseLeaf, LeafError> {
+    } = leaf;
+    let on_link = body.on_link.cloned();
+    let on_color = body.on_color.cloned();
+    let reference_scope = body.scope.cloned();
+    let (heading, table_header) = match kind {
+        LeafKind::Prose => (None, None),
+        LeafKind::Heading(level) => (Some(level), None),
+        LeafKind::TableCell { header } => (None, Some(header)),
+    };
     let prepared = prepare_inline(spans, theme, source_id, order, separator);
     if !prepared.colors.is_empty() && on_color.is_none() {
         return Err(LeafError::InlineDecorations);

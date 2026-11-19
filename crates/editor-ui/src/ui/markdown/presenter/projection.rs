@@ -1,14 +1,11 @@
 use super::super::CodeFence;
-use super::super::visual::{BodyTone, LinkAction};
+use super::super::projected::LeafRender;
+use super::super::visual::BodyContext;
 use super::{
-    CodeServices, HeatmapServices, MarkdownPresenter, PreparationProof, PresenterError,
-    ProjectedLeafInfo, ProjectedMarkdown, code_card,
+    BodyServices, MarkdownPresenter, PreparationProof, PresenterError, ProjectedLeafInfo,
+    ProjectedMarkdown, SelectionPlace, code_card,
 };
-use crate::ui::theme::ArtisanTheme;
-use aqua_core::GpuiHsla;
-use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
-use aqua_ui::element::Element;
-use editor_assets::AssetId;
+use aqua_text::document::{SelectionSource, SelectionSourceId};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -58,14 +55,9 @@ impl MarkdownPresenter {
     pub fn render_projected(
         &self,
         row: usize,
-        theme: &ArtisanTheme,
-        tone: BodyTone,
-        document: SelectionDocumentId,
-        order: &[u64],
+        body: BodyContext<'_>,
+        place: SelectionPlace<'_>,
         mut source_id: impl FnMut(usize) -> SelectionSourceId,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
-        scope: Option<crate::ui::rich::actions::ResourceScope>,
     ) -> Result<ProjectedMarkdown, PresenterError> {
         let projected = self
             .projected
@@ -74,23 +66,16 @@ impl MarkdownPresenter {
         let source_range = projected
             .range(row)
             .ok_or(PresenterError::Unavailable("projected row"))?;
-        let (element, selection_sources, selection_batch, geometry) = projected.render(
-            row,
-            theme,
-            tone,
-            document,
-            None,
-            None,
-            self.selection_owner,
-            &self.selection_revision,
-            order,
-            &mut source_id,
-            on_link,
-            on_color,
-            scope,
-            None,
-            None,
-        )?;
+        let render = LeafRender {
+            body,
+            place,
+            reveal: None,
+            batch_owner: self.selection_owner,
+            rich: None,
+            ordinary: None,
+        };
+        let (element, selection_sources, selection_batch, geometry) =
+            projected.render(row, render, None, &self.selection_revision, &mut source_id)?;
         Ok(ProjectedMarkdown {
             element,
             selection_sources,
@@ -103,44 +88,14 @@ impl MarkdownPresenter {
         })
     }
 
-    pub fn render_projected_with_services(
-        &self,
-        row: usize,
-        id: &str,
-        theme: &ArtisanTheme,
-        tone: BodyTone,
-        document: SelectionDocumentId,
-        order: &[u64],
-        source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: &Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
-        scope: Option<crate::ui::rich::actions::ResourceScope>,
-        charts: Option<&HeatmapServices>,
-    ) -> Result<ProjectedMarkdown, PresenterError> {
-        self.render_projected_with_code(
-            row, id, theme, tone, document, order, source_id, glyph, invalidate, on_link, on_color,
-            scope, charts, None,
-        )
-    }
-
     pub fn render_projected_with_code(
         &self,
         row: usize,
         id: &str,
-        theme: &ArtisanTheme,
-        tone: BodyTone,
-        document: SelectionDocumentId,
-        order: &[u64],
+        body: BodyContext<'_>,
+        place: SelectionPlace<'_>,
         mut source_id: impl FnMut(usize) -> SelectionSourceId,
-        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: &Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
-        scope: Option<crate::ui::rich::actions::ResourceScope>,
-        charts: Option<&HeatmapServices>,
-        code: Option<&CodeServices>,
+        services: BodyServices<'_>,
     ) -> Result<ProjectedMarkdown, PresenterError> {
         let projected = self
             .projected
@@ -149,28 +104,24 @@ impl MarkdownPresenter {
         let source_range = projected
             .range(row)
             .ok_or(PresenterError::Unavailable("projected row"))?;
-        let reference_scope = scope.clone();
         let rich = |index: usize, fence: &CodeFence| {
             if fence.diagram.is_some() {
-                return Ok(self.render_diagram(id, index, fence, theme, invalidate, code));
+                return Ok(self.render_diagram(
+                    id,
+                    index,
+                    fence,
+                    body.theme,
+                    services.invalidate,
+                    services.code,
+                ));
             }
             let entry = self
                 .rich
                 .get(index)
                 .and_then(Option::as_ref)
                 .ok_or(PresenterError::Unavailable("nested rich block"))?;
-            self.render_rich(
-                entry,
-                id,
-                theme,
-                &Rc::clone(glyph),
-                &Rc::clone(invalidate),
-                charts,
-                code,
-                reference_scope.clone(),
-            )
+            self.render_rich(entry, id, body, services)
         };
-        let color_action = on_color.clone();
         let ordinary = |ordinal: usize,
                         fence: &super::super::fence::Fence,
                         sources: &[SelectionSource],
@@ -178,11 +129,10 @@ impl MarkdownPresenter {
             code_card(
                 fence,
                 &format!("{id}-code-{ordinal}"),
-                theme,
-                document,
+                body,
+                place.document,
                 sources,
-                code,
-                color_action.clone(),
+                services.code,
                 note,
             )
         };
@@ -192,22 +142,20 @@ impl MarkdownPresenter {
             .get(id)
             .and_then(|rows| rows.get(&row))
             .cloned();
+        let render = LeafRender {
+            body,
+            place,
+            reveal: reveal.as_deref(),
+            batch_owner: self.selection_owner,
+            rich: Some(&rich),
+            ordinary: Some(&ordinary),
+        };
         let (element, selection_sources, selection_batch, geometry) = projected.render(
             row,
-            theme,
-            tone,
-            document,
+            render,
             Some(id),
-            reveal.as_deref(),
-            self.selection_owner,
             &self.selection_revision,
-            order,
             &mut source_id,
-            on_link,
-            on_color,
-            scope,
-            Some(&rich),
-            Some(&ordinary),
         )?;
         Ok(ProjectedMarkdown {
             element,

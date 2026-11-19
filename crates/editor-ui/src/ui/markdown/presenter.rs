@@ -370,6 +370,48 @@ struct RetainedRich {
     prepared: RichFence,
 }
 
+#[derive(Clone, Copy)]
+pub struct BodyServices<'a> {
+    pub glyph: &'a rich::narrative::callout::GlyphFactory,
+    pub invalidate: &'a Rc<dyn Fn()>,
+    pub charts: Option<&'a HeatmapServices>,
+    pub code: Option<&'a CodeServices>,
+}
+
+impl std::fmt::Debug for BodyServices<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodyServices")
+            .field("charts", &self.charts.is_some())
+            .field("code", &self.code.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevealSlot {
+    pub start: usize,
+    pub last: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SelectionPlace<'a> {
+    pub document: SelectionDocumentId,
+    pub order: &'a [u64],
+}
+
+#[derive(Clone, Copy)]
+struct RichCall<'a> {
+    entry: &'a RetainedRich,
+    envelope: &'a rich::Envelope,
+    id: &'a str,
+    theme: &'a ArtisanTheme,
+    glyph: &'a rich::narrative::callout::GlyphFactory,
+    invalidate: &'a Rc<dyn Fn()>,
+    heatmap: Option<&'a HeatmapServices>,
+    code: Option<&'a CodeServices>,
+    reference_scope: Option<&'a rich::actions::ResourceScope>,
+}
+
 impl Default for MarkdownPresenter {
     fn default() -> Self {
         Self {

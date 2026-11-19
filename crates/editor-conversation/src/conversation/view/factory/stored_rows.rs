@@ -1,13 +1,14 @@
-use super::{
-    RealizeRowError, RealizedRow, RowFactory, Service, Staleness, StoredResources, media_width,
-};
+use super::realize::RowContext;
+use super::{RealizeRowError, RowFactory, Service, Staleness, StoredResources, media_width};
 use crate::conversation::fold::{self, Slot};
 use crate::conversation::presentation::{BodyKey, ScopedCodeAction};
+use crate::conversation::stored::{StoredLeafServices, StoredLeafTarget};
 use crate::conversation::view::reveal::MountedReveal;
 use aqua_ui::collection::BatchedCollectionRow;
 use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
+use editor_ui::markdown::presenter::SelectionPlace;
 use editor_ui::markdown::stored::PagePreparation;
-use editor_ui::markdown::visual::BodyTone;
+use editor_ui::markdown::visual::{BodyContext, BodyTone};
 use editor_ui::rich::actions::ResourceScope;
 use editor_ui::text::slice::slice;
 use std::rc::Rc;
@@ -25,6 +26,14 @@ fn pending_above(
         .build()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct StoredBlock<'a> {
+    pub(super) item: &'a artisan_api::Item,
+    pub(super) slot: Slot,
+    pub(super) block: usize,
+    pub(super) reference: &'a artisan_api::ContentRef,
+}
+
 pub(super) fn plain_block(text: &str, block: usize) -> Option<&str> {
     fold::plain_ranges(text)
         .get(block)
@@ -34,14 +43,8 @@ pub(super) fn plain_block(text: &str, block: usize) -> Option<&str> {
 impl RowFactory {
     pub(super) fn stored_row(
         &self,
-        row: &RealizedRow,
-        row_owner: &Rc<super::super::row_cache::RowOwner>,
-        item: &artisan_api::Item,
-        slot: Slot,
-        block: usize,
-        reference: &artisan_api::ContentRef,
-        reveal: Option<&crate::conversation::view::reveal::RevealHandle>,
-        content_width: Option<f32>,
+        cx: &RowContext<'_>,
+        target: StoredBlock<'_>,
         batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<
         (
@@ -50,6 +53,19 @@ impl RowFactory {
         ),
         RealizeRowError,
     > {
+        let RowContext {
+            row,
+            owner: row_owner,
+            reveal,
+            content_width,
+            ..
+        } = *cx;
+        let StoredBlock {
+            item,
+            slot,
+            block,
+            reference,
+        } = target;
         use aqua_ui::element::Text;
         use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         let services = self
@@ -158,28 +174,37 @@ impl RowFactory {
                 action,
             ));
         });
+        let resource_scope = ResourceScope {
+            host: self.scope.host.to_string(),
+            thread: self.scope.thread.clone(),
+        };
         let (rendered, lease) = stored.render_leaf(
-            &key,
-            &source,
-            block,
-            leaf,
-            document,
-            &order,
-            &self.theme,
-            BodyTone::Foreground,
-            self.allocate.as_ref(),
-            &Rc::clone(&self.invalidate),
-            Rc::clone(&self.on_link),
-            Rc::clone(&self.on_color),
-            ResourceScope {
-                host: self.scope.host.to_string(),
-                thread: self.scope.thread.clone(),
+            StoredLeafTarget {
+                key: &key,
+                source: &source,
+                ordinal: block,
+                leaf,
             },
-            reveal.as_ref().map(|(owner, _, _)| Rc::clone(owner)),
-            media,
-            code_emit,
-            self.scope.instance,
-            self.reduced_motion,
+            BodyContext {
+                theme: &self.theme,
+                tone: BodyTone::Foreground,
+                on_link: Some(&self.on_link),
+                on_color: Some(&self.on_color),
+                scope: Some(&resource_scope),
+            },
+            SelectionPlace {
+                document,
+                order: &order,
+            },
+            self.allocate.as_ref(),
+            StoredLeafServices {
+                invalidate: &self.invalidate,
+                reveal: reveal.map(|(owner, _, _)| Rc::clone(owner)),
+                media,
+                code_emit,
+                instance: self.scope.instance,
+                reduced_motion: self.reduced_motion,
+            },
         )?;
         *row_owner.stored_leaf.borrow_mut() = Some(lease);
         let prepared = if self.reveals.is_some() && reveal.is_some() {
@@ -259,15 +284,22 @@ impl RowFactory {
 
     pub(super) fn literal_row(
         &self,
-        row_owner: &Rc<super::super::row_cache::RowOwner>,
-        item: &artisan_api::Item,
-        slot: Slot,
+        cx: &RowContext<'_>,
+        target: StoredBlock<'_>,
         section: fold::PlainSection,
-        block: usize,
-        reference: &artisan_api::ContentRef,
-        version: u64,
         batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<aqua_ui::element::Element, RealizeRowError> {
+        let RowContext {
+            row,
+            owner: row_owner,
+            ..
+        } = *cx;
+        let StoredBlock {
+            item,
+            slot,
+            block,
+            reference,
+        } = target;
         use crate::conversation::view::resources::ResourceKey;
         use aqua_ui::element::Text;
         use editor_ui::markdown::literal::LiteralPreparation;
@@ -284,7 +316,7 @@ impl RowFactory {
             .projection_versions
             .get(&key)
             .copied()
-            .unwrap_or(version);
+            .unwrap_or(row.model.version);
         let pending = |text: &str| {
             self.unsettled.set(true);
             Text::new(text.to_owned()).build()

@@ -3,12 +3,14 @@ use super::presentation::{BodyKey, PresentationScope};
 use super::projection::BodyProjection;
 use editor_core::{Core, host::ScopedSourceProvider};
 use editor_ui::markdown::literal::{LiteralOwner, LiteralPreparation};
-use editor_ui::markdown::presenter::{HeatmapServices, MarkdownPresenter, StoredProjectedMarkdown};
+use editor_ui::markdown::presenter::{
+    BodyServices, HeatmapServices, MarkdownPresenter, RevealSlot, SelectionPlace,
+    StoredProjectedMarkdown,
+};
 use editor_ui::markdown::stored::{
     LeafPreparation, PAGE_LEAVES, PagePreparation, StoredOwner, StoredPreparation, StoredSource,
 };
-use editor_ui::markdown::visual::{BodyTone, LinkAction};
-use editor_ui::theme::ArtisanTheme;
+use editor_ui::markdown::visual::BodyContext;
 
 pub const ROW_WINDOW: usize = 16 * PAGE_LEAVES;
 const WINDOW_EDGE: usize = 4 * PAGE_LEAVES;
@@ -52,7 +54,7 @@ pub fn retired_leaves(
     retired
 }
 
-use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
+use aqua_text::document::SelectionSourceId;
 use aqua_ui::collection::SelectionSourceBatch;
 use artisan_api::{ContentRef, SourceIndexFormat, TextContent};
 use std::cell::RefCell;
@@ -135,6 +137,22 @@ struct PendingRelease {
     _leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
     key: BodyKey,
     ordinal: usize,
+}
+
+pub(crate) struct StoredLeafTarget<'a> {
+    pub(crate) key: &'a BodyKey,
+    pub(crate) source: &'a StoredSource,
+    pub(crate) ordinal: usize,
+    pub(crate) leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
+}
+
+pub(crate) struct StoredLeafServices<'a> {
+    pub(crate) invalidate: &'a Rc<dyn Fn()>,
+    pub(crate) reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
+    pub(crate) media: Option<editor_ui::markdown::presenter::MediaServices>,
+    pub(crate) code_emit: Rc<dyn Fn(super::presentation::CodeAction)>,
+    pub(crate) instance: editor_core::HostInstance,
+    pub(crate) reduced_motion: bool,
 }
 
 pub(crate) struct StoredLeafLease {
@@ -375,25 +393,27 @@ impl StoredConversation {
 
     pub(crate) fn render_leaf(
         &mut self,
-        key: &BodyKey,
-        source: &StoredSource,
-        ordinal: usize,
-        leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
-        document: SelectionDocumentId,
-        order: &[u64],
-        theme: &ArtisanTheme,
-        tone: BodyTone,
+        target: StoredLeafTarget<'_>,
+        context: BodyContext<'_>,
+        place: SelectionPlace<'_>,
         allocate: &dyn Fn() -> SelectionSourceId,
-        invalidate: &Rc<dyn Fn()>,
-        link: Rc<dyn Fn(LinkAction)>,
-        color: Rc<dyn Fn(editor_ui::rich::actions::ShowCopyMenu)>,
-        resource_scope: editor_ui::rich::actions::ResourceScope,
-        reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
-        media: Option<editor_ui::markdown::presenter::MediaServices>,
-        code_emit: Rc<dyn Fn(super::presentation::CodeAction)>,
-        instance: editor_core::HostInstance,
-        reduced_motion: bool,
+        services: StoredLeafServices<'_>,
     ) -> Result<(StoredProjectedMarkdown, Rc<StoredLeafLease>), StoredBodyError> {
+        let StoredLeafTarget {
+            key,
+            source,
+            ordinal,
+            leaf,
+        } = target;
+        let StoredLeafServices {
+            invalidate,
+            reveal,
+            media,
+            code_emit,
+            instance,
+            reduced_motion,
+        } = services;
+        let theme = context.theme;
         if !self.owner.source_is_current(source) || !self.owner.leaf_is_current(leaf.proof()) {
             return Err(StoredBodyError::StaleLeaf {
                 key: key.clone(),
@@ -435,8 +455,8 @@ impl StoredConversation {
                 ordinal,
                 Rc::clone(&leaf),
                 theme,
-                document,
-                order,
+                place.document,
+                place.order,
                 |index| {
                     while ids.len() <= index {
                         ids.push(allocate());
@@ -469,17 +489,17 @@ impl StoredConversation {
                 &self.owner,
                 leaf_owner,
                 ordinal,
-                0,
-                ordinal + 1 == source.block_count(),
-                theme,
-                tone,
-                &editor_ui::markdown::glyph_painter(),
-                invalidate,
-                Some(link),
-                Some(color),
-                Some(resource_scope),
-                Some(&charts),
-                Some(&code),
+                RevealSlot {
+                    start: 0,
+                    last: ordinal + 1 == source.block_count(),
+                },
+                context,
+                BodyServices {
+                    glyph: &editor_ui::markdown::glyph_painter(),
+                    invalidate,
+                    charts: Some(&charts),
+                    code: Some(&code),
+                },
             )
             .map_err(failed)?;
         let lease = match body.leases.get(&ordinal) {

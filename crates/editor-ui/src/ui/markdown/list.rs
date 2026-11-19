@@ -1,16 +1,12 @@
-use std::rc::Rc;
-
 use aqua_core::{CollectionSemantics, Insets, Role};
-use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
 use super::presenter::PresenterError;
-use super::visual::{BodyTone, LinkAction, interactive_leaf, raw_leaf};
+use super::visual::{BodyContext, BodyTone, LeafKind, Sources, interactive_leaf, raw_leaf};
 use super::{Block, ListItem};
-use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
-use crate::ui::theme::{ArtisanTheme, ProseTypography};
+use crate::ui::theme::ProseTypography;
 
 struct Marker {
     indent: usize,
@@ -140,74 +136,47 @@ pub(super) fn render(
     ordered: bool,
     start: Option<u64>,
     items: &[ListItem],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
+    body: BodyContext<'_>,
     prefix: &[u64],
-    source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
-    sources: &mut Vec<SelectionSource>,
-    on_link: Option<&Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<&Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<&ResourceScope>,
+    sources: &mut Sources<'_>,
 ) -> Result<Element, PresenterError> {
+    let theme = body.theme;
     let mut rows = Vec::new();
     visit_items(ordered, start.unwrap_or(1), items, 0, &mut rows);
     let mut list = ui::Box::new().layout("column").width(Length::Pct(100.0));
     for (ordinal, row) in rows.into_iter().enumerate() {
         let mut order = prefix.to_vec();
         order.push(ordinal as u64);
-        let id = source_id(sources.len());
+        let source = sources.leaf(order, "\n");
         let leaf = match row.block {
-            Some(Block::Paragraph { spans, .. }) => interactive_leaf(
-                spans,
-                theme,
-                tone,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.cloned(),
-                on_color.cloned(),
-                scope.cloned(),
-                None,
-            )
-            .map_err(PresenterError::Inline)?,
+            Some(Block::Paragraph { spans, .. }) => {
+                interactive_leaf(spans, body, source, LeafKind::Prose, Vec::new())
+                    .map_err(PresenterError::Inline)?
+            }
             Some(Block::Heading { level, spans, .. }) => interactive_leaf(
                 spans,
-                theme,
-                BodyTone::Foreground,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.cloned(),
-                on_color.cloned(),
-                scope.cloned(),
-                Some(*level),
+                body.with_tone(BodyTone::Foreground),
+                source,
+                LeafKind::Heading(*level),
+                Vec::new(),
             )
             .map_err(PresenterError::Inline)?,
-            Some(Block::Html { source }) => {
-                raw_leaf(source, theme, tone, document, id, order, "\n")
-            }
-            None => interactive_leaf(
-                &[],
+            Some(Block::Html { source: raw }) => raw_leaf(
+                raw,
                 theme,
-                tone,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.cloned(),
-                on_color.cloned(),
-                scope.cloned(),
-                None,
-            )
-            .map_err(PresenterError::Inline)?,
+                body.tone,
+                source.document,
+                source.id,
+                source.order,
+                source.separator,
+            ),
+            None => interactive_leaf(&[], body, source, LeafKind::Prose, Vec::new())
+                .map_err(PresenterError::Inline)?,
             Some(Block::Code(_)) => return Err(PresenterError::Unavailable("list code fence")),
             Some(Block::Table(_)) => return Err(PresenterError::Unavailable("list table")),
             Some(Block::List { .. }) => return Err(PresenterError::Unavailable("list flow")),
         };
-        sources.push(leaf.source);
+        sources.collected.push(leaf.source);
         let mut frame = ui::Box::new()
             .width(Length::Pct(100.0))
             .style(Style::new().padding_insets(Insets {

@@ -1,3 +1,4 @@
+use super::stored_rows::StoredBlock;
 use super::{
     HeldByRow, Part, RealizeRowError, RealizedRow, RowFactory, RowSource, Staleness, authored,
     bubble_sender, image_caption, message_author, plain_block, row_settles_statically, truncate,
@@ -438,11 +439,7 @@ impl RowFactory {
         section: PlainSection,
         block: usize,
     ) -> Result<Option<Element>, RealizeRowError> {
-        let RowContext {
-            row,
-            owner: row_owner,
-            ..
-        } = *cx;
+        let row = cx.row;
         Ok({
             let item = row
                 .model
@@ -453,13 +450,14 @@ impl RowFactory {
                 return Err(RealizeRowError::Changed(Part::StoredSource));
             };
             Some(self.literal_row(
-                row_owner,
-                item,
-                slot,
+                cx,
+                StoredBlock {
+                    item,
+                    slot,
+                    block,
+                    reference,
+                },
                 section,
-                block,
-                reference,
-                row.model.version,
                 &mut out.batches,
             )?)
         })
@@ -477,8 +475,7 @@ impl RowFactory {
             row,
             key,
             owner: row_owner,
-            reveal,
-            content_width,
+            ..
         } = *cx;
         Ok({
             let item = row
@@ -490,14 +487,13 @@ impl RowFactory {
                 return Err(RealizeRowError::Changed(Part::StoredSource));
             };
             let (element, proof) = self.stored_row(
-                row,
-                row_owner,
-                item,
-                slot,
-                block,
-                reference,
-                reveal,
-                content_width,
+                cx,
+                StoredBlock {
+                    item,
+                    slot,
+                    block,
+                    reference,
+                },
                 &mut out.batches,
             )?;
             out.stored_proof = proof;

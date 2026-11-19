@@ -1,5 +1,8 @@
 use super::{HeatmapServices, MarkdownPresenter};
 use crate::ui::markdown::MarkdownEngine;
+use crate::ui::markdown::presenter::BodyServices;
+use crate::ui::markdown::presenter::SelectionPlace;
+use crate::ui::markdown::visual::BodyContext;
 use crate::ui::markdown::visual::BodyTone;
 use crate::ui::text::slice::slice;
 use crate::ui::theme::{ArtisanTheme, ThemeMode};
@@ -18,20 +21,27 @@ fn rendered_rows(source: &str) -> Vec<Result<(), String>> {
                 Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
             let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
             presenter
-                .render_projected_with_services(
+                .render_projected_with_code(
                     row,
                     "item",
-                    theme,
-                    BodyTone::Foreground,
-                    SelectionDocumentId(1),
-                    &[1],
+                    BodyContext {
+                        theme,
+                        tone: BodyTone::Foreground,
+                        on_link: None,
+                        on_color: None,
+                        scope: None,
+                    },
+                    SelectionPlace {
+                        document: SelectionDocumentId(1),
+                        order: &[1],
+                    },
                     |index| SelectionSourceId(index as u64),
-                    &glyph,
-                    &invalidate,
-                    None,
-                    None,
-                    None,
-                    Some(&services),
+                    BodyServices {
+                        glyph: &glyph,
+                        invalidate: &invalidate,
+                        charts: Some(&services),
+                        code: None,
+                    },
                 )
                 .map(drop)
                 .map_err(|error| error.to_string())
@@ -127,19 +137,26 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
         Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
     let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     streamed
-        .render_with_services(
+        .render(
             "item",
-            theme,
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[1],
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[1],
+            },
             |index| SelectionSourceId(index as u64),
-            &glyph,
-            &invalidate,
-            None,
-            None,
-            Some(&HeatmapServices::new(*theme)),
-            None,
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: Some(&HeatmapServices::new(*theme)),
+                code: None,
+            },
         )
         .unwrap();
 }

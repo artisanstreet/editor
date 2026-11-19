@@ -1,5 +1,6 @@
+use super::super::visual::BodyContext;
 use super::{
-    CodeServices, MarkdownPresenter, PresenterError, ReferenceServices, RetainedRich, enveloped,
+    CodeServices, MarkdownPresenter, PresenterError, ReferenceServices, RichCall, enveloped,
 };
 use crate::ui::kit::{Space, Spaced, TextRole};
 use crate::ui::rich::{self};
@@ -13,13 +14,13 @@ use std::rc::Rc;
 pub(super) fn code_card(
     fence: &super::super::fence::Fence,
     id: &str,
-    theme: &ArtisanTheme,
+    body: BodyContext<'_>,
     document: aqua_text::document::SelectionDocumentId,
     sources: &[SelectionSource],
     code: Option<&CodeServices>,
-    on_color: Option<Rc<dyn Fn(rich::actions::ShowCopyMenu)>>,
     note: Option<&str>,
 ) -> Result<Element, PresenterError> {
+    let theme = body.theme;
     let services = code.ok_or(PresenterError::Unavailable("code copy services"))?;
     let card = fence.render(
         id,
@@ -27,7 +28,7 @@ pub(super) fn code_card(
         document,
         sources,
         services.copy_enabled.then(|| Rc::clone(&services.copy)),
-        on_color,
+        body.on_color.cloned(),
     );
     Ok(if let Some(note) = note {
         ui::Box::new()
@@ -90,15 +91,19 @@ impl MarkdownPresenter {
     pub(super) fn render_annotated_code(
         &self,
         block: &rich::code::annotated::AnnotatedCode,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        code: Option<&CodeServices>,
-        reference_scope: Option<rich::actions::ResourceScope>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
-        let (services, reference) = reference_services(code, reference_scope.as_ref())?;
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            code,
+            reference_scope,
+            ..
+        } = call;
+        let (services, reference) = reference_services(code, reference_scope)?;
         let block_id = format!("{id}-rich-{}-annotated", entry.id);
         self.annotated_ids
             .borrow_mut()
@@ -118,7 +123,7 @@ impl MarkdownPresenter {
         let content = block.render(
             theme,
             &block_id,
-            reference_scope,
+            reference_scope.cloned(),
             reference.instance,
             Rc::clone(&reference.open),
             state,
@@ -137,15 +142,19 @@ impl MarkdownPresenter {
     pub(super) fn render_file_tree(
         &self,
         tree: &rich::code::file_tree::FileTree,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
-        code: Option<&CodeServices>,
-        reference_scope: Option<rich::actions::ResourceScope>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
-        let (_, reference) = reference_services(code, reference_scope.as_ref())?;
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            code,
+            reference_scope,
+            ..
+        } = call;
+        let (_, reference) = reference_services(code, reference_scope)?;
         let block_id = format!("{id}-rich-{}-file-tree", entry.id);
         self.file_tree_ids
             .borrow_mut()
@@ -168,11 +177,12 @@ impl MarkdownPresenter {
         let open = Rc::clone(&reference.open);
         let instance = reference.instance;
         let refresh = Rc::clone(invalidate);
+        let scope = reference_scope.cloned();
         let emit = Rc::new(move |action| {
             let effect = state_for_events.borrow_mut().dispatch(
                 &tree_for_events,
                 &event_id,
-                reference_scope.clone(),
+                scope.clone(),
                 action,
             );
             if let Some(focus) = effect.focus {
@@ -191,19 +201,23 @@ impl MarkdownPresenter {
 
     pub(super) fn render_code_ref(
         reference: &rich::code::code_ref::CodeRefBlock,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        code: Option<&CodeServices>,
-        reference_scope: Option<rich::actions::ResourceScope>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
-        let (services, open) = reference_services(code, reference_scope.as_ref())?;
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            code,
+            reference_scope,
+            ..
+        } = call;
+        let (services, open) = reference_services(code, reference_scope)?;
         let block_id = format!("{id}-rich-{}-code-ref", entry.id);
         let content = reference.render(
             theme,
             &block_id,
-            reference_scope,
+            reference_scope.cloned(),
             open.instance,
             Rc::clone(&open.open),
         );

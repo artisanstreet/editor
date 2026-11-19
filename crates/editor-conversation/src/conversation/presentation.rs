@@ -12,9 +12,12 @@ use std::sync::Arc;
 use aqua_core::GpuiHsla;
 use editor_assets::AssetId;
 use editor_ui::markdown::MarkdownEngine;
+use editor_ui::markdown::presenter::BodyServices;
+use editor_ui::markdown::presenter::SelectionPlace;
 use editor_ui::markdown::presenter::{
     CodeServices, HeatmapServices, MarkdownPresenter, MediaServices, PreparationProof,
 };
+use editor_ui::markdown::visual::BodyContext;
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::theme::ArtisanTheme;
 
@@ -438,24 +441,31 @@ impl MarkdownOwners {
         body.rendered = None;
         let rendered = body
             .presenter
-            .render_with_services(
+            .render(
                 request.id,
-                request.theme,
-                request.tone,
-                self.selection.document(),
-                request.order,
+                BodyContext {
+                    theme: request.theme,
+                    tone: request.tone,
+                    on_link: Some(&request.on_link),
+                    on_color: Some(&request.on_color),
+                    scope: request.reference_scope.as_ref(),
+                },
+                SelectionPlace {
+                    document: self.selection.document(),
+                    order: request.order,
+                },
                 |ordinal| {
                     while body.ids.len() <= ordinal {
                         body.ids.push(allocate());
                     }
                     body.ids[ordinal]
                 },
-                &request.glyph,
-                &request.invalidate,
-                Some(&request.on_link),
-                Some(&request.on_color),
-                Some(request.heatmap),
-                request.reference_scope.as_ref(),
+                BodyServices {
+                    glyph: &request.glyph,
+                    invalidate: &request.invalidate,
+                    charts: Some(request.heatmap),
+                    code: None,
+                },
             )
             .map_err(|source| BodyError::Present {
                 key: request.key.clone(),
@@ -567,23 +577,29 @@ impl MarkdownOwners {
             .render_projected_with_code(
                 row,
                 request.id,
-                request.theme,
-                request.tone,
-                self.selection.document(),
-                request.order,
+                BodyContext {
+                    theme: request.theme,
+                    tone: request.tone,
+                    on_link: Some(&request.on_link),
+                    on_color: Some(&request.on_color),
+                    scope: request.reference_scope.as_ref(),
+                },
+                SelectionPlace {
+                    document: self.selection.document(),
+                    order: request.order,
+                },
                 |ordinal| {
                     while body.ids.len() <= ordinal {
                         body.ids.push(allocate());
                     }
                     body.ids[ordinal]
                 },
-                &request.glyph,
-                &request.invalidate,
-                Some(request.on_link),
-                Some(request.on_color),
-                request.reference_scope,
-                Some(request.heatmap),
-                code,
+                BodyServices {
+                    glyph: &request.glyph,
+                    invalidate: &request.invalidate,
+                    charts: Some(request.heatmap),
+                    code,
+                },
             )
             .map_err(|source| BodyError::Present {
                 key: request.key.clone(),

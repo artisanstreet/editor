@@ -1,8 +1,15 @@
 use super::*;
 use crate::ui::markdown::MarkdownEngine;
+use crate::ui::markdown::presenter::BodyServices;
 use crate::ui::markdown::presenter::MarkdownPresenter;
+use crate::ui::markdown::presenter::SelectionPlace;
+use crate::ui::markdown::visual::BodyContext;
+use crate::ui::markdown::visual::BodyTone;
+use crate::ui::theme::ArtisanTheme;
 use aqua_core::{NodeId, SemanticNode};
+use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_text::{SharedFonts, SharedRuns};
+use std::rc::Rc;
 
 const TABLE: &str = "| Name | Size |\n| --- | ---: |\n| alpha | 1 |\n| beta | 2 |\n";
 
@@ -104,17 +111,26 @@ fn rendered_tables_keep_rows_and_column_headers() {
         Rc::new(|_, _, _| ui::Box::new().build());
     let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = prepared()
-        .render_with_context(
+        .render(
             "answer",
-            &ArtisanTheme::resolved(),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[0],
+            BodyContext {
+                theme: &ArtisanTheme::resolved(),
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[0],
+            },
             |index| SelectionSourceId(index as u64 + 1),
-            &glyph,
-            &invalidate,
-            None,
-            None,
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let nodes = semantics(rendered.element);
@@ -137,14 +153,18 @@ fn streamed_table_rows_keep_rows_and_column_headers() {
             let rendered = presenter
                 .render_projected(
                     row,
-                    &ArtisanTheme::resolved(),
-                    BodyTone::Foreground,
-                    SelectionDocumentId(1),
-                    &[0],
+                    BodyContext {
+                        theme: &ArtisanTheme::resolved(),
+                        tone: BodyTone::Foreground,
+                        on_link: None,
+                        on_color: None,
+                        scope: None,
+                    },
+                    SelectionPlace {
+                        document: SelectionDocumentId(1),
+                        order: &[0],
+                    },
                     |index| SelectionSourceId(index as u64 + 1),
-                    None,
-                    None,
-                    None,
                 )
                 .unwrap();
             rows(&semantics(rendered.element))

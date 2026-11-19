@@ -1,26 +1,18 @@
 use super::presenter::PresenterError;
-use super::visual::{BodyTone, LinkAction, interactive_table_leaf};
+use super::visual::{BodyContext, LeafKind, Sources, interactive_leaf};
 use super::{Table, TableAlignment};
-use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
-use crate::ui::theme::{ArtisanTheme, ProseTypography};
+use crate::ui::theme::ProseTypography;
 use aqua_core::{CollectionSemantics, Insets, Role};
-use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
-use std::rc::Rc;
 
 pub(super) fn render(
     table: &Table,
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
+    body: BodyContext<'_>,
     prefix: &[u64],
-    source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
-    sources: &mut Vec<SelectionSource>,
-    on_link: Option<&Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<&Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<&ResourceScope>,
+    sources: &mut Sources<'_>,
 ) -> Result<Element, PresenterError> {
+    let theme = body.theme;
     let columns = table.alignments.len();
     if columns == 0 {
         return Ok(ui::Box::new().build());
@@ -81,21 +73,16 @@ pub(super) fn render(
                 let mut order = prefix.to_vec();
                 order.push(row as u64);
                 order.push(column as u64);
-                let leaf = interactive_table_leaf(
+                let source = sources.leaf(order, if column == 0 { "\n" } else { "\t" });
+                let leaf = interactive_leaf(
                     &value.spans,
-                    theme,
-                    tone,
-                    row == 0,
-                    document,
-                    source_id(sources.len()),
-                    order,
-                    if column == 0 { "\n" } else { "\t" },
-                    on_link.cloned(),
-                    on_color.cloned(),
-                    scope.cloned(),
+                    body,
+                    source,
+                    LeafKind::TableCell { header: row == 0 },
+                    Vec::new(),
                 )
                 .map_err(PresenterError::Inline)?;
-                sources.push(leaf.source);
+                sources.collected.push(leaf.source);
                 cell = cell.child(leaf.element);
             }
             let role = match row {

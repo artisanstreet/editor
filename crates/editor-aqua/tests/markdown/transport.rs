@@ -7,9 +7,9 @@ use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostKind, hosts, runtime
 use editor_aqua::qualification::fixture::ForgeServer;
 use editor_aqua::ui::markdown::{
     Block, IndexedLeafContent,
-    presenter::MarkdownPresenter,
+    presenter::{BodyServices, MarkdownPresenter, RevealSlot},
     stored::{LeafPreparation, PagePreparation, StoredOwner, StoredPreparation, StoredSource},
-    visual::BodyTone,
+    visual::{BodyContext, BodyTone},
 };
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::{
@@ -232,17 +232,23 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             owner,
             "row",
             0,
-            0,
-            true,
-            theme,
-            BodyTone::Foreground,
-            &glyph,
-            &invalidate,
-            None,
-            None,
-            None,
-            None,
-            None,
+            RevealSlot {
+                start: 0,
+                last: true,
+            },
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
     };
     let projected = render(&presenter, &owner).unwrap();

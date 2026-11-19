@@ -1,16 +1,14 @@
-use super::super::visual::{BodyTone, LinkAction};
+use super::super::projected::{LeafRender, LeafSlots};
+use super::super::visual::BodyContext;
 use super::super::{Block, CodeFence};
 use super::{
-    CodeServices, HeatmapServices, MarkdownPresenter, PreparationProof, PresenterError,
-    RetainedRich, StoredProjectedLeaf, StoredProjectedMarkdown, code_card,
+    BodyServices, MarkdownPresenter, PreparationProof, PresenterError, RetainedRich, RevealSlot,
+    SelectionPlace, StoredProjectedLeaf, StoredProjectedMarkdown, code_card,
 };
 use crate::ui::rich::{self, RichFence};
 use crate::ui::theme::ArtisanTheme;
-use aqua_core::GpuiHsla;
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::collection_runtime::{SelectionBatchOwner, SelectionSourceBatch};
-use aqua_ui::element::Element;
-use editor_assets::AssetId;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -136,17 +134,9 @@ impl MarkdownPresenter {
         owner: &super::super::stored::StoredOwner,
         id: &str,
         ordinal: usize,
-        slot_start: usize,
-        final_row: bool,
-        theme: &ArtisanTheme,
-        tone: BodyTone,
-        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: &Rc<dyn Fn()>,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(rich::actions::ShowCopyMenu)>>,
-        scope: Option<rich::actions::ResourceScope>,
-        charts: Option<&HeatmapServices>,
-        code: Option<&CodeServices>,
+        slot: RevealSlot,
+        body: BodyContext<'_>,
+        services: BodyServices<'_>,
     ) -> Result<StoredProjectedMarkdown, PresenterError> {
         let entries = self.stored_leaves.borrow();
         let entry = entries
@@ -155,10 +145,16 @@ impl MarkdownPresenter {
         if !owner.leaf_is_current(entry.leaf.proof()) {
             return Err(PresenterError::Unavailable("stale stored leaf"));
         }
-        let rich_scope = scope.clone();
         let rich = |index: usize, fence: &CodeFence| {
             if fence.diagram.is_some() {
-                return Ok(self.render_diagram(id, index, fence, theme, invalidate, code));
+                return Ok(self.render_diagram(
+                    id,
+                    index,
+                    fence,
+                    body.theme,
+                    services.invalidate,
+                    services.code,
+                ));
             }
             self.render_rich(
                 entry
@@ -166,15 +162,10 @@ impl MarkdownPresenter {
                     .as_ref()
                     .ok_or(PresenterError::Unavailable("nested rich block"))?,
                 id,
-                theme,
-                &Rc::clone(glyph),
-                &Rc::clone(invalidate),
-                charts,
-                code,
-                rich_scope.clone(),
+                body,
+                services,
             )
         };
-        let color_action = on_color.clone();
         let ordinary = |row: usize,
                         fence: &super::super::fence::Fence,
                         sources: &[SelectionSource],
@@ -182,11 +173,10 @@ impl MarkdownPresenter {
             code_card(
                 fence,
                 &format!("{id}-code-{row}"),
-                theme,
+                body,
                 entry.document,
                 sources,
-                code,
-                color_action.clone(),
+                services.code,
                 note,
             )
         };
@@ -199,22 +189,24 @@ impl MarkdownPresenter {
         let (element, geometry) = super::super::projected::render_stored_leaf(
             &entry.leaf,
             ordinal,
-            &entry.sources,
-            slot_start,
-            final_row,
-            theme,
-            tone,
-            entry.document,
-            reveal.as_deref(),
-            entry.selection_owner,
-            &entry.prefix,
-            on_link,
-            on_color,
-            scope,
+            LeafSlots {
+                sources: &entry.sources,
+                start: slot.start,
+                last: slot.last,
+            },
             entry.fence.as_ref(),
             entry.fallback_note.as_deref(),
-            Some(&rich),
-            Some(&ordinary),
+            LeafRender {
+                body,
+                place: SelectionPlace {
+                    document: entry.document,
+                    order: &entry.prefix,
+                },
+                reveal: reveal.as_deref(),
+                batch_owner: entry.selection_owner,
+                rich: Some(&rich),
+                ordinary: Some(&ordinary),
+            },
         )?;
         Ok(StoredProjectedMarkdown {
             element,

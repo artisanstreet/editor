@@ -1,6 +1,9 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use editor_aqua::ui::markdown::MarkdownEngine;
+use editor_aqua::ui::markdown::presenter::BodyServices;
 use editor_aqua::ui::markdown::presenter::MarkdownPresenter;
+use editor_aqua::ui::markdown::presenter::SelectionPlace;
+use editor_aqua::ui::markdown::visual::BodyContext;
 use editor_aqua::ui::markdown::visual::BodyTone;
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::rc::Rc;
@@ -97,13 +100,21 @@ fn completed_image_invalidates_retained_loading_row() {
                 let element = presenter
                     .render(
                         "item",
-                        ArtisanTheme::for_mode(ThemeMode::Dark),
-                        BodyTone::Foreground,
-                        SelectionDocumentId(1),
-                        &[1],
+                        BodyContext::plain(
+                            ArtisanTheme::for_mode(ThemeMode::Dark),
+                            BodyTone::Foreground,
+                        ),
+                        SelectionPlace {
+                            document: SelectionDocumentId(1),
+                            order: &[1],
+                        },
                         |index| SelectionSourceId(index as u64 + 1),
-                        &glyph,
-                        &invalidate,
+                        BodyServices {
+                            glyph: &glyph,
+                            invalidate: &invalidate,
+                            charts: None,
+                            code: None,
+                        },
                     )
                     .unwrap()
                     .element;
@@ -211,13 +222,21 @@ fn preparation_proof_and_complete_selection_follow_source_revision() {
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     assert_eq!(rendered.selection_sources.len(), 2);
@@ -244,13 +263,21 @@ fn nested_lists_keep_selection_leaves_in_source_order() {
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -282,13 +309,21 @@ fn table_cells_register_tab_and_row_separators_in_order() {
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -320,17 +355,21 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
         presenter
             .render_projected(
                 row,
-                ArtisanTheme::for_mode(ThemeMode::Dark),
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| {
                     allocations.set(allocations.get() + 1);
                     SelectionSourceId(index as u64 + 10)
                 },
-                None,
-                None,
-                None,
             )
             .unwrap()
     };
@@ -383,14 +422,18 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
     let replacement = presenter
         .render_projected(
             0,
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            None,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(
@@ -416,20 +459,27 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
         Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
     let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let row = presenter
-        .render_projected_with_services(
+        .render_projected_with_code(
             1,
             "item",
-            theme,
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
-            None,
-            None,
-            None,
-            Some(&services),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: Some(&services),
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = row
@@ -471,18 +521,24 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
         .render_projected_with_code(
             1,
             "item",
-            theme,
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
-            None,
-            None,
-            None,
-            None,
-            Some(&code),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: Some(&code),
+            },
         )
         .unwrap();
     let values: Vec<_> = row
@@ -529,14 +585,18 @@ fn projected_reveal_metadata_tracks_keyed_cells_and_streaming_tail() {
         presenter
             .render_projected(
                 row,
-                ArtisanTheme::for_mode(ThemeMode::Dark),
-                BodyTone::Foreground,
-                SelectionDocumentId(9),
-                &[3],
+                BodyContext {
+                    theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(9),
+                    order: &[3],
+                },
                 |index| SelectionSourceId(index as u64 + 100),
-                None,
-                None,
-                None,
             )
             .unwrap()
     };
@@ -591,18 +651,24 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
             .render_projected_with_code(
                 row,
                 "item",
-                theme,
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme,
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| SelectionSourceId(index as u64 + 10),
-                &glyph,
-                &invalidate,
-                None,
-                None,
-                None,
-                None,
-                Some(&code),
+                BodyServices {
+                    glyph: &glyph,
+                    invalidate: &invalidate,
+                    charts: None,
+                    code: Some(&code),
+                },
             )
             .unwrap()
     };
@@ -641,18 +707,24 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
             .render_projected_with_code(
                 row,
                 "item",
-                theme,
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme,
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| SelectionSourceId(index as u64 + 10),
-                &glyph,
-                &invalidate,
-                None,
-                None,
-                None,
-                None,
-                Some(&code),
+                BodyServices {
+                    glyph: &glyph,
+                    invalidate: &invalidate,
+                    charts: None,
+                    code: Some(&code),
+                },
             )
             .unwrap();
     }
@@ -676,18 +748,24 @@ fn callout_draws_the_documented_subtitle_and_caption() {
         .render_projected_with_code(
             0,
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            &glyph,
-            &invalidate,
-            None,
-            None,
-            None,
-            None,
-            Some(&code),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: Some(&code),
+            },
         )
         .expect("a callout with the documented envelope draws");
     let texts = test_support::editor::ui::painted_texts(&test_support::editor::ui::mounted(

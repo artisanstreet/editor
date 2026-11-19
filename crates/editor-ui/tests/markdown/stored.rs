@@ -1,5 +1,8 @@
 use super::*;
+use crate::ui::markdown::presenter::BodyServices;
+use crate::ui::markdown::presenter::RevealSlot;
 use crate::ui::markdown::presenter::{MarkdownPresenter, PresenterError, StoredProjectedMarkdown};
+use crate::ui::markdown::visual::BodyContext;
 use crate::ui::markdown::visual::BodyTone;
 use crate::ui::text::slice::slice;
 use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
@@ -100,17 +103,23 @@ fn render_leaf(
         owner,
         "row",
         ordinal,
-        slot_start,
-        true,
-        crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
-        BodyTone::Foreground,
-        &glyph,
-        &invalidate,
-        None,
-        None,
-        None,
-        None,
-        None,
+        RevealSlot {
+            start: slot_start,
+            last: true,
+        },
+        BodyContext {
+            theme: crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
+            tone: BodyTone::Foreground,
+            on_link: None,
+            on_color: None,
+            scope: None,
+        },
+        BodyServices {
+            glyph: &glyph,
+            invalidate: &invalidate,
+            charts: None,
+            code: None,
+        },
     )
 }
 

@@ -1,6 +1,9 @@
 use super::*;
 use crate::ui::markdown::MarkdownEngine;
+use crate::ui::markdown::presenter::BodyServices;
 use crate::ui::markdown::presenter::MarkdownPresenter;
+use crate::ui::markdown::presenter::SelectionPlace;
+use crate::ui::markdown::visual::BodyContext;
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role, SemanticNode};
 use aqua_text::{SharedFonts, SharedRuns};
 use std::cell::RefCell;
@@ -16,17 +19,26 @@ fn answer(source: &str, on_link: impl Fn(LinkAction) + 'static) -> aqua::UiApp {
     let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let on_color: Rc<dyn Fn(ShowCopyMenu)> = Rc::new(|_| {});
     let rendered = presenter
-        .render_with_context(
+        .render(
             "answer",
-            &ArtisanTheme::resolved(),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[0],
+            BodyContext {
+                theme: &ArtisanTheme::resolved(),
+                tone: BodyTone::Foreground,
+                on_link: Some(&on_link),
+                on_color: Some(&on_color),
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[0],
+            },
             |index| SelectionSourceId(index as u64 + 1),
-            &glyph,
-            &invalidate,
-            Some(&on_link),
-            Some(&on_color),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let fonts = SharedFonts::new();

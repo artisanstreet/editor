@@ -1,9 +1,6 @@
-use super::{MarkdownPresenter, MediaServices, PresenterError, RetainedRich, enveloped};
+use super::{MarkdownPresenter, MediaServices, PresenterError, RichCall, enveloped};
 use crate::ui::rich::{self};
-use crate::ui::theme::ArtisanTheme;
-use aqua_core::GpuiHsla;
 use aqua_ui::element::Element;
-use editor_assets::AssetId;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,13 +9,17 @@ impl MarkdownPresenter {
     pub(super) fn render_model(
         &self,
         model: &rich::media::model::ModelBlock,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: &Rc<dyn Fn()>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            glyph,
+            invalidate,
+            ..
+        } = call;
         let media = self
             .media_services
             .borrow()
@@ -64,12 +65,16 @@ impl MarkdownPresenter {
     pub(super) fn render_image(
         &self,
         model: &Arc<rich::media::image::ImageBlock>,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            ..
+        } = call;
         let services = self
             .media_services
             .borrow()
@@ -181,13 +186,17 @@ impl MarkdownPresenter {
     pub(super) fn render_audio(
         &self,
         block: &rich::media::audio::AudioBlock,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        glyph: &Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
-        invalidate: &Rc<dyn Fn()>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            glyph,
+            invalidate,
+            ..
+        } = call;
         let services = self
             .media_services
             .borrow()
@@ -216,12 +225,16 @@ impl MarkdownPresenter {
     pub(super) fn render_image_compare(
         &self,
         model: &rich::media::image_compare::ImageCompare,
-        entry: &RetainedRich,
-        envelope: &rich::Envelope,
-        id: &str,
-        theme: &ArtisanTheme,
-        invalidate: &Rc<dyn Fn()>,
+        call: RichCall<'_>,
     ) -> Result<Element, PresenterError> {
+        let RichCall {
+            entry,
+            envelope,
+            id,
+            theme,
+            invalidate,
+            ..
+        } = call;
         let services = self
             .media_services
             .borrow()
