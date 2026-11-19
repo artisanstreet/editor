@@ -772,8 +772,8 @@ impl Tx<'_> {
         let interrupted = runs.len();
         let mut continued = 0;
         for mut run in runs {
-            let error = run.error().map(str::to_owned);
-            run.finish(RunOutcome::Interrupted, error, ended_at);
+            run.finish(RunOutcome::Interrupted, None, ended_at)
+                .expect("invariant: recovery reads only runs that are still running");
             let run = self.save_run(run)?;
             if self.continue_after_restart(&run)? {
                 continued += 1;

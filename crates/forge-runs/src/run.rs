@@ -107,12 +107,17 @@ impl Ending {
         }
     }
 
-    const fn run_outcome(&self, shutting_down: bool) -> RunOutcome {
-        match self {
-            Self::Stopped(_) if shutting_down => RunOutcome::Interrupted,
-            Self::Stopped(_) => RunOutcome::Cancelled,
-            Self::Finished(outcome) => match outcome.run_outcome() {
-                RunOutcome::Cancelled if shutting_down => RunOutcome::Interrupted,
+    fn run_outcome(&self, stopped_by: Option<StoppedBy>, run: &RunId) -> RunOutcome {
+        match (self, stopped_by) {
+            (Self::Stopped(_), Some(StoppedBy::User)) => RunOutcome::Cancelled,
+            (Self::Stopped(_), Some(StoppedBy::Shutdown)) => RunOutcome::Interrupted,
+            (Self::Stopped(_), None) => {
+                unreachable!("invariant: run {run} stopped without a Stop or a shutdown")
+            }
+            (Self::Finished(outcome), _) => match outcome.run_outcome() {
+                RunOutcome::Cancelled if stopped_by == Some(StoppedBy::Shutdown) => {
+                    RunOutcome::Interrupted
+                }
                 ended @ (RunOutcome::Done
                 | RunOutcome::Cancelled
                 | RunOutcome::Failed
@@ -121,6 +126,12 @@ impl Ending {
             },
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoppedBy {
+    User,
+    Shutdown,
 }
 
 const STOP_UNCONFIRMED: &str = "The engine did not confirm it stopped within 45 seconds; underlying work may still be running.";
@@ -274,7 +285,12 @@ pub(crate) async fn drive(
             diagnostics::chain(&error)
         ));
     }
-    let ended = ending.run_outcome(hub.inner.shutdown.is_cancelled());
+    let stopped_by = match (stopped_through, hub.inner.shutdown.is_cancelled()) {
+        (Some(_), _) => Some(StoppedBy::User),
+        (None, true) => Some(StoppedBy::Shutdown),
+        (None, false) => None,
+    };
+    let ended = ending.run_outcome(stopped_by, &run.id);
     let status = ended.status();
     hub.attention_lock()
         .entry(thread_id.clone())
@@ -1594,7 +1610,9 @@ async fn announce_stop(
     pending: &[artisan_api::Item],
 ) -> Result<Run, forge_store::SettleRunError> {
     let mut stopped = run.clone();
-    stopped.finish(RunOutcome::Cancelled, None, artisan_api::now());
+    stopped
+        .finish(RunOutcome::Cancelled, None, artisan_api::now())
+        .expect("invariant: a run announces its stop while it is still running");
     let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
         run: stopped,
         open: open_items(items),
@@ -1641,7 +1659,19 @@ async fn finish(
         Ending::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
         | Ending::Stopped(_) => None,
     };
-    run.finish(ended, ending.error().map(str::to_owned), artisan_api::now());
+    let error = ending.error().map(str::to_owned);
+    match run.finish(ended, error.clone(), artisan_api::now()) {
+        Ok(()) => {}
+        Err(announced) if announced.ended == ended => {
+            if let RunState::Finished {
+                error: recorded, ..
+            } = &mut run.state
+            {
+                *recorded = error;
+            }
+        }
+        Err(announced) => unreachable!("invariant: {announced}"),
+    }
     let settlement = forge_store::Settlement {
         run: run.clone(),
         open,

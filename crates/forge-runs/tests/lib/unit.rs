@@ -4853,7 +4853,11 @@ async fn a_successful_agent_result_arriving_after_stop_does_not_restart_its_pare
         .await
         .unwrap()
         .unwrap();
-    run.finish(artisan_api::RunOutcome::Done, None, artisan_api::now());
+    run.state = artisan_api::RunState::Finished {
+        outcome: artisan_api::RunOutcome::Done,
+        error: None,
+        ended_at: artisan_api::now(),
+    };
     fixture.hub.store().upsert_run(run).await.unwrap();
     fixture.hub.reconcile_agents().await;
     assert_eq!(user_messages(&fixture.items().await), 1);

@@ -508,3 +508,63 @@ async fn stop_then_continue_then_stop_leaves_the_turn_stopped() {
             .unwrap()
     );
 }
+
+async fn stays_stopped_after_restart(fixture: &Fixture) {
+    let run = fixture
+        .hub
+        .store()
+        .latest_run(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status(), RunStatus::Cancelled);
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .continue_pending(&fixture.thread_id)
+            .await
+            .unwrap(),
+        "a turn the user stopped never resumes when Forge starts again"
+    );
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .pending_threads(8, Vec::new())
+            .await
+            .unwrap()
+            .contains(&fixture.thread_id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_forge_shuts_down_during_is_not_resumed_on_restart() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+        .await
+        .unwrap();
+    fixture.hub.shutdown();
+    winding.release.notify_one();
+    fixture.hub.stop(Duration::from_secs(10)).await;
+
+    stays_stopped_after_restart(&fixture).await;
+    assert_eq!(winding.turns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_pressed_while_forge_shuts_down_is_not_resumed_on_restart() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    fixture.hub.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+        .await
+        .unwrap();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    winding.release.notify_one();
+    fixture.hub.stop(Duration::from_secs(10)).await;
+
+    stays_stopped_after_restart(&fixture).await;
+}

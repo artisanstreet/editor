@@ -154,13 +154,34 @@ impl Run {
         matches!(self.state, RunState::Running)
     }
 
-    pub fn finish(&mut self, outcome: RunOutcome, error: Option<String>, at: Timestamp) {
+    pub fn finish(
+        &mut self,
+        outcome: RunOutcome,
+        error: Option<String>,
+        at: Timestamp,
+    ) -> Result<(), RunAlreadyFinished> {
+        if let RunState::Finished { outcome: ended, .. } = self.state {
+            return Err(RunAlreadyFinished {
+                run: self.id.clone(),
+                ended,
+                requested: outcome,
+            });
+        }
         self.state = RunState::Finished {
             outcome,
             error,
-            ended_at: self.ended_at().unwrap_or(at),
+            ended_at: at,
         };
+        Ok(())
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("run {run} already ended {ended:?}, so it cannot end {requested:?} as well")]
+pub struct RunAlreadyFinished {
+    pub run: RunId,
+    pub ended: RunOutcome,
+    pub requested: RunOutcome,
 }
 
 #[derive(Debug, thiserror::Error)]

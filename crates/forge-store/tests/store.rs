@@ -809,7 +809,9 @@ async fn a_run_stays_in_the_thread_it_started_in() {
         .unwrap();
     let mut moved = started.clone();
     moved.thread_id = other.clone();
-    moved.finish(artisan_api::RunOutcome::Done, None, now());
+    moved
+        .finish(artisan_api::RunOutcome::Done, None, now())
+        .unwrap();
 
     let error = store.upsert_run(moved).await.unwrap_err();
 
@@ -2091,7 +2093,9 @@ async fn turning_retries_off_publishes_the_setting_before_the_threads_it_unparks
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;
     let mut failed = live_run_with_session(&store, &thread).await;
-    failed.finish(artisan_api::RunOutcome::Failed, None, now());
+    failed
+        .finish(artisan_api::RunOutcome::Failed, None, now())
+        .unwrap();
     let (_, parked) = store
         .settle_run(forge_store::Settlement {
             run: failed,

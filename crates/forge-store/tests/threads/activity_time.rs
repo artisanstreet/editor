@@ -74,7 +74,9 @@ async fn only_accepted_activity_changes_thread_recency() {
         .unwrap();
     let unchanged = store.thread(&thread.id).await.unwrap().unwrap();
     assert_eq!(unchanged.activity_at, 20, "usage alone is not activity");
-    usage.finish(artisan_api::RunOutcome::Done, None, 30);
+    usage
+        .finish(artisan_api::RunOutcome::Done, None, 30)
+        .unwrap();
     let done = store
         .upsert_run_at(
             usage,
