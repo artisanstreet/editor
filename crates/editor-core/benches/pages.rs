@@ -1,12 +1,14 @@
 use artisan_api::{Event, Thread, ThreadId, ThreadsPage};
 use divan::Bencher;
 use editor_core::ThreadPageDirection;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 use test_support::editor::core::StubbedHost;
 use test_support::editor::forge::empty_state;
 
 const THREADS: u64 = 1_000;
-const UPDATES: u64 = 100;
-const CHUNK: u64 = 25;
+const BURST: usize = 50;
+const ADMIT_WITHIN: Duration = Duration::from_secs(10);
 
 fn thread(index: u64, seq: u64, activity: u64) -> Thread {
     serde_json::from_value(serde_json::json!({
@@ -44,29 +46,58 @@ fn loaded_host() -> StubbedHost {
     stubbed
 }
 
+struct Burst {
+    stubbed: StubbedHost,
+    seq: u64,
+    last: Option<ThreadId>,
+}
+
+impl Burst {
+    fn admit(&mut self) {
+        assert_eq!(
+            self.stubbed.core.pending_work(),
+            0,
+            "bench: the previous burst drained completely"
+        );
+        if let Some(id) = &self.last {
+            let applied = self.stubbed.host().threads.get(id).map(|thread| thread.seq);
+            assert_eq!(applied, Some(self.seq), "bench: the previous burst applied");
+        }
+        for _ in 0..BURST {
+            self.seq += 1;
+            let updated = thread((self.seq * 37) % THREADS, self.seq, self.seq);
+            self.last = Some(updated.id.clone());
+            self.stubbed
+                .forge
+                .publish(Event::Thread { thread: updated });
+        }
+        let deadline = Instant::now() + ADMIT_WITHIN;
+        while self.stubbed.core.pending_work() < BURST {
+            assert!(
+                Instant::now() < deadline,
+                "bench: the Editor never admitted the burst of {BURST} events"
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+
+    fn apply(&mut self) {
+        while self.stubbed.core.drain_step(|_, _| {}) {}
+    }
+}
+
 fn main() {
     divan::main();
 }
 
-#[divan::bench(sample_count = 20)]
+#[divan::bench(sample_count = 100, sample_size = 1)]
 fn apply_a_burst_of_thread_updates(bencher: Bencher<'_, '_>) {
-    let mut stubbed = loaded_host();
-    let mut seq = THREADS;
-    bencher.bench_local(|| {
-        for chunk in 0..UPDATES / CHUNK {
-            let mut last = None;
-            for update in chunk * CHUNK..(chunk + 1) * CHUNK {
-                seq += 1;
-                let updated = thread((update * 37) % THREADS, seq, seq);
-                last = Some((updated.id.clone(), seq));
-                stubbed.forge.publish(Event::Thread { thread: updated });
-            }
-            let (id, seq): (ThreadId, u64) = last.expect("bench: a chunk has updates");
-            stubbed.settle("bench: the burst applies", |core, host| {
-                core.host(host)
-                    .and_then(|data| data.threads.get(&id))
-                    .is_some_and(|thread| thread.seq == seq)
-            });
-        }
+    let burst = RefCell::new(Burst {
+        stubbed: loaded_host(),
+        seq: THREADS,
+        last: None,
     });
+    bencher
+        .with_inputs(|| burst.borrow_mut().admit())
+        .bench_local_values(|()| burst.borrow_mut().apply());
 }
