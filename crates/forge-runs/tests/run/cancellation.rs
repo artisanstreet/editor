@@ -568,3 +568,40 @@ async fn a_stop_pressed_while_forge_shuts_down_is_not_resumed_on_restart() {
 
     stays_stopped_after_restart(&fixture).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continue_acknowledged_during_a_stop_survives_a_storage_failure() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+        .await
+        .unwrap();
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    let disk = durability::DiskFull::arming(&fixture, "continues");
+    disk.strike();
+    winding.release.notify_one();
+    test_support::wait::within("the stopped run to end", Duration::from_secs(10), async {
+        while fixture.hub.is_live(&fixture.thread_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(winding.turns(), 1);
+
+    disk.clear();
+    test_support::wait::eventually(
+        "the acknowledged continue to run once storage recovers",
+        Duration::from_secs(10),
+        || async { winding.turns() == 2 },
+    )
+    .await;
+    let continued = fixture.settled().await;
+    assert_eq!(
+        continued
+            .iter()
+            .find(|run| run.continuation.is_some())
+            .map(|run| (run.status(), run.continuation)),
+        Some((RunStatus::Done, Some(artisan_api::Continuation::Requested)))
+    );
+}

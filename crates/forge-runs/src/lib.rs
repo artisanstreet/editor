@@ -87,6 +87,7 @@ struct Inner {
     harness_for: HarnessFor,
     live: Mutex<HashMap<ThreadId, LiveRun>>,
     unsettled: Mutex<HashMap<ThreadId, forge_store::Settlement>>,
+    owed_continues: Mutex<std::collections::HashSet<ThreadId>>,
     suggestions: Mutex<HashMap<ThreadId, Suggested>>,
     attention: Mutex<HashMap<ThreadId, side::Attention>>,
     untitled: Mutex<std::collections::HashSet<ThreadId>>,
@@ -115,6 +116,12 @@ fn retry_delay(failures: u32) -> std::time::Duration {
     FIRST_RETRY
         .saturating_mul(2_u32.saturating_pow(failures.saturating_sub(1).min(6)))
         .min(LONGEST_RETRY)
+}
+
+enum Continuing {
+    Continued,
+    Reported,
+    Owed,
 }
 
 struct LiveRun {
@@ -273,6 +280,7 @@ impl Hub {
                 harness_for,
                 live: Mutex::new(HashMap::new()),
                 unsettled: Mutex::new(HashMap::new()),
+                owed_continues: Mutex::new(std::collections::HashSet::new()),
                 suggestions: Mutex::new(HashMap::new()),
                 attention: Mutex::new(HashMap::new()),
                 untitled: Mutex::new(std::collections::HashSet::new()),
@@ -601,8 +609,80 @@ impl Hub {
             None => {}
         }
         self.carry_on(thread_id).await?;
+        self.owed_continues_lock().remove(thread_id);
         self.resume_pending();
         Ok(())
+    }
+
+    async fn fulfil_continue(&self, thread_id: &ThreadId) -> Continuing {
+        if self.unsettled_lock().contains_key(thread_id) {
+            self.owed_continues_lock().insert(thread_id.clone());
+            return Continuing::Owed;
+        }
+        let refused = match self.carry_on(thread_id).await {
+            Ok(()) => {
+                self.owed_continues_lock().remove(thread_id);
+                return Continuing::Continued;
+            }
+            Err(ContinueError::Refused { refused, .. }) => refused,
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down; retrying: {}", diagnostics::chain(&error));
+                self.owed_continues_lock().insert(thread_id.clone());
+                return Continuing::Owed;
+            }
+        };
+        let report = forge_store::NewItem {
+            id: ItemId::new(),
+            thread_id: thread_id.clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::Error {
+                kind: artisan_api::ErrorKind::Execution,
+                message: format!("Continue could not start: {}", refused.0).into(),
+                retryable: false,
+            },
+        };
+        match self.store().upsert_item(report).await {
+            Ok(_) => {
+                self.owed_continues_lock().remove(thread_id);
+                Continuing::Reported
+            }
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, "report that the continue could not start; retrying: {}", diagnostics::chain(&error));
+                self.owed_continues_lock().insert(thread_id.clone());
+                Continuing::Owed
+            }
+        }
+    }
+
+    async fn continue_owed(&self) -> bool {
+        let owed: Vec<ThreadId> = self.owed_continues_lock().iter().cloned().collect();
+        if owed.is_empty() {
+            return true;
+        }
+        let _admission = self.inner.admission.lock().await;
+        let mut done = true;
+        for thread in owed {
+            if self.lock().contains_key(&thread) {
+                continue;
+            }
+            match self.fulfil_continue(&thread).await {
+                Continuing::Continued | Continuing::Reported => {}
+                Continuing::Owed => done = false,
+            }
+        }
+        done
+    }
+
+    fn owed_continues_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashSet<ThreadId>> {
+        self.inner
+            .owed_continues
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn carry_on(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
@@ -1136,6 +1216,7 @@ impl Hub {
                     }
                     let mut failed = !readable;
                     failed |= !hub.settle_unsettled().await;
+                    failed |= !hub.continue_owed().await;
                     stalled = true;
                     loop {
                         let _admission = hub.inner.admission.lock().await;
@@ -1241,16 +1322,20 @@ impl Hub {
     async fn end_live(&self, thread_id: &ThreadId) -> bool {
         let _admission = self.inner.admission.lock().await;
         let phase = self.lock().get(thread_id).map(|run| run.phase);
-        let continued = matches!(
-            phase,
+        let continued = match phase {
             Some(Phase::Stopping {
                 then: AfterStop::Continue,
                 ..
-            })
-        ) && !self.inner.shutdown.is_cancelled();
-        if continued && let Err(error) = self.carry_on(thread_id).await {
-            tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down: {}", diagnostics::chain(&error));
-        }
+            }) => match self.fulfil_continue(thread_id).await {
+                Continuing::Continued => true,
+                Continuing::Reported => false,
+                Continuing::Owed => {
+                    self.resume_pending();
+                    false
+                }
+            },
+            Some(Phase::Working | Phase::Stopping { .. }) | None => false,
+        };
         self.lock().remove(thread_id);
         continued
     }
