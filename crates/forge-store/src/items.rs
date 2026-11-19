@@ -840,7 +840,8 @@ impl Store {
         excluded: Vec<ThreadId>,
     ) -> Result<Vec<ThreadId>, PendingThreadsError> {
         let limit = limit.min(8);
-        self.read(move |conn| read::pending_threads(conn, limit, &excluded))
+        let now = self.now();
+        self.read(move |conn| read::pending_threads(conn, limit, &excluded, now))
             .await
             .map_err(|cause| PendingThreadsError {
                 cause: Box::new(cause),

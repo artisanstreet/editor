@@ -2,7 +2,7 @@ use crate::content::ContentError;
 use crate::error::{StorageError, operation_error};
 use crate::source_index::SourceIndexError;
 use crate::{Store, collection, content, source_index};
-use artisan_api::{ContentId, now};
+use artisan_api::ContentId;
 use std::sync::Arc;
 
 operation_error!(ContentRangeError(ContentError), "read a range of content {content}", content: ContentId);
@@ -147,7 +147,7 @@ impl Store {
     }
 
     pub async fn gc_content(&self) -> Result<usize, CollectContentError> {
-        self.write(|tx| content::collect(tx, now()))
+        self.write(|tx| content::collect(tx, artisan_api::now()))
             .await
             .map_err(|cause| CollectContentError {
                 cause: Box::new(cause),

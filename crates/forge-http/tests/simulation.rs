@@ -93,7 +93,6 @@ struct Session {
 }
 
 fn simulate(seed: u64) {
-    artisan_api::clock::reset();
     let actions = plan::plan(seed);
     let dir = tempfile::tempdir().expect("create the simulation folder");
     let mut reproduce = Reproduce {
@@ -190,7 +189,7 @@ impl Session {
             } => self.turn(number, delivery, ending),
             Action::Draft { number, disk_fails } => self.save_draft(number, disk_fails),
             Action::Restart(stop) => self.forge.restart(stop),
-            Action::StepClock { by_ms } => artisan_api::clock::step(by_ms),
+            Action::StepClock { by_ms } => self.forge.clock().step(by_ms),
             Action::DropEvents { after } => self.observer.cut_next_stream(after),
         }
     }

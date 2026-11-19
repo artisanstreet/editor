@@ -3,7 +3,7 @@ use forge_http::PairInvite;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -18,7 +18,24 @@ const STOPPED_WITHIN: Duration = Duration::from_secs(60);
 pub(crate) struct Forge {
     data: PathBuf,
     disk: Disk,
+    clock: Clock,
     running: Option<Running>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Clock(Arc<AtomicI64>);
+
+impl Clock {
+    pub(crate) fn step(&self, by_ms: i64) {
+        self.0.fetch_add(by_ms, Ordering::SeqCst);
+    }
+
+    fn wall(&self) -> artisan_api::WallClock {
+        let offset = Arc::clone(&self.0);
+        artisan_api::WallClock::new(move || {
+            artisan_api::now().saturating_add(offset.load(Ordering::SeqCst))
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -33,22 +50,20 @@ impl Disk {
         self.0.store(0, Ordering::SeqCst);
     }
 
-    fn environment(&self) -> forge_store::Environment {
+    fn connections(&self) -> forge_store::Connections {
         let failing = Arc::clone(&self.0);
-        forge_store::Environment {
-            connections: forge_store::Connections::new(move |path| {
-                let mut conn = rusqlite::Connection::open(path)?;
-                let failing = Arc::clone(&failing);
-                conn.commit_hook(Some(move || {
-                    failing
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                            left.checked_sub(1)
-                        })
-                        .is_ok()
-                }))?;
-                Ok(conn)
-            }),
-        }
+        forge_store::Connections::new(move |path| {
+            let mut conn = rusqlite::Connection::open(path)?;
+            let failing = Arc::clone(&failing);
+            conn.commit_hook(Some(move || {
+                failing
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok()
+            }))?;
+            Ok(conn)
+        })
     }
 }
 
@@ -64,6 +79,7 @@ impl Forge {
         let mut forge = Self {
             data: data.to_path_buf(),
             disk: Disk::default(),
+            clock: Clock::default(),
             running: None,
         };
         let store = forge.launch();
@@ -79,6 +95,10 @@ impl Forge {
 
     pub(crate) const fn disk(&self) -> &Disk {
         &self.disk
+    }
+
+    pub(crate) const fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     pub(crate) fn address(&self) -> SocketAddr {
@@ -144,7 +164,10 @@ impl Forge {
                     data_dir: self.data.clone(),
                     listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
                 },
-                self.disk.environment(),
+                forge_store::Environment {
+                    connections: self.disk.connections(),
+                    clock: self.clock.wall(),
+                },
             ))
             .unwrap_or_else(|error| panic!("Forge starts: {}", diagnostics::chain(&error)));
         let address = server.local_addr().expect("Forge listens");

@@ -7,7 +7,7 @@ use crate::{
 };
 use artisan_api::{
     Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, ItemKind, Project,
-    Run, RunId, RunOutcome, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
+    Run, RunId, RunOutcome, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread,
 };
 use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
@@ -152,6 +152,7 @@ pub(crate) struct Writer {
     events: Option<crate::feed::Feed>,
     hot: Arc<crate::hot::HotPages>,
     commits: Commits,
+    clock: artisan_api::WallClock,
 }
 
 impl Writer {
@@ -161,6 +162,7 @@ impl Writer {
         events: Option<crate::feed::Feed>,
         hot: Arc<crate::hot::HotPages>,
         commits: Commits,
+        clock: artisan_api::WallClock,
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
@@ -173,6 +175,7 @@ impl Writer {
             events,
             hot,
             commits,
+            clock,
         })
     }
 
@@ -202,6 +205,7 @@ impl Writer {
             sql,
             seq,
             events: Vec::new(),
+            clock: self.clock.clone(),
             #[cfg(test)]
             stamp: None,
         };
@@ -225,6 +229,7 @@ pub(crate) struct Tx<'c> {
     pub(crate) sql: Transaction<'c>,
     seq: Seq,
     events: Vec<Envelope>,
+    clock: artisan_api::WallClock,
     #[cfg(test)]
     stamp: Option<Stamp>,
 }
@@ -411,34 +416,24 @@ impl Tx<'_> {
         Ok(run)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::unused_self,
-            reason = "the stamp override exists only for tests"
-        )
-    )]
     pub(crate) fn created_at(&self) -> Timestamp {
         #[cfg(test)]
         if let Some(stamp) = self.stamp {
             return stamp.created_at;
         }
-        now()
+        self.clock.now()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::unused_self,
-            reason = "the stamp override exists only for tests"
-        )
-    )]
     fn updated_at(&self) -> Timestamp {
         #[cfg(test)]
         if let Some(stamp) = self.stamp {
             return stamp.updated_at;
         }
-        now()
+        self.clock.now()
+    }
+
+    pub(crate) fn now(&self) -> Timestamp {
+        self.clock.now()
     }
 
     pub(crate) const fn next_seq(&mut self) -> Seq {
@@ -767,7 +762,7 @@ impl Tx<'_> {
         threads: Option<Vec<ThreadId>>,
     ) -> Result<(), WriteFailure> {
         let scope = threads.map(|threads| to_body(&threads)).transpose()?;
-        let ended_at = now();
+        let ended_at = self.now();
         let runs: Vec<Run> = read::many(self, include_str!("sql/recovery/runs.sql"), [&scope])?;
         let interrupted = runs.len();
         let mut continued = 0;

@@ -1,6 +1,6 @@
 use crate::error::{StorageError, operation_error};
 use crate::{Store, read};
-use artisan_api::{ItemId, ProjectId, ThreadId, Timestamp, now};
+use artisan_api::{ItemId, ProjectId, ThreadId, Timestamp};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -636,8 +636,8 @@ impl Store {
                     )?;
                     require(
                         *state == ClaimState::Active
-                            && *expires_at > now()
-                            && *expires_at <= now() + 86_400_000,
+                            && *expires_at > tx.now()
+                            && *expires_at <= tx.now() + 86_400_000,
                         CoordinationFailure::ClaimLifetime,
                     )?;
                     *resources = resources
@@ -708,7 +708,7 @@ impl Store {
                 owner: caller,
                 project: thread.project_id,
                 revision: previous.map_or(1, |r| r.revision + 1),
-                updated_at: now(),
+                updated_at: tx.now(),
                 content,
             };
             save(tx, &record)?;
@@ -760,7 +760,7 @@ impl Store {
                         record.owner == caller && (1..=86_400).contains(&seconds),
                         CoordinationFailure::RenewalInvalid,
                     )?;
-                    *expires_at = now() + i64::from(seconds) * 1000;
+                    *expires_at = tx.now() + i64::from(seconds) * 1000;
                 }
                 (
                     Content::Message {
@@ -863,7 +863,7 @@ impl Store {
                 _ => return Err(CoordinationFailure::TransitionInvalid),
             }
             record.revision += 1;
-            record.updated_at = now();
+            record.updated_at = tx.now();
             save(tx, &record)?;
             Ok(record)
         })

@@ -1,6 +1,6 @@
 use crate::Store;
 use crate::error::{StorageError, operation_error};
-use artisan_api::{DeviceId, Timestamp, now};
+use artisan_api::{DeviceId, Timestamp};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rusqlite::{Connection, params};
@@ -142,7 +142,7 @@ pub(crate) fn device_signal(database: &Path) -> PathBuf {
 }
 
 pub(crate) fn announce_device_change(database: &Path) -> std::io::Result<()> {
-    std::fs::write(device_signal(database), now().to_string())
+    std::fs::write(device_signal(database), artisan_api::now().to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -312,14 +312,19 @@ impl Store {
         self.write_acknowledged(move |tx| {
             if tx.execute(
                 include_str!("sql/pairing/redeem_code.sql"),
-                params![code.hex(), now()],
+                params![code.hex(), tx.now()],
             )? == 0
             {
                 return Ok(None);
             }
             let id: String = tx.query_row(
                 include_str!("sql/pairing/authorize.sql"),
-                params![DeviceId::new().as_str(), name, certificate.as_str(), now()],
+                params![
+                    DeviceId::new().as_str(),
+                    name,
+                    certificate.as_str(),
+                    tx.now()
+                ],
                 |row| row.get(0),
             )?;
             Ok(Some(DeviceId(id)))
@@ -340,7 +345,12 @@ impl Store {
         self.write_acknowledged(move |tx| {
             let id: String = tx.query_row(
                 include_str!("sql/pairing/authorize.sql"),
-                params![DeviceId::new().as_str(), name, certificate.as_str(), now()],
+                params![
+                    DeviceId::new().as_str(),
+                    name,
+                    certificate.as_str(),
+                    tx.now()
+                ],
                 |row| row.get(0),
             )?;
             Ok(DeviceId(id))
@@ -386,7 +396,7 @@ impl Store {
         self.write(move |tx| {
             tx.execute(
                 include_str!("sql/pairing/touch.sql"),
-                params![id.as_str(), now()],
+                params![id.as_str(), tx.now()],
             )?;
             Ok(())
         })
@@ -402,7 +412,7 @@ impl Store {
         code: PairCodeHash,
         expires_at: Timestamp,
     ) -> Result<(), AddPairCodeError> {
-        self.write_acknowledged(move |tx| add_pair_code(tx, &code, expires_at))
+        self.write_acknowledged(move |tx| add_pair_code(tx, &code, expires_at, tx.now()))
             .await
             .map_err(|cause| AddPairCodeError {
                 cause: Box::new(cause),
@@ -432,9 +442,10 @@ pub(crate) fn add_pair_code(
     conn: &Connection,
     code: &PairCodeHash,
     expires_at: Timestamp,
+    now: Timestamp,
 ) -> Result<()> {
     conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))?
-        .execute([now()])?;
+        .execute([now])?;
     conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))?
         .execute(params![code.hex(), expires_at])?;
     Ok(())

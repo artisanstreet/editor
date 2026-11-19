@@ -139,7 +139,7 @@ impl Admin {
     ) -> Result<(), PairCodeError> {
         let saved = || -> Result<(), StorageError> {
             let tx = self.conn.unchecked_transaction()?;
-            crate::pairing::add_pair_code(&tx, code, expires_at)?;
+            crate::pairing::add_pair_code(&tx, code, expires_at, artisan_api::now())?;
             tx.commit()?;
             Ok(())
         };

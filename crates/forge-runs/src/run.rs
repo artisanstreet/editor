@@ -259,7 +259,13 @@ pub(crate) async fn drive(
     if let Some(live) = hub.lock().get_mut(thread_id) {
         live.engine = Some(engine);
     }
-    let unstarted = unstarted(&thread, run_id.clone(), observed.cutoff, continuation);
+    let unstarted = unstarted(
+        &thread,
+        run_id.clone(),
+        observed.cutoff,
+        continuation,
+        hub.store().now(),
+    );
     let Started {
         mut run,
         previous,
@@ -338,6 +344,7 @@ fn unstarted(
     id: RunId,
     input_cutoff: u64,
     continuation: Option<artisan_api::Continuation>,
+    started_at: artisan_api::Timestamp,
 ) -> Run {
     Run {
         config: Some(thread.config.clone()),
@@ -350,7 +357,7 @@ fn unstarted(
         session_id: None,
         seq: 0,
         input_cutoff,
-        started_at: artisan_api::now(),
+        started_at,
         continuation,
     }
 }
@@ -1771,7 +1778,7 @@ async fn announce_stop(
 ) -> Result<Run, forge_store::SettleRunError> {
     let mut stopped = run.clone();
     stopped
-        .finish(RunOutcome::Cancelled, None, artisan_api::now())
+        .finish(RunOutcome::Cancelled, None, hub.store().now())
         .expect("invariant: a run announces its stop while it is still running");
     let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
         run: stopped,
@@ -1820,7 +1827,7 @@ async fn finish(
         | Ending::Stopped(_) => None,
     };
     let error = ending.error().map(str::to_owned);
-    match run.finish(ended, error.clone(), artisan_api::now()) {
+    match run.finish(ended, error.clone(), hub.store().now()) {
         Ok(()) => {}
         Err(announced) if announced.ended == ended => {
             if let RunState::Finished {

@@ -289,11 +289,7 @@ impl Store {
             let version = latest + 1;
             tx.execute(
                 include_str!("sql/settings/save_prompt_version.sql"),
-                params![
-                    i64::try_from(version).unwrap_or(i64::MAX),
-                    text,
-                    artisan_api::now()
-                ],
+                params![i64::try_from(version).unwrap_or(i64::MAX), text, tx.now()],
             )?;
             tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
             tx.save_setting("global_prompt_version".into(), serde_json::json!(version))?;

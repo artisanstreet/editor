@@ -63,7 +63,7 @@ fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
     }
     migrate(&mut conn).unwrap();
     assert_eq!(
-        crate::read::pending_threads(&conn, 8, &[]).unwrap(),
+        crate::read::pending_threads(&conn, 8, &[], artisan_api::now()).unwrap(),
         [ThreadId("t".into())]
     );
     let agent = ItemId("agent".into());

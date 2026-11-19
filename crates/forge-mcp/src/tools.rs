@@ -755,7 +755,7 @@ impl Scope {
         clippy::cast_possible_truncation,
         reason = "a day count is fractional; `as` truncates it to whole milliseconds and saturates"
     )]
-    fn recall(self) -> Result<RecallScope> {
+    fn recall(self, now: artisan_api::Timestamp) -> Result<RecallScope> {
         Ok(RecallScope {
             thread: self.thread.as_deref().map(thread_id),
             project: self.project.map(ProjectId::from),
@@ -763,7 +763,7 @@ impl Scope {
             kinds: self.kinds,
             since: self
                 .since_days
-                .map(|days| artisan_api::now() - (days * 86_400_000.0) as i64),
+                .map(|days| now - (days * 86_400_000.0) as i64),
             until: None,
             skip_archived: self.skip_archived,
         })
@@ -914,7 +914,7 @@ pub(crate) async fn call(
             let search: Search = args(arguments)?;
             let page = store
                 .recall_search(
-                    search.scope.recall()?,
+                    search.scope.recall(hub.store().now())?,
                     search.query,
                     search.include_output,
                     search.limit.unwrap_or(15),
@@ -944,7 +944,7 @@ pub(crate) async fn call(
             let grep: Grep = args(arguments)?;
             let page = store
                 .recall_grep(
-                    grep.scope.recall()?,
+                    grep.scope.recall(hub.store().now())?,
                     GrepQuery {
                         pattern: grep.pattern,
                         ignore_case: grep.ignore_case,
@@ -1218,12 +1218,8 @@ pub(crate) async fn call(
                         .unwrap_or_default(),
                 )
                 .expect(STRING_WRITE);
-                writeln!(
-                    out,
-                    "{}\n",
-                    status.discovery.description(artisan_api::now())
-                )
-                .expect(STRING_WRITE);
+                writeln!(out, "{}\n", status.discovery.description(hub.store().now()))
+                    .expect(STRING_WRITE);
                 if !installed || status.models.is_empty() {
                     continue;
                 }

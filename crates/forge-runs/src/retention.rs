@@ -29,7 +29,10 @@ impl Hub {
         let Some(days) = self.retention_days().await? else {
             return Ok(0);
         };
-        let cutoff = artisan_api::now().saturating_sub(i64::from(days).saturating_mul(DAY_MS));
+        let cutoff = self
+            .store()
+            .now()
+            .saturating_sub(i64::from(days).saturating_mul(DAY_MS));
         let mut total = 0;
         loop {
             let live: HashSet<_> = self.lock().keys().cloned().collect();

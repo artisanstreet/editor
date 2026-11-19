@@ -1224,7 +1224,7 @@ impl Hub {
                         .deferred
                         .swap(false, std::sync::atomic::Ordering::AcqRel);
                     failed |= deferred;
-                    unclaimed_at = Some(artisan_api::now());
+                    unclaimed_at = Some(hub.store().now());
                     loop {
                         if deferred {
                             break;

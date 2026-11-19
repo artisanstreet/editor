@@ -1,15 +1,27 @@
-use std::sync::atomic::{AtomicI64, Ordering};
+use crate::Timestamp;
+use std::sync::Arc;
 
-static OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+#[derive(Clone)]
+pub struct WallClock(Arc<dyn Fn() -> Timestamp + Send + Sync>);
 
-pub fn step(by_ms: i64) {
-    OFFSET_MS.fetch_add(by_ms, Ordering::AcqRel);
+impl WallClock {
+    #[must_use]
+    pub fn system() -> Self {
+        Self::new(crate::now)
+    }
+
+    pub fn new(read: impl Fn() -> Timestamp + Send + Sync + 'static) -> Self {
+        Self(Arc::new(read))
+    }
+
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        (self.0)()
+    }
 }
 
-pub fn reset() {
-    OFFSET_MS.store(0, Ordering::Release);
-}
-
-pub(crate) fn offset() -> i64 {
-    OFFSET_MS.load(Ordering::Acquire)
+impl std::fmt::Debug for WallClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WallClock").field(&self.now()).finish()
+    }
 }

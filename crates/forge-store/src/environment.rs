@@ -1,3 +1,4 @@
+use artisan_api::WallClock;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ impl std::fmt::Debug for Connections {
 #[derive(Clone, Debug)]
 pub struct Environment {
     pub connections: Connections,
+    pub clock: WallClock,
 }
 
 impl Environment {
@@ -40,6 +42,7 @@ impl Environment {
     pub fn system() -> Self {
         Self {
             connections: Connections::system(),
+            clock: WallClock::system(),
         }
     }
 }

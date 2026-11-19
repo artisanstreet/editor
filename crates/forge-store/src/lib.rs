@@ -286,6 +286,7 @@ struct Inner {
     device_watch: pairing::DeviceWatch,
     database: PathBuf,
     connections: Connections,
+    clock: artisan_api::WallClock,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
     blob_lock: Arc<tokio::sync::Mutex<()>>,
@@ -625,7 +626,7 @@ impl Store {
                     restored: u32::try_from(restored)
                         .expect("invariant: schema versions fit in u32"),
                     set_aside: aside.display().to_string(),
-                    at: artisan_api::now(),
+                    at: environment.clock.now(),
                 })
             }
         };
@@ -681,6 +682,11 @@ impl Store {
         )
     }
 
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.inner.clock.now()
+    }
+
     pub const fn schema_version() -> usize {
         schema::version()
     }
@@ -692,7 +698,7 @@ impl Store {
         opening: Opening,
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
-        let connections = environment.connections;
+        let Environment { connections, clock } = environment;
         let recover = matches!(opening, Opening::Upgrade(_));
         let prepare = |source| OpenStoreError::Database {
             database: database.clone(),
@@ -728,6 +734,7 @@ impl Store {
                 count: Arc::clone(&commits),
                 committed,
             },
+            clock.clone(),
         )
         .map_err(prepare)?;
         recover_after_opening(&mut writer, opening, &database)?;
@@ -783,6 +790,7 @@ impl Store {
                 device_watch,
                 database,
                 connections,
+                clock,
                 blob_dir,
                 resource_dir,
                 blob_lock: Arc::new(tokio::sync::Mutex::new(())),

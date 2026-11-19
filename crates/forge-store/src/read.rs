@@ -149,16 +149,16 @@ pub(crate) fn pending_threads(
     conn: &Connection,
     limit: usize,
     excluded: &[ThreadId],
+    now: artisan_api::Timestamp,
 ) -> Result<Vec<ThreadId>> {
     let mut query = conn.prepare_cached(concat!(
         include_str!("sql/pending/runnable_inputs.sql"),
         include_str!("sql/pending/threads.sql")
     ))?;
     Ok(query
-        .query_map(
-            params![to_body(excluded)?, limit, artisan_api::now()],
-            |row| row.get::<_, String>(0),
-        )?
+        .query_map(params![to_body(excluded)?, limit, now], |row| {
+            row.get::<_, String>(0)
+        })?
         .map(|row| row.map(ThreadId))
         .collect::<rusqlite::Result<_>>()?)
 }

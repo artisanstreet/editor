@@ -1,6 +1,5 @@
 mod agent_names;
-#[cfg(feature = "test-support")]
-pub mod clock;
+mod clock;
 mod content;
 mod engine;
 mod event;
@@ -22,6 +21,7 @@ pub mod transport;
 mod tunnel;
 
 pub use agent_names::{AGENT_NAMES, choose_agent_name, fallback_agent_name};
+pub use clock::WallClock;
 pub use content::{
     CONTENT_RANGE_BYTES, ContentId, ContentQuery, ContentRange, ContentRef, INLINE_TEXT_BYTES,
     TextContent,
@@ -95,14 +95,11 @@ pub type Timestamp = i64;
 
 #[must_use]
 pub fn now() -> Timestamp {
-    let wall = std::time::SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-        });
-    #[cfg(feature = "test-support")]
-    let wall = wall.saturating_add(clock::offset());
-    wall
+        })
 }
 
 pub const PROTOCOL_VERSION: u32 = 7;

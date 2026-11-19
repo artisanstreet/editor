@@ -2,7 +2,7 @@ use crate::awareness::{AwarenessError, nullable, object, optional_record_schema,
 use crate::forge::{self, ForgeError};
 use crate::server::Failure;
 use crate::{Tool, awareness};
-use artisan_api::{ThreadId, now};
+use artisan_api::ThreadId;
 use forge_runs::Hub;
 use forge_store::coordination::{
     ClaimState, Content, CoordinationFailure, Intent, MessageState, Query, Record, Resource,
@@ -502,7 +502,7 @@ async fn claim_resources(hub: &Hub, caller: &ThreadId, _name: &str, args: Value)
                     resources,
                     purpose: string(&args, "purpose")?,
                     state: ClaimState::Active,
-                    expires_at: now()
+                    expires_at: hub.store().now()
                         + i64::try_from(seconds)
                             .expect("invariant: a claim lifetime is at most 86400 seconds")
                             * 1000,
@@ -517,7 +517,7 @@ async fn claim_resources(hub: &Hub, caller: &ThreadId, _name: &str, args: Value)
                 record.id
             );
         };
-        let mut conflicts:Vec<_>=all_records(hub,Query { kind:Some("claim".to_owned()),..Default::default() }).await.map_err(CoordinationError::Records)?.into_iter().filter(|other| other.owner!=*caller && other.active_claim(now()) && matches!(&other.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect();
+        let mut conflicts:Vec<_>=all_records(hub,Query { kind:Some("claim".to_owned()),..Default::default() }).await.map_err(CoordinationError::Records)?.into_iter().filter(|other| other.owner!=*caller && other.active_claim(hub.store().now()) && matches!(&other.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect();
         let overlaps_truncated = conflicts.len() > 50;
         conflicts.truncate(50);
         json!({"advisory":true,"record":record,"overlaps_truncated":overlaps_truncated,"overlaps":conflicts,"next_action":"coordinate overlapping work; claims never block filesystem writes"})
@@ -587,7 +587,7 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
                 .coordination_list(query)
                 .await
                 .map_err(forge("list the coordination records"))?;
-            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"records":page.records.into_iter().map(|record|json!({"active":record.active_claim(now()),"record":record})).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"event_cursor":page.event_cursor})
+            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"records":page.records.into_iter().map(|record|json!({"active":record.active_claim(hub.store().now()),"record":record})).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"event_cursor":page.event_cursor})
         } else {
             let limit = query.limit as usize;
             let event_cursor = store
@@ -615,7 +615,7 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
             } else {
                 None
             };
-            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"event_cursor":event_cursor,"records":records.into_iter().map(|record|json!({"active":record.active_claim(now()),"record":record})).collect::<Vec<_>>(),"next_cursor":next_cursor})
+            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"event_cursor":event_cursor,"records":records.into_iter().map(|record|json!({"active":record.active_claim(hub.store().now()),"record":record})).collect::<Vec<_>>(),"next_cursor":next_cursor})
         }
     };
     Ok(value)

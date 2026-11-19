@@ -23,7 +23,6 @@ hex.workspace = true
 
 [features]
 tls = ["dep:rcgen", "dep:rustls"]
-test-support = []
 
 [lints]
 workspace = true

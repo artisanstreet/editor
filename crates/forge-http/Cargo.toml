@@ -54,7 +54,7 @@ url.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
-artisan-api = { workspace = true, features = ["tls", "test-support"] }
+artisan-api = { workspace = true, features = ["tls"] }
 forge-store.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 sse-core.workspace = true

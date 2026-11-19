@@ -459,7 +459,8 @@ async fn relevant(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Resu
         project.clone(),
     )
     .await?;
-    let mut matches = rank_records(records, &resources, &dependencies, caller);
+    let now = hub.store().now();
+    let mut matches = rank_records(records, &resources, &dependencies, caller, now);
     let mut query = discovery::Query {
         project: project.clone(),
         parent: list.parent.map(ThreadId::from),
@@ -525,7 +526,7 @@ async fn relevant(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Resu
         None
     };
     Ok(
-        json!({"observed_at":artisan_api::now(),"scope":{"host":"current_forge","project":project,"resources":resources},"ranking":"overlapping_claim, work_dependency, overlapping_declared_scope, same_project; then newest activity","workers":ranked.into_iter().map(|entry|{ let mut result=worker(hub,&entry.4); result["relevance"]=json!({"score":entry.0,"reasons":entry.3}); result }).collect::<Vec<_>>(),"next_cursor":next_cursor}),
+        json!({"observed_at":hub.store().now(),"scope":{"host":"current_forge","project":project,"resources":resources},"ranking":"overlapping_claim, work_dependency, overlapping_declared_scope, same_project; then newest activity","workers":ranked.into_iter().map(|entry|{ let mut result=worker(hub,&entry.4); result["relevance"]=json!({"score":entry.0,"reasons":entry.3}); result }).collect::<Vec<_>>(),"next_cursor":next_cursor}),
     )
 }
 
@@ -724,7 +725,7 @@ async fn list_workers(
         .await
         .map_err(forge("list the workers"))?;
     Ok(Some(
-        json!({"observed_at":artisan_api::now(),"scope":{"host":"current_forge","project":project,"worktree":worktree,"default":"caller_project","worktree_source":"published_work_or_project_path"},"workers":page.workers.into_iter().map(|w|worker(hub,&w)).collect::<Vec<_>>(),"next_cursor":page.next_cursor}),
+        json!({"observed_at":hub.store().now(),"scope":{"host":"current_forge","project":project,"worktree":worktree,"default":"caller_project","worktree_source":"published_work_or_project_path"},"workers":page.workers.into_iter().map(|w|worker(hub,&w)).collect::<Vec<_>>(),"next_cursor":page.next_cursor}),
     ))
 }
 
@@ -760,7 +761,7 @@ async fn get_worker(
         .next()
         .ok_or(AwarenessError::Vanished { thread: target })?;
     Ok(Some(
-        json!({"observed_at":artisan_api::now(),"worker":worker(hub,&found)}),
+        json!({"observed_at":hub.store().now(),"worker":worker(hub,&found)}),
     ))
 }
 
@@ -880,13 +881,14 @@ fn rank_records(
     resources: &[Resource],
     dependencies: &[ThreadId],
     caller: &ThreadId,
+    now: artisan_api::Timestamp,
 ) -> BTreeMap<ThreadId, (u32, Vec<Value>)> {
     let mut matches: BTreeMap<ThreadId, (u32, Vec<Value>)> = BTreeMap::new();
     for record in records {
         let reason = match &record.content {
             Content::Claim {
                 resources: other, ..
-            } if record.active_claim(artisan_api::now())
+            } if record.active_claim(now)
                 && other
                     .iter()
                     .any(|a| resources.iter().any(|b| a.overlaps(b))) =>
@@ -981,7 +983,7 @@ async fn relevant_context(
     .map_err(AwarenessError::Records)?;
     for record in &records {
         if record.owner == *caller
-            && record.active_claim(artisan_api::now())
+            && record.active_claim(hub.store().now())
             && let Content::Claim {
                 resources: claimed, ..
             } = &record.content

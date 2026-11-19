@@ -688,7 +688,7 @@ fn fresh_identity() -> Result<String, IdentityError> {
 
 pub async fn invite(store: &Store) -> Result<PairInvite, InviteError> {
     let identity = identity(store).await?;
-    let (code, expires_at) = new_code()?;
+    let (code, expires_at) = new_code(store.now())?;
     store
         .add_pair_code(forge_store::PairCodeHash::of(&code), expires_at)
         .await
@@ -712,7 +712,7 @@ pub fn invite_offline(admin: &forge_store::admin::Admin) -> Result<PairInvite, I
             .map_err(IdentityError::SaveOffline)?
     };
     let identity: Identity = serde_json::from_str(&stored).map_err(IdentityError::Decode)?;
-    let (code, expires_at) = new_code()?;
+    let (code, expires_at) = new_code(artisan_api::now())?;
     admin
         .add_pair_code(&forge_store::PairCodeHash::of(&code), expires_at)
         .map_err(InviteError::SaveOffline)?;
@@ -723,7 +723,7 @@ pub fn invite_offline(admin: &forge_store::admin::Admin) -> Result<PairInvite, I
     })
 }
 
-fn new_code() -> Result<(String, Timestamp), InviteError> {
+fn new_code(now: Timestamp) -> Result<(String, Timestamp), InviteError> {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).map_err(InviteError::Code)?;
     let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -731,7 +731,7 @@ fn new_code() -> Result<(String, Timestamp), InviteError> {
         .iter()
         .map(|byte| alphabet[usize::from(byte % 32)] as char)
         .collect();
-    Ok((code, artisan_api::now() + PAIR_CODE_LIFETIME_MS))
+    Ok((code, now + PAIR_CODE_LIFETIME_MS))
 }
 
 #[derive(Debug, thiserror::Error)]
