@@ -65,3 +65,67 @@ fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
     assert!(log.contains("turn started"), "{log}");
     assert!(log.contains("host=\"h-3\""), "{log}");
 }
+
+const PRUNE_TEST: &str = "a_crash_keeps_only_the_newest_reports_of_its_app";
+
+#[test]
+fn a_crash_keeps_only_the_newest_reports_of_its_app() {
+    if let Some(data) = std::env::var_os(CRASH_DATA) {
+        let recent = diagnostics::subscribe("info", std::io::sink).unwrap();
+        crash(Path::new(&data), recent);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let folder = CrashReporter::folder(directory.path());
+    std::fs::create_dir_all(&folder).unwrap();
+    let hour = std::time::Duration::from_secs(3600);
+    let old = |name: &str, hours: u32| {
+        let path = folder.join(name);
+        std::fs::write(&path, "an old report").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + hour * hours)
+            .unwrap();
+    };
+    for report in 0..CrashReporter::KEPT_REPORTS {
+        old(
+            &format!("forge-{report}-1.txt"),
+            u32::try_from(report).unwrap() + 1,
+        );
+    }
+    old("editor-0-1.txt", 0);
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([PRUNE_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CRASH_DATA, directory.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the child must crash");
+
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), CrashReporter::KEPT_REPORTS + 1, "{names:?}");
+    assert!(
+        !names.contains(&"forge-0-1.txt".to_owned()),
+        "the oldest Forge report went: {names:?}"
+    );
+    assert!(names.contains(&"forge-1-1.txt".to_owned()), "{names:?}");
+    assert!(
+        names.contains(&"editor-0-1.txt".to_owned()),
+        "another app's report stays: {names:?}"
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| std::fs::read_to_string(folder.join(name))
+                .unwrap()
+                .contains("crashed"))
+            .count(),
+        1,
+        "the new report is kept: {names:?}"
+    );
+}

@@ -15,6 +15,22 @@ pub struct CrashReporter {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum PruneReportsError {
+    #[error("list the crash reports in {folder}")]
+    List {
+        folder: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the old crash report {path}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum WriteReportError {
     #[error("create the crash report folder {path}")]
     CreateFolder {
@@ -59,6 +75,8 @@ impl Report<'_> {
 }
 
 impl CrashReporter {
+    pub const KEPT_REPORTS: usize = 20;
+
     pub fn folder(data: &Path) -> PathBuf {
         data.join("crashes")
     }
@@ -71,7 +89,12 @@ impl CrashReporter {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             match self.write(info) {
-                Ok(path) => eprintln!("crash report: {}", path.display()),
+                Ok(path) => {
+                    eprintln!("crash report: {}", path.display());
+                    if let Err(error) = prune(&Self::folder(&self.data), self.app) {
+                        eprintln!("{}", crate::chain(&error));
+                    }
+                }
                 Err(error) => eprintln!("{}", crate::chain(&error)),
             }
             previous(info);
@@ -117,6 +140,35 @@ impl CrashReporter {
         })?;
         Ok(path)
     }
+}
+
+fn prune(folder: &Path, app: App) -> Result<(), PruneReportsError> {
+    let listed = |source| PruneReportsError::List {
+        folder: folder.to_owned(),
+        source,
+    };
+    let prefix = format!("{}-", app.id());
+    let mut reports = Vec::new();
+    for entry in std::fs::read_dir(folder).map_err(listed)? {
+        let entry = entry.map_err(listed)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".txt") {
+            let written = entry
+                .metadata()
+                .map_err(listed)?
+                .modified()
+                .map_err(listed)?;
+            reports.push((written, entry.path()));
+        }
+    }
+    reports.sort_by(|(left, _), (right, _)| right.cmp(left));
+    reports
+        .into_iter()
+        .skip(CrashReporter::KEPT_REPORTS)
+        .try_for_each(|(_, path)| {
+            std::fs::remove_file(&path).map_err(|source| PruneReportsError::Remove { path, source })
+        })
 }
 
 fn stamp(now: SystemTime) -> String {
