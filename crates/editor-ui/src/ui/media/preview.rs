@@ -328,7 +328,7 @@ impl Preview {
                 }
                 Some(Press::Picture { at: start, .. }) if self.gallery_count() > 1 => {
                     let offset = at.x - start.x;
-                    std::mem::replace(&mut self.swipe_offset, offset) != offset
+                    std::mem::replace(&mut self.swipe_offset, offset).to_bits() != offset.to_bits()
                 }
                 Some(Press::Picture { .. } | Press::Backdrop { .. }) | None => false,
             },
@@ -344,8 +344,9 @@ impl Preview {
                 Some(Press::Picture { at: start, .. }) => {
                     let dx = at.x - start.x;
                     let dy = at.y - start.y;
-                    let moved = std::mem::replace(&mut self.swipe_offset, 0.0) != 0.0;
-                    if self.zoom == 1.0 && dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
+                    let moved = std::mem::replace(&mut self.swipe_offset, 0.0).to_bits()
+                        != 0.0_f32.to_bits();
+                    if self.zoom <= 1.0 && dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
                         self.navigate(dx < 0.0, now, reduced_motion) || moved
                     } else {
                         moved
@@ -359,7 +360,7 @@ impl Preview {
                 viewport,
             } => {
                 let zoom = (self.zoom * ZOOM_PER_NOTCH.powf(-delta / NOTCH)).clamp(1.0, MAX_ZOOM);
-                if zoom == self.zoom {
+                if zoom.to_bits() == self.zoom.to_bits() {
                     return false;
                 }
                 let ratio = zoom / self.zoom;
@@ -370,8 +371,8 @@ impl Preview {
                 self.zoom = zoom;
                 self.pan = self.clamped(
                     aqua_core::Point {
-                        x: self.pan.x + (at.x - centre.x) * (1.0 - ratio),
-                        y: self.pan.y + (at.y - centre.y) * (1.0 - ratio),
+                        x: (at.x - centre.x).mul_add(1.0 - ratio, self.pan.x),
+                        y: (at.y - centre.y).mul_add(1.0 - ratio, self.pan.y),
                     },
                     viewport,
                 );
@@ -404,7 +405,7 @@ impl Preview {
 
     fn clamped(&self, pan: aqua_core::Point, viewport: Size) -> aqua_core::Point {
         let (width, height) = self.picture_size(viewport);
-        let reach = |picture: f32, room: f32| ((picture * self.zoom - room) / 2.0).max(0.0);
+        let reach = |picture: f32, room: f32| (picture.mul_add(self.zoom, -room) / 2.0).max(0.0);
         let (x, y) = (reach(width, viewport.w), reach(height, viewport.h));
         aqua_core::Point {
             x: pan.x.clamp(-x, x),
@@ -474,15 +475,15 @@ impl Preview {
     )]
     fn picture_size(&self, viewport: Size) -> (f32, f32) {
         let Some(image) = &self.image else {
-            return ((viewport.w - 112.0).max(1.0).min(320.0), 180.0);
+            return ((viewport.w - 112.0).clamp(1.0, 320.0), 180.0);
         };
         let aqua::images::ImageStatus::Ready { width, height } = image.status() else {
-            return ((viewport.w - 112.0).max(1.0).min(320.0), 180.0);
+            return ((viewport.w - 112.0).clamp(1.0, 320.0), 180.0);
         };
         let width = width.max(1) as f32;
         let height = height.max(1) as f32;
-        let scale = ((viewport.w - 112.0).max(1.0).min(960.0) / width)
-            .min((viewport.h - 112.0).max(1.0).min(720.0) / height)
+        let scale = ((viewport.w - 112.0).clamp(1.0, 960.0) / width)
+            .min((viewport.h - 112.0).clamp(1.0, 720.0) / height)
             .min(1.0);
         (width * scale, height * scale)
     }
@@ -503,9 +504,9 @@ impl Preview {
         let top = (viewport.h - height) / 2.0 + self.pan.y;
         let duration = 0.25;
         let progress = |since: Instant| {
-            MotionCurve::SmoothOut.sample(f64::from(
+            MotionCurve::SmoothOut.sample_f32(f64::from(
                 (now.saturating_duration_since(since).as_secs_f32() / duration).min(1.0),
-            )) as f32
+            ))
         };
         let presence = if reduced_motion {
             1.0

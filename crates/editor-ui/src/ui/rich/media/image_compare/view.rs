@@ -358,7 +358,7 @@ impl CompareState {
                 after: after_label.clone(),
                 emit: Rc::clone(&emit),
             });
-            let width = available_width.min(max_width * 2.0 + 8.0);
+            let width = available_width.min(max_width.mul_add(2.0, 8.0));
             let half = ((width - 8.0) / 2.0).max(0.0);
             UiBox::new()
                 .width(width)
@@ -658,7 +658,10 @@ fn image_layer(
 }
 
 fn pill(theme: &crate::ui::theme::ArtisanTheme, text: String) -> aqua_ui::element::Element {
-    let height = TextRole::Caption.spec().line + 2.0 * Surface::Pill(0.0).padding_px();
+    let height = 2.0f32.mul_add(
+        Surface::Pill(0.0).padding_px(),
+        TextRole::Caption.spec().line,
+    );
     Surface::Pill(height).build(
         theme,
         vec![TextRole::Caption.text(theme, text).wrap(false).build()],
@@ -779,6 +782,10 @@ fn frame(
     let activate = Rc::clone(&emit);
     described(root, &interaction)
         .on_accessibility_request(move |access| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the split is a fraction in 0..=1"
+            )]
             let action = match access {
                 aqua_ui::tree::AccessibilityRequest::SetValue(percent) => {
                     Action::Split((percent / 100.0) as f32)

@@ -75,7 +75,7 @@ impl DiagramState {
         self.drag = None;
     }
 
-    fn destination(&mut self, bounds: Rect, diagram: &DiagramSvg) -> Rect {
+    fn destination(&self, bounds: Rect, diagram: &DiagramSvg) -> Rect {
         let fit = (bounds.w / diagram.width())
             .min(bounds.h / diagram.height())
             .min(1.0);

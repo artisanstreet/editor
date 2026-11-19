@@ -28,7 +28,7 @@ fn slider_keyboard_drag_and_toggle_follow_source_rules() {
         width: 100.0,
         clicks: 1
     }));
-    assert_eq!(state.split, 1.0);
+    assert_eq!((state.split).to_bits(), 1.0_f32.to_bits());
     assert!(!state.dispatch(Action::Key {
         key: Key::Named(NamedKey::End),
         shift: false
@@ -40,7 +40,7 @@ fn slider_keyboard_drag_and_toggle_follow_source_rules() {
         width: 100.0,
         clicks: 2
     }));
-    assert_eq!(state.split, 0.5);
+    assert_eq!((state.split).to_bits(), 0.5_f32.to_bits());
     assert!(state.dispatch(Action::Mode(2)));
     assert!(state.dispatch(Action::Key {
         key: Key::Char(' '),

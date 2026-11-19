@@ -38,7 +38,7 @@ impl MarkdownPresenter {
         owner: &super::super::stored::StoredOwner,
         id: &str,
         ordinal: usize,
-        leaf: Arc<super::super::stored::StoredLeaf>,
+        leaf: Rc<super::super::stored::StoredLeaf>,
         theme: &ArtisanTheme,
         document: SelectionDocumentId,
         prefix: &[u64],
@@ -52,7 +52,7 @@ impl MarkdownPresenter {
         }
         let key = (id.to_owned(), ordinal);
         if self.stored_leaves.borrow().get(&key).is_some_and(|cached| {
-            Arc::ptr_eq(&cached.leaf, &leaf)
+            Rc::ptr_eq(&cached.leaf, &leaf)
                 && cached.document == document
                 && cached.prefix == prefix
         }) {

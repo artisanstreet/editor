@@ -46,9 +46,9 @@ fn typeahead_matches_composed_and_decomposed_accents() {
     runtime.handle_input(&InputEvent::TextInput {
         text: "e\u{301}".into(),
     });
-    assert_eq!(state.borrow().highlighted, Some("eclair"));
+    assert_eq!(state.borrow().highlighted(), Some(&"eclair"));
     state.borrow_mut().set_open(false);
-    state.borrow_mut().highlighted = Some("dark");
+    state.borrow_mut().set_highlighted(Some("dark"));
     runtime.handle_input(&InputEvent::Ime(ImeEvent::Commit { text: "em".into() }));
-    assert_eq!(state.borrow().highlighted, Some("ember"));
+    assert_eq!(state.borrow().highlighted(), Some(&"ember"));
 }

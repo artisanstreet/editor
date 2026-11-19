@@ -28,7 +28,7 @@ fn authored_sources_keep_host_relative_paths_and_decode_data_urls() {
         panic!("expected data URL");
     };
     assert_eq!(base64, percent);
-    assert_eq!(base64.bytes.as_ref(), &[0x89, 0x50, 0x4e, 0x47, 0xff]);
+    assert_eq!(base64.bytes(), &[0x89, 0x50, 0x4e, 0x47, 0xff]);
     assert_eq!(parse("data:text/plain;base64,???"), Parsed::Invalid);
 }
 

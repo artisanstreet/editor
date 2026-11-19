@@ -113,7 +113,7 @@ pub struct Trigger<'a> {
     pub emit: Rc<dyn Fn(Event)>,
 }
 
-impl<'a> std::fmt::Debug for Trigger<'a> {
+impl std::fmt::Debug for Trigger<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Trigger").finish_non_exhaustive()
     }
@@ -169,7 +169,7 @@ pub struct Sheet<'a> {
     pub emit: Rc<dyn Fn(Event)>,
 }
 
-impl<'a> std::fmt::Debug for Sheet<'a> {
+impl std::fmt::Debug for Sheet<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sheet").finish_non_exhaustive()
     }
@@ -447,7 +447,7 @@ fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element
 }
 
 fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
-    Arc::clone(image) as Arc<dyn std::any::Any + Send + Sync>
+    Arc::<ImageHandle>::clone(image)
 }
 
 fn label(theme: &ArtisanTheme, text: &str, color: Oklch, weight: FontWeight) -> Element {

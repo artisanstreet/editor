@@ -48,6 +48,7 @@ impl StickerFrame {
         let glue = MotionCurve::EaseInOut.sample_f32((t - GLUE_START) / GLUE);
         let curl = 1.0 - MotionCurve::SmoothOut.sample_f32((t - CURL_START) / CURL);
         let press = ((t - PRESS_START) / (1.0 - PRESS_START)).clamp(0.0, 1.0);
+        #[expect(clippy::cast_possible_truncation, reason = "a sine is in -1..=1")]
         let press = (press * std::f64::consts::PI).sin() as f32 * PRESS_SCALE;
         Self {
             opacity: MotionCurve::EaseOut.sample_f32(t / FADE),
@@ -69,6 +70,7 @@ const STEPS: u32 = 24;
 fn keys<T>(value: impl Fn(StickerFrame) -> T) -> Vec<Key<T>> {
     (0..=STEPS)
         .map(|step| {
+            #[expect(clippy::cast_precision_loss, reason = "STEPS is 24")]
             let at = step as f32 / STEPS as f32;
             Key::new(
                 at,

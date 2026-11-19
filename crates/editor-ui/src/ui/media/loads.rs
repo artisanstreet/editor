@@ -3,7 +3,7 @@ use super::{
     source::MediaFetcher,
 };
 use editor_core::{delivery::Delivery, runtime};
-use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, num::NonZeroUsize, rc::Rc, sync::Arc};
 use tokio::task::AbortHandle;
 
 struct Completion<T> {
@@ -16,7 +16,7 @@ struct Job<L: ResourceLoader> {
 }
 struct State<L: ResourceLoader, T> {
     next: u64,
-    jobs: HashMap<u64, Job<L>>,
+    jobs: BTreeMap<u64, Job<L>>,
     delivery: Delivery<Completion<T>>,
 }
 impl<L: ResourceLoader, T> Drop for State<L, T> {
@@ -49,7 +49,7 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
         Self {
             state: Rc::new(RefCell::new(State {
                 next: 0,
-                jobs: HashMap::new(),
+                jobs: BTreeMap::new(),
                 delivery: Delivery::with_wake(
                     const { NonZeroUsize::new(16).expect("16 is not zero") },
                     sender,

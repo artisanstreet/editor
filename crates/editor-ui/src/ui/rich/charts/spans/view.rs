@@ -208,7 +208,7 @@ fn row_paint(
         let x0 = domain.fraction(span.start);
         let x1 = domain.fraction(span.end);
         let rect = Rect {
-            x: bounds.x + bounds.w * x0,
+            x: bounds.w.mul_add(x0, bounds.x),
             y: bounds.y + 2.0,
             w: (bounds.w * (x1 - x0)).max(2.0),
             h: (bounds.h - 4.0).max(0.0),

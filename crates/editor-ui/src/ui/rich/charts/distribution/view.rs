@@ -207,7 +207,7 @@ fn box_shapes(summary: &Summary, domain: Domain, color: GpuiHsla, fill: GpuiHsla
     ];
     let mut i = 0;
     while let Some(value) = summary.outliers.get(i) {
-        i += summary.outliers[i..].partition_point(|other| other == value);
+        i += summary.outliers[i..].partition_point(|other| other.to_bits() == value.to_bits());
         let mut c = color;
         c.a *= Opacity::Outlier.alpha();
         shapes.push(Shape::Dot {
@@ -531,7 +531,7 @@ pub(crate) fn view(
         ));
     }
     root = root.child(framed);
-    let shares = data
+    let tail_shares = data
         .samples
         .iter()
         .map(|sample| {
@@ -552,7 +552,10 @@ pub(crate) fn view(
         format!("{id}-slider"),
         theme,
         "Threshold",
-        format!("≤ {} · {shares}", reading(threshold, data.unit.as_deref())),
+        format!(
+            "≤ {} · {tail_shares}",
+            reading(threshold, data.unit.as_deref())
+        ),
         slider,
     )
     .on_change(move |_| invalidate())

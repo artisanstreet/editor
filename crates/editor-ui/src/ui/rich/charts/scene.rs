@@ -56,7 +56,7 @@ pub(crate) fn fractions(probe: &Probe, position: Point) -> Option<(f32, f32)> {
 fn at(bounds: Rect, (x, y): (f32, f32)) -> Point {
     let x = if x.is_finite() { x } else { 0.0 };
     let y = if y.is_finite() { y } else { 0.0 };
-    Point::new(bounds.x + bounds.w * x, bounds.y + bounds.h * y)
+    Point::new(bounds.w.mul_add(x, bounds.x), bounds.h.mul_add(y, bounds.y))
 }
 
 #[derive(Clone)]

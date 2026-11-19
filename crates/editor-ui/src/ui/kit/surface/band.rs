@@ -113,14 +113,14 @@ impl Band {
             GpuiBackground::Solid(surfaces.bg.to_reference_paint())
         };
         let padding = self.padding();
-        let pad = Row::FormRow.pad();
+        let pad = Row::Form.pad();
         let fill = selected.then(|| {
             UiBox::new()
                 .style(Hover::Neutral.style(theme))
                 .style(
                     Style::new()
                         .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                        .radius(Length::Px(Row::FormRow.radius_in(CARD))),
+                        .radius(Length::Px(Row::radius_in(CARD))),
                 )
                 .build()
                 .exclude_from_hit_testing()

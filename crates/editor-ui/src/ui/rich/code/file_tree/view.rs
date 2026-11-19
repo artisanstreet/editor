@@ -298,7 +298,7 @@ fn row(
         .height(row_height())
         .spaced(ROW.gap())
         .padded(ROW.pad().x)
-        .radius(ROW.radius_in(Surface::Card))
+        .radius(kit::Row::radius_in(Surface::Card))
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
@@ -308,7 +308,7 @@ fn row(
         .child(live::layer(
             Hover::Neutral,
             theme,
-            ROW.radius_in(Surface::Card),
+            kit::Row::radius_in(Surface::Card),
             false,
         ))
         .child(

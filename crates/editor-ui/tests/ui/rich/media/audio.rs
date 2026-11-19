@@ -148,6 +148,8 @@ fn fire_request(
 fn the_play_button_is_named_and_toggles_from_keyboard_and_assistive_tech() {
     let toggles = Rc::new(Cell::new(0));
     let count = Rc::clone(&toggles);
+    let glyphs: GlyphFactory =
+        Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build());
     let button = |shown: &Shown| {
         let count = Rc::clone(&count);
         play_button(
@@ -156,8 +158,7 @@ fn the_play_button_is_named_and_toggles_from_keyboard_and_assistive_tech() {
             shown,
             "intro.ogg",
             false,
-            &(Rc::new(|_, size, _| ui::Box::new().width(size).height(size).build())
-                as GlyphFactory),
+            &glyphs,
             Rc::new(|_| {}),
             Rc::new(move || count.set(count.get() + 1)),
         )

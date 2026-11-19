@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::ui::chrome::card::hex;
 use crate::ui::theme::Oklch;
 
@@ -35,7 +37,16 @@ fn sample(fraction: f32) -> [u8; 3] {
     let ((from_at, from), (to_at, to)) = (RIM[upper - 1], RIM[upper]);
     let span = (to_at - from_at).max(f32::EPSILON);
     let t = ((fraction - from_at) / span).clamp(0.0, 1.0);
-    let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a lerp between two u8 channels stays within 0..=255"
+    )]
+    let lerp = |a: u8, b: u8| {
+        (f32::from(b) - f32::from(a))
+            .mul_add(t, f32::from(a))
+            .round() as u8
+    };
     [
         lerp(from[0], to[0]),
         lerp(from[1], to[1]),
@@ -46,9 +57,11 @@ fn sample(fraction: f32) -> [u8; 3] {
 #[must_use]
 pub fn wedges(orbit_degrees: f32, segments: usize) -> Vec<Wedge> {
     let segments = segments.max(1);
+    #[expect(clippy::cast_precision_loss, reason = "segment counts are a few dozen")]
     let step = 360.0 / segments as f32;
     (0..segments)
         .map(|index| {
+            #[expect(clippy::cast_precision_loss, reason = "segment counts are a few dozen")]
             let from = index as f32 * step;
             Wedge {
                 from_degrees: from + orbit_degrees,
@@ -63,16 +76,16 @@ fn mix(base: Oklch, ink: Oklch, amount: f32) -> String {
     hex(base.animate_to(ink, amount))
 }
 
-fn rounded(x: f32, y: f32, w: f32, h: f32, r: f32) -> String {
-    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> String {
+    let r = radius.min(width / 2.0).min(height / 2.0).max(0.0);
     format!(
-        "M{l} {y}H{rr}A{r} {r} 0 0 1 {right} {t}V{b}A{r} {r} 0 0 1 {rr} {bottom}H{l}A{r} {r} 0 0 1 {x} {b}V{t}A{r} {r} 0 0 1 {l} {y}Z",
-        l = x + r,
-        rr = x + w - r,
-        right = x + w,
-        t = y + r,
-        b = y + h - r,
-        bottom = y + h,
+        "M{l} {top}H{rr}A{r} {r} 0 0 1 {right} {t}V{b}A{r} {r} 0 0 1 {rr} {bottom}H{l}A{r} {r} 0 0 1 {left} {b}V{t}A{r} {r} 0 0 1 {l} {top}Z",
+        l = left + r,
+        rr = left + width - r,
+        right = left + width,
+        t = top + r,
+        b = top + height - r,
+        bottom = top + height,
     )
 }
 
@@ -83,19 +96,24 @@ pub fn svg(width: f32, height: f32, radius: f32, orbit_degrees: f32) -> String {
     let reach = w.hypot(h);
     let point = |degrees: f32| {
         let radians = (degrees - 90.0).to_radians();
-        (cx + reach * radians.cos(), cy + reach * radians.sin())
+        (
+            reach.mul_add(radians.cos(), cx),
+            reach.mul_add(radians.sin(), cy),
+        )
     };
     let fan = wedges(orbit_degrees, SEGMENTS)
         .into_iter()
-        .map(|wedge| {
+        .fold(String::new(), |mut fan, wedge| {
             let (x0, y0) = point(wedge.from_degrees);
             let (x1, y1) = point(wedge.to_degrees + 0.5);
-            format!(
+            write!(
+                fan,
                 r#"<path d="M{cx} {cy}L{x0} {y0}L{x1} {y1}Z" fill="rgb({},{},{})"/>"#,
                 wedge.color[0], wedge.color[1], wedge.color[2]
             )
-        })
-        .collect::<String>();
+            .expect("invariant: writing to a String cannot fail");
+            fan
+        });
     let outer = rounded(0.0, 0.0, w, h, radius);
     let inner = rounded(1.0, 1.0, w - 2.0, h - 2.0, (radius - 1.0).max(0.0));
     format!(

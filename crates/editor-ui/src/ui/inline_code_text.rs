@@ -7,6 +7,10 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use super::theme::{ArtisanTheme, ProseTypography};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "code, strong, emphasis and strike are independent marks that combine freely"
+)]
 pub struct InlineStyle {
     pub code: bool,
     pub strong: bool,

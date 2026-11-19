@@ -78,6 +78,10 @@ struct Composition {
     before: Snapshot,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "reversed selection, disabled, the limit notice and an open list are independent editor states"
+)]
 pub struct Editor {
     text: String,
     paint_revision: u64,
@@ -135,6 +139,10 @@ impl Editor {
         }
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -144,12 +152,20 @@ impl Editor {
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn selection(&self) -> Range<usize> {
         self.selection.clone()
     }
     pub fn selection_reversed(&self) -> bool {
         self.reversed
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn marked_range(&self) -> Option<Range<usize>> {
         self.composition
             .as_ref()
@@ -183,7 +199,7 @@ impl Editor {
     }
     pub fn set_tokenizer(&mut self, tokenizer: Option<Rc<dyn Fn(&str) -> Vec<TokenRange>>>) {
         *self.token_cache.get_mut() = None;
-        self.tokenizer = tokenizer.map(|tokenize| {
+        self.tokenizer = tokenizer.map(|tokenize| -> StyledTokenizer {
             Rc::new(move |text: &str| {
                 tokenize(text)
                     .into_iter()
@@ -194,7 +210,7 @@ impl Editor {
                         glyph: None,
                     })
                     .collect()
-            }) as StyledTokenizer
+            })
         });
     }
     pub fn set_styled_tokenizer(&mut self, tokenizer: Option<StyledTokenizer>) {
@@ -243,7 +259,7 @@ impl Editor {
             text
         };
         self.limit_notice = text.len() > MAX_BYTES;
-        self.text = grapheme_prefix(text, MAX_BYTES).to_owned();
+        grapheme_prefix(text, MAX_BYTES).clone_into(&mut self.text);
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
         let end = self.text.len();
@@ -518,6 +534,10 @@ impl Editor {
         utf16_range_to_utf8(&self.text, range)
             .is_some_and(|range| self.set_selection(range, reversed))
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn unmark_text(&mut self) {
         self.finish_composition();
     }
@@ -527,6 +547,10 @@ impl Editor {
     pub fn marked_utf16(&self) -> Option<Range<usize>> {
         utf8_range_to_utf16(&self.text, self.marked_range()?)
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
         self.text.get(utf16_range_to_utf8(&self.text, range)?)
     }

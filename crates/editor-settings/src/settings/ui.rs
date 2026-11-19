@@ -170,7 +170,7 @@ pub(crate) fn row(
     let item = RowItem::new(
         format!("settings-row-{title}"),
         *theme,
-        Row::FormRow,
+        Row::Form,
         CARD,
         title,
     );
@@ -190,7 +190,7 @@ pub(crate) fn block(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padded(Row::FormRow.pad().y)
+        .padded(Row::Form.pad().y)
         .child(content)
         .build()
 }

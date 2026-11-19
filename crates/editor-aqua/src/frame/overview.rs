@@ -219,7 +219,7 @@ fn fact(theme: &ArtisanTheme, icon: AssetId, title: &str, value: &str) -> Elemen
     RowItem::new(
         format!("artisan-overview-fact-{title}"),
         *theme,
-        Row::KeyRow,
+        Row::Key,
         SURFACE,
         format!("{title}: {value}"),
     )
@@ -242,7 +242,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
     RowItem::new(
         "artisan-overview-context",
         theme,
-        Row::KeyRow,
+        Row::Key,
         SURFACE,
         reading.percent_sentence(),
     )

@@ -62,16 +62,19 @@ pub(crate) struct ImageState {
 impl ImageState {
     pub(crate) fn new(block: &ImageBlock, fetcher: MediaFetcher, loader: Images) -> Self {
         let sources: Vec<_> = block.images.iter().map(|image| image.src.clone()).collect();
+        let loading = sources.iter().map(|_| Loaded::Loading).collect();
+        let anchors = sources.iter().map(|_| Rc::new(Cell::new(None))).collect();
+        let waiters = sources
+            .iter()
+            .map(|_| NEXT_WAITER.fetch_add(1, Ordering::Relaxed))
+            .collect();
         let mut state = Self {
-            loaded: sources.iter().map(|_| Loaded::Loading).collect(),
-            anchors: sources.iter().map(|_| Rc::new(Cell::new(None))).collect(),
-            waiters: sources
-                .iter()
-                .map(|_| NEXT_WAITER.fetch_add(1, Ordering::Relaxed))
-                .collect(),
-            sources,
-            fetcher,
             loader,
+            fetcher,
+            sources,
+            loaded: loading,
+            anchors,
+            waiters,
             wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
         };
         state.refresh();
@@ -152,8 +155,11 @@ impl ImageState {
         let mut index = 0;
         for columns in gallery_rows(block.images.len()) {
             let count = usize::from(columns);
-            let tile_width =
-                (width - Space::S8.px() * (f32::from(columns) - 1.0)).max(0.0) / f32::from(columns);
+            let tile_width = Space::S8
+                .px()
+                .mul_add(-(f32::from(columns) - 1.0), width)
+                .max(0.0)
+                / f32::from(columns);
             let mut row = UiBox::new().width(width).spaced(Space::S8);
             for _ in 0..count {
                 let picture = &block.images[index];
@@ -210,7 +216,7 @@ impl ImageState {
                     Loaded::Failed(ImageError::NeedsConsent) => Some(Action::AllowRemote),
                     Loaded::Loading | Loaded::Failed(_) => None,
                 };
-                let presses = matches!(loaded, Loaded::Ready(_));
+                let opens_on_press = matches!(loaded, Loaded::Ready(_));
                 let pressed = Rc::new(Cell::new(None));
                 let down = Rc::clone(&pressed);
                 let anchor = Rc::clone(&self.anchors[index]);
@@ -280,7 +286,7 @@ impl ImageState {
                                 RoutedInput::Native(InputEvent::PointerDown(
                                     pointer,
                                     PointerButton::Primary,
-                                )) if presses => {
+                                )) if opens_on_press => {
                                     down.set(Some(pointer.contact));
                                     InputResponse {
                                         focus: aqua_ui::input::FocusRequest::Focus,

@@ -106,9 +106,11 @@ impl PreparedInline {
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
-        let mut base_color = match tone {
-            BodyTone::Muted => theme.colors.text_muted,
-            BodyTone::Foreground => theme.colors.text,
+        let base_color = match (heading, table_header, tone) {
+            (Some(_), _, _) | (None, Some(true), _) | (None, _, BodyTone::Foreground) => {
+                theme.colors.text
+            }
+            (None, None | Some(false), BodyTone::Muted) => theme.colors.text_muted,
         };
         if let Some(level) = heading {
             let spec = ProseTypography::heading(level);
@@ -120,14 +122,12 @@ impl PreparedInline {
             base.weight = ProseTypography::HEADING_WEIGHT;
             base.letter_spacing_em =
                 Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
-            base_color = theme.colors.text;
         }
         if let Some(header) = table_header {
             base.size_px = theme.typography.size(ProseTypography::TABLE_SIZE_PX);
             base.line_height_px = theme.typography.size(ProseTypography::TABLE_LINE_PX);
             if header {
                 base.weight = ProseTypography::STRONG_WEIGHT;
-                base_color = theme.colors.text;
             }
         }
         let mut spans = Vec::new();
@@ -168,9 +168,9 @@ impl PreparedInline {
         let destination = &self.links.get(usize::try_from(id).ok()?)?.destination;
         Some(if let Some(path) = file_link_path(destination) {
             LinkAction::OpenReference(OpenReference {
+                scope,
                 path: path.to_string_lossy().into_owned(),
                 line: file_link_line(destination),
-                scope,
             })
         } else {
             LinkAction::OpenUrl(destination.clone())
@@ -286,8 +286,8 @@ pub fn prepare_inline(
         .runs
         .into_iter()
         .map(|(range, index)| InlineRun {
-            style: styles[index].clone(),
             range,
+            style: styles[index].clone(),
         })
         .collect();
     let links: Vec<_> = flat

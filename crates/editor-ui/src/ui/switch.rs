@@ -114,9 +114,9 @@ impl Switch {
         if self.focus_visible && !self.disabled {
             style.merge(&focus_style);
         }
-        let outer = height + 2.0 * reach;
+        let outer = 2.0f32.mul_add(reach, height);
         let mut root = Button::new()
-            .width(width + 2.0 * reach)
+            .width(2.0f32.mul_add(reach, width))
             .height(outer)
             .radius(Corner::Full.resolve(outer))
             .style(style)

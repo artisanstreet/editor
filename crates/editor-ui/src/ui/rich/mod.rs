@@ -83,7 +83,7 @@ fn prepare_kind(kind: &str, value: &serde_json::Value) -> Option<Result<Prepared
 #[derive(Debug)]
 pub(crate) enum RichFence {
     Pending { kind: String },
-    Ready(Envelope),
+    Ready(Box<Envelope>),
     Invalid { note: String },
 }
 
@@ -131,7 +131,7 @@ pub(crate) fn prepare(language: Option<&str>, source: &str, closed: bool) -> Opt
             .and_then(|value| prepare_value(kind, &value))
     };
     Some(match parsed {
-        Ok(prepared) => RichFence::Ready(prepared),
+        Ok(prepared) => RichFence::Ready(Box::new(prepared)),
         Err(error) => RichFence::Invalid {
             note: format!("Couldn't draw artisan-{kind}: {error}"),
         },

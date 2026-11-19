@@ -88,7 +88,14 @@ impl Preferences {
                 .get("text_scale")
                 .and_then(serde_json::Value::as_f64)
                 .filter(|percent| percent.is_finite())
-                .map(|percent| (percent.clamp(100.0, 225.0) / 100.0) as f32),
+                .map(|percent| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "the scale is clamped to 1..=2.25"
+                    )]
+                    let scale = (percent.clamp(100.0, 225.0) / 100.0) as f32;
+                    scale
+                }),
             streaming: if string("streaming_mode") == Some("swift") {
                 StreamingMode::Swift
             } else {

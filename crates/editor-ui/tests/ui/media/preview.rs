@@ -54,7 +54,7 @@ fn fixture() -> (
         image,
         Instant::now(),
     )
-    .unwrap();
+    .expect("preview");
     (directory, core, config, assets, preview)
 }
 
@@ -162,7 +162,7 @@ fn the_wheel_zooms_about_the_cursor_and_drags_pan_only_where_the_picture_overflo
     for _ in 0..40 {
         act(&mut preview, wheel(-16.0));
     }
-    assert_eq!(preview.zoom, 8.0);
+    assert_eq!((preview.zoom).to_bits(), 8.0_f32.to_bits());
     assert_eq!(preview.pan, point(0.0, 0.0));
 
     act(
@@ -291,9 +291,9 @@ fn mounted_preview_emits_source_frame_with_supported_entrance_transform() {
         .collect();
     assert!(transforms.iter().any(|transform| transform.a > 0.96
         && transform.a < 1.0
-        && transform.a == transform.d
-        && transform.b == 0.0
-        && transform.c == 0.0
+        && transform.a.to_bits() == transform.d.to_bits()
+        && transform.b.abs() < f32::EPSILON
+        && transform.c.abs() < f32::EPSILON
         && transform.tx.is_finite()
         && transform.ty.is_finite()));
     assert_eq!(

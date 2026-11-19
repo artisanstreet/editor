@@ -249,7 +249,8 @@ impl LiteralOwner {
                     .to_owned(),
             );
         }
-        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+        let found = self.entries.iter().position(|entry| entry.key == key);
+        if let Some(index) = found {
             let same = self.entries[index].source.revision() == source.revision()
                 && self.entries[index].source.source_ref() == source.source_ref()
                 && self.entries[index].descriptor == descriptor;
@@ -285,7 +286,9 @@ impl LiteralOwner {
         }
         let requested = (end - start) * 2 + FETCH_HEADROOM;
         let capacity = loop {
-            if let Ok(permit) = Arc::clone(&self.capacity).try_acquire_many_owned(requested as u32)
+            if let Ok(permit) = Arc::clone(&self.capacity).try_acquire_many_owned(
+                u32::try_from(requested).unwrap_or_else(|_| panic!("invariant: literal {key} requests {requested} bytes, bounded by MAX_LEAF_BYTES")),
+            )
             {
                 break permit;
             }
@@ -336,12 +339,12 @@ impl LiteralOwner {
         true
     }
     fn result(&self, key: &str) -> LiteralPreparation {
-        match self
+        let phase = self
             .entries
             .iter()
             .find(|entry| entry.key == key)
-            .map(|entry| &entry.phase)
-        {
+            .map(|entry| &entry.phase);
+        match phase {
             Some(Phase::Ready(leaf)) => LiteralPreparation::Ready(Arc::clone(leaf)),
             Some(Phase::Failed(error)) => LiteralPreparation::Failed(error.clone()),
             _ => LiteralPreparation::Pending,

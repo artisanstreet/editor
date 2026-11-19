@@ -27,7 +27,7 @@ fn viewport() -> Rect {
 
 #[test]
 fn fit_centers_the_diagram_and_never_upscales() {
-    let mut state = DiagramState::new();
+    let state = DiagramState::new();
     let small = state.destination(viewport(), &diagram(100.0, 50.0));
     assert_eq!((small.w, small.h), (100.0, 50.0));
     assert_eq!((small.x, small.y), (160.0, 95.0));
@@ -44,11 +44,11 @@ fn zoom_is_bounded_and_scales_the_pan_with_it() {
     for _ in 0..40 {
         state.zoom_by(ZOOM_STEP);
     }
-    assert_eq!(state.zoom, MAX_ZOOM);
+    assert_eq!((state.zoom).to_bits(), (MAX_ZOOM).to_bits());
     for _ in 0..80 {
         state.zoom_by(1.0 / ZOOM_STEP);
     }
-    assert_eq!(state.zoom, MIN_ZOOM);
+    assert_eq!((state.zoom).to_bits(), (MIN_ZOOM).to_bits());
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn dragging_pans_until_released_and_a_new_diagram_resets_the_view() {
     assert!(state.drag_to(Point { x: 70.0, y: 90.0 }));
     assert_eq!((state.pan.x, state.pan.y), (-30.0, -10.0));
     state.sync(&first);
-    assert_eq!(state.zoom, 2.0);
+    assert_eq!((state.zoom).to_bits(), 2.0_f32.to_bits());
     state.sync(&diagram(400.0, 200.0));
     assert_eq!((state.zoom, state.pan.x, state.drag), (1.0, 0.0, None));
 }
@@ -89,9 +89,9 @@ fn dragging_pans_until_released_and_a_new_diagram_resets_the_view() {
 fn keys_zoom_pan_and_reset() {
     let mut state = DiagramState::new();
     assert!(state.key(Key::Char('+')));
-    assert_eq!(state.zoom, ZOOM_STEP);
+    assert_eq!((state.zoom).to_bits(), (ZOOM_STEP).to_bits());
     assert!(state.key(Key::Named(NamedKey::Left)));
-    assert_eq!(state.pan.x, KEY_PAN_PX);
+    assert_eq!((state.pan.x).to_bits(), (KEY_PAN_PX).to_bits());
     assert!(state.key(Key::Char('0')));
     assert_eq!((state.zoom, state.pan.x), (1.0, 0.0));
     assert!(!state.key(Key::Char('x')));

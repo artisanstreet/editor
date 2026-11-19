@@ -146,7 +146,7 @@ impl Compare {
             clippy::cast_precision_loss,
             reason = "comparison is limited to sixteen options"
         )]
-        let minimum = count as f32 * 96.0 + 128.0;
+        let minimum = (count as f32).mul_add(96.0, 128.0);
         let mut header = ui::Box::new()
             .layout("row")
             .style(Style::new().align(aqua_ui::AlignItems::END))

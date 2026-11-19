@@ -367,7 +367,7 @@ pub(crate) fn view(
             x: if last {
                 NODE_WIDTH + 6.0
             } else {
-                at * width + NODE_WIDTH.mul_add(1.0 - at, 6.0)
+                at.mul_add(width, NODE_WIDTH.mul_add(1.0 - at, 6.0))
             },
             y: f32::midpoint(place.y0, place.y1) - line_height / 2.0,
             max_width: (room - NODE_WIDTH - 12.0).max(0.0),

@@ -103,6 +103,10 @@ impl Glide {
             Self::Running(run) => match run.progress(now) {
                 progress if progress >= 1.0 => run.to,
                 progress => {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "eased progress is in 0..=1"
+                    )]
                     let eased = transition.easing.sample(progress) as f32;
                     (run.to - run.from).mul_add(eased, run.from)
                 }

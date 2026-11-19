@@ -73,7 +73,7 @@ fn bounds(node: &SemanticNode) -> Rect {
 fn arrowing_past_the_visible_options_scrolls_the_highlighted_option_into_view() {
     let state = Rc::new(RefCell::new(SelectState::new(Instant::now())));
     arrow_down(&state, 12);
-    assert_eq!(state.borrow().highlighted, Some(12));
+    assert_eq!(state.borrow().highlighted(), Some(&12));
     let app = mounted(menu(&state));
     let list = bounds(
         &app.tree()

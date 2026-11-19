@@ -76,7 +76,7 @@ impl Marquee {
             app.tree()
                 .find_by_key(hash_key(Key::from(format!("{}-{}", self.id, suffix))))
         });
-        let (Some(first), Some(second)) = (first, second) else {
+        let [Some(first), Some(second)] = [first, second] else {
             self.animating = false;
             return false;
         };

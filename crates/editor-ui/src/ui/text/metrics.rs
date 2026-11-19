@@ -1,7 +1,9 @@
 use aqua_text::{FontFamily, TextStyle};
 
 use super::editor::Mode;
-use crate::ui::theme::{ArtisanTheme, Opacity, ProseTypography, RadiusStep, RadiusTokens};
+use crate::ui::theme::{
+    ArtisanTheme, Opacity, ProseTypography, RadiusStep, RadiusTokens, SpacingTokens,
+};
 
 pub(crate) struct EditorMetrics {
     pub text_style: TextStyle,
@@ -30,8 +32,8 @@ impl EditorMetrics {
                     16.0,
                     24.0,
                     8.0,
-                    theme.spacing.steps(3.0),
-                    theme.spacing.steps(3.0),
+                    SpacingTokens::steps(3.0),
+                    SpacingTokens::steps(3.0),
                     RadiusTokens::value(RadiusStep::Xl),
                 ),
                 Mode::Prompt => (16.0, 24.0, 1.0, 8.0, 4.0, 0.0),
@@ -105,6 +107,10 @@ impl EditorMetrics {
     }
 
     pub(crate) fn min_height(&self) -> f32 {
-        self.line_height * self.visible_lines + self.padding_y * 2.0 + self.border_width * 2.0
+        self.border_width.mul_add(
+            2.0,
+            self.padding_y
+                .mul_add(2.0, self.line_height * self.visible_lines),
+        )
     }
 }

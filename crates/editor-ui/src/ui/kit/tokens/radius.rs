@@ -13,7 +13,9 @@ impl Inset {
 
     #[must_use]
     pub(crate) fn of(px: f32) -> Option<Self> {
-        Self::ALL.into_iter().find(|inset| inset.px() == px)
+        Self::ALL
+            .into_iter()
+            .find(|inset| inset.px().to_bits() == px.to_bits())
     }
 
     #[must_use]

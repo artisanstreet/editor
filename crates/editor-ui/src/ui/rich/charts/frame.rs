@@ -85,7 +85,7 @@ pub(crate) fn concentration_frame(
                     Style::new()
                         .absolute_at(
                             Some(0.0),
-                            Some(super::scale::f32_of_count(step) * 60.0 - 8.0),
+                            Some(super::scale::f32_of_count(step).mul_add(60.0, -8.0)),
                             Some(8.0),
                             None,
                         )
@@ -250,12 +250,17 @@ pub(crate) fn plot_label_positioned(
     let mut row = ui::Box::new()
         .layout("row")
         .width(Length::Pct(100.0))
-        .style(Style::new().absolute_at(
-            Some(0.0),
-            Some(y.clamp(0.0, 1.0) * 240.0 + if below { 3.0 } else { -18.0 }),
-            None,
-            None,
-        ));
+        .style(
+            Style::new().absolute_at(
+                Some(0.0),
+                Some(
+                    y.clamp(0.0, 1.0)
+                        .mul_add(240.0, if below { 3.0 } else { -18.0 }),
+                ),
+                None,
+                None,
+            ),
+        );
     if x > 0.7 {
         row = row.child(
             ui::Box::new()
@@ -513,7 +518,12 @@ pub(crate) fn numeric_frame_with_labels(
                 .height(16.0)
                 .style(
                     Style::new()
-                        .absolute_at(Some(8.0), Some(y * frame.height - 8.0), Some(0.0), None)
+                        .absolute_at(
+                            Some(8.0),
+                            Some(y.mul_add(frame.height, -8.0)),
+                            Some(0.0),
+                            None,
+                        )
                         .clip(true),
                 )
                 .child(
@@ -538,7 +548,7 @@ pub(crate) fn numeric_frame_with_labels(
                     Style::new()
                         .absolute_at(
                             Some(0.0),
-                            Some(tick.at * frame.height - 8.0),
+                            Some(tick.at.mul_add(frame.height, -8.0)),
                             Some(8.0),
                             None,
                         )

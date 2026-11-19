@@ -18,7 +18,10 @@ fn loading_gap_recreates_camera_but_consecutive_ready_retarget_keeps_it() {
         .orbit(10.0, 0.0);
     let generation = state.0.borrow().entries["model"].generation;
     state.ready("model", initial, Shading::Wireframe, owner.clone(), 2);
-    assert_eq!(state.0.borrow().entries["model"].camera.yaw, 40.0);
+    assert_eq!(
+        (state.0.borrow().entries["model"].camera.yaw).to_bits(),
+        40.0_f32.to_bits()
+    );
     assert_ne!(state.0.borrow().entries["model"].generation, generation);
     state.suspend("model");
     state.ready("model", initial, Shading::Wireframe, owner, 2);
@@ -52,13 +55,16 @@ fn camera_input_clamps_and_reset_restores_the_authored_view() {
     let mut inner = state.0.borrow_mut();
     let entry = inner.entries.get_mut("model").unwrap();
     assert!(entry.key(Key::Named(NamedKey::Right), Modifiers::SHIFT));
-    assert_eq!(entry.camera.yaw, 39.0);
+    assert_eq!((entry.camera.yaw).to_bits(), 39.0_f32.to_bits());
     entry.orbit(720.0, 500.0);
-    assert_eq!(entry.camera.pitch, 89.0);
+    assert_eq!((entry.camera.pitch).to_bits(), 89.0_f32.to_bits());
     for _ in 0..100 {
         assert!(entry.key(Key::Char('+'), Modifiers::NONE));
     }
-    assert_eq!(entry.camera.distance, Camera::NEAREST);
+    assert_eq!(
+        (entry.camera.distance).to_bits(),
+        (Camera::NEAREST).to_bits()
+    );
     entry.bounds.set(Some(Rect {
         x: 0.0,
         y: 0.0,

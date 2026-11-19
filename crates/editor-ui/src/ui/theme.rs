@@ -116,6 +116,10 @@ pub enum Opacity {
 
 impl Opacity {
     #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each opacity token is its own design value; tokens that share a value today stay separate"
+    )]
     pub const fn alpha(self) -> f32 {
         match self {
             Self::Disabled => 0.5,
@@ -577,14 +581,14 @@ impl ColorTokens {
         };
         Self {
             contrast: Contrast::High,
+            link: pick(BLUE_900, BLUE_300),
+            selected: pick(GRAY_200, POLAR_600),
+            line: pick(GRAY_600, POLAR_300),
+            line_strong: self.text,
             text_muted: self.text,
             text_muted_glass: self.text,
             text_faint: self.text,
-            line: pick(GRAY_600, POLAR_300),
-            line_strong: self.text,
-            selected: pick(GRAY_200, POLAR_600),
             ring: pick(BLUE_700, AMBER_300),
-            link: pick(BLUE_900, BLUE_300),
             unread: pick(BLUE_900, BLUE_300),
             thread_title_active: pick(BLUE_900, BLUE_300),
             mention_skill: pick(BLUE_900, BLUE_300),
@@ -840,6 +844,10 @@ pub struct FontRole {
 #[derive(Debug)]
 pub struct ProseTypography;
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "every field is a pixel measure and the suffix names the unit, as across the theme"
+)]
 pub struct ProseHeading {
     pub(crate) size_px: f32,
     pub(crate) line_px: f32,
@@ -909,7 +917,7 @@ pub struct SpacingTokens;
 impl SpacingTokens {
     const BASE_PX: f32 = 4.0;
     #[must_use]
-    pub(crate) fn steps(self, count: f32) -> Pixels {
+    pub(crate) fn steps(count: f32) -> Pixels {
         px(Self::BASE_PX * count)
     }
 }
@@ -1155,10 +1163,10 @@ impl TypographyTokens {
     #[must_use]
     pub(crate) fn scaled(self, scale: f32) -> Self {
         Self {
-            scale,
             control_text: px(14.0 * scale),
             editor_text_desktop: px(14.0 * scale),
             label_text: px(12.0 * scale),
+            scale,
             ..self
         }
     }

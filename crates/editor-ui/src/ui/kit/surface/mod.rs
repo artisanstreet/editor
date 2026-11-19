@@ -74,8 +74,8 @@ impl Surface {
             | Self::Tooltip(_)
             | Self::Inset
             | Self::Code
-            | Self::Callout(_) => Corner::Fixed(Radius::Panel),
-            Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
+            | Self::Callout(_)
+            | Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
             Self::Dialog | Self::Picker(Picker::Sheet) | Self::Card | Self::Bubble => {
                 Corner::Fixed(Radius::Shell)
             }
@@ -96,8 +96,8 @@ impl Surface {
             | Self::Picker(Picker::Sheet)
             | Self::Card
             | Self::Code
-            | Self::Composer => Some(Space::S8),
-            Self::Field => Some(Space::S8),
+            | Self::Composer
+            | Self::Field => Some(Space::S8),
             Self::Callout(_) | Self::Bubble => Some(Space::S12),
             Self::Tooltip(Tooltip::Card) => Some(Space::S16),
             Self::Media(_) => None,

@@ -455,6 +455,11 @@ impl ModelBlock {
                     .build()
             }
             Geometry::Software(_) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "the side is clamped to 1..=2400 pixels first"
+                )]
                 let side = |value: f32| (value * scale).round().clamp(1.0, 2400.0) as u32;
                 let (pixel_width, pixel_height) = (side(width), side(height));
                 let samples = if dragging || pixel_width * pixel_height * 4 > 3_000_000 {

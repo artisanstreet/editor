@@ -28,6 +28,10 @@ impl Tone {
 }
 
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a percentage is in 0..=100"
+)]
 pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
     let percent = percent.clamp(0.0, 100.0);
     let fill = match Tone::of(percent) {

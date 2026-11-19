@@ -209,11 +209,11 @@ impl ProjectedDocument {
         command: Option<&str>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Leaf, MarkdownIndexError> {
-        let context = index
+        let leaf_context = index
             .context(ordinal)
             .cloned()
             .ok_or(MarkdownIndexError::InvalidShape)?;
-        let table_continues = table_continues(index, ordinal, &context);
+        let table_continues = table_continues(index, ordinal, &leaf_context);
         let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
         if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
             (ordinal, command, &mut content)
@@ -249,14 +249,14 @@ impl ProjectedDocument {
         let signature = leaf_signature(
             source,
             &range,
-            &context,
+            &leaf_context,
             table_continues,
             command.filter(|_| ordinal == 0),
         );
         Ok(Leaf {
             range,
             signature,
-            context,
+            context: leaf_context,
             content,
             table_continues,
             rich_without_source,
@@ -666,7 +666,9 @@ fn render_leaf(
                 )?
             }
         }
-        _ => return Err(PresenterError::Unavailable("projected nested flow")),
+        IndexedLeafContent::Block(_) => {
+            return Err(PresenterError::Unavailable("projected nested flow"));
+        }
     };
     let gap: f32 = target
         .context

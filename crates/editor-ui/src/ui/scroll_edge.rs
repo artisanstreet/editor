@@ -209,7 +209,7 @@ impl ScrollEdges {
         (
             EdgeFade {
                 shown: target
-                    * super::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32,
+                    * super::motion::MotionCurve::EaseInOut.sample_f32(f64::from(progress)),
                 at: moving.then_some(now),
             },
             moving,
@@ -274,7 +274,7 @@ impl ScrollEdges {
         let (fade, moving) = self.advance_fade(edge, target(hidden), reduced, now);
         let previous = self.fade(edge);
         self.fades[slot(edge)].set(fade);
-        if previous.shown() != fade.shown()
+        if previous.shown().to_bits() != fade.shown().to_bits()
             && let Some(mut paint) = ui.tree().paint(band)
         {
             edge_style(paint_kind, edge, color, fade.shown())

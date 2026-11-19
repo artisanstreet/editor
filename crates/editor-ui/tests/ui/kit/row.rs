@@ -85,7 +85,7 @@ fn hits_control(row: Row) -> bool {
 #[test]
 fn a_form_rows_trailing_control_receives_the_pointer() {
     assert!(
-        hits_control(Row::FormRow),
+        hits_control(Row::Form),
         "a switch or select at the end of a form row stays clickable"
     );
 }

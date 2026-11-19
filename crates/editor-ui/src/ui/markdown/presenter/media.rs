@@ -156,7 +156,8 @@ impl MarkdownPresenter {
                     refresh();
                 }
                 rich::media::image::Action::CopyPath { index, position } => {
-                    if let Some(source) = state.borrow().preview_sources().1.get(index) {
+                    let (_, sources) = state.borrow().preview_sources();
+                    if let Some(source) = sources.get(index) {
                         effect(crate::ui::media::preview::Effect::ShowCopyMenu(
                             rich::actions::ShowCopyMenu {
                                 position,
@@ -286,8 +287,14 @@ impl MarkdownPresenter {
 
     pub fn drain_media(&self) -> bool {
         let mut changed = self.audio.drain();
-        if let Some(services) = self.media_services.borrow().values().next() {
-            changed |= self.models.drain(&services.image_assets);
+        let assets = self
+            .media_services
+            .borrow()
+            .values()
+            .next()
+            .map(|services| services.image_assets.clone());
+        if let Some(assets) = assets {
+            changed |= self.models.drain(&assets);
         }
         for (_, _, state) in self.images.borrow().values() {
             changed |= state.borrow_mut().refresh();

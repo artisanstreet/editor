@@ -100,8 +100,8 @@ fn render_leaf(
         true,
         crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
         BodyTone::Foreground,
-        std::rc::Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-        std::rc::Rc::new(|| {}),
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
+        Rc::new(|| {}),
         None,
         None,
         None,
@@ -376,7 +376,7 @@ fn leaf_admission_precedes_collector_allocation() {
         panic!("expected cached page")
     };
     let held = Arc::clone(&owner.capacity)
-        .try_acquire_many_owned(PREPARED_BYTES as u32)
+        .try_acquire_many_owned(u32::try_from(PREPARED_BYTES).expect("budget fits u32"))
         .unwrap();
     assert!(matches!(
         owner.leaf("leaf", &current, 0),
@@ -508,7 +508,9 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
     };
     let permit = Arc::new(
         Arc::clone(&owner.capacity)
-            .try_acquire_many_owned((metadata.len() + RANGE_BYTES as usize) as u32)
+            .try_acquire_many_owned(
+                u32::try_from(metadata.len() + RANGE_BYTES as usize).expect("budget fits u32"),
+            )
             .unwrap(),
     );
     owner.leaves.push_back(LeafEntry {
@@ -631,7 +633,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert_eq!(initial_ranges.len(), 1);
     assert_eq!(initial_ranges[0].bytes, 0..3);
     assert_eq!(
-        initial_ranges[0].opacity, 0.35,
+        initial_ranges[0].opacity.to_bits(),
+        0.35_f32.to_bits(),
         "fresh stored text starts readable while its fade begins"
     );
     reveal.begin_frame(
@@ -689,7 +692,13 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             },
         ],
     };
-    let result = (Default::default(), false, table, Arc::<str>::from("c"), 256);
+    let result = (
+        artisan_markdown_index::LeafContext::default(),
+        false,
+        table,
+        Arc::<str>::from("c"),
+        256,
+    );
     let LeafPreparation::Ready(table) = prepared(&mut owner, &source, "table", 1, 5, result) else {
         panic!("expected table")
     };
@@ -734,7 +743,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         range: 0..1,
     });
     let result = (
-        Default::default(),
+        artisan_markdown_index::LeafContext::default(),
         false,
         oversized,
         Arc::<str>::from("x"),

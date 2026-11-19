@@ -203,7 +203,7 @@ pub(crate) fn visual_factory(
 ) -> super::view::ThreadVisualFactory {
     use aqua_ui::element::Box as UiBox;
     let theme = *theme;
-    std::rc::Rc::new(move |data, image, repository| {
+    std::rc::Rc::new(move |data, image, forge| {
         let title_color = if data.selected {
             theme.colors.thread_title_active
         } else {
@@ -235,9 +235,7 @@ pub(crate) fn visual_factory(
         );
         let project_mark = editor_ui::project_mark::project_mark(
             image,
-            repository
-                .as_ref()
-                .map(|repository| repository.host.as_deref()),
+            &forge,
             IconSize::Sm,
             theme.colors.text_muted.to_reference_paint(),
         );

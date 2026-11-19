@@ -637,9 +637,11 @@ impl<V: SectionViews> ShellApplication<V> {
             return;
         };
         let settings_open = matches!(self.shell.core.screen(), crate::core::Screen::Settings(_));
-        let font_open = settings_open && workspace.settings.font_select.borrow().open;
-        let streaming_open = settings_open && workspace.settings.streaming_select.borrow().open;
-        let retention_open = settings_open && workspace.settings.retention_select.borrow().open;
+        let font_open = settings_open && workspace.settings.font_select.borrow().is_open();
+        let streaming_open =
+            settings_open && workspace.settings.streaming_select.borrow().is_open();
+        let retention_open =
+            settings_open && workspace.settings.retention_select.borrow().is_open();
         let theme = self.shell.preferences.theme();
         let font = font_open.then(|| {
             crate::settings::view::font_menu(

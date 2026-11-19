@@ -35,7 +35,7 @@ pub enum KeyFace {
 }
 
 pub struct Key {
-    key: NodeKey,
+    id: NodeKey,
     theme: ArtisanTheme,
     label: String,
     size: KeySize,
@@ -61,7 +61,7 @@ impl Key {
         face: KeyFace,
     ) -> Self {
         Self {
-            key: key.into(),
+            id: key.into(),
             theme,
             label: label.into(),
             size,
@@ -150,7 +150,7 @@ impl Key {
             )
             .child(content);
         let activation = Activation {
-            key: self.key,
+            key: self.id,
             label: self.label,
             disabled: self.disabled,
             on_activate: self.on_activate,

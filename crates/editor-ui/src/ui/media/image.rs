@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, num::NonZeroUsize, rc::Rc, sync::Arc};
 
 use aqua::images::{ImageAssets, ImageHandle, ImageStatus};
 use tokio::task::AbortHandle;
@@ -77,7 +77,7 @@ struct Job {
 
 struct State {
     next: u64,
-    jobs: HashMap<u64, Job>,
+    jobs: BTreeMap<u64, Job>,
     delivery: Delivery<Completion>,
 }
 
@@ -114,7 +114,7 @@ impl Images {
         Self {
             state: Rc::new(RefCell::new(State {
                 next: 0,
-                jobs: HashMap::new(),
+                jobs: BTreeMap::new(),
                 delivery: Delivery::with_wake(
                     const { NonZeroUsize::new(16).expect("16 is not zero") },
                     mailbox.sender(),
@@ -235,20 +235,15 @@ impl Images {
         self.discard_stale();
         let jobs = {
             let mut state = self.state.borrow_mut();
-            let ready: Vec<_> = state
-                .jobs
-                .iter()
-                .filter_map(|(id, job)| match &job.phase {
-                    Phase::Decoding(image) if !matches!(image.status(), ImageStatus::Pending) => {
-                        Some(*id)
-                    }
-                    _ => None,
-                })
-                .collect();
-            ready
-                .into_iter()
-                .filter_map(|id| state.jobs.remove(&id))
-                .collect::<Vec<_>>()
+            let (ready, waiting): (BTreeMap<u64, Job>, BTreeMap<u64, Job>) =
+                std::mem::take(&mut state.jobs)
+                    .into_iter()
+                    .partition(|(_, job)| match &job.phase {
+                        Phase::Decoding(image) => !matches!(image.status(), ImageStatus::Pending),
+                        Phase::Fetching => false,
+                    });
+            state.jobs = waiting;
+            ready.into_values().collect::<Vec<_>>()
         };
         let changed = !jobs.is_empty();
         for job in jobs {
@@ -279,7 +274,7 @@ impl Images {
 
     pub fn clear(&self) {
         let mut state = self.state.borrow_mut();
-        for (_, job) in state.jobs.drain() {
+        for job in std::mem::take(&mut state.jobs).into_values() {
             job.ticket.cancel();
             job.abort.abort();
         }

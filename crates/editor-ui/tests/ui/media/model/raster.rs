@@ -12,9 +12,10 @@ fn strip(triangles: usize) -> Mesh {
             Vec3::new(left, 0.5, 0.0),
         ]);
     }
+    let normals = vec![Vec3::Z; positions.len()];
     Mesh {
-        normals: vec![Vec3::Z; positions.len()],
         positions,
+        normals,
         colors: None,
     }
 }

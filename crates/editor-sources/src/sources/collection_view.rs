@@ -138,7 +138,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
                 )
                 .size(READ)
                 .nested(
-                    ENTRY.radius_in(Surface::Inset),
+                    Row::radius_in(Surface::Inset),
                     (entry_height() - READ.height()) / 2.0,
                 )
                 .disabled(preview.disabled)

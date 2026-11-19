@@ -214,7 +214,7 @@ fn trace_silhouette(bounds: Rect, tab_width: f32, radius: f32) -> Vec<PathComman
 fn strip_right(bounds: Rect, tab_width: f32, reveal: f32) -> Option<f32> {
     let start = bounds.x + tab_width + TAB_RADIUS;
     let end = bounds.right();
-    (reveal > 0.0 && end > start).then(|| start + (end - start) * reveal.min(1.0))
+    (reveal > 0.0 && end > start).then(|| (end - start).mul_add(reveal.min(1.0), start))
 }
 
 #[derive(Clone, Copy)]
@@ -429,7 +429,7 @@ impl PreparedTabCard {
                 bounds.x,
                 bounds.y,
                 right,
-                bottom + (-layer.spread_radius).max(0.0) * 2.0,
+                (-layer.spread_radius).max(0.0).mul_add(2.0, bottom),
             );
             for clip in outside(body, reach) {
                 shadows.push(ShadowPass {

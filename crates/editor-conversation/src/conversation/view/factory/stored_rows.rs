@@ -131,7 +131,7 @@ impl RowFactory {
             let width = media_width(
                 super::super::reading_width(width),
                 slot,
-                leaf.context.lists.len(),
+                leaf.context().lists.len(),
             );
             if width.is_nan() || width <= 0.0 {
                 return Err(RealizeRowError::Unmeasured);

@@ -34,7 +34,7 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
         matched: Vec::new(),
     };
     let factory = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), false);
-    let visuals = factory(&row, None, None);
+    let visuals = factory(&row, None, editor_ui::project_mark::Forge::Folder);
     let runs = SharedRuns::new();
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
@@ -81,7 +81,11 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
             .any(|(_, item)| matches!(item, DisplayItem::PopGpuiQuadPulse))
     );
 
-    let reduced = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), true)(&row, None, None);
+    let reduced = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), true)(
+        &row,
+        None,
+        editor_ui::project_mark::Forge::Folder,
+    );
     let mut reduced_app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     reduced_app
         .mount(|_| UiBox::new().child(reduced.dot.unwrap()).build())

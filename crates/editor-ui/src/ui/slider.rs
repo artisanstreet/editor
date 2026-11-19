@@ -106,7 +106,7 @@ impl SliderState {
 
     fn set(&mut self, value: f64) -> bool {
         let value = self.range.snap(value);
-        if self.value == value {
+        if self.value.to_bits() == value.to_bits() {
             return false;
         }
         self.value = value;
@@ -121,9 +121,13 @@ impl SliderState {
         self.set(self.range.min + f64::from(t) * (self.range.max - self.range.min))
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the fraction is clamped to 0..=1"
+    )]
     fn fraction(&self) -> f32 {
         let span = self.range.max - self.range.min;
-        if span == 0.0 {
+        if span.abs() < f64::EPSILON {
             0.0
         } else {
             ((self.value - self.range.min) / span).clamp(0.0, 1.0) as f32
@@ -201,7 +205,7 @@ impl Slider {
                     background: GpuiBackground::Solid(fill),
                 };
                 let thumb_bounds = Rect {
-                    x: bounds.x + bounds.w * fraction - 6.0,
+                    x: bounds.w.mul_add(fraction, bounds.x) - 6.0,
                     y: bounds.y + 4.0,
                     w: 12.0,
                     h: 12.0,

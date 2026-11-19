@@ -26,7 +26,7 @@ const VISIBLE_ROWS: u8 = 8;
 
 fn row_height() -> f32 {
     2.0f32.mul_add(
-        KitRow::FormRow.pad().y.px(),
+        KitRow::Form.pad().y.px(),
         KitRow::ListItem(Density::Tall).lines() + Space::S2.px(),
     )
 }
@@ -190,7 +190,7 @@ pub(crate) fn archived(
     } else {
         let header = UiBox::new()
             .spaced(Space::S16)
-            .padded(KitRow::FormRow.pad().y)
+            .padded(KitRow::Form.pad().y)
             .style(Style::new().align(AlignItems::CENTER))
             .child(ui::grow(ui::line(
                 theme,
@@ -229,7 +229,7 @@ pub(crate) fn archived(
                 UiBox::new()
                     .width(Length::Pct(100.0))
                     .spaced(Space::S16)
-                    .padded(KitRow::FormRow.pad().y)
+                    .padded(KitRow::Form.pad().y)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(ui::grow(
                         ui::stack(Space::S2)

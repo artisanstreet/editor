@@ -2,7 +2,7 @@ use super::super::{CodeFence, MarkdownEngine};
 use super::{MarkdownPresenter, PreparationProof, PresenterError, RetainedRich, fence_key};
 use crate::ui::rich::{self, RichFence};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 impl MarkdownPresenter {
@@ -170,7 +170,7 @@ impl MarkdownPresenter {
     }
 
     pub(super) fn remove_rich(&self, rich_id: u64) {
-        let remove = |ids: &RefCell<HashMap<String, HashSet<String>>>,
+        let remove = |ids: &RefCell<BTreeMap<String, BTreeSet<String>>>,
                       suffix: &str,
                       remove: &dyn Fn(&str)| {
             for (owner, keys) in ids.borrow_mut().iter_mut() {

@@ -349,6 +349,6 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     let LeafPreparation::Ready(leaf) = stored.borrow_mut().leaf(&key, &source, 0) else {
         panic!("the first block of the reply is prepared once its page loads")
     };
-    assert!(leaf.source.starts_with("Paragraph 000"));
+    assert!(leaf.source().starts_with("Paragraph 000"));
     runtime().block_on(restarted.shutdown()).unwrap();
 }

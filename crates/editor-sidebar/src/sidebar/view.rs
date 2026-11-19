@@ -888,14 +888,14 @@ pub type ThreadVisualFactory = Rc<
     dyn Fn(
         &super::list::RowData,
         Option<std::sync::Arc<aqua::images::ImageHandle>>,
-        Option<artisan_api::ProjectRepository>,
+        editor_ui::project_mark::Forge,
     ) -> super::row::RowVisuals,
 >;
 
 #[derive(Clone)]
 struct ThreadMetadata {
     icon: Option<std::sync::Arc<aqua::images::ImageHandle>>,
-    repository: Option<artisan_api::ProjectRepository>,
+    forge: editor_ui::project_mark::Forge,
     drag: Option<editor_core::DraggedThread>,
 }
 
@@ -955,7 +955,7 @@ pub fn thread_entries_view(
                 row.id.clone(),
                 ThreadMetadata {
                     icon: host.project_icon(&row.project),
-                    repository: host.repository(&row.project).cloned(),
+                    forge: editor_ui::project_mark::Forge::of(host.repository(&row.project)),
                     drag: super::row::drag(host.id.clone(), thread),
                 },
             ))
@@ -980,10 +980,10 @@ pub fn thread_entries_view(
             Entry::Thread(data, layout) => {
                 let meta = metadata.get(&data.id).cloned().unwrap_or(ThreadMetadata {
                     icon: None,
-                    repository: None,
+                    forge: editor_ui::project_mark::Forge::Folder,
                     drag: None,
                 });
-                let row_visuals = visuals(data, meta.icon, meta.repository);
+                let row_visuals = visuals(data, meta.icon, meta.forge);
                 super::row::build(
                     data,
                     row_host.clone(),

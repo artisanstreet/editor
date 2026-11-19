@@ -190,7 +190,6 @@ impl MarkdownPresenter {
     }
 
     pub(super) fn render_code_ref(
-        &self,
         reference: &rich::code::code_ref::CodeRefBlock,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
@@ -260,8 +259,6 @@ impl MarkdownPresenter {
         let states = Rc::clone(&self.copies);
         let owner = owner.to_owned();
         CodeServices {
-            copy_enabled,
-            reference,
             copy: Rc::new(move |id, source| {
                 let controller = states
                     .borrow_mut()
@@ -285,6 +282,8 @@ impl MarkdownPresenter {
                 )
                 .build(now)
             }),
+            copy_enabled,
+            reference,
         }
     }
 }

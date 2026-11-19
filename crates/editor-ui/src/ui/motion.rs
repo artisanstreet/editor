@@ -74,6 +74,10 @@ impl MotionDuration {
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the names are the CSS easing curves these implement"
+)]
 pub enum MotionCurve {
     SmoothOut,
     EaseOut,

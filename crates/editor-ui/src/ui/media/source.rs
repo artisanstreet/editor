@@ -254,7 +254,13 @@ impl<T> Owned<T> {
 #[derive(Clone, Debug)]
 pub struct Payload {
     id: u64,
-    pub bytes: Arc<[u8]>,
+    pub(crate) bytes: Arc<[u8]>,
+}
+
+impl Payload {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl PartialEq for Payload {
@@ -278,10 +284,8 @@ pub struct MediaSource {
 
 impl From<String> for MediaSource {
     fn from(raw: String) -> Self {
-        Self {
-            parsed: parse(&raw),
-            raw,
-        }
+        let parsed = parse(&raw);
+        Self { raw, parsed }
     }
 }
 

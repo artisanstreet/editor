@@ -201,12 +201,12 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let start = usize::try_from(descriptor.source_start).unwrap();
     let end = usize::try_from(descriptor.source_end).unwrap();
     assert_eq!(
-        leaf.source.as_ref(),
+        leaf.source(),
         text.get(start..end)
             .expect("the test text slices on a char boundary")
     );
     assert!(matches!(
-        &leaf.content,
+        leaf.content(),
         IndexedLeafContent::Block(Block::Paragraph { .. })
     ));
     assert!(owner.leaf_is_current(leaf.proof()));
@@ -217,7 +217,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             &owner,
             "row",
             0,
-            Arc::clone(&leaf),
+            Rc::clone(&leaf),
             theme,
             SelectionDocumentId(9),
             &[7],

@@ -297,8 +297,8 @@ impl Layout {
             row_spans[span.row].push(index);
         }
         Ok(Self {
-            row_spans,
             spans,
+            row_spans,
             lanes,
             markers,
             rows: count,

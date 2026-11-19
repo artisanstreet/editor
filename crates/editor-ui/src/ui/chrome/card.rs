@@ -159,6 +159,11 @@ pub(crate) fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
 #[must_use]
 pub fn hex(color: Oklch) -> String {
     let srgb = color.to_srgb();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the channel is clamped to 0..=255 first"
+    )]
     let channel = |value: f32| (value * 255.0).round().clamp(0.0, 255.0) as u8;
     format!(
         "#{:02x}{:02x}{:02x}",
@@ -190,7 +195,7 @@ pub(crate) fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
     let source = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}"><defs><radialGradient id="p" gradientUnits="userSpaceOnUse" cx="{cx}" cy="{cy}" r="{rx}" gradientTransform="translate({cx} {cy}) scale(1 {ratio}) translate(-{cx} -{cy})"><stop offset="0" stop-color="{haze}"/><stop offset="0.25" stop-color="{sky}"/><stop offset="0.58" stop-color="{blue}"/><stop offset="0.92" stop-color="{navy}"/></radialGradient><linearGradient id="t" gradientUnits="userSpaceOnUse" x1="0" y1="1" x2="0" y2="2.5"><stop offset="0" stop-color="{highlight}" stop-opacity="0.28"/><stop offset="1" stop-color="{highlight}" stop-opacity="0"/></linearGradient><linearGradient id="b" gradientUnits="userSpaceOnUse" x1="0" y1="{shade_top}" x2="0" y2="{shade_bottom}"><stop offset="0" stop-color="{shade}" stop-opacity="0"/><stop offset="1" stop-color="{shade}" stop-opacity="0.22"/></linearGradient></defs><rect width="{w}" height="{h}" rx="{radius}" fill="{edge}"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#p)"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#t)"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#b)"/></svg>"#,
         cx = w * 0.5,
-        cy = 1.0 + face_h * 1.25,
+        cy = face_h.mul_add(1.25, 1.0),
         rx = face_w * 1.3,
         ratio = (face_h * 1.4) / (face_w * 1.3),
         inner = (radius - 1.0).max(0.0),

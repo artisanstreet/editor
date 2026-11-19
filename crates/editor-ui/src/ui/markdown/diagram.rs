@@ -326,6 +326,11 @@ fn diagram_theme(theme: &ArtisanTheme) -> Theme {
 
 fn hex(color: Oklch) -> String {
     let srgb = color.to_srgb();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the channel is clamped to 0..=255 first"
+    )]
     let channel = |value: f32| format!("{:02x}", (value.clamp(0.0, 1.0) * 255.0).round() as u8);
     format!("#{}{}{}", channel(srgb.r), channel(srgb.g), channel(srgb.b))
 }

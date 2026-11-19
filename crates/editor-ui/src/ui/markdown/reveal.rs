@@ -77,6 +77,10 @@ impl PreparedReveal {
     pub fn mark_presented(&self) {
         self.presented.set(true);
     }
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "streaming, freshness, reduced motion and swift reveal are independent frame inputs"
+    )]
     pub fn begin_frame(
         &self,
         now: Instant,
@@ -155,7 +159,7 @@ impl PreparedReveal {
         let height = self.frontier.get().map_or(0.0, |frontier| {
             (frontier - content_top).max(0.0).min(content_height)
         });
-        self.visible_height.replace(height) != height
+        self.visible_height.replace(height).to_bits() != height.to_bits()
     }
     pub fn visible_height(&self) -> f32 {
         self.visible_height.get()
@@ -165,7 +169,8 @@ impl PreparedReveal {
             .borrow_mut()
             .insert(slot, height)
             .unwrap_or(0.0)
-            != height
+            .to_bits()
+            != height.to_bits()
     }
     pub fn block_panel_height(&self, slot: usize) -> f32 {
         self.block_heights

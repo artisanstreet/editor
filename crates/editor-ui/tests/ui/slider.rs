@@ -55,5 +55,5 @@ fn assistive_tech_reads_and_sets_the_slider_range() {
         });
     }
     assert_eq!(changes.borrow().as_slice(), &[7.0, 8.0, 7.0, 6.0]);
-    assert_eq!(state.borrow().value(), 6.0);
+    assert_eq!((state.borrow().value()).to_bits(), 6.0_f64.to_bits());
 }

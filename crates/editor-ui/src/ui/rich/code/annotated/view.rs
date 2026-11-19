@@ -12,7 +12,7 @@ use editor_assets::AssetId;
 use super::{AnnotatedCode, Model};
 use crate::ui::{
     kit::{
-        self, Button, ButtonSize, ButtonTone, Corner, Density, Divider, Ellipsis, Hover, Label,
+        Button, ButtonSize, ButtonTone, Corner, Density, Divider, Ellipsis, Hover, Label, Row,
         Space, Spaced, Surface, TextRole,
     },
     rich::actions::{OpenReference, ResourceScope},
@@ -20,7 +20,7 @@ use crate::ui::{
 };
 
 const LINE_HEIGHT: f32 = TextRole::Code.spec().line;
-const NOTE: kit::Row = kit::Row::ListItem(Density::Dense);
+const NOTE: Row = Row::ListItem(Density::Dense);
 const BADGE: f32 = 16.0;
 const MARKER: f32 = 24.0;
 const EDGE: f32 = 2.0;
@@ -186,7 +186,7 @@ impl AnnotatedCode {
                 .with_key(format!("{id}-code-scroll")),
         );
         if !model.notes.is_empty() {
-            let note_height = TextRole::Label.spec().line + 2.0 * NOTE.pad().y.px();
+            let note_height = 2.0f32.mul_add(NOTE.pad().y.px(), TextRole::Label.spec().line);
             let height = crate::ui::rich::charts::scale::f32_of_count(model.notes.len().min(6))
                 * note_height;
             let note_model = Arc::clone(&model);
@@ -394,7 +394,7 @@ fn note_row(
     let mut row = UiBox::new()
         .spaced(NOTE.gap())
         .padded(NOTE.pad().y)
-        .radius(NOTE.radius_in(Surface::Card))
+        .radius(Row::radius_in(Surface::Card))
         .style(Style::new().align(AlignItems::FLEX_START));
     if on {
         row = row.style(Hover::Neutral.style(theme));

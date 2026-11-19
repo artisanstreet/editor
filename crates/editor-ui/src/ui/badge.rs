@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
+use super::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, SpacingTokens};
 use aqua_core::{
     DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets, Point, Rect,
     Transform2D,
@@ -54,7 +54,7 @@ fn pill(t: &ArtisanTheme, label: String) -> Element {
         .text_style(TextStyle {
             families: vec![FontFamily::Named(t.typography.sans.family.to_owned())],
             size_px: t.typography.label_text,
-            line_height_px: t.spacing.steps(4.0),
+            line_height_px: SpacingTokens::steps(4.0),
             weight: FontWeight::MEDIUM,
             ..TextStyle::default()
         })
@@ -72,10 +72,10 @@ fn pill(t: &ArtisanTheme, label: String) -> Element {
                 .justify(JustifyContent::CENTER)
                 .flex_shrink(0.0)
                 .padding_insets(Insets {
-                    left: t.spacing.steps(2.0),
-                    right: t.spacing.steps(2.0),
-                    top: t.spacing.steps(0.5),
-                    bottom: t.spacing.steps(0.5),
+                    left: SpacingTokens::steps(2.0),
+                    right: SpacingTokens::steps(2.0),
+                    top: SpacingTokens::steps(0.5),
+                    bottom: SpacingTokens::steps(0.5),
                 }),
         )
         .child(text)
@@ -102,7 +102,7 @@ const INNER_LIGHT: f32 = 0.05;
 const RIM: f32 = 0.1;
 
 fn shade(offset: f32) -> Oklch {
-    gray(BASE + offset * CONTRAST)
+    gray(offset.mul_add(CONTRAST, BASE))
 }
 
 fn gray(percent: f32) -> Oklch {

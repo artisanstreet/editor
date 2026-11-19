@@ -35,7 +35,7 @@ fn card(theme: ArtisanTheme, title: &str, details: Element) -> Element {
     let block = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padded(Row::FormRow.pad().y)
+        .padded(Row::Form.pad().y)
         .spaced(Space::S8)
         .style(TextRole::Label.inherit(&theme))
         .child(TextRole::LabelStrong.text(&theme, title.to_owned()).build())

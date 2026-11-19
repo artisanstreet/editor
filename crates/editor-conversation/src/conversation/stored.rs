@@ -132,13 +132,13 @@ struct Body {
 
 struct PendingRelease {
     batch: Arc<SelectionSourceBatch>,
-    _leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
+    _leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
     key: BodyKey,
     ordinal: usize,
 }
 
 pub(crate) struct StoredLeafLease {
-    leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
+    leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
     batch: Arc<SelectionSourceBatch>,
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     key: BodyKey,
@@ -372,7 +372,7 @@ impl StoredConversation {
         key: &BodyKey,
         source: &StoredSource,
         ordinal: usize,
-        leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
+        leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
         document: SelectionDocumentId,
         order: &[u64],
         theme: &ArtisanTheme,
@@ -406,7 +406,7 @@ impl StoredConversation {
         if body
             .leases
             .get(&ordinal)
-            .is_some_and(|old| !Arc::ptr_eq(&old.leaf, &leaf))
+            .is_some_and(|old| !Rc::ptr_eq(&old.leaf, &leaf))
         {
             body.presenter.release_stored_leaf(&body.owner, ordinal);
             body.leases.remove(&ordinal);

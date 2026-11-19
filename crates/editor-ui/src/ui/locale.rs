@@ -6,6 +6,7 @@ use icu_datetime::input::{Date, DateTime, Time};
 use icu_datetime::options::YearStyle;
 use icu_decimal::DecimalFormatter;
 use icu_decimal::input::{Decimal, SignDisplay};
+use icu_decimal::options::DecimalFormatterOptions;
 use icu_locale_core::{Locale, locale};
 use std::fmt;
 use std::sync::LazyLock;
@@ -131,11 +132,13 @@ fn datetime(at: NaiveDateTime) -> DateTime<Gregorian> {
 }
 
 fn decimal_formatter(locale: &Locale) -> DecimalFormatter {
-    DecimalFormatter::try_new(locale.into(), Default::default()).unwrap_or_else(|error| {
-        tracing::warn!(%locale, %error, "load number formats; formatting numbers for en-US");
-        DecimalFormatter::try_new((&FALLBACK).into(), Default::default())
-            .expect("invariant: compiled ICU data formats en-US numbers")
-    })
+    DecimalFormatter::try_new(locale.into(), DecimalFormatterOptions::default()).unwrap_or_else(
+        |error| {
+            tracing::warn!(%locale, %error, "load number formats; formatting numbers for en-US");
+            DecimalFormatter::try_new((&FALLBACK).into(), DecimalFormatterOptions::default())
+                .expect("invariant: compiled ICU data formats en-US numbers")
+        },
+    )
 }
 
 fn clock_formatter(locale: &Locale) -> FixedCalendarDateTimeFormatter<Gregorian, T> {

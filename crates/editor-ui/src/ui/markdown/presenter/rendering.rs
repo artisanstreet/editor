@@ -413,7 +413,7 @@ impl MarkdownPresenter {
                 reference_scope,
             )?,
             Prepared::CodeRef(reference) => {
-                self.render_code_ref(reference, entry, envelope, id, theme, code, reference_scope)?
+                Self::render_code_ref(reference, entry, envelope, id, theme, code, reference_scope)?
             }
             Prepared::Compare(compare) => {
                 self.render_compare(compare, entry, envelope, id, theme, invalidate, heatmap)?

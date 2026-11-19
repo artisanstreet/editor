@@ -29,10 +29,10 @@ impl<V> SelectEntry<V> {
 
 #[derive(Clone, Debug)]
 pub struct SelectState<V> {
-    pub open: bool,
+    open: bool,
     shown: bool,
     motion: MenuMotion,
-    pub highlighted: Option<V>,
+    highlighted: Option<V>,
     keyed: bool,
     query: String,
     typed_at: Instant,
@@ -47,6 +47,18 @@ pub struct SelectKeyResult<V> {
 }
 
 impl<V: Clone + Eq> SelectState<V> {
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub const fn highlighted(&self) -> Option<&V> {
+        self.highlighted.as_ref()
+    }
+
+    pub fn set_highlighted(&mut self, value: Option<V>) {
+        self.highlighted = value;
+    }
+
     pub fn new(now: Instant) -> Self {
         Self {
             open: false,
@@ -221,6 +233,10 @@ impl<V: Clone + Eq> SelectState<V> {
     }
 
     fn reveal(&mut self, index: usize, viewport: f32) {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "option indices are far below 2^23"
+        )]
         let top = OPTION_HEIGHT * index as f32;
         let bottom = top + OPTION_HEIGHT;
         if top < self.scroll {
@@ -242,7 +258,7 @@ impl<V: Clone + Eq> SelectState<V> {
     }
 }
 
-fn select_key_name(key: &InputKey) -> Option<&'static str> {
+fn select_key_name(key: InputKey) -> Option<&'static str> {
     match key {
         InputKey::Named(NamedKey::Escape) => Some("escape"),
         InputKey::Named(NamedKey::Tab) => Some("tab"),
@@ -256,6 +272,10 @@ fn select_key_name(key: &InputKey) -> Option<&'static str> {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "option counts are far below 2^23"
+)]
 fn menu_height(theme: &ArtisanTheme, count: usize) -> f32 {
     (OPTION_HEIGHT * count.max(1) as f32).min(theme.density.command_list_max_height)
 }
@@ -290,7 +310,7 @@ pub struct Select<V: Clone + Eq + 'static> {
     id: Key,
     theme: ArtisanTheme,
     selected: Option<V>,
-    entries: Rc<Vec<SelectEntry<V>>>,
+    entries: Rc<[SelectEntry<V>]>,
     label: String,
     state: Rc<RefCell<SelectState<V>>>,
     disabled: bool,
@@ -316,7 +336,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
             id: id.into(),
             theme,
             selected,
-            entries: Rc::new(entries),
+            entries: Rc::from(entries),
             label: "Choose".into(),
             state,
             disabled: false,
@@ -429,7 +449,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
                         let before = state.open;
                         let result = match &event.input {
                             RoutedInput::Native(InputEvent::KeyDown(key)) => {
-                                match select_key_name(&key.key) {
+                                match select_key_name(key.key) {
                                     Some(name) => state.key(name, &entries),
                                     None => return InputResponse::default(),
                                 }

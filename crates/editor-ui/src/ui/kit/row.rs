@@ -24,8 +24,8 @@ pub enum Row {
     ListItem(Density),
     Heading,
     ListHeading,
-    FormRow,
-    KeyRow,
+    Form,
+    Key,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,12 +38,12 @@ impl Row {
     #[must_use]
     pub const fn pad(self) -> Pad {
         let (x, y) = match self {
-            Self::MenuItem | Self::KeyRow => (Space::S12, Space::S8),
+            Self::MenuItem | Self::Key => (Space::S12, Space::S8),
             Self::ListItem(Density::Regular | Density::Tall) => (Space::S8, Space::S8),
             Self::ListItem(Density::Dense) => (Space::S4, Space::S4),
             Self::Heading => (Space::S12, Space::S6),
             Self::ListHeading => (Space::S8, Space::S6),
-            Self::FormRow => (Space::S12, Space::S12),
+            Self::Form => (Space::S12, Space::S12),
         };
         Pad { x, y }
     }
@@ -70,19 +70,19 @@ impl Row {
     pub const fn interactive(self) -> bool {
         !matches!(
             self,
-            Self::Heading | Self::ListHeading | Self::FormRow | Self::KeyRow
+            Self::Heading | Self::ListHeading | Self::Form | Self::Key
         )
     }
 
     #[must_use]
     const fn wraps(self) -> bool {
-        matches!(self, Self::FormRow)
+        matches!(self, Self::Form)
     }
 
     #[must_use]
     pub const fn gap(self) -> Space {
         match self {
-            Self::FormRow => Space::S16,
+            Self::Form => Space::S16,
             _ => Space::S8,
         }
     }
@@ -90,13 +90,13 @@ impl Row {
     #[must_use]
     pub const fn height(self) -> Option<f32> {
         match self {
-            Self::FormRow => None,
+            Self::Form => None,
             _ => Some(self.lines() + 2.0 * self.pad().y.px()),
         }
     }
 
     #[must_use]
-    pub fn radius_in(self, surface: Surface) -> f32 {
+    pub fn radius_in(surface: Surface) -> f32 {
         surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
             super::tokens::radius::Radius::px,
@@ -148,7 +148,7 @@ impl RowItem {
             key: key.into(),
             theme,
             row,
-            radius: row.radius_in(surface),
+            radius: Row::radius_in(surface),
             hover: Hover::Neutral,
             face: None,
             leading: None,

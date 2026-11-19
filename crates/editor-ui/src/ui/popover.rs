@@ -36,7 +36,12 @@ impl PopoverPanel {
     fn build(self) -> Element {
         let width = Length::Px((self.viewport_width - VIEWPORT_MARGIN).max(1.0));
         let height = Length::Px(
-            (self.viewport_height - VIEWPORT_MARGIN - 2.0 * Surface::Menu.padding_px()).max(1.0),
+            2.0f32
+                .mul_add(
+                    -Surface::Menu.padding_px(),
+                    self.viewport_height - VIEWPORT_MARGIN,
+                )
+                .max(1.0),
         );
         let scroll = Scroll::new()
             .style(
@@ -271,10 +276,10 @@ impl AnimatedPickerHost {
             factory: None,
             motion,
             entrance,
-            open_duration,
-            close_duration,
             scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            open_duration,
+            close_duration,
             flight: None,
             now,
         };
@@ -305,10 +310,10 @@ impl AnimatedPickerHost {
             factory: None,
             motion,
             entrance: PickerEntrance::Scale { origin },
-            open_duration: super::picker_motion::DROPDOWN_OPEN,
-            close_duration: super::picker_motion::DROPDOWN_CLOSE,
             scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            open_duration: super::picker_motion::DROPDOWN_OPEN,
+            close_duration: super::picker_motion::DROPDOWN_CLOSE,
             flight: None,
             now,
         };
@@ -363,6 +368,10 @@ impl AnimatedPickerHost {
         .as_secs_f64();
         let reduced =
             app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "progress is clamped to 0..=1"
+        )]
         let progress = if duration > 0.0 && !reduced {
             ((now - started) / duration).clamp(0.0, 1.0) as f32
         } else {
@@ -429,7 +438,7 @@ impl AnimatedPickerHost {
         Ok(())
     }
 
-    pub fn refresh(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
+    pub fn refresh(&self, app: &mut aqua::UiApp) -> Result<(), String> {
         let factory = self
             .factory
             .as_ref()
@@ -438,11 +447,7 @@ impl AnimatedPickerHost {
         self.refresh_content(app, content)
     }
 
-    pub fn refresh_content(
-        &mut self,
-        app: &mut aqua::UiApp,
-        content: Element,
-    ) -> Result<(), String> {
+    pub fn refresh_content(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
         let (opacity, transform) = self.frame_values(app);
         self.popup.refresh(
             app,

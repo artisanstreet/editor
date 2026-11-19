@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::rc::Rc;
 
 use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceIndexRange};
 
@@ -40,12 +41,10 @@ fn validate_page(
         return Err("Markdown descriptor page does not match its immutable source".to_owned());
     }
     for (position, leaf) in page.leaves.iter().enumerate() {
-        if leaf.ordinal != page.start + position as u64
-            || leaf.source_start > leaf.source_end
-            || leaf.source_end > reference.bytes
-            || leaf.metadata_start >= leaf.metadata_end
-            || leaf.metadata_end > page.index.metadata.bytes
-        {
+        let source_fits = (leaf.source_start..=reference.bytes).contains(&leaf.source_end);
+        let metadata_fits = leaf.metadata_start < leaf.metadata_end
+            && leaf.metadata_end <= page.index.metadata.bytes;
+        if leaf.ordinal != page.start + position as u64 || !source_fits || !metadata_fits {
             return Err("Markdown descriptor does not match its source or metadata".to_owned());
         }
     }
@@ -74,11 +73,12 @@ impl RangeCollector {
             return Err("Markdown source range exceeds its admission limit".to_owned());
         }
         let cursor = range.start;
+        let text = String::with_capacity(range.len());
         Ok(Self {
             reference,
-            text: String::with_capacity(range.len()),
             range,
             cursor,
+            text,
         })
     }
 
@@ -201,30 +201,44 @@ pub enum StoredPreparation {
 #[derive(Debug, Clone)]
 pub enum LeafPreparation {
     Pending,
-    Ready(Arc<StoredLeaf>),
+    Ready(Rc<StoredLeaf>),
     Failed(String),
 }
 
 struct PreparedLease {
-    _permit: Option<OwnedSemaphorePermit>,
+    permit: Option<OwnedSemaphorePermit>,
     wake: aqua::mailbox::Wake,
 }
 
 impl Drop for PreparedLease {
     fn drop(&mut self) {
-        drop(self._permit.take());
+        drop(self.permit.take());
         (self.wake)();
     }
 }
 
 pub struct StoredLeaf {
     pub(crate) descriptor: SourceLeafDescriptor,
-    pub source: Arc<str>,
-    pub context: artisan_markdown_index::LeafContext,
+    pub(crate) source: Arc<str>,
+    pub(crate) context: artisan_markdown_index::LeafContext,
     pub(crate) table_continues: bool,
-    pub content: IndexedLeafContent,
+    pub(crate) content: IndexedLeafContent,
     proof: LeafProof,
     _capacity: PreparedLease,
+}
+
+impl StoredLeaf {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub const fn context(&self) -> &artisan_markdown_index::LeafContext {
+        &self.context
+    }
+
+    pub const fn content(&self) -> &IndexedLeafContent {
+        &self.content
+    }
 }
 
 impl std::fmt::Debug for StoredLeaf {
@@ -305,7 +319,7 @@ enum LeafPhase {
         source: String,
     },
     Working,
-    Ready(Arc<StoredLeaf>),
+    Ready(Rc<StoredLeaf>),
     Failed(String),
 }
 
@@ -617,7 +631,9 @@ impl StoredOwner {
                 .pages
                 .remove(position)
                 .expect("invariant: a found page position is in the cache");
-            let descriptor = cached.1.leaves[(wanted - cached.1.start) as usize].clone();
+            let descriptor = cached.1.leaves[usize::try_from(wanted - cached.1.start)
+                .expect("invariant: a page holds at most SOURCE_INDEX_PAGE_LEAVES leaves")]
+            .clone();
             self.pages.push_back(cached);
             return PagePreparation::Ready(descriptor);
         }
@@ -735,7 +751,8 @@ impl StoredOwner {
         let Some(descriptor) = self.descriptor(source, ordinal).cloned() else {
             return LeafPreparation::Pending;
         };
-        if let Some(index) = self.leaves.iter().position(|entry| entry.key == key) {
+        let found = self.leaves.iter().position(|entry| entry.key == key);
+        if let Some(index) = found {
             let same = {
                 let entry = &self.leaves[index];
                 entry.source.owner == source.owner
@@ -749,7 +766,7 @@ impl StoredOwner {
                     .remove(index)
                     .unwrap_or_else(|| panic!("invariant: leaf {key} was found at {index}"));
                 let result = match &entry.phase {
-                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(Arc::clone(leaf)),
+                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(Rc::clone(leaf)),
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
                     _ => LeafPreparation::Pending,
                 };
@@ -805,21 +822,15 @@ impl StoredOwner {
             };
             self.leaves.remove(index);
         };
-        let metadata_start = match usize::try_from(descriptor.metadata_start) {
-            Ok(value) => value,
-            Err(_) => {
-                return LeafPreparation::Failed(
-                    "Markdown source offset exceeds this platform".to_owned(),
-                );
-            }
+        let Ok(metadata_start) = usize::try_from(descriptor.metadata_start) else {
+            return LeafPreparation::Failed(
+                "Markdown source offset exceeds this platform".to_owned(),
+            );
         };
-        let metadata_end = match usize::try_from(descriptor.metadata_end) {
-            Ok(value) => value,
-            Err(_) => {
-                return LeafPreparation::Failed(
-                    "Markdown source offset exceeds this platform".to_owned(),
-                );
-            }
+        let Ok(metadata_end) = usize::try_from(descriptor.metadata_end) else {
+            return LeafPreparation::Failed(
+                "Markdown source offset exceeds this platform".to_owned(),
+            );
         };
         let collector =
             match RangeCollector::new(source.header.metadata.clone(), metadata_start..metadata_end)
@@ -984,18 +995,19 @@ impl StoredOwner {
                     },
                     _ => return Err("Markdown metadata does not match its content".to_owned()),
                 };
-                let context = record.context;
-                let context_bytes = context.lists.capacity()
+                let leaf_context = record.context;
+                let context_bytes = leaf_context.lists.capacity()
                     * size_of::<artisan_markdown_index::ListLevel>()
-                    + context.table_alignments.capacity()
+                    + leaf_context.table_alignments.capacity()
                         * size_of::<artisan_markdown_index::TableAlignment>()
-                    + context.spacing.capacity() * size_of::<artisan_markdown_index::LeafSpacing>();
+                    + leaf_context.spacing.capacity()
+                        * size_of::<artisan_markdown_index::LeafSpacing>();
                 let retained_bytes = syntax_bytes
                     .saturating_add(context_bytes)
                     .saturating_add(source.len())
                     .saturating_add(size_of::<StoredLeaf>());
                 Ok((
-                    context,
+                    leaf_context,
                     record.table_continues,
                     content,
                     Arc::<str>::from(source),
@@ -1200,7 +1212,7 @@ impl StoredOwner {
                             return Err("Markdown preview exceeds its presentation-memory budget; open the full source".to_owned());
                         }
                         let permit = loop {
-                            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(bytes as u32) {
+                            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(u32::try_from(bytes).unwrap_or_else(|_| panic!("invariant: leaf {key} prepares {bytes} bytes, bounded by PREPARED_BYTES"))) {
                                 break permit;
                             }
                             let Some(oldest) = self.leaves.iter().position(|entry| entry.key != key && matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))) else {
@@ -1221,11 +1233,11 @@ impl StoredOwner {
                     entry.capacity = None;
                     let ordinal = usize::try_from(entry.descriptor.ordinal).unwrap_or(usize::MAX);
                     entry.phase = match result {
-                        Ok((context, table_continues, content, source, capacity)) => {
-                            LeafPhase::Ready(Arc::new(StoredLeaf {
+                        Ok((leaf_context, table_continues, content, source, capacity)) => {
+                            LeafPhase::Ready(Rc::new(StoredLeaf {
                                 descriptor: entry.descriptor.clone(),
                                 source,
-                                context,
+                                context: leaf_context,
                                 table_continues,
                                 content,
                                 proof: LeafProof {
@@ -1236,7 +1248,7 @@ impl StoredOwner {
                                     generation,
                                 },
                                 _capacity: PreparedLease {
-                                    _permit: Some(capacity),
+                                    permit: Some(capacity),
                                     wake: self.delivery.waker(),
                                 },
                             }))

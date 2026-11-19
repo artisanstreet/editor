@@ -54,7 +54,7 @@ impl Divider {
             Self::Rule => 2.0 * LINE,
             Self::Labelled(_) => TextRole::Caption.spec().line,
         };
-        body + 2.0 * GAP.px()
+        2.0f32.mul_add(GAP.px(), body)
     }
 
     #[must_use]

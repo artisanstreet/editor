@@ -88,8 +88,8 @@ impl PhraseMotion {
     ) -> (Option<Vec<PhraseWord>>, bool) {
         let words: Vec<String> = text.split(' ').map(str::to_owned).collect();
         if !self.initialized {
-            self.current = words.clone();
-            self.previous = words.clone();
+            self.current.clone_from(&words);
+            self.previous.clone_from(&words);
             self.initialized = true;
         }
         if self.current != words {

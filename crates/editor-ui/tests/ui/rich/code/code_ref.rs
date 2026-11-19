@@ -83,10 +83,10 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
     assert!(core.host_if_instance(&id, instance).is_none());
     app.set_viewport(500.0, 300.0, 1.0);
     app.build_frame().unwrap();
-    let code = app.tree().traverse().into_iter().find(|id| {
+    let code_node = app.tree().traverse().into_iter().find(|id| {
         matches!(&app.tree().get(*id).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == "one")
     }).unwrap();
-    let code_bounds = app.tree().rect(code).unwrap();
+    let code_bounds = app.tree().rect(code_node).unwrap();
     let code_pointer = PointerEvent {
         contact: 0,
         kind: PointerKind::Mouse,
@@ -99,7 +99,7 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
     ));
     app.handle_input(&InputEvent::PointerUp(code_pointer, PointerButton::Primary));
     assert!(
-        matches!(&app.tree().get(code).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.selection.is_none())
+        matches!(&app.tree().get(code_node).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.selection.is_none())
     );
     assert!(received.borrow().is_empty());
     let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("block-path"));

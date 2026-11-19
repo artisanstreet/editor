@@ -6,7 +6,7 @@ pub(crate) const DROPDOWN_PRE_SCALE: f32 = 0.97;
 const HIDDEN_OFFSET: f32 = 8.0;
 #[must_use]
 pub fn smooth_out(progress: f32) -> f32 {
-    super::motion::MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
+    super::motion::MotionCurve::SmoothOut.sample_f32(f64::from(progress))
 }
 
 #[must_use]

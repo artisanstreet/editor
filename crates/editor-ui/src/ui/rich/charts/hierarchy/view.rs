@@ -126,7 +126,7 @@ impl HierarchyState {
             && geometry.layout == layout
             && geometry.focus == entry.focus
             && geometry.levels == levels
-            && geometry.width == width
+            && geometry.width.to_bits() == width.to_bits()
         {
             return Arc::clone(geometry);
         }
@@ -316,10 +316,10 @@ fn paint(
             0.0
         };
         let rect = Rect {
-            x: bounds.x + bounds.w * part.x + pad,
-            y: bounds.y + bounds.h * part.y + vertical,
-            w: (bounds.w * part.w - pad * 2.0).max(0.0),
-            h: (bounds.h * part.h - vertical * 2.0).max(0.0),
+            x: bounds.w.mul_add(part.x, bounds.x) + pad,
+            y: bounds.h.mul_add(part.y, bounds.y) + vertical,
+            w: bounds.w.mul_add(part.w, -(pad * 2.0)).max(0.0),
+            h: bounds.h.mul_add(part.h, -(vertical * 2.0)).max(0.0),
         };
         if rect.w <= 0.0 || rect.h <= 0.0 {
             continue;
