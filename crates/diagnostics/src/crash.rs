@@ -1,4 +1,5 @@
 use crate::RecentLines;
+use crate::frames::Frames;
 use artisan_paths::App;
 use std::backtrace::Backtrace;
 use std::panic::PanicHookInfo;
@@ -53,6 +54,7 @@ struct Report<'a> {
     message: &'a str,
     location: String,
     backtrace: Backtrace,
+    frames: Frames,
     spans: SpanTrace,
     log: Vec<String>,
 }
@@ -61,7 +63,7 @@ impl Report<'_> {
     fn render(&self) -> String {
         let log = self.log.join("\n");
         format!(
-            "{} {} crashed\nthread: {}\nmessage: {}\nlocation: {}\n\nspan trace:\n{}\n\nbacktrace:\n{}\n\nrecent log ({} lines):\n{log}\n",
+            "{} {} crashed\nthread: {}\nmessage: {}\nlocation: {}\n\nspan trace:\n{}\n\nbacktrace:\n{}\n\n{}\n{}\nrecent log ({} lines):\n{log}\n",
             self.app.display_name(),
             self.version,
             self.thread,
@@ -69,6 +71,8 @@ impl Report<'_> {
             self.location,
             self.spans,
             self.backtrace,
+            crate::frames::HEADING,
+            self.frames,
             self.log.len(),
         )
     }
@@ -120,6 +124,7 @@ impl CrashReporter {
                 },
             ),
             backtrace: Backtrace::force_capture(),
+            frames: Frames::capture(),
             spans: SpanTrace::capture(),
             log: self.recent.snapshot(),
         };

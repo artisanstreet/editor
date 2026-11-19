@@ -8,13 +8,28 @@ description = "Crash reports, rotating log files and the tracing subscriber shar
 
 [dependencies]
 artisan-paths.workspace = true
+backtrace.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+addr2line.workspace = true
+gimli.workspace = true
+object.workspace = true
+
+[target.'cfg(target_env = "msvc")'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

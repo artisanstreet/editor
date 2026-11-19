@@ -63,7 +63,8 @@ fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
     let report = std::fs::read_to_string(&reports[0]).unwrap();
     let (head, rest) = report.split_once("span trace:").unwrap();
     let (spans, rest) = rest.split_once("backtrace:").unwrap();
-    let (frames, log) = rest.split_once("recent log").unwrap();
+    let (frames, rest) = rest.split_once(diagnostics::frames::HEADING).unwrap();
+    let (recorded, log) = rest.split_once("recent log").unwrap();
     assert!(head.starts_with("Forge 9.9.9 (test) crashed"), "{head}");
     assert!(
         head.contains("message: invariant: run r-7 of thread t-42 lost its turn"),
@@ -78,6 +79,13 @@ fn a_panic_writes_a_report_with_message_location_frames_spans_and_log() {
     assert!(spans.contains("run=\"r-7\""), "{spans}");
     assert!(has_frame_at(frames, "abandon_turn", PANIC_LINE), "{frames}");
     assert!(frames.contains("a_panic_writes_a_report"), "{frames}");
+    let resolved = symbolized(recorded);
+    assert!(
+        resolved
+            .iter()
+            .any(|(function, line)| function.contains("abandon_turn") && *line == Some(PANIC_LINE)),
+        "the recorded frames don't resolve offline to the panic: {resolved:?}\n{recorded}"
+    );
     assert!(log.contains("turn started"), "{log}");
     assert!(log.contains("host=\"h-3\""), "{log}");
 }
@@ -144,4 +152,149 @@ fn a_crash_keeps_only_the_newest_reports_of_its_app() {
         1,
         "the new report is kept: {names:?}"
     );
+}
+
+fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(name)?.strip_prefix('='))
+}
+
+#[expect(clippy::unwrap_used, reason = "a malformed report fails the test")]
+fn hex(text: &str) -> u64 {
+    u64::from_str_radix(text.trim_start_matches("0x"), 16).unwrap()
+}
+
+#[expect(clippy::unwrap_used, reason = "a malformed report fails the test")]
+fn symbolized(recorded: &str) -> Vec<(String, Option<u32>)> {
+    let this = std::env::current_exe().unwrap();
+    let name = this.file_name().unwrap().to_owned();
+    let offsets: Vec<u64> = recorded
+        .lines()
+        .filter(|line| {
+            line.split_once("module=").is_some_and(|(_, module)| {
+                Path::new(module.trim()).file_name() == Some(name.as_os_str())
+            })
+        })
+        .map(|line| hex(field(line, "offset").unwrap()))
+        .collect();
+    assert!(
+        !offsets.is_empty(),
+        "no recorded frame is in {}: {recorded}",
+        this.display()
+    );
+    resolve(&this, &offsets)
+}
+
+#[cfg(not(target_env = "msvc"))]
+#[expect(
+    clippy::unwrap_used,
+    reason = "an executable without readable DWARF fails the test"
+)]
+fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
+    use object::{Object as _, ObjectSection as _};
+    let bytes = std::fs::read(module).unwrap();
+    let file = object::File::parse(&*bytes).unwrap();
+    let endian = if file.is_little_endian() {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+    let sections = gimli::DwarfSections::load(|id| {
+        file.section_by_name(id.name()).map_or_else(
+            || Ok(std::borrow::Cow::Borrowed(&[][..])),
+            |section| section.uncompressed_data(),
+        )
+    })
+    .unwrap();
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
+    let context = addr2line::Context::from_dwarf(dwarf).unwrap();
+    let symbols = file.symbol_map();
+    let mut resolved = Vec::new();
+    for offset in offsets {
+        let address = file.relative_address_base() + offset - 1;
+        let symbol = symbols
+            .get(address)
+            .map(|symbol| symbol.name().to_owned())
+            .unwrap_or_default();
+        let mut frames = context.find_frames(address).skip_all_loads().unwrap();
+        while let Some(frame) = frames.next().unwrap() {
+            let function = frame
+                .function
+                .as_ref()
+                .map(|function| function.raw_name().unwrap().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| symbol.clone());
+            resolved.push((function, frame.location.and_then(|location| location.line)));
+        }
+    }
+    resolved
+}
+
+#[cfg(target_env = "msvc")]
+#[expect(
+    unsafe_code,
+    reason = "dbghelp reads the PDB beside the test executable"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a PDB dbghelp can't load fails the test"
+)]
+fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Diagnostics::Debug::{
+        IMAGEHLP_LINEW64, MAX_SYM_NAME, SYMBOL_INFOW, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME,
+        SymCleanup, SymFromAddrW, SymGetLineFromAddrW64, SymInitializeW, SymLoadModuleExW,
+        SymSetOptions,
+    };
+    use windows::core::PCWSTR;
+    const LOADED_AT: u64 = 0x1000_0000;
+    let process = HANDLE(std::ptr::without_provenance_mut(0x5eed));
+    let path: Vec<u16> = module.as_os_str().encode_wide().chain([0]).collect();
+    let mut resolved = Vec::new();
+    unsafe {
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+        SymInitializeW(process, PCWSTR::null(), false).unwrap();
+        let base = SymLoadModuleExW(
+            process,
+            None,
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            LOADED_AT,
+            0,
+            None,
+            None,
+        );
+        assert_ne!(base, 0, "dbghelp loads {}", module.display());
+        for offset in offsets {
+            let address = base + offset - 1;
+            let mut buffer =
+                vec![0_u64; (size_of::<SYMBOL_INFOW>() + MAX_SYM_NAME as usize * 2) / 8 + 1];
+            let symbol = buffer.as_mut_ptr().cast::<SYMBOL_INFOW>();
+            (*symbol).SizeOfStruct = u32::try_from(size_of::<SYMBOL_INFOW>()).unwrap();
+            (*symbol).MaxNameLen = MAX_SYM_NAME;
+            let function = SymFromAddrW(process, address, None, symbol).map_or_else(
+                |_| String::new(),
+                |()| {
+                    let name = std::slice::from_raw_parts(
+                        (&raw const (*symbol).Name).cast::<u16>(),
+                        (*symbol).NameLen as usize,
+                    );
+                    String::from_utf16_lossy(name)
+                },
+            );
+            let mut line = IMAGEHLP_LINEW64 {
+                SizeOfStruct: u32::try_from(size_of::<IMAGEHLP_LINEW64>()).unwrap(),
+                ..IMAGEHLP_LINEW64::default()
+            };
+            let mut displacement = 0;
+            let number =
+                SymGetLineFromAddrW64(process, address, &raw mut displacement, &raw mut line)
+                    .ok()
+                    .map(|()| line.LineNumber);
+            resolved.push((function, number));
+        }
+        SymCleanup(process).unwrap();
+    }
+    resolved
 }

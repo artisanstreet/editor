@@ -1453,12 +1453,18 @@ dependencies = [
 name = "diagnostics"
 version = "0.0.0"
 dependencies = [
+ "addr2line",
  "artisan-paths",
+ "backtrace",
+ "gimli",
+ "libc",
+ "object",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
  "tracing-error",
  "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2607,6 +2613,10 @@ name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
+dependencies = [
+ "fallible-iterator",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "glam"

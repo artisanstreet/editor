@@ -1,4 +1,5 @@
 pub mod crash;
+pub mod frames;
 pub mod log_file;
 pub mod recent;
 pub mod subscriber;
