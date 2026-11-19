@@ -88,6 +88,7 @@ struct Inner {
     live: Mutex<HashMap<ThreadId, LiveRun>>,
     unsettled: Mutex<HashMap<ThreadId, forge_store::Settlement>>,
     owed_continues: Mutex<std::collections::HashSet<ThreadId>>,
+    deferred: std::sync::atomic::AtomicBool,
     suggestions: Mutex<HashMap<ThreadId, Suggested>>,
     attention: Mutex<HashMap<ThreadId, side::Attention>>,
     untitled: Mutex<std::collections::HashSet<ThreadId>>,
@@ -281,6 +282,7 @@ impl Hub {
                 live: Mutex::new(HashMap::new()),
                 unsettled: Mutex::new(HashMap::new()),
                 owed_continues: Mutex::new(std::collections::HashSet::new()),
+                deferred: std::sync::atomic::AtomicBool::new(false),
                 suggestions: Mutex::new(HashMap::new()),
                 attention: Mutex::new(HashMap::new()),
                 untitled: Mutex::new(std::collections::HashSet::new()),
@@ -1230,8 +1232,16 @@ impl Hub {
                     let mut failed = !readable;
                     failed |= !hub.settle_unsettled().await;
                     failed |= !hub.continue_owed().await;
+                    let deferred = hub
+                        .inner
+                        .deferred
+                        .swap(false, std::sync::atomic::Ordering::AcqRel);
+                    failed |= deferred;
                     stalled = true;
                     loop {
+                        if deferred {
+                            break;
+                        }
                         let _admission = hub.inner.admission.lock().await;
                         if hub.inner.shutdown.is_cancelled() {
                             return;
@@ -1311,10 +1321,15 @@ impl Hub {
             .await;
             if let Err(error) = &outcome {
                 tracing::error!(thread = %thread_id, run = %run_id, "run failed: {}", diagnostics::chain(&error));
+                if error.retry_later() {
+                    hub.inner
+                        .deferred
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
             }
-            let continued = hub.end_live(&thread_id).await;
+            hub.end_live(&thread_id).await;
             drop(permit);
-            if (outcome.is_ok() || continued) && !hub.inner.shutdown.is_cancelled() {
+            if !hub.inner.shutdown.is_cancelled() {
                 hub.resume_pending();
             }
             if !hub.inner.shutdown.is_cancelled() {
@@ -1332,25 +1347,20 @@ impl Hub {
             .spawn(tracing::Instrument::instrument(run, span));
     }
 
-    async fn end_live(&self, thread_id: &ThreadId) -> bool {
+    async fn end_live(&self, thread_id: &ThreadId) {
         let _admission = self.inner.admission.lock().await;
         let phase = self.lock().get(thread_id).map(|run| run.phase);
-        let continued = match phase {
-            Some(Phase::Stopping {
-                then: AfterStop::Continue,
-                ..
-            }) => match self.fulfil_continue(thread_id).await {
-                Continuing::Continued => true,
-                Continuing::Reported => false,
-                Continuing::Owed => {
-                    self.resume_pending();
-                    false
-                }
-            },
-            Some(Phase::Working | Phase::Stopping { .. }) | None => false,
-        };
+        if let Some(Phase::Stopping {
+            then: AfterStop::Continue,
+            ..
+        }) = phase
+        {
+            match self.fulfil_continue(thread_id).await {
+                Continuing::Continued | Continuing::Reported => {}
+                Continuing::Owed => self.resume_pending(),
+            }
+        }
         self.lock().remove(thread_id);
-        continued
     }
 
     #[must_use]

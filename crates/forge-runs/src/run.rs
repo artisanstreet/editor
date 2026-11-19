@@ -79,6 +79,22 @@ pub(crate) enum DriveError {
     },
 }
 
+impl DriveError {
+    pub(crate) const fn retry_later(&self) -> bool {
+        match self {
+            Self::Continuation(_)
+            | Self::PendingInputs(_)
+            | Self::ReadThread(_)
+            | Self::Begin(_) => true,
+            Self::ThreadGone { .. }
+            | Self::LatestRun(_)
+            | Self::CancelledItems(_)
+            | Self::Settle(_)
+            | Self::Transport { .. } => false,
+        }
+    }
+}
+
 enum Ending {
     Finished(Outcome),
     Stopped(Cleanup),
@@ -237,30 +253,17 @@ pub(crate) async fn drive(
     if let Some(live) = hub.lock().get_mut(thread_id) {
         live.engine = Some(engine);
     }
-    let previous = store.latest_run(thread_id).await?;
-    let first_run = previous.is_none();
-    let carry_on = match continuation {
-        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
-        None => None,
+    let unstarted = unstarted(&thread, run_id.clone(), observed.cutoff, continuation);
+    let Started {
+        mut run,
+        previous,
+        carry_on,
+        transport,
+        first_run,
+    } = match Box::pin(start(hub, &thread, unstarted.clone())).await {
+        Ok(started) => started,
+        Err(error) => return Box::pin(fail_unstarted(hub, unstarted, &pending, &error)).await,
     };
-    let (transport, session_id) = launch_choice(hub, thread_id, engine, previous.as_ref()).await?;
-    let carried = session_id.as_ref().and(previous.as_ref());
-    let usage = carried_usage(carried, &thread.config);
-    let mut run = Run {
-        config: Some(thread.config.clone()),
-        id: run_id.clone(),
-        thread_id: thread_id.clone(),
-        engine,
-        model: thread.config.model.clone(),
-        state: RunState::Running,
-        usage,
-        session_id,
-        seq: 0,
-        input_cutoff: observed.cutoff,
-        started_at: artisan_api::now(),
-        continuation,
-    };
-    run = store.begin_run(run).await?;
 
     let claude_ai_home =
         (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
@@ -322,6 +325,84 @@ pub(crate) async fn drive(
         hub.engines().changed(engine);
     }
     Ok(status)
+}
+
+fn unstarted(
+    thread: &artisan_api::Thread,
+    id: RunId,
+    input_cutoff: u64,
+    continuation: Option<artisan_api::Continuation>,
+) -> Run {
+    Run {
+        config: Some(thread.config.clone()),
+        id,
+        thread_id: thread.id.clone(),
+        engine: thread.config.engine,
+        model: thread.config.model.clone(),
+        state: RunState::Running,
+        usage: Usage::default(),
+        session_id: None,
+        seq: 0,
+        input_cutoff,
+        started_at: artisan_api::now(),
+        continuation,
+    }
+}
+
+struct Started {
+    run: Run,
+    previous: Option<Run>,
+    carry_on: Option<String>,
+    transport: Option<ClaudeTransport>,
+    first_run: bool,
+}
+
+async fn start(
+    hub: &Hub,
+    thread: &artisan_api::Thread,
+    mut run: Run,
+) -> Result<Started, DriveError> {
+    let store = hub.store();
+    let previous = store.latest_run(&thread.id).await?;
+    let first_run = previous.is_none();
+    let carry_on = match run.continuation {
+        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
+        None => None,
+    };
+    let (transport, session_id) =
+        launch_choice(hub, &thread.id, run.engine, previous.as_ref()).await?;
+    let carried = session_id.as_ref().and(previous.as_ref());
+    run.usage = carried_usage(carried, &thread.config);
+    run.session_id = session_id;
+    let run = store.begin_run(run).await?;
+    Ok(Started {
+        run,
+        previous,
+        carry_on,
+        transport,
+        first_run,
+    })
+}
+
+async fn fail_unstarted(
+    hub: &Hub,
+    run: Run,
+    pending: &[artisan_api::Item],
+    error: &DriveError,
+) -> Result<RunStatus, DriveError> {
+    tracing::error!(thread = %run.thread_id, run = %run.id, "the run could not start: {}", diagnostics::chain(error));
+    let mut run = hub.store().begin_run(run).await?;
+    let attempted = pending.iter().map(|item| item.id.clone()).collect();
+    finish(
+        hub,
+        &mut run,
+        &Work::default(),
+        Ending::Finished(Outcome::failed(diagnostics::chain(error))),
+        RunOutcome::Failed,
+        attempted,
+    )
+    .await?;
+    Ok(RunStatus::Failed)
 }
 
 struct Delivery<'a> {

@@ -160,3 +160,38 @@ async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
         ItemKind::Error { message, .. } if message.inline() == Some("the working directory is gone")
     )));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_cannot_start_fails_its_message_where_the_user_sees_it() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3"))
+        .unwrap()
+        .execute_batch(include_str!("corrupt_transport.sql"))
+        .unwrap();
+    let sent = message("hello");
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, sent.clone())
+        .await
+        .unwrap();
+
+    fixture
+        .wait_for(|items| {
+            items
+                .iter()
+                .any(|item| item.id == sent.id && item.status == Status::Failed)
+                && items
+                    .iter()
+                    .any(|item| matches!(item.kind, ItemKind::Error { .. }))
+        })
+        .await;
+    let run = fixture
+        .hub
+        .store()
+        .latest_run(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert!(!fixture.hub.is_live(&fixture.thread_id));
+}
