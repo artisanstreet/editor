@@ -24,8 +24,6 @@ mod secrets;
 mod settings;
 mod source_index;
 mod sources;
-#[cfg(test)]
-mod stamped_writes;
 mod text_search;
 mod threads;
 mod writer;

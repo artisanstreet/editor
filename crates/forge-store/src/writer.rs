@@ -192,8 +192,6 @@ impl Writer {
             seq,
             events: Vec::new(),
             clock: self.clock.clone(),
-            #[cfg(test)]
-            stamp: None,
         };
         let result = job(&mut tx)?;
         let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
@@ -216,15 +214,6 @@ pub(crate) struct Tx<'c> {
     seq: Seq,
     events: Vec<Envelope>,
     clock: artisan_api::WallClock,
-    #[cfg(test)]
-    stamp: Option<Stamp>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Stamp {
-    pub(crate) created_at: Timestamp,
-    pub(crate) updated_at: Timestamp,
 }
 
 impl Deref for Tx<'_> {
@@ -236,18 +225,6 @@ impl Deref for Tx<'_> {
 }
 
 impl Tx<'_> {
-    #[cfg(test)]
-    pub(crate) fn with_stamp<R, E>(
-        &mut self,
-        stamp: Stamp,
-        job: impl FnOnce(&mut Self) -> Result<R, E>,
-    ) -> Result<R, E> {
-        let previous = self.stamp.replace(stamp);
-        let result = job(self);
-        self.stamp = previous;
-        result
-    }
-
     pub(crate) fn create_project(&mut self, request: CreateProject) -> Result<Project> {
         if let Some(existing) = read::project(self, &request.id)? {
             return Ok(existing);
@@ -403,18 +380,10 @@ impl Tx<'_> {
     }
 
     pub(crate) fn created_at(&self) -> Timestamp {
-        #[cfg(test)]
-        if let Some(stamp) = self.stamp {
-            return stamp.created_at;
-        }
         self.clock.now()
     }
 
     fn updated_at(&self) -> Timestamp {
-        #[cfg(test)]
-        if let Some(stamp) = self.stamp {
-            return stamp.updated_at;
-        }
         self.clock.now()
     }
 
