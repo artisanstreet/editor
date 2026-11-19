@@ -51,7 +51,11 @@ pub(crate) fn shell_output(output: Option<&Output>) -> Option<&str> {
             text: TextContent::Inline(text),
             ..
         }) => Some(text),
-        _ => None,
+        Some(Output {
+            text: TextContent::Stored(_),
+            ..
+        })
+        | None => None,
     }
 }
 
@@ -106,14 +110,15 @@ fn home_relative(path: &str) -> String {
     } else {
         path
     };
-    let home_end = if path == "/root" || path.starts_with("/root/") {
-        Some("/root".len())
-    } else {
-        ["/home/", "/Users/"].iter().find_map(|prefix| {
-            let user = path.strip_prefix(prefix)?;
-            let user_len = user.find('/').unwrap_or(user.len());
-            (user_len > 0).then_some(prefix.len() + user_len)
-        })
-    };
-    home_end.map_or_else(|| path.to_owned(), |end| format!("~{}", &path[end..]))
+    let below_home = path
+        .strip_prefix("/root")
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .or_else(|| {
+            ["/home/", "/Users/"].iter().find_map(|prefix| {
+                let user = path.strip_prefix(prefix)?;
+                let rest = user.find('/').map_or("", |at| user.split_at(at).1);
+                (rest.len() < user.len()).then_some(rest)
+            })
+        });
+    below_home.map_or_else(|| path.to_owned(), |rest| format!("~{rest}"))
 }

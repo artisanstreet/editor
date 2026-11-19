@@ -52,7 +52,7 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     let old = core.host(&config.id).unwrap().instance();
     core.remove_host(&config.id).unwrap();
     assert!(removed.drain(&core));
-    assert!(removed.job.is_none());
+    assert!(removed.job().is_none());
     assert!(removed.error().is_none());
 
     core.add_test_host(&config, client(&core));
@@ -60,7 +60,7 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     let mut replaced = pending_dialog(&core, &config);
     core.add_test_host(&config, client(&core));
     assert!(replaced.drain(&core));
-    assert!(replaced.job.is_none());
+    assert!(replaced.job().is_none());
     assert!(replaced.error().is_none());
 }
 

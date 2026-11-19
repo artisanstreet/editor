@@ -6,8 +6,8 @@ mod palette;
 mod terminal;
 mod view;
 
-pub use model::Entry;
 pub(crate) use model::entries;
+pub use model::{Entry, Fact};
 pub use terminal::{Feed, ShellPrompt, StreamState, command_lines, shell_prompt};
 pub(crate) use terminal::{accepts_item, shell_output};
 

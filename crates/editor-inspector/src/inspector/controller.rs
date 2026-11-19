@@ -5,31 +5,32 @@ use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen};
 use editor_sources::{CollectionBrowser, ContentText};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+#[derive(Default)]
 pub struct Inspector {
-    pub open: Option<(HostId, ThreadId)>,
+    pub(crate) open: Option<(HostId, ThreadId)>,
     instance: Option<HostInstance>,
-    pub summary: Arc<InspectorSummary>,
+    pub(crate) summary: Arc<InspectorSummary>,
     pub(crate) entries: Vec<Entry>,
     pub(crate) error: Option<String>,
     pub(crate) source: Option<ContentText>,
     pub(crate) plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
 }
 
-impl Default for Inspector {
-    fn default() -> Self {
-        Self {
-            open: None,
-            instance: None,
-            summary: Arc::default(),
-            entries: Vec::new(),
-            error: None,
-            source: None,
-            plan: None,
-        }
+impl std::fmt::Debug for Inspector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inspector").finish_non_exhaustive()
     }
 }
 
 impl Inspector {
+    pub const fn open(&self) -> Option<&(HostId, ThreadId)> {
+        self.open.as_ref()
+    }
+
+    pub fn summary(&self) -> &InspectorSummary {
+        &self.summary
+    }
+
     pub fn is_current(&self, core: &Core) -> bool {
         self.open.as_ref().is_some_and(|(host, _)| {
             self.instance
@@ -42,7 +43,7 @@ impl Inspector {
             .open
             .as_ref()
             .and_then(|(host, _)| core.host(host))
-            .map(|host| host.instance());
+            .map(editor_core::HostData::instance);
         if self.open == conversation.open && self.instance == instance {
             return false;
         }
@@ -81,9 +82,22 @@ impl Inspector {
                     true
                 }
                 HostEvent::Changed | HostEvent::ThreadChanged { .. } => true,
-                _ => changed,
+                HostEvent::ImagesChanged
+                | HostEvent::EngineInstall { .. }
+                | HostEvent::ThreadSummaryChanged { .. }
+                | HostEvent::WslDistro { .. }
+                | HostEvent::Item(_)
+                | HostEvent::Live { .. }
+                | HostEvent::EditorCall { .. } => changed,
             },
-            _ => changed,
+            CoreEvent::ScreenChanged
+            | CoreEvent::HostsChanged
+            | CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => changed,
         }
     }
 
@@ -103,7 +117,7 @@ impl Inspector {
         match (&mut self.plan, self.summary.plan.stored()) {
             (Some(plan), Some(source)) => plan.borrow_mut().set_source(source.clone()),
             (_, None) => self.plan = None,
-            _ => {}
+            (None, Some(_)) => {}
         }
         self.entries = entries(&self.summary);
     }
@@ -122,7 +136,7 @@ impl Inspector {
         core: &mut Core,
         conversation: &mut Conversation,
         id: artisan_api::ItemId,
-        thread: Option<artisan_api::ThreadId>,
+        thread: Option<ThreadId>,
     ) {
         let Some((host, _)) = &self.open else {
             return;

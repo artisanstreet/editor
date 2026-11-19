@@ -56,14 +56,10 @@ pub struct Overview {
 impl Overview {
     #[must_use]
     pub(crate) fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
-        let host = inspector
-            .open
-            .as_ref()
-            .and_then(|(host, _)| core.host(host));
+        let host = inspector.open().and_then(|(host, _)| core.host(host));
         let project = host.and_then(|host| {
             inspector
-                .open
-                .as_ref()
+                .open()
                 .and_then(|(_, thread)| host.threads.get(thread))
                 .map(|thread| &thread.project_id)
         });
@@ -75,7 +71,7 @@ impl Overview {
             branch: project.and_then(|project| host?.repository(project)?.branch.clone()),
             context,
             agents: inspector
-                .summary
+                .summary()
                 .agents
                 .iter()
                 .map(|agent| Subagent {
@@ -327,7 +323,7 @@ fn subagent(
             .build(),
     )
     .on_activate(move || emit(open.clone()))
-    .hint(move || render_agent_card(&tooltip, theme))
+    .hint(move || render_agent_card(&tooltip, &theme))
     .build()
 }
 

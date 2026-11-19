@@ -11,12 +11,18 @@ use std::{num::NonZeroUsize, ops::Range, sync::Arc};
 struct Completion(CompletionKey, Result<Item, CallError>);
 
 pub struct TerminalDialog {
-    pub job: Option<Job>,
+    pub(crate) job: Option<Job>,
     error: Option<String>,
     pub(crate) following: bool,
     generation: u64,
     fetch: CompletionSlot,
     delivery: Delivery<Completion>,
+}
+
+impl std::fmt::Debug for TerminalDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalDialog").finish_non_exhaustive()
+    }
 }
 
 pub struct Job {
@@ -37,6 +43,12 @@ pub struct Job {
     source: Option<(Option<u64>, usize, u64)>,
 }
 
+impl std::fmt::Debug for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Job").finish_non_exhaustive()
+    }
+}
+
 impl Job {
     fn missing(&self) -> bool {
         self.unverified || self.screen.cleared_earlier() || self.screen.truncated_line_count() > 0
@@ -52,6 +64,10 @@ impl Job {
 }
 
 impl TerminalDialog {
+    pub const fn job(&self) -> Option<&Job> {
+        self.job.as_ref()
+    }
+
     pub fn new(core: &Core) -> Self {
         Self {
             job: None,
@@ -170,7 +186,7 @@ impl TerminalDialog {
                     self.error = Some(format!(
                         "Couldn't load shell output: {}",
                         diagnostics::chain(&error)
-                    ))
+                    ));
                 }
             }
             changed = true;
@@ -210,7 +226,15 @@ impl TerminalDialog {
                 self.sync(core);
                 true
             }
-            _ => false,
+            HostEvent::ImagesChanged
+            | HostEvent::EngineInstall { .. }
+            | HostEvent::ThreadSummaryChanged { .. }
+            | HostEvent::Changed
+            | HostEvent::WslDistro { .. }
+            | HostEvent::ThreadChanged { .. }
+            | HostEvent::Item(_)
+            | HostEvent::Live { .. }
+            | HostEvent::EditorCall { .. } => false,
         }
     }
 

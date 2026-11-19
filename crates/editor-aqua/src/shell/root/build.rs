@@ -371,7 +371,7 @@ impl RootViews {
                 &theme,
                 &crate::frame::overview::Overview::of(
                     &shell.core,
-                    &workspace.inspector.inspector,
+                    workspace.inspector.inspector(),
                     self.context_reading.clone(),
                 ),
                 reduced,

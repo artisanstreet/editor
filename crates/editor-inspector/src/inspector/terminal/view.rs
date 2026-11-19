@@ -10,6 +10,7 @@ use aqua_ui::{
 };
 use editor_assets::AssetId;
 use editor_ui::kit::{Button, ButtonTone, Finish, IconButton, IconButtonSize, Surface, TextRole};
+use editor_ui::text::slice::slice;
 use editor_ui::theme::ArtisanTheme;
 use std::{cell::RefCell, rc::Rc};
 
@@ -44,9 +45,9 @@ impl CollectionSource for Rows {
     fn key(&self, index: usize) -> Key {
         Key::Usize(index)
     }
-    fn layout(&self, width: f32) -> CollectionLayout {
+    fn layout(&self, available_width: f32) -> CollectionLayout {
         CollectionLayout {
-            content_width: width,
+            content_width: available_width,
             column_widths: Vec::new(),
         }
     }
@@ -80,37 +81,40 @@ impl CollectionSource for Rows {
                 let command = job
                     .commands
                     .get(index)
-                    .map_or("", |range| &job.command[range.clone()]);
+                    .map_or("", |range| slice(&job.command, range.clone()));
                 let mut spans = Vec::new();
                 let highlighted = if index == 0 && prompt.coloured {
-                    prefix.trim_end().trim_end_matches('$').len()
+                    prefix.trim_end().trim_end_matches('$')
                 } else {
-                    0
+                    ""
                 };
-                if highlighted > 0 {
+                let rest = prefix.strip_prefix(highlighted).unwrap_or_else(|| {
+                    panic!(
+                        "invariant: {highlighted:?} is trimmed from the end of prompt {prefix:?}"
+                    )
+                });
+                if !highlighted.is_empty() {
                     spans.push(
-                        StyledSpan::new(&prefix[..highlighted], TerminalPalette::bold(&font))
+                        StyledSpan::new(highlighted, TerminalPalette::bold(&font))
                             .gpui_source_color(TerminalPalette::for_theme(&theme).base[12]),
                     );
                 }
-                spans.push(StyledSpan::new(
-                    format!("{}{command}", &prefix[highlighted..]),
-                    font.clone(),
-                ));
+                spans.push(StyledSpan::new(format!("{rest}{command}"), font));
                 row = row.child(TYPE.text(&theme, "").spans(spans).build());
             }
             Some(Row::Missing) => {
                 row = row.child(
                     TYPE.text(
                         &theme,
-                        match job.unverified {
-                            true => "Live output only; Forge supplied no final snapshot.",
-                            false => "Earlier output is not kept; showing the newest.",
+                        if job.unverified {
+                            "Live output only; Forge supplied no final snapshot."
+                        } else {
+                            "Earlier output is not kept; showing the newest."
                         },
                     )
                     .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                     .build(),
-                )
+                );
             }
             Some(Row::Output(index)) => {
                 if let Some(line) = job.screen.line(index) {
@@ -146,13 +150,13 @@ impl CollectionSource for Rows {
 
 pub(crate) fn terminal_view(
     dialog: Rc<RefCell<TerminalDialog>>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport_height: f32,
     hovered: bool,
     copied: bool,
     command_source: Option<Element>,
     output_source: Option<Element>,
-    action: Rc<dyn Fn(TerminalAction)>,
+    action: &Rc<dyn Fn(TerminalAction)>,
 ) -> Element {
     let state = dialog.borrow();
     let job = state
@@ -174,21 +178,17 @@ pub(crate) fn terminal_view(
         .min((viewport_height - 160.0).max(32.0));
     let mut content = UiBox::new().layout("column").width(Length::Pct(100.0));
     if let Some(error) = state.error() {
-        let retry = Rc::clone(&action);
+        let retry = Rc::clone(action);
         content = content
-            .child(TextRole::Label.text(&theme, error.to_owned()).build())
+            .child(TextRole::Label.text(theme, error.to_owned()).build())
             .child(
-                Button::text("terminal-retry", theme, ButtonTone::Neutral, "Try again")
+                Button::text("terminal-retry", *theme, ButtonTone::Neutral, "Try again")
                     .within(WELL)
                     .on_activate(move |_| retry(TerminalAction::Retry))
                     .build(),
             );
     } else if state.loading() && job.data.is_none() {
-        content = content.child(
-            TextRole::Label
-                .text(&theme, "Loading shell output…")
-                .build(),
-        );
+        content = content.child(TextRole::Label.text(theme, "Loading shell output…").build());
     }
     if let Some(source) = command_source {
         content = content.child(source);
@@ -201,7 +201,7 @@ pub(crate) fn terminal_view(
     let source = Rc::new(Rows {
         dialog,
         layout,
-        theme,
+        theme: *theme,
     });
     let mut descriptor = CollectionDescriptor::new(
         source,
@@ -214,9 +214,9 @@ pub(crate) fn terminal_view(
         line_height(),
         4,
     );
-    let viewport_callback = Rc::clone(&action);
+    let viewport_callback = Rc::clone(action);
     descriptor.on_viewport = Some(Rc::new(move |viewport| {
-        viewport_callback(TerminalAction::Viewport(viewport))
+        viewport_callback(TerminalAction::Viewport(viewport));
     }));
     let mut well = vec![
         content
@@ -224,7 +224,7 @@ pub(crate) fn terminal_view(
             .build(),
     ];
     let edge = WELL.padding_px();
-    let copy = Rc::clone(&action);
+    let copy = Rc::clone(action);
     well.push(
         UiBox::new()
             .opacity(if hovered { 1.0 } else { 0.0 })
@@ -232,7 +232,7 @@ pub(crate) fn terminal_view(
             .child(
                 IconButton::new(
                     "inspector-terminal-copy",
-                    theme,
+                    *theme,
                     if copied {
                         AssetId::TABLER_CHECK
                     } else {
@@ -250,14 +250,14 @@ pub(crate) fn terminal_view(
             .build(),
     );
     if !following {
-        let latest = Rc::clone(&action);
+        let latest = Rc::clone(action);
         well.push(
             UiBox::new()
                 .style(Style::new().absolute_at(None, None, Some(edge), Some(edge)))
                 .child(
                     IconButton::new(
                         "inspector-terminal-latest",
-                        theme,
+                        *theme,
                         AssetId::TABLER_ARROW_BAR_TO_DOWN,
                         "Jump to latest",
                         IconButtonSize::Md,
@@ -270,9 +270,9 @@ pub(crate) fn terminal_view(
                 .build(),
         );
     }
-    let hover = Rc::clone(&action);
+    let hover = Rc::clone(action);
     DIALOG
-        .build(&theme, vec![WELL.build(&theme, well)])
+        .build(theme, vec![WELL.build(theme, well)])
         .style(Style::new().width(Length::Pct(100.0)))
         .with_key("inspector-terminal-card")
         .on_hover_change(move |value| hover(TerminalAction::Hover(value)))

@@ -821,14 +821,16 @@ impl Workspace {
         now: aqua::Instant,
     ) -> Result<aqua_ui::element::Element, crate::inspector::BuildInspectorError> {
         let actions = Rc::clone(&self.inspector_actions);
+        let on_action: Rc<dyn Fn(crate::inspector::OwnerAction)> =
+            Rc::new(move |action| actions.borrow_mut().push_back(action));
         let elements = self.inspector.build(
             core,
             ui,
-            *theme,
+            theme,
             viewport_height,
             reduced_motion,
             now,
-            Rc::new(move |action| actions.borrow_mut().push_back(action)),
+            &on_action,
         )?;
         self.terminal_content = elements.terminal;
         Ok(elements.panel)

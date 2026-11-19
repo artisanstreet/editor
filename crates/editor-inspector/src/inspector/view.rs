@@ -1,4 +1,4 @@
-use super::{Entry, Inspector};
+use super::{Entry, Fact, Inspector};
 use aqua_text::StyledSpan;
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
@@ -57,7 +57,10 @@ fn inked(theme: &ArtisanTheme, role: TextRole, words: impl Into<String>, ink: Ok
 fn static_row(children: Vec<Element>) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
-        .height(ROW.height().unwrap_or_default())
+        .height(
+            ROW.height()
+                .expect("invariant: inspector list rows have a fixed height"),
+        )
         .padded(ROW.pad().x)
         .spaced(ROW.gap())
         .style(
@@ -104,7 +107,7 @@ fn status_dot(color: Oklch, pulse: Option<u32>) -> Element {
         .build()
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AgentCard {
     engine: Option<artisan_api::EngineId>,
     model: Option<String>,
@@ -210,9 +213,9 @@ pub fn agent_card(
     }
 }
 
-pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
+pub fn render_agent_card(card: &AgentCard, theme: &ArtisanTheme) -> Element {
     let icon = card.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
-        editor_ui::engine::engine_icon(&theme, engine)
+        editor_ui::engine::engine_icon(theme, engine)
     });
     let title = card
         .model
@@ -224,7 +227,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
             .spaced(Space::S8)
             .style(Style::new().align(AlignItems::CENTER))
             .child(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()))
-            .child(fit(TextRole::Title.text(&theme, title)))
+            .child(fit(TextRole::Title.text(theme, title)))
             .build(),
     );
     if !card.settings.is_empty() {
@@ -238,7 +241,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
                         IconSize::Md
                             .glyph(*icon, theme.colors.text_muted_glass.to_reference_paint()),
                     )
-                    .child(TextRole::Caption.text(&theme, value.clone()).build())
+                    .child(TextRole::Caption.text(theme, value.clone()).build())
                     .build(),
             );
         }
@@ -247,7 +250,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
     if !card.purpose.is_empty() {
         content = content.child(
             inked(
-                &theme,
+                theme,
                 TextRole::Caption,
                 card.purpose.clone(),
                 theme.colors.text_muted_glass,
@@ -256,22 +259,29 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
             .build(),
         );
     }
-    CARD.build(&theme, vec![content.build()])
+    CARD.build(theme, vec![content.build()])
         .style(Style::new().max_width(Length::Px(CARD_WIDTH)))
+}
+
+struct Facts {
+    project: Option<String>,
+    machine: Option<String>,
+    branch: Option<String>,
+    worktree: Option<String>,
 }
 
 fn fact_row(
     theme: &ArtisanTheme,
-    label: &str,
-    values: &[Option<String>; 4],
+    fact: Fact,
+    facts: &Facts,
     edits: Option<&artisan_api::EditTotals>,
 ) -> Element {
-    let (icon, title, value) = match label {
-        "Project" => (AssetId::TABLER_FOLDER, "Project", values[0].clone()),
-        "Forge" => (AssetId::TABLER_DEVICE_LAPTOP, "Machine", values[1].clone()),
-        "Branch" => (AssetId::TABLER_GIT_BRANCH, "Branch", values[2].clone()),
-        "Worktree" => (AssetId::TABLER_FOLDER_CODE, "Worktree", values[3].clone()),
-        _ => (AssetId::TABLER_FILE_DIFF, "Changes", None),
+    let (icon, title, value) = match fact {
+        Fact::Project => (AssetId::TABLER_FOLDER, "Project", &facts.project),
+        Fact::Machine => (AssetId::TABLER_DEVICE_LAPTOP, "Machine", &facts.machine),
+        Fact::Branch => (AssetId::TABLER_GIT_BRANCH, "Branch", &facts.branch),
+        Fact::Worktree => (AssetId::TABLER_FOLDER_CODE, "Worktree", &facts.worktree),
+        Fact::Edits => (AssetId::TABLER_FILE_DIFF, "Changes", &None),
     };
     let mut children = vec![
         muted_glyph(theme, icon),
@@ -280,8 +290,8 @@ fn fact_row(
             .child(fit(TextRole::Label.text(theme, title)))
             .build(),
     ];
-    match (label, edits) {
-        ("Edit operations", Some(edits)) => {
+    match (fact, edits) {
+        (Fact::Edits, Some(edits)) => {
             children.push(
                 inked(
                     theme,
@@ -301,8 +311,8 @@ fn fact_row(
                 .build(),
             );
         }
-        ("Edit operations", None) => {}
-        _ => children.push(
+        (Fact::Edits, None) => {}
+        (Fact::Project | Fact::Machine | Fact::Branch | Fact::Worktree, _) => children.push(
             UiBox::new()
                 .clip(true)
                 .style(
@@ -311,7 +321,7 @@ fn fact_row(
                         .max_width(Length::Px(VALUE_WIDTH)),
                 )
                 .child(fit(
-                    TextRole::Label.text(theme, value.unwrap_or_else(|| "—".into()))
+                    TextRole::Label.text(theme, value.clone().unwrap_or_else(|| "—".into()))
                 ))
                 .build(),
         ),
@@ -320,12 +330,13 @@ fn fact_row(
 }
 
 fn agent_row(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     agent: &artisan_api::InspectorAgent,
     card: AgentCard,
     pulse: Option<u32>,
     action: Rc<dyn Fn(InspectorAction)>,
 ) -> Element {
+    let theme = *theme;
     let description = match &agent.description {
         TextContent::Inline(value) => value.lines().next().unwrap_or_default().to_owned(),
         TextContent::Stored(_) => "Stored description. Open agent to read.".into(),
@@ -373,14 +384,14 @@ fn agent_row(
         action(InspectorAction::OpenAgent {
             id: id.clone(),
             thread: thread.clone(),
-        })
+        });
     })
-    .hint(move || render_agent_card(&card, theme))
+    .hint(move || render_agent_card(&card, &theme))
     .build()
 }
 
 fn plan_row(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     index: usize,
     step: &artisan_api::PlanStep,
     action: Rc<dyn Fn(InspectorAction)>,
@@ -388,19 +399,15 @@ fn plan_row(
     match &step.text {
         TextContent::Inline(value) => {
             let resolved = matches!(step.status, StepStatus::Done | StepStatus::Cancelled);
-            let ink = match resolved {
-                true => theme.colors.text_muted,
-                false => theme.colors.text,
+            let ink = if resolved {
+                theme.colors.text_muted
+            } else {
+                theme.colors.text
             };
-            let mut struck = TextRole::Label.style(&theme);
+            let mut struck = TextRole::Label.style(theme);
             struck.strikethrough = resolved;
-            static_row(vec![fit(inked(
-                &theme,
-                TextRole::Label,
-                value.clone(),
-                ink,
-            )
-            .spans(vec![StyledSpan::new(value.clone(), struck)]))])
+            static_row(vec![fit(inked(theme, TextRole::Label, value.clone(), ink)
+                .spans(vec![StyledSpan::new(value.clone(), struck)]))])
         }
         TextContent::Stored(source) => {
             let source = source.clone();
@@ -412,7 +419,7 @@ fn plan_row(
             };
             Button::text(
                 format!("inspector-plan-{index}"),
-                theme,
+                *theme,
                 ButtonTone::Quiet,
                 format!("{status} Read step"),
             )
@@ -424,7 +431,7 @@ fn plan_row(
 }
 
 fn terminal_row(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     terminal: &artisan_api::InspectorTerminal,
     action: Rc<dyn Fn(InspectorAction)>,
 ) -> Element {
@@ -436,20 +443,21 @@ fn terminal_row(
             .to_owned(),
         TextContent::Stored(_) => "Stored shell command".into(),
     };
-    let icon = match terminal.watch {
-        true => AssetId::TABLER_EYE,
-        false => AssetId::TABLER_TERMINAL_2,
+    let icon = if terminal.watch {
+        AssetId::TABLER_EYE
+    } else {
+        AssetId::TABLER_TERMINAL_2
     };
     let item = terminal.id.clone();
     RowItem::new(
         format!("inspector-terminal-{}", terminal.id),
-        theme,
+        *theme,
         ROW,
         LIST,
         label.clone(),
     )
-    .leading(muted_glyph(&theme, icon))
-    .body(fit(TextRole::Code.text(&theme, label)))
+    .leading(muted_glyph(theme, icon))
+    .body(fit(TextRole::Code.text(theme, label)))
     .on_activate(move || action(InspectorAction::OpenTerminal(item.clone())))
     .build()
 }
@@ -457,13 +465,14 @@ fn terminal_row(
 pub(crate) fn inspector_view(
     core: &Core,
     inspector: &Inspector,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     source: Option<Element>,
     plan: Option<Element>,
     reduced_motion: bool,
     pulse_starts: Rc<RefCell<HashMap<usize, u32>>>,
-    action: Rc<dyn Fn(InspectorAction)>,
+    action: &Rc<dyn Fn(InspectorAction)>,
 ) -> Element {
+    let theme = *theme;
     assert!(
         inspector.source.is_none() || source.is_some(),
         "invariant: an inspector source is rendered with its source view"
@@ -483,12 +492,12 @@ pub(crate) fn inspector_view(
             .and_then(|(_, thread)| host.threads.get(thread))
             .and_then(|thread| host.projects.get(&thread.project_id))
     });
-    let values = [
-        project.map(|project| project.name.clone()),
-        host.map(|host| host.name.clone()),
-        project.and_then(|project| host?.repository(&project.id)?.branch.clone()),
-        project.and_then(|project| host?.repository(&project.id)?.worktree.clone()),
-    ];
+    let facts = Facts {
+        project: project.map(|project| project.name.clone()),
+        machine: host.map(|host| host.name.clone()),
+        branch: project.and_then(|project| host?.repository(&project.id)?.branch.clone()),
+        worktree: project.and_then(|project| host?.repository(&project.id)?.worktree.clone()),
+    };
     let cards: Vec<_> = inspector
         .summary
         .agents
@@ -513,7 +522,7 @@ pub(crate) fn inspector_view(
                 .gpui_source_text_color(theme.colors.text.to_reference_text_color()),
         );
     if let Some(error) = &inspector.error {
-        let retry = Rc::clone(&action);
+        let retry = Rc::clone(action);
         root = root
             .child(static_row(vec![fit(
                 TextRole::Label.text(&theme, error.clone())
@@ -525,7 +534,7 @@ pub(crate) fn inspector_view(
                     .build(),
             );
     }
-    let row_action = Rc::clone(&action);
+    let row_action = Rc::clone(action);
     let list = List::new()
         .items(entries.into_iter().enumerate())
         .key(|(index, _)| *index)
@@ -539,7 +548,7 @@ pub(crate) fn inspector_view(
                     *label,
                 )
                 .build(),
-                Entry::Fact(label) => fact_row(&theme, label, &values, summary.edits.as_ref()),
+                Entry::Fact(fact) => fact_row(&theme, *fact, &facts, summary.edits.as_ref()),
                 Entry::Agent(index) => {
                     let agent = &summary.agents[*index];
                     let pulse = (agent.status == Status::Running && !reduced_motion).then(|| {
@@ -549,7 +558,7 @@ pub(crate) fn inspector_view(
                             .or_insert_with(editor_ui::clock::pulse_ms)
                     });
                     agent_row(
-                        theme,
+                        &theme,
                         agent,
                         cards[*index].clone(),
                         pulse,
@@ -574,12 +583,12 @@ pub(crate) fn inspector_view(
                 Entry::Plan(index) => match &summary.plan {
                     Collection::Inline(steps) => steps.get(*index).map_or_else(
                         || static_row(Vec::new()),
-                        |step| plan_row(theme, *index, step, Rc::clone(&row_action)),
+                        |step| plan_row(&theme, *index, step, Rc::clone(&row_action)),
                     ),
                     Collection::Stored(_) => static_row(Vec::new()),
                 },
                 Entry::Terminal(index) => {
-                    terminal_row(theme, &summary.terminals[*index], Rc::clone(&row_action))
+                    terminal_row(&theme, &summary.terminals[*index], Rc::clone(&row_action))
                 }
                 Entry::Workflow(index) => {
                     let workflow = &summary.workflows[*index];
@@ -595,14 +604,15 @@ pub(crate) fn inspector_view(
             let closes = rows
                 .get(index + 1)
                 .is_none_or(|entry| matches!(entry, Entry::Heading(_)));
-            match closes {
-                true => UiBox::new()
+            if closes {
+                UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
                     .child(content)
                     .child(Divider::Rule.build(&theme, bleed))
-                    .build(),
-                false => content,
+                    .build()
+            } else {
+                content
             }
         })
         .virtualize()
