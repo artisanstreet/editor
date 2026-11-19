@@ -151,6 +151,31 @@ pub enum ContinueError {
     Restore(#[from] forge_store::RestoreInputsError),
     #[error(transparent)]
     Request(#[from] forge_store::RequestContinueError),
+    #[error("check where thread {thread} runs")]
+    Route {
+        thread: ThreadId,
+        #[source]
+        source: RegistryFileError,
+    },
+    #[error("hand the Continue of thread {thread} to the generation running it")]
+    Peer {
+        thread: ThreadId,
+        #[source]
+        source: Box<PeerError>,
+    },
+}
+
+impl ContinueError {
+    #[must_use]
+    pub(crate) const fn class(&self) -> ErrorClass {
+        match self {
+            Self::Refused { .. } => ErrorClass::Conflict,
+            Self::Peer { source, .. } => source.class(),
+            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) | Self::Route { .. } => {
+                ErrorClass::Internal
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

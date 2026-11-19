@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -32,6 +32,9 @@ pub enum Command {
         answer: Answer,
     },
     Cancel {
+        thread: ThreadId,
+    },
+    Continue {
         thread: ThreadId,
     },
     Update {
@@ -60,6 +63,7 @@ impl Command {
             Self::Accept { .. } => "accept",
             Self::Answer { .. } => "answer",
             Self::Cancel { .. } => "cancel",
+            Self::Continue { .. } => "continue",
             Self::Update { .. } => "update",
             Self::ClearGoal { .. } => "clear_goal",
             Self::EditorReply { .. } => "editor_reply",
@@ -255,6 +259,8 @@ pub enum ControlError {
     #[error(transparent)]
     Cancel(Box<crate::CancelError>),
     #[error(transparent)]
+    Continue(Box<crate::ContinueError>),
+    #[error(transparent)]
     Update(Box<crate::UpdateError>),
     #[error(transparent)]
     ClearGoal(Box<crate::ClearGoalError>),
@@ -275,6 +281,7 @@ impl ControlError {
             Self::Accept(error) => error.class(),
             Self::Answer(error) => error.class(),
             Self::Cancel(error) => error.class(),
+            Self::Continue(error) => error.class(),
             Self::Update(error) => error.class(),
             Self::ClearGoal(error) => error.class(),
             Self::Unmanaged | Self::Activate(_) | Self::Encode { .. } | Self::Lifecycle { .. } => {
@@ -380,6 +387,12 @@ impl crate::Hub {
                 self.cancel_local(&thread)
                     .await
                     .map_err(|error| ControlError::Cancel(Box::new(error)))?;
+                Ok(Value::Null)
+            }
+            Command::Continue { thread } => {
+                self.continue_here(&thread)
+                    .await
+                    .map_err(|error| ControlError::Continue(Box::new(error)))?;
                 Ok(Value::Null)
             }
             Command::Update { thread, update } => encode(

@@ -117,6 +117,7 @@ async fn control(
         | Command::Accept { .. }
         | Command::Answer { .. }
         | Command::Cancel { .. }
+        | Command::Continue { .. }
         | Command::Update { .. }
         | Command::ClearGoal { .. }
         | Command::EditorReply { .. }

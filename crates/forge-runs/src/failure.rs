@@ -499,7 +499,10 @@ impl ContinueError {
                     thread: thread.clone(),
                 },
             }),
-            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) => Failure::Internal,
+            Self::Peer { source, .. } => source.wire(),
+            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) | Self::Route { .. } => {
+                Failure::Internal
+            }
         }
     }
 }
@@ -574,6 +577,7 @@ impl ControlError {
             Self::Accept(error) => error.wire(),
             Self::Answer(error) => error.wire(),
             Self::Cancel(error) => error.wire(),
+            Self::Continue(error) => error.wire(),
             Self::Update(error) => error.wire(),
             Self::ClearGoal(error) => error.wire(),
             Self::Unmanaged | Self::Activate(_) | Self::Encode { .. } | Self::Lifecycle { .. } => {

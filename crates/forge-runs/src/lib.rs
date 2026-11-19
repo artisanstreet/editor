@@ -566,6 +566,30 @@ impl Hub {
     }
 
     pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let route = self
+            .route(thread_id)
+            .map_err(|source| ContinueError::Route {
+                thread: thread_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
+            runtime::request(
+                &member,
+                &runtime::Command::Continue {
+                    thread: thread_id.clone(),
+                },
+            )
+            .await
+            .map_err(|source| ContinueError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            })?;
+            return Ok(());
+        }
+        self.continue_here(thread_id).await
+    }
+
+    async fn continue_here(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
         let refused = |reason| ContinueError::Refused {
             thread: thread_id.clone(),
             reason,

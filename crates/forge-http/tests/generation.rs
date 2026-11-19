@@ -16,15 +16,18 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Notify;
 
 struct Script {
     name: &'static str,
     starts: Arc<AtomicUsize>,
+    release: Arc<Notify>,
 }
 impl Harness for Script {
     fn run(&self, turn: Turn, mut io: RunIo) -> futures::future::BoxFuture<'static, Outcome> {
         let name = self.name;
         let starts = Arc::clone(&self.starts);
+        let release = Arc::clone(&self.release);
         Box::pin(async move {
             starts.fetch_add(1, Ordering::SeqCst);
             io.emit(EngineEvent::Session {
@@ -33,6 +36,11 @@ impl Harness for Script {
             .await;
             io.emit(EngineEvent::InputAccepted { id: turn.input.id })
                 .await;
+            if turn.input.text == "linger" {
+                io.cancel.cancelled().await;
+                release.notified().await;
+                return Outcome::cancelled();
+            }
             if turn.input.text == "hold" {
                 io.emit(EngineEvent::Item {
                     key: "question".into(),
@@ -105,21 +113,18 @@ fn message(text: &str) -> SendMessage {
 }
 
 async fn wait(store: &Store, thread: &ThreadId, status: RunStatus) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if store
+    test_support::wait::eventually(
+        "the thread's latest run",
+        Duration::from_secs(10),
+        || async {
+            store
                 .latest_run(thread)
                 .await
                 .unwrap()
                 .is_some_and(|run| run.status() == status)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+        },
+    )
+    .await;
 }
 
 async fn generation(
@@ -127,8 +132,13 @@ async fn generation(
     registry: &Registry,
     name: &'static str,
     starts: Arc<AtomicUsize>,
+    release: Arc<Notify>,
 ) -> (Hub, std::net::SocketAddr) {
-    let harness: Arc<dyn Harness> = Arc::new(Script { name, starts });
+    let harness: Arc<dyn Harness> = Arc::new(Script {
+        name,
+        starts,
+        release,
+    });
     let server = start_generation_with_harness(
         ServeConfig {
             data_dir: data.to_path_buf(),
@@ -188,7 +198,14 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     let registry = Registry::open(data).unwrap();
     let old_starts = Arc::new(AtomicUsize::new(0));
     let new_starts = Arc::new(AtomicUsize::new(0));
-    let (old, _) = generation(data, &registry, "old", Arc::clone(&old_starts)).await;
+    let (old, _) = generation(
+        data,
+        &registry,
+        "old",
+        Arc::clone(&old_starts),
+        Arc::default(),
+    )
+    .await;
     let old_member = old.generation().unwrap().member().clone();
     runtime::request(&old_member, &Command::Activate)
         .await
@@ -199,7 +216,14 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
         .unwrap();
     wait(&store, &threads[0], RunStatus::Running).await;
     let original = store.latest_run(&threads[0]).await.unwrap().unwrap();
-    let (replacement, _) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
+    let (replacement, _) = generation(
+        data,
+        &registry,
+        "new",
+        Arc::clone(&new_starts),
+        Arc::default(),
+    )
+    .await;
     let new_member = replacement.generation().unwrap().member().clone();
     let mut events = replacement.store().subscribe();
     assert_eq!(
@@ -242,17 +266,7 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10),async {loop {if matches!(events.recv().await.unwrap().event,artisan_api::Event::Live {text,..} if text=="old:steered") {break;}}}).await.unwrap();
-    let question = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let items = store.items_awaiting_user().await.unwrap();
-            if let Some(item) = items.first() {
-                break item.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let question = awaiting_question(&store).await;
     replacement
         .answer(
             &question.id,
@@ -271,13 +285,12 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     );
     replacement.cancel(&threads[0]).await.unwrap();
     wait(&store, &threads[0], RunStatus::Cancelled).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while old.local_active_count() != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "the old generation to let go of its threads",
+        Duration::from_secs(10),
+        || async { old.local_active_count() == 0 },
+    )
+    .await;
     assert_eq!(
         runtime::request(&old_member, &Command::Retire)
             .await
@@ -296,6 +309,7 @@ struct Overlap {
     new_address: std::net::SocketAddr,
     new_member: runtime::Member,
     new_starts: Arc<AtomicUsize>,
+    release: Arc<Notify>,
 }
 
 async fn overlap(held: &[&str]) -> Overlap {
@@ -334,7 +348,15 @@ async fn overlap(held: &[&str]) -> Overlap {
         );
     }
     let registry = Registry::open(data).unwrap();
-    let (old, _) = generation(data, &registry, "old", Arc::new(AtomicUsize::new(0))).await;
+    let release = Arc::new(Notify::new());
+    let (old, _) = generation(
+        data,
+        &registry,
+        "old",
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&release),
+    )
+    .await;
     let old_member = old.generation().unwrap().member().clone();
     runtime::request(&old_member, &Command::Activate)
         .await
@@ -345,7 +367,14 @@ async fn overlap(held: &[&str]) -> Overlap {
         wait(&store, thread, RunStatus::Running).await;
     }
     let new_starts = Arc::new(AtomicUsize::new(0));
-    let (new, new_address) = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
+    let (new, new_address) = generation(
+        data,
+        &registry,
+        "new",
+        Arc::clone(&new_starts),
+        Arc::default(),
+    )
+    .await;
     let new_member = new.generation().unwrap().member().clone();
     runtime::request(&new_member, &Command::Activate)
         .await
@@ -360,30 +389,25 @@ async fn overlap(held: &[&str]) -> Overlap {
         new_address,
         new_member,
         new_starts,
+        release,
     }
 }
 
 async fn awaiting_question(store: &Store) -> artisan_api::PendingItem {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(item) = store.items_awaiting_user().await.unwrap().first() {
-                break item.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    test_support::wait::eventually("a question", Duration::from_secs(10), || async {
+        !store.items_awaiting_user().await.unwrap().is_empty()
     })
-    .await
-    .unwrap()
+    .await;
+    store.items_awaiting_user().await.unwrap().remove(0)
 }
 
 async fn overlapping(hub: &Hub) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !hub.generation().unwrap().overlapping() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "the generations to overlap",
+        Duration::from_secs(10),
+        || async { hub.generation().unwrap().overlapping() },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -516,6 +540,45 @@ async fn generations_cancelling_each_others_threads_at_once_both_finish() {
     on_new.unwrap();
     wait(&overlap.store, &overlap.threads[0], RunStatus::Cancelled).await;
     wait(&overlap.store, &overlap.threads[1], RunStatus::Cancelled).await;
+    runtime::request(&overlap.new_member, &Command::Stop)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_pressed_on_the_new_generation_reaches_the_one_winding_down_the_stop() {
+    let overlap = overlap(&["linger"]).await;
+    overlapping(&overlap.new).await;
+    overlap.new.cancel(&overlap.threads[0]).await.unwrap();
+    wait(&overlap.store, &overlap.threads[0], RunStatus::Cancelled).await;
+    assert!(
+        overlap.old.is_live(&overlap.threads[0]),
+        "the old generation still winds the stop down"
+    );
+
+    overlap
+        .new
+        .continue_turn(&overlap.threads[0])
+        .await
+        .expect("Continue goes to the generation that owns the thread");
+    overlap.release.notify_one();
+
+    test_support::wait::eventually(
+        "the stopped turn to carry on",
+        Duration::from_secs(10),
+        || async {
+            overlap
+                .store
+                .latest_run(&overlap.threads[0])
+                .await
+                .unwrap()
+                .is_some_and(|run| {
+                    run.status() == RunStatus::Done
+                        && run.continuation == Some(artisan_api::Continuation::Requested)
+                })
+        },
+    )
+    .await;
     runtime::request(&overlap.new_member, &Command::Stop)
         .await
         .unwrap();
