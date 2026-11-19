@@ -156,6 +156,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
         fixture.dir.path().to_path_buf(),
         Arc::new(move |_| Arc::clone(&harness)),
     );
+    let mut changes = restarted.store().watch_coordination();
     tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let current = restarted
@@ -173,7 +174,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
             ) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            changes.changed().await.unwrap();
         }
     })
     .await

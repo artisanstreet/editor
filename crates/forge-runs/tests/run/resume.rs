@@ -39,21 +39,23 @@ impl Harness for FakeCodex {
 }
 
 async fn agent_settles(fixture: &Fixture, agent: &ItemId) -> AgentInfo {
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        loop {
-            let info = fixture
-                .hub
-                .agent_status(&fixture.thread_id, agent.as_str())
-                .await
-                .unwrap();
-            if info.state.is_settled() && !fixture.hub.is_live(&info.thread) {
-                return info;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the agent settles")
+    let status = || async {
+        fixture
+            .hub
+            .agent_status(&fixture.thread_id, agent.as_str())
+            .await
+            .unwrap()
+    };
+    test_support::wait::eventually(
+        "the agent settles",
+        test_support::wait::LIVENESS,
+        || async {
+            let info = status().await;
+            info.state.is_settled() && !fixture.hub.is_live(&info.thread)
+        },
+    )
+    .await;
+    status().await
 }
 
 #[tokio::test(flavor = "multi_thread")]
