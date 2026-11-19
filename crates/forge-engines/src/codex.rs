@@ -66,6 +66,8 @@ pub enum RunError {
         #[source]
         source: RequestError,
     },
+    #[error("attach to a fresh Codex app-server after the cached one ended")]
+    Reattach(#[source] AttachError),
     #[error("Codex exited during {during}{}", if ended.is_empty() { String::new() } else { format!(": {ended}") })]
     Exited { during: &'static str, ended: String },
     #[error("read Codex output during {during}")]
@@ -289,7 +291,17 @@ enum Step {
 impl Run {
     async fn run(&mut self, turn: &Turn) -> Result<Outcome, RunError> {
         let (method, params) = thread_params(turn, ProjectGuard::of(turn));
-        match self.call(method, params).await {
+        let mut opened = self.call(method, params.clone()).await;
+        if let Err(RequestError::Exited { .. } | RequestError::Write(_)) = opened {
+            tracing::info!(
+                thread = %turn.thread_id,
+                "the Codex app-server ended before it opened the session; opening it on a fresh server"
+            );
+            self.conn = server::attach(turn).await.map_err(RunError::Reattach)?;
+            self.decoder = Decoder::default();
+            opened = self.call(method, params).await;
+        }
+        match opened {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(Outcome::Cancelled),
             Err(RequestError::Refused(source))

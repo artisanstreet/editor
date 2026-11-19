@@ -188,6 +188,22 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
 }
 
 #[tokio::test]
+async fn a_cached_app_server_that_exits_before_opening_the_session_hands_the_turn_to_a_fresh_one() {
+    let fixture = Fixture::new();
+    let (first, events) = run(fixture.turn("then exit on resume", None)).await;
+    assert_eq!(first.status(), artisan_api::RunStatus::Done, "{first:?}");
+    let thread = session(&events);
+    let (second, events) = run(fixture.turn("again", Some(&thread))).await;
+    assert_eq!(second.status(), artisan_api::RunStatus::Done, "{second:?}");
+    let seen = format!("{events:?}");
+    assert!(
+        seen.contains(&format!("reply on {thread} to again")),
+        "{seen}"
+    );
+    assert_eq!(fixture.spawns(), 2, "the turn moved to a fresh app-server");
+}
+
+#[tokio::test]
 async fn a_changed_codex_config_starts_a_fresh_app_server() {
     let fixture = Fixture::new();
     let (first, events) = run(fixture.turn("hello", None)).await;

@@ -66,6 +66,7 @@ struct AppServer {
     turn: String,
     asked: Option<Asked>,
     answered: bool,
+    exit_on_resume: bool,
 }
 
 pub(crate) fn app_server() -> ExitCode {
@@ -85,6 +86,7 @@ pub(crate) fn app_server() -> ExitCode {
         turn: String::new(),
         asked: None,
         answered: false,
+        exit_on_resume: false,
     };
     while let Some(line) = read_line() {
         server.handle(&line);
@@ -110,6 +112,7 @@ impl AppServer {
                 let thread = format!("thread-{}-{}", std::process::id(), self.threads);
                 self.load(id, &thread);
             }
+            "thread/resume" if self.exit_on_resume => std::process::exit(0),
             "thread/resume" => self.load(id, &thread),
             "thread/unsubscribe" => self.release(id, &thread),
             "thread/name/set" => {
@@ -202,6 +205,7 @@ impl AppServer {
             .unwrap_or_default()
             .to_owned();
         respond(id, &json!({ "turn": { "id": turn } }));
+        self.exit_on_resume = text == "then exit on resume";
         match text.as_str() {
             "jam" => std::thread::sleep(Duration::from_secs(30)),
             "flood" => {
