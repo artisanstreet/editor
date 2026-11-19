@@ -176,46 +176,55 @@ fn write_private_if_changed(
     artisan_paths::private::write_file(path, bytes)
 }
 
-pub(crate) struct GatewayFile {
-    path: PathBuf,
+pub(crate) struct GatewayConfig {
+    inline: String,
+    env: Vec<(String, String)>,
 }
 
-impl GatewayFile {
-    pub(crate) fn write(
-        home: &Path,
-        servers: &[(String, String)],
-    ) -> Result<Self, artisan_paths::private::PrivateFileError> {
-        static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = home
-            .join(".artisan/gateway")
-            .join(format!("{}-{launch}.json", std::process::id()));
-        let servers: Map<String, Value> = servers
+impl GatewayConfig {
+    pub(crate) fn for_claude(servers: &[(String, String)]) -> Self {
+        let variable = |name: &str| -> String {
+            let name: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("ARTISAN_GATEWAY_{name}")
+        };
+        let config: Map<String, Value> = servers
             .iter()
-            .map(|(name, url)| (name.clone(), json!({ "type": "http", "url": url })))
+            .map(|(name, _)| {
+                let url = format!("${{{}}}", variable(name));
+                (name.clone(), json!({ "type": "http", "url": url }))
+            })
             .collect();
-        let config = json!({ "mcpServers": servers }).to_string();
-        artisan_paths::private::write_file(&path, config.as_bytes())?;
-        Ok(Self { path })
+        Self {
+            inline: json!({ "mcpServers": config }).to_string(),
+            env: servers
+                .iter()
+                .map(|(name, url)| (variable(name), url.clone()))
+                .collect(),
+        }
     }
 
     pub(crate) fn claude_args(&self, args: &[String]) -> Vec<String> {
-        let path = self.path.to_string_lossy().into_owned();
         let mut args = args.to_vec();
         match args.iter().position(|arg| arg == "--mcp-config") {
-            Some(flag) => args.insert((flag + 2).min(args.len()), path),
-            None => args.extend(["--mcp-config".to_owned(), path]),
+            Some(flag) => args.insert((flag + 2).min(args.len()), self.inline.clone()),
+            None => args.extend(["--mcp-config".to_owned(), self.inline.clone()]),
         }
         args
     }
-}
 
-impl Drop for GatewayFile {
-    fn drop(&mut self) {
-        if let Err(failure) = remove_file_if_present(&self.path) {
-            let error: &dyn std::error::Error = &failure;
-            tracing::warn!(path = %self.path.display(), error, "couldn't remove a finished launch's gateway file");
-        }
+    pub(crate) fn env(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 }
 

@@ -14,13 +14,6 @@ const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    #[error("write the gateway MCP config for {engine} thread {thread}")]
-    Gateway {
-        engine: EngineId,
-        thread: ThreadId,
-        #[source]
-        source: artisan_paths::private::PrivateFileError,
-    },
     #[error("sandbox {engine} thread {thread}")]
     Sandbox {
         engine: EngineId,
@@ -127,7 +120,6 @@ pub struct EngineProcess {
     oversized: bool,
     trace: Trace,
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
-    gateway: Option<crate::customise::GatewayFile>,
 }
 
 pub fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
@@ -147,13 +139,7 @@ pub(crate) fn spawn_in(
 ) -> Result<EngineProcess, SpawnError> {
     let gateway = match turn.engine {
         EngineId::Claude if !turn.launch.gateway_mcp.is_empty() => Some(
-            crate::customise::GatewayFile::write(&turn.home, &turn.launch.gateway_mcp).map_err(
-                |source| SpawnError::Gateway {
-                    engine: turn.engine,
-                    thread: turn.thread_id.clone(),
-                    source,
-                },
-            )?,
+            crate::customise::GatewayConfig::for_claude(&turn.launch.gateway_mcp),
         ),
         EngineId::Claude | EngineId::Codex | EngineId::OpenCode => None,
     };
@@ -167,6 +153,11 @@ pub(crate) fn spawn_in(
         .args(&launch_args)
         .current_dir(cwd)
         .envs(turn.launch.env.iter().map(|(key, value)| (key, value)))
+        .envs(
+            gateway
+                .iter()
+                .flat_map(crate::customise::GatewayConfig::env),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -190,9 +181,7 @@ pub(crate) fn spawn_in(
             thread: turn.thread_id.clone(),
             source: Box::new(source),
         })?;
-    let mut process = spawn_command(command, trace, sandbox)?;
-    process.gateway = gateway;
-    Ok(process)
+    spawn_command(command, trace, sandbox)
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError> {
@@ -331,7 +320,6 @@ fn spawn_command(
         oversized: false,
         trace,
         stderr_task,
-        gateway: None,
     })
 }
 
