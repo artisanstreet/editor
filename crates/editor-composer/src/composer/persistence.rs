@@ -300,7 +300,7 @@ impl DraftSessions {
                     "recovered a draft kept locally at shutdown"
                 );
                 state.recover(
-                    spooled.body,
+                    spooled.draft,
                     spooled
                         .images
                         .into_iter()
@@ -374,11 +374,11 @@ impl DraftHandle {
     }
 
     fn keep_locally(&self) -> bool {
-        let (pending, scope, body, images) = self.read(|state| {
+        let (pending, scope, draft, images) = self.read(|state| {
             (
                 state.pending(),
                 state.scope().to_owned(),
-                state.body().clone(),
+                state.kept(),
                 state.unacknowledged_images(),
             )
         });
@@ -405,7 +405,7 @@ impl DraftHandle {
             })
             .collect::<Vec<_>>();
         let kept = spool
-            .keep(&self.0.host, &scope, &body, &images)
+            .keep(&self.0.host, &scope, draft, &images)
             .map_err(KeepLocallyError::Spool);
         match kept {
             Ok(()) => {

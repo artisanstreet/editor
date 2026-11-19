@@ -5,11 +5,12 @@ use artisan_api::{
     ResourceFailure, SendMessage, ThreadId,
 };
 use editor_core::client::CallError;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
 pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(400);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Submission {
     pub message: SendMessage,
     pub create: Option<CreateThread>,
@@ -128,9 +129,30 @@ impl From<DraftSnapshot> for Snapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Base {
+    revision: u64,
+    written: Option<Box<DraftBody>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct UnsentPost {
+    submission: Submission,
+    sent: DraftBody,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct KeptDraft {
+    pub(crate) body: DraftBody,
+    #[serde(default)]
+    pub(crate) base: Option<Base>,
+    #[serde(default)]
+    pub(crate) post: Option<UnsentPost>,
+}
+
 #[derive(Debug)]
 enum Remote {
-    Unloaded,
+    Unloaded(Option<Base>),
     Loaded(Snapshot),
     Ambiguous {
         snapshot: Snapshot,
@@ -163,6 +185,7 @@ enum Stage {
 #[derive(Debug)]
 struct Outgoing {
     request: Submission,
+    sent: DraftBody,
     stage: Stage,
     edited: u64,
 }
@@ -296,7 +319,7 @@ impl Draft {
 
     fn snapshot(&self) -> Option<&Snapshot> {
         match &self.remote {
-            Remote::Unloaded => None,
+            Remote::Unloaded(_) => None,
             Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => Some(snapshot),
         }
     }
@@ -424,7 +447,7 @@ impl Draft {
             .outgoing()
             .is_some_and(|outgoing| outgoing.stage == Stage::Queued && saved >= outgoing.edited);
         match &self.remote {
-            Remote::Unloaded | Remote::Ambiguous { .. } => Some(Planned::Load),
+            Remote::Unloaded(_) | Remote::Ambiguous { .. } => Some(Planned::Load),
             Remote::Loaded(_) if self.edits.unsaved() && !posting => Some(Planned::Write),
             Remote::Loaded(_) => posting.then_some(Planned::Post),
         }
@@ -445,7 +468,7 @@ impl DraftSession {
             scope,
             state: State::Open(Box::new(Draft {
                 body: DraftBody::default(),
-                remote: Remote::Unloaded,
+                remote: Remote::Unloaded(None),
                 edits: Edits {
                     latest: 0,
                     saved: 0,
@@ -484,12 +507,12 @@ impl DraftSession {
 
     pub fn is_loaded(&self) -> bool {
         self.draft()
-            .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded))
+            .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded(_)))
     }
 
     pub(crate) fn presentable(&self) -> bool {
         self.draft().is_some_and(|draft| {
-            !matches!(draft.remote, Remote::Unloaded) || !draft.body.is_empty()
+            !matches!(draft.remote, Remote::Unloaded(_)) || !draft.body.is_empty()
         })
     }
 
@@ -547,20 +570,69 @@ impl DraftSession {
         })
     }
 
-    pub(crate) fn recover(&mut self, body: DraftBody, images: Vec<PendingUpload>) {
+    pub(crate) fn recover(&mut self, recovery: KeptDraft, images: Vec<PendingUpload>) {
         let State::Open(draft) = &mut self.state else {
             unreachable!(
                 "invariant: draft {} is recovered as it opens, before it can be removed",
                 self.scope
             );
         };
-        if !body.is_empty() {
-            draft.body = body;
+        draft.remote = Remote::Unloaded(recovery.base);
+        if let Some(post) = recovery.post {
+            draft.body = post.sent.clone();
+            draft.send = Send::Outgoing(Box::new(Outgoing {
+                request: post.submission,
+                sent: post.sent,
+                stage: Stage::Queued,
+                edited: draft.edits.latest,
+            }));
+        }
+        if recovery.body != draft.body {
+            draft.body = recovery.body;
             draft.edits.edit();
         }
         for image in images {
             draft.adopt(image);
         }
+    }
+
+    pub(crate) fn kept(&self) -> KeptDraft {
+        KeptDraft {
+            body: self.body().clone(),
+            base: self.base(),
+            post: self.unsent_post(),
+        }
+    }
+
+    fn base(&self) -> Option<Base> {
+        self.draft().and_then(|draft| match &draft.remote {
+            Remote::Unloaded(base) => base.clone(),
+            Remote::Loaded(snapshot) => Some(Base {
+                revision: snapshot.revision,
+                written: None,
+            }),
+            Remote::Ambiguous { snapshot, written } => Some(Base {
+                revision: snapshot.revision,
+                written: Some(written.clone()),
+            }),
+        })
+    }
+
+    fn unsent_post(&self) -> Option<UnsentPost> {
+        self.draft()
+            .and_then(Draft::outgoing)
+            .filter(|outgoing| outgoing.stage != Stage::Released)
+            .map(|outgoing| UnsentPost {
+                submission: outgoing.request.clone(),
+                sent: outgoing.sent.clone(),
+            })
+    }
+
+    pub(crate) fn unsent(&self) -> Option<&DraftBody> {
+        self.draft()
+            .and_then(Draft::outgoing)
+            .filter(|outgoing| outgoing.stage != Stage::Released)
+            .map(|outgoing| &outgoing.sent)
     }
 
     pub(crate) fn adopt(&mut self, image: PendingUpload) {
@@ -688,6 +760,7 @@ impl DraftSession {
             Send::Idle | Send::Accepted(_) => {
                 draft.send = Send::Outgoing(Box::new(Outgoing {
                     request: submission,
+                    sent: draft.body.clone(),
                     stage: Stage::Queued,
                     edited: draft.edits.latest,
                 }));
@@ -760,7 +833,7 @@ impl DraftSession {
                     Operation::Post(Box::new(outgoing.request.clone())),
                 )
             }
-            (Planned::Write | Planned::Post, Remote::Unloaded | Remote::Ambiguous { .. }, _)
+            (Planned::Write | Planned::Post, Remote::Unloaded(_) | Remote::Ambiguous { .. }, _)
             | (Planned::Post, Remote::Loaded(_), Send::Idle | Send::Accepted(_)) => {
                 unreachable!(
                     "invariant: draft {} plans writes and posts only against a loaded draft, and posts only an outgoing message",
@@ -781,7 +854,13 @@ impl DraftSession {
             Ok(snapshot) => {
                 let snapshot = Snapshot::from(snapshot);
                 let (landed, unchanged) = match &draft.remote {
-                    Remote::Unloaded => (false, false),
+                    Remote::Unloaded(None) => (false, false),
+                    Remote::Unloaded(Some(base)) => (
+                        base.written
+                            .as_ref()
+                            .is_some_and(|written| snapshot.body.matches(written)),
+                        snapshot.revision == base.revision,
+                    ),
                     Remote::Loaded(previous) => (false, snapshot.revision == previous.revision),
                     Remote::Ambiguous {
                         snapshot: previous,
@@ -839,9 +918,9 @@ impl DraftSession {
                 }
             }
             Err(source) => {
-                let snapshot = match std::mem::replace(&mut draft.remote, Remote::Unloaded) {
+                let snapshot = match std::mem::replace(&mut draft.remote, Remote::Unloaded(None)) {
                     Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => snapshot,
-                    Remote::Unloaded => {
+                    Remote::Unloaded(_) => {
                         unreachable!("invariant: draft {} wrote before it loaded", self.scope)
                     }
                 };
@@ -873,7 +952,7 @@ impl DraftSession {
                         self.scope
                     );
                 };
-                draft.remote = Remote::Unloaded;
+                draft.remote = Remote::Unloaded(None);
                 draft.requeue_waiting();
                 if outgoing.edited == draft.edits.latest {
                     draft.body = DraftBody::default();

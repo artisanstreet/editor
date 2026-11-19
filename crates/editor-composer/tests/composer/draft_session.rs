@@ -168,3 +168,41 @@ fn an_image_forge_refuses_for_good_is_handed_back_without_holding_up_a_queued_se
     assert!(state.take_lost_images().is_empty());
     assert!(!state.pending());
 }
+
+#[test]
+fn a_kept_draft_whose_last_write_landed_while_closing_is_not_taken_for_another_clients() {
+    let mut state = DraftSession::new("new".into());
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
+    state.loaded(Ok(DraftSnapshot {
+        revision: 1,
+        body: json!({"text": "first"}),
+    }));
+    state.queue(typed("second"));
+    let Some(Operation::Write { body, edited, .. }) = state.next_operation() else {
+        panic!("expected the typed draft to be written");
+    };
+    state.written(&body, edited, Err(refused(Failure::Internal)));
+    state.queue(typed("second, then more"));
+
+    let mut reopened = DraftSession::new("new".into());
+    reopened.recover(state.kept(), Vec::new());
+    assert!(matches!(reopened.next_operation(), Some(Operation::Load)));
+    reopened.loaded(Ok(DraftSnapshot {
+        revision: 2,
+        body: json!({"text": "second"}),
+    }));
+    assert!(
+        !reopened.conflict(),
+        "the draft Forge holds is the write this client sent before closing"
+    );
+    let Some(Operation::Write {
+        expected_revision,
+        body,
+        ..
+    }) = reopened.next_operation()
+    else {
+        panic!("expected the kept draft to be written");
+    };
+    assert_eq!(expected_revision, 2);
+    assert_eq!(*body, typed("second, then more"));
+}

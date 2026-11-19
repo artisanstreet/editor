@@ -725,15 +725,24 @@ impl Composer {
         };
         let events = session.drain_events();
         let lost = session.take_lost_images();
-        let (presentable, sending, failed, body, unreadable) = session.read(|state| {
+        let (presentable, sending, failed, body, unreadable, unsent) = session.read(|state| {
             (
                 state.presentable(),
                 state.sending(),
                 state.send_failed(),
                 state.body().clone(),
                 state.unreadable().map(ToString::to_string),
+                state.unsent().cloned(),
             )
         });
+        let unsent = match (unsent, &self.outbox) {
+            (Some(sent), Outbox::Idle) => {
+                self.outbox = Outbox::InFlight(Box::new(sent));
+                true
+            }
+            (Some(_), Outbox::InFlight(_) | Outbox::Restored) => true,
+            (None, Outbox::Idle | Outbox::InFlight(_) | Outbox::Restored) => false,
+        };
         for event in &events {
             match event {
                 SessionEvent::Accepted { .. } => {
@@ -780,7 +789,7 @@ impl Composer {
         self.editor
             .borrow_mut()
             .set_disabled(holding || self.questionnaire.sending.is_some());
-        if presentable && self.restore_revision.take() == Some(self.edit_revision) {
+        if presentable && !unsent && self.restore_revision.take() == Some(self.edit_revision) {
             if let Some(error) = unreadable {
                 self.notice = Some(format!("Couldn't read this draft: {error}"));
             }

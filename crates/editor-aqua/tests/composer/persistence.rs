@@ -1062,6 +1062,195 @@ fn an_image_forge_refuses_comes_back_as_a_failed_image_and_the_draft_keeps_savin
     });
 }
 
+async fn answer_empty_draft(listener: &TcpListener, acceptor: &TlsAcceptor, revision: u64) {
+    let (mut socket, route, _) = composer_request(listener, acceptor).await;
+    assert!(route.starts_with("GET /drafts/"), "{route}");
+    respond(&mut socket, json!({"revision": revision, "body": null})).await;
+}
+
+fn accepted_message(id: &str, text: &str) -> Value {
+    json!({"id": id, "thread_id": "thread", "position": 1, "seq": 1, "run_id": null, "parent_id": null, "status": "done", "created_at": 0, "updated_at": 0, "kind": {"type": "user_message", "text": text}})
+}
+
+#[test]
+fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_draft() {
+    use artisan_api::{ItemId, SendMessage, ThreadId};
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::{DraftSession, Submission};
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_draft",
+    ) {
+        return;
+    }
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "sending");
+        let instance = core.host(&host).unwrap().instance();
+        let client = core.host(&host).unwrap().client.clone();
+        let thread = ThreadId::from("thread");
+        let target = ComposerTarget::Thread {
+            host: host.clone(),
+            thread: thread.clone(),
+        };
+        let scope = target.scope();
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(host.clone(), instance, scope.clone(), client)
+            .unwrap();
+        answer_empty_draft(&listener, &acceptor, 0).await;
+        wait_for_session(&lease, DraftSession::is_loaded).await;
+        lease.queue(typed("send me"));
+        lease.submit(Submission {
+            thread: thread.clone(),
+            create: None,
+            message: SendMessage {
+                id: ItemId::from("message"),
+                text: "send me".into(),
+                images: Vec::new(),
+                config: None,
+                draft: None,
+            },
+        });
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("PUT /drafts/"), "{route}");
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        let (unanswered, route, body) = composer_request(&listener, &acceptor).await;
+        assert_eq!(route, "POST /threads/thread/messages HTTP/1.1");
+        assert_eq!(body["id"], "message");
+        drop(lease);
+        drop(sessions);
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(unanswered);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        answer_empty_draft(&listener, &acceptor, 2).await;
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert_eq!(
+            route, "POST /threads/thread/messages HTTP/1.1",
+            "the send left unanswered is finished rather than written back as a draft"
+        );
+        assert_eq!(
+            body["id"], "message",
+            "it is the same message, so Forge does not take it twice"
+        );
+        composer.sync(&core);
+        assert_eq!(
+            composer.editor.borrow().text(),
+            "",
+            "the message being sent is not offered as a draft"
+        );
+        respond(&mut socket, accepted_message("message", "send me")).await;
+        drop(socket);
+        answer_empty_draft(&listener, &acceptor, 2).await;
+        wait_for_session(composer.session.as_ref().unwrap(), |state| {
+            state.is_loaded() && !state.pending()
+        })
+        .await;
+        composer.sync(&core);
+        assert_eq!(composer.editor.borrow().text(), "");
+        assert_eq!(spool.take(&host, &scope).unwrap(), None);
+    });
+}
+
+#[test]
+fn typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep() {
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep",
+    ) {
+        return;
+    }
+    let (directory, core, config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        lease.queue(typed("first"));
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(&lease, |state| !state.pending()).await;
+        lease.queue(typed("first, then more"));
+        let (offline, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        drop(lease);
+        drop(sessions);
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(offline);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client)
+            .unwrap();
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "GET /drafts/new HTTP/1.1");
+        respond(
+            &mut socket,
+            json!({"revision": 1, "body": {"text": "first"}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(&lease, DraftSession::is_loaded).await;
+        assert!(
+            !lease.read(DraftSession::conflict),
+            "the draft Forge holds is the one this client's edit started from"
+        );
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(
+            body,
+            json!({"expected_revision": 1, "body": {"text": "first, then more"}})
+        );
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 2, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(&lease, |state| !state.pending()).await;
+        assert_eq!(spool.take(&config.id, "new").unwrap(), None);
+    });
+}
+
 #[test]
 fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
     use editor_aqua::composer::draft_session::DraftSession;

@@ -1,4 +1,4 @@
-use super::draft_body::DraftBody;
+use super::draft_session::KeptDraft;
 use editor_core::{
     HostId,
     config_file::{self, ReadConfigError, WriteConfigError},
@@ -18,7 +18,7 @@ pub struct DraftSpool {
 
 #[derive(Debug, PartialEq)]
 pub struct SpooledDraft {
-    pub(crate) body: DraftBody,
+    pub(crate) draft: KeptDraft,
     pub(crate) images: Vec<Vec<u8>>,
 }
 
@@ -110,7 +110,8 @@ impl ImageDigest {
 struct Record {
     host: HostId,
     scope: String,
-    body: DraftBody,
+    #[serde(flatten)]
+    draft: KeptDraft,
     #[serde(default)]
     images: Vec<ImageDigest>,
 }
@@ -127,7 +128,7 @@ impl DraftSpool {
         &self,
         host: &HostId,
         scope: &str,
-        body: &DraftBody,
+        draft: KeptDraft,
         images: &[std::sync::Arc<[u8]>],
     ) -> Result<(), KeepSpooledDraftError> {
         std::fs::create_dir_all(&self.dir).map_err(|source| {
@@ -154,7 +155,7 @@ impl DraftSpool {
             &Record {
                 host: host.clone(),
                 scope: scope.to_owned(),
-                body: body.clone(),
+                draft,
                 images: digests,
             },
         )
@@ -200,7 +201,7 @@ impl DraftSpool {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(SpooledDraft {
-            body: record.body,
+            draft: record.draft,
             images,
         }))
     }
