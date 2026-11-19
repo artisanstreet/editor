@@ -46,11 +46,20 @@ pub enum ClaudeAiSignInError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenMenus {
+    pub(crate) font: bool,
+    pub(crate) streaming: bool,
+    pub(crate) retention: bool,
+}
+
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the Editor shell and other crates' tests drive the settings forms and editors directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct SettingsController {
     pub(crate) reported_prompt_dirty: bool,
-    pub(crate) reported_font_menu: bool,
-    pub(crate) reported_streaming_menu: bool,
-    pub(crate) reported_retention_menu: bool,
+    pub(crate) reported_menus: OpenMenus,
     pub mcp_editors: Vec<Rc<RefCell<Editor>>>,
     pub retention_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
     pub font_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
@@ -74,9 +83,7 @@ impl Default for SettingsController {
     fn default() -> Self {
         Self {
             reported_prompt_dirty: false,
-            reported_font_menu: false,
-            reported_streaming_menu: false,
-            reported_retention_menu: false,
+            reported_menus: OpenMenus::default(),
             mcp_editors: (0..6)
                 .map(|_| Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))))
                 .collect(),
@@ -99,7 +106,10 @@ impl Default for SettingsController {
             editor_setting_error: None,
             parked_prompts: HashMap::new(),
             setting_writes: SettingWrites::default(),
-            completion: OwnedDelivery::new(NonZeroUsize::new(64).unwrap()),
+            completion: OwnedDelivery::new(
+                NonZeroUsize::new(64)
+                    .expect("invariant: the settings delivery capacity is non-zero"),
+            ),
             tasks: Vec::new(),
             active_instance: None,
         }
@@ -113,27 +123,27 @@ impl SettingsController {
 
     pub fn sync_editors(&self, ui: &mut aqua::UiApp) {
         let mut editors = vec![
-            ("sign-in-email".to_owned(), self.sign_in.email.clone()),
+            ("sign-in-email".to_owned(), Rc::clone(&self.sign_in.email)),
             (
                 "sign-in-second-factor".to_owned(),
-                self.sign_in.second_factor.clone(),
+                Rc::clone(&self.sign_in.second_factor),
             ),
-            ("forges-code".to_owned(), self.forge_code.clone()),
+            ("forges-code".to_owned(), Rc::clone(&self.forge_code)),
             (
                 "settings-global-prompt-editor".to_owned(),
-                self.prompt_editor.clone(),
+                Rc::clone(&self.prompt_editor),
             ),
         ];
         editors.extend(
             self.mcp_editors
                 .iter()
                 .enumerate()
-                .map(|(index, editor)| (format!("settings-mcp-field-{index}"), editor.clone())),
+                .map(|(index, editor)| (format!("settings-mcp-field-{index}"), Rc::clone(editor))),
         );
         editors.extend(self.engines.login_codes.iter().map(|(engine, editor)| {
             (
                 format!("settings-engine-login-code-{engine}"),
-                editor.clone(),
+                Rc::clone(editor),
             )
         }));
         for (key, editor) in editors {
@@ -146,7 +156,7 @@ impl SettingsController {
     }
 
     pub fn sync(&mut self, core: &mut Core) {
-        let instance = core.active_host().map(|host| host.instance());
+        let instance = core.active_host().map(editor_core::HostData::instance);
         if self.active_instance != instance {
             self.active_instance = instance;
             self.park_prompt();
@@ -166,7 +176,11 @@ impl SettingsController {
         self.lock_mcp_fields();
         let page = match core.screen() {
             Screen::Settings(page) => *page,
-            _ => return,
+            Screen::Home
+            | Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Marketplace
+            | Screen::Usage => return,
         };
         if let SettingsPage::Engine(engine) = page.parent() {
             self.engines.prepare(engine);
@@ -257,19 +271,24 @@ impl SettingsController {
             }
             | editor_core::CoreEvent::HostsChanged
             | editor_core::CoreEvent::ScreenChanged => self.archive.invalidate(),
-            _ => {}
+            editor_core::CoreEvent::Host { .. }
+            | editor_core::CoreEvent::SettingsChanged
+            | editor_core::CoreEvent::AccessChanged
+            | editor_core::CoreEvent::McpSignInChanged
+            | editor_core::CoreEvent::OpenUrl(_)
+            | editor_core::CoreEvent::Account(_) => {}
         }
         self.sync(core);
     }
 
-    pub(crate) fn claim_forge(&mut self, core: &mut Core) {
-        let code = self.forge_code.borrow().text().to_owned();
-        core.account_mut().claim_code(&code);
+    pub(crate) fn claim_forge(&self, core: &mut Core) {
+        let forge_code = self.forge_code.borrow().text().to_owned();
+        core.account_mut().claim_code(&forge_code);
         self.forge_code.borrow_mut().set_text("");
     }
 
     pub(crate) fn unarchive(&mut self, core: &Core, thread: artisan_api::ThreadId) {
-        if core.active_host().map(|host| host.instance()) != self.active_instance
+        if core.active_host().map(editor_core::HostData::instance) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.archive.host.as_ref()
         {
             return;
@@ -296,8 +315,8 @@ impl SettingsController {
                     .await
                     .map(|_| ())
                     .map_err(|error| ::diagnostics::chain(&error));
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::Archive(request, result),
@@ -361,8 +380,8 @@ impl SettingsController {
                     .set_setting(request.target.key, &request.value)
                     .await
                     .map_err(|error| ::diagnostics::chain(&error));
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: request.target.host.clone(),
                         instance: request.target.instance,
                         result: Completion::Setting(request, result),
@@ -401,12 +420,19 @@ impl SettingsController {
 
     pub fn save_mcp(&mut self, core: &Core) {
         let fields = &mut self.extensions.fields;
-        fields.name = self.mcp_editors[0].borrow().text().to_owned();
-        fields.command = self.mcp_editors[1].borrow().text().to_owned();
-        fields.args = self.mcp_editors[2].borrow().text().to_owned();
-        fields.url = self.mcp_editors[3].borrow().text().to_owned();
-        fields.env = self.mcp_editors[4].borrow().text().to_owned();
-        fields.headers = self.mcp_editors[5].borrow().text().to_owned();
+        for (field, editor) in [
+            &mut fields.name,
+            &mut fields.command,
+            &mut fields.args,
+            &mut fields.url,
+            &mut fields.env,
+            &mut fields.headers,
+        ]
+        .into_iter()
+        .zip(&self.mcp_editors)
+        {
+            editor.borrow().text().clone_into(field);
+        }
         if !self.active_form_host(core) {
             return;
         }
@@ -437,7 +463,7 @@ impl SettingsController {
         drop(core.start_mcp_sign_in(&host, server, true));
     }
 
-    pub(crate) fn cancel_mcp_sign_in(&mut self, core: &mut Core, server: &str) {
+    pub(crate) fn cancel_mcp_sign_in(&self, core: &mut Core, server: &str) {
         if !self.active_form_host(core) {
             return;
         }
@@ -466,8 +492,8 @@ impl SettingsController {
                     })
                     .await
                     .map_err(|error| ::diagnostics::chain(&error));
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::McpSignOut(server, result),
@@ -478,7 +504,7 @@ impl SettingsController {
     }
 
     pub(crate) fn sign_in_claude_ai(&mut self, core: &Core) {
-        if core.active_host().map(|host| host.instance()) != self.active_instance {
+        if core.active_host().map(editor_core::HostData::instance) != self.active_instance {
             return;
         }
         let Some(request) = self.engines.begin(EngineId::Claude) else {
@@ -524,8 +550,8 @@ impl SettingsController {
                         diagnostics::chain(&error)
                     )
                 });
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::Engine(request, result),
@@ -551,8 +577,8 @@ impl SettingsController {
                     .await
                     .map(|_| ())
                     .map_err(|error| ::diagnostics::chain(&error));
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::Mcp(Box::new(request), result),
@@ -563,14 +589,24 @@ impl SettingsController {
     }
 
     pub(crate) fn engine_action(&mut self, core: &Core, engine: EngineId, action: EngineCommand) {
-        if core.active_host().map(|host| host.instance()) != self.active_instance
+        if core.active_host().map(editor_core::HostData::instance) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.engines.host.as_ref()
         {
             return;
         }
         let request = match action {
             EngineCommand::CancelLogin {} => self.engines.begin_cancel(engine),
-            _ => self.engines.begin(engine),
+            EngineCommand::Install {}
+            | EngineCommand::Update {}
+            | EngineCommand::Rollback {}
+            | EngineCommand::Use { .. }
+            | EngineCommand::Login {}
+            | EngineCommand::LoginCode { .. }
+            | EngineCommand::Logout {}
+            | EngineCommand::Refresh {}
+            | EngineCommand::Versions {}
+            | EngineCommand::ClaudeAiSignIn { .. }
+            | EngineCommand::ClaudeAiSignOut {} => self.engines.begin(engine),
         };
         let Some(request) = request else {
             return;
@@ -597,8 +633,8 @@ impl SettingsController {
                             ::diagnostics::chain(&error)
                         )
                     });
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::Engine(request, result),
@@ -617,15 +653,12 @@ impl SettingsController {
     }
 
     fn submit_prompt(&mut self, core: &Core, resolution: Option<artisan_api::ResolvePrompt>) {
-        if core.active_host().map(|host| host.instance()) != self.active_instance
+        if core.active_host().map(editor_core::HostData::instance) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.prompt.host.as_ref()
         {
             return;
         }
-        let Some(request) = self
-            .prompt
-            .save(&self.prompt_editor.borrow().text().to_owned())
-        else {
+        let Some(request) = self.prompt.save(self.prompt_editor.borrow().text()) else {
             return;
         };
         let Some(host) = core.host(&HostId(request.host.clone())) else {
@@ -643,8 +676,8 @@ impl SettingsController {
                     None => client.save_global_prompt(&request.save).await,
                 }
                 .map_err(|error| ::diagnostics::chain(&error));
-                let _ = sender
-                    .send(HostCompletion {
+                sender
+                    .offer(HostCompletion {
                         host: id,
                         instance,
                         result: Completion::Prompt(request, result),
@@ -655,7 +688,7 @@ impl SettingsController {
     }
 
     fn active_form_host(&self, core: &Core) -> bool {
-        core.active_host().map(|host| host.instance()) == self.active_instance
+        core.active_host().map(editor_core::HostData::instance) == self.active_instance
             && core.active_host().map(|host| &host.id.0) == self.extensions.host.as_ref()
     }
 
@@ -672,15 +705,11 @@ impl SettingsController {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn complete_setting_for_tests(
-        &mut self,
-        request: SettingRequest,
-        result: Result<(), String>,
-    ) {
+    pub fn complete_setting_for_tests(&self, request: SettingRequest, result: Result<(), String>) {
         let sender = self.completion.sender();
         runtime::runtime().block_on(async move {
-            let _ = sender
-                .send(HostCompletion {
+            sender
+                .offer(HostCompletion {
                     host: request.target.host.clone(),
                     instance: request.target.instance,
                     result: Completion::Setting(request, result),
@@ -731,15 +760,15 @@ impl SettingsController {
                     self.lock_mcp_fields();
                 }
                 Completion::McpSignOut(server, result) => {
-                    if self.extensions.host.as_deref() == Some(completion.host.0.as_str()) {
-                        if let Err(error) = result {
-                            self.extensions.error =
-                                Some(format!("Couldn't sign out of {server}: {error}"));
-                        }
+                    if self.extensions.host.as_deref() == Some(completion.host.0.as_str())
+                        && let Err(error) = result
+                    {
+                        self.extensions.error =
+                            Some(format!("Couldn't sign out of {server}: {error}"));
                     }
                 }
                 Completion::Engine(request, result) => {
-                    self.engines.complete(&request, result.err())
+                    self.engines.complete(&request, result.err());
                 }
                 Completion::Prompt(request, result) => {
                     if !self.prompt.accepts(&request) {
@@ -789,4 +818,13 @@ fn same_host_instance<I: PartialEq, T: PartialEq>(
     current: Option<(&I, T)>,
 ) -> bool {
     matches!((expected, current), (Some((expected_id, expected_instance)), Some((current_id, current_instance))) if expected_id == current_id && expected_instance == current_instance)
+}
+
+impl std::fmt::Debug for SettingsController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsController")
+            .field("active_instance", &self.active_instance)
+            .field("tasks", &self.tasks.len())
+            .finish_non_exhaustive()
+    }
 }

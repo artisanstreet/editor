@@ -22,10 +22,13 @@ use editor_ui::{
 
 const AGE_WIDTH: f32 = 112.0;
 const ACTION_WIDTH: f32 = 96.0;
-const VISIBLE_ROWS: usize = 8;
+const VISIBLE_ROWS: u8 = 8;
 
 fn row_height() -> f32 {
-    KitRow::ListItem(Density::Tall).lines() + Space::S2.px() + 2.0 * KitRow::FormRow.pad().y.px()
+    2.0f32.mul_add(
+        KitRow::FormRow.pad().y.px(),
+        KitRow::ListItem(Density::Tall).lines() + Space::S2.px(),
+    )
 }
 
 fn column(width: f32, child: Element) -> Element {
@@ -40,7 +43,10 @@ fn entries() -> Vec<SelectEntry<Option<u32>>> {
     let choices = artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
         .and_then(|decl| match decl.kind {
             artisan_api::SettingKind::Choice { values } => Some(values),
-            _ => None,
+            artisan_api::SettingKind::Bool
+            | artisan_api::SettingKind::ModelCustomizations
+            | artisan_api::SettingKind::Options { .. }
+            | artisan_api::SettingKind::Text { .. } => None,
         })
         .unwrap_or(&[]);
     choices
@@ -73,17 +79,17 @@ fn selected(host: &HostData) -> Option<u32> {
 pub fn retention_menu(
     controller: &SettingsController,
     host: &HostData,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<Option<u32>> {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let host_id = host.id.clone();
     let instance = host.instance();
     SelectMenu::new(
-        theme,
+        *theme,
         Some(selected(host)),
         entries(),
-        controller.retention_select.clone(),
+        Rc::clone(&controller.retention_select),
         ui::CONTROL_WIDTH,
     )
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
@@ -96,7 +102,7 @@ pub(crate) fn cleanup(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let host_id = host.id.clone();
     let instance = host.instance();
     let select = Select::new(
@@ -104,7 +110,7 @@ pub(crate) fn cleanup(
         *theme,
         Some(selected(host)),
         entries(),
-        controller.retention_select.clone(),
+        Rc::clone(&controller.retention_select),
     )
     .label("Delete inactive threads")
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
@@ -141,11 +147,15 @@ struct Row {
     restoring: bool,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the archive page is one virtualized list with its header, empty and error states"
+)]
 pub(crate) fn archived(
     controller: &SettingsController,
     host: &HostData,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let page = host.thread_page(true);
     let rows: Vec<Row> = controller
@@ -194,15 +204,16 @@ pub(crate) fn archived(
             ))
             .child(UiBox::new().width(ACTION_WIDTH).build())
             .build();
-        let height = rows.len().min(VISIBLE_ROWS) as f32 * row_height();
+        let visible = u8::try_from(rows.len()).map_or(VISIBLE_ROWS, |rows| rows.min(VISIBLE_ROWS));
+        let height = f32::from(visible) * row_height();
         let theme = *theme;
-        let row_emit = emit.clone();
+        let row_emit = Rc::clone(emit);
         let list = List::new()
             .items(rows)
             .key(|row| format!("archived-{}", row.id))
             .row(move |row| {
                 let id = row.id.clone();
-                let send = row_emit.clone();
+                let send = Rc::clone(&row_emit);
                 let button = ui::button(
                     &theme,
                     format!("settings-archived-{}-unarchive", row.id),
@@ -263,7 +274,7 @@ pub(crate) fn archived(
         body = body.child(ui::error_text(theme, error));
     }
     if !page.at_latest() || page.error().is_some() {
-        let send = emit.clone();
+        let send = Rc::clone(emit);
         body = body.child(ui::button(
             theme,
             "archived-latest",
@@ -274,7 +285,7 @@ pub(crate) fn archived(
         ));
     }
     if page.has_older() {
-        let send = emit.clone();
+        let send = Rc::clone(emit);
         body = body.child(ui::button(
             theme,
             "archived-older",

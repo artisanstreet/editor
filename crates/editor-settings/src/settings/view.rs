@@ -99,31 +99,41 @@ pub enum ViewAction {
 const PAGE_WIDTH: f32 = 680.0;
 const STATUS_WIDTH: f32 = 240.0;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per settings action; splitting the match would only move arms elsewhere"
+)]
 pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: ViewAction) -> bool {
-    match &action {
+    if matches!(
+        action,
         ViewAction::EngineEdited
-        | ViewAction::AccountEdited
-        | ViewAction::McpEdited
-        | ViewAction::OpenUrl(_)
-        | ViewAction::OpenNotices
-        | ViewAction::CopyText(_) => return false,
+            | ViewAction::AccountEdited
+            | ViewAction::McpEdited
+            | ViewAction::OpenUrl(_)
+            | ViewAction::OpenNotices
+            | ViewAction::CopyText(_)
+    ) {
+        return false;
+    }
+    if matches!(
+        action,
         ViewAction::PromptPresentationChanged
-        | ViewAction::McpPresentationChanged
-        | ViewAction::AccountPresentationChanged
-        | ViewAction::EnginePresentationChanged => return true,
-        ViewAction::PromptChanged => {
-            controller.prompt.changed();
-            let dirty = controller.prompt_editor.borrow().text() != controller.prompt.saved;
-            let changed = controller.reported_prompt_dirty != dirty;
-            controller.reported_prompt_dirty = dirty;
-            return changed;
-        }
-        _ => {}
+            | ViewAction::McpPresentationChanged
+            | ViewAction::AccountPresentationChanged
+            | ViewAction::EnginePresentationChanged
+    ) {
+        return true;
+    }
+    if matches!(action, ViewAction::PromptChanged) {
+        controller.prompt.changed();
+        let dirty = controller.prompt_editor.borrow().text() != controller.prompt.saved;
+        let changed = controller.reported_prompt_dirty != dirty;
+        controller.reported_prompt_dirty = dirty;
+        return changed;
     }
     let before = ViewSnapshot::capture(controller, core);
     match action {
         ViewAction::Navigate(screen) => core.navigate(screen),
-        ViewAction::EngineEdited | ViewAction::EnginePresentationChanged => {}
         ViewAction::EngineAction(engine, action) => controller.engine_action(core, engine, action),
         ViewAction::EngineVersions(engine) => {
             if !controller.engines.choosing_version.remove(&engine) {
@@ -157,7 +167,6 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
             .into(),
         ),
         ViewAction::ClaudeSignIn => controller.sign_in_claude_ai(core),
-        ViewAction::AccountEdited | ViewAction::AccountPresentationChanged => {}
         ViewAction::AccountRequestLink => controller.sign_in.request_link(core),
         ViewAction::AccountFinish => controller.sign_in.finish_sign_in(core),
         ViewAction::AccountDismiss => core.account_mut().dismiss_error(),
@@ -174,7 +183,7 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         ViewAction::ForgeConfirm => core.account_mut().confirm_forge(),
         ViewAction::ForgeRefresh => core.account_mut().refresh_local_forge(),
         ViewAction::ForgeClaim => controller.claim_forge(core),
-        ViewAction::RetentionMenu(open) => controller.reported_retention_menu = open,
+        ViewAction::RetentionMenu(open) => controller.reported_menus.retention = open,
         ViewAction::SetRetention(host, instance, days) => controller.set_host_setting_for(
             core,
             host,
@@ -188,10 +197,10 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
             } else {
                 editor_core::ThreadPageDirection::Older
             };
-            if let Some(id) = core.active_host().map(|host| host.id.clone()) {
-                if let Some(host) = core.host_mut(&id) {
-                    host.load_threads(true, direction);
-                }
+            if let Some(id) = core.active_host().map(|host| host.id.clone())
+                && let Some(host) = core.host_mut(&id)
+            {
+                host.load_threads(true, direction);
             }
         }
         ViewAction::Unarchive(thread) => controller.unarchive(core, thread),
@@ -199,20 +208,20 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         ViewAction::McpRemove(server) => controller.remove_mcp(core, server),
         ViewAction::McpSave => controller.save_mcp(core),
         ViewAction::McpCancel => controller.cancel_mcp(),
-        ViewAction::McpEdited
+        ViewAction::EngineEdited
+        | ViewAction::EnginePresentationChanged
+        | ViewAction::AccountEdited
+        | ViewAction::AccountPresentationChanged
+        | ViewAction::McpEdited
         | ViewAction::McpPresentationChanged
+        | ViewAction::PromptChanged
+        | ViewAction::PromptPresentationChanged
         | ViewAction::OpenUrl(_)
         | ViewAction::OpenNotices
         | ViewAction::CopyText(_) => {}
         ViewAction::McpSignIn(server) => controller.sign_in_mcp(core, &server),
         ViewAction::McpCancelSignIn(server) => controller.cancel_mcp_sign_in(core, &server),
         ViewAction::McpSignOut(server) => controller.sign_out_mcp(core, server),
-        ViewAction::PromptChanged => {
-            controller.prompt.changed();
-            controller.reported_prompt_dirty =
-                controller.prompt_editor.borrow().text() != controller.prompt.saved;
-        }
-        ViewAction::PromptPresentationChanged => {}
         ViewAction::SavePrompt => controller.save_prompt(core),
         ViewAction::LoadLatestPrompt => controller.load_latest_prompt(core),
         ViewAction::ResolvePrompt(resolution) => controller.resolve_prompt(core, resolution),
@@ -222,8 +231,8 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
                 host.load_prompt(true);
             }
         }
-        ViewAction::FontMenu(open) => controller.reported_font_menu = open,
-        ViewAction::StreamingMenu(open) => controller.reported_streaming_menu = open,
+        ViewAction::FontMenu(open) => controller.reported_menus.font = open,
+        ViewAction::StreamingMenu(open) => controller.reported_menus.streaming = open,
         ViewAction::SetFont(font) => controller.set_editor_setting(core, "font_set", font.into()),
         ViewAction::SetDarkMode(enabled) => {
             controller.set_editor_setting(core, "dark_mode", enabled.into());
@@ -255,7 +264,7 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         }
         ViewAction::ReloadSettings => controller.reload_editor_settings(core),
         ViewAction::SetHostSetting(host, instance, key, enabled) => {
-            controller.set_host_setting_for(core, host, instance, key, enabled.into())
+            controller.set_host_setting_for(core, host, instance, key, enabled.into());
         }
         ViewAction::RetryHostSetting(target) => controller.retry_setting(core, target),
         ViewAction::DismissHostSetting(target) => controller.dismiss_setting_failure(&target),
@@ -265,10 +274,14 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
     before != ViewSnapshot::capture(controller, core)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "routes every settings page and wraps it in the shared frame"
+)]
 pub fn build(
     controller: &SettingsController,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     build_info: &BuildInfo,
     _viewport: aqua_core::Size,
     _visible: bool,
@@ -276,58 +289,62 @@ pub fn build(
 ) -> Element {
     let page = match core.screen() {
         Screen::Settings(page) => *page,
-        _ => SettingsPage::General,
+        Screen::Home
+        | Screen::Thread { .. }
+        | Screen::NewThread { .. }
+        | Screen::Marketplace
+        | Screen::Usage => SettingsPage::General,
     };
     if page == SettingsPage::GlobalPrompt && core.active_host().is_some() {
-        return prompt(controller, core, &theme, emit);
+        return prompt(controller, core, theme, emit);
     }
-    let emit_for_error = emit.clone();
+    let emit_for_error = Rc::clone(&emit);
     let content = match (page.parent(), core.active_host()) {
         (SettingsPage::General, _) if page == SettingsPage::General => ui::column()
-            .child(ui::header(&theme, page.label(), page::description(page)))
-            .child(appearance(controller, &theme, core, emit.clone(), false))
-            .child(streaming(controller, &theme, core, emit.clone(), false))
-            .child(notifications(&theme, core, emit.clone(), false))
-            .child(performance(&theme, core, emit, false))
+            .child(ui::header(theme, page.label(), page::description(page)))
+            .child(appearance(controller, theme, core, Rc::clone(&emit), false))
+            .child(streaming(controller, theme, core, Rc::clone(&emit), false))
+            .child(notifications(theme, core, Rc::clone(&emit), false))
+            .child(performance(theme, core, emit, false))
             .build(),
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Appearance) =>
         {
-            appearance(controller, &theme, core, emit, true)
+            appearance(controller, theme, core, emit, true)
         }
         (SettingsPage::General, _) if page == SettingsPage::Section(SettingsSection::Streaming) => {
-            streaming(controller, &theme, core, emit, true)
+            streaming(controller, theme, core, emit, true)
         }
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Performance) =>
         {
-            performance(&theme, core, emit, true)
+            performance(theme, core, emit, true)
         }
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Notifications) =>
         {
-            notifications(&theme, core, emit, true)
+            notifications(theme, core, emit, true)
         }
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Threads
                 || page == SettingsPage::Section(SettingsSection::Archive) =>
         {
             let mut content =
-                ui::column().child(ui::header(&theme, page.label(), page::description(page)));
+                ui::column().child(ui::header(theme, page.label(), page::description(page)));
             if page == SettingsPage::Threads {
                 content = content
                     .child(thread_section(
-                        &theme,
+                        theme,
                         host,
                         ThreadSection::Automation,
-                        emit.clone(),
+                        &emit,
                         false,
                     ))
                     .child(thread_section(
-                        &theme,
+                        theme,
                         host,
                         ThreadSection::Assistance,
-                        emit.clone(),
+                        &emit,
                         false,
                     ));
             }
@@ -335,63 +352,63 @@ pub fn build(
                 .child(super::archive_view::cleanup(
                     controller,
                     host,
-                    &theme,
-                    emit.clone(),
+                    theme,
+                    Rc::clone(&emit),
                 ))
                 .child(super::archive_view::archived(
-                    controller, host, &theme, emit,
+                    controller, host, theme, &emit,
                 ))
                 .build()
         }
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Section(SettingsSection::Automation) =>
         {
-            thread_section(&theme, host, ThreadSection::Automation, emit, true)
+            thread_section(theme, host, ThreadSection::Automation, &emit, true)
         }
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Section(SettingsSection::Assistance) =>
         {
-            thread_section(&theme, host, ThreadSection::Assistance, emit, true)
+            thread_section(theme, host, ThreadSection::Assistance, &emit, true)
         }
         (SettingsPage::Extensions, Some(host))
             if page == SettingsPage::Extensions
                 || page == SettingsPage::Section(SettingsSection::McpServers) =>
         {
             let mut content = ui::column()
-                .child(ui::header(&theme, page.label(), page::description(page)))
+                .child(ui::header(theme, page.label(), page::description(page)))
                 .child(super::mcp_view::section(
                     controller,
                     core,
                     host,
-                    &theme,
-                    emit.clone(),
+                    theme,
+                    Rc::clone(&emit),
                 ));
             if page == SettingsPage::Extensions {
-                content = content.child(skills_section(&theme, emit));
+                content = content.child(skills_section(theme, emit));
             }
             content.build()
         }
         (SettingsPage::Extensions, Some(_))
             if page == SettingsPage::Section(SettingsSection::Skills) =>
         {
-            skills(&theme, emit)
+            skills(theme, emit)
         }
         (SettingsPage::Engine(engine), Some(host)) => {
-            super::engine_view::page(controller, core, host, engine, page, &theme, emit)
+            super::engine_view::page(controller, host, engine, page, theme, emit)
         }
-        (SettingsPage::Account, _) => super::account_view::page(controller, core, &theme, emit),
-        (SettingsPage::About, _) => about(&theme, build_info, emit),
-        (SettingsPage::Hosts, _) => hosts(&theme, core),
+        (SettingsPage::Account, _) => super::account_view::page(controller, core, theme, &emit),
+        (SettingsPage::About, _) => about(theme, build_info, emit),
+        (SettingsPage::Hosts, _) => hosts(theme, core),
         _ => ui::column()
-            .child(ui::header(&theme, page.label(), page::description(page)))
+            .child(ui::header(theme, page.label(), page::description(page)))
             .child(ui::text(
-                &theme,
+                theme,
                 TextRole::Label,
                 Ink::Muted,
                 "Pair a Forge on the Account page first.",
             ))
             .child(ui::button(
-                &theme,
+                theme,
                 "settings-open-account",
                 "Open Account",
                 ButtonTone::Neutral,
@@ -399,17 +416,17 @@ pub fn build(
                 move || {
                     emit(ViewAction::Navigate(Screen::Settings(
                         SettingsPage::Account,
-                    )))
+                    )));
                 },
             ))
             .build(),
     };
     let host_failures = core
         .active_host()
-        .and_then(|host| host_setting_failures(controller, host, &theme, &emit_for_error));
+        .and_then(|host| host_setting_failures(controller, host, theme, &emit_for_error));
     let content = match (
         page.parent(),
-        device_settings_error(controller, core, &theme, emit_for_error),
+        device_settings_error(controller, core, theme, emit_for_error),
         host_failures,
     ) {
         (SettingsPage::General, Some(error), _) => ui::column().child(error).child(content).build(),
@@ -468,8 +485,8 @@ fn host_setting_failures(
     }
     let mut stack = ui::stack(Space::S8);
     for (target, failure) in failures {
-        let retry = emit.clone();
-        let dismiss = emit.clone();
+        let retry = Rc::clone(emit);
+        let dismiss = Rc::clone(emit);
         let retried = target.clone();
         stack = stack
             .child(ui::callout(
@@ -682,7 +699,7 @@ fn thread_section(
     theme: &ArtisanTheme,
     host: &HostData,
     section: ThreadSection,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
     let (title, entries): (
@@ -751,7 +768,7 @@ fn thread_section(
                         true
                     }
                 });
-            let send = emit.clone();
+            let send = Rc::clone(emit);
             let host_id = host.id.clone();
             let instance = host.instance();
             let control = Switch::new(
@@ -766,7 +783,7 @@ fn thread_section(
                     instance,
                     key,
                     enabled,
-                ))
+                ));
             })
             .build();
             ui::row(theme, label, description, Some(control))
@@ -817,13 +834,18 @@ fn prompt(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let form = &controller.prompt;
-    let notify = emit.clone();
-    let editor =
-        EditorController::from_shared(controller.prompt_editor.clone(), move |event| match event {
+    let notify = Rc::clone(&emit);
+    let editor = EditorController::from_shared(
+        Rc::clone(&controller.prompt_editor),
+        move |event| match event {
             EditorEvent::Changed => notify(ViewAction::PromptChanged),
             EditorEvent::PresentationChanged => notify(ViewAction::PromptPresentationChanged),
-            _ => {}
-        });
+            EditorEvent::SelectionChanged { .. }
+            | EditorEvent::Submitted
+            | EditorEvent::List(_)
+            | EditorEvent::PastedFiles { .. } => {}
+        },
+    );
     let mut page = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -846,7 +868,7 @@ fn prompt(
                         .flex_grow(1.0)
                         .min_height(Length::Pct(0.0)),
                 )
-                .child(prompt_reconciliation(controller, core, theme, emit.clone()))
+                .child(prompt_reconciliation(controller, core, theme, &emit))
                 .child(editor.element_with_notice_keyed(
                     "settings-global-prompt-editor",
                     Mode::Document,
@@ -871,14 +893,14 @@ fn prompt(
     page = page.child(ui::callout(
         theme,
         Tone::Neutral,
-        form.status(&controller.prompt_editor.borrow().text()),
+        form.status(controller.prompt_editor.borrow().text()),
     ));
     let mut actions = ui::actions().style(Style::new().flex_shrink(0.0));
     if core
         .active_host()
         .is_some_and(|host| host.prompt_load().error.is_some())
     {
-        let send = emit.clone();
+        let send = Rc::clone(&emit);
         actions = actions.child(ui::button(
             theme,
             "settings-global-prompt-retry",
@@ -889,7 +911,7 @@ fn prompt(
         ));
     }
     if form.newer {
-        let send = emit.clone();
+        let send = Rc::clone(&emit);
         actions = actions.child(ui::button(
             theme,
             "settings-global-prompt-load-latest",
@@ -911,11 +933,15 @@ fn prompt(
     page.child(actions.build()).build()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the prompt reconciliation card renders each engine status as one branch of a single layout"
+)]
 fn prompt_reconciliation(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let mut controls = ui::stack(Space::S12);
     let Some(prompt) = core
@@ -934,7 +960,7 @@ fn prompt_reconciliation(
             .map(|engine| engine.display_name())
             .collect::<Vec<_>>()
             .join(", ");
-        let send = emit.clone();
+        let send = Rc::clone(emit);
         let candidate_id = candidate.id.clone();
         controls = controls.child(
             ui::stack(Space::S8)
@@ -957,7 +983,7 @@ fn prompt_reconciliation(
                                     artisan_api::ResolvePrompt::Choose {
                                         candidate_id: candidate_id.clone(),
                                     },
-                                ))
+                                ));
                             },
                         ))
                         .build(),
@@ -968,8 +994,8 @@ fn prompt_reconciliation(
     for engine in &prompt.engines {
         match engine.status {
             artisan_api::PromptEngineStatus::Drifted => {
-                let use_send = emit.clone();
-                let restore_send = emit.clone();
+                let use_send = Rc::clone(emit);
+                let restore_send = Rc::clone(emit);
                 let id = engine.engine;
                 let mut row = ui::stack(Space::S8).child(ui::callout(
                     theme,
@@ -995,7 +1021,7 @@ fn prompt_reconciliation(
                                 move || {
                                     use_send(ViewAction::ResolvePrompt(
                                         artisan_api::ResolvePrompt::UseEngine { engine: id },
-                                    ))
+                                    ));
                                 },
                             ))
                             .child(ui::button(
@@ -1007,7 +1033,7 @@ fn prompt_reconciliation(
                                 move || {
                                     restore_send(ViewAction::ResolvePrompt(
                                         artisan_api::ResolvePrompt::RestoreEngine { engine: id },
-                                    ))
+                                    ));
                                 },
                             ))
                             .build(),
@@ -1024,7 +1050,10 @@ fn prompt_reconciliation(
                     ));
                 }
             }
-            _ => {}
+            artisan_api::PromptEngineStatus::Synced
+            | artisan_api::PromptEngineStatus::AwaitingChoice
+            | artisan_api::PromptEngineStatus::EngineAbsent
+            | artisan_api::PromptEngineStatus::Unavailable => {}
         }
     }
     controls.build()
@@ -1115,15 +1144,15 @@ fn streaming_value(core: &Core) -> &'static str {
 pub fn streaming_menu(
     controller: &SettingsController,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<&'static str> {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     SelectMenu::new(
-        theme,
+        *theme,
         Some(streaming_value(core)),
         streaming_entries(),
-        controller.streaming_select.clone(),
+        Rc::clone(&controller.streaming_select),
         ui::CONTROL_WIDTH,
     )
     .on_change(move |mode| change(ViewAction::SetStreaming(mode)))
@@ -1137,13 +1166,13 @@ fn streaming(
     emit: Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let select = Select::new(
         "settings-streaming-mode",
         *theme,
         Some(streaming_value(core)),
         streaming_entries(),
-        controller.streaming_select.clone(),
+        Rc::clone(&controller.streaming_select),
     )
     .label("Text Streaming")
     .on_change(move |mode| change(ViewAction::SetStreaming(mode)))
@@ -1194,15 +1223,15 @@ fn font_value(core: &Core) -> &'static str {
 pub fn font_menu(
     controller: &SettingsController,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<&'static str> {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     SelectMenu::new(
-        theme,
+        *theme,
         Some(font_value(core)),
         font_entries(),
-        controller.font_select.clone(),
+        Rc::clone(&controller.font_select),
         ui::CONTROL_WIDTH,
     )
     .on_change(move |font| change(ViewAction::SetFont(font)))
@@ -1216,7 +1245,7 @@ fn appearance(
     emit: Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
-    let send = emit.clone();
+    let send = Rc::clone(&emit);
     let dark = Switch::new(
         "settings-switch-dark-mode",
         *theme,
@@ -1225,14 +1254,14 @@ fn appearance(
     )
     .on_change(move |enabled| send(ViewAction::SetDarkMode(enabled)))
     .build();
-    let send = emit.clone();
-    let open = emit.clone();
+    let send = Rc::clone(&emit);
+    let open = Rc::clone(&emit);
     let fonts = Select::new(
         "settings-font-set",
         *theme,
         Some(font_value(core)),
         font_entries(),
-        controller.font_select.clone(),
+        Rc::clone(&controller.font_select),
     )
     .label("Fonts")
     .on_change(move |font| send(ViewAction::SetFont(font)))
@@ -1244,8 +1273,8 @@ fn appearance(
         .get("outline_text")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let show_models = emit.clone();
-    let hide_options = emit.clone();
+    let show_models = Rc::clone(&emit);
+    let hide_options = Rc::clone(&emit);
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
@@ -1351,7 +1380,7 @@ struct ViewSnapshot {
     engine_errors: std::collections::HashMap<artisan_api::EngineId, String>,
     engine_versions: std::collections::HashSet<artisan_api::EngineId>,
     engine_codes: std::collections::HashMap<artisan_api::EngineId, String>,
-    mcp_editing: Option<Option<artisan_api::McpServer>>,
+    mcp_editing: Option<super::extensions::McpEditing>,
     mcp_saving: bool,
     mcp_sign_ins: Vec<(String, editor_core::McpSignInPhase, Option<String>)>,
     mcp_error: Option<String>,
@@ -1363,6 +1392,10 @@ struct ViewSnapshot {
 }
 
 impl ViewSnapshot {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the snapshot reads every field the settings view renders, one line each"
+    )]
     fn capture(controller: &SettingsController, core: &Core) -> Self {
         let host = core.active_host();
         let preferences = editor_ui::preferences::Preferences::from_core(
@@ -1423,7 +1456,7 @@ impl ViewSnapshot {
                 })
                 .collect(),
             setting_failures: host.map_or_else(Vec::new, |host| controller.setting_failures(host)),
-            host_instance: host.map(|host| host.instance()),
+            host_instance: host.map(HostData::instance),
             archive_loading: host.map(|host| {
                 let page = host.thread_page(true);
                 (
@@ -1479,9 +1512,9 @@ impl ViewSnapshot {
             forge_code: controller.forge_code.borrow().text().to_owned(),
             second_factor: controller.sign_in.second_factor.borrow().text().to_owned(),
             menus: (
-                controller.reported_font_menu,
-                controller.reported_streaming_menu,
-                controller.reported_retention_menu,
+                controller.reported_menus.font,
+                controller.reported_menus.streaming,
+                controller.reported_menus.retention,
             ),
         }
     }

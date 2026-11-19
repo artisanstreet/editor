@@ -631,7 +631,7 @@ impl<V: SectionViews> ShellApplication<V> {
             crate::settings::view::font_menu(
                 &workspace.settings,
                 &self.shell.core,
-                theme,
+                &theme,
                 workspace.settings_emit(),
             )
             .into_parts()
@@ -640,7 +640,7 @@ impl<V: SectionViews> ShellApplication<V> {
             crate::settings::view::streaming_menu(
                 &workspace.settings,
                 &self.shell.core,
-                theme,
+                &theme,
                 workspace.settings_emit(),
             )
             .into_parts()
@@ -650,7 +650,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 crate::settings::archive_view::retention_menu(
                     &workspace.settings,
                     host,
-                    theme,
+                    &theme,
                     workspace.settings_emit(),
                 )
                 .into_parts()

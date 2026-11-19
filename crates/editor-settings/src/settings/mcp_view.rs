@@ -31,7 +31,7 @@ fn button(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     ui::button(theme, id, label, tone, disabled, move || {
-        emit(action.clone())
+        emit(action.clone());
     })
 }
 
@@ -58,7 +58,7 @@ fn controls(
     name: &str,
     status: Option<McpAuthStatus>,
     sign_in: Option<&McpSignIn>,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Vec<Element> {
     let make = |kind: &str, label: &str, tone, disabled, action| {
         button(
@@ -68,7 +68,7 @@ fn controls(
             tone,
             disabled,
             action,
-            emit.clone(),
+            Rc::clone(emit),
         )
     };
     match sign_in.map(|sign_in| (sign_in.phase(), sign_in.authorize_url().map(str::to_owned))) {
@@ -149,7 +149,7 @@ fn controls(
                 false,
                 ViewAction::McpSignOut(name.into()),
             )],
-            _ => Vec::new(),
+            Some(McpAuthStatus::NeedsToken) | None => Vec::new(),
         },
     }
 }
@@ -175,15 +175,18 @@ fn form(
     ];
     let mut body = ui::stack(Space::S12);
     for (index, (label, placeholder)) in fields.into_iter().enumerate() {
-        let send = emit.clone();
-        let editor =
-            EditorController::from_shared(controller.mcp_editors[index].clone(), move |event| {
-                match event {
-                    EditorEvent::Changed => send(ViewAction::McpEdited),
-                    EditorEvent::PresentationChanged => send(ViewAction::McpPresentationChanged),
-                    _ => {}
-                }
-            });
+        let send = Rc::clone(&emit);
+        let editor = EditorController::from_shared(
+            Rc::clone(&controller.mcp_editors[index]),
+            move |event| match event {
+                EditorEvent::Changed => send(ViewAction::McpEdited),
+                EditorEvent::PresentationChanged => send(ViewAction::McpPresentationChanged),
+                EditorEvent::SelectionChanged { .. }
+                | EditorEvent::Submitted
+                | EditorEvent::List(_)
+                | EditorEvent::PastedFiles { .. } => {}
+            },
+        );
         body = body.child(
             ui::stack(Space::S4)
                 .child(ui::text(theme, TextRole::Label, Ink::Muted, label))
@@ -207,7 +210,7 @@ fn form(
             ButtonTone::Primary,
             saving,
             ViewAction::McpSave,
-            emit.clone(),
+            Rc::clone(&emit),
         ))
         .child(button(
             theme,
@@ -251,7 +254,8 @@ pub(crate) fn section(
             format!(
                 "{} {}",
                 server.command,
-                serde_json::to_string(&server.args).unwrap_or_default()
+                serde_json::to_string(&server.args)
+                    .expect("invariant: a list of strings always serializes")
             )
         });
         let status = match auth {
@@ -259,12 +263,12 @@ pub(crate) fn section(
             Err(_shown_above) => None,
         };
         let sign_in = core.mcp_sign_in(&host.id, &server.name);
-        let summary =
-            note(status, sign_in).map_or(target.clone(), |note| format!("{target} · {note}"));
+        let summary = note(status, sign_in)
+            .map_or_else(|| target.clone(), |note| format!("{target} · {note}"));
         let mut actions = UiBox::new()
             .spaced(Space::S8)
             .style(Style::new().wrap(true))
-            .children(controls(theme, &server.name, status, sign_in, emit.clone()));
+            .children(controls(theme, &server.name, status, sign_in, &emit));
         actions = actions.child(button(
             theme,
             format!("mcp-edit-{}", server.name),
@@ -272,7 +276,7 @@ pub(crate) fn section(
             ButtonTone::Quiet,
             false,
             ViewAction::McpOpen(Some(server.clone())),
-            emit.clone(),
+            Rc::clone(&emit),
         ));
         actions = actions.child(button(
             theme,
@@ -281,7 +285,7 @@ pub(crate) fn section(
             ButtonTone::Quiet,
             controller.extensions.saving,
             ViewAction::McpRemove(server.clone()),
-            emit.clone(),
+            Rc::clone(&emit),
         ));
         rows.push(ui::row(theme, server.name, summary, Some(actions.build())));
     }
@@ -294,7 +298,7 @@ pub(crate) fn section(
         ));
     }
     if controller.extensions.editing.is_some() {
-        rows.push(form(controller, theme, emit.clone()));
+        rows.push(form(controller, theme, Rc::clone(&emit)));
     }
     let mut body = ui::stack(Space::S8).child(ui::card(theme, rows));
     if let Some(error) = &controller.extensions.error {

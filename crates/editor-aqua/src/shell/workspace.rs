@@ -1377,7 +1377,7 @@ impl Workspace {
     ) -> aqua_ui::element::Element {
         crate::shell::view::home(
             theme,
-            crate::settings::account_view::forges(&self.home, core, theme, self.home_emit()),
+            crate::settings::account_view::forges(&self.home, core, theme, &self.home_emit()),
         )
     }
 
@@ -1641,7 +1641,7 @@ impl Workspace {
         crate::settings::view::build(
             &self.settings,
             core,
-            theme,
+            &theme,
             build,
             viewport,
             visible,

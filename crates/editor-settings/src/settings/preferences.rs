@@ -21,13 +21,14 @@ pub struct SettingFailure {
     pub(crate) cause: String,
 }
 
+#[derive(Debug)]
 struct KeyWrite {
     sent: Value,
     confirmed: Option<Value>,
     next: Option<Value>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SettingWrites {
     keys: HashMap<SettingKey, KeyWrite>,
     failures: HashMap<SettingKey, SettingFailure>,

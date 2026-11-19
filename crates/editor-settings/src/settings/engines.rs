@@ -7,6 +7,10 @@ use std::{
 };
 
 #[derive(Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "other crates' tests seed the engine form's busy and cancelling sets directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct EnginesForm {
     pub(crate) host: Option<String>,
     pub login_codes: HashMap<EngineId, Rc<RefCell<Editor>>>,
@@ -108,5 +112,15 @@ impl EnginesForm {
         }
         code.borrow_mut().set_text("");
         Some(trimmed)
+    }
+}
+
+impl std::fmt::Debug for EnginesForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnginesForm")
+            .field("host", &self.host)
+            .field("busy", &self.busy)
+            .field("cancelling", &self.cancelling)
+            .finish_non_exhaustive()
     }
 }

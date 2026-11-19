@@ -4,7 +4,7 @@ use artisan_api::ThreadId;
 
 use editor_core::HostData;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ArchiveForm {
     pub(crate) host: Option<String>,
     pub(crate) restoring: HashSet<ThreadId>,
@@ -14,6 +14,7 @@ pub struct ArchiveForm {
     dirty: bool,
 }
 
+#[derive(Debug)]
 pub struct ArchiveRequest {
     pub(crate) host: String,
     pub(crate) thread: ThreadId,

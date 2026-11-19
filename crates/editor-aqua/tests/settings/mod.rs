@@ -323,7 +323,7 @@ fn every_settings_page_shows_content_without_a_host() {
         let texts = page_texts(build(
             &controller,
             &core,
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &BuildInfo::default(),
             aqua_core::Size::new(900.0, 700.0),
             true,
@@ -390,7 +390,7 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
         page_texts(build(
             &controller,
             core,
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &BuildInfo::default(),
             aqua_core::Size::new(900.0, 700.0),
             true,
@@ -478,7 +478,7 @@ fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
                 build(
                     &controller,
                     &core,
-                    ArtisanTheme::resolved(),
+                    &ArtisanTheme::resolved(),
                     &BuildInfo::default(),
                     aqua_core::Size::new(900.0, 700.0),
                     true,
@@ -713,7 +713,7 @@ fn about_page_opens_the_third_party_notices() {
     let page = build(
         &controller,
         &core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &BuildInfo::default(),
         aqua_core::Size::new(900.0, 700.0),
         true,
@@ -782,7 +782,7 @@ fn render_settings(
     let view = build(
         controller,
         core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &BuildInfo::default(),
         aqua_core::Size::new(900.0, 2400.0),
         true,
@@ -1015,7 +1015,7 @@ fn signed_in_account_page_opens_the_terms_and_privacy_policy() {
         let page = build(
             &controller,
             &core,
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             &BuildInfo::default(),
             aqua_core::Size::new(900.0, 3000.0),
             true,

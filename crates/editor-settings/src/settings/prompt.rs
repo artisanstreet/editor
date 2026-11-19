@@ -1,6 +1,10 @@
 use artisan_api::{GlobalPrompt, SavePrompt};
 
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "other crates' tests seed the prompt form's loaded state directly; making it private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct PromptForm {
     pub(crate) host: Option<String>,
     pub loaded: bool,

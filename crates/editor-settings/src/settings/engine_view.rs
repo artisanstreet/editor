@@ -8,7 +8,7 @@ use aqua_ui::element::{Box as UiBox, Element};
 use artisan_api::{
     ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
 };
-use editor_core::{Core, HostData, SettingsPage, SettingsSection};
+use editor_core::{HostData, SettingsPage, SettingsSection};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
     switch::Switch,
@@ -30,7 +30,7 @@ fn button(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     ui::button(theme, id, label, tone, disabled, move || {
-        emit(action.clone())
+        emit(action.clone());
     })
 }
 fn band(theme: &ArtisanTheme, value: String) -> Element {
@@ -91,6 +91,10 @@ fn installation_copy(status: &EngineStatus) -> String {
         InstallState::Failed { message } => message.clone(),
     }
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "the engine installation block renders each install state as one branch of a single layout"
+)]
 fn installation(
     controller: &SettingsController,
     status: &EngineStatus,
@@ -117,7 +121,7 @@ fn installation(
                 },
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Install {}),
-                emit.clone(),
+                Rc::clone(&emit),
             );
             blocks.push(ui::row(
                 theme,
@@ -139,7 +143,7 @@ fn installation(
                     ButtonTone::Primary,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Update {}),
-                    emit.clone(),
+                    Rc::clone(&emit),
                 ));
             }
             controls = controls
@@ -150,7 +154,7 @@ fn installation(
                     ButtonTone::Neutral,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Rollback {}),
-                    emit.clone(),
+                    Rc::clone(&emit),
                 ))
                 .child(button(
                     theme,
@@ -159,7 +163,7 @@ fn installation(
                     ButtonTone::Neutral,
                     busy,
                     ViewAction::EngineVersions(engine),
-                    emit.clone(),
+                    Rc::clone(&emit),
                 ));
             let detail = update.as_ref().map_or_else(
                 || format!("Follows the latest release ({version})."),
@@ -167,7 +171,7 @@ fn installation(
             );
             blocks.push(ui::row(theme, "Version", detail, Some(controls.build())));
         }
-        _ => {}
+        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {}
     }
     if let Some(value) = status.integrity {
         blocks.push(ui::note(theme, integrity(value)));
@@ -216,7 +220,7 @@ fn installation(
                         ButtonTone::Neutral,
                         busy,
                         ViewAction::EngineUse(engine, version.version.clone()),
-                        emit.clone(),
+                        Rc::clone(&emit),
                     ));
                 }
                 list = list.child(row.build());
@@ -247,7 +251,10 @@ fn account_copy(status: &EngineStatus) -> String {
             SignInState::SignedOut => {
                 return "Not signed in. OpenCode's free models still work.".into();
             }
-            _ => {}
+            SignInState::Unknown
+            | SignInState::LoggingIn { .. }
+            | SignInState::SignedIn { account: None }
+            | SignInState::Failed { .. } => {}
         }
     }
     match &status.sign_in {
@@ -269,6 +276,10 @@ fn sign_in_copy(engine: EngineId) -> String {
         }
     }
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "the engine account block renders each sign-in state as one branch of a single layout"
+)]
 fn account(
     controller: &SettingsController,
     status: &EngineStatus,
@@ -293,7 +304,7 @@ fn account(
                     ButtonTone::Primary,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Login {}),
-                    emit.clone(),
+                    Rc::clone(&emit),
                 )),
             ));
         }
@@ -308,7 +319,7 @@ fn account(
                 ButtonTone::Neutral,
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Logout {}),
-                emit.clone(),
+                Rc::clone(&emit),
             )),
         )),
         SignInState::LoggingIn {
@@ -333,7 +344,7 @@ fn account(
                             ButtonTone::Quiet,
                             false,
                             ViewAction::OpenUrl(url.clone()),
-                            emit.clone(),
+                            Rc::clone(&emit),
                         ))
                         .build(),
                 );
@@ -347,40 +358,40 @@ fn account(
                         .build(),
                 );
             }
-            if *accepts_code {
-                if let Some(field) = controller.engines.login_codes.get(&engine) {
-                    let send = emit.clone();
-                    let editor =
-                        EditorController::from_shared(field.clone(), move |event| match event {
-                            EditorEvent::Changed => send(ViewAction::EngineEdited),
-                            EditorEvent::PresentationChanged => {
-                                send(ViewAction::EnginePresentationChanged)
-                            }
-                            EditorEvent::Submitted => send(ViewAction::EngineCode(engine)),
-                            _ => {}
-                        });
-                    content = content.child(
-                        ui::actions()
-                            .child(ui::grow(editor.element_with_notice_keyed(
-                                format!("settings-engine-login-code-{engine}"),
-                                Mode::SingleLine,
-                                theme,
-                                "Paste the code",
-                                false,
-                                false,
-                            )))
-                            .child(button(
-                                theme,
-                                format!("settings-engine-code-{engine}"),
-                                "Submit code",
-                                ButtonTone::Primary,
-                                busy,
-                                ViewAction::EngineCode(engine),
-                                emit.clone(),
-                            ))
-                            .build(),
-                    );
-                }
+            if *accepts_code && let Some(field) = controller.engines.login_codes.get(&engine) {
+                let send = Rc::clone(&emit);
+                let editor =
+                    EditorController::from_shared(Rc::clone(field), move |event| match event {
+                        EditorEvent::Changed => send(ViewAction::EngineEdited),
+                        EditorEvent::PresentationChanged => {
+                            send(ViewAction::EnginePresentationChanged);
+                        }
+                        EditorEvent::Submitted => send(ViewAction::EngineCode(engine)),
+                        EditorEvent::SelectionChanged { .. }
+                        | EditorEvent::List(_)
+                        | EditorEvent::PastedFiles { .. } => {}
+                    });
+                content = content.child(
+                    ui::actions()
+                        .child(ui::grow(editor.element_with_notice_keyed(
+                            format!("settings-engine-login-code-{engine}"),
+                            Mode::SingleLine,
+                            theme,
+                            "Paste the code",
+                            false,
+                            false,
+                        )))
+                        .child(button(
+                            theme,
+                            format!("settings-engine-code-{engine}"),
+                            "Submit code",
+                            ButtonTone::Primary,
+                            busy,
+                            ViewAction::EngineCode(engine),
+                            Rc::clone(&emit),
+                        ))
+                        .build(),
+                );
             }
             let cancelling = controller.engines.cancelling.contains(&engine);
             content = content.child(button(
@@ -394,11 +405,11 @@ fn account(
                 ButtonTone::Quiet,
                 cancelling,
                 ViewAction::EngineAction(engine, EngineCommand::CancelLogin {}),
-                emit.clone(),
+                Rc::clone(&emit),
             ));
             blocks.push(ui::block(content.build()));
         }
-        _ => {}
+        SignInState::SignedOut | SignInState::Failed { .. } | SignInState::Unknown => {}
     }
     ui::section(
         theme,
@@ -418,7 +429,7 @@ fn claude(
     let busy = controller.engines.busy.contains(&EngineId::Claude);
     let on = artisan_api::transport_of(host.setting(artisan_api::TRANSPORT_KEY))
         == artisan_api::CLAUDE_AI;
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let host_id = host.id.clone();
     let instance = host.instance();
     let switch = Switch::new(
@@ -432,7 +443,7 @@ fn claude(
             host_id.clone(),
             instance,
             checked,
-        ))
+        ));
     })
     .build();
     let state = status.claude_ai.clone().unwrap_or(ClaudeAiState::SignedOut);
@@ -492,7 +503,6 @@ fn claude(
 
 pub(crate) fn page(
     controller: &SettingsController,
-    core: &Core,
     host: &HostData,
     engine: EngineId,
     selected: SettingsPage,
@@ -522,10 +532,10 @@ pub(crate) fn page(
             .build();
     };
     if selected.shows(SettingsSection::Installation(engine)) {
-        content = content.child(installation(controller, status, theme, emit.clone()));
+        content = content.child(installation(controller, status, theme, Rc::clone(&emit)));
     }
     if selected.shows(SettingsSection::Account(engine)) {
-        content = content.child(account(controller, status, theme, emit.clone()));
+        content = content.child(account(controller, status, theme, Rc::clone(&emit)));
     }
     if engine == EngineId::Claude && selected.shows(SettingsSection::ClaudeAi) {
         content = content.child(claude(controller, host, status, theme, emit));
@@ -533,6 +543,5 @@ pub(crate) fn page(
     if let Some(error) = controller.engines.errors.get(&engine) {
         content = content.child(ui::error_text(theme, error));
     }
-    let _ = core;
     content.build()
 }

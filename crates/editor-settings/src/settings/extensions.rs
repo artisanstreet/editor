@@ -16,13 +16,16 @@ impl ServerFields {
         Self {
             name: server.name.clone(),
             command: server.command.clone(),
-            args: serde_json::to_string(&server.args).unwrap_or_default(),
+            args: serde_json::to_string(&server.args)
+                .expect("invariant: a list of strings always serializes"),
             url: server.url.clone().unwrap_or_default(),
-            env: serde_json::to_string(&server.env).unwrap_or_default(),
+            env: serde_json::to_string(&server.env)
+                .expect("invariant: a map of strings always serializes"),
             headers: if server.headers.is_empty() {
                 String::new()
             } else {
-                serde_json::to_string(&server.headers).unwrap_or_default()
+                serde_json::to_string(&server.headers)
+                    .expect("invariant: a map of strings always serializes")
             },
         }
     }
@@ -75,10 +78,29 @@ impl ServerFields {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpEditing {
+    New,
+    Existing(McpServer),
+}
+
+impl McpEditing {
+    fn previous(&self) -> Option<McpServer> {
+        match self {
+            Self::New => None,
+            Self::Existing(server) => Some(server.clone()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "other crates' tests read the form's saving and editing state directly; making it private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct ExtensionsForm {
     pub(crate) host: Option<String>,
-    pub editing: Option<Option<McpServer>>,
+    pub editing: Option<McpEditing>,
     pub fields: ServerFields,
     pub saving: bool,
     pub(crate) error: Option<String>,
@@ -108,8 +130,8 @@ impl ExtensionsForm {
     pub fn open(&mut self, previous: Option<McpServer>) {
         self.generation += 1;
         self.saving = false;
-        self.fields = ServerFields::from_server(previous.as_ref().unwrap_or(&McpServer::default()));
-        self.editing = Some(previous);
+        self.fields = ServerFields::from_server(&previous.clone().unwrap_or_default());
+        self.editing = Some(previous.map_or(McpEditing::New, McpEditing::Existing));
         self.error = None;
     }
 
@@ -127,7 +149,7 @@ impl ExtensionsForm {
         if self.saving {
             return None;
         }
-        let previous = self.editing.clone()?;
+        let previous = self.editing.as_ref()?.previous();
         self.host.as_ref()?;
         match self.fields.parse(previous.as_ref()) {
             Ok(server) => self.begin(McpMutation::Upsert { previous, server }, true),

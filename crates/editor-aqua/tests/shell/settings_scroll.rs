@@ -29,7 +29,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     let page = view::build(
         &controller,
         &core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &build,
         viewport,
         true,
@@ -67,7 +67,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     let page = view::build(
         &controller,
         &core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &build,
         viewport,
         true,

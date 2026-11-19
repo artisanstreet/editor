@@ -174,9 +174,10 @@ pub(crate) fn row(
         CARD,
         title,
     );
-    let item = match description.is_empty() {
-        true => item,
-        false => item.detail(description),
+    let item = if description.is_empty() {
+        item
+    } else {
+        item.detail(description)
     };
     match control {
         Some(control) => item.trailing(control),
