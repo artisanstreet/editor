@@ -184,4 +184,61 @@ mod tests {
             "with --yes, Artisan's ae takes the place"
         );
     }
+
+    fn artisans_ae(sandbox: &Sandbox) -> PathBuf {
+        App::Ae
+            .dir_under(&artisan_street(sandbox.root.path()))
+            .join(App::Ae.binary_name())
+    }
+
+    fn install_ae_only(sandbox: &Sandbox, stage: &str, yes: bool) -> Output {
+        let mut args = vec!["install", "--apply", "--editor", "none", "--forge", "none"];
+        if yes {
+            args.push("--yes");
+        }
+        args.extend(["--from", stage]);
+        sandbox.ae(&args)
+    }
+
+    #[test]
+    fn an_ae_link_from_a_dotfile_manager_is_only_replaced_with_consent() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let dotfiles = sandbox.root.path().join("home/dotfiles/bin/ae");
+        script(&dotfiles, "#!/bin/sh\necho my own ae\n");
+        let link = sandbox.root.path().join("home/.local/bin/ae");
+        std::fs::create_dir_all(link.parent().expect("the link has a folder"))
+            .expect("create ~/.local/bin");
+        std::os::unix::fs::symlink(&dotfiles, &link).expect("link the dotfile ae");
+        let stage = ae_only_stage(&sandbox);
+
+        let applied = install_ae_only(&sandbox, &stage, false);
+
+        assert!(!applied.status.success(), "the install stops to ask");
+        assert!(
+            String::from_utf8_lossy(&applied.stderr).contains("--yes"),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("their link is still there"),
+            dotfiles
+        );
+
+        let agreed = install_ae_only(&sandbox, &stage, true);
+
+        assert!(
+            agreed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&agreed.stderr)
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("ae is linked"),
+            artisans_ae(&sandbox)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dotfiles).expect("their ae itself is untouched"),
+            "#!/bin/sh\necho my own ae\n"
+        );
+    }
 }

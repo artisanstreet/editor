@@ -40,6 +40,20 @@ pub(crate) enum AddToPathError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub(crate) enum ExistingAeError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum RemoveFromPathError {
     #[error(transparent)]
     Locate(#[from] LocateError),
@@ -47,6 +61,12 @@ pub(crate) enum RemoveFromPathError {
     PowerShell(#[source] RunError),
     #[error("find the home folder")]
     Home(#[source] EnvPathError),
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(transparent)]
     Remove(#[from] RemoveError),
 }
@@ -99,6 +119,53 @@ pub(crate) enum LaunchEditorError {
     Spawn(#[from] SpawnError),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Held {
+    Nothing,
+    Link(PathBuf),
+    Other,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExistingAe {
+    Artisans,
+    Foreign { path: PathBuf },
+}
+
+fn held(link: &Path) -> std::io::Result<Held> {
+    match link.symlink_metadata() {
+        Ok(metadata) if metadata.is_symlink() => Ok(Held::Link(std::fs::read_link(link)?)),
+        Ok(_) => Ok(Held::Other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Held::Nothing),
+        Err(error) => Err(error),
+    }
+}
+
+fn artisans(held: &Held, binary: &Path) -> bool {
+    match held {
+        Held::Nothing => true,
+        Held::Link(target) => target == binary,
+        Held::Other => false,
+    }
+}
+
+pub(crate) fn existing_ae() -> Result<ExistingAe, ExistingAeError> {
+    if cfg!(windows) {
+        return Ok(ExistingAe::Artisans);
+    }
+    let link = unix_link().map_err(ExistingAeError::Home)?;
+    let binary = paths::binary(App::Ae)?;
+    let found = held(&link).map_err(|source| ExistingAeError::Inspect {
+        path: link.clone(),
+        source,
+    })?;
+    Ok(if artisans(&found, &binary) {
+        ExistingAe::Artisans
+    } else {
+        ExistingAe::Foreign { path: link }
+    })
+}
+
 pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
     if cfg!(windows) {
         let dir = ps_quote(&paths::dir(App::Ae)?);
@@ -142,24 +209,17 @@ pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
     }
 }
 
-pub(crate) fn foreign_ae() -> Option<PathBuf> {
-    if cfg!(windows) {
-        return None;
-    }
-    let link = unix_link().ok()?;
-    link.symlink_metadata()
-        .is_ok_and(|metadata| !metadata.is_symlink())
-        .then_some(link)
-}
-
 pub(crate) fn remove_from_path() -> Result<(), RemoveFromPathError> {
     if cfg!(windows) {
         remove_path_entry(&paths::dir(App::Ae)?).map_err(RemoveFromPathError::PowerShell)
     } else {
         let link = unix_link().map_err(RemoveFromPathError::Home)?;
-        if std::fs::read_link(&link)
-            .is_ok_and(|target| target == App::Ae.binary().unwrap_or_default())
-        {
+        let binary = paths::binary(App::Ae)?;
+        let found = held(&link).map_err(|source| RemoveFromPathError::Inspect {
+            path: link.clone(),
+            source,
+        })?;
+        if matches!(&found, Held::Link(target) if *target == binary) {
             sys::remove(&link)?;
         }
         Ok(())

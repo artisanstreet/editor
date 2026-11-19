@@ -58,6 +58,8 @@ pub(crate) enum InstallError {
         version: String,
         system: &'static str,
     },
+    #[error("look for an `ae` that isn't Artisan's")]
+    ExistingAe(#[from] platform::ExistingAeError),
     #[error("replace the `ae` that isn't Artisan's")]
     RemoveForeign(#[source] RemoveError),
     #[error("remember {} as the install folder", root.display())]
@@ -952,8 +954,9 @@ fn confirmed(question: &str) -> Result<bool, AskError> {
 }
 
 fn replace_foreign_ae(args: &InstallArgs) -> Result<bool, InstallError> {
-    let Some(file) = platform::foreign_ae() else {
-        return Ok(true);
+    let file = match platform::existing_ae()? {
+        platform::ExistingAe::Artisans => return Ok(true),
+        platform::ExistingAe::Foreign { path } => path,
     };
     let replace = if ui::interactive() && !args.apply {
         confirmed(&format!(
@@ -1658,8 +1661,16 @@ fn clear_leftovers(dir: &Path) -> Result<(), InstallAppError> {
     Ok(())
 }
 
-const FOREIGN_AE_IN_WSL: &str =
-    r#"test -e "$HOME/.local/bin/ae" && ! test -L "$HOME/.local/bin/ae""#;
+const FOREIGN_AE_IN_WSL: &str = concat!(
+    r#"link="$HOME/.local/bin/ae"; "#,
+    r#"test -e "$link" || test -L "$link" || exit 1; "#,
+    r#"test -L "$link" || exit 0; "#,
+    r#"default="${XDG_DATA_HOME:-$HOME/.local/share}/artisan-street"; "#,
+    r#"root="$default"; "#,
+    r#"if test -e "$default/location"; then IFS= read -r root < "$default/location"; fi; "#,
+    r#"test "$(readlink "$link")" = "${root%/}/ae/ae" && exit 1; "#,
+    r#"exit 0"#,
+);
 
 fn replaces_foreign_ae_in(distro: &str, yes: bool) -> Result<bool, InstallInWslError> {
     let status = sys::quiet(std::process::Command::new("wsl.exe").args([
@@ -2079,3 +2090,7 @@ fn remove_self_later(ae: &Path, dir: &Path) -> Result<(), RemoveSelfLaterError> 
 #[cfg(test)]
 #[path = "../tests/install/plan.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/install/foreign_ae_in_wsl.rs"]
+mod foreign_ae_in_wsl_tests;
