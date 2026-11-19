@@ -1,21 +1,14 @@
-#![expect(
-    clippy::allow_attributes,
-    clippy::undocumented_unsafe_blocks,
-    clippy::unused_result_ok,
-    unreachable_pub,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code, reason = "setiopolicy_np is a C call")]
+#[expect(unsafe_code, reason = "setiopolicy_np is a C call")]
 mod macos;
 mod sandbox;
 #[cfg(unix)]
-#[allow(unsafe_code, reason = "pre_exec runs between fork and exec")]
+#[expect(unsafe_code, reason = "pre_exec runs between fork and exec")]
 mod unix;
 #[cfg(windows)]
-#[allow(unsafe_code, reason = "Win32 process calls")]
+#[expect(unsafe_code, reason = "Win32 process calls")]
 mod windows;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

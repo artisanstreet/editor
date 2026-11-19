@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-#[allow(
+#[expect(
     unsafe_code,
     reason = "Landlock is entered through raw syscalls between fork and exec"
 )]

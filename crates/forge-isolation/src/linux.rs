@@ -130,9 +130,10 @@ fn found(layout: &Layout) -> Result<(), String> {
 
 fn enable(layout: &Layout, controller: Controller) -> Result<(), String> {
     let name = controller.name();
-    let available = std::fs::read_to_string(layout.root.join("cgroup.controllers"))
-        .map(|controllers| delegated(&controllers))
-        .unwrap_or_default();
+    let controllers = layout.root.join("cgroup.controllers");
+    let available = std::fs::read_to_string(&controllers)
+        .map(|listed| delegated(&listed))
+        .map_err(|error| format!("read {}: {error}", controllers.display()))?;
     if !available.contains(&controller) {
         return Err(format!(
             "the {name} controller isn't delegated to this service"
@@ -181,11 +182,11 @@ pub fn protect_forge() -> Vec<Outcome> {
     }
     let memory = enable(&layout, Controller::Memory);
     let ceiling = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .as_deref()
-        .and_then(total_memory)
-        .map(engine_memory_ceiling)
-        .ok_or_else(|| "read the machine's memory size".to_owned());
+        .map_err(|error| format!("read /proc/meminfo: {error}"))
+        .and_then(|meminfo| {
+            total_memory(&meminfo).ok_or_else(|| "/proc/meminfo names no MemTotal".to_owned())
+        })
+        .map(engine_memory_ceiling);
     let capped = memory
         .clone()
         .and(ceiling)
@@ -283,15 +284,15 @@ pub(crate) fn engines_membership() -> Option<&'static CStr> {
     ENGINES_MEMBERSHIP.get().map(CString::as_c_str)
 }
 
-fn overwrite(path: &CStr, bytes: &[u8]) {
-    if let Ok(file) = rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty()) {
-        rustix::io::write(&file, bytes).ok();
-    }
+fn overwrite(path: &CStr, bytes: &[u8]) -> rustix::io::Result<()> {
+    let file = rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())?;
+    rustix::io::write(&file, bytes)?;
+    Ok(())
 }
 
-pub(crate) fn enter(engines: Option<&CStr>) {
+pub(crate) fn enter(engines: Option<&CStr>) -> rustix::io::Result<()> {
     if let Some(membership) = engines {
-        overwrite(membership, b"0");
+        overwrite(membership, b"0")?;
     }
-    overwrite(OWN_OOM_SCORE, ENGINE_OOM_SCORE);
+    overwrite(OWN_OOM_SCORE, ENGINE_OOM_SCORE)
 }
