@@ -4,6 +4,7 @@ use aqua_ui::collection::BatchedCollectionRow;
 use artisan_api::TextContent;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::sync::Arc;
 
 pub(super) fn answer_text(text: &str) -> &str {
@@ -52,7 +53,7 @@ impl RowFactory {
         owner: &Rc<super::super::row_cache::RowOwner>,
         item: &artisan_api::Item,
         field: crate::conversation::content::SourceField,
-        batches: &RefCell<Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>>,
+        batches: &RefCell<Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>>,
         used: &RefCell<std::collections::HashSet<super::super::resources::ResourceKey>>,
     ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use crate::conversation::view::resources::ResourceKey;
@@ -88,8 +89,8 @@ impl RowFactory {
                         item.position,
                         Slot::Answer,
                     ),
-                    text: std::sync::Arc::from(text.as_str()),
-                    separator: std::sync::Arc::from("\n\n"),
+                    text: Arc::from(text.as_str()),
+                    separator: Arc::from("\n\n"),
                     copies: Vec::new(),
                 };
                 let element = Text::new(text.clone())
@@ -153,7 +154,7 @@ impl RowFactory {
         }
         let scope = self.scope.clone();
         let provider = services.provider.clone();
-        let emit = services.emit.clone();
+        let emit = Rc::clone(&services.emit);
         let weak = Rc::downgrade(owner);
         let item_id = item.id.clone();
         let seq = item.seq;
@@ -163,9 +164,9 @@ impl RowFactory {
                 seq,
                 scope: scope.clone(),
                 provider: provider.clone(),
-                owner: weak.clone(),
+                owner: Weak::clone(&weak),
                 action: RowSourceActionKind::Content(action),
-            })
+            });
         });
         let view = owner
             .sources

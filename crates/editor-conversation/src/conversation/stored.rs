@@ -148,8 +148,8 @@ pub(crate) struct StoredLeafLease {
 impl Drop for StoredLeafLease {
     fn drop(&mut self) {
         self.cleanup.borrow_mut().push(PendingRelease {
-            batch: self.batch.clone(),
-            _leaf: self.leaf.clone(),
+            batch: Arc::clone(&self.batch),
+            _leaf: Rc::clone(&self.leaf),
             key: self.key.clone(),
             ordinal: self.ordinal,
         });
@@ -329,32 +329,31 @@ impl StoredConversation {
         for body in self.bodies.values() {
             {
                 let id = &body.owner;
-                for (block, key, row) in body.presenter.heatmap_reveals(&id) {
+                for (block, key, row) in body.presenter.heatmap_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.heatmap_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.funnel_reveals(&id) {
+                for (block, key, row) in body.presenter.funnel_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.funnel_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.distribution_reveals(&id) {
+                for (block, key, row) in body.presenter.distribution_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.distribution_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.spans_reveals(&id) {
+                for (block, key, row) in body.presenter.spans_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.spans_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, collection, row, index) in body.presenter.file_tree_focus_requests(&id)
-                {
+                for (block, collection, row, index) in body.presenter.file_tree_focus_requests(id) {
                     changed |= app.reveal_collection_item(collection.as_str(), index);
                     if app.focus_key(row.as_str()) {
                         body.presenter
@@ -416,18 +415,18 @@ impl StoredConversation {
         let leaf_owner = &body.owner;
         if let Some(media) = media {
             body.presenter
-                .set_media_services(&leaf_owner, media)
+                .set_media_services(leaf_owner, media)
                 .map_err(failed)?;
         }
         let ids = body.ids.entry(ordinal).or_default();
         body.presenter
-            .set_projected_reveal(&leaf_owner, ordinal, reveal);
+            .set_projected_reveal(leaf_owner, ordinal, reveal);
         body.presenter
             .prepare_stored_leaf(
                 &self.owner,
-                &leaf_owner,
+                leaf_owner,
                 ordinal,
-                leaf.clone(),
+                Rc::clone(&leaf),
                 theme,
                 document,
                 order,
@@ -440,10 +439,10 @@ impl StoredConversation {
             )
             .map_err(failed)?;
         let charts = HeatmapServices::new(*theme);
-        let copy = code_emit.clone();
+        let copy = Rc::clone(&code_emit);
         let reference = code_emit;
         let code = body.presenter.code_services(
-            &leaf_owner,
+            leaf_owner,
             *theme,
             reduced_motion,
             Rc::new(move |effect| copy(super::presentation::CodeAction::Copy(effect))),
@@ -461,7 +460,7 @@ impl StoredConversation {
             .presenter
             .render_stored_leaf(
                 &self.owner,
-                &leaf_owner,
+                leaf_owner,
                 ordinal,
                 0,
                 ordinal + 1 == source.block_count(),
@@ -478,23 +477,23 @@ impl StoredConversation {
             .map_err(failed)?;
         let lease = match body.leases.get(&ordinal) {
             Some(existing) if Arc::ptr_eq(&existing.batch, &rendered.selection_batch) => {
-                existing.clone()
+                Rc::clone(existing)
             }
             _ => {
                 let lease = Rc::new(StoredLeafLease {
                     leaf,
-                    batch: rendered.selection_batch.clone(),
-                    cleanup: self.cleanup.clone(),
+                    batch: Arc::clone(&rendered.selection_batch),
+                    cleanup: Rc::clone(&self.cleanup),
                     key: key.clone(),
                     ordinal,
                 });
                 self.live.push(Rc::downgrade(&lease));
-                body.leases.insert(ordinal, lease.clone());
+                body.leases.insert(ordinal, Rc::clone(&lease));
                 lease
             }
         };
         body.batches
-            .insert(ordinal, rendered.selection_batch.clone());
+            .insert(ordinal, Arc::clone(&rendered.selection_batch));
         self.order
             .retain(|(other, row)| other != key || *row != ordinal);
         self.order.push_back((key.clone(), ordinal));

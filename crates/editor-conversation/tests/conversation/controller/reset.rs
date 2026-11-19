@@ -73,11 +73,9 @@ fn page(id: &str) -> ItemsPage {
 }
 
 pub(super) fn enqueue(conversation: &Conversation, completion: Completion) {
-    assert!(
-        runtime()
-            .block_on(conversation.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime()
+        .block_on(conversation.delivery.sender().send(completion))
+        .unwrap();
 }
 
 pub(super) fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
@@ -163,7 +161,7 @@ fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
         Completion::Work {
             origin: previous,
             first: 10,
-            result: Err(editor_core::client::CallError {
+            result: Err(CallError {
                 method: "GET".parse().expect("GET is an HTTP method"),
                 path: "/threads/thread/work".into(),
                 failure: Box::new(editor_core::client::CallFailure::Inconsistent {

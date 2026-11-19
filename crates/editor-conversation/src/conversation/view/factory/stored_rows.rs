@@ -10,6 +10,7 @@ use editor_ui::markdown::visual::BodyTone;
 use editor_ui::rich::actions::ResourceScope;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::sync::Arc;
 
 fn pending_above(
@@ -145,7 +146,7 @@ impl RowFactory {
         let proof = stored
             .proof(&self.scope, &key, &source, block, item.seq, &proof_leaf)
             .ok_or(RealizeRowError::Stale(Staleness::StoredProof))?;
-        let emit = self.on_code.clone();
+        let emit = Rc::clone(&self.on_code);
         let code_scope = self.scope.clone();
         let code_key = key.clone();
         let code_proof = proof.clone();
@@ -154,7 +155,7 @@ impl RowFactory {
             emit(ScopedCodeAction::stored(
                 code_scope.clone(),
                 code_key.clone(),
-                code_owner.clone(),
+                Weak::clone(&code_owner),
                 code_proof.clone(),
                 action,
             ));
@@ -169,14 +170,14 @@ impl RowFactory {
             &self.theme,
             BodyTone::Foreground,
             self.allocate.as_ref(),
-            self.invalidate.clone(),
-            self.on_link.clone(),
-            self.on_color.clone(),
+            Rc::clone(&self.invalidate),
+            Rc::clone(&self.on_link),
+            Rc::clone(&self.on_color),
             ResourceScope {
                 host: self.scope.host.to_string(),
                 thread: self.scope.thread.clone(),
             },
-            reveal.as_ref().map(|(owner, _, _)| owner.clone()),
+            reveal.as_ref().map(|(owner, _, _)| Rc::clone(owner)),
             media,
             code_emit,
             self.scope.instance,
@@ -267,7 +268,7 @@ impl RowFactory {
         block: usize,
         reference: &artisan_api::ContentRef,
         version: u64,
-        batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
+        batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use crate::conversation::view::resources::ResourceKey;
         use aqua_ui::element::Text;

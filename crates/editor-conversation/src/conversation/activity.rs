@@ -712,7 +712,7 @@ fn first_field(input: &str) -> Option<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMessage {
-    pub(crate) to: Option<artisan_api::ItemId>,
+    pub(crate) to: Option<ItemId>,
     pub(crate) direction: MessageDirection,
     pub(crate) summary: Option<String>,
     pub(crate) text: artisan_api::TextContent,

@@ -132,7 +132,7 @@ impl TranscriptObservations {
                     .viewports
                     .push(ViewportObservation {
                         viewport,
-                        active: active.clone(),
+                        active: Rc::clone(&active),
                     });
             }
         })
@@ -147,7 +147,7 @@ impl TranscriptObservations {
         let height_events = self.clone();
         let height_key = snapshot.row.key();
         let version = snapshot.version;
-        let height_active = snapshot.active.clone();
+        let height_active = Rc::clone(&snapshot.active);
         let height = Rc::new(move |bounds: aqua_core::Rect| {
             height_events
                 .0
@@ -158,7 +158,7 @@ impl TranscriptObservations {
                     key: height_key.clone(),
                     version,
                     height: bounds.h,
-                    active: height_active.clone(),
+                    active: Rc::clone(&height_active),
                 });
         });
         let paint_events = self.clone();
@@ -330,15 +330,13 @@ impl TranscriptObservations {
         let mut bounds = std::collections::HashMap::new();
         for index in mounted.clone() {
             let key = &state.row_keys[index];
-            let hash = match state.key_hashes.get(key) {
-                Some(hash) => *hash,
-                None => {
-                    let hash =
-                        aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!("{key:?}")));
-                    let key = key.clone();
-                    state.key_hashes.insert(key, hash);
-                    hash
-                }
+            let hash = if let Some(hash) = state.key_hashes.get(key) {
+                *hash
+            } else {
+                let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!("{key:?}")));
+                let key = key.clone();
+                state.key_hashes.insert(key, hash);
+                hash
             };
             if let Some(rect) = app
                 .tree()
@@ -512,7 +510,7 @@ impl PaintedRow {
 
 impl ObservedRead {
     #[cfg(feature = "qualification")]
-    pub fn observed_seq(&self) -> artisan_api::Seq {
+    pub fn observed_seq(&self) -> Seq {
         self.candidate.observed_seq()
     }
 
@@ -524,10 +522,10 @@ impl ObservedRead {
     ) -> bool {
         if !self.snapshot.active.get()
             || !self.scope.current(conversation, core)
-            || !conversation
+            || conversation
                 .row_position(&self.snapshot.row.key())
                 .and_then(|index| conversation.rows.get(index))
-                .is_some_and(|(_, version)| *version == self.snapshot.version)
+                .is_none_or(|(_, version)| *version != self.snapshot.version)
         {
             return false;
         }
@@ -754,7 +752,7 @@ pub fn observer(
         .enumerate()
         .rev()
         .find_map(|(index, (row, _))| match row {
-            crate::conversation::fold::Row::EarlierWork { first, .. }
+            Row::EarlierWork { first, .. }
                 if (index < viewport.visible.start && viewport.visible.start - index <= 8)
                     || near(index, 1200.0) =>
             {
@@ -794,9 +792,9 @@ fn overscan_from_environment(name: &str, fallback: f32) -> f32 {
 
 fn transcript_overscan_pixels(conversation: &Conversation) -> f32 {
     let settled = overscan_from_environment("AQUA_OVERSCAN_PX", SETTLED_OVERSCAN_PIXELS);
-    match conversation.landing.is_some() {
-        true => overscan_from_environment("AQUA_LANDING_OVERSCAN_PX", LANDING_OVERSCAN_PIXELS)
-            .min(settled),
-        false => settled,
+    if conversation.landing.is_some() {
+        overscan_from_environment("AQUA_LANDING_OVERSCAN_PX", LANDING_OVERSCAN_PIXELS).min(settled)
+    } else {
+        settled
     }
 }

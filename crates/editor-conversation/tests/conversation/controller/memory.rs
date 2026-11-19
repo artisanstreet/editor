@@ -53,7 +53,7 @@ fn a_parked_thread_counts_its_streaming_text() {
         artisan_api::LiveTarget::Text {
             item_id: ItemId("current".into()),
         },
-        std::sync::Arc::new(ropey::Rope::from_str(&streamed)),
+        Arc::new(ropey::Rope::from_str(&streamed)),
     );
     let parked = ParkedThread {
         view,

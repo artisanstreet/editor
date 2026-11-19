@@ -98,7 +98,7 @@ enum Completion {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScrollAction {
     End,
     Tail,
@@ -230,7 +230,7 @@ impl Conversation {
     pub fn sync_screen(&mut self, core: &mut Core) {
         match core.workspace_screen().clone() {
             Screen::Thread { host, thread } => {
-                let current = core.host(&host).map(|host| host.instance());
+                let current = core.host(&host).map(editor_core::HostData::instance);
                 if current.is_none() {
                     if self.open.is_some() {
                         self.close(core);
@@ -261,7 +261,7 @@ impl Conversation {
     pub fn open_thread(&mut self, core: &mut Core, host: HostId, thread: ThreadId) {
         let _span = tracing::info_span!("open_thread", %host, %thread).entered();
         self.away = false;
-        let Some(instance) = core.host(&host).map(|host| host.instance()) else {
+        let Some(instance) = core.host(&host).map(editor_core::HostData::instance) else {
             self.close(core);
             return;
         };
@@ -1199,7 +1199,7 @@ impl Conversation {
             generation: self.generation,
         };
         let sender = self.delivery.sender();
-        let id = item.clone();
+        let id = item;
         self.answer_tasks.insert(
             request,
             AbortOnDropHandle::new(runtime().spawn(async move {
@@ -1223,7 +1223,7 @@ impl Conversation {
             CoreEvent::Host { host, event }
                 if self.open.as_ref().is_some_and(|(open, _)| open == host) =>
             {
-                self.host_event(core, event, watched)
+                self.host_event(core, event, watched);
             }
             _ => {}
         }
@@ -1324,7 +1324,7 @@ impl Conversation {
             self.host_instance
                 .map(|instance| (host, instance, self.generation))
         });
-        let current = core.host(&origin.host).map(|host| host.instance());
+        let current = core.host(&origin.host).map(editor_core::HostData::instance);
         completion_is_current(
             (&origin.host, origin.instance, origin.generation),
             open,
@@ -1351,7 +1351,7 @@ impl Conversation {
     pub fn page_task_finished(&self) -> bool {
         self.page_task
             .as_ref()
-            .is_some_and(|task| task.is_finished())
+            .is_some_and(AbortOnDropHandle::is_finished)
     }
 
     pub fn drain(&mut self, core: &mut Core) -> bool {
@@ -1455,7 +1455,7 @@ impl Conversation {
                             self.load_error = Some(format!(
                                 "Couldn't load this work: {}",
                                 diagnostics::chain(&error)
-                            ))
+                            ));
                         }
                     }
                 }
@@ -1513,7 +1513,7 @@ impl Conversation {
     }
 }
 
-fn answer_failure(error: &editor_core::client::CallError) -> String {
+fn answer_failure(error: &CallError) -> String {
     use artisan_api::Failure;
     let why = match error.refused() {
         Some(
@@ -1551,7 +1551,7 @@ fn shape_source<'a>(
         _ => 0,
     };
     match (slot, &item.kind) {
-        (fold::Slot::Prose, artisan_api::ItemKind::AssistantMessage { text, .. }) => {
+        (fold::Slot::Prose, ItemKind::AssistantMessage { text, .. }) => {
             let live = (item.status == artisan_api::Status::Running)
                 .then(|| {
                     view.live.get(&artisan_api::LiveTarget::Text {
@@ -1577,7 +1577,7 @@ fn shape_source<'a>(
         }
         (
             fold::Slot::Text(fold::TextSection::User),
-            artisan_api::ItemKind::UserMessage {
+            ItemKind::UserMessage {
                 text: artisan_api::TextContent::Inline(source),
                 ..
             },

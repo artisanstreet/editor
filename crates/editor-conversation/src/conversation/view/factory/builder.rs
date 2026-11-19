@@ -183,10 +183,10 @@ impl RowFactory {
                 live.entry(id.clone()).or_insert(binding);
             }
         }
-        self.admission = Some(conversation.reveal.clone());
+        self.admission = Some(Rc::clone(&conversation.reveal));
         self.reveals = Some(RevealResources {
             owners,
-            arrivals: conversation.arrivals.clone(),
+            arrivals: Rc::clone(&conversation.arrivals),
             live,
             swift,
         });

@@ -112,27 +112,25 @@ impl QuestionPages {
                 Collection::Stored(source) => Some((question.id.clone(), source.clone())),
                 Collection::Inline(_) => None,
             });
-        match option {
-            Some((question, source)) => {
-                if self.option_question.as_ref() != Some(&(panel.step, question.clone()))
-                    || self.options.as_ref().is_none_or(|owner| {
-                        !owner.matches(host_id, instance, &active.item, &source)
-                    })
-                {
-                    self.options = Some(Owner {
-                        host: host_id.clone(),
-                        instance,
-                        item: active.item.clone(),
-                        source: source.clone(),
-                        browser: Rc::new(RefCell::new(CollectionBrowser::new(host, source))),
-                    });
-                    self.option_question = Some((panel.step, question));
-                }
+        if let Some((question, source)) = option {
+            if self.option_question.as_ref() != Some(&(panel.step, question.clone()))
+                || self
+                    .options
+                    .as_ref()
+                    .is_none_or(|owner| !owner.matches(host_id, instance, &active.item, &source))
+            {
+                self.options = Some(Owner {
+                    host: host_id.clone(),
+                    instance,
+                    item: active.item.clone(),
+                    source: source.clone(),
+                    browser: Rc::new(RefCell::new(CollectionBrowser::new(host, source))),
+                });
+                self.option_question = Some((panel.step, question));
             }
-            None => {
-                self.options = None;
-                self.option_question = None;
-            }
+        } else {
+            self.options = None;
+            self.option_question = None;
         }
     }
 
@@ -453,7 +451,7 @@ impl QuestionCollection {
                     item: item.clone(),
                     source: source.clone(),
                     action,
-                })
+                });
             });
         if browser.borrow().selected().is_some() {
             return Some(editor_sources::collection_detail(

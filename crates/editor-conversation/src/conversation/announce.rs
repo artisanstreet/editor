@@ -169,9 +169,10 @@ pub fn announcer(announcement: &Announcement) -> Element {
         .role(Role::Text)
         .aria_label(announcement.text.clone())
         .aria_live(LiveRegion::Polite);
-    match announcement.text.is_empty() {
-        true => region.aria_hidden(),
-        false => region,
+    if announcement.text.is_empty() {
+        region.aria_hidden()
+    } else {
+        region
     }
 }
 

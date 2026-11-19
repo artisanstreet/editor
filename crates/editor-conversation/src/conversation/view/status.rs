@@ -114,7 +114,10 @@ pub(crate) fn run<T>(
             .or_else(|| phase::status_copy(phase).map(str::to_owned))?,
         ),
     };
-    let live = model.run.as_ref().is_none_or(|summary| summary.live());
+    let live = model
+        .run
+        .as_ref()
+        .is_none_or(super::super::fold::RunSummary::live);
     Some(render(text, live, theme))
 }
 

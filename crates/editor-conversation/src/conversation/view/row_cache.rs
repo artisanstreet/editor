@@ -88,10 +88,10 @@ impl RowCache {
 
     pub fn candidate(&self, key: &RowKey) -> Rc<RowOwner> {
         if let Some(owner) = self.rows.get(key) {
-            return owner.clone();
+            return Rc::clone(owner);
         }
         let mut owner = RowOwner::default();
-        owner.cleanup = self.cleanup.clone();
+        owner.cleanup = Rc::clone(&self.cleanup);
         owner.identity = self
             .scope
             .as_ref()

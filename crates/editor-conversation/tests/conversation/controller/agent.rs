@@ -78,11 +78,9 @@ fn step(position: Seq) -> Item {
 }
 
 fn deliver(conversation: &mut Conversation, core: &mut Core, completion: Completion) {
-    assert!(
-        runtime()
-            .block_on(conversation.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime()
+        .block_on(conversation.delivery.sender().send(completion))
+        .unwrap();
     conversation.drain(core);
 }
 

@@ -7,6 +7,7 @@ use artisan_api::{ItemId, ThreadId};
 use editor_core::{Core, HostId, HostInstance};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use aqua_core::GpuiHsla;
 use editor_assets::AssetId;
@@ -105,7 +106,7 @@ pub(crate) struct PreparedProjectedRow {
 #[derive(Clone)]
 pub struct ProjectedProof {
     key: BodyKey,
-    source: std::rc::Rc<str>,
+    source: Rc<str>,
     row: usize,
     range: std::ops::Range<usize>,
     proof: PreparationProof,
@@ -204,12 +205,12 @@ impl SelectionOwners {
 struct MarkdownBody {
     presenter: MarkdownPresenter,
     id: String,
-    source: std::rc::Rc<str>,
+    source: Rc<str>,
     ids: Vec<SelectionSourceId>,
     rendered: Option<PreparationProof>,
     revision: u64,
     projected: HashMap<usize, (std::ops::Range<usize>, PreparationProof)>,
-    batch: Option<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
+    batch: Option<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     prepared_item_seq: Option<artisan_api::Seq>,
     preparation: Option<PreparationProof>,
 }
@@ -363,7 +364,7 @@ impl MarkdownOwners {
             .or_insert_with(|| MarkdownBody {
                 presenter: MarkdownPresenter::default(),
                 id: request.id.to_owned(),
-                source: std::rc::Rc::from(""),
+                source: Rc::from(""),
                 ids: Vec::new(),
                 rendered: None,
                 revision: 0,
@@ -390,7 +391,7 @@ impl MarkdownOwners {
             body.preparation = None;
             body.revision = body.revision.wrapping_add(1);
             self.selection.retain(app, |key| key != &request.key);
-            body.source = std::rc::Rc::from(request.source);
+            body.source = Rc::from(request.source);
         }
         body.preparation = Some(
             prepare_body(
@@ -474,7 +475,7 @@ impl MarkdownOwners {
         let body = self.bodies.entry(key).or_insert_with(|| MarkdownBody {
             presenter: MarkdownPresenter::default(),
             id: id.to_owned(),
-            source: std::rc::Rc::from(""),
+            source: Rc::from(""),
             ids: Vec::new(),
             rendered: None,
             revision: 0,
@@ -499,7 +500,7 @@ impl MarkdownOwners {
             body.prepared_item_seq = None;
             body.preparation = None;
             body.revision = body.revision.wrapping_add(1);
-            body.source = std::rc::Rc::from(source);
+            body.source = Rc::from(source);
         }
         body.preparation =
             Some(prepare_body(&mut body.presenter, engine, source, slot).map_err(failed)?);
@@ -594,14 +595,14 @@ impl MarkdownOwners {
                 });
             }
             self.selection.bodies.insert(request.key.clone(), ids);
-            body.batch = Some(rendered.selection_batch.clone());
+            body.batch = Some(Arc::clone(&rendered.selection_batch));
         }
         let text = reveal
             .as_deref()
             .map_or_else(Vec::new, |reveal| rendered.reveal_text(reveal));
         let proof = ProjectedProof {
             key: request.key.clone(),
-            source: body.source.clone(),
+            source: Rc::clone(&body.source),
             row,
             range: rendered.source_range.clone(),
             proof: rendered.proof.clone(),
@@ -650,7 +651,7 @@ impl MarkdownOwners {
                     revision,
                     stored: None,
                     action,
-                })
+                });
             })
         };
         let copy = Rc::clone(&bind);
@@ -739,7 +740,7 @@ impl MarkdownOwners {
         let (range, proof) = body.projected.get(&row)?;
         Some(ProjectedProof {
             key: key.clone(),
-            source: body.source.clone(),
+            source: Rc::clone(&body.source),
             row,
             range: range.clone(),
             proof: proof.clone(),

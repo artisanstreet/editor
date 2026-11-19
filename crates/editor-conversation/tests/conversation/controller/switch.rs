@@ -57,11 +57,9 @@ fn page(thread: &str) -> ItemsPage {
 }
 
 fn deliver(conversation: &mut Conversation, core: &mut Core, completion: Completion) {
-    assert!(
-        runtime()
-            .block_on(conversation.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime()
+        .block_on(conversation.delivery.sender().send(completion))
+        .unwrap();
     assert!(conversation.drain(core));
 }
 
@@ -170,16 +168,14 @@ fn going_back_before_the_page_arrives_cancels_the_switch_and_lands_at_the_latest
     assert!(conversation.pending.is_none());
     assert_eq!(conversation.scroll_actions(), [ScrollAction::Tail]);
     assert!(conversation.landed_at.is_some());
-    assert!(
-        runtime()
-            .block_on(
-                conversation
-                    .delivery
-                    .sender()
-                    .send(page_for(origin, Fetch::Tail, "second"))
-            )
-            .is_ok()
-    );
+    runtime()
+        .block_on(
+            conversation
+                .delivery
+                .sender()
+                .send(page_for(origin, Fetch::Tail, "second")),
+        )
+        .unwrap();
     assert!(!conversation.drain(&mut core));
     assert_eq!(shown(&conversation), "first");
     assert!(holds(&conversation, "first"));

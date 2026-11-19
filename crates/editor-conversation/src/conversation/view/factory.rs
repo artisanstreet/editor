@@ -220,7 +220,7 @@ pub struct RowFactory {
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
     style_epoch: u64,
     fingerprints: RefCell<HashMap<usize, (RowKey, Option<u64>)>>,
-    live_texts: RefCell<HashMap<usize, (std::sync::Arc<ropey::Rope>, Rc<str>)>>,
+    live_texts: RefCell<HashMap<usize, (Arc<ropey::Rope>, Rc<str>)>>,
     inline_texts: RefCell<HashMap<(artisan_api::ItemId, artisan_api::Seq), Rc<str>>>,
     unsettled: Cell<bool>,
     content_keyed: Cell<bool>,
@@ -336,7 +336,7 @@ impl RowFactory {
         row_owner
             .motion
             .borrow_mut()
-            .on_refit(self.invalidate.clone());
+            .on_refit(Rc::clone(&self.invalidate));
         let reveal = match (&self.reveals, row.model.row.semantic()) {
             (
                 Some(resources),
@@ -707,7 +707,7 @@ impl RowFactory {
                                 .model
                                 .live
                                 .get(&target)
-                                .is_some_and(|source| std::sync::Arc::ptr_eq(source, &binding.text))
+                                .is_some_and(|source| Arc::ptr_eq(source, &binding.text))
                             {
                                 return Err(RealizeRowError::Stale(Staleness::LiveSnapshot));
                             }
@@ -770,8 +770,8 @@ impl RowFactory {
                                 owner.mark_presented();
                             }
                             let copy_source = super::source_actions::CopySource::from_parts(
-                                live.as_ref().map(|binding| binding.text.clone()),
-                                std::sync::Arc::from(source),
+                                live.as_ref().map(|binding| Arc::clone(&binding.text)),
+                                Arc::from(source),
                             );
                             break 'prose Some(super::source_actions::failed_body(
                                 self.theme,
@@ -785,7 +785,10 @@ impl RowFactory {
                 };
                 drop(prepare_span);
                 let preview_notice = (*block + 1 == count)
-                    .then(|| live.as_ref().and_then(|binding| binding.preview_notice()))
+                    .then(|| {
+                        live.as_ref()
+                            .and_then(super::super::live::LiveBinding::preview_notice)
+                    })
                     .flatten();
                 let shaped = self.shape_counts.contains_key(&body_key);
                 if (if shaped {
@@ -827,7 +830,7 @@ impl RowFactory {
                     self.theme,
                     self.reduced_motion,
                     true,
-                    self.on_code.clone(),
+                    Rc::clone(&self.on_code),
                 )?;
                 let order = fold::selection_order(self.scope.agent.is_some(), item.position, *slot);
                 let id = id.to_string();
@@ -843,9 +846,9 @@ impl RowFactory {
                         tone: BodyTone::Foreground,
                         order: &order,
                         glyph: editor_ui::markdown::glyph_painter(),
-                        invalidate: self.invalidate.clone(),
-                        on_link: self.on_link.clone(),
-                        on_color: self.on_color.clone(),
+                        invalidate: Rc::clone(&self.invalidate),
+                        on_link: Rc::clone(&self.on_link),
+                        on_color: Rc::clone(&self.on_color),
                         reference_scope: Some(ResourceScope {
                             host: self.scope.host.to_string(),
                             thread: self.scope.thread.clone(),
@@ -854,7 +857,7 @@ impl RowFactory {
                     },
                     *block,
                     Some(&code),
-                    reveal.as_ref().map(|(owner, _, _)| owner.clone()),
+                    reveal.as_ref().map(|(owner, _, _)| Rc::clone(owner)),
                     || (self.allocate)(),
                 )?;
                 drop(projected_span);
@@ -1173,7 +1176,8 @@ impl RowFactory {
                 if let Some(id) = id {
                     let fresh = row.disclosure.clip.is_none()
                         && row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
-                    let live = standalone || row.model.run.as_ref().is_some_and(|run| run.live());
+                    let live =
+                        standalone || row.model.run.as_ref().is_some_and(fold::RunSummary::live);
                     let entrance = row_owner.motion.borrow_mut().entrance(
                         key.clone(),
                         fresh,
@@ -1188,7 +1192,7 @@ impl RowFactory {
                         Some(entrance.wrap(
                             element,
                             row.disclosure.gap.unwrap_or(row.model.gap),
-                            self.invalidate.clone(),
+                            Rc::clone(&self.invalidate),
                         ))
                     } else {
                         Some(element)
@@ -1277,9 +1281,9 @@ impl RowFactory {
                             _ => None,
                         })
                     }),
-                active: self.active.clone(),
+                active: Rc::clone(&self.active),
                 revealed: !row.held && !row.disclosure.hidden,
-                reveal_ready: reveal.as_ref().map(|(_, _, ready)| ready.clone()),
+                reveal_ready: reveal.as_ref().map(|(_, _, ready)| Rc::clone(ready)),
                 stored: stored_proof.map(|proof| {
                     (
                         Rc::downgrade(
@@ -1294,9 +1298,9 @@ impl RowFactory {
                 }),
                 live: snapshot_live,
             };
-            let (height, painted) = observations.callbacks(snapshot, self.markdown.clone());
-            let height_active = self.active.clone();
-            let paint_active = self.active.clone();
+            let (height, painted) = observations.callbacks(snapshot, Rc::clone(&self.markdown));
+            let height_active = Rc::clone(&self.active);
+            let paint_active = Rc::clone(&self.active);
             let height = Rc::new(move |bounds| {
                 if height_active.get() {
                     height(bounds);
@@ -1327,7 +1331,7 @@ impl RowFactory {
         }
         self.row_cache
             .borrow_mut()
-            .commit(key.clone(), row_owner.clone());
+            .commit(key.clone(), Rc::clone(&row_owner));
         self.realized_owners
             .borrow_mut()
             .insert(key.clone(), Rc::downgrade(&row_owner));

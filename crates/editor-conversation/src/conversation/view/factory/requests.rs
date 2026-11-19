@@ -1,6 +1,7 @@
 use super::{Part, RealizeRowError, RowFactory, Service, Staleness, truncate};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::rc::Weak;
 
 impl RowFactory {
     pub(super) fn approval_card(
@@ -44,7 +45,7 @@ impl RowFactory {
             self.reduced_motion,
             now,
         );
-        let invalidate = self.invalidate.clone();
+        let invalidate = Rc::clone(&self.invalidate);
         let result = super::super::work::activity_row(
             item,
             expanded,
@@ -166,7 +167,7 @@ impl RowFactory {
                 let collection = source.clone();
                 let scope = self.scope.clone();
                 let provider = services.provider.clone();
-                let emit = services.emit.clone();
+                let emit = Rc::clone(&services.emit);
                 let weak = Rc::downgrade(owner);
                 let item_id = item.id.clone();
                 let seq = item.seq;
@@ -176,14 +177,14 @@ impl RowFactory {
                         seq,
                         scope: scope.clone(),
                         provider: provider.clone(),
-                        owner: weak.clone(),
+                        owner: Weak::clone(&weak),
                         action: RowSourceActionKind::QuestionDetail {
                             collection: collection.clone(),
                             source: detail_source.clone(),
                             identity,
                             action,
                         },
-                    })
+                    });
                 });
                 let view = editor_sources::content_view(
                     detail,
@@ -209,7 +210,7 @@ impl RowFactory {
         };
         let scope = self.scope.clone();
         let provider = services.provider.clone();
-        let emit = services.emit.clone();
+        let emit = Rc::clone(&services.emit);
         let weak = Rc::downgrade(owner);
         let item_id = item.id.clone();
         let seq = item.seq;
@@ -219,9 +220,9 @@ impl RowFactory {
                 seq,
                 scope: scope.clone(),
                 provider: provider.clone(),
-                owner: weak.clone(),
+                owner: Weak::clone(&weak),
                 action: RowSourceActionKind::Questions(action),
-            })
+            });
         });
         let view = owner
             .questions

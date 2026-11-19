@@ -22,9 +22,10 @@ fn number_width(count: usize) -> f32 {
 }
 
 fn entry(theme: &ArtisanTheme, number: usize, label: &str, current: bool, width: f32) -> Element {
-    let role = match current {
-        true => TextRole::LabelStrong,
-        false => TextRole::Label,
+    let role = if current {
+        TextRole::LabelStrong
+    } else {
+        TextRole::Label
     };
     let number = UiBox::new()
         .width(width)

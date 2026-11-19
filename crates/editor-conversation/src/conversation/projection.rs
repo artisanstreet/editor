@@ -126,7 +126,7 @@ impl Projections {
             .get(key)
             .filter(|shape| shape.fingerprint == fingerprint)
         {
-            return Some(shape.signatures.clone());
+            return Some(Arc::clone(&shape.signatures));
         }
         let text = source.text();
         let command = source
@@ -139,12 +139,12 @@ impl Projections {
             None => editor_ui::markdown::ShapedSource::new(&text, command),
         }
         .ok()?;
-        let signatures = shaped.signatures().clone();
+        let signatures = Arc::clone(shaped.signatures());
         self.shapes.insert(
             key.clone(),
             BodyShape {
                 fingerprint,
-                signatures: signatures.clone(),
+                signatures: Arc::clone(&signatures),
                 streaming: source.running.then_some(shaped),
             },
         );

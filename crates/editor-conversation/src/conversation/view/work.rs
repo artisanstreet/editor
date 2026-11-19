@@ -16,9 +16,10 @@ const HEADER_TAIL: Space = Space::S8;
 const FAILURE_TAIL: Space = Space::S4;
 
 pub(crate) const fn line_role(mono: bool) -> TextRole {
-    match mono {
-        true => TextRole::Code,
-        false => TextRole::Prose,
+    if mono {
+        TextRole::Code
+    } else {
+        TextRole::Prose
     }
 }
 
@@ -106,10 +107,7 @@ pub(crate) fn header(
     match run.filter(|_| controlled).cloned() {
         Some(run) => {
             let open = !summary.open;
-            let words = match open {
-                true => "Show work",
-                false => "Hide work",
-            };
+            let words = if open { "Show work" } else { "Hide work" };
             Some(activator(
                 theme,
                 format!("work-header-{run}"),
@@ -119,7 +117,7 @@ pub(crate) fn header(
                     dispatch(Action::ToggleWork {
                         run: run.clone(),
                         open,
-                    })
+                    });
                 },
             ))
         }
@@ -170,7 +168,7 @@ pub(crate) fn chain(
             dispatch(Action::ToggleChain {
                 id: first.clone(),
                 open: !open,
-            })
+            });
         },
     ))
 }
@@ -261,27 +259,26 @@ pub(crate) fn activity_row<E>(
             words.code,
         ))
         .build();
-    let sentence = match has_details {
-        true => {
-            let id = item.id.clone();
-            activator(
-                &theme,
-                format!("work-item-{id}"),
-                "Toggle details",
-                line,
-                move || {
-                    dispatch(Action::ToggleItem {
-                        id: id.clone(),
-                        expanded: !expanded,
-                    })
-                },
-            )
-        }
-        false => UiBox::new()
+    let sentence = if has_details {
+        let id = item.id.clone();
+        activator(
+            &theme,
+            format!("work-item-{id}"),
+            "Toggle details",
+            line,
+            move || {
+                dispatch(Action::ToggleItem {
+                    id: id.clone(),
+                    expanded: !expanded,
+                });
+            },
+        )
+    } else {
+        UiBox::new()
             .width(Length::Pct(100.0))
             .style(Style::new().min_width(Length::Pct(0.0)))
             .child(line)
-            .build(),
+            .build()
     };
     Ok(match failure.filter(|_| expanded && has_details) {
         Some(error) => Some(

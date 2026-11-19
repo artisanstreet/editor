@@ -15,7 +15,7 @@ impl RowFactory {
             .observations
             .as_ref()
             .ok_or(ConfigureRowsError::NoObservations)?;
-        Ok(observations.viewport_callback(self.active.clone()))
+        Ok(observations.viewport_callback(Rc::clone(&self.active)))
     }
 
     pub fn publish_projections(

@@ -159,13 +159,15 @@ fn row_frame_with_body_observer(
             .child(filling(content))
             .build()
     });
-    let top = match content.is_some() && !held && !deferred {
-        true => gap,
-        false => 0.0,
+    let top = if content.is_some() && !held && !deferred {
+        gap
+    } else {
+        0.0
     };
-    let tail = match content.is_some() && matches!(model.row, Row::Status(_)) {
-        true => STATUS_TAIL.px(),
-        false => 0.0,
+    let tail = if content.is_some() && matches!(model.row, Row::Status(_)) {
+        STATUS_TAIL.px()
+    } else {
+        0.0
     };
     let mut column = UiBox::new()
         .layout("column")
@@ -245,9 +247,10 @@ pub const TRANSCRIPT_FRAME: &str = "conversation-transcript-frame";
 
 #[must_use]
 pub fn composer_lift(viewport_width: f32) -> f32 {
-    match viewport_width >= NARROW {
-        true => COMPOSER_LIFT,
-        false => COMPOSER_LIFT_NARROW,
+    if viewport_width >= NARROW {
+        COMPOSER_LIFT
+    } else {
+        COMPOSER_LIFT_NARROW
     }
     .px()
 }

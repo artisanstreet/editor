@@ -2,6 +2,7 @@ use super::{RowFactory, RowFingerprint, RowSource};
 use crate::conversation::fold::{Row, RowKey};
 use crate::conversation::presentation::BodyKey;
 use std::rc::Rc;
+use std::sync::Arc;
 
 impl RowFactory {
     pub(super) fn fingerprint(&self, index: usize, key: &RowKey) -> Option<u64> {
@@ -35,7 +36,10 @@ impl RowFactory {
                 }
             }
             Row::Work { .. } | Row::WorkHeader(_)
-                if model.run.as_ref().is_some_and(|run| run.live()) =>
+                if model
+                    .run
+                    .as_ref()
+                    .is_some_and(crate::conversation::fold::RunSummary::live) =>
             {
                 u64::try_from(self.work.timestamp / 1_000).ok()
             }
@@ -65,21 +69,22 @@ impl RowFactory {
         snapshots.key(index)
     }
 
-    pub(super) fn live_text(&self, rope: &std::sync::Arc<ropey::Rope>) -> Rc<str> {
-        let at = std::sync::Arc::as_ptr(rope) as usize;
+    pub(super) fn live_text(&self, rope: &Arc<ropey::Rope>) -> Rc<str> {
+        let at = Arc::as_ptr(rope) as usize;
         self.live_texts
             .borrow_mut()
             .entry(at)
-            .or_insert_with(|| (rope.clone(), Rc::from(rope.to_string())))
+            .or_insert_with(|| (Arc::clone(rope), Rc::from(rope.to_string())))
             .1
             .clone()
     }
 
     pub(super) fn inline_text(&self, item: &artisan_api::Item, text: &str) -> Rc<str> {
-        self.inline_texts
-            .borrow_mut()
-            .entry((item.id.clone(), item.seq))
-            .or_insert_with(|| Rc::from(text))
-            .clone()
+        Rc::clone(
+            self.inline_texts
+                .borrow_mut()
+                .entry((item.id.clone(), item.seq))
+                .or_insert_with(|| Rc::from(text)),
+        )
     }
 }

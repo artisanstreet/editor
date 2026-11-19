@@ -14,16 +14,18 @@ pub(crate) type Dispatch = Rc<dyn Fn(Action)>;
 const CARD: Surface = Surface::Card;
 
 pub(crate) const fn field_role(mono: bool) -> TextRole {
-    match mono {
-        true => TextRole::Code,
-        false => TextRole::Label,
+    if mono {
+        TextRole::Code
+    } else {
+        TextRole::Label
     }
 }
 
 fn body(text: impl Into<String>, theme: ArtisanTheme, muted: bool, mono: bool) -> Element {
-    let ink = match muted {
-        true => theme.colors.text_muted,
-        false => theme.colors.text,
+    let ink = if muted {
+        theme.colors.text_muted
+    } else {
+        theme.colors.text
     };
     field_role(mono)
         .text(&theme, text.into())
@@ -109,7 +111,7 @@ pub(crate) fn approval<E>(
             }
         }
         ApprovalRequest::Action { .. } => {
-            details = details.child(source(SourceField::ApprovalDescription)?)
+            details = details.child(source(SourceField::ApprovalDescription)?);
         }
     }
     if approval.reason.is_some() {
@@ -140,7 +142,7 @@ pub(crate) fn approval<E>(
                     dispatch(Action::Answer {
                         id: id.clone(),
                         answer: Answer::Approval { decision },
-                    })
+                    });
                 })
                 .build(),
             );

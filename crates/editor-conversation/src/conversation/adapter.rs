@@ -308,7 +308,7 @@ pub enum ScrollDirective {
     ToRow { index: usize, animate: bool },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ScrollResolution {
     Ready(ScrollDirective),
     AwaitingRows,

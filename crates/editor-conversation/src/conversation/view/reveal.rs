@@ -62,7 +62,7 @@ impl MountedReveals {
         self.rows
             .get(key)?
             .upgrade()
-            .map(|row| row.borrow().reveal.clone())
+            .map(|row| Rc::clone(&row.borrow().reveal))
     }
 
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
@@ -92,7 +92,7 @@ impl MountedReveals {
             }))
         });
         let row = row.borrow();
-        (row.reveal.clone(), row.fresh, row.ready.clone())
+        (Rc::clone(&row.reveal), row.fresh, Rc::clone(&row.ready))
     }
 
     pub(crate) fn record(
@@ -312,16 +312,15 @@ fn unique_key(tree: &UiTree, root: NodeId, key: &str) -> Option<NodeId> {
 }
 
 fn unique_hash(tree: &UiTree, root: NodeId, hash: aqua_ui::tree::KeyHash) -> Option<NodeId> {
-    match tree.sole_node_with_key(hash) {
-        Some(node) => is_within(tree, node, root).then_some(node),
-        None => {
-            let mut within = tree
-                .nodes_with_key(hash)
-                .into_iter()
-                .filter(|node| is_within(tree, *node, root));
-            let found = within.next()?;
-            within.next().is_none().then_some(found)
-        }
+    if let Some(node) = tree.sole_node_with_key(hash) {
+        is_within(tree, node, root).then_some(node)
+    } else {
+        let mut within = tree
+            .nodes_with_key(hash)
+            .into_iter()
+            .filter(|node| is_within(tree, *node, root));
+        let found = within.next()?;
+        within.next().is_none().then_some(found)
     }
 }
 

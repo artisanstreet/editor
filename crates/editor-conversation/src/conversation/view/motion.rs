@@ -106,7 +106,7 @@ impl RowMotion {
             height: Rc::new(Cell::new(0.0)),
         });
         let started = state.started?;
-        let height = state.height.clone();
+        let height = Rc::clone(&state.height);
         self.entrance_frame(started, height, reduced_motion, now)
     }
 
@@ -130,7 +130,7 @@ impl RowMotion {
             state.started = None;
         }
         let started = state.started?;
-        let height = state.height.clone();
+        let height = Rc::clone(&state.height);
         self.entrance_frame(started, height, reduced_motion, now)
     }
 
@@ -212,12 +212,9 @@ impl RowMotion {
         reduced_motion: bool,
         now: Instant,
     ) -> Option<Sticker> {
-        let state = self
-            .stickers
-            .entry(key.clone())
-            .or_insert_with(|| StickerState {
-                started: (fresh && !reduced_motion).then_some(now),
-            });
+        let state = self.stickers.entry(key).or_insert_with(|| StickerState {
+            started: (fresh && !reduced_motion).then_some(now),
+        });
         let elapsed = now.saturating_duration_since(state.started?);
         if elapsed >= sticker::DURATION || reduced_motion {
             return None;
@@ -332,7 +329,7 @@ impl EntranceFrame {
     pub fn wrap(self, element: Element, gap: f32, invalidate: Rc<dyn Fn()>) -> Element {
         use aqua_ui::element::{Box as UiBox, Canvas};
         use aqua_ui::style::{Length, Style};
-        let measured = self.height.clone();
+        let measured = Rc::clone(&self.height);
         let probe = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |tree, node| {
