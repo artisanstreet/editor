@@ -1,5 +1,6 @@
 use super::{
     attachment::{Attachments, Source},
+    draft_body::{DraftBody, DraftPath, SavedFile},
     draft_session::Submission,
     mentions::Mentions,
     persistence::{DraftLease, DraftSessions, SessionEvent},
@@ -7,17 +8,11 @@ use super::{
     questionnaire::QuestionnairePanel,
 };
 use artisan_api::{
-    BlobHash, CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
+    CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
 };
 use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
 use editor_ui::text::editor::{Editor, ListKey, Mode};
-use serde::{Deserialize, Serialize};
-use std::{
-    cell::RefCell,
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
 
 #[derive(Clone, Copy, Debug)]
 enum TurnCall {
@@ -88,55 +83,11 @@ enum Outbox {
     Restored,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DraftBody {
-    #[serde(default)]
-    pub(crate) text: String,
-    #[serde(default)]
-    pub(crate) images: Vec<BlobHash>,
-    #[serde(default)]
-    pub(crate) files: Vec<DraftFile>,
-    #[serde(default)]
-    pub(crate) config: Option<EngineConfig>,
-    #[serde(default)]
-    pub(crate) project: Option<ProjectId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) follow_ups: Vec<Self>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct DraftFile {
-    #[serde(skip)]
     pub key: u64,
     pub path: DraftPath,
-    #[serde(default)]
     pub folder: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DraftPath(String);
-
-#[derive(Debug, thiserror::Error)]
-#[error("{} is not a Unicode path, so it cannot be linked in a message", .path.display())]
-pub struct NonUnicodePath {
-    path: PathBuf,
-}
-
-impl DraftPath {
-    pub fn as_path(&self) -> &Path {
-        Path::new(&self.0)
-    }
-}
-
-impl TryFrom<PathBuf> for DraftPath {
-    type Error = NonUnicodePath;
-
-    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        match path.into_os_string().into_string() {
-            Ok(path) => Ok(Self(path)),
-            Err(path) => Err(NonUnicodePath { path: path.into() }),
-        }
-    }
 }
 
 fn open_draft(
@@ -742,7 +693,14 @@ impl Composer {
                         .collect()
                 })
                 .unwrap_or_default(),
-            files: self.files.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|file| SavedFile {
+                    path: file.path.clone(),
+                    folder: file.folder,
+                })
+                .collect(),
             config: self.config.clone(),
             project: self.project.clone(),
             follow_ups: self.parked.clone(),
@@ -753,19 +711,7 @@ impl Composer {
         let Some(session) = &self.session else {
             return;
         };
-        let body = self.draft_body();
-        let value = if body.text.is_empty()
-            && body.images.is_empty()
-            && body.files.is_empty()
-            && body.config.is_none()
-            && body.project.is_none()
-            && body.follow_ups.is_empty()
-        {
-            serde_json::Value::Null
-        } else {
-            serde_json::to_value(body).expect("DraftBody serializes")
-        };
-        session.queue(value);
+        session.queue(self.draft_body());
     }
 
     pub fn sync(&mut self, core: &Core) -> Vec<SessionEvent> {
@@ -778,12 +724,13 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (presentable, sending, failed, body) = session.read(|state| {
+        let (presentable, sending, failed, body, unreadable) = session.read(|state| {
             (
                 state.presentable(),
                 state.sending(),
                 state.send_failed(),
                 state.body().clone(),
+                state.unreadable().map(ToString::to_string),
             )
         });
         for event in &events {
@@ -826,14 +773,12 @@ impl Composer {
         self.editor
             .borrow_mut()
             .set_disabled(holding || self.questionnaire.sending.is_some());
-        if presentable
-            && self.restore_revision.take() == Some(self.edit_revision)
-            && body != serde_json::Value::Null
-        {
-            match serde_json::from_value::<DraftBody>(body) {
-                Ok(body) if self.input_empty() => self.restore_body(body),
-                Ok(_) => {}
-                Err(error) => self.notice = Some(format!("Couldn't read this draft: {error}")),
+        if presentable && self.restore_revision.take() == Some(self.edit_revision) {
+            if let Some(error) = unreadable {
+                self.notice = Some(format!("Couldn't read this draft: {error}"));
+            }
+            if !body.is_empty() && self.input_empty() {
+                self.restore_body(body);
             }
         }
         events
@@ -870,10 +815,14 @@ impl Composer {
         self.files = body
             .files
             .into_iter()
-            .map(|mut file| {
-                file.key = self.next_file_key;
+            .map(|file| {
+                let key = self.next_file_key;
                 self.next_file_key = self.next_file_key.wrapping_add(1);
-                file
+                DraftFile {
+                    key,
+                    path: file.path,
+                    folder: file.folder,
+                }
             })
             .collect();
     }
@@ -1104,10 +1053,10 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
             let slash = if file.folder { "/" } else { "" };
             let path = file.path.as_path();
             let name = path.file_name().map_or_else(
-                || file.path.0.clone(),
+                || file.path.as_str().to_owned(),
                 |name| name.to_string_lossy().into_owned(),
             );
-            markdown_link(&format!("{name}{slash}"), &file.path.0)
+            markdown_link(&format!("{name}{slash}"), file.path.as_str())
         })
         .collect::<Vec<_>>()
         .join("\n");

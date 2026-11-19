@@ -2,16 +2,23 @@ use super::*;
 use artisan_api::{DraftSnapshot, DraftWriteResult};
 use serde_json::json;
 
+fn typed(text: &str) -> DraftBody {
+    DraftBody {
+        text: text.to_owned(),
+        ..DraftBody::default()
+    }
+}
+
 fn in_conflict() -> DraftSession {
     let mut state = DraftSession::new("new".into());
     assert!(matches!(state.next_operation(), Some(Operation::Load)));
     state.loaded(Ok(DraftSnapshot::default()));
-    state.queue(json!({"text": "mine"}));
-    let Some(Operation::Write { request, edited }) = state.next_operation() else {
+    state.queue(typed("mine"));
+    let Some(Operation::Write { body, edited, .. }) = state.next_operation() else {
         panic!("expected the typed draft to be written");
     };
     state.written(
-        &request,
+        &body,
         edited,
         Ok(DraftWriteResult {
             saved: false,
@@ -39,7 +46,7 @@ fn choosing_the_other_clients_draft_drops_images_still_uploading_for_mine() {
         None,
         "the image belongs to the discarded draft"
     );
-    assert_eq!(state.body(), &json!({"text": "theirs"}));
+    assert_eq!(state.body(), &typed("theirs"));
     assert!(
         !state.pending(),
         "nothing from the discarded draft is saved over the one the user chose"

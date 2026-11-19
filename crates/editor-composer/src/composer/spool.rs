@@ -1,9 +1,9 @@
+use super::draft_body::DraftBody;
 use editor_core::{
     HostId,
     config_file::{self, ReadConfigError, WriteConfigError},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::Digest as _;
 use std::{
     collections::HashSet,
@@ -16,9 +16,9 @@ pub struct DraftSpool {
     dir: PathBuf,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct SpooledDraft {
-    pub(crate) body: Value,
+    pub(crate) body: DraftBody,
     pub(crate) images: Vec<Vec<u8>>,
 }
 
@@ -110,7 +110,7 @@ impl ImageDigest {
 struct Record {
     host: HostId,
     scope: String,
-    body: Value,
+    body: DraftBody,
     #[serde(default)]
     images: Vec<ImageDigest>,
 }
@@ -127,7 +127,7 @@ impl DraftSpool {
         &self,
         host: &HostId,
         scope: &str,
-        body: &Value,
+        body: &DraftBody,
         images: &[Vec<u8>],
     ) -> Result<(), KeepSpooledDraftError> {
         std::fs::create_dir_all(&self.dir).map_err(|source| {

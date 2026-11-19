@@ -1,5 +1,6 @@
 pub mod attachment;
 pub mod controller;
+pub mod draft_body;
 pub mod draft_session;
 pub mod encode;
 pub mod engine_light;

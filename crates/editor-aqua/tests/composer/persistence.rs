@@ -1,4 +1,5 @@
 use artisan_api::tls::{Identity, fingerprint};
+use editor_aqua::composer::draft_body::DraftBody;
 use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::persistence::{DraftHandle, DraftLease};
 use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
@@ -9,6 +10,13 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
+
+fn typed(text: &str) -> DraftBody {
+    DraftBody {
+        text: text.to_owned(),
+        ..DraftBody::default()
+    }
+}
 
 async fn server() -> (TcpListener, TlsAcceptor, ForgeClient) {
     let (listener, acceptor, pin) = pinned_server().await;
@@ -122,7 +130,7 @@ fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
         load(&lease, &listener, &acceptor).await;
         let mut changed = lease.subscribe();
         let draft = json!({"text": "preserve this prompt"});
-        lease.queue(draft.clone());
+        lease.queue(typed("preserve this prompt"));
         lease.submit(Submission {
             thread: ThreadId("thread".into()),
             create: None,
@@ -148,7 +156,10 @@ fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
             changed.changed().await.unwrap();
         }
         assert!(!lease.read(editor_aqua::composer::draft_session::DraftSession::sending));
-        assert_eq!(lease.read(|state| state.body().clone()), draft);
+        assert_eq!(
+            lease.read(|state| state.body().clone()),
+            typed("preserve this prompt")
+        );
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::pending));
 
         lease.retry();
@@ -234,25 +245,25 @@ fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
             client.clone(),
         )
         .unwrap();
-    old.queue(serde_json::json!({"text": "old pairing"}));
+    old.queue(typed("old pairing"));
     core.remove_host(&config.id).unwrap();
     test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let current_instance = core.host(&config.id).unwrap().instance();
     let current = sessions
         .open(config.id.clone(), current_instance, "new".into(), client)
         .unwrap();
-    current.queue(serde_json::json!({"text": "current pairing"}));
+    current.queue(typed("current pairing"));
 
     sessions.retain_hosts(&core);
 
     assert!(old.read(editor_aqua::composer::draft_session::DraftSession::removed));
     assert!(!current.read(editor_aqua::composer::draft_session::DraftSession::removed));
-    old.queue(serde_json::json!({"text": "stale edit"}));
+    old.queue(typed("stale edit"));
     old.retry();
-    assert_eq!(old.read(|state| state.body().clone()), Value::Null);
+    assert_eq!(old.read(|state| state.body().clone()), DraftBody::default());
     assert_eq!(
         current.read(|state| state.body().clone()),
-        serde_json::json!({"text": "current pairing"})
+        typed("current pairing")
     );
 }
 
@@ -274,7 +285,7 @@ fn dropping_lease_and_manager_flushes_a_loaded_dirty_draft() {
         let handle = DraftHandle::clone(&lease);
         let mut changed = handle.subscribe();
         let expected = json!({"text": "draft survives workspace teardown"});
-        lease.queue(expected.clone());
+        lease.queue(typed("draft survives workspace teardown"));
 
         drop(lease);
         drop(sessions);
@@ -294,7 +305,10 @@ fn dropping_lease_and_manager_flushes_a_loaded_dirty_draft() {
         }
         assert!(!handle.read(editor_aqua::composer::draft_session::DraftSession::removed));
         assert_eq!(persisted, expected);
-        assert_eq!(handle.read(|state| state.body().clone()), persisted);
+        assert_eq!(
+            handle.read(|state| state.body().clone()),
+            typed("draft survives workspace teardown")
+        );
     });
 }
 
@@ -316,7 +330,7 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
             )
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "send survives teardown"}));
+        lease.queue(typed("send survives teardown"));
         lease.submit(Submission {
             thread: ThreadId("thread".into()),
             create: None,
@@ -357,7 +371,10 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
             changed.changed().await.unwrap();
         }
         assert!(!handle.read(editor_aqua::composer::draft_session::DraftSession::removed));
-        assert_eq!(handle.read(|state| state.body().clone()), Value::Null);
+        assert_eq!(
+            handle.read(|state| state.body().clone()),
+            DraftBody::default()
+        );
     });
 }
 
@@ -379,7 +396,7 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
             )
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "stale pairing"}));
+        lease.queue(typed("stale pairing"));
         lease.submit(Submission {
             thread: ThreadId("thread".into()),
             create: None,
@@ -400,7 +417,10 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
 
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::removed));
         assert!(!lease.read(editor_aqua::composer::draft_session::DraftSession::sending));
-        assert_eq!(lease.read(|state| state.body().clone()), Value::Null);
+        assert_eq!(
+            lease.read(|state| state.body().clone()),
+            DraftBody::default()
+        );
         let mut bytes = [0; 1024];
         loop {
             match socket.read(&mut bytes).await {
@@ -452,7 +472,7 @@ fn process_exit_waits_for_draft_write_acceptance() {
             )
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "persist before process exit"}));
+        lease.queue(typed("persist before process exit"));
         drop(lease);
         drop(sessions);
 
@@ -492,7 +512,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
             )
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "server never acknowledges"}));
+        lease.queue(typed("server never acknowledges"));
         drop(lease);
         drop(sessions);
         let (mut socket, route, _) = request(&listener, &acceptor).await;
@@ -536,7 +556,7 @@ fn process_exit_reports_a_rejected_draft_write() {
             )
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "local draft"}));
+        lease.queue(typed("local draft"));
         drop(lease);
         drop(sessions);
 
@@ -581,7 +601,7 @@ fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
             .open(config.id.clone(), instance, "new".into(), client.clone())
             .unwrap();
         load(&lease, &listener, &acceptor).await;
-        lease.queue(json!({"text": "typed while Forge was unreachable"}));
+        lease.queue(typed("typed while Forge was unreachable"));
         drop(lease);
         drop(sessions);
         let (socket, route, _) = request(&listener, &acceptor).await;
@@ -1049,7 +1069,7 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
             .unwrap()
             .read(|state| state.body().clone());
         assert_eq!(
-            saved["follow_ups"][0]["text"], "the follow-up",
+            saved.follow_ups[0].text, "the follow-up",
             "what was typed while sending is kept beside it"
         );
         drop(directory);
@@ -1070,7 +1090,7 @@ fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
             .unwrap();
         load(&lease, &listener, &acceptor).await;
         let mut changed = lease.subscribe();
-        lease.queue(json!({"text": "mine"}));
+        lease.queue(typed("mine"));
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         respond(
@@ -1110,7 +1130,7 @@ fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
             lease.read(editor_aqua::composer::draft_session::DraftSession::conflict),
             "the failed upload does not hide the other client's draft"
         );
-        lease.queue(json!({"text": "mine, typed after the upload failed"}));
+        lease.queue(typed("mine, typed after the upload failed"));
         assert!(
             lease.read(|state| state.conflict() && state.halted()),
             "the next keystroke does not write over the other client's draft"

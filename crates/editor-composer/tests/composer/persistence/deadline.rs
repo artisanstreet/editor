@@ -1,17 +1,19 @@
 use super::*;
 use artisan_api::tls::{Identity, fingerprint};
 use artisan_api::{DraftSnapshot, DraftWriteResult};
-use serde_json::json;
 
-fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
+fn pending_write() -> (DraftHandle, DraftBody, u64) {
     let identity = Identity::generate("deadline-test").unwrap();
     let pin = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &pin, &identity).unwrap();
     let mut state = DraftSession::new("new".into());
     assert!(matches!(state.next_operation(), Some(Operation::Load)));
     state.loaded(Ok(DraftSnapshot::default()));
-    state.queue(json!({"text": "pending"}));
-    let Some(Operation::Write { request, edited }) = state.next_operation() else {
+    state.queue(DraftBody {
+        text: "pending".to_owned(),
+        ..DraftBody::default()
+    });
+    let Some(Operation::Write { body, edited, .. }) = state.next_operation() else {
         panic!("expected a pending write");
     };
     let (changed, _) = watch::channel(0);
@@ -30,22 +32,22 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
         changed,
         cancelled: CancellationToken::new(),
     }));
-    (handle, request, edited)
+    (handle, *body, edited)
 }
 
 #[test]
 fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
-    let (handle, request, edited) = pending_write();
+    let (handle, written, edited) = pending_write();
     assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared.state.written(
-            &request,
+            &written,
             edited,
             Ok(DraftWriteResult {
                 saved: true,
                 current: DraftSnapshot {
                     revision: 1,
-                    body: request.body.clone(),
+                    body: written.to_wire(),
                 },
             }),
         );
@@ -56,11 +58,11 @@ fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
 
 #[test]
 fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
-    let (handle, request, edited) = pending_write();
+    let (handle, written, edited) = pending_write();
     assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared.state.written(
-            &request,
+            &written,
             edited,
             Err(test_support::editor::forge::inconsistent(
                 "/drafts/new",

@@ -68,7 +68,7 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     assert!(draft.read(editor_aqua::composer::draft_session::DraftSession::removed));
     assert_eq!(
         draft.read(|state| state.body().clone()),
-        serde_json::Value::Null
+        editor_aqua::composer::draft_body::DraftBody::default()
     );
 }
 

@@ -1,11 +1,11 @@
 use super::attachment::{PendingUpload, ReadImageError};
+use super::draft_body::DraftBody;
 use super::draft_session::{
     AdoptImageError, DraftSession, Operation, PostMessageError, SAVE_DELAY, Submission,
 };
 use super::spool::{DraftSpool, KeepSpooledDraftError};
-use artisan_api::{BlobHash, ItemId, ThreadId};
+use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
-use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
@@ -490,7 +490,7 @@ impl DraftHandle {
         self.0.changed.send_replace(version);
     }
 
-    pub fn queue(&self, body: Value) {
+    pub fn queue(&self, body: DraftBody) {
         let mut shared = self.0.shared();
         if !shared.state.queue(body) {
             return;
@@ -572,10 +572,18 @@ impl DraftHandle {
                 let result = client.draft(&session.0.scope).await;
                 session.mutate(|shared| shared.state.loaded(result));
             }
-            Operation::Write { request, edited } => {
+            Operation::Write {
+                expected_revision,
+                body,
+                edited,
+            } => {
+                let request = WriteDraft {
+                    expected_revision,
+                    body: body.to_wire(),
+                };
                 let result = client.set_draft(&session.0.scope, &request).await;
                 session.mutate(|shared| {
-                    shared.state.written(&request, edited, result);
+                    shared.state.written(&body, edited, result);
                     session.forget_recovered(shared);
                 });
             }

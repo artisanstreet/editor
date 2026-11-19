@@ -1,11 +1,10 @@
 use super::attachment::{PendingUpload, UploadImageError};
-use super::controller::DraftBody;
+use super::draft_body::{DraftBody, EMPTY_BODY, RemoteBody};
 use artisan_api::{
     BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ItemId, SendMessage,
-    ThreadId, WriteDraft,
+    ThreadId,
 };
 use editor_core::client::CallError;
-use serde_json::Value;
 use std::time::Duration;
 
 pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(400);
@@ -29,7 +28,11 @@ pub enum Posting {
 #[derive(Debug)]
 pub enum Operation {
     Load,
-    Write { request: WriteDraft, edited: u64 },
+    Write {
+        expected_revision: u64,
+        body: Box<DraftBody>,
+        edited: u64,
+    },
     Post(Box<Submission>),
 }
 
@@ -84,25 +87,32 @@ pub enum DraftFailure {
         #[source]
         source: AdoptImageError,
     },
-    #[error("Couldn't add an image pasted before leaving this draft")]
-    AddImage {
-        scope: String,
-        #[source]
-        source: serde_json::Error,
-    },
 }
 
 const CONFLICT: &str = "This draft changed on another client. Choose which version to keep.";
 const REMOVED: &str = "This Forge pairing was removed.";
-const NO_BODY: &Value = &Value::Null;
+#[derive(Debug)]
+struct Snapshot {
+    revision: u64,
+    body: RemoteBody,
+}
+
+impl From<DraftSnapshot> for Snapshot {
+    fn from(snapshot: DraftSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision,
+            body: RemoteBody::from_wire(snapshot.body),
+        }
+    }
+}
 
 #[derive(Debug)]
 enum Remote {
     Unloaded,
-    Loaded(DraftSnapshot),
+    Loaded(Snapshot),
     Ambiguous {
-        snapshot: DraftSnapshot,
-        written: Value,
+        snapshot: Snapshot,
+        written: Box<DraftBody>,
     },
 }
 
@@ -188,7 +198,7 @@ impl Edits {
 
 #[derive(Debug)]
 struct Draft {
-    body: Value,
+    body: DraftBody,
     remote: Remote,
     edits: Edits,
     adopting: Vec<Adoption>,
@@ -241,14 +251,14 @@ impl Draft {
         }
     }
 
-    fn snapshot(&self) -> Option<&DraftSnapshot> {
+    fn snapshot(&self) -> Option<&Snapshot> {
         match &self.remote {
             Remote::Unloaded => None,
             Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => Some(snapshot),
         }
     }
 
-    fn queue(&mut self, body: Value) -> bool {
+    fn queue(&mut self, body: DraftBody) -> bool {
         if self.body == body {
             return false;
         }
@@ -324,7 +334,7 @@ impl DraftSession {
         Self {
             scope,
             state: State::Open(Box::new(Draft {
-                body: Value::Null,
+                body: DraftBody::default(),
                 remote: Remote::Unloaded,
                 edits: Edits {
                     latest: 0,
@@ -350,8 +360,15 @@ impl DraftSession {
         }
     }
 
-    pub fn body(&self) -> &Value {
-        self.draft().map_or(NO_BODY, |draft| &draft.body)
+    pub fn body(&self) -> &DraftBody {
+        self.draft().map_or(&EMPTY_BODY, |draft| &draft.body)
+    }
+
+    pub(crate) fn unreadable(&self) -> Option<&serde_json::Error> {
+        self.draft()
+            .filter(|draft| !draft.edits.unsaved())
+            .and_then(Draft::snapshot)
+            .and_then(|snapshot| snapshot.body.unreadable())
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -360,8 +377,9 @@ impl DraftSession {
     }
 
     pub(crate) fn presentable(&self) -> bool {
-        self.draft()
-            .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded) || !draft.body.is_null())
+        self.draft().is_some_and(|draft| {
+            !matches!(draft.remote, Remote::Unloaded) || !draft.body.is_empty()
+        })
     }
 
     pub fn conflict(&self) -> bool {
@@ -399,14 +417,14 @@ impl DraftSession {
         })
     }
 
-    pub(crate) fn recover(&mut self, body: Value, images: Vec<PendingUpload>) {
+    pub(crate) fn recover(&mut self, body: DraftBody, images: Vec<PendingUpload>) {
         let State::Open(draft) = &mut self.state else {
             unreachable!(
                 "invariant: draft {} is recovered as it opens, before it can be removed",
                 self.scope
             );
         };
-        if !body.is_null() {
+        if !body.is_empty() {
             draft.body = body;
             draft.edits.edit();
         }
@@ -488,28 +506,9 @@ impl DraftSession {
                 return None;
             }
         };
-        let mut body = match &draft.body {
-            Value::Null => DraftBody::default(),
-            body @ (Value::Bool(_)
-            | Value::Number(_)
-            | Value::String(_)
-            | Value::Array(_)
-            | Value::Object(_)) => match serde_json::from_value::<DraftBody>(body.clone()) {
-                Ok(body) => body,
-                Err(source) => {
-                    let failure = DraftFailure::AddImage {
-                        scope: self.scope.clone(),
-                        source,
-                    };
-                    draft.fail(&self.scope, failure);
-                    return None;
-                }
-            },
-        };
-        if !body.images.contains(&hash) {
-            body.images.push(hash.clone());
-        }
-        draft.queue(serde_json::to_value(body).expect("invariant: DraftBody serializes"));
+        let mut body = draft.body.clone();
+        body.add_image(hash.clone());
+        draft.queue(body);
         Some(hash)
     }
 
@@ -542,7 +541,7 @@ impl DraftSession {
             .is_some_and(|outgoing| outgoing.stage == Stage::Released)
     }
 
-    pub fn queue(&mut self, body: Value) -> bool {
+    pub fn queue(&mut self, body: DraftBody) -> bool {
         match &mut self.state {
             State::Open(draft) => draft.queue(body),
             State::Removed => false,
@@ -592,7 +591,7 @@ impl DraftSession {
         if let State::Open(draft) = &mut self.state {
             draft.body = draft
                 .snapshot()
-                .map_or(Value::Null, |snapshot| snapshot.body.clone());
+                .map_or_else(DraftBody::default, |snapshot| snapshot.body.shown());
             draft.edits.settle();
             draft.adopting.clear();
             draft.halt = Halt::Clear;
@@ -622,10 +621,8 @@ impl DraftSession {
             Remote::Loaded(snapshot) if draft.edits.unsaved() && !posting => (
                 Request::Writing,
                 Operation::Write {
-                    request: WriteDraft {
-                        expected_revision: snapshot.revision,
-                        body: draft.body.clone(),
-                    },
+                    expected_revision: snapshot.revision,
+                    body: Box::new(draft.body.clone()),
                     edited: draft.edits.latest,
                 },
             ),
@@ -659,6 +656,7 @@ impl DraftSession {
         draft.finish(&self.scope, Request::Loading);
         match result {
             Ok(snapshot) => {
+                let snapshot = Snapshot::from(snapshot);
                 let (landed, unchanged) = match &draft.remote {
                     Remote::Unloaded => (false, false),
                     Remote::Loaded(previous) => (false, snapshot.revision == previous.revision),
@@ -666,7 +664,7 @@ impl DraftSession {
                         snapshot: previous,
                         written,
                     } => (
-                        *written == snapshot.body,
+                        snapshot.body.matches(written),
                         snapshot.revision == previous.revision,
                     ),
                 };
@@ -674,10 +672,10 @@ impl DraftSession {
                 let unseen = !landed
                     && !unchanged
                     && unsaved
-                    && !snapshot.body.is_null()
-                    && snapshot.body != draft.body;
+                    && !snapshot.body.is_empty()
+                    && !snapshot.body.matches(&draft.body);
                 if !unsaved {
-                    draft.body = snapshot.body.clone();
+                    draft.body = snapshot.body.shown();
                 }
                 draft.remote = Remote::Loaded(snapshot);
                 if unseen {
@@ -696,7 +694,7 @@ impl DraftSession {
 
     pub fn written(
         &mut self,
-        request: &WriteDraft,
+        written: &DraftBody,
         edited: u64,
         result: Result<DraftWriteResult, CallError>,
     ) {
@@ -706,8 +704,9 @@ impl DraftSession {
         draft.finish(&self.scope, Request::Writing);
         match result {
             Ok(result) => {
-                let matched = result.saved || result.current.body == request.body;
-                draft.remote = Remote::Loaded(result.current);
+                let current = Snapshot::from(result.current);
+                let matched = result.saved || current.body.matches(written);
+                draft.remote = Remote::Loaded(current);
                 if matched {
                     draft.edits.saved_through(edited);
                 } else {
@@ -723,7 +722,7 @@ impl DraftSession {
                 };
                 draft.remote = Remote::Ambiguous {
                     snapshot,
-                    written: request.body.clone(),
+                    written: Box::new(written.clone()),
                 };
                 let failure = DraftFailure::Save {
                     scope: self.scope.clone(),
@@ -751,7 +750,7 @@ impl DraftSession {
                 };
                 draft.remote = Remote::Unloaded;
                 if outgoing.edited == draft.edits.latest {
-                    draft.body = Value::Null;
+                    draft.body = DraftBody::default();
                     draft.edits.settle();
                 } else {
                     draft.edits.saved = outgoing.edited;
