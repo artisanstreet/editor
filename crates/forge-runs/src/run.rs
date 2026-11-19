@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 pub enum PrepareError {
     #[error("{} is not installed", engine.display_name())]
     NotInstalled { engine: EngineId },
+    #[error(transparent)]
+    Gateway(Box<crate::gateway::GatewayError>),
     #[error("prepare the folder of thread {thread}")]
     Folder {
         thread: ThreadId,
@@ -1115,7 +1117,10 @@ async fn prepare_on(
     launch
         .env
         .splice(0..0, engines.launch_env_for_binary(engine, &binary));
-    let gateway = hub.gateway_pass(&thread.id).await;
+    let gateway = hub
+        .gateway_pass(&thread.id)
+        .await
+        .map_err(|source| PrepareError::Gateway(Box::new(source)))?;
     for (name, url) in gateway.servers() {
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }

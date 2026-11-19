@@ -47,6 +47,26 @@ impl CallEditorError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayError {
+    #[error("read whether computer use is on for the run of thread {thread}")]
+    Setting {
+        thread: ThreadId,
+        #[source]
+        source: forge_store::ReadSettingError,
+    },
+    #[error(
+        "the {COMPUTER_USE_KEY} setting is neither true nor false for the run of thread {thread}"
+    )]
+    NotOnOrOff { thread: ThreadId },
+    #[error("make the gateway credential of the run of thread {thread}")]
+    Token {
+        thread: ThreadId,
+        #[source]
+        source: getrandom::Error,
+    },
+}
+
 #[derive(Debug)]
 struct PendingCall {
     call: EditorCall,
@@ -129,59 +149,73 @@ impl Hub {
         });
     }
 
-    pub(crate) async fn gateway_pass(&self, thread: &ThreadId) -> GatewayPass {
-        let computer = self.gateway_lock().computer && self.computer_use_on().await;
+    pub(crate) async fn gateway_pass(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<GatewayPass, GatewayError> {
+        let (base, computer) = {
+            let gateway = self.gateway_lock();
+            (gateway.base.clone(), gateway.computer)
+        };
         let ended = CancellationToken::new();
-        let issued = self.issue_gateway_token(GatewayCaller {
+        let Some(base) = base else {
+            return Ok(GatewayPass {
+                hub: self.clone(),
+                token: None,
+                ended,
+                servers: Vec::new(),
+            });
+        };
+        let computer = computer && self.computer_use_on(thread).await?;
+        let token = self.issue_gateway_token(GatewayCaller {
             thread: thread.clone(),
             ended: ended.clone(),
-        });
-        let servers = issued.as_ref().map_or_else(Vec::new, |(base, token)| {
-            let token = token.expose();
-            let mut servers = vec![(
-                forge_engines::ARTISAN_MCP.to_owned(),
-                format!("{base}{}/{token}", forge_engines::ARTISAN_MCP),
-            )];
-            if computer {
-                servers.push((
-                    forge_engines::COMPUTER_MCP.to_owned(),
-                    format!("{base}{}/{token}", forge_engines::COMPUTER_MCP),
-                ));
-            }
-            servers
-        });
-        GatewayPass {
+        })?;
+        let mut servers = vec![(
+            forge_engines::ARTISAN_MCP.to_owned(),
+            format!("{base}{}/{}", forge_engines::ARTISAN_MCP, token.expose()),
+        )];
+        if computer {
+            servers.push((
+                forge_engines::COMPUTER_MCP.to_owned(),
+                format!("{base}{}/{}", forge_engines::COMPUTER_MCP, token.expose()),
+            ));
+        }
+        Ok(GatewayPass {
             hub: self.clone(),
-            token: issued.map(|(_, token)| token),
+            token: Some(token),
             ended,
             servers,
+        })
+    }
+
+    async fn computer_use_on(&self, thread: &ThreadId) -> Result<bool, GatewayError> {
+        let value = self
+            .store()
+            .setting(COMPUTER_USE_KEY)
+            .await
+            .map_err(|source| GatewayError::Setting {
+                thread: thread.clone(),
+                source,
+            })?;
+        match value {
+            None => Ok(false),
+            Some(serde_json::Value::Bool(on)) => Ok(on),
+            Some(_) => Err(GatewayError::NotOnOrOff {
+                thread: thread.clone(),
+            }),
         }
     }
 
-    async fn computer_use_on(&self) -> bool {
-        match self.store().setting(COMPUTER_USE_KEY).await {
-            Ok(value) => value.and_then(|value| value.as_bool()).unwrap_or(false),
-            Err(error) => {
-                tracing::warn!(
-                    key = COMPUTER_USE_KEY,
-                    "reading a setting: {}",
-                    diagnostics::chain(&error)
-                );
-                false
-            }
-        }
-    }
-
-    fn issue_gateway_token(&self, caller: GatewayCaller) -> Option<(String, Secret)> {
-        let base = self.gateway_lock().base.clone()?;
+    fn issue_gateway_token(&self, caller: GatewayCaller) -> Result<Secret, GatewayError> {
         let mut bytes = [0_u8; 24];
-        if let Err(error) = getrandom::fill(&mut bytes) {
-            tracing::error!(thread = %caller.thread, "making the run's gateway credential: {error}");
-            return None;
-        }
+        getrandom::fill(&mut bytes).map_err(|source| GatewayError::Token {
+            thread: caller.thread.clone(),
+            source,
+        })?;
         let token = hex::encode(bytes);
         self.gateway_lock().passes.insert(token.clone(), caller);
-        Some((base, Secret::from(token.as_str())))
+        Ok(Secret::from(token.as_str()))
     }
 
     pub async fn call_editor(

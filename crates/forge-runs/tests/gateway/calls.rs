@@ -121,3 +121,43 @@ async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() 
     );
     fixture.hub.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_computer_use_setting_that_is_neither_on_nor_off_fails_the_turn_and_says_why() {
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ran = Arc::clone(&started);
+    let fixture = fixture(Arc::new(move |_, _| {
+        ran.store(true, Ordering::SeqCst);
+        Box::pin(async { Outcome::done() })
+    }))
+    .await;
+    fixture
+        .hub
+        .set_gateway("http://127.0.0.1:9/mcp/".to_owned(), true);
+    fixture
+        .hub
+        .store()
+        .set_setting(COMPUTER_USE_KEY.to_owned(), serde_json::json!("yes"))
+        .await
+        .unwrap();
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("look around"))
+        .await
+        .unwrap();
+    let runs = fixture.settled().await;
+
+    assert_eq!(runs[0].status(), RunStatus::Failed, "{runs:#?}");
+    assert!(
+        runs[0]
+            .error()
+            .is_some_and(|error| error.contains("computer_use setting is neither true nor false")),
+        "{runs:#?}"
+    );
+    assert!(
+        !started.load(Ordering::SeqCst),
+        "the engine is not launched without the tools the user turned on"
+    );
+    fixture.hub.shutdown();
+}

@@ -6,7 +6,7 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
     fixture
         .hub
         .set_gateway("http://127.0.0.1:9/mcp/".to_owned(), false);
-    let pass = fixture.hub.gateway_pass(&fixture.thread_id).await;
+    let pass = fixture.hub.gateway_pass(&fixture.thread_id).await.unwrap();
     let servers = pass.servers().to_vec();
     let token = servers[0].1.rsplit('/').next().unwrap().to_owned();
     let admitted = fixture
@@ -34,6 +34,6 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
         admitted.ended.is_cancelled(),
         "calls admitted before the thread was removed keep acting for it"
     );
-    let reissued = fixture.hub.gateway_pass(&fixture.thread_id).await;
+    let reissued = fixture.hub.gateway_pass(&fixture.thread_id).await.unwrap();
     assert_ne!(reissued.servers()[0].1, servers[0].1);
 }
