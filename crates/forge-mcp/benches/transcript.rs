@@ -88,7 +88,7 @@ fn call(fixture: &Fixture, name: &str, arguments: &Value) -> Value {
         .runtime
         .block_on(server::handle(
             &fixture.mcp,
-            &fixture.thread,
+            &forge_runs::GatewayCaller { thread: fixture.thread.clone(), ended: tokio_util::sync::CancellationToken::new() },
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
         ))
         .expect("bench: call")

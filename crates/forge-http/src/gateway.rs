@@ -77,7 +77,7 @@ async fn serve<T: ToolSet + Clone + 'static>(
     Path(token): Path<String>,
     body: Bytes,
 ) -> Response {
-    let Some(caller) = served.hub.gateway_thread(&token) else {
+    let Some(caller) = served.hub.gateway_caller(&token) else {
         return (
             StatusCode::NOT_FOUND,
             "This MCP address is no longer valid.",

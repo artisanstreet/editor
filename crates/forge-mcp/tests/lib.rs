@@ -25,7 +25,7 @@ async fn an_address_issued_to_a_removed_thread_reaches_no_tool() {
     let mcp = ArtisanMcp::new(hub.clone());
     let reply = server::handle(
         &mcp,
-        &ThreadId::new(),
+        &forge_runs::GatewayCaller { thread: ThreadId::new(), ended: tokio_util::sync::CancellationToken::new() },
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}),
     )
     .await

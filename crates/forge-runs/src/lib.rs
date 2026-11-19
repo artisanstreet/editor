@@ -35,7 +35,7 @@ pub use extensions::{
     SetSkillEnabledError, SkillCatalogError,
 };
 pub use gateway::COMPUTER_USE_KEY;
-pub use gateway::CallEditorError;
+pub use gateway::{CallEditorError, GatewayCaller};
 pub use mcp_auth::{
     Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
     ReadMcpServersError,

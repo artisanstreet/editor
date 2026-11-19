@@ -2358,6 +2358,7 @@ dependencies = [
  "test-support",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

@@ -1,5 +1,5 @@
 use artisan_api::ThreadId;
-use forge_runs::ErrorClass;
+use forge_runs::{ErrorClass, GatewayCaller};
 use forge_store::coordination::Conflict;
 use serde_json::{Map, Number, Value, json};
 use std::future::Future;
@@ -7,6 +7,10 @@ use std::future::Future;
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const STRUCTURED_LIMIT: usize = 256 * 1024;
+
+const ENDED_CODE: i64 = -32001;
+
+const ENDED: &str = "This MCP address is no longer valid: the run it was issued to has ended.";
 
 #[derive(Debug)]
 pub struct Tool {
@@ -240,7 +244,7 @@ fn error_reply(id: Option<&RequestId>, code: i64, message: &str) -> Value {
     })
 }
 
-pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Option<Value> {
+pub async fn handle<T: ToolSet>(set: &T, caller: &GatewayCaller, body: Value) -> Option<Value> {
     match body {
         Value::Array(messages) if messages.is_empty() => Some(error_reply(
             None,
@@ -264,7 +268,7 @@ pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Opti
     }
 }
 
-async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: &Value) -> Option<Value> {
+async fn one<T: ToolSet>(set: &T, caller: &GatewayCaller, message: &Value) -> Option<Value> {
     let (id, method, params) = match Envelope::parse(message) {
         Envelope::Request { id, method, params } => (id, method, params),
         Envelope::Notification | Envelope::Response => return None,
@@ -272,17 +276,30 @@ async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: &Value) -> Option<
             return Some(error_reply(id.as_ref(), -32600, reason.message()));
         }
     };
-    let result = match method.as_str() {
-        "initialize" => Ok(initialize(set, &params)),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": list(&set.tools()) })),
-        "tools/call" => call(set, caller, &params).await,
-        _ => Err((-32601, format!("Unknown method {method}"))),
+    let result = tokio::select! {
+        biased;
+        () = caller.ended.cancelled() => Err((ENDED_CODE, ENDED.to_owned())),
+        result = dispatch(set, &caller.thread, &method, &params) => result,
     };
     Some(match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id.to_json(), "result": result }),
         Err((code, message)) => error_reply(Some(&id), code, &message),
     })
+}
+
+async fn dispatch<T: ToolSet>(
+    set: &T,
+    caller: &ThreadId,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
+    match method {
+        "initialize" => Ok(initialize(set, params)),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({ "tools": list(&set.tools()) })),
+        "tools/call" => call(set, caller, params).await,
+        _ => Err((-32601, format!("Unknown method {method}"))),
+    }
 }
 
 async fn call<T: ToolSet>(

@@ -1,9 +1,13 @@
 use artisan_api::ThreadId;
 use forge_engines::Engines;
-use forge_mcp::{ArtisanMcp, server};
-use forge_runs::Hub;
+use forge_mcp::{ArtisanMcp, Content, Tool, ToolSet, server};
+use forge_runs::{GatewayCaller, Hub};
 use forge_store::Store;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 async fn replies(messages: Value) -> Option<Value> {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -13,7 +17,15 @@ async fn replies(messages: Value) -> Option<Value> {
         Engines::new(directory.path()),
         directory.path().to_path_buf(),
     );
-    let reply = server::handle(&ArtisanMcp::new(hub.clone()), &ThreadId::new(), messages).await;
+    let reply = server::handle(
+        &ArtisanMcp::new(hub.clone()),
+        &GatewayCaller {
+            thread: ThreadId::new(),
+            ended: CancellationToken::new(),
+        },
+        messages,
+    )
+    .await;
     hub.shutdown();
     reply
 }
@@ -68,4 +80,133 @@ async fn a_batch_answers_its_malformed_requests_and_not_its_notifications() {
             .await
             .is_none()
     );
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the gated tool set never fails")]
+struct NeverFails;
+
+impl forge_mcp::ToolError for NeverFails {
+    fn failure(&self) -> forge_mcp::Failure<'_> {
+        forge_mcp::Failure::Broken
+    }
+}
+
+#[derive(Clone, Default)]
+struct Gated {
+    waiting: Arc<tokio::sync::Notify>,
+    run_ended: Arc<tokio::sync::Notify>,
+    created: Arc<AtomicUsize>,
+}
+
+fn no_properties() -> Value {
+    json!({})
+}
+
+impl ToolSet for Gated {
+    type Error = NeverFails;
+
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+
+    fn title(&self) -> &'static str {
+        "Gated"
+    }
+
+    fn instructions(&self) -> &'static str {
+        ""
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        ["wait_for_agents", "create_thread"]
+            .into_iter()
+            .map(|name| Tool {
+                name,
+                description: name,
+                properties: no_properties,
+                required: &[],
+                output_schema: None,
+                read_only: false,
+                destructive: false,
+            })
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        _caller: &ThreadId,
+        name: &str,
+        _arguments: Value,
+    ) -> Result<Vec<Content>, NeverFails> {
+        if name == "wait_for_agents" {
+            self.waiting.notify_one();
+            self.run_ended.notified().await;
+        }
+        self.created.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Content::Text("created".to_owned())])
+    }
+}
+
+fn tool_call(id: u64, name: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}})
+}
+
+#[tokio::test]
+async fn a_batch_admitted_before_its_run_ended_does_nothing_once_the_run_ends() {
+    let set = Gated::default();
+    let caller = GatewayCaller {
+        thread: ThreadId::new(),
+        ended: CancellationToken::new(),
+    };
+    let handled = tokio::spawn({
+        let (set, caller) = (set.clone(), caller.clone());
+        async move {
+            server::handle(
+                &set,
+                &caller,
+                json!([
+                    tool_call(1, "wait_for_agents"),
+                    tool_call(2, "create_thread")
+                ]),
+            )
+            .await
+        }
+    });
+    set.waiting.notified().await;
+
+    caller.ended.cancel();
+    set.run_ended.notify_one();
+    let reply = tokio::time::timeout(Duration::from_secs(10), handled)
+        .await
+        .expect("the batch kept running after its run ended")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        set.created.load(Ordering::SeqCst),
+        0,
+        "a call after the run ended still acted for its thread"
+    );
+    let ended = |id: u64| json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":"This MCP address is no longer valid: the run it was issued to has ended."}});
+    assert_eq!(reply, json!([ended(1), ended(2)]));
+}
+
+#[tokio::test]
+async fn a_batch_runs_every_call_while_its_run_lasts() {
+    let set = Gated::default();
+    let caller = GatewayCaller {
+        thread: ThreadId::new(),
+        ended: CancellationToken::new(),
+    };
+
+    let reply = server::handle(
+        &set,
+        &caller,
+        json!([tool_call(1, "create_thread"), tool_call(2, "create_thread")]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(set.created.load(Ordering::SeqCst), 2, "{reply}");
 }

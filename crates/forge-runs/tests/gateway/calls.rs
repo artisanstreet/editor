@@ -70,7 +70,7 @@ async fn a_call_whose_caller_went_away_is_no_longer_offered() {
     fixture.hub.shutdown();
 }
 
-type ActingDuringTheRun = (String, Option<ThreadId>);
+type ActingDuringTheRun = (String, Option<GatewayCaller>);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() {
@@ -90,7 +90,7 @@ async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() 
             let acting = hub_slot
                 .get()
                 .expect("the hub is set before the run")
-                .gateway_thread(&token);
+                .gateway_caller(&token);
             *during.lock().unwrap() = Some((token, acting));
             Box::pin(async { Outcome::done() })
         }
@@ -109,11 +109,15 @@ async fn a_runs_gateway_address_stops_acting_for_its_thread_when_the_run_ends() 
     fixture.settled().await;
 
     let (token, acting) = during.lock().unwrap().clone().expect("the run started");
-    assert_eq!(acting, Some(fixture.thread_id.clone()));
-    assert_eq!(
-        fixture.hub.gateway_thread(&token),
-        None,
+    let acting = acting.expect("the run's address acts for its thread while it runs");
+    assert_eq!(acting.thread, fixture.thread_id);
+    assert!(
+        fixture.hub.gateway_caller(&token).is_none(),
         "a finished run's gateway address still acts for its thread"
+    );
+    assert!(
+        acting.ended.is_cancelled(),
+        "calls admitted during the run keep acting for its thread after it ended"
     );
     fixture.hub.shutdown();
 }

@@ -452,7 +452,7 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
         ..
     } = &live(Fake::default()).await;
     let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot"}});
-    let denied = forge_mcp::server::handle(set, caller, call.clone())
+    let denied = forge_mcp::server::handle(set, &gateway(caller), call.clone())
         .await
         .unwrap();
     assert_eq!(denied["result"]["isError"], true);
@@ -460,7 +460,7 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
         .set_setting("computer_use".into(), json!(true))
         .await
         .unwrap();
-    let reply = forge_mcp::server::handle(set, caller, call.clone())
+    let reply = forge_mcp::server::handle(set, &gateway(caller), call.clone())
         .await
         .unwrap();
     assert_eq!(reply["result"]["isError"], false);
@@ -476,7 +476,9 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
         .set_setting("computer_use".into(), json!(false))
         .await
         .unwrap();
-    let revoked = forge_mcp::server::handle(set, caller, call).await.unwrap();
+    let revoked = forge_mcp::server::handle(set, &gateway(caller), call)
+        .await
+        .unwrap();
     assert_eq!(revoked["result"]["isError"], true);
 }
 
@@ -566,4 +568,11 @@ fn successful_batch_reports_settled_screen_and_restores_cursor() {
     assert!(outcome.settled);
     assert!(matches!(outcome.screen, runner::Screen::Unchanged));
     assert_eq!(*desktop.cursor.lock().unwrap(), Point { x: 110, y: 210 });
+}
+
+fn gateway(thread: &artisan_api::ThreadId) -> forge_runs::GatewayCaller {
+    forge_runs::GatewayCaller {
+        thread: thread.clone(),
+        ended: tokio_util::sync::CancellationToken::new(),
+    }
 }

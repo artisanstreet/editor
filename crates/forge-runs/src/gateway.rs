@@ -64,11 +64,17 @@ impl Drop for CallGuard {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct GatewayCaller {
+    pub thread: ThreadId,
+    pub ended: CancellationToken,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Gateway {
     base: Option<String>,
     computer: bool,
-    passes: HashMap<String, ThreadId>,
+    passes: HashMap<String, GatewayCaller>,
     calls: HashMap<String, PendingCall>,
 }
 
@@ -76,6 +82,7 @@ pub(crate) struct Gateway {
 pub(crate) struct GatewayPass {
     hub: Hub,
     token: Option<Secret>,
+    ended: CancellationToken,
     servers: Vec<(String, String)>,
 }
 
@@ -91,6 +98,7 @@ impl Drop for GatewayPass {
         if let Some(token) = &self.token {
             self.hub.gateway_lock().passes.remove(token.expose());
         }
+        self.ended.cancel();
     }
 }
 
@@ -102,7 +110,7 @@ impl Hub {
     }
 
     #[must_use]
-    pub fn gateway_thread(&self, token: &str) -> Option<ThreadId> {
+    pub fn gateway_caller(&self, token: &str) -> Option<GatewayCaller> {
         self.gateway_lock().passes.get(token).cloned()
     }
 
@@ -112,14 +120,22 @@ impl Hub {
     }
 
     pub(crate) fn revoke_gateway_credential(&self, thread: &ThreadId) {
-        self.gateway_lock()
-            .passes
-            .retain(|_, holder| holder != thread);
+        self.gateway_lock().passes.retain(|_, holder| {
+            let kept = holder.thread != *thread;
+            if !kept {
+                holder.ended.cancel();
+            }
+            kept
+        });
     }
 
     pub(crate) async fn gateway_pass(&self, thread: &ThreadId) -> GatewayPass {
         let computer = self.gateway_lock().computer && self.computer_use_on().await;
-        let issued = self.issue_gateway_token(thread);
+        let ended = CancellationToken::new();
+        let issued = self.issue_gateway_token(GatewayCaller {
+            thread: thread.clone(),
+            ended: ended.clone(),
+        });
         let servers = issued.as_ref().map_or_else(Vec::new, |(base, token)| {
             let token = token.expose();
             let mut servers = vec![(
@@ -137,6 +153,7 @@ impl Hub {
         GatewayPass {
             hub: self.clone(),
             token: issued.map(|(_, token)| token),
+            ended,
             servers,
         }
     }
@@ -155,17 +172,15 @@ impl Hub {
         }
     }
 
-    fn issue_gateway_token(&self, thread: &ThreadId) -> Option<(String, Secret)> {
+    fn issue_gateway_token(&self, caller: GatewayCaller) -> Option<(String, Secret)> {
         let base = self.gateway_lock().base.clone()?;
         let mut bytes = [0_u8; 24];
         if let Err(error) = getrandom::fill(&mut bytes) {
-            tracing::error!(%thread, "making the run's gateway credential: {error}");
+            tracing::error!(thread = %caller.thread, "making the run's gateway credential: {error}");
             return None;
         }
         let token = hex::encode(bytes);
-        self.gateway_lock()
-            .passes
-            .insert(token.clone(), thread.clone());
+        self.gateway_lock().passes.insert(token.clone(), caller);
         Some((base, Secret::from(token.as_str())))
     }
 
