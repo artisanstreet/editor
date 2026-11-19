@@ -62,7 +62,7 @@ fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
         shared.state.written(
             &request,
             edited,
-            Err(editor_core::client::CallError::test_inconsistent(
+            Err(test_support::editor::forge::inconsistent(
                 "/drafts/new",
                 "rejected",
             )),

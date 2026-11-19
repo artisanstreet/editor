@@ -1,7 +1,11 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
+use artisan_api::ThreadId;
 use artisan_api::{Collection, CollectionRef, ContentId, ContentRef, Item, ItemKind, Status};
+use axum::http::StatusCode;
+use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
+use editor_aqua::conversation::presentation::PresentationScope;
 use editor_aqua::conversation::view::row_cache::RowCache;
 use editor_aqua::core::Core;
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
@@ -9,7 +13,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use test_support::editor::core::{OpenThread, connect, remote_host, test_core};
+use test_support::editor::core::{StubbedHost, connect, remote_host, test_core};
+use test_support::editor::forge::empty_state;
 use test_support::editor::rows::{listed, realized, row_factory, row_list, row_model, source_ids};
 use test_support::editor::ui::{click, mount, mounted, ui_app};
 use test_support::items::item;
@@ -45,14 +50,17 @@ fn question(id: &str, digit: char) -> Arc<Item> {
     reason = "one eviction scenario walked step by step"
 )]
 fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_eviction() {
-    let opened = OpenThread::new("question-host", "thread");
-    let scope = opened.scope();
-    let OpenThread {
-        directory: _directory,
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let mut conversation = Conversation::new(&stubbed.core);
+    let host = stubbed.host.clone();
+    conversation.open_thread(&mut stubbed.core, host, ThreadId::from("thread"));
+    let scope = PresentationScope::capture(&conversation, &stubbed.core).unwrap();
+    let StubbedHost {
         core,
-        conversation,
+        forge,
+        directory: _directory,
         ..
-    } = opened;
+    } = stubbed;
     let provider = core.source_provider(&scope.host, scope.instance).unwrap();
     let cache = Rc::new(RefCell::new(RowCache::default()));
     let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(415))));
@@ -107,8 +115,9 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     else {
         panic!("expected stored questions")
     };
+    let _other_first = forge.take("GET", &records('2'));
     other_browser.borrow_mut().retry(&core);
-    let _other_completion = other_browser.borrow_mut().completion_for_tests();
+    let _other_retry = forge.take("GET", &records('2'));
     assert_eq!(other_browser.borrow().window().source(), other_source);
     assert!(matches!(
         other_browser.borrow().window().state(),
@@ -135,21 +144,18 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
             options: Collection::Inline(Vec::new()),
         }],
     };
-    let old = browser.borrow_mut().completion_for_tests();
-    let failed = browser.borrow_mut().completion_for_tests();
-    deliver(
-        &browser,
-        &failed,
-        Err(editor_aqua::core::client::RangeError::InvalidSource {
-            source_id: ContentId("test failure".to_owned()),
-        }),
-        &core,
+    let old = forge.take("GET", &records('1'));
+    browser.borrow_mut().retry(&core);
+    forge.take("GET", &records('1')).fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "test failure",
     );
-    assert!(matches!(
-        browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Failed(_)
-    ));
-    deliver(&browser, &old, Ok(page.clone()), &core);
+    settle(&browser, &core, "the current read fails", |state| {
+        matches!(state, editor_aqua::core::RangeState::Failed(_))
+    });
+    old.respond(&page);
+    browser.borrow_mut().drain(&core);
     assert!(matches!(
         browser.borrow().window().state(),
         editor_aqua::core::RangeState::Failed(_)
@@ -176,8 +182,10 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         browser.borrow().window().state(),
         editor_aqua::core::RangeState::Loading
     ));
-    let ready = browser.borrow_mut().completion_for_tests();
-    deliver(&browser, &ready, Ok(page), &core);
+    forge.take("GET", &records('1')).respond(&page);
+    settle(&browser, &core, "the retried read lands", |state| {
+        !matches!(state, editor_aqua::core::RangeState::Loading)
+    });
     assert!(
         matches!(browser.borrow().window().state(), editor_aqua::core::RangeState::Ready(page) if page.records[0].id == "ready")
     );
@@ -290,34 +298,20 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
     assert!(owners.export_is_current(&new));
 }
 
-fn deliver(
+fn records(digit: char) -> String {
+    format!("/content/{}/records", digit.to_string().repeat(64))
+}
+
+fn settle(
     browser: &Rc<RefCell<editor_aqua::sources::CollectionBrowser<artisan_api::Question>>>,
-    completion: &editor_aqua::core::RangeCompletion<
-        artisan_api::CollectionRange<artisan_api::Question>,
-    >,
-    result: Result<
-        artisan_api::CollectionRange<artisan_api::Question>,
-        editor_aqua::core::client::RangeError,
-    >,
     core: &Core,
+    what: &str,
+    done: impl Fn(
+        &editor_aqua::core::RangeState<artisan_api::CollectionRange<artisan_api::Question>>,
+    ) -> bool,
 ) {
-    editor_aqua::core::runtime::runtime().block_on(async {
-        let send = completion.complete(result);
-        tokio::pin!(send);
-        let admitted = test_support::wait::within(
-            "the range completion's admission",
-            Duration::from_secs(10),
-            async {
-                loop {
-                    tokio::select! {
-                        admitted = &mut send => break admitted,
-                        () = tokio::task::yield_now() => { browser.borrow_mut().drain(core); }
-                    }
-                }
-            },
-        )
-        .await;
-        assert!(admitted, "the browser admits the range completion");
+    test_support::wait::wait_until(what, Duration::from_secs(10), || {
+        browser.borrow_mut().drain(core);
+        done(browser.borrow().window().state())
     });
-    browser.borrow_mut().drain(core);
 }

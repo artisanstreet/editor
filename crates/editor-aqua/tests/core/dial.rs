@@ -1,6 +1,4 @@
-use editor_aqua::core::{
-    Core, EditorFiles, HostConfig, HostId, HostKind, Services, save_onboarding_for_tests,
-};
+use editor_aqua::core::{Core, EditorFiles, HostConfig, HostId, HostKind, Services};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -28,8 +26,6 @@ fn write_files(files: &EditorFiles) {
     });
     std::fs::write(files.dir.join("account.json"), account.to_string())
         .expect("the fixture file is written");
-    save_onboarding_for_tests(files, CORE_URL, ACCOUNT, MACHINE)
-        .expect("the onboarding fixture is saved");
     let hosts = serde_json::json!({
         "hosts": [HostConfig {
             id: HostId(MACHINE.into()),
@@ -53,9 +49,9 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
     write_files(&files);
     let (release, blocked) = mpsc::channel::<()>();
     let blocked = Mutex::new(blocked);
-    let services = Services::scripted(
+    let services = Services::new(
         CORE_URL,
-        Arc::new(move |_| {
+        editor_aqua::core::Ae::new(test_support::editor::account::ScriptedAe::new(move |_| {
             let released = blocked.lock().unwrap().recv();
             match released {
                 Ok(()) | Err(mpsc::RecvError) => {}
@@ -64,8 +60,9 @@ fn saved_local_forge_is_dialed_while_the_binding_read_is_pending() {
                 command: "account status".to_owned(),
                 detail: "released".to_owned(),
             })
-        }),
-        None,
+        })),
+        editor_aqua::core::RelayRoute::Off,
+        editor_aqua::core::Clock::system(),
     );
     let mut core = Core::with_services(files, services).unwrap();
     let id = HostId(MACHINE.into());
@@ -181,17 +178,20 @@ fn a_pairing_that_cannot_be_saved_is_not_left_connected_and_can_be_retried() {
         "account_id": ACCOUNT,
     })
     .to_string();
-    let services = Services::scripted(
+    let services = Services::new(
         CORE_URL,
-        Arc::new(move |args| match args {
-            ["account", ..] => Ok(status.clone()),
-            ["pair", "--json"] => Ok(invite.clone()),
-            _ => Err(editor_aqua::core::ae::AeError::Failed {
-                command: args.join(" "),
-                detail: "unexpected ae call".to_owned(),
-            }),
-        }),
-        None,
+        editor_aqua::core::Ae::new(test_support::editor::account::ScriptedAe::new(
+            move |args| match args {
+                ["account", ..] => Ok(status.clone()),
+                ["pair", "--json"] => Ok(invite.clone()),
+                _ => Err(editor_aqua::core::ae::AeError::Failed {
+                    command: args.join(" "),
+                    detail: "unexpected ae call".to_owned(),
+                }),
+            },
+        )),
+        editor_aqua::core::RelayRoute::Off,
+        editor_aqua::core::Clock::system(),
     );
     let mut core = Core::with_services(files.clone(), services).unwrap();
     std::fs::set_permissions(&files.dir, std::fs::Permissions::from_mode(0o500)).unwrap();

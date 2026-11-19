@@ -1,4 +1,4 @@
-use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+use editor_aqua::core::{Screen, SettingsPage};
 use editor_aqua::shell::host::ShellResources;
 use editor_aqua::sidebar::{controller::Sidebar, settings_nav};
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -10,10 +10,7 @@ use std::{
 #[test]
 fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     core.navigate(Screen::Settings(SettingsPage::General));
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::General));
     let mut sidebar = Sidebar::new(false);

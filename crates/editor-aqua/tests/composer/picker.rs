@@ -125,19 +125,17 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
     use editor_aqua::composer::persistence::DraftSessions;
     use editor_aqua::composer::picker::Menu;
     use editor_aqua::composer::view::ComposerOwner;
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
     use editor_aqua::ui::theme::ArtisanTheme;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("picker-gates").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
     let host = HostId("picker-gates".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),

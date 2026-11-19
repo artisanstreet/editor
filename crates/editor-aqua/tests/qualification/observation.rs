@@ -1,14 +1,11 @@
 use editor_aqua::conversation::presentation::PresentationScope;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::qualification::observation::{PaintCollector, PaintedRow};
 
 #[test]
 fn paint_generation_tracks_completed_frames_and_revokes_replaced_scopes() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("qualification".into()),
         name: "Qualification".into(),
@@ -22,8 +19,7 @@ fn paint_generation_tracks_completed_frames_and_revokes_replaced_scopes() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let scope = PresentationScope {
         host: config.id.clone(),
         instance: core.host(&config.id).unwrap().instance(),

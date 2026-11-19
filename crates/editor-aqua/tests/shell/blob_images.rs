@@ -1,7 +1,7 @@
 use super::RootViews;
 use crate::{
     conversation::{presentation::PresentationScope, view::factory::BlobAction},
-    core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen},
+    core::{EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen},
     shell::host::{Shell, ShellResources},
 };
 use artisan_api::{BlobHash, Item, ItemId, ItemKind, Status, ThreadId};
@@ -19,7 +19,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     };
     let mut resources = ShellResources::new(1.0).unwrap();
     let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-    shell.core = Core::for_tests(files).unwrap();
+    shell.core = test_support::editor::core::test_core(&files.dir);
     let config = HostConfig {
         id: HostId("blob-host".into()),
         name: "Forge".into(),
@@ -33,7 +33,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         shell.core.identity().unwrap(),
     )
     .unwrap();
-    shell.core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut shell.core, &config, client.clone());
     let thread = ThreadId("blob-thread".into());
     shell.core.navigate(Screen::Thread {
         host: config.id.clone(),
@@ -110,7 +110,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     assert_eq!(preview.view.opener_key(), Some("image-opener"));
     assert!(preview.owner.is_none());
     shell.core.remove_host(&config.id).unwrap();
-    shell.core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut shell.core, &config, client);
     assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, &id, 3, action(hash)));
     assert!(root.image_preview.is_none());
     assert!(!preview.view.is_live(&shell.core));

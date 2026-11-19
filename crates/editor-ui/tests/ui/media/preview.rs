@@ -1,5 +1,5 @@
 use super::*;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{ForgeClient, HostConfig, HostKind};
 
 fn fixture() -> (
     tempfile::TempDir,
@@ -9,10 +9,7 @@ fn fixture() -> (
     Preview,
 ) {
     let directory = tempfile::tempdir().expect("temp dir");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("preview".into()),
         name: "preview".into(),
@@ -26,10 +23,7 @@ fn fixture() -> (
         core.identity().expect("identity"),
     )
     .expect("client");
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id)
-        .expect("host")
-        .test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let instance = core.host(&config.id).expect("host").instance();
     let assets = aqua::images::ImageAssets::default();
     let image = assets
@@ -205,8 +199,7 @@ fn replacement_host_cannot_drive_a_preview_from_the_previous_instance() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert_ne!(core.host(&config.id).unwrap().instance(), old);
     assert!(!preview.is_live(&core));
     assert!(!preview.dispatch(7, Action::Navigate(true), &core, Instant::now(), false));
@@ -400,8 +393,7 @@ fn ready_only_preview_rejects_replaced_host_and_stale_actions() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(!preview.is_live(&core));
     assert!(!preview.dispatch(11, Action::Close, &core, Instant::now(), false));
 }

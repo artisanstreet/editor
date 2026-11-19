@@ -1,7 +1,7 @@
 use aqua::prelude::{AquaWindowId, InputEvent, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{AppCtx, Application, Aqua, AquaConfig, UiApp};
 use aqua_ui::element::{Box as UiBox, Element, Text};
-use editor_aqua::core::{Core, EditorFiles};
+use editor_aqua::core::EditorFiles;
 use editor_aqua::shell::{
     application::{SectionViews, ShellApplication},
     host::{Shell, ShellResources},
@@ -61,7 +61,7 @@ fn scale_change_reaches_layout_before_the_rebuild() {
         runtime: Vec::new(),
     };
     let mut app = ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -98,7 +98,7 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         };
         let mut app =
             ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
-        let mut core = Core::for_tests(files).unwrap();
+        let mut core = test_support::editor::core::test_core(&files.dir);
         core.set_image_assets(app.shell.images().clone());
         app.shell.core = core;
         app.shell.entry.sync(&app.shell.core);

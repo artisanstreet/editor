@@ -1,188 +1,103 @@
-use aqua::images::{DecodedImage, ImageAssets, ImageHandle};
-use artisan_api::{
-    BlobHash, Event, Project, ProjectId,
-    tls::{Identity, fingerprint},
-};
-use editor_core::runtime::runtime;
-use editor_core::{BlobImage, Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-use std::net::TcpListener;
-use std::sync::Arc;
+use aqua::images::ImageAssets;
+use artisan_api::{BlobHash, BlobRef, Project, ProjectId};
+use axum::http::StatusCode;
+use editor_core::{BlobImage, CoreEvent, HostEvent};
 use std::time::Duration;
-use test_support::wait::wait_until;
+use test_support::clock::ManualClock;
+use test_support::editor::core::StubbedHost;
+use test_support::editor::forge::{HeldRequest, empty_state, png};
 
-struct Forge {
-    _directory: tempfile::TempDir,
-    _listener: TcpListener,
-    core: Core,
-    host: HostId,
+const ICON: &str = "/projects/project/icon";
+
+fn project() -> ProjectId {
+    ProjectId("project".into())
 }
 
-fn forge() -> Forge {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a Forge that never answers");
-    let identity = Identity::generate("icons-test").expect("identity");
-    let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
-    let config = HostConfig {
-        id: HostId("icons-forge".into()),
-        name: "Icons".into(),
-        address: listener.local_addr().expect("address").to_string(),
-        fingerprint: pin.clone(),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(&config.address, &pin, &identity).expect("client");
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id)
-        .expect("host")
-        .test_stop_connection();
-    Forge {
-        _directory: directory,
-        _listener: listener,
-        core,
-        host: config.id,
+fn forge_with_clock(clock: &std::sync::Arc<ManualClock>) -> StubbedHost {
+    let mut state = empty_state();
+    state.projects.push(Project {
+        id: project(),
+        path: "/work/project".into(),
+        name: "project".into(),
+        seq: 1,
+        created_at: 0,
+        removed: false,
+    });
+    let mut forge = StubbedHost::start_with_clock(state, axum::Router::new(), clock.clock());
+    forge.core.set_image_assets(ImageAssets::default());
+    forge
+}
+
+fn forge() -> StubbedHost {
+    forge_with_clock(&ManualClock::starting_at(0))
+}
+
+fn blob(hash: &str) -> BlobRef {
+    BlobRef {
+        hash: BlobHash(hash.into()),
+        bytes: 64,
     }
 }
 
-impl Forge {
-    fn decode(&mut self, hash: &BlobHash, image: Arc<ImageHandle>) {
-        let host = self.host.clone();
-        let generation = self
-            .core
-            .host_mut(&host)
-            .expect("host")
-            .test_begin_image(hash.clone());
-        let sender = self
-            .core
-            .host(&host)
-            .expect("host")
-            .test_transition_sender();
-        runtime().block_on(sender.image(hash.clone(), generation, image));
-        wait_until("the decoded image lands", Duration::from_secs(10), || {
-            self.core.drain_with(|_, _| {});
-            matches!(
-                self.core.host(&host).expect("host").image(hash),
-                Some(BlobImage::Ready(_))
-            )
-        });
-    }
+fn settle_image(forge: &mut StubbedHost, hash: &BlobHash, done: fn(&BlobImage) -> bool) {
+    forge.settle("the image settles", |core, host| {
+        core.host(host)
+            .and_then(|data| data.image(hash))
+            .is_some_and(|image| done(&image))
+    });
 }
 
-fn pixel(assets: &ImageAssets, shade: u8) -> Arc<ImageHandle> {
-    Arc::new(
-        assets
-            .insert(DecodedImage::from_rgba(1, 1, vec![shade, shade, shade, 255]).expect("pixel"))
-            .expect("inserted"),
-    )
+fn decode(forge: &mut StubbedHost, hash: &BlobHash, shade: u8) {
+    forge.host_mut().load_image(hash.clone(), false);
+    forge
+        .take("GET", &format!("/blobs/{hash}"))
+        .respond_bytes("image/png", png(shade));
+    settle_image(forge, hash, |image| matches!(image, BlobImage::Ready(_)));
 }
 
 #[test]
 fn an_evicted_project_icon_frees_its_pixels() {
     let mut forge = forge();
-    let host = forge.host.clone();
-    let project = ProjectId("project".into());
-    let sender = forge
-        .core
-        .host(&host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(sender.event(Event::Project {
-        project: Project {
-            id: project.clone(),
-            path: "/work/project".into(),
-            name: "project".into(),
-            seq: 1,
-            created_at: 0,
-            removed: false,
-        },
-    }));
-    wait_until("the project arrives", Duration::from_secs(10), || {
-        forge.core.drain_with(|_, _| {});
-        forge
-            .core
-            .host(&host)
-            .expect("host")
-            .projects
-            .contains_key(&project)
-    });
-    let assets = ImageAssets::default();
     let icon = BlobHash("icon".into());
-    let image = pixel(&assets, 10);
-    let pixels = image.downgrade();
-    forge.decode(&icon, image);
-    let shown = {
-        let data = forge.core.host_mut(&host).expect("host");
-        data.test_project_icon(project.clone(), icon.clone());
-        data.load_project_icon(&project);
-        data.project_icon(&project)
-    };
-    assert!(shown.is_some(), "the sidebar shows the decoded icon");
+    forge.host_mut().load_project_icon(&project());
+    forge.take("GET", ICON).respond(Some(blob("icon")));
+    forge
+        .take("GET", "/blobs/icon")
+        .respond_bytes("image/png", png(10));
+    settle_image(&mut forge, &icon, |image| {
+        matches!(image, BlobImage::Ready(_))
+    });
+    let shown = forge.host().project_icon(&project());
+    let pixels = shown
+        .as_ref()
+        .expect("the sidebar shows the decoded icon")
+        .downgrade();
     drop(shown);
-    let other = pixel(&assets, 30);
     for index in 0..32 {
-        forge.decode(&BlobHash(format!("other-{index}")), Arc::clone(&other));
+        decode(&mut forge, &BlobHash(format!("other-{index}")), 30);
     }
     assert!(
         pixels.upgrade().is_none(),
         "no hidden reference keeps the evicted icon's pixels alive"
     );
-    assert!(
-        forge
-            .core
-            .host(&host)
-            .expect("host")
-            .project_icon(&project)
-            .is_none()
-    );
+    assert!(forge.host().project_icon(&project()).is_none());
 }
 
 #[test]
 fn retrying_project_icons_reloads_an_icon_whose_image_failed() {
     let mut forge = forge();
-    let host = forge.host.clone();
-    let project = ProjectId("project".into());
-    let sender = forge
-        .core
-        .host(&host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(sender.event(Event::Project {
-        project: Project {
-            id: project.clone(),
-            path: "/work/project".into(),
-            name: "project".into(),
-            seq: 1,
-            created_at: 0,
-            removed: false,
-        },
-    }));
-    wait_until("the project arrives", Duration::from_secs(10), || {
-        forge.core.drain_with(|_, _| {});
-        forge
-            .core
-            .host(&host)
-            .expect("host")
-            .projects
-            .contains_key(&project)
-    });
     let icon = BlobHash("icon".into());
-    let generation = forge
-        .core
-        .host_mut(&host)
-        .expect("host")
-        .test_begin_image(icon.clone());
-    runtime().block_on(sender.image_failure(icon.clone(), generation, "connection reset"));
-    wait_until("the icon image fails", Duration::from_secs(10), || {
-        forge.core.drain_with(|_, _| {});
-        matches!(
-            forge.core.host(&host).expect("host").image(&icon),
-            Some(BlobImage::Failed(_))
-        )
+    forge.host_mut().load_project_icon(&project());
+    forge.take("GET", ICON).respond(Some(blob("icon")));
+    forge.take("GET", "/blobs/icon").fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "connection reset",
+    );
+    settle_image(&mut forge, &icon, |image| {
+        matches!(image, BlobImage::Failed(_))
     });
-    let data = forge.core.host_mut(&host).expect("host");
-    data.test_project_icon(project, icon.clone());
+    let data = forge.host_mut();
     assert!(
         data.project_icons_failed(),
         "the sidebar offers Retry for an icon whose image failed"
@@ -193,23 +108,54 @@ fn retrying_project_icons_reloads_an_icon_whose_image_failed() {
         "Retry downloads the failed icon image again"
     );
     assert!(!data.project_icons_failed());
+    forge.take("GET", "/blobs/icon");
+}
+
+fn next_read(forge: &mut StubbedHost, clock: &ManualClock, changed: &mut bool) -> HeldRequest {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        forge.core.drain_with(|_, event| {
+            if matches!(
+                event,
+                CoreEvent::Host {
+                    event: HostEvent::ImagesChanged,
+                    ..
+                }
+            ) {
+                *changed = true;
+            }
+        });
+        clock.advance(Duration::from_secs(301));
+        forge.host_mut().load_project_icon(&project());
+        if let Some(read) = forge.forge.try_take("GET", ICON) {
+            return read;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Editor never re-read the project icon"
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
 }
 
 #[test]
 fn rereading_an_unchanged_project_icon_leaves_the_window_alone() {
-    let mut forge = forge();
-    let project = ProjectId("project".into());
-    let data = forge.core.host_mut(&forge.host).expect("host");
-    assert!(
-        data.test_project_icon(project.clone(), BlobHash("icon".into())),
-        "the first icon read shows the icon"
-    );
-    assert!(
-        !data.test_project_icon(project.clone(), BlobHash("icon".into())),
-        "a periodic re-read of the same icon must not rebuild the window"
-    );
-    assert!(
-        data.test_project_icon(project, BlobHash("new-icon".into())),
-        "a replaced icon is shown"
-    );
+    let clock = ManualClock::starting_at(0);
+    let mut forge = forge_with_clock(&clock);
+    let mut changed = false;
+    let mut read = next_read(&mut forge, &clock, &mut changed);
+    for (answer, shown, expected) in [
+        ("icon", "the first icon read shows the icon", true),
+        (
+            "icon",
+            "a periodic re-read of the same icon must not rebuild the window",
+            false,
+        ),
+        ("new-icon", "a replaced icon is shown", true),
+    ] {
+        read.respond(Some(blob(answer)));
+        changed = false;
+        read = next_read(&mut forge, &clock, &mut changed);
+        assert_eq!(changed, expected, "{shown}");
+    }
 }

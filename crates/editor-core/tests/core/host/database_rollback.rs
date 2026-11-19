@@ -1,13 +1,13 @@
-use artisan_api::{DatabaseRollback, State, tls::Identity};
+use artisan_api::{DatabaseRollback, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use editor_core::runtime::runtime;
-use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_core::{Core, HostConfig, HostId, HostKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use test_support::http::StubServer;
+use test_support::editor::forge::TlsServer;
 use test_support::wait::wait_until;
 
 const SET_ASIDE: &str = "/data/forge.sqlite3.rolled-back-from-32-0";
@@ -37,7 +37,7 @@ fn state() -> State {
 
 struct Forge {
     _directory: tempfile::TempDir,
-    _server: StubServer,
+    _server: TlsServer,
     dismissals: Arc<AtomicUsize>,
     core: Core,
     host: HostId,
@@ -69,23 +69,17 @@ fn forge(dismissal: StatusCode) -> Forge {
                 }
             }),
         );
-    let server = runtime().block_on(StubServer::serve(router));
+    let server = runtime().block_on(TlsServer::serve(router));
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
-    let identity = Identity::generate("rollback-notice-test").expect("identity");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("stub-forge".into()),
         name: "Stub".into(),
-        address: server.url().trim_start_matches("http://").to_owned(),
-        fingerprint: artisan_api::tls::fingerprint(
-            identity.certificate_der().expect("certificate").as_ref(),
-        ),
+        address: server.address().to_owned(),
+        fingerprint: server.fingerprint().to_owned(),
         kind: HostKind::Remote,
     };
-    core.add_test_host(&config, ForgeClient::plain_for_tests(server.url()));
+    test_support::editor::core::connect(&mut core, &config);
     Forge {
         _directory: directory,
         _server: server,

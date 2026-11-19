@@ -4,7 +4,7 @@ use aqua::prelude::{
 use aqua::{AppCtx, Aqua, AquaConfig, UiApp};
 use aqua_core::PointerKind;
 use aqua_ui::element::{Box as UiBox, Element, Text};
-use editor_aqua::core::{Core, EditorFiles};
+use editor_aqua::core::EditorFiles;
 use editor_aqua::shell::{
     application::{SectionViews, ShellApplication},
     host::{Shell, ShellResources},
@@ -17,6 +17,16 @@ struct Fixture {
     builds: Rc<Cell<usize>>,
     change: Rc<Cell<bool>>,
     focused: Rc<Cell<bool>>,
+}
+
+fn settled(core: &editor_aqua::core::Core) -> bool {
+    let account = core.account();
+    core.pending_work() == 0
+        && !account.reading_local_forge()
+        && matches!(
+            account.phase(),
+            editor_aqua::core::AccountPhase::Authenticated { verified: true, .. }
+        )
 }
 
 #[test]
@@ -128,7 +138,7 @@ fn independent_section_updates_avoid_root_rebuilds_and_failed_refreshes_fall_bac
             ..RefreshFixture::default()
         },
     );
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -145,7 +155,7 @@ fn independent_section_updates_avoid_root_rebuilds_and_failed_refreshes_fall_bac
     ));
     aqua.dispatch_start(&mut app, id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while app.shell.core.test_startup_pending() {
+    while !settled(&app.shell.core) {
         assert!(std::time::Instant::now() < deadline);
         aqua.dispatch_wake(&mut app, id);
         std::thread::yield_now();
@@ -243,7 +253,7 @@ fn rebuilds_follow_state_changes_and_effect_only_focus_is_applied() {
     };
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::new(files.clone(), resources, views);
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -260,7 +270,7 @@ fn rebuilds_follow_state_changes_and_effect_only_focus_is_applied() {
     aqua.dispatch_start(&mut app, id);
     assert_eq!(builds.get(), 1);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while app.shell.core.test_startup_pending() {
+    while !settled(&app.shell.core) {
         assert!(
             std::time::Instant::now() < deadline,
             "Core startup did not settle"
@@ -380,7 +390,7 @@ fn editor_word_left_consumes_alt_left_before_workspace_back() {
         clear_focus: Rc::clone(&clear_focus),
     };
     let mut app = ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     core.navigate(editor_aqua::core::Screen::Usage);
     app.shell.core = core;
@@ -494,7 +504,7 @@ fn hover_input_updates_without_any_render_completion() {
     };
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::new(files.clone(), resources, HoverFixture::default());
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -511,7 +521,7 @@ fn hover_input_updates_without_any_render_completion() {
     ));
     aqua.dispatch_start(&mut app, id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while app.shell.core.test_startup_pending() {
+    while !settled(&app.shell.core) {
         assert!(
             std::time::Instant::now() < deadline,
             "Core startup did not settle"

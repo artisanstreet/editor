@@ -229,8 +229,8 @@ impl Session {
                 .shell
                 .core
                 .host(&self.scenario.host)
-                .is_some_and(editor_core::HostData::is_live)
-                && !self.app.shell.core.test_startup_pending();
+                .is_some_and(|host| host.is_live() && !host.has_requests_in_flight())
+                && self.app.shell.core.pending_work() == 0;
             let pixels = self.surface.read().map_err(SessionError::Surface)?.rgba;
             if ready && previous.as_ref() == Some(&pixels) {
                 identical += 1;

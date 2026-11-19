@@ -1,49 +1,11 @@
-use artisan_api::{
-    Event, Thread, ThreadId, ThreadsPage,
-    tls::{Identity, fingerprint},
-};
-use editor_core::runtime::runtime;
-use editor_core::{
-    Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, ThreadPageDirection,
-};
-use std::net::TcpListener;
-use std::time::Duration;
-use test_support::wait::wait_until;
+use artisan_api::{Event, Thread, ThreadId, ThreadsPage};
+use axum::http::StatusCode;
+use editor_core::ThreadPageDirection;
+use test_support::editor::core::StubbedHost;
+use test_support::editor::forge::{HeldRequest, empty_state};
 
-struct Silent {
-    _directory: tempfile::TempDir,
-    _listener: TcpListener,
-    core: Core,
-    host: HostId,
-}
-
-fn silent_host() -> Silent {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a Forge that never answers");
-    let identity = Identity::generate("pages-test").expect("identity");
-    let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
-    let config = HostConfig {
-        id: HostId("silent-forge".into()),
-        name: "Silent".into(),
-        address: listener.local_addr().expect("address").to_string(),
-        fingerprint: pin.clone(),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(&config.address, &pin, &identity).expect("client");
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id)
-        .expect("host")
-        .test_stop_connection();
-    Silent {
-        _directory: directory,
-        _listener: listener,
-        core,
-        host: config.id,
-    }
+fn forge() -> StubbedHost {
+    StubbedHost::start(empty_state(), axum::Router::new())
 }
 
 fn thread(id: &str, seq: u64, activity: u64, archived: bool) -> Thread {
@@ -71,135 +33,105 @@ fn page(threads: Vec<Thread>) -> ThreadsPage {
     }
 }
 
-impl Silent {
-    fn ids(&self, archived: bool) -> Vec<String> {
-        let host = self.core.host(&self.host).expect("host");
-        host.thread_page(archived)
-            .ids()
-            .iter()
-            .map(|id| id.0.clone())
-            .collect()
-    }
+fn ids(forge: &StubbedHost, archived: bool) -> Vec<String> {
+    forge
+        .host()
+        .thread_page(archived)
+        .ids()
+        .iter()
+        .map(|id| id.0.clone())
+        .collect()
+}
 
-    fn title(&self, id: &str) -> Option<String> {
-        let host = self.core.host(&self.host).expect("host");
-        host.threads
-            .get(&ThreadId(id.into()))
-            .and_then(|thread| thread.title.clone())
-    }
+fn title(forge: &StubbedHost, id: &str) -> Option<String> {
+    forge
+        .host()
+        .threads
+        .get(&ThreadId(id.into()))
+        .and_then(|thread| thread.title.clone())
+}
 
-    fn start_loading(&mut self, archived: bool, direction: ThreadPageDirection) -> u64 {
-        let host = self.core.host_mut(&self.host).expect("host");
-        host.load_threads(archived, direction);
-        assert!(
-            host.thread_page(archived).is_loading(),
-            "the page starts loading"
-        );
-        host.test_thread_page_generation(archived)
-    }
+fn working(forge: &StubbedHost, thread: &str) -> bool {
+    forge.host().is_working(&ThreadId(thread.into()))
+}
 
-    fn generation(&self, archived: bool) -> u64 {
-        let host = self.core.host(&self.host).expect("host");
-        host.test_thread_page_generation(archived)
-    }
+fn start_loading(
+    forge: &mut StubbedHost,
+    archived: bool,
+    direction: ThreadPageDirection,
+) -> HeldRequest {
+    forge.host_mut().load_threads(archived, direction);
+    assert!(
+        forge.host().thread_page(archived).is_loading(),
+        "the page starts loading"
+    );
+    forge.forge.take("GET", "/threads")
+}
 
-    fn settle(&mut self, archived: bool) {
-        let host = self.host.clone();
-        wait_until(
-            "the page completion applies",
-            Duration::from_secs(10),
-            || {
-                self.core.drain_with(|_, _| {});
-                !self
-                    .core
-                    .host(&host)
-                    .expect("host")
-                    .thread_page(archived)
-                    .is_loading()
-            },
-        );
+fn settle(forge: &mut StubbedHost, archived: bool) {
+    forge.settle("the page completion applies", |core, host| {
+        core.host(host)
+            .is_some_and(|data| !data.thread_page(archived).is_loading())
+    });
+}
+
+fn publish_and_apply(forge: &mut StubbedHost, events: Vec<Event>) {
+    for event in events {
+        forge.forge.publish(event);
     }
+    forge.apply_published();
 }
 
 #[test]
 fn a_page_that_started_before_newer_events_does_not_roll_them_back() {
-    let mut forge = silent_host();
-    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
+    let mut forge = forge();
+    let loading = start_loading(&mut forge, false, ThreadPageDirection::Latest);
     let mut renamed = thread("renamed", 9, 9, false);
     renamed.title = Some("renamed later".into());
-    let sender = forge
-        .core
-        .host(&forge.host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(async {
-        sender.event(Event::Thread { thread: renamed }).await;
-        sender
-            .event(Event::ThreadRemoved {
+    publish_and_apply(
+        &mut forge,
+        vec![
+            Event::Thread { thread: renamed },
+            Event::ThreadRemoved {
                 thread_id: ThreadId("deleted".into()),
-            })
-            .await;
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                generation,
-                page(vec![
-                    thread("renamed", 3, 3, false),
-                    thread("deleted", 2, 2, false),
-                    thread("kept", 1, 1, false),
-                ]),
-            )
-            .await;
-    });
-    forge.settle(false);
+            },
+        ],
+    );
+    loading.respond(page(vec![
+        thread("renamed", 3, 3, false),
+        thread("deleted", 2, 2, false),
+        thread("kept", 1, 1, false),
+    ]));
+    settle(&mut forge, false);
     assert_eq!(
-        forge.ids(false),
+        ids(&forge, false),
         ["renamed", "kept"],
         "a deleted thread stays deleted"
     );
     assert_eq!(
-        forge.title("renamed").as_deref(),
+        title(&forge, "renamed").as_deref(),
         Some("renamed later"),
         "the page's older copy does not replace the newer event"
     );
-    assert_eq!(forge.title("deleted"), None);
+    assert_eq!(title(&forge, "deleted"), None);
 }
 
 #[test]
 fn a_superseded_page_is_ignored_and_the_current_one_applies() {
-    let mut forge = silent_host();
-    let current = forge.start_loading(false, ThreadPageDirection::Latest);
-    let sender = forge
-        .core
-        .host(&forge.host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(async {
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                current.wrapping_sub(1),
-                page(vec![thread("stale", 1, 1, false)]),
-            )
-            .await;
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                current,
-                page(vec![thread("current", 1, 1, false)]),
-            )
-            .await;
+    let mut forge = forge();
+    let superseded = start_loading(&mut forge, false, ThreadPageDirection::Latest);
+    forge.forge.publish(Event::Reset);
+    forge.settle("Forge's state reloads", |core, host| {
+        core.host(host)
+            .is_some_and(|data| !data.thread_page(false).is_loading())
     });
-    forge.settle(false);
-    assert_eq!(forge.ids(false), ["current"]);
+    let current = start_loading(&mut forge, false, ThreadPageDirection::Latest);
+    superseded.respond(page(vec![thread("stale", 1, 1, false)]));
+    current.respond(page(vec![thread("current", 1, 1, false)]));
+    settle(&mut forge, false);
+    assert_eq!(ids(&forge, false), ["current"]);
     assert_eq!(
-        forge.title("stale"),
+        title(&forge, "stale"),
         None,
         "nothing from the superseded page is kept"
     );
@@ -207,74 +139,37 @@ fn a_superseded_page_is_ignored_and_the_current_one_applies() {
 
 #[test]
 fn archived_threads_land_only_in_the_archive_and_older_pages_append() {
-    let mut forge = silent_host();
-    let first = forge.start_loading(false, ThreadPageDirection::Latest);
-    let sender = forge
-        .core
-        .host(&forge.host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(async {
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                first,
-                ThreadsPage {
-                    next: Some(artisan_api::ThreadCursor {
-                        activity_seq: 5,
-                        id: ThreadId("newest".into()),
-                    }),
-                    ..page(vec![
-                        thread("newest", 6, 6, false),
-                        thread("archived", 5, 5, true),
-                    ])
-                },
-            )
-            .await;
+    let mut forge = forge();
+    start_loading(&mut forge, false, ThreadPageDirection::Latest).respond(ThreadsPage {
+        next: Some(artisan_api::ThreadCursor {
+            activity_seq: 5,
+            id: ThreadId("newest".into()),
+        }),
+        ..page(vec![
+            thread("newest", 6, 6, false),
+            thread("archived", 5, 5, true),
+        ])
     });
-    forge.settle(false);
+    settle(&mut forge, false);
     assert_eq!(
-        forge.ids(false),
+        ids(&forge, false),
         ["newest"],
         "archived threads stay out of the inbox"
     );
     assert!(
-        forge
-            .core
-            .host(&forge.host)
-            .expect("host")
-            .thread_page(false)
-            .has_older(),
+        forge.host().thread_page(false).has_older(),
         "older threads wait until the list scrolls to them"
     );
-    forge.start_loading(false, ThreadPageDirection::Older);
-    let older = forge.generation(false);
-    let sender = forge
-        .core
-        .host(&forge.host)
-        .expect("host")
-        .test_transition_sender();
-    runtime().block_on(async {
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Older,
-                6,
-                older,
-                page(vec![thread("oldest", 1, 1, false)]),
-            )
-            .await;
-    });
-    forge.settle(false);
+    start_loading(&mut forge, false, ThreadPageDirection::Older)
+        .respond(page(vec![thread("oldest", 1, 1, false)]));
+    settle(&mut forge, false);
     assert_eq!(
-        forge.ids(false),
+        ids(&forge, false),
         ["newest", "oldest"],
         "older pages add below"
     );
     assert!(
-        forge.ids(true).is_empty(),
+        ids(&forge, true).is_empty(),
         "the archive page was never asked for"
     );
 }
@@ -304,157 +199,87 @@ fn done() -> artisan_api::RunState {
     }
 }
 
-impl Silent {
-    fn send(&self, deliver: impl AsyncFnOnce(&editor_core::host::TestHostTransitions)) {
-        let sender = self
-            .core
-            .host(&self.host)
-            .expect("host")
-            .test_transition_sender();
-        runtime().block_on(deliver(&sender));
-    }
-
-    fn drain_until(&mut self, what: &str, mut done: impl FnMut(&editor_core::HostData) -> bool) {
-        let host = self.host.clone();
-        wait_until(what, Duration::from_secs(10), || {
-            self.core.drain_with(|_, _| {});
-            done(self.core.host(&host).expect("host"))
-        });
-    }
-
-    fn working(&self, thread: &str) -> bool {
-        self.core
-            .host(&self.host)
-            .expect("host")
-            .is_working(&ThreadId(thread.into()))
-    }
-}
-
 #[test]
 fn a_page_loaded_during_a_stop_keeps_the_run_stopped() {
-    let mut forge = silent_host();
-    forge.send(async |sender| {
-        sender
-            .event(Event::Thread {
+    let mut forge = forge();
+    publish_and_apply(
+        &mut forge,
+        vec![
+            Event::Thread {
                 thread: thread("busy", 1, 1, false),
-            })
-            .await;
-        sender
-            .event(Event::Run {
+            },
+            Event::Run {
                 run: run("busy", 2, artisan_api::RunState::Running),
-            })
-            .await;
-    });
-    forge.drain_until("the run arrives", |host| {
-        host.runs.contains_key(&ThreadId("busy".into()))
-    });
+            },
+        ],
+    );
     forge
-        .core
-        .host_mut(&forge.host)
-        .expect("host")
+        .host_mut()
         .stop_optimistically(&ThreadId("busy".into()));
-    assert!(!forge.working("busy"), "Stop shows the run stopped at once");
-    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
-    forge.send(async |sender| {
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                generation,
-                ThreadsPage {
-                    runs: vec![run("busy", 2, artisan_api::RunState::Running)],
-                    ..page(vec![thread("busy", 1, 1, false)])
-                },
-            )
-            .await;
-    });
-    forge.settle(false);
     assert!(
-        !forge.working("busy"),
+        !working(&forge, "busy"),
+        "Stop shows the run stopped at once"
+    );
+    start_loading(&mut forge, false, ThreadPageDirection::Latest).respond(ThreadsPage {
+        runs: vec![run("busy", 2, artisan_api::RunState::Running)],
+        ..page(vec![thread("busy", 1, 1, false)])
+    });
+    settle(&mut forge, false);
+    assert!(
+        !working(&forge, "busy"),
         "a page that left Forge before the stop does not bring the run back"
     );
 }
 
 #[test]
 fn a_page_loaded_before_a_delete_does_not_bring_back_its_running_run() {
-    let mut forge = silent_host();
-    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
-    forge.send(async |sender| {
-        sender
-            .event(Event::ThreadRemoved {
-                thread_id: ThreadId("deleted".into()),
-            })
-            .await;
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                generation,
-                ThreadsPage {
-                    runs: vec![run("deleted", 2, artisan_api::RunState::Running)],
-                    ..page(vec![thread("deleted", 1, 1, false)])
-                },
-            )
-            .await;
+    let mut forge = forge();
+    let loading = start_loading(&mut forge, false, ThreadPageDirection::Latest);
+    publish_and_apply(
+        &mut forge,
+        vec![Event::ThreadRemoved {
+            thread_id: ThreadId("deleted".into()),
+        }],
+    );
+    loading.respond(ThreadsPage {
+        runs: vec![run("deleted", 2, artisan_api::RunState::Running)],
+        ..page(vec![thread("deleted", 1, 1, false)])
     });
-    forge.settle(false);
-    assert!(!forge.working("deleted"));
+    settle(&mut forge, false);
+    assert!(!working(&forge, "deleted"));
     assert!(
-        !forge
-            .core
-            .host(&forge.host)
-            .expect("host")
-            .runs
-            .contains_key(&ThreadId("deleted".into())),
+        !forge.host().runs.contains_key(&ThreadId("deleted".into())),
         "the deleted thread's run stays forgotten"
     );
 }
 
 #[test]
 fn a_queued_older_run_event_does_not_undo_a_newer_page() {
-    let mut forge = silent_host();
-    let generation = forge.start_loading(false, ThreadPageDirection::Latest);
-    forge.send(async |sender| {
-        sender
-            .thread_page(
-                false,
-                ThreadPageDirection::Latest,
-                0,
-                generation,
-                ThreadsPage {
-                    runs: vec![run("finished", 9, done())],
-                    ..page(vec![thread("finished", 1, 1, false)])
-                },
-            )
-            .await;
-        sender
-            .event(Event::Run {
-                run: run("finished", 5, artisan_api::RunState::Running),
-            })
-            .await;
+    let mut forge = forge();
+    start_loading(&mut forge, false, ThreadPageDirection::Latest).respond(ThreadsPage {
+        runs: vec![run("finished", 9, done())],
+        ..page(vec![thread("finished", 1, 1, false)])
     });
-    forge.settle(false);
-    forge.drain_until("the queued event is applied", |_| true);
+    settle(&mut forge, false);
+    publish_and_apply(
+        &mut forge,
+        vec![Event::Run {
+            run: run("finished", 5, artisan_api::RunState::Running),
+        }],
+    );
     assert!(
-        !forge.working("finished"),
+        !working(&forge, "finished"),
         "the finished run stays finished"
     );
 }
 
 #[test]
 fn scrolling_far_back_keeps_a_bounded_window_and_reloads_newer_threads() {
-    let mut forge = silent_host();
-    let sender = forge
-        .core
-        .host(&forge.host)
-        .expect("host")
-        .test_transition_sender();
+    let mut forge = forge();
     let mut activity = 10_000;
     let mut direction = ThreadPageDirection::Latest;
     for _ in 0..8 {
-        let generation = forge.start_loading(false, direction);
+        let loading = start_loading(&mut forge, false, direction);
         let threads: Vec<Thread> = (0..200)
             .map(|_| {
                 activity -= 1;
@@ -464,27 +289,21 @@ fn scrolling_far_back_keeps_a_bounded_window_and_reloads_newer_threads() {
             })
             .collect();
         let last = threads.last().expect("a full page").id.clone();
-        runtime().block_on(sender.thread_page(
-            false,
-            direction,
-            0,
-            generation,
-            ThreadsPage {
-                next: Some(artisan_api::ThreadCursor {
-                    activity_seq: activity,
-                    id: last,
-                }),
-                ..page(threads)
-            },
-        ));
-        forge.settle(false);
+        loading.respond(ThreadsPage {
+            next: Some(artisan_api::ThreadCursor {
+                activity_seq: activity,
+                id: last,
+            }),
+            ..page(threads)
+        });
+        settle(&mut forge, false);
         direction = ThreadPageDirection::Older;
     }
-    let ids = forge.ids(false);
+    let ids = ids(&forge, false);
     assert_eq!(ids.len(), 1_000, "the list keeps five pages");
     assert_eq!(ids.first().map(String::as_str), Some("t9399"));
     assert_eq!(ids.last().map(String::as_str), Some("t8400"));
-    let host = forge.core.host(&forge.host).expect("host");
+    let host = forge.host();
     assert!(
         !host.thread_page(false).at_latest(),
         "scrolling back up asks for the newer threads again"
@@ -495,55 +314,22 @@ fn scrolling_far_back_keeps_a_bounded_window_and_reloads_newer_threads() {
     );
 }
 
-fn refusing_forge(
-    refusal: serde_json::Value,
-) -> (
-    tempfile::TempDir,
-    test_support::http::StubServer,
-    Core,
-    HostId,
-) {
-    let router = axum::Router::new().route(
-        "/threads/{id}",
-        axum::routing::get(move || {
-            let refusal = refusal.clone();
-            async move { (axum::http::StatusCode::NOT_FOUND, axum::Json(refusal)) }
-        }),
-    );
-    let server = runtime().block_on(test_support::http::StubServer::serve(router));
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
-    let identity = Identity::generate("refusing-forge").expect("identity");
-    let config = HostConfig {
-        id: HostId("refusing-forge".into()),
-        name: "Refusing".into(),
-        address: server.url().trim_start_matches("http://").to_owned(),
-        fingerprint: fingerprint(identity.certificate_der().expect("certificate").as_ref()),
-        kind: HostKind::Remote,
-    };
-    core.add_test_host(&config, ForgeClient::plain_for_tests(server.url()));
-    core.host_mut(&config.id)
-        .expect("host")
-        .test_stop_connection();
-    (directory, server, core, config.id)
-}
-
 fn opened(refusal: serde_json::Value) -> editor_core::ThreadUnavailable {
-    let (_directory, _server, mut core, host) = refusing_forge(refusal);
+    let mut forge = forge();
     let thread = ThreadId("gone-thread".into());
-    core.navigate(editor_core::Screen::Thread {
-        host: host.clone(),
+    forge.core.navigate(editor_core::Screen::Thread {
+        host: forge.host.clone(),
         thread: thread.clone(),
     });
+    forge
+        .forge
+        .take("GET", "/threads/gone-thread")
+        .respond_with(StatusCode::NOT_FOUND, refusal);
     let mut unavailable = None;
-    wait_until("the thread lookup settles", Duration::from_secs(20), || {
-        core.drain_with(|_, _| {});
+    forge.settle("the thread lookup settles", |core, host| {
         unavailable = core
-            .host(&host)
-            .and_then(|forge| forge.thread_unavailable(&thread))
+            .host(host)
+            .and_then(|data| data.thread_unavailable(&thread))
             .cloned();
         unavailable.is_some()
     });

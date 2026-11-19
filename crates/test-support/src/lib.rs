@@ -6,7 +6,7 @@ pub mod wait;
 
 #[cfg(any(feature = "tokio", feature = "clock"))]
 pub mod clock;
-#[cfg(feature = "editor")]
+#[cfg(feature = "editor-core")]
 pub mod editor;
 #[cfg(feature = "http")]
 pub mod http;

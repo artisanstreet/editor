@@ -115,7 +115,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let files = EditorFiles {
         dir: directory.path().join("editor"),
     };
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     let pairing = runtime().block_on(server.pairing_input()).unwrap();
     let config = runtime()
         .block_on(hosts::pair(
@@ -134,10 +134,9 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client.clone());
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while core.test_startup_pending() {
+    while core.pending_work() > 0 {
         assert!(Instant::now() < deadline, "Core startup did not settle");
         core.drain_with(|_, _| {});
         std::thread::yield_now();
@@ -261,9 +260,10 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             .any(|run| run.text.contains("Paragraph 000"))
     );
     assert!(owner.leaf_is_current(&projected.proof));
-    stored_conversation_transaction(&mut core, &config, &client, &item, deadline);
+    stored_conversation_transaction(&server, &mut core, &config, &client, &item, deadline);
     assert_eq!(owner.page(&first, 64), PagePreparation::Pending);
-    core.add_test_host(&config, client);
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(!provider.is_available());
     owner.drain();
     assert!(!owner.leaf_is_current(leaf.proof()));
@@ -280,6 +280,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     reason = "one stored-conversation transaction driven against a real Forge"
 )]
 fn stored_conversation_transaction(
+    server: &ForgeServer,
     core: &mut Core,
     config: &editor_aqua::core::HostConfig,
     client: &ForgeClient,
@@ -287,7 +288,6 @@ fn stored_conversation_transaction(
     deadline: Instant,
 ) {
     use aqua_text::{SharedFonts, SharedRuns};
-    use artisan_api::Event;
     use editor_aqua::conversation::{
         adapter::row_model,
         controller::Conversation,
@@ -309,11 +309,6 @@ fn stored_conversation_transaction(
     });
     let mut conversation = Conversation::new(core);
     conversation.open_thread(core, config.id.clone(), item.thread_id.clone());
-    let sender = core
-        .host(&config.id)
-        .expect("the test host is configured")
-        .test_transition_sender();
-    runtime().block_on(sender.event(Event::Item { item: item.clone() }));
     while conversation
         .view
         .as_ref()
@@ -323,6 +318,7 @@ fn stored_conversation_transaction(
         core.drain_with(|core, event| {
             conversation.core_event(core, &event, false);
         });
+        conversation.drain(core);
         assert!(Instant::now() < deadline, "stored item delivery deadline");
         std::thread::yield_now();
     }
@@ -497,14 +493,34 @@ fn stored_conversation_transaction(
         app.unregister_selection_source_in(document, source_id),
         "the row registered its selection source"
     );
-    let mut changed = item.clone();
-    changed.seq += 1;
-    if let ItemKind::AssistantMessage { text, .. } = &mut changed.kind {
-        *text = TextContent::Stored(artisan_api::ContentRef::from_text("different source"));
-    }
-    runtime().block_on(sender.event(Event::Item {
-        item: changed.clone(),
-    }));
+    let different = (0..130)
+        .map(|index| format!("Different {index:03} {}.\n\n", "source ".repeat(22)))
+        .collect::<Vec<_>>()
+        .concat();
+    let changed = runtime()
+        .block_on(server.store().upsert_item(forge_store::NewItem {
+            id: item.id.clone(),
+            thread_id: item.thread_id.clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: different.into(),
+                phase: Phase::Final,
+            },
+        }))
+        .expect("Forge stores the changed item");
+    assert!(
+        matches!(
+            &changed.kind,
+            ItemKind::AssistantMessage {
+                text: TextContent::Stored(_),
+                ..
+            }
+        ),
+        "a long changed body is stored, not inlined"
+    );
     while conversation
         .view
         .as_ref()
@@ -521,7 +537,9 @@ fn stored_conversation_transaction(
         !candidate.acknowledge(&conversation, core, &markdown.borrow()),
         "a changed body is not acknowledged as painted"
     );
-    core.add_test_host(config, client.clone());
+    core.remove_host(&config.id)
+        .expect("the replaced host is removed");
+    test_support::editor::core::connect_client(core, config, client.clone());
     assert!(
         !stale_host.acknowledge(&conversation, core, &markdown.borrow()),
         "a paint from a replaced host is not acknowledged"

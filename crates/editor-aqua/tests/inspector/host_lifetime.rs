@@ -1,6 +1,6 @@
 use artisan_api::{ItemId, ThreadId};
 use editor_aqua::{
-    core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind},
+    core::{Core, HostConfig, HostId, HostKind},
     inspector::TerminalDialog,
 };
 use std::sync::{Arc, mpsc};
@@ -14,10 +14,6 @@ fn config() -> HostConfig {
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     }
-}
-
-fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
 }
 
 fn pending_dialog(core: &Core, config: &HostConfig) -> TerminalDialog {
@@ -40,12 +36,9 @@ fn pending_dialog(core: &Core, config: &HostConfig) -> TerminalDialog {
 #[test]
 fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = config();
-    core.add_test_host(&config, client(&core));
+    test_support::editor::core::connect(&mut core, &config);
     let mut current = pending_dialog(&core, &config);
     assert!(current.drain(&core));
     assert!(
@@ -61,10 +54,11 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     assert!(removed.job().is_none());
     assert!(removed.error().is_none());
 
-    core.add_test_host(&config, client(&core));
+    test_support::editor::core::connect(&mut core, &config);
     assert_ne!(old, core.host(&config.id).unwrap().instance());
     let mut replaced = pending_dialog(&core, &config);
-    core.add_test_host(&config, client(&core));
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect(&mut core, &config);
     assert!(replaced.drain(&core));
     assert!(replaced.job().is_none());
     assert!(replaced.error().is_none());
@@ -73,18 +67,16 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
 #[test]
 fn inspector_scope_rejects_same_id_host_replacement_until_followed() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = config();
-    core.add_test_host(&config, client(&core));
+    test_support::editor::core::connect(&mut core, &config);
     let mut conversation = editor_aqua::conversation::controller::Conversation::new(&core);
     conversation.open = Some((config.id.clone(), ThreadId("thread".into())));
     let mut inspector = editor_aqua::inspector::Inspector::default();
     assert!(inspector.follow(&core, &conversation));
     assert!(inspector.is_current(&core));
-    core.add_test_host(&config, client(&core));
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect(&mut core, &config);
     assert!(!inspector.is_current(&core));
     assert!(inspector.follow(&core, &conversation));
     assert!(inspector.is_current(&core));
@@ -95,12 +87,9 @@ fn inspector_scope_rejects_same_id_host_replacement_until_followed() {
 #[test]
 fn a_fetch_that_finished_before_retry_does_not_cancel_the_retry() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = config();
-    core.add_test_host(&config, client(&core));
+    test_support::editor::core::connect(&mut core, &config);
     let mut dialog = pending_dialog(&core, &config);
     dialog.fetch(&core);
     assert!(!dialog.drain(&core));

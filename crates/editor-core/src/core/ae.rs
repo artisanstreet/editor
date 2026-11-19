@@ -1,14 +1,22 @@
+use futures::future::BoxFuture;
+use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
-#[derive(Clone)]
-pub enum Ae {
-    Installed,
-    #[cfg(any(test, feature = "test-support"))]
-    Scripted(AeScript),
+pub trait RunAe: Send + Sync {
+    fn run(&self, args: Vec<String>) -> BoxFuture<'static, Result<String, AeError>>;
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub type AeScript = std::sync::Arc<dyn Fn(&[&str]) -> Result<String, AeError> + Send + Sync>;
+#[derive(Clone)]
+pub struct Ae(Arc<dyn RunAe>);
+
+#[derive(Debug, Clone, Copy)]
+pub struct InstalledAe;
+
+impl RunAe for InstalledAe {
+    fn run(&self, args: Vec<String>) -> BoxFuture<'static, Result<String, AeError>> {
+        Box::pin(installed(args))
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AeError {
@@ -31,12 +39,13 @@ pub enum AeError {
 }
 
 impl Ae {
+    pub fn new(runner: impl RunAe + 'static) -> Self {
+        Self(Arc::new(runner))
+    }
     pub(crate) async fn run(&self, args: &[&str]) -> Result<String, AeError> {
-        match self {
-            Self::Installed => installed(args.iter().map(|arg| (*arg).to_owned()).collect()).await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Scripted(script) => script(args),
-        }
+        self.0
+            .run(args.iter().map(|arg| (*arg).to_owned()).collect())
+            .await
     }
 }
 
@@ -76,10 +85,6 @@ async fn installed(args: Vec<String>) -> Result<String, AeError> {
 
 impl std::fmt::Debug for Ae {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Installed => f.write_str("Installed"),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Scripted(_) => f.write_str("Scripted"),
-        }
+        f.write_str("Ae")
     }
 }

@@ -178,47 +178,6 @@ enum Message {
     Request(u64, Result<(), NetworkError>, bool),
 }
 
-#[cfg(feature = "test-support")]
-#[derive(Debug)]
-pub struct TestAccountTransitions {
-    sender: crate::core::delivery::DeliverySender<Message>,
-    generation: u64,
-}
-#[cfg(feature = "test-support")]
-impl TestAccountTransitions {
-    pub async fn profile(&self, profile: AccountProfile) {
-        let (applied, _) = tokio::sync::oneshot::channel();
-        assert!(
-            self.sender
-                .send(Message::Synced(self.generation, Ok(profile), applied))
-                .await
-                .is_ok(),
-            "account closed before the test transition was delivered"
-        );
-    }
-    pub async fn transport_failure(&self) {
-        drop(self.transport_failure_ack().await);
-    }
-    pub async fn transport_failure_ack(&self) -> tokio::sync::oneshot::Receiver<()> {
-        let (applied, acknowledged) = tokio::sync::oneshot::channel();
-        assert!(
-            self.sender
-                .send(Message::Synced(
-                    self.generation,
-                    Err(NetworkError::UnexpectedStatus {
-                        action: "sync the account",
-                        status: 503,
-                    }),
-                    applied
-                ))
-                .await
-                .is_ok(),
-            "account closed before the test transition was delivered"
-        );
-        acknowledged
-    }
-}
-
 pub(crate) struct AccountEvents {
     applied: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -324,16 +283,6 @@ impl Account {
             this.refresh();
         }
         this
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn test_sync_sender(&mut self) -> TestAccountTransitions {
-        self.sync = None;
-        self.sync_generation = self.sync_generation.wrapping_add(1);
-        TestAccountTransitions {
-            sender: self.delivery.sender(),
-            generation: self.sync_generation,
-        }
     }
 
     pub fn phase(&self) -> &AccountPhase {
@@ -789,32 +738,11 @@ impl Account {
                 .await;
         })));
     }
-    #[cfg(feature = "test-support")]
-    pub(crate) fn sign_in_for_tests(&mut self, profile: AccountProfile, machine_id: String) {
-        self.sign_in = None;
-        self.sync = None;
-        self.forge = None;
-        self.request = None;
-        self.sign_generation = self.sign_generation.wrapping_add(1);
-        self.sync_generation = self.sync_generation.wrapping_add(1);
-        self.forge_generation = self.forge_generation.wrapping_add(1);
-        self.request_generation = self.request_generation.wrapping_add(1);
-        self.session = Some(SessionToken::new("test-session".to_owned()));
-        self.onboarding = Some(OnboardingRecord {
-            account_id: profile.account_id.clone(),
-            base_url: self.base_url.clone(),
-            machine_id,
-        });
-        self.binding = Some(AeBinding::Unenrolled);
-        self.phase = AccountPhase::Authenticated {
-            profile,
-            verified: true,
-        };
-        self.changed();
-    }
-
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.delivery.peek_order()
+    }
+    pub(crate) fn admitted(&self) -> usize {
+        self.delivery.admitted()
     }
     pub(crate) fn drain(&mut self) -> AccountEvents {
         let applied = self

@@ -1,9 +1,9 @@
-use artisan_api::{
-    ProjectId, ProjectRepository,
-    tls::{Identity, fingerprint},
-};
-use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-use std::net::TcpListener;
+use artisan_api::{ProjectId, ProjectRepository};
+use editor_core::{CoreEvent, HostEvent};
+use std::time::Duration;
+use test_support::clock::ManualClock;
+use test_support::editor::core::StubbedHost;
+use test_support::editor::forge::{HeldRequest, empty_state};
 
 fn branch(name: &str) -> ProjectRepository {
     ProjectRepository {
@@ -14,39 +14,77 @@ fn branch(name: &str) -> ProjectRepository {
     }
 }
 
+fn project() -> artisan_api::Project {
+    artisan_api::Project {
+        id: ProjectId("project".into()),
+        path: "/work/project".into(),
+        name: "project".into(),
+        seq: 1,
+        created_at: 0,
+        removed: false,
+    }
+}
+
+const REPOSITORY: &str = "/projects/project/repository";
+
+fn next_read(forge: &mut StubbedHost, clock: &ManualClock, changed: &mut bool) -> HeldRequest {
+    let project = ProjectId("project".into());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        forge.core.drain_with(|_, event| {
+            if matches!(
+                event,
+                CoreEvent::Host {
+                    event: HostEvent::Changed,
+                    ..
+                }
+            ) {
+                *changed = true;
+            }
+        });
+        clock.advance(Duration::from_secs(3));
+        forge.host_mut().load_repository(&project, false);
+        if let Some(read) = forge.forge.try_take("GET", REPOSITORY) {
+            return read;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Editor never re-read the repository"
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn rereading_an_unchanged_repository_leaves_the_window_alone() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a Forge that never answers");
-    let identity = Identity::generate("repository-test").expect("identity");
-    let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
-    let config = HostConfig {
-        id: HostId("repository-forge".into()),
-        name: "Repository".into(),
-        address: listener.local_addr().expect("address").to_string(),
-        fingerprint: pin.clone(),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(&config.address, &pin, &identity).expect("client");
-    core.add_test_host(&config, client);
-    let data = core.host_mut(&config.id).expect("host");
-    data.test_stop_connection();
-    let project = ProjectId("project".into());
-    assert!(
-        data.test_repository(project.clone(), Some(branch("main"))),
-        "the first read shows the branch"
-    );
-    assert!(
-        !data.test_repository(project.clone(), Some(branch("main"))),
-        "a periodic re-read of the same branch must not rebuild the window"
-    );
-    assert!(
-        data.test_repository(project.clone(), Some(branch("feature"))),
-        "a switched branch is shown"
-    );
-    assert!(data.test_repository(project, None), "leaving git is shown");
+    let clock = ManualClock::starting_at(0);
+    let mut state = empty_state();
+    state.projects.push(project());
+    let mut forge = StubbedHost::start_with_clock(state, axum::Router::new(), clock.clock());
+    let mut changed = false;
+    let mut read = next_read(&mut forge, &clock, &mut changed);
+    for (answer, shown, expected) in [
+        (
+            Some(branch("main")),
+            "the first read shows the branch",
+            true,
+        ),
+        (
+            Some(branch("main")),
+            "a periodic re-read of the same branch must not rebuild the window",
+            false,
+        ),
+        (Some(branch("feature")), "a switched branch is shown", true),
+        (None, "leaving git is shown", true),
+    ] {
+        read.respond(answer.clone());
+        changed = false;
+        read = next_read(&mut forge, &clock, &mut changed);
+        assert_eq!(changed, expected, "{shown}");
+        assert_eq!(
+            forge.host().repository(&ProjectId("project".into())),
+            answer.as_ref(),
+            "{shown}"
+        );
+    }
 }

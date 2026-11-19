@@ -71,21 +71,6 @@ pub(super) struct ImageCache {
 }
 
 impl HostData {
-    #[cfg(feature = "test-support")]
-    pub fn test_begin_image(&mut self, hash: BlobHash) -> u64 {
-        self.images.generation += 1;
-        let generation = self.images.generation;
-        self.images
-            .values
-            .borrow_mut()
-            .kept
-            .insert(hash.clone(), BlobImage::Loading);
-        let task = crate::core::runtime::runtime().spawn(std::future::pending());
-        self.images
-            .decoding
-            .insert(hash, (generation, AbortOnDropHandle::new(task)));
-        generation
-    }
     pub(crate) fn set_image_assets(&mut self, assets: ImageAssets) {
         self.images.assets = Some(assets);
     }

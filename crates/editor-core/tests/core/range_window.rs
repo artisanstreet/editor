@@ -1,12 +1,18 @@
+use artisan_api::tls::Identity;
 use artisan_api::{ContentId, ContentRange, ContentRef};
 use editor_core::runtime::runtime;
 use editor_core::{ContentWindow, ForgeClient, RangeState};
 use std::time::Duration;
+use test_support::editor::forge::{StubForge, empty_state};
 use test_support::wait::wait_until;
+
+fn source() -> ContentId {
+    ContentId("ab".repeat(32))
+}
 
 fn page(start: u64, end: u64) -> ContentRange {
     ContentRange {
-        id: ContentId("source".into()),
+        id: source(),
         start,
         end,
         total: 1_000,
@@ -16,16 +22,20 @@ fn page(start: u64, end: u64) -> ContentRange {
 
 #[test]
 fn asking_for_the_end_of_a_source_does_not_show_an_earlier_page() {
+    let forge = runtime().block_on(StubForge::serve(empty_state(), axum::Router::new()));
+    let identity = Identity::generate("range-window-test").expect("identity");
+    let client = ForgeClient::new(forge.address(), forge.fingerprint(), &identity).expect("client");
     let mut window = ContentWindow::new(
-        ForgeClient::plain_for_tests("http://127.0.0.1:9"),
+        client,
         ContentRef {
-            id: ContentId("source".into()),
+            id: source(),
             bytes: 1_000,
             lines: 10,
         },
     );
-    let first = window.completion_for_tests();
-    assert!(runtime().block_on(first.complete(Ok(page(0, 100)))));
+    forge
+        .take("GET", &format!("/content/{}", source()))
+        .respond(page(0, 100));
     wait_until("the first page arrives", Duration::from_secs(10), || {
         window.drain()
     });

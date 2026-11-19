@@ -9,15 +9,12 @@ use editor_aqua::conversation::fold::Row;
 use editor_aqua::conversation::presentation::{MarkdownOwners, PresentationScope};
 use editor_aqua::conversation::view::transcript::TranscriptObservations;
 use editor_aqua::conversation::viewport::{Fetch, Input};
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
 
 #[test]
 fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("work-only-host".into()),
         name: "Forge".into(),
@@ -31,7 +28,7 @@ fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), ThreadId::from("thread"));
     conversation.viewport(

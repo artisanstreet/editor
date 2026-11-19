@@ -1,22 +1,35 @@
-use editor_aqua::core::{ConnectionStatus, Screen, SettingsPage};
+use editor_aqua::core::{ConnectionStatus, HostConfig, HostId, HostKind, Screen, SettingsPage};
 use editor_aqua::shell::connection::ConnectionPresenter;
 use editor_aqua::ui::theme::ArtisanTheme;
 use std::time::{Duration, Instant};
-use test_support::editor::core::{connect, remote_host, test_core};
+use test_support::editor::core::{connect, test_core};
+use test_support::editor::forge::{TlsServer, empty_state};
+
+fn forge_whose_stream_always_closes() -> TlsServer {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::routing::get;
+    let router = axum::Router::new()
+        .route("/state", get(|| async { axum::Json(empty_state()) }))
+        .route(
+            "/events",
+            get(|| async { ([(CONTENT_TYPE, "text/event-stream")], "") }),
+        );
+    editor_aqua::core::runtime::runtime().block_on(TlsServer::serve(router))
+}
 
 #[test]
 fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_core(directory.path());
-    let config = remote_host("offline-forge");
+    let forge = forge_whose_stream_always_closes();
+    let config = HostConfig {
+        id: HostId("offline-forge".into()),
+        name: "Forge".into(),
+        address: forge.address().to_owned(),
+        fingerprint: forge.fingerprint().to_owned(),
+        kind: HostKind::Remote,
+    };
     connect(&mut core, &config);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
-    editor_aqua::core::runtime::runtime().block_on(sender.status(ConnectionStatus::Offline {
-        attempt: 1,
-        reason: "dns error: failed to lookup address".into(),
-        fault: None,
-    }));
     test_support::wait::wait_until("the host goes offline", Duration::from_secs(10), || {
         core.drain_with(|_, _| {});
         matches!(
@@ -35,7 +48,7 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     let mut app = test_support::editor::ui::mounted(900.0, 700.0, status);
     let texts = test_support::editor::ui::painted_texts(&app);
     for expected in [
-        "Last attempt: dns error: failed to lookup address",
+        "Last attempt: Forge's event stream closed",
         "Try again now",
         "Forges",
     ] {

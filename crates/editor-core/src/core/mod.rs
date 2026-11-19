@@ -20,17 +20,12 @@ pub mod services;
 pub mod settings;
 mod settings_writer;
 pub mod store;
-#[cfg(feature = "test-support")]
-mod testing;
-#[cfg(feature = "test-support")]
-pub use testing::save_onboarding_for_tests;
 
 pub use access::EntryGate;
 pub use account::{
     AUTH_ORIGIN, Account, AccountEvent, AccountLink, AccountMachine, AccountPhase, LocalForge,
 };
-#[cfg(feature = "test-support")]
-pub use ae::AeScript;
+pub use ae::{Ae, AeError, RunAe};
 pub use client::ForgeClient;
 pub use clock::{Clock, TimeSource};
 pub use completion::{CompletionKey, CompletionSlot};
@@ -45,15 +40,11 @@ pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,
 };
 pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
-#[cfg(feature = "test-support")]
-pub use range_window::RangeCompletion;
 pub use range_window::{CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow};
 pub(crate) use resident::CollectionBytes;
 pub use resident::ResidentBytes;
 pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSection};
-#[cfg(feature = "test-support")]
-pub use services::RelayScript;
-pub use services::{RelayDialRequest, Services};
+pub use services::{DialRelay, RelayDialRequest, RelayRoute, Services};
 pub use settings::{SetSettingError, Settings, StoredSettingError};
 pub use settings_writer::{SettingsSave, SettingsShutdown, drain_settings};
 pub use store::{Core, CoreEvent, OpenCoreError};

@@ -1,54 +1,60 @@
 use artisan_api::ContentRef;
+use axum::http::StatusCode;
 use editor_aqua::{
-    core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, RangeState},
+    core::{Core, HostConfig, RangeState},
     sources::ContentText,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use test_support::editor::core::{Delivered, connect, stub_host};
+use test_support::editor::forge::StubForge;
 
-fn config() -> HostConfig {
-    HostConfig {
-        id: HostId("same-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    }
+fn forge() -> StubForge {
+    editor_aqua::core::runtime::runtime().block_on(StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ))
 }
 
-fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new(
-        "127.0.0.1:1",
-        &"0".repeat(64),
-        core.identity().expect("the test Core has an identity"),
-    )
-    .expect("the test Forge client builds")
+fn connected(core: &mut Core, forge: &StubForge) -> HostConfig {
+    let config = stub_host("same-host", "Forge", forge);
+    connect(core, &config);
+    config
 }
 
-fn pending_copy(core: &Core, config: &HostConfig) -> ContentText {
+fn replace(core: &mut Core, config: &HostConfig) {
+    core.remove_host(&config.id)
+        .expect("the replaced host is removed");
+    connect(core, config);
+}
+
+fn pending_copy(core: &Core, config: &HostConfig, forge: &StubForge) -> ContentText {
+    let source = ContentRef::from_text("stored content");
+    let path = format!("/content/{}", source.id);
     let mut view = ContentText::new(
         core.host(&config.id).expect("the test host is configured"),
-        ContentRef::from_text("stored content"),
+        source,
     );
+    let delivered = Delivered::watch(view.action_wake());
     view.copy(core);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !view.action_finished() {
-        assert!(Instant::now() < deadline, "source copy did not finish");
-        std::thread::sleep(Duration::from_millis(5));
+    for _ in ["the source window", "the copy"] {
+        forge.take("GET", &path).fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "internal",
+            "source unavailable",
+        );
     }
+    delivered.wait("the source copy");
     view
 }
 
 #[test]
 fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_source_round_trip() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
 
-    let mut current = pending_copy(&core, &config);
+    let mut current = pending_copy(&core, &config, &forge);
     assert!(current.drain(&core).is_none());
     assert!(
         current
@@ -56,7 +62,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
             .is_some_and(|error| error.starts_with("Couldn't copy source:"))
     );
 
-    let mut removed = pending_copy(&core, &config);
+    let mut removed = pending_copy(&core, &config, &forge);
     let old = core.host(&config.id).unwrap().instance();
     core.remove_host(&config.id).unwrap();
     assert!(removed.drain(&core).is_none());
@@ -65,17 +71,17 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
         matches!(removed.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
     );
 
-    core.add_test_host(&config, client(&core));
+    connect(&mut core, &config);
     assert_ne!(old, core.host(&config.id).unwrap().instance());
-    let mut replaced = pending_copy(&core, &config);
-    core.add_test_host(&config, client(&core));
+    let mut replaced = pending_copy(&core, &config, &forge);
+    replace(&mut core, &config);
     assert!(replaced.drain(&core).is_none());
     assert!(replaced.error().is_none());
     assert!(
         matches!(replaced.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
     );
 
-    let mut switched = pending_copy(&core, &config);
+    let mut switched = pending_copy(&core, &config, &forge);
     switched.set_source(ContentRef::from_text("other content"));
     switched.set_source(ContentRef::from_text("stored content"));
     switched.copy(&core);
@@ -93,12 +99,9 @@ fn collection_actions_do_not_reach_a_recreated_host() {
     use editor_aqua::sources::{CollectionBrowser, CollectionPreview};
     use std::cell::Cell;
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let source = CollectionRef {
         source: ContentRef::from_text("entry"),
         count: 1,
@@ -122,7 +125,7 @@ fn collection_actions_do_not_reach_a_recreated_host() {
     activated.set(false);
     core.remove_host(&config.id).unwrap();
     assert!(!browser.activate(&core, &page, 0, present, |_, _| activated.set(true)));
-    core.add_test_host(&config, client(&core));
+    connect(&mut core, &config);
     assert!(!browser.activate(&core, &page, 0, present, |_, _| activated.set(true)));
     assert!(!activated.get());
 }
@@ -130,12 +133,9 @@ fn collection_actions_do_not_reach_a_recreated_host() {
 #[test]
 fn late_save_dialog_cannot_export_a_replaced_source_or_host() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let mut view = ContentText::new(
         core.host(&config.id).unwrap(),
         ContentRef::from_text("first"),
@@ -148,7 +148,7 @@ fn late_save_dialog_cannot_export_a_replaced_source_or_host() {
     view.finish_export(&core, old_picker, Some(path.clone()));
     assert!(view.busy());
     assert!(!path.exists());
-    core.add_test_host(&config, client(&core));
+    replace(&mut core, &config);
     view.finish_export(&core, current_picker, Some(path.clone()));
     assert!(!view.busy());
     assert!(!path.exists());
@@ -157,12 +157,9 @@ fn late_save_dialog_cannot_export_a_replaced_source_or_host() {
 #[test]
 fn picker_failures_only_apply_to_the_current_source_and_host() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let mut view = ContentText::new(
         core.host(&config.id).unwrap(),
         ContentRef::from_text("first"),
@@ -180,7 +177,7 @@ fn picker_failures_only_apply_to_the_current_source_and_host() {
     assert!(view.error().is_none());
     assert!(!view.busy());
     let replaced = view.begin_export(&core).unwrap();
-    core.add_test_host(&config, client(&core));
+    replace(&mut core, &config);
     view.finish_export_result(&core, replaced, Err("removed host".into()));
     assert!(view.error().is_none());
     assert!(!view.busy());
@@ -190,12 +187,9 @@ fn picker_failures_only_apply_to_the_current_source_and_host() {
 fn source_change_reporting_rejects_noops_and_keeps_picker_effects() {
     use editor_aqua::sources::{ContentAction, ContentEffect, dispatch_content_changed};
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let mut view = ContentText::new(
         core.host(&config.id).unwrap(),
         ContentRef::from_text("source"),
@@ -230,12 +224,9 @@ fn collection_change_reporting_ignores_repeated_back_and_pending_request() {
         CollectionAction, CollectionBrowser, CollectionPreview, dispatch_collection_changed,
     };
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let source = CollectionRef {
         source: ContentRef::from_text("entry"),
         count: 1,
@@ -285,12 +276,9 @@ fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
     use editor_aqua::ui::theme::ArtisanTheme;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = forge();
+    let config = connected(&mut core, &forge);
     let mut view = ContentText::new(core.host(&config.id).unwrap(), ContentRef::from_text(""));
     view.copy(&core);
     let copied = test_support::wait::wait_for("the source copy", Duration::from_secs(15), || {

@@ -10,7 +10,7 @@ use artisan_api::{
     tls::{Identity, fingerprint},
 };
 use editor_aqua::{
-    core::{Core, DraggedThread, EditorFiles, ForgeClient, HostConfig, HostId, HostKind},
+    core::{DraggedThread, ForgeClient, HostConfig, HostId, HostKind},
     sidebar::drag_preview::DragPreviewHost,
     ui::theme::ArtisanTheme,
 };
@@ -18,15 +18,13 @@ use editor_aqua::{
 #[test]
 fn preview_tracks_offset_without_blocking_hit_testing_and_closes_on_drag_end() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&dir.path().join("editor"));
     let identity = Identity::generate("drag-preview").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
     let id = HostId("host".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id: id.clone(),
             name: "Forge".into(),

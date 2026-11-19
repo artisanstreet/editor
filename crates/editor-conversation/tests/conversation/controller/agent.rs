@@ -1,15 +1,12 @@
 use super::*;
 use crate::conversation::viewport::State;
 use artisan_api::{Status, TextContent};
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{ForgeClient, HostConfig, HostKind};
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("agent-host".into()),
         name: "Agent Forge".into(),
@@ -23,7 +20,7 @@ fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id, ThreadId("thread".into()));
     (directory, listener, core, conversation)

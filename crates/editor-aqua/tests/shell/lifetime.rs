@@ -1,5 +1,5 @@
 use artisan_api::ThreadId;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::shell::resource_preview::{PreviewError, ResourcePreview};
 use std::{
     sync::{Arc, mpsc},
@@ -9,6 +9,16 @@ use test_support::net::ClosingListener;
 
 fn client(core: &Core, address: &str) -> ForgeClient {
     ForgeClient::new(address, &"0".repeat(64), core.identity().unwrap()).unwrap()
+}
+
+fn connect(core: &mut Core, config: &HostConfig) {
+    let client = client(core, &config.address);
+    test_support::editor::core::connect_client(core, config, client);
+}
+
+fn replace(core: &mut Core, config: &HostConfig) {
+    core.remove_host(&config.id).unwrap();
+    connect(core, config);
 }
 
 fn config(address: &str) -> HostConfig {
@@ -49,14 +59,11 @@ fn wait_for_result(preview: &ResourcePreview) {
 #[test]
 fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let forge = ClosingListener::bind();
     let address = forge.address().to_string();
     let config = config(&address);
-    core.add_test_host(&config, client(&core, &address));
+    connect(&mut core, &config);
 
     let mut current = pending_preview(&core, &config);
     wait_for_result(&current);
@@ -73,12 +80,12 @@ fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
         Some(Err(PreviewError::HostGone { .. }))
     ));
 
-    core.add_test_host(&config, client(&core, &address));
+    connect(&mut core, &config);
     let new = core.host(&config.id).unwrap().instance();
     assert_ne!(old, new);
     let mut replaced = pending_preview(&core, &config);
     wait_for_result(&replaced);
-    core.add_test_host(&config, client(&core, &address));
+    replace(&mut core, &config);
     assert!(replaced.drain(&core));
     assert!(matches!(
         replaced.content(),

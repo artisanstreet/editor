@@ -109,58 +109,31 @@ fn second_factor_distinguishes_six_ascii_digits() {
 
 #[test]
 fn delayed_setting_failure_does_not_rollback_replaced_host() {
-    use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-    use editor_aqua::settings::{
-        controller::SettingsController,
-        preferences::{SettingKey, SettingRequest},
-    };
+    use axum::http::StatusCode;
+    use editor_aqua::settings::controller::SettingsController;
     use serde_json::json;
 
     let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().to_path_buf(),
-    };
-    let identity = Identity::generate("settings-test").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let config = HostConfig {
-        id: HostId("same-host".into()),
-        name: "Test Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: fingerprint.clone(),
-        kind: HostKind::Local,
-    };
-    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
-    let mut core = Core::for_tests(files).unwrap();
-    core.add_test_host(&config, client.clone());
+    let forge = stub_forge();
+    let config = test_support::editor::core::stub_host("same-host", "Test Forge", &forge);
+    let mut core = test_support::editor::core::test_core(dir.path());
+    connect_live(&mut core, &config);
     let original = core.host(&config.id).unwrap().instance();
     let host = core.host_mut(&config.id).unwrap();
     host.settings.insert("suggestions", json!(false));
-    host.settings.insert("suggestions", json!(true));
-    host.settings.insert("summary_titles", json!(true));
-    let request = SettingRequest {
-        target: SettingKey {
-            host: config.id.clone(),
-            instance: original,
-            key: "suggestions",
-        },
-        value: json!(true),
-    };
-    let removed_request = SettingRequest {
-        target: SettingKey {
-            host: config.id.clone(),
-            instance: original,
-            key: "summary_titles",
-        },
-        value: json!(true),
-    };
+    host.settings.insert("summary_titles", json!(false));
+    let mut settings = SettingsController::default();
+    for key in ["suggestions", "summary_titles"] {
+        settings.set_host_setting_for(&mut core, config.id.clone(), original, key, json!(true));
+    }
+    let request = forge.take("PUT", "/settings/suggestions");
+    let removed_request = forge.take("PUT", "/settings/summary_titles");
     core.remove_host(&config.id).unwrap();
     assert!(core.host_if_instance(&config.id, original).is_none());
-    let mut settings = SettingsController::default();
-    settings.complete_setting_for_tests(removed_request, Err("late failure".into()));
-    assert!(settings.drain(&mut core));
+    removed_request.fail(StatusCode::SERVICE_UNAVAILABLE, "internal", "late failure");
+    drain_settings(&mut settings, &mut core, "the removed host's late failure");
     assert!(core.host(&config.id).is_none());
-    core.add_test_host(&config, client);
+    connect_live(&mut core, &config);
     let host = core.host_mut(&config.id).unwrap();
     assert_ne!(host.instance(), original);
     host.settings.insert("suggestions", json!("replacement"));
@@ -175,12 +148,42 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
         core.host(&config.id).unwrap().setting("suggestions"),
         Some(&json!("replacement"))
     );
-    settings.complete_setting_for_tests(request, Err("late failure".into()));
-    assert!(settings.drain(&mut core));
+    request.fail(StatusCode::SERVICE_UNAVAILABLE, "internal", "late failure");
+    drain_settings(&mut settings, &mut core, "the replaced host's late failure");
     assert_eq!(
         core.host(&config.id).unwrap().setting("suggestions"),
         Some(&json!("replacement"))
     );
+}
+
+fn stub_forge() -> test_support::editor::forge::StubForge {
+    editor_aqua::core::runtime::runtime().block_on(test_support::editor::forge::StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ))
+}
+
+fn connect_live(core: &mut editor_aqua::core::Core, config: &editor_aqua::core::HostConfig) {
+    test_support::editor::core::connect(core, config);
+    test_support::wait::wait_until(
+        "the stub Forge to go live",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(&config.id)
+                .is_some_and(editor_aqua::core::HostData::is_live)
+        },
+    );
+}
+
+fn drain_settings(
+    settings: &mut editor_aqua::settings::controller::SettingsController,
+    core: &mut editor_aqua::core::Core,
+    what: &str,
+) {
+    test_support::wait::wait_until(what, std::time::Duration::from_secs(10), || {
+        settings.drain(core)
+    });
 }
 
 #[test]
@@ -208,17 +211,13 @@ fn engine_login_code_requires_text_and_clears_only_on_submission() {
 
 #[test]
 fn dispatch_reports_visible_changes_without_blocking_side_effects() {
-    use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::settings::{
         controller::SettingsController,
         view::{ViewAction, dispatch},
     };
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let mut settings = SettingsController::default();
     assert!(!dispatch(&mut settings, &mut core, ViewAction::McpCancel));
     assert!(!dispatch(
@@ -280,15 +279,12 @@ fn dispatch_reports_visible_changes_without_blocking_side_effects() {
 #[test]
 fn every_settings_page_shows_content_without_a_host() {
     use artisan_api::EngineId;
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage, SettingsSection};
+    use editor_aqua::core::{Screen, SettingsPage, SettingsSection};
     use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::rc::Rc;
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let controller = SettingsController::default();
     let mut pages = vec![
         SettingsPage::General,
@@ -363,17 +359,14 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
     use artisan_api::EngineId;
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{
-        Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen, SettingsPage,
+        Core, ForgeClient, HostConfig, HostId, HostKind, Screen, SettingsPage,
     };
     use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::rc::Rc;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let controller = SettingsController::default();
     let identity = Identity::generate("settings-with-host").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
@@ -411,7 +404,7 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
             "{page:?} without a host"
         );
     }
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     for page in host_pages {
         let texts = render(&mut core, page);
         assert!(
@@ -456,16 +449,13 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
 
 #[test]
 fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::rc::Rc;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let controller = SettingsController::default();
     for page in [
         SettingsPage::General,
@@ -527,7 +517,7 @@ fn add_host(core: &mut editor_aqua::core::Core, id: &str) -> editor_aqua::core::
     };
     let client = ForgeClient::new(&config.address, &fingerprint, &identity)
         .expect("the test Forge client builds");
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(core, &config, client);
     config.id
 }
 
@@ -547,14 +537,10 @@ fn retention_target(
 
 #[test]
 fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
-    use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::settings::preferences::SettingWrites;
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let target = retention_target(&mut core);
     let key = target.key;
     let mut settings = editor_aqua::core::HostSettings::new(target.host.clone());
@@ -613,14 +599,11 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
 
 #[test]
 fn switching_hosts_keeps_unsaved_global_instructions() {
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Core, Screen, SettingsPage};
     use editor_aqua::settings::controller::SettingsController;
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let first = add_host(&mut core, "first-forge");
     let second = add_host(&mut core, "second-forge");
     for (id, text) in [(&first, "first saved"), (&second, "second saved")] {
@@ -668,13 +651,10 @@ fn switching_hosts_keeps_unsaved_global_instructions() {
 
 #[test]
 fn an_mcp_form_that_is_saving_keeps_its_fields_and_cannot_be_dismissed() {
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::controller::SettingsController;
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     add_host(&mut core, "mcp-forge");
     core.navigate(Screen::Settings(SettingsPage::Extensions));
     let mut settings = SettingsController::default();
@@ -703,7 +683,7 @@ fn about_page_opens_the_third_party_notices() {
     use aqua::UiApp;
     use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
     use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{
         about::BuildInfo,
         controller::SettingsController,
@@ -712,10 +692,7 @@ fn about_page_opens_the_third_party_notices() {
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::{cell::RefCell, rc::Rc};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     core.navigate(Screen::Settings(SettingsPage::About));
     let controller = SettingsController::default();
     let emitted = Rc::new(RefCell::new(Vec::new()));
@@ -786,7 +763,7 @@ fn silent_host(
     };
     let client = ForgeClient::new(&config.address, &fingerprint, &identity)
         .expect("the test Forge client builds");
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(core, &config, client);
     (silent, config.id)
 }
 
@@ -816,20 +793,21 @@ fn render_settings(
 
 #[test]
 fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use axum::http::StatusCode;
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{
         controller::SettingsController,
-        preferences::{SettingKey, SettingRequest},
+        preferences::SettingKey,
         view::{ViewAction, dispatch},
     };
     use serde_json::json;
     use std::{cell::RefCell, rc::Rc};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
-    let (_silent, id) = silent_host(&mut core, "Desk");
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let forge = stub_forge();
+    let config = test_support::editor::core::stub_host("Desk", "Desk", &forge);
+    connect_live(&mut core, &config);
+    let id = config.id.clone();
     core.navigate(Screen::Settings(SettingsPage::Threads));
     let mut settings = SettingsController::default();
     settings.sync(&mut core);
@@ -843,14 +821,14 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
         &mut core,
         ViewAction::SetHostSetting(id.clone(), target.instance, "suggestions", false)
     ));
-    settings.complete_setting_for_tests(
-        SettingRequest {
-            target: target.clone(),
-            value: json!(false),
-        },
-        Err("the host did not answer".into()),
+    let sent = forge.take("PUT", "/settings/suggestions");
+    assert_eq!(sent.json::<serde_json::Value>(), json!(false));
+    sent.fail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "internal",
+        "the host did not answer",
     );
-    assert!(settings.drain(&mut core));
+    drain_settings(&mut settings, &mut core, "the failed setting");
     assert_ne!(
         core.host(&id).unwrap().setting("suggestions"),
         Some(&json!(false))
@@ -865,7 +843,7 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
     let texts = test_support::editor::ui::painted_texts(&app);
     assert!(
         texts.iter().any(|text| text
-            == "Couldn't save “Suggest the next message” on Desk: the host did not answer"),
+            == "Couldn't save “Suggest the next message” on Desk: PUT /settings/suggestions: Forge refused the call: Forge answered 503 Service Unavailable: the host did not answer"),
         "{texts:?}"
     );
     test_support::editor::ui::click(&mut app, "settings-retry-suggestions");
@@ -875,6 +853,13 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
     assert_eq!(
         core.host(&id).unwrap().setting("suggestions"),
         Some(&json!(false)),
+        "Try again sends the choice that failed"
+    );
+    assert_eq!(
+        forge
+            .take("PUT", "/settings/suggestions")
+            .json::<serde_json::Value>(),
+        json!(false),
         "Try again sends the choice that failed"
     );
     let texts = test_support::editor::ui::painted_texts(&render_settings(
@@ -889,7 +874,7 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
 fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
     use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
     use artisan_api::{EngineId, EngineStatus};
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{
         controller::SettingsController,
         view::{ViewAction, dispatch},
@@ -897,10 +882,7 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
     use serde_json::json;
     use std::{cell::RefCell, rc::Rc};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let (_silent, id) = silent_host(&mut core, "Desk");
     let engine = EngineId::Codex;
     let status: EngineStatus = serde_json::from_value(json!({
@@ -975,15 +957,12 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
 
 #[test]
 fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
-    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{controller::SettingsController, view::dispatch};
     use serde_json::json;
     use std::{cell::RefCell, rc::Rc};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let (_silent, id) = silent_host(&mut core, "Desk");
     core.host_mut(&id).unwrap().settings.insert(
         "mcp_servers",
@@ -1011,7 +990,7 @@ fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
 
 #[test]
 fn signed_in_account_page_opens_the_terms_and_privacy_policy() {
-    use editor_aqua::core::{AccountLink, Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::core::{AccountLink, Screen, SettingsPage};
     use editor_aqua::settings::{
         about::BuildInfo,
         controller::SettingsController,
@@ -1021,10 +1000,7 @@ fn signed_in_account_page_opens_the_terms_and_privacy_policy() {
     use std::{cell::RefCell, rc::Rc};
     use test_support::editor::ui::{click, mounted};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_path_buf(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     assert!(core.account().profile().is_some());
     core.navigate(Screen::Settings(SettingsPage::Account));
     let controller = SettingsController::default();

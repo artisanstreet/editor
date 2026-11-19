@@ -1,5 +1,5 @@
 use artisan_api::tls::{Identity, fingerprint};
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
+use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind, Screen};
 use editor_aqua::shell::{
     host::ShellResources, selection::SelectionAllocator, workspace::Workspace,
 };
@@ -17,10 +17,7 @@ fn host_config(fingerprint: &str) -> HostConfig {
 #[test]
 fn start_waits_for_a_host_that_connects_after_the_workspace_mounts() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let mut ui = ShellResources::new(1.0).unwrap().ui;
     let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
 
@@ -31,7 +28,7 @@ fn start_waits_for_a_host_that_connects_after_the_workspace_mounts() {
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let config = host_config(&fingerprint);
     let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     workspace.finish_events(&mut core, &mut ui);
     assert_eq!(
         core.screen(),
@@ -45,15 +42,12 @@ fn start_waits_for_a_host_that_connects_after_the_workspace_mounts() {
 #[test]
 fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let identity = Identity::generate("workspace-draft-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let config = host_config(&fingerprint);
     let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     core.navigate(Screen::NewThread {
         host: config.id.clone(),
         project: None,
@@ -82,10 +76,7 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
 fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
     for settings in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let mut core = Core::for_tests(EditorFiles {
-            dir: directory.path().to_owned(),
-        })
-        .unwrap();
+        let mut core = test_support::editor::core::test_core(directory.path());
         let (mut workspace, _) =
             Workspace::new(&core, None, SelectionAllocator::default().workspace());
         let emit = workspace.sidebar_emit(settings);
@@ -112,15 +103,12 @@ fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it()
     use editor_aqua::shell::workspace::Followed;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let identity = Identity::generate("accepted-send").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let config = host_config(&fingerprint);
     let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let composing = Screen::NewThread {
         host: config.id.clone(),
         project: None,

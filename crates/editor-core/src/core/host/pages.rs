@@ -224,17 +224,6 @@ impl HostData {
     pub fn thread_page(&self, archived: bool) -> &ThreadPage {
         &self.thread_pages.pages[usize::from(archived)]
     }
-    #[cfg(feature = "test-support")]
-    pub fn test_thread_page_generation(&self, archived: bool) -> u64 {
-        match &self.thread_pages.pages[usize::from(archived)].load {
-            PageLoad::Loading { generation, .. } => *generation,
-            PageLoad::Unloaded | PageLoad::Ready | PageLoad::Failed(_) => {
-                unreachable!(
-                    "invariant: the test asked for the generation of a page that is not loading"
-                )
-            }
-        }
-    }
     pub fn thread_unavailable(&self, id: &ThreadId) -> Option<&ThreadUnavailable> {
         self.thread_pages.unavailable.get(id)
     }

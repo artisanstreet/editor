@@ -65,14 +65,3 @@ pub(crate) fn load_onboarding(
 ) -> Result<Option<OnboardingRecord>, ReadConfigError> {
     config_file::read(&onboarding_path(data_dir, base_url, account_id))
 }
-
-#[cfg(feature = "test-support")]
-pub(crate) fn save_onboarding(
-    data_dir: &Path,
-    record: &OnboardingRecord,
-) -> Result<(), config_file::WriteConfigError> {
-    config_file::write(
-        &onboarding_path(data_dir, &record.base_url, &record.account_id),
-        record,
-    )
-}

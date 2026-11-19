@@ -10,7 +10,8 @@ use editor_aqua::conversation::presentation::{
 use editor_aqua::core::Core;
 use std::rc::Rc;
 use std::sync::Arc;
-use test_support::editor::core::{OpenThread, connect, remote_host, test_core};
+use test_support::editor::core::{OpenThread, StubbedHost, connect, stub_host, test_core};
+use test_support::editor::forge::empty_state;
 use test_support::editor::rows::{
     fixed_source, listed, realized, row_factory, row_factory_with, row_list, row_model, source_ids,
 };
@@ -210,16 +211,17 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     use editor_aqua::conversation::live::LiveBinding;
     use editor_aqua::conversation::view::reveal::MountedReveals;
     use editor_aqua::conversation::view::transcript::TranscriptObservations;
-    use editor_aqua::core::runtime::runtime;
     use editor_aqua::core::{CoreEvent, HostEvent, Screen};
     use std::cell::RefCell;
     use std::time::Duration;
 
-    let directory = tempfile::tempdir().unwrap();
-    let mut core = test_core(directory.path());
-    let config = remote_host("live-host");
-    connect(&mut core, &config);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    let StubbedHost {
+        mut core,
+        forge,
+        host,
+        directory: _directory,
+    } = StubbedHost::start(empty_state(), axum::Router::new());
+    let config = stub_host(&host.0, "Stub", &forge);
     let thread = ThreadId("live-thread".into());
     let id = ItemId("live-reply".into());
     core.navigate(Screen::Thread {
@@ -228,7 +230,6 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     });
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
     let target = LiveTarget::Text {
         item_id: id.clone(),
     };
@@ -243,41 +244,33 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
             delivered
         });
     };
-    runtime().block_on(async {
-        sender
-            .event(Event::Item {
-                item: Item {
-                    status: Status::Running,
-                    ..items::item(
-                        id.clone(),
-                        thread.clone(),
-                        1,
-                        artisan_api::ItemKind::AssistantMessage {
-                            text: if stored_saved {
-                                TextContent::Stored(artisan_api::ContentRef::from_text(
-                                    "saved reply",
-                                ))
-                            } else {
-                                TextContent::Inline(String::new())
-                            },
-                            phase: artisan_api::Phase::Final,
-                        },
-                    )
+    forge.publish(Event::Item {
+        item: Item {
+            status: Status::Running,
+            ..items::item(
+                id.clone(),
+                thread.clone(),
+                1,
+                artisan_api::ItemKind::AssistantMessage {
+                    text: if stored_saved {
+                        TextContent::Stored(artisan_api::ContentRef::from_text("saved reply"))
+                    } else {
+                        TextContent::Inline(String::new())
+                    },
+                    phase: artisan_api::Phase::Final,
                 },
-            })
-            .await;
-        sender
-            .event(Event::Live {
-                thread_id: thread.clone(),
-                target: target.clone(),
-                text: "visible words ".into(),
-                append: false,
-                coverage: LiveCoverage {
-                    start: 10,
-                    total: 24,
-                },
-            })
-            .await;
+            )
+        },
+    });
+    forge.publish(Event::Live {
+        thread_id: thread.clone(),
+        target: target.clone(),
+        text: "visible words ".into(),
+        append: false,
+        coverage: LiveCoverage {
+            start: 10,
+            total: 24,
+        },
     });
     drain_live(&mut core, &mut conversation);
     let first = LiveBinding::capture(&conversation, &core, &id).unwrap();
@@ -352,7 +345,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
             .capture(&conversation, &core, &markdown.borrow(), &scope, clip, true)
             .is_none()
     }));
-    runtime().block_on(sender.event(Event::Live {
+    forge.publish(Event::Live {
         thread_id: thread.clone(),
         target: target.clone(),
         text: "visible words ".into(),
@@ -361,7 +354,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
             start: 0,
             total: 14,
         },
-    }));
+    });
     drain_live(&mut core, &mut conversation);
     assert!(!first.current(&conversation, &core));
     let old_model = frozen_rows.model(index).unwrap();
@@ -964,6 +957,7 @@ fn replacing_a_body_releases_only_its_obsolete_selection_sources() {
     assert!(app.unregister_selection_source_in(document, SelectionSourceId(3)));
     owners.retain(&mut app, |key| *key == second);
     assert!(app.unregister_selection_source_in(document, SelectionSourceId(2)));
+    opened.core.remove_host(&opened.host.id).unwrap();
     connect(&mut opened.core, &opened.host);
     assert!(!scope.current(&opened.conversation, &opened.core));
     owners.rebind(&mut app, None);
@@ -975,16 +969,17 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
     use editor_aqua::conversation::adapter::row_model;
     use editor_aqua::conversation::fold::{Row, RowKey};
     use editor_aqua::conversation::view::reveal::MountedReveals;
-    use editor_aqua::core::runtime::runtime;
     use editor_aqua::core::{CoreEvent, HostEvent, Screen};
     use std::cell::RefCell;
     use std::time::Duration;
 
-    let directory = tempfile::tempdir().unwrap();
-    let mut core = test_core(directory.path());
-    let config = remote_host("inline-host");
-    connect(&mut core, &config);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    let StubbedHost {
+        mut core,
+        forge,
+        host,
+        directory: _directory,
+    } = StubbedHost::start(empty_state(), axum::Router::new());
+    let config = stub_host(&host.0, "Stub", &forge);
     let thread = ThreadId("inline-thread".into());
     let id = ItemId("inline-reply".into());
     core.navigate(Screen::Thread {
@@ -992,9 +987,8 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
         thread: thread.clone(),
     });
     let mut conversation = Conversation::new(&core);
-    conversation.open_thread(&mut core, config.id.clone(), thread.clone());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
-    runtime().block_on(sender.event(Event::Item {
+    conversation.open_thread(&mut core, config.id, thread.clone());
+    forge.publish(Event::Item {
         item: Item {
             status: Status::Running,
             ..items::item(
@@ -1004,7 +998,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
                 assistant_reply("streamed words so far"),
             )
         },
-    }));
+    });
     wait_until("the item event", Duration::from_secs(15), || {
         let mut delivered = false;
         core.drain_with(|core, event| {
@@ -1047,16 +1041,17 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
     use editor_aqua::conversation::fold::{Row, RowKey};
     use editor_aqua::conversation::stored::StoredConversation;
     use editor_aqua::conversation::view::reveal::MountedReveals;
-    use editor_aqua::core::runtime::runtime;
     use editor_aqua::core::{CoreEvent, HostEvent, Screen};
     use std::cell::RefCell;
     use std::time::Duration;
 
-    let directory = tempfile::tempdir().unwrap();
-    let mut core = test_core(directory.path());
-    let config = remote_host("stored-host");
-    connect(&mut core, &config);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    let StubbedHost {
+        mut core,
+        forge,
+        host,
+        directory: _directory,
+    } = StubbedHost::start(empty_state(), axum::Router::new());
+    let config = stub_host(&host.0, "Stub", &forge);
     let thread = ThreadId("stored-thread".into());
     let id = ItemId("stored-reply".into());
     core.navigate(Screen::Thread {
@@ -1064,9 +1059,8 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
         thread: thread.clone(),
     });
     let mut conversation = Conversation::new(&core);
-    conversation.open_thread(&mut core, config.id.clone(), thread.clone());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
-    runtime().block_on(sender.event(Event::Item {
+    conversation.open_thread(&mut core, config.id, thread.clone());
+    forge.publish(Event::Item {
         item: Item {
             status: Status::Done,
             ..items::item(
@@ -1079,7 +1073,7 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
                 },
             )
         },
-    }));
+    });
     wait_until("the item event", Duration::from_secs(15), || {
         let mut delivered = false;
         core.drain_with(|core, event| {

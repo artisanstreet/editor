@@ -104,20 +104,6 @@ pub struct RangeWindow<R: RangePage + Send> {
 pub type ContentWindow = RangeWindow<ContentRange>;
 pub type CollectionWindow<T> = RangeWindow<CollectionRange<T>>;
 
-#[cfg(feature = "test-support")]
-#[derive(Debug)]
-pub struct RangeCompletion<R: RangePage + Send> {
-    generation: u64,
-    sender: crate::core::delivery::DeliverySender<(u64, Result<R, RangeError>)>,
-}
-
-#[cfg(feature = "test-support")]
-impl<R: RangePage + Send> RangeCompletion<R> {
-    pub async fn complete(&self, result: Result<R, RangeError>) -> bool {
-        self.sender.send((self.generation, result)).await.is_ok()
-    }
-}
-
 impl<R: RangePage + Send> RangeWindow<R> {
     pub fn new(client: ForgeClient, source: R::Source) -> Self {
         let mut window = Self {
@@ -136,17 +122,6 @@ impl<R: RangePage + Send> RangeWindow<R> {
 
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
         self.delivery.mailbox()
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(&mut self) -> RangeCompletion<R> {
-        self.read = None;
-        self.generation = self.generation.wrapping_add(1);
-        self.delivery.drain();
-        RangeCompletion {
-            generation: self.generation,
-            sender: self.delivery.sender(),
-        }
     }
 
     pub fn source(&self) -> &R::Source {

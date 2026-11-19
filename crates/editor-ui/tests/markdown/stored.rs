@@ -196,12 +196,9 @@ fn owner_fixture() -> (
     editor_core::HostConfig,
     ScopedSourceProvider,
 ) {
-    use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+    use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("stored".into()),
         name: "stored".into(),
@@ -215,8 +212,7 @@ fn owner_fixture() -> (
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let provider = core
         .source_provider(&config.id, core.host(&config.id).unwrap().instance())
         .unwrap();
@@ -370,7 +366,8 @@ fn a_failed_page_reports_its_offset_and_cause_until_retried() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     owner.drain();
     assert!(owner.indices.is_empty());
     assert!(!owner.source_is_current(&tail));

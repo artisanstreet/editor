@@ -1,10 +1,12 @@
 use artisan_account::network::{CoreSessionClient, SessionToken};
 
-use crate::core::ae::Ae;
+use crate::core::ae::{Ae, InstalledAe};
 use crate::core::client::{ForgeClient, RelayClientError};
 use crate::core::clock::Clock;
 use crate::core::runtime::run_http;
 use artisan_account::network::MachineEntry as AccountMachine;
+use futures::future::BoxFuture;
+use std::sync::Arc;
 
 const RELAY_URL_DEFAULT: &str = "wss://relay.editor.artisan.st";
 
@@ -16,53 +18,75 @@ pub struct Services {
     pub(crate) clock: Clock,
 }
 
-#[derive(Clone)]
-pub enum RelayRoute {
-    Url(String),
-    Off,
-    #[cfg(any(test, feature = "test-support"))]
-    Scripted(RelayScript),
+pub trait DialRelay: Send + Sync {
+    fn dial(
+        &self,
+        request: RelayDialRequest,
+        core: CoreSessionClient,
+        session: SessionToken,
+    ) -> BoxFuture<'static, Result<ForgeClient, RelayClientError>>;
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub type RelayScript = std::sync::Arc<
-    dyn Fn(&RelayDialRequest) -> Result<ForgeClient, RelayClientError> + Send + Sync,
->;
+#[derive(Debug, Clone)]
+pub struct HostedRelay {
+    pub url: String,
+}
+
+impl DialRelay for HostedRelay {
+    fn dial(
+        &self,
+        request: RelayDialRequest,
+        core: CoreSessionClient,
+        session: SessionToken,
+    ) -> BoxFuture<'static, Result<ForgeClient, RelayClientError>> {
+        let context = artisan_account::relay_client::RelayDialContext {
+            relay_base_url: self.url.clone(),
+            core,
+            session,
+        };
+        Box::pin(async move { ForgeClient::via_relay(request, &context).await })
+    }
+}
+
+#[derive(Clone)]
+pub enum RelayRoute {
+    Dial(Arc<dyn DialRelay>),
+    Off,
+}
+
+impl RelayRoute {
+    pub fn dial(relay: impl DialRelay + 'static) -> Self {
+        Self::Dial(Arc::new(relay))
+    }
+}
 
 impl Services {
     #[must_use]
     pub(crate) fn installed() -> Self {
         let relay = match std::env::var("AST_RELAY_URL") {
             Ok(url) if url.trim().is_empty() => RelayRoute::Off,
-            Ok(url) => RelayRoute::Url(url.trim().to_owned()),
-            Err(_) => RelayRoute::Url(RELAY_URL_DEFAULT.to_owned()),
+            Ok(url) => RelayRoute::dial(HostedRelay {
+                url: url.trim().to_owned(),
+            }),
+            Err(_) => RelayRoute::dial(HostedRelay {
+                url: RELAY_URL_DEFAULT.to_owned(),
+            }),
         };
         Self {
             core_url: None,
-            ae: Ae::Installed,
+            ae: Ae::new(InstalledAe),
             relay,
             clock: Clock::system(),
         }
     }
 
-    #[cfg(feature = "test-support")]
     #[must_use]
-    pub(crate) fn with_clock(self, clock: Clock) -> Self {
-        Self { clock, ..self }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn scripted(
-        core_url: &str,
-        ae: crate::core::ae::AeScript,
-        relay: Option<RelayScript>,
-    ) -> Self {
+    pub fn new(core_url: &str, ae: Ae, relay: RelayRoute, clock: Clock) -> Self {
         Self {
             core_url: Some(core_url.to_owned()),
-            ae: Ae::Scripted(ae),
-            relay: relay.map_or(RelayRoute::Off, RelayRoute::Scripted),
-            clock: Clock::system(),
+            ae,
+            relay,
+            clock,
         }
     }
 }
@@ -73,6 +97,13 @@ pub struct RelayDialRequest {
     pub(crate) forge_ed25519_b64u: String,
     pub(crate) grant_jwt: String,
     pub(crate) cnf_secret: [u8; 32],
+}
+
+impl RelayDialRequest {
+    #[must_use]
+    pub fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
 }
 
 impl Drop for RelayDialRequest {
@@ -144,17 +175,8 @@ pub(crate) async fn open_relay(
         cnf_secret: *keypair.secret(),
     };
     let dialed = match route {
-        RelayRoute::Url(relay_base_url) => {
-            let context = artisan_account::relay_client::RelayDialContext {
-                relay_base_url,
-                core,
-                session,
-            };
-            ForgeClient::via_relay(request, &context).await
-        }
+        RelayRoute::Dial(relay) => relay.dial(request, core, session).await,
         RelayRoute::Off => unreachable!("invariant: a Relay that is off was refused above"),
-        #[cfg(any(test, feature = "test-support"))]
-        RelayRoute::Scripted(open) => open(&request),
     };
     dialed.map_err(|source| OpenRelayError::Dial {
         machine: machine_id,
@@ -165,10 +187,8 @@ pub(crate) async fn open_relay(
 impl std::fmt::Debug for RelayRoute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Url(url) => f.debug_tuple("Url").field(url).finish(),
+            Self::Dial(_) => f.write_str("Dial"),
             Self::Off => f.write_str("Off"),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Scripted(_) => f.write_str("Scripted"),
         }
     }
 }

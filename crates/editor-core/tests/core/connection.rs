@@ -2,13 +2,12 @@ use artisan_api::{Envelope, Event};
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use editor_core::ForgeClient;
 use editor_core::connection::{self, ConnectionStatus, Deadlines, SessionError, Update};
 use futures::StreamExt as _;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use test_support::http::StubServer;
+use test_support::editor::forge::TlsServer;
 use test_support::wait::within;
 
 async fn state() -> axum::Json<serde_json::Value> {
@@ -69,19 +68,19 @@ async fn refusal_that_never_finishes() -> Response {
 struct Follower {
     updates: tokio::sync::mpsc::Receiver<Update>,
     retry: Arc<tokio::sync::Notify>,
-    _server: StubServer,
+    _server: TlsServer,
     _observe: tokio::sync::watch::Sender<Option<artisan_api::ThreadId>>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl Follower {
     async fn start(router: axum::Router, deadlines: Deadlines) -> Self {
-        let server = StubServer::serve(router.route("/state", axum::routing::get(state))).await;
+        let server = TlsServer::serve(router.route("/state", axum::routing::get(state))).await;
         let (sender, updates) = tokio::sync::mpsc::channel(64);
         let (observe, observed) = tokio::sync::watch::channel(None);
         let retry = Arc::new(tokio::sync::Notify::new());
         let task = tokio::spawn(connection::run(
-            ForgeClient::plain_for_tests(server.url()),
+            server.client(),
             sender,
             Arc::clone(&retry),
             observed,

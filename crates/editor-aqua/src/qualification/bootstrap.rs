@@ -1,7 +1,7 @@
 use super::fixture::{LoadBootstrapError, PairingError, VerifiedBootstrap, VerifyInputsError};
 use crate::core::config_file::WriteConfigError;
 use crate::core::hosts::PairError;
-use crate::core::{Core, EditorFiles, HostId, IdentityError, OpenCoreError, Screen, hosts};
+use crate::core::{Core, EditorFiles, HostId, IdentityError, Screen, hosts};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -65,8 +65,8 @@ impl Bootstrap {
         Ok(Self { verified, files })
     }
 
-    pub(crate) fn core(&self) -> Result<Core, OpenCoreError> {
-        let mut core = Core::for_tests(self.files.clone())?;
+    pub(crate) fn core(&self) -> Result<Core, super::sign_in::OpenSignedInError> {
+        let mut core = super::sign_in::open_signed_in(self.files.clone())?;
         core.navigate(Screen::Thread {
             host: self.verified.host().clone(),
             thread: self.verified.thread().clone(),

@@ -293,122 +293,6 @@ pub(super) enum HostCompletion {
     ),
 }
 
-#[cfg(feature = "test-support")]
-#[derive(Debug)]
-pub struct TestHostTransitions {
-    sender: crate::core::delivery::DeliverySender<HostMessage>,
-}
-#[cfg(feature = "test-support")]
-impl TestHostTransitions {
-    pub async fn status(&self, status: ConnectionStatus) {
-        assert!(
-            self.sender
-                .send(HostMessage::Update(Update::Status(status)))
-                .await
-                .is_ok(),
-            "host closed before the status transition was delivered"
-        );
-    }
-    pub async fn event(&self, event: Event) {
-        let permit = Arc::new(tokio::sync::Semaphore::new(1))
-            .acquire_owned()
-            .await
-            .expect("invariant: a fresh semaphore is open");
-        let envelope = artisan_api::Envelope {
-            seq: Some(1),
-            live_revision: 0,
-            event,
-        };
-        assert!(
-            self.sender
-                .send(HostMessage::Update(Update::Event(
-                    Box::new(envelope),
-                    permit,
-                )))
-                .await
-                .is_ok(),
-            "host closed before the event transition was delivered"
-        );
-    }
-    pub async fn thread_page(
-        &self,
-        archived: bool,
-        direction: ThreadPageDirection,
-        started_seq: artisan_api::Seq,
-        generation: u64,
-        page: artisan_api::ThreadsPage,
-    ) {
-        assert!(
-            self.sender
-                .send(HostMessage::completion(HostCompletion::ThreadPage {
-                    archived,
-                    direction,
-                    started_seq,
-                    generation,
-                    result: Ok(page),
-                }))
-                .await
-                .is_ok(),
-            "host closed before the thread page was delivered"
-        );
-    }
-    pub async fn prompt(&self, generation: u64, prompt: artisan_api::GlobalPrompt) {
-        assert!(
-            self.sender
-                .send(HostMessage::completion(HostCompletion::Prompt(
-                    generation,
-                    Ok(prompt),
-                )))
-                .await
-                .is_ok(),
-            "host closed before the prompt transition was delivered"
-        );
-    }
-    pub async fn catalog(&self, generation: u64, catalog: Vec<artisan_api::CatalogSkill>) {
-        assert!(
-            self.sender
-                .send(HostMessage::completion(HostCompletion::Catalog(
-                    generation,
-                    Ok(catalog),
-                )))
-                .await
-                .is_ok(),
-            "host closed before the catalog transition was delivered"
-        );
-    }
-    pub async fn image(
-        &self,
-        hash: artisan_api::BlobHash,
-        generation: u64,
-        image: Arc<aqua::images::ImageHandle>,
-    ) {
-        assert!(
-            self.sender
-                .send(HostMessage::completion(HostCompletion::DecodedImage(
-                    hash,
-                    generation,
-                    Ok(image),
-                )))
-                .await
-                .is_ok(),
-            "host closed before the image transition was delivered"
-        );
-    }
-    pub async fn image_failure(&self, hash: artisan_api::BlobHash, generation: u64, error: &str) {
-        assert!(
-            self.sender
-                .send(HostMessage::completion(HostCompletion::DecodedImage(
-                    hash,
-                    generation,
-                    Err(error.to_owned()),
-                )))
-                .await
-                .is_ok(),
-            "host closed before the image failure was delivered"
-        );
-    }
-}
-
 #[derive(Clone)]
 struct HostEffects {
     queue: crate::core::store::Effects,
@@ -418,10 +302,6 @@ struct HostEffects {
 impl HostEffects {
     fn push(&self, event: HostEvent) {
         self.queue.host(&self.id, self.instance, event);
-    }
-    #[cfg(feature = "test-support")]
-    fn clear(&self) {
-        self.queue.clear_host(&self.id, self.instance);
     }
 }
 
@@ -483,6 +363,7 @@ pub struct HostData {
     repository_reads: HashMap<ProjectId, (u64, AbortOnDropHandle<()>)>,
     repository_order: VecDeque<ProjectId>,
     repository_generation: u64,
+    clock: crate::core::clock::Clock,
 }
 
 impl HostData {
@@ -504,6 +385,7 @@ impl HostData {
         wake: aqua::mailbox::Sender<()>,
         order: AdmissionOrder,
         effects: crate::core::store::Effects,
+        clock: crate::core::clock::Clock,
     ) -> Self {
         let delivery = Delivery::with_order(
             NonZeroUsize::new(64).expect("invariant: the host delivery capacity is non-zero"),
@@ -581,32 +463,9 @@ impl HostData {
             repository_reads: HashMap::new(),
             repository_order: VecDeque::new(),
             repository_generation: 0,
+            clock,
         }
     }
-    #[cfg(feature = "test-support")]
-    pub fn test_stop_connection(&mut self) {
-        self.connection.abort();
-        self.delivery.reset_for_tests();
-        self.status = ConnectionStatus::Live;
-        self.pending_events.clear();
-    }
-    #[cfg(feature = "test-support")]
-    pub fn test_transition_sender(&self) -> TestHostTransitions {
-        TestHostTransitions {
-            sender: self.delivery.sender(),
-        }
-    }
-    #[cfg(feature = "test-support")]
-    pub fn test_begin_projections(&mut self) -> (u64, u64) {
-        self.projection_generation += 1;
-        let prompt = self.projection_generation;
-        self.prompt_load = Projection::loading(prompt, None);
-        self.projection_generation += 1;
-        let catalog = self.projection_generation;
-        self.catalog_load = Projection::loading(catalog, None);
-        (prompt, catalog)
-    }
-
     pub fn instance(&self) -> HostInstance {
         self.instance
     }
@@ -805,14 +664,12 @@ impl HostData {
         self.pump_read_acks(None);
     }
 
-    #[cfg(feature = "test-support")]
-    pub const fn test_read_ack_in_flight(&self) -> bool {
+    #[must_use]
+    pub fn has_requests_in_flight(&self) -> bool {
         self.read_writer.is_some()
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn pending_read(&self, thread: &ThreadId) -> Option<artisan_api::Seq> {
-        self.read_acks.get(thread).copied()
+            || !self.read_acks.is_empty()
+            || !self.repository_reads.is_empty()
+            || self.project_icons_reading()
     }
 
     fn pump_read_acks(&mut self, after: Option<&ThreadId>) {
@@ -1092,7 +949,7 @@ impl HostData {
         }
         if !refresh
             && self.repositories.get(project).is_some_and(|entry| {
-                entry.checked.elapsed()
+                self.clock.now().saturating_duration_since(entry.checked)
                     < std::time::Duration::from_secs(if entry.failed { 5 } else { 2 })
             })
         {
@@ -1116,6 +973,9 @@ impl HostData {
 
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.delivery.peek_order()
+    }
+    pub(crate) fn admitted(&self) -> usize {
+        self.delivery.admitted()
     }
     pub(crate) fn drain(&mut self) {
         let events = self.pending_events.clone();
@@ -1482,7 +1342,7 @@ impl HostData {
             project.clone(),
             RepositoryEntry {
                 value,
-                checked: std::time::Instant::now(),
+                checked: self.clock.now(),
                 failed,
             },
         );
@@ -1494,19 +1354,6 @@ impl HostData {
             }
         }
         changed
-    }
-    #[cfg(feature = "test-support")]
-    pub fn test_repository(
-        &mut self,
-        project: ProjectId,
-        repository: Option<artisan_api::ProjectRepository>,
-    ) -> bool {
-        self.repository_generation = self.repository_generation.wrapping_add(1);
-        let generation = self.repository_generation;
-        let task = crate::core::runtime::runtime().spawn(std::future::pending());
-        self.repository_reads
-            .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
-        self.finish_repository(project, generation, Ok(repository))
     }
     fn apply_event(&mut self, event: Event, events: &HostEffects) {
         match event {

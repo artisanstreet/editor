@@ -1,4 +1,4 @@
-use crate::core::{Core, EditorFiles, HostId, OpenCoreError, Screen, SettingsPage};
+use crate::core::{Core, EditorFiles, HostId, Screen, SettingsPage};
 use crate::qualification::fixture::{
     Fixture, ForgeServer, InvalidFixture, PairingError, SeedError, StartForgeError,
 };
@@ -58,7 +58,7 @@ pub enum ScenarioError {
     #[error("sign the capture Editor in to its Forge")]
     Join(#[source] JoinForgeError),
     #[error("open the capture Editor's core")]
-    Core(#[source] OpenCoreError),
+    Core(#[source] crate::qualification::sign_in::OpenSignedInError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,7 +126,8 @@ impl Scenario {
         let directory = tempfile::tempdir().map_err(ScenarioError::Directory)?;
         let editor_dir = directory.path().join("editor");
         let (scenario, files) = Self::launch(fixture_path, directory.path(), &editor_dir, latency)?;
-        let core = Core::for_tests(files).map_err(ScenarioError::Core)?;
+        let core =
+            crate::qualification::sign_in::open_signed_in(files).map_err(ScenarioError::Core)?;
         Ok((
             Self {
                 _directory: Some(directory),

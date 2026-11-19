@@ -44,10 +44,7 @@ fn references_without_a_path_or_with_line_zero_are_rejected_and_reversed_ranges_
 fn clicking_path_dispatches_original_reference_with_captured_scope() {
     let value = block(r#"{"ref":"src/x.rs:7-9","excerpt":"one\ntwo"}"#);
     let directory = tempfile::tempdir().unwrap();
-    let mut core = editor_core::Core::for_tests(editor_core::EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = artisan_api::tls::Identity::generate("code-ref-test").unwrap();
     let fingerprint = artisan_api::tls::fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
@@ -59,7 +56,7 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
         fingerprint,
         kind: editor_core::HostKind::Local,
     };
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let instance = core.host(&id).unwrap().instance();
     let scope = ResourceScope {
         host: "host-a".into(),
@@ -79,7 +76,7 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
     })
     .unwrap();
     core.remove_host(&id).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(core.host_if_instance(&id, instance).is_none());
     app.set_viewport(500.0, 300.0, 1.0);
     app.build_frame().unwrap();

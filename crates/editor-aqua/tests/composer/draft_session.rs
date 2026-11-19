@@ -138,13 +138,10 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         controller::{Composer, ComposerTarget},
         persistence::DraftSessions,
     };
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+    use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
@@ -156,7 +153,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         fingerprint,
         kind: HostKind::Local,
     };
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let first = core.host(&id).unwrap().instance();
     let mut sessions = DraftSessions::default();
     let target = ComposerTarget::NewThread {
@@ -398,7 +395,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             .1
     );
     core.remove_host(&id).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(
         !owner
             .dispatch_with_change(&mut core, ComposerAction::ToggleProject, None)
@@ -584,7 +581,7 @@ fn engine_light_flies_on_tab_change_but_not_on_remeasurement() {
 }
 
 fn unanswered(check: &'static str) -> editor_aqua::core::client::CallError {
-    editor_aqua::core::client::CallError::test_inconsistent("/drafts/new", check)
+    test_support::editor::forge::inconsistent("/drafts/new", check)
 }
 
 fn not_sent() -> editor_aqua::composer::draft_session::PostMessageError {

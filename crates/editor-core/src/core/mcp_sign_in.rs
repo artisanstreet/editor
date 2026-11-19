@@ -549,6 +549,9 @@ impl McpSignIns {
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.delivery.peek_order()
     }
+    pub(crate) fn admitted(&self) -> usize {
+        self.delivery.admitted()
+    }
     pub(crate) fn drain(&mut self) {
         if let Some(message) = self.delivery.drain_one() {
             match message {

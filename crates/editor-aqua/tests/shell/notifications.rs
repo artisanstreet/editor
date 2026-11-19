@@ -73,71 +73,53 @@ fn lifecycle_barriers_flush_before_terminal_or_navigation_events() {
 #[test]
 fn coalescing_notifications_never_drops_the_underlying_text_appends() {
     use artisan_api::{Event, LiveCoverage};
-    use editor_aqua::core::{
-        Core, EditorFiles, ForgeClient, HostConfig, HostKind, runtime::runtime,
-    };
-    let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().into(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("burst".into()),
-        name: "Burst".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
-    drop(core.drain());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    stubbed.apply_published();
     let thread = ThreadId("thread".into());
     let target = LiveTarget::Text {
         item_id: ItemId::new(),
     };
     let chunks: Vec<String> = (0..32).map(|index| format!("{index}:héllo ")).collect();
-    runtime().block_on(async {
-        let mut total = 0;
-        for (index, chunk) in chunks.iter().enumerate() {
-            total += chunk.len() as u64;
-            sender
-                .event(Event::Live {
-                    thread_id: thread.clone(),
-                    target: target.clone(),
-                    text: chunk.clone(),
-                    append: index > 0,
-                    coverage: LiveCoverage { start: 0, total },
-                })
-                .await;
-        }
-    });
+    let mut total = 0;
+    for (index, chunk) in chunks.iter().enumerate() {
+        total += chunk.len() as u64;
+        stubbed.forge.publish(Event::Live {
+            thread_id: thread.clone(),
+            target: target.clone(),
+            text: chunk.clone(),
+            append: index > 0,
+            coverage: LiveCoverage { start: 0, total },
+        });
+    }
+    let complete = chunks.concat();
     let mut batch = LiveBatch::default();
-    while core.drain_step(|_, event| {
-        if let Some(event) = batch.push(event) {
-            assert!(!matches!(
-                event,
-                CoreEvent::Host {
-                    event: HostEvent::Live { .. },
-                    ..
+    test_support::wait::wait_until(
+        "every published append reaches the host",
+        std::time::Duration::from_secs(10),
+        || {
+            while stubbed.core.drain_step(|_, event| {
+                if let Some(event) = batch.push(event) {
+                    assert!(!matches!(
+                        event,
+                        CoreEvent::Host {
+                            event: HostEvent::Live { .. },
+                            ..
+                        }
+                    ));
                 }
-            ));
-        }
-    }) {}
+            }) {}
+            stubbed
+                .host()
+                .live_snapshot(&thread, &target)
+                .is_some_and(|snapshot| snapshot.text.len_bytes() == complete.len())
+        },
+    );
     let events = batch.take();
     assert_eq!(events.len(), 1);
-    let snapshot = core
-        .host(&config.id)
-        .unwrap()
-        .live_snapshot(&thread, &target)
-        .unwrap();
-    assert_eq!(snapshot.text.to_string(), chunks.concat());
+    let snapshot = stubbed.host().live_snapshot(&thread, &target).unwrap();
+    assert_eq!(snapshot.text.to_string(), complete);
     assert!(snapshot.coverage.is_complete(snapshot.text.len_bytes()));
 }
 

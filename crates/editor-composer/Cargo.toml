@@ -34,6 +34,7 @@ editor-ui.workspace = true
 
 [dev-dependencies]
 editor-composer = { path = ".", features = ["test-support"] }
+test-support = { workspace = true, features = ["editor-core"] }
 reqwest.workspace = true
 
 [lints]

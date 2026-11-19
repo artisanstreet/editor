@@ -1,16 +1,10 @@
 use artisan_api::ThreadId;
 use editor_core::{
-    Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen, SetSettingError,
-    SettingsPage, SettingsSave, ThreadUnavailable,
+    Core, ForgeClient, HostConfig, HostId, HostKind, Screen, SetSettingError, SettingsPage,
+    SettingsSave, ThreadUnavailable,
 };
 use serde_json::json;
 use std::time::{Duration, Instant};
-
-fn files(directory: &tempfile::TempDir) -> EditorFiles {
-    EditorFiles {
-        dir: directory.path().to_owned(),
-    }
-}
 
 fn settle(core: &mut Core) {
     test_support::wait::wait_until(
@@ -29,7 +23,7 @@ fn unreadable_settings_are_kept_and_block_saves_until_recovered() {
     let path = directory.path().join("settings.json");
     let original = b"{\"dark_mode\": false, \"font_set\": \"system\",".to_vec();
     std::fs::write(&path, &original).expect("seed settings.json");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     assert!(core.settings().unreadable().is_some());
     assert!(matches!(
         core.set_setting("dark_mode", json!(true)),
@@ -57,7 +51,7 @@ fn unreadable_settings_are_kept_and_block_saves_until_recovered() {
 fn a_settings_file_that_breaks_later_is_not_overwritten() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("settings.json");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     core.set_setting("dark_mode", json!(true))
         .expect("first save");
     settle(&mut core);
@@ -89,7 +83,7 @@ fn changing_a_setting_does_not_wait_for_a_slow_disk() {
     use std::io::Write as _;
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("settings.json");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     assert!(
         std::process::Command::new("mkfifo")
             .arg(&path)
@@ -148,7 +142,7 @@ fn a_setting_that_cannot_be_saved_says_why_and_goes_back() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("settings.json");
     std::fs::write(&path, b"{\"dark_mode\": false}").expect("seed settings.json");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let writable = std::fs::metadata(directory.path())
         .expect("folder metadata")
         .permissions();
@@ -174,8 +168,8 @@ fn a_setting_that_cannot_be_saved_says_why_and_goes_back() {
 #[test]
 fn two_editors_changing_different_settings_keep_both() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut first = Core::for_tests(files(&directory)).expect("first core");
-    let mut second = Core::for_tests(files(&directory)).expect("second core");
+    let mut first = test_support::editor::core::test_core(directory.path());
+    let mut second = test_support::editor::core::test_core(directory.path());
     first
         .set_setting("dark_mode", json!(false))
         .expect("first save");
@@ -202,7 +196,7 @@ fn forge(core: &mut Core, id: &str) -> HostId {
     let identity = core.identity().cloned().expect("test identity");
     let client =
         ForgeClient::new(&config.address, &config.fingerprint, &identity).expect("test client");
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(core, &config, client);
     config.id
 }
 
@@ -216,7 +210,7 @@ fn new_thread(host: &HostId) -> Screen {
 #[test]
 fn settings_opened_after_going_back_edit_the_forge_on_screen() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let first = forge(&mut core, "first-forge");
     let second = forge(&mut core, "second-forge");
 
@@ -236,7 +230,7 @@ fn settings_opened_after_going_back_edit_the_forge_on_screen() {
 #[test]
 fn removing_a_forge_drops_it_from_back_navigation() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let kept = forge(&mut core, "kept-forge");
     let removed = forge(&mut core, "removed-forge");
 
@@ -268,7 +262,7 @@ fn stored_settings_that_break_their_declaration_are_ignored_everywhere() {
         br#"{"dark_mode": "false", "streaming_mode": "fast", "graphics_vsync": false, "font_set": "system"}"#,
     )
     .expect("seed settings.json");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
 
     assert_eq!(
         core.settings().get("dark_mode"),
@@ -294,7 +288,7 @@ fn stored_settings_that_break_their_declaration_are_ignored_everywhere() {
 #[test]
 fn opening_a_thread_its_forge_cannot_send_says_why() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let host = forge(&mut core, "silent-forge");
     let thread = ThreadId("unknown-thread".into());
     core.navigate(Screen::Thread {
@@ -336,7 +330,7 @@ fn opening_a_thread_its_forge_cannot_send_says_why() {
 fn settings_edit_the_forge_on_screen_when_the_last_forge_cannot_be_saved() {
     use std::os::unix::fs::PermissionsExt as _;
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(files(&directory)).expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let first = forge(&mut core, "first-forge");
     let _second = forge(&mut core, "second-forge");
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500))

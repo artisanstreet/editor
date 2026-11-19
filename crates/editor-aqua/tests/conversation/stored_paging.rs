@@ -86,8 +86,8 @@ fn the_row_window_opens_at_the_tail_and_shifts_once_per_edge_reached() {
 fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     use aqua_text::document::SelectionDocumentId;
     use artisan_api::{
-        CreateProject, CreateThread, EngineConfig, EngineId, Event, ItemId, ItemKind, Phase,
-        ProjectId, Status, TextContent, ThreadId,
+        CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId,
+        Status, TextContent, ThreadId,
     };
     use editor_aqua::conversation::adapter::{ScopedAction, row_model};
     use editor_aqua::conversation::controller::Conversation;
@@ -95,9 +95,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     use editor_aqua::conversation::presentation::{BodyKey, MarkdownOwners, PresentationScope};
     use editor_aqua::conversation::stored::StoredConversation;
     use editor_aqua::conversation::view::factory::RealizedRow;
-    use editor_aqua::core::{
-        Core, EditorFiles, ForgeClient, HostKind, Screen, hosts, runtime::runtime,
-    };
+    use editor_aqua::core::{ForgeClient, HostKind, Screen, hosts, runtime::runtime};
     use editor_aqua::qualification::fixture::ForgeServer;
     use editor_aqua::ui::markdown::stored::{LeafPreparation, StoredPreparation};
     use std::cell::RefCell;
@@ -168,10 +166,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     else {
         panic!("a reply over the inline limit is stored")
     };
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let pairing = runtime().block_on(server.pairing_input()).unwrap();
     let config = runtime()
         .block_on(hosts::pair(
@@ -190,10 +185,9 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let deadline = Instant::now() + Duration::from_secs(60);
-    while core.test_startup_pending() {
+    while core.pending_work() > 0 {
         assert!(Instant::now() < deadline, "Core startup did not settle");
         core.drain_with(|_, _| {});
         std::thread::yield_now();
@@ -204,8 +198,6 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     });
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), item.thread_id.clone());
-    let sender = core.host(&config.id).unwrap().test_transition_sender();
-    runtime().block_on(sender.event(Event::Item { item: item.clone() }));
     while conversation
         .view
         .as_ref()
@@ -215,6 +207,7 @@ fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
         core.drain_with(|core, event| {
             conversation.core_event(core, &event, false);
         });
+        conversation.drain(&mut core);
         assert!(
             Instant::now() < deadline,
             "the stored reply reaches the conversation"

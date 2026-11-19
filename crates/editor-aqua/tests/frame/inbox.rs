@@ -1,4 +1,6 @@
 use editor_aqua::frame::inbox::history_height;
+use test_support::editor::core::StubbedHost;
+use test_support::editor::forge::{TlsServer, empty_state};
 
 #[test]
 fn open_history_fills_the_space_the_inbox_leaves_without_overflowing() {
@@ -32,97 +34,86 @@ fn the_open_fraction_scales_the_height_and_clamps() {
     test_support::assert_near!(history_height(800.0, 250.0, 900.0, -1.0), 0.0);
 }
 
-struct Forge {
-    _directory: tempfile::TempDir,
-    _listener: std::net::TcpListener,
-    core: editor_aqua::core::Core,
-    host: editor_aqua::core::HostId,
+fn live_forge() -> StubbedHost {
+    let mut forge = StubbedHost::start(empty_state(), axum::Router::new());
+    let host = forge.host.clone();
+    forge.core.navigate(editor_aqua::core::Screen::NewThread {
+        host,
+        project: None,
+    });
+    forge
 }
 
-fn silent_forge() -> Forge {
-    use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
+struct ForgeBeforeState {
+    _server: TlsServer,
+    release: tokio::sync::watch::Sender<bool>,
+    core: editor_aqua::core::Core,
+    host: editor_aqua::core::HostId,
+    _directory: tempfile::TempDir,
+}
+
+fn forge_before_its_state() -> ForgeBeforeState {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::routing::get;
+    use editor_aqua::core::{HostConfig, HostId, HostKind, Screen};
+    let (release, released) = tokio::sync::watch::channel(false);
+    let router = axum::Router::new()
+        .route(
+            "/state",
+            get(move || {
+                let mut released = released.clone();
+                async move {
+                    drop(released.wait_for(|released| *released).await);
+                    axum::Json(empty_state())
+                }
+            }),
+        )
+        .route(
+            "/events",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    axum::body::Body::from_stream(futures::stream::pending::<
+                        Result<axum::body::Bytes, std::convert::Infallible>,
+                    >()),
+                )
+            }),
+        );
+    let server = editor_aqua::core::runtime::runtime().block_on(TlsServer::serve(router));
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .expect("core opens");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a Forge that never answers");
-    let identity = Identity::generate("inbox-test").expect("identity");
-    let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let config = HostConfig {
         id: HostId("inbox-forge".into()),
         name: "Inbox".into(),
-        address: listener.local_addr().expect("address").to_string(),
-        fingerprint: pin.clone(),
-        kind: HostKind::Local,
+        address: server.address().to_owned(),
+        fingerprint: server.fingerprint().to_owned(),
+        kind: HostKind::Remote,
     };
-    let client = ForgeClient::new(&config.address, &pin, &identity).expect("client");
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id)
-        .expect("host")
-        .test_stop_connection();
+    test_support::editor::core::connect(&mut core, &config);
     core.navigate(Screen::NewThread {
         host: config.id.clone(),
         project: None,
     });
-    Forge {
-        _directory: directory,
-        _listener: listener,
+    ForgeBeforeState {
+        _server: server,
+        release,
         core,
         host: config.id,
+        _directory: directory,
     }
 }
 
-impl Forge {
-    fn go_live(&mut self) {
+impl ForgeBeforeState {
+    fn answer_with_an_empty_forge(&mut self) {
+        self.release.send_replace(true);
         let host = self.host.clone();
-        let sender = self
-            .core
-            .host(&host)
-            .expect("host")
-            .test_transition_sender();
-        editor_aqua::core::runtime::runtime()
-            .block_on(sender.status(editor_aqua::core::ConnectionStatus::Live));
         test_support::wait::wait_until(
-            "the host goes live",
+            "the empty Forge goes live",
             std::time::Duration::from_secs(10),
             || {
                 self.core.drain_with(|_, _| {});
-                self.core.host(&host).expect("host").is_live()
-            },
-        );
-    }
-
-    fn load_empty_page(&mut self) {
-        use editor_aqua::core::host::ThreadPageDirection;
-        let host = self.host.clone();
-        let data = self.core.host_mut(&host).expect("host");
-        data.load_threads(false, ThreadPageDirection::Latest);
-        let generation = data.test_thread_page_generation(false);
-        let sender = data.test_transition_sender();
-        editor_aqua::core::runtime::runtime().block_on(sender.thread_page(
-            false,
-            ThreadPageDirection::Latest,
-            0,
-            generation,
-            artisan_api::ThreadsPage {
-                threads: Vec::new(),
-                runs: Vec::new(),
-                next: None,
-                newer: false,
-            },
-        ));
-        test_support::wait::wait_until(
-            "the empty page lands",
-            std::time::Duration::from_secs(10),
-            || {
-                self.core.drain_with(|_, _| {});
-                self.core
-                    .host(&host)
-                    .expect("host")
-                    .thread_page(false)
-                    .is_loaded()
+                let data = self.core.host(&host).expect("host");
+                data.is_live() && data.thread_page(false).is_loaded()
             },
         );
     }
@@ -160,24 +151,30 @@ fn rendered(
 
 #[test]
 fn a_failed_message_search_says_so_and_retries() {
-    use editor_aqua::core::client::CallError;
+    use axum::http::StatusCode;
     use editor_aqua::sidebar::{
         controller::{Sidebar, TextSearchStatus},
         view::{ViewAction, dispatch},
     };
-    let mut forge = silent_forge();
+    let mut forge = live_forge();
     let mut sidebar = Sidebar::new(false);
     sidebar.sync(&forge.core, 0);
     sidebar.search.borrow_mut().set_text("needle");
     sidebar.search_text(&forge.core);
     assert_eq!(sidebar.text_search_status(), TextSearchStatus::Searching);
-    let key = sidebar.text_search_key().expect("a search runs");
-    futures::executor::block_on(sidebar.test_search_failure(
-        key,
-        "needle".into(),
-        CallError::test_inconsistent("/search", "hits point at known items"),
-    ));
-    sidebar.drain(&mut forge.core, 0);
+    forge.take("GET", "/search/text").fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "hits point at known items",
+    );
+    test_support::wait::wait_until(
+        "the failed search reaches the sidebar",
+        std::time::Duration::from_secs(10),
+        || {
+            sidebar.drain(&mut forge.core, 0);
+            sidebar.text_search_status() != TextSearchStatus::Searching
+        },
+    );
     let (mut app, texts, actions) = rendered(&sidebar, &forge.core);
     assert!(
         texts
@@ -203,14 +200,16 @@ fn an_empty_inbox_moves_from_loading_to_a_new_thread_prompt() {
         controller::Sidebar,
         view::{ViewAction, dispatch},
     };
-    let mut forge = silent_forge();
-    forge.go_live();
+    let mut forge = forge_before_its_state();
     let mut sidebar = Sidebar::new(false);
     sidebar.sync(&forge.core, 0);
     let (_app, texts, _) = rendered(&sidebar, &forge.core);
-    assert_eq!(texts, ["Loading threads…"]);
+    assert!(
+        texts.is_empty(),
+        "nothing claims the inbox is empty before Forge's state arrives: {texts:?}"
+    );
 
-    forge.load_empty_page();
+    forge.answer_with_an_empty_forge();
     sidebar.sync(&forge.core, 0);
     let (mut app, texts, actions) = rendered(&sidebar, &forge.core);
     assert_eq!(texts, ["No threads yet.", "New thread"]);

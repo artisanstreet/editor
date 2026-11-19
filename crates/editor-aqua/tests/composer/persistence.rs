@@ -1,7 +1,7 @@
 use artisan_api::tls::{Identity, fingerprint};
 use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::persistence::{DraftHandle, DraftLease};
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -206,10 +206,7 @@ fn run(future: impl Future<Output = ()>) {
 
 fn fixture() -> (tempfile::TempDir, Core, HostConfig, ForgeClient) {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let identity = Identity::generate("draft-lifetime-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let config = HostConfig {
@@ -220,7 +217,7 @@ fn fixture() -> (tempfile::TempDir, Core, HostConfig, ForgeClient) {
         kind: HostKind::Local,
     };
     let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     (directory, core, config, client)
 }
 
@@ -239,7 +236,7 @@ fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
         .unwrap();
     old.queue(serde_json::json!({"text": "old pairing"}));
     core.remove_host(&config.id).unwrap();
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let current_instance = core.host(&config.id).unwrap().instance();
     let current = sessions
         .open(config.id.clone(), current_instance, "new".into(), client)
@@ -690,7 +687,8 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
         let identity = Identity::generate("failed-send").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let host = HostId("failed-send".into());
-        core.add_test_host(
+        test_support::editor::core::connect_client(
+            &mut core,
             &HostConfig {
                 id: host.clone(),
                 name: "Forge".into(),

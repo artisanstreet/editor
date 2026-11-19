@@ -133,14 +133,6 @@ impl<T> Delivery<T> {
             },
         }
     }
-    #[cfg(feature = "test-support")]
-    pub(crate) fn reset_for_tests(&mut self) {
-        let wake = self.sender.wake.clone();
-        let order = self.sender.order.clone();
-        let capacity = NonZeroUsize::new(self.receiver.max_capacity())
-            .expect("invariant: a delivery channel was built with a non-zero capacity");
-        *self = Self::with_order(capacity, wake, order);
-    }
     pub fn wake_mailbox(&self) -> Option<&Mailbox<()>> {
         self.wake.as_ref()
     }
@@ -163,6 +155,9 @@ impl<T> Delivery<T> {
             self.front = self.receiver.try_recv().ok();
         }
         self.front.as_ref().map(|item| item.sequence)
+    }
+    pub fn admitted(&self) -> usize {
+        usize::from(self.front.is_some()) + self.receiver.len()
     }
     pub fn drain_one(&mut self) -> Option<T> {
         let item = self

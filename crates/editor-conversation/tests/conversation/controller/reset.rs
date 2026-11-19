@@ -1,6 +1,6 @@
 use super::*;
 use artisan_api::Status;
-use editor_core::{Clock, EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{Clock, ForgeClient, HostConfig, HostKind};
 use test_support::clock::ManualClock;
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
@@ -12,13 +12,7 @@ pub(super) fn fixture_at(
 ) -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut core = Core::for_tests_with_clock(
-        EditorFiles {
-            dir: directory.path().to_owned(),
-        },
-        clock,
-    )
-    .unwrap();
+    let mut core = test_support::editor::core::test_core_with_clock(directory.path(), clock);
     let config = HostConfig {
         id: HostId("reset-host".into()),
         name: "Reset Forge".into(),
@@ -32,7 +26,7 @@ pub(super) fn fixture_at(
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id, ThreadId("thread".into()));
     (directory, listener, core, conversation)

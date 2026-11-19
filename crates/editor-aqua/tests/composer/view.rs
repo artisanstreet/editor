@@ -3,7 +3,7 @@ use artisan_api::tls::{Identity, fingerprint};
 use editor_aqua::composer::controller::ComposerTarget;
 use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::view::ComposerOwner;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::ui::theme::ArtisanTheme;
 
 const SENT: &str = "Work is his work skill: do the entire feature request, not one step and not half of it.\n\nAnd review spawns two reviewers that look for footguns and bad state handling.";
@@ -28,15 +28,13 @@ fn card(owner: &ComposerOwner, core: &Core, host: &HostId) -> aqua_ui::element::
 #[test]
 fn a_sent_message_leaves_the_prompt_on_screen_at_once() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-view").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
     let host = HostId("composer-view".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),
@@ -80,15 +78,13 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
     use editor_aqua::composer::mentions::{Kind, Row};
     use editor_aqua::composer::view::ComposerAction;
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-mentions").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
     let host = HostId("composer-mentions".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),
@@ -135,15 +131,13 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
 fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
     use editor_aqua::composer::view::ComposerAction;
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("composer-notice").unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
     let host = HostId("composer-notice".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id: host.clone(),
             name: "Forge".into(),

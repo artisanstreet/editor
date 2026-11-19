@@ -1,7 +1,7 @@
 use aqua::prelude::{AquaWindowId, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{Aqua, AquaConfig};
 use aqua_protocol::{DialogOutcome, RequestId};
-use editor_aqua::core::{Core, EditorFiles};
+use editor_aqua::core::EditorFiles;
 use editor_aqua::shell::{application::ShellApplication, host::ShellResources, root::RootViews};
 use std::{cell::RefCell, rc::Rc};
 
@@ -17,7 +17,7 @@ pub(super) fn started() -> (
     };
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::new(files.clone(), resources, RootViews::default());
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);

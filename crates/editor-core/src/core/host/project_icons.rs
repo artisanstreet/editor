@@ -54,16 +54,6 @@ impl ProjectIcons {
     }
 }
 impl HostData {
-    #[cfg(feature = "test-support")]
-    pub fn test_project_icon(&mut self, project: ProjectId, hash: BlobHash) -> bool {
-        self.project_icons.generation = self.project_icons.generation.wrapping_add(1);
-        let generation = self.project_icons.generation;
-        let task = crate::core::runtime::runtime().spawn(std::future::pending());
-        self.project_icons
-            .reading
-            .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
-        self.finish_project_icon(project, generation, Ok(Some(hash)))
-    }
     pub fn project_icon(&self, project: &ProjectId) -> Option<Arc<ImageHandle>> {
         let hash = self.project_icons.entries.get(project)?.hash.as_ref()?;
         match self.image(hash)? {
@@ -71,7 +61,9 @@ impl HostData {
             BlobImage::Loading | BlobImage::Failed(_) => None,
         }
     }
-    #[cfg(feature = "test-support")]
+    pub(super) fn project_icons_reading(&self) -> bool {
+        !self.project_icons.reading.is_empty()
+    }
     #[must_use]
     pub fn project_icon_checked(&self, project: &ProjectId) -> bool {
         self.project_icons.entries.contains_key(project)
@@ -89,7 +81,7 @@ impl HostData {
         if !self.projects.contains_key(project) || !self.is_live() {
             return;
         }
-        let now = Instant::now();
+        let now = self.clock.now();
         let hash = self
             .project_icons
             .entries
@@ -176,7 +168,7 @@ impl HostData {
             project.clone(),
             Entry {
                 hash: hash.clone(),
-                checked: Some(Instant::now()),
+                checked: Some(self.clock.now()),
                 failed,
             },
         );

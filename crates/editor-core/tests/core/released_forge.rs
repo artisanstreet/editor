@@ -3,13 +3,12 @@ use axum::body::Body;
 use axum::http::header;
 use axum::response::Response;
 use axum::routing::get;
-use editor_core::ForgeClient;
 use editor_core::connection::{self, ConnectionStatus, Deadlines, Update};
 use futures::StreamExt as _;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use test_support::http::StubServer;
+use test_support::editor::forge::TlsServer;
 use test_support::wait::within;
 
 const THREAD: &str = "01a1f000-0000-7000-8000-000000000002";
@@ -40,8 +39,8 @@ async fn events() -> Response {
         .expect("build the recorded event stream")
 }
 
-async fn released_forge() -> StubServer {
-    StubServer::serve(
+async fn released_forge() -> TlsServer {
+    TlsServer::serve(
         axum::Router::new()
             .route("/state", get(|| async { json(STATE) }))
             .route("/events", get(events))
@@ -78,7 +77,7 @@ fn said(kind: &ItemKind) -> Option<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn todays_editor_reads_a_thread_from_the_last_released_forge() {
     let forge = released_forge().await;
-    let client = ForgeClient::plain_for_tests(forge.url());
+    let client = forge.client();
     let thread = ThreadId(THREAD.to_owned());
 
     let state = client
@@ -125,7 +124,7 @@ async fn todays_editor_reads_a_thread_from_the_last_released_forge() {
     let (sender, mut updates) = tokio::sync::mpsc::channel(64);
     let (_observe, observed) = tokio::sync::watch::channel(None);
     let following = tokio::spawn(connection::run(
-        ForgeClient::plain_for_tests(forge.url()),
+        forge.client(),
         sender,
         Arc::new(tokio::sync::Notify::new()),
         observed,

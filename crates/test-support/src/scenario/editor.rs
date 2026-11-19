@@ -351,13 +351,14 @@ impl Editor {
         }
         let served = serve(scenario, directory.path(), &work);
         let files = EditorFiles { dir: editor_dir };
-        join_forges(&files, &served.invites).expect("sign the Editor in to its Forges");
+        join_forges(&files, "Test", &served.invites).expect("sign the Editor in to its Forges");
         let host = &served
             .invites
             .first()
             .expect("invariant: a scenario starts with one Forge")
             .host;
-        let mut core = Core::for_tests(files).expect("open the Editor's core");
+        let mut core = editor_aqua::qualification::sign_in::open_signed_in(files)
+            .expect("open the signed-in Editor's core");
         core.navigate(screen(opening, host));
         let Window {
             mut aqua,

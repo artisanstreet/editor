@@ -2,7 +2,7 @@ use editor_aqua::core::{AccountPhase, Core, EditorFiles, Services};
 use std::{
     io::{BufRead as _, BufReader, Read as _, Write as _},
     net::TcpListener,
-    sync::{Arc, mpsc},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -55,15 +55,16 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
         }
     });
     let directory = tempfile::tempdir().unwrap();
-    let services = Services::scripted(
+    let services = Services::new(
         &url,
-        Arc::new(|args| {
+        editor_aqua::core::Ae::new(test_support::editor::account::ScriptedAe::new(|args| {
             Err(editor_aqua::core::ae::AeError::Failed {
                 command: args.join(" "),
                 detail: "no ae".to_owned(),
             })
-        }),
-        None,
+        })),
+        editor_aqua::core::RelayRoute::Off,
+        editor_aqua::core::Clock::system(),
     );
     let mut core = Core::with_services(
         EditorFiles {
@@ -116,10 +117,7 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
 #[test]
 fn a_late_cancel_does_not_clear_an_authenticated_profile() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let original = core.account().profile().unwrap().clone();
     let mut entry = editor_aqua::shell::entry::Entry::new(
         None,

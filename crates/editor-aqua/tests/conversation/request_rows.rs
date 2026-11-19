@@ -191,6 +191,7 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         effect,
         Some(editor_aqua::conversation::view::row_sources::RowSourceEffect::SavePath(_))
     ));
+    core.remove_host(&config.id).unwrap();
     connect(&mut core, &config);
     assert!(!scoped.dispatch(
         &mut conversation,

@@ -196,6 +196,9 @@ impl SettingsSaves {
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.saved.peek_order()
     }
+    pub(crate) fn admitted(&self) -> usize {
+        self.saved.admitted()
+    }
 
     pub(crate) fn settle(&mut self, settings: &mut Settings) -> Option<Settled> {
         let saved = self.saved.drain_one()?;

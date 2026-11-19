@@ -1,4 +1,5 @@
-use super::core::{connect, remote_host, test_core_with_clock};
+use super::core::{connect, remote_host, stub_host, test_core_with_clock};
+use super::forge::StubForge;
 use artisan_api::ThreadId;
 use editor_aqua::core::{Clock, Core, EditorFiles, HostConfig, Screen};
 use editor_aqua::shell::application::SectionViews as _;
@@ -37,6 +38,54 @@ impl ThreadShell {
         prepare: impl FnOnce(&mut Core, &HostConfig),
     ) -> Self {
         Self::open_with_clock(host, thread, motion, Clock::system(), prepare)
+    }
+
+    pub fn open_stubbed(forge: &StubForge, host: &str, thread: &str, motion: Motion) -> Self {
+        let directory = tempfile::tempdir().expect("create a test data folder");
+        let files = EditorFiles {
+            dir: directory.path().to_owned(),
+        };
+        let mut resources = ShellResources::new(1.0).expect("create headless shell resources");
+        if motion == Motion::Reduced {
+            resources
+                .ui
+                .host_mut()
+                .motion_mut()
+                .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
+        }
+        let (mut shell, _) = Shell::new(files, resources.images.clone());
+        shell.core = test_core_with_clock(directory.path(), Clock::system());
+        shell.core.set_image_assets(resources.images.clone());
+        let host = stub_host(host, "Stub", forge);
+        connect(&mut shell.core, &host);
+        crate::wait::wait_until("the stub Forge to go live", crate::wait::LIVENESS, || {
+            shell.core.drain_with(|_, _| {});
+            shell
+                .core
+                .host(&host.id)
+                .is_some_and(editor_aqua::core::HostData::is_live)
+        });
+        let thread = ThreadId::from(thread);
+        shell.core.navigate(Screen::Thread {
+            host: host.id.clone(),
+            thread: thread.clone(),
+        });
+        shell.entry.sync(&shell.core);
+        let workspace = shell
+            .entry
+            .workspace_mut()
+            .expect("a signed-in shell on a thread shows a workspace");
+        workspace
+            .conversation_mut()
+            .open_thread(&mut shell.core, host.id.clone(), thread.clone());
+        workspace.sync_composer(&shell.core, &mut resources.ui);
+        Self {
+            shell,
+            resources,
+            host,
+            thread,
+            directory,
+        }
     }
 
     fn open_with_clock(

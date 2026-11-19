@@ -121,10 +121,6 @@ pub struct ContentText {
 }
 
 impl ContentText {
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(&mut self) -> editor_core::RangeCompletion<ContentRange> {
-        self.window.completion_for_tests()
-    }
     pub fn new(host: &HostData, source: ContentRef) -> Self {
         Self::from_parts(
             host.client.clone(),
@@ -210,11 +206,6 @@ impl ContentText {
         self.window.disconnect();
         self.sync();
         false
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn action_finished(&self) -> bool {
-        self.action.is_finished()
     }
 
     pub fn busy(&self) -> bool {
@@ -393,10 +384,6 @@ pub struct CollectionBrowser<T: serde::de::DeserializeOwned + Send + 'static> {
 }
 
 impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(&mut self) -> editor_core::RangeCompletion<CollectionRange<T>> {
-        self.window.completion_for_tests()
-    }
     pub fn new(host: &HostData, source: CollectionRef) -> Self {
         Self::from_parts(
             host.client.clone(),

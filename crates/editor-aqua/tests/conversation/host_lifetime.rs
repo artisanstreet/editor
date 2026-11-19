@@ -2,7 +2,7 @@ use artisan_api::{ItemId, ThreadId};
 use editor_aqua::conversation::adapter::{Action, ScopedAction};
 use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::stored::StoredConversation;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,17 @@ fn config() -> HostConfig {
 
 fn client(core: &Core) -> ForgeClient {
     ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
+}
+
+fn connect(core: &mut Core, config: &HostConfig) {
+    let client = client(core);
+    test_support::editor::core::connect_client(core, config, client);
+}
+
+fn replace(core: &mut Core, config: &HostConfig) {
+    core.remove_host(&config.id)
+        .expect("the replaced host is removed");
+    connect(core, config);
 }
 
 fn page_wakes(conversation: &Conversation) -> mpsc::Receiver<()> {
@@ -40,12 +51,9 @@ fn wait_for_page(woken: &mpsc::Receiver<()>) {
 #[test]
 fn pending_page_rejects_removed_and_recreated_host() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = config();
-    core.add_test_host(&config, client(&core));
+    connect(&mut core, &config);
     let thread = ThreadId("thread".into());
     let mut conversation = Conversation::new(&core);
     let woken = page_wakes(&conversation);
@@ -67,12 +75,12 @@ fn pending_page_rejects_removed_and_recreated_host() {
     assert!(conversation.load_error.is_none());
     assert!(conversation.view.as_ref().unwrap().viewport.in_flight);
 
-    core.add_test_host(&config, client(&core));
+    connect(&mut core, &config);
     let replacement = core.host(&config.id).unwrap().instance();
     assert_ne!(original, replacement);
     conversation.open_thread(&mut core, config.id.clone(), thread);
     wait_for_page(&woken);
-    core.add_test_host(&config, client(&core));
+    replace(&mut core, &config);
     assert_ne!(replacement, core.host(&config.id).unwrap().instance());
     conversation.drain(&mut core);
     assert!(conversation.load_error.is_none());
@@ -82,12 +90,9 @@ fn pending_page_rejects_removed_and_recreated_host() {
 #[test]
 fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = config();
-    core.add_test_host(&config, client(&core));
+    connect(&mut core, &config);
     let thread = ThreadId("thread".into());
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
@@ -100,7 +105,7 @@ fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
         },
     )
     .unwrap();
-    core.add_test_host(&config, client(&core));
+    replace(&mut core, &config);
     assert!(!action.dispatch(
         &mut conversation,
         &mut StoredConversation::default(),

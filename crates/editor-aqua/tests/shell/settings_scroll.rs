@@ -1,6 +1,6 @@
 use aqua_core::{InputEvent, Point, ScrollDelta, Size};
 use aqua_ui::element::Box as UiBox;
-use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+use editor_aqua::core::{Screen, SettingsPage};
 use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view};
 use editor_aqua::shell::{host::ShellResources, wheel::keyed_node};
 use editor_aqua::ui::{dialog::DialogHost, theme::ArtisanTheme};
@@ -8,10 +8,7 @@ use std::rc::Rc;
 
 fn settings_scroll(viewport: Size, scale: f32) {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().into(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     core.navigate(Screen::Settings(SettingsPage::General));
     let controller = SettingsController::default();
     let build = BuildInfo::default();

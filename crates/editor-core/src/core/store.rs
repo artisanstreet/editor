@@ -125,10 +125,6 @@ impl Effects {
     fn pop(&self) -> Option<Effect> {
         self.queue.borrow_mut().pop_front()
     }
-    #[cfg(feature = "test-support")]
-    pub(crate) fn clear_host(&self, id: &HostId, instance: HostInstance) {
-        self.queue.borrow_mut().retain(|effect| !matches!(effect, Effect::Host(host, token, _) if host == id && *token == instance));
-    }
 }
 
 pub struct Core {
@@ -267,109 +263,6 @@ impl Core {
         core.reconcile();
         core
     }
-    #[cfg(feature = "test-support")]
-    pub fn for_tests(files: EditorFiles) -> Result<Self, OpenCoreError> {
-        Self::for_tests_with_clock(files, crate::core::clock::Clock::system())
-    }
-    #[cfg(feature = "test-support")]
-    pub fn for_tests_with_clock(
-        files: EditorFiles,
-        clock: crate::core::clock::Clock,
-    ) -> Result<Self, OpenCoreError> {
-        use artisan_account::network::{AccountProfile, Jwk, MachineEntry};
-        let services = Services::scripted(
-            "http://127.0.0.1:1",
-            std::sync::Arc::new(|args| {
-                Err(crate::core::ae::AeError::Failed {
-                    command: args.join(" "),
-                    detail: "no `ae` in component tests".to_owned(),
-                })
-            }),
-            None,
-        )
-        .with_clock(clock);
-        let mut core = Self::with_services(files, services)?;
-        let machine = MachineEntry {
-            id: "mch_test0000000000000000000000".to_owned(),
-            label: "Test Forge".to_owned(),
-            public_key: Jwk {
-                kty: "OKP".to_owned(),
-                crv: "Ed25519".to_owned(),
-                x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            },
-            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
-            revoked_at: None,
-            last_seen_at: None,
-        };
-        let profile = AccountProfile {
-            account_id: "acct_test00000000000000000000".to_owned(),
-            email: "test@example.invalid".to_owned(),
-            display_name: "Test".to_owned(),
-            username: None,
-            avatar_url: None,
-            totp_enrolled: false,
-            machines: vec![machine.clone()],
-            latest_config_version: None,
-        };
-        core.account.sign_in_for_tests(profile, machine.id);
-        core.gate = core.account.entry_gate();
-        let identity = core
-            .identity
-            .clone()
-            .expect("invariant: Core::with_services opened an identity");
-        for config in core.hosts_file.hosts.clone() {
-            let client = ForgeClient::new(&config.address, &config.fingerprint, &identity)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "test host {} has no client: {}",
-                        config.id,
-                        ::diagnostics::chain(&error)
-                    )
-                });
-            let mut host = HostData::new(
-                config.id.clone(),
-                config.name.clone(),
-                client,
-                core.wake.sender(),
-                core.admission.clone(),
-                core.events.clone(),
-            );
-            host.set_pairing(&config.kind, &config.address);
-            if let Some(assets) = &core.image_assets {
-                host.set_image_assets(assets.clone());
-            }
-            core.hosts.insert(config.id, host);
-        }
-        Ok(core)
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn add_test_host(&mut self, config: &HostConfig, client: ForgeClient) {
-        let file = self
-            .files
-            .update_hosts(|file| {
-                file.hosts.retain(|known| known.id != config.id);
-                file.hosts.push(config.clone());
-                file.last = Some(config.id.clone());
-            })
-            .expect("invariant: test hosts.json is writable");
-        self.hosts_file = file;
-        let mut host = HostData::new(
-            config.id.clone(),
-            config.name.clone(),
-            client,
-            self.wake.sender(),
-            self.admission.clone(),
-            self.events.clone(),
-        );
-        host.set_pairing(&config.kind, &config.address);
-        if let Some(assets) = &self.image_assets {
-            host.set_image_assets(assets.clone());
-        }
-        self.hosts.insert(config.id.clone(), host);
-        self.events.push(CoreEvent::HostsChanged);
-    }
-
     pub fn set_image_assets(&mut self, assets: aqua::images::ImageAssets) {
         self.hosts
             .values_mut()
@@ -380,23 +273,20 @@ impl Core {
         &self.wake
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn test_startup_pending(&mut self) -> bool {
+    pub fn pending_work(&self) -> usize {
         let admission = self.admission.clone();
         admission.inspect(|| {
-            let admitted = self.account.peek_order().is_some()
-                || self.mcp_sign_ins.peek_order().is_some()
-                || self.opened.peek_order().is_some()
-                || self.saves.peek_order().is_some()
-                || self
-                    .hosts
-                    .values_mut()
-                    .any(|host| host.peek_order().is_some());
+            let admitted = self.account.admitted()
+                + self.mcp_sign_ins.admitted()
+                + self.opened.admitted()
+                + self.saves.admitted()
+                + self.hosts.values().map(HostData::admitted).sum::<usize>();
             let opening = self
                 .dials
                 .values()
-                .any(|dial| matches!(dial, Dial::Opening { .. }));
-            admitted || opening || !self.events.queue.borrow().is_empty()
+                .filter(|dial| matches!(dial, Dial::Opening { .. }))
+                .count();
+            admitted + opening + self.events.queue.borrow().len()
         })
     }
     pub const fn files(&self) -> &EditorFiles {
@@ -847,6 +737,7 @@ impl Core {
             self.wake.sender(),
             self.admission.clone(),
             self.events.clone(),
+            self.account.services().clock.clone(),
         );
         host.set_pairing(&config.kind, &config.address);
         if let Some(assets) = &self.image_assets {

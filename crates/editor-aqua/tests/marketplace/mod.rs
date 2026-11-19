@@ -142,15 +142,12 @@ fn removed_and_readded_host_rejects_old_requests() {
 fn same_id_host_replacement_resets_marketplace_requests() {
     use artisan_api::SkillAction;
     use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen};
     use editor_aqua::marketplace::Operation;
     use editor_aqua::marketplace::controller::MarketplaceController;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("marketplace-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
@@ -162,7 +159,7 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         fingerprint,
         kind: HostKind::Local,
     };
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     core.navigate(Screen::Marketplace);
     let mut controller = MarketplaceController::default();
     controller.sync(&mut core);
@@ -182,7 +179,7 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         .unwrap();
     core.remove_host(&id).unwrap();
     assert!(core.host_if_instance(&id, first).is_none());
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert_ne!(core.host(&id).unwrap().instance(), first);
     assert!(core.host_if_instance(&id, first).is_none());
     controller.sync(&mut core);
@@ -211,24 +208,20 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::{element::Key, tree::hash_key};
     use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{
-        Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen, SettingsPage,
-    };
+    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen, SettingsPage};
     use editor_aqua::marketplace::{controller::MarketplaceController, view};
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::cell::RefCell;
     use std::rc::Rc;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("marketplace-view-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
     let id = HostId("view-host".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id,
             name: "Forge".into(),
@@ -512,32 +505,18 @@ fn an_mcp_server_does_not_hide_a_skills_sh_skill_with_the_same_name() {
 
 #[test]
 fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
-    use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen};
+    use editor_aqua::core::{Core, Screen};
     use editor_aqua::marketplace::controller::MarketplaceController;
+    use test_support::editor::core::{Delivered, stub_host};
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
-    let identity = Identity::generate("marketplace-switch-test").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
-    let first = HostId("first".into());
-    let second = HostId("second".into());
-    for id in [&first, &second] {
-        core.add_test_host(
-            &HostConfig {
-                id: id.clone(),
-                name: id.0.clone(),
-                address: "127.0.0.1:1".into(),
-                fingerprint: fingerprint.clone(),
-                kind: HostKind::Local,
-            },
-            client.clone(),
-        );
-    }
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
     let show_on = |core: &mut Core, host: &HostId| {
         core.navigate(Screen::NewThread {
             host: host.clone(),
@@ -545,21 +524,26 @@ fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
         });
         core.navigate(Screen::Marketplace);
     };
-    show_on(&mut core, &first);
+    show_on(&mut core, &first.id);
     let mut controller = MarketplaceController::default();
     controller.sync(&mut core);
+    let delivered = Delivered::watch(controller.wake_mailbox());
     controller.search.state().borrow_mut().set_text("pdf");
     controller.edited(&core);
-    let on_first = controller.search_key().unwrap();
+    first_forge
+        .take("GET", "/marketplace/search")
+        .respond(vec![listing("first", "pdf", 1)]);
+    delivered.wait("the first host's search results");
 
-    show_on(&mut core, &second);
+    show_on(&mut core, &second.id);
     controller.sync(&mut core);
-    assert_eq!(controller.page.host.as_ref(), Some(&second));
-    assert_eq!(controller.search_key().unwrap().host(), &second);
-
-    futures::executor::block_on(
-        controller.finish_search_for_tests(on_first, Ok(vec![listing("first", "pdf", 1)])),
+    assert_eq!(controller.page.host.as_ref(), Some(&second.id));
+    let on_second = second_forge.take("GET", "/marketplace/search");
+    assert!(
+        on_second.query().is_some_and(|query| query.contains("pdf")),
+        "the search restarts on the second host: {on_second:?}"
     );
+
     controller.drain(&mut core);
     assert_eq!(
         controller.page.listings,
@@ -568,29 +552,39 @@ fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
     );
 }
 
+fn stub_forge() -> test_support::editor::forge::StubForge {
+    editor_aqua::core::runtime::runtime().block_on(test_support::editor::forge::StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ))
+}
+
+fn connect_live(core: &mut editor_aqua::core::Core, config: &editor_aqua::core::HostConfig) {
+    test_support::editor::core::connect(core, config);
+    test_support::wait::wait_until("the stub Forge to go live", Duration::from_secs(10), || {
+        core.drain_with(|_, _| {});
+        core.host(&config.id)
+            .is_some_and(editor_aqua::core::HostData::is_live)
+    });
+}
+
 fn marketplace_host(
     core: &mut editor_aqua::core::Core,
-) -> editor_aqua::marketplace::controller::MarketplaceController {
-    use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen};
+) -> (
+    editor_aqua::marketplace::controller::MarketplaceController,
+    test_support::editor::forge::StubForge,
+) {
+    use editor_aqua::core::Screen;
     use editor_aqua::marketplace::controller::MarketplaceController;
-    let identity = Identity::generate("marketplace-state-test").expect("identity");
-    let fingerprint = fingerprint(identity.certificate_der().expect("certificate").as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).expect("client");
-    core.add_test_host(
-        &HostConfig {
-            id: HostId("state-host".into()),
-            name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
-            fingerprint,
-            kind: HostKind::Local,
-        },
-        client,
+    let forge = stub_forge();
+    connect_live(
+        core,
+        &test_support::editor::core::stub_host("state-host", "Forge", &forge),
     );
     core.navigate(Screen::Marketplace);
     let mut controller = MarketplaceController::default();
     controller.sync(core);
-    controller
+    (controller, forge)
 }
 
 fn marketplace_app(
@@ -613,28 +607,27 @@ fn marketplace_app(
 
 #[test]
 fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
-    use editor_aqua::core::{Core, EditorFiles};
+    use axum::http::StatusCode;
     use editor_aqua::marketplace::view::{self, ViewAction};
     use std::{cell::RefCell, rc::Rc};
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
-    let mut controller = marketplace_host(&mut core);
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = marketplace_host(&mut core);
     controller.search.state().borrow_mut().set_text("pdf");
     controller.edited(&core);
-    let key = controller.search_key().unwrap();
-    futures::executor::block_on(controller.finish_search_for_tests(
-        key,
-        Err(CallError {
-            method: "GET".parse().expect("GET is an HTTP method"),
-            path: "/marketplace/search".into(),
-            failure: Box::new(CallFailure::Inconsistent { check: "test" }),
-        }),
-    ));
-    controller.drain(&mut core);
-    assert!(matches!(controller.page.listings, Remote::Failed(_)));
+    forge.take("GET", "/marketplace/search").fail(
+        StatusCode::BAD_GATEWAY,
+        "internal",
+        "skills.sh did not answer",
+    );
+    test_support::wait::wait_until(
+        "the failed search to reach the page",
+        Duration::from_secs(10),
+        || {
+            controller.drain(&mut core);
+            matches!(controller.page.listings, Remote::Failed(_))
+        },
+    );
     let actions = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&actions);
     let mut app = marketplace_app(
@@ -655,21 +648,21 @@ fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
     assert!(view::dispatch(&mut controller, &mut core, retry));
     assert_eq!(controller.page.listings, Remote::Searching);
     assert_eq!(controller.page.query, "pdf");
-    assert!(controller.search_key().is_some());
+    let retried = forge.take("GET", "/marketplace/search");
+    assert!(
+        retried.query().is_some_and(|query| query.contains("pdf")),
+        "Try again searches the same query: {retried:?}"
+    );
 }
 
 #[test]
 fn a_quarantined_skill_being_installed_says_so_on_its_row() {
     use artisan_api::SkillAction;
-    use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::marketplace::Operation;
     use std::rc::Rc;
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
-    let mut controller = marketplace_host(&mut core);
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, _forge) = marketplace_host(&mut core);
     controller.page.items = vec![discovered("pdf-tools"), discovered("csv-tools")];
     controller.page.found_open = true;
     controller
@@ -693,14 +686,10 @@ fn a_quarantined_skill_being_installed_says_so_on_its_row() {
 
 #[test]
 fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
-    use editor_aqua::core::{Core, EditorFiles};
     use std::rc::Rc;
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
-    let mut controller = marketplace_host(&mut core);
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, _forge) = marketplace_host(&mut core);
     let long = "a-very-long-skill-name-that-keeps-going-".repeat(6);
     controller.page.items = vec![Item::Server(ServerRow {
         name: long.clone(),

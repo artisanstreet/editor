@@ -5,17 +5,15 @@ use aqua_core::{InputEvent, Point, ScrollDelta};
 use aqua_protocol::AccessTreeUpdate;
 use artisan_api::ThreadId;
 use editor_aqua::core::diagnostics::rebuild_stats::take_tally;
-use editor_aqua::core::{Core, EditorFiles, HostId, Screen, hosts, runtime::runtime};
+use editor_aqua::core::{EditorFiles, HostId, Screen, hosts, runtime::runtime};
 use editor_aqua::qualification::fixture::{Fixture, ForgeServer};
 use editor_aqua::qualification::observation::Observation;
 use editor_aqua::shell::{application::ShellApplication, host::ShellResources, root::RootViews};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use test_support::http::StubServer;
 use tokio::sync::broadcast::error::TryRecvError;
 
-const ACCOUNT_ID: &str = "acct_budget00000000000000000";
 const MACHINE_ID: &str = "mch_budget00000000000000000";
 const QUIET_FRAMES: usize = 8;
 const QUIET_FOR: Duration = Duration::from_millis(300);
@@ -99,13 +97,11 @@ impl Span {
 
 pub(crate) struct Editor {
     forge: ForgeServer,
-    _account: StubServer,
     aqua: Aqua,
     app: ShellApplication<RootViews>,
     id: AquaWindowId,
     observed: ObservedWindowState,
     host: HostId,
-    thread: ThreadId,
     changes: forge_store::Subscription,
     bridge: Arc<A11yBridge>,
     sequence: u64,
@@ -114,7 +110,6 @@ pub(crate) struct Editor {
 
 pub(crate) struct Seeded {
     forge: ForgeServer,
-    account: StubServer,
     files: EditorFiles,
     host: HostId,
     directory: tempfile::TempDir,
@@ -157,71 +152,25 @@ pub(crate) fn seed(fixture: &Fixture) -> Seeded {
             last: Some(host.clone()),
         })
         .expect("the hosts file saves");
-    let account = save_signed_in_account(&files);
     Seeded {
         forge,
-        account,
         files,
         host,
         directory,
     }
 }
 
-fn save_signed_in_account(files: &EditorFiles) -> StubServer {
-    use artisan_account::network::{AccountProfile, Jwk, MachineEntry};
-    let profile = AccountProfile {
-        account_id: ACCOUNT_ID.to_owned(),
-        email: "budgets@example.invalid".to_owned(),
-        display_name: "Budgets".to_owned(),
-        username: None,
-        avatar_url: None,
-        totp_enrolled: false,
-        machines: vec![MachineEntry {
-            id: MACHINE_ID.to_owned(),
-            label: "Budget Forge".to_owned(),
-            public_key: Jwk {
-                kty: "OKP".to_owned(),
-                crv: "Ed25519".to_owned(),
-                x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            },
-            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
-            revoked_at: None,
-            last_seen_at: None,
-        }],
-        latest_config_version: None,
-    };
-    let me = serde_json::to_value(&profile).expect("the account profile encodes");
-    let server = runtime().block_on(StubServer::serve(axum::Router::new().route(
-        "/v1/me",
-        axum::routing::get(move || std::future::ready(axum::Json(me.clone()))),
-    )));
-    let account = serde_json::json!({
-        "base_url": server.url(),
-        "session_token": "budgets-session",
-        "profile": profile,
-    });
-    std::fs::write(
-        files.dir.join("account.json"),
-        serde_json::to_vec_pretty(&account).expect("the account encodes"),
-    )
-    .expect("the account saves");
-    editor_aqua::core::save_onboarding_for_tests(files, server.url(), ACCOUNT_ID, MACHINE_ID)
-        .expect("the onboarding saves");
-    server
-}
-
 impl Editor {
     pub(crate) fn open(seeded: Seeded, thread: &ThreadId, width: f64, height: f64) -> Self {
         let Seeded {
             forge,
-            account,
             files,
             host,
             directory,
         } = seeded;
         let changes = forge.store().subscribe();
         take_tally();
-        let mut core = Core::for_tests(files).expect("the Editor core opens");
+        let mut core = test_support::editor::core::test_core(&files.dir);
         core.navigate(Screen::Thread {
             host: host.clone(),
             thread: thread.clone(),
@@ -245,13 +194,11 @@ impl Editor {
         bridge.connect();
         Self {
             forge,
-            _account: account,
             aqua,
             app,
             id,
             observed,
             host,
-            thread: thread.clone(),
             changes,
             bridge,
             sequence: 0,
@@ -312,11 +259,11 @@ impl Editor {
             let forge_moved = self.forge_moved();
             let caught_up = self.app.shell.core.host(&self.host).is_some_and(|host| {
                 host.is_live()
-                    && host.pending_read(&self.thread).is_none()
+                    && !host.has_requests_in_flight()
                     && host.projects.keys().all(|project| {
                         host.repository_checked(project) && host.project_icon_checked(project)
                     })
-            }) && !self.app.shell.core.test_startup_pending();
+            }) && self.app.shell.core.pending_work() == 0;
             let done = caught_up && observed.as_ref().is_some_and(&ready);
             if done && still && !forge_moved {
                 quiet += 1;
@@ -336,7 +283,7 @@ impl Editor {
         }
     }
 
-    fn forge_moved(&mut self) -> bool {
+    fn forge_moved(&self) -> bool {
         let mut moved = false;
         loop {
             match self.changes.try_recv() {

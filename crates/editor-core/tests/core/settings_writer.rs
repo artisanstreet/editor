@@ -1,8 +1,6 @@
 #![cfg(unix)]
 
-use editor_core::{
-    Core, EditorFiles, SetSettingError, SettingsSave, SettingsShutdown, drain_settings,
-};
+use editor_core::{Core, SetSettingError, SettingsSave, SettingsShutdown, drain_settings};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write as _;
@@ -33,10 +31,7 @@ impl Folder {
     }
 
     fn core(&self) -> Core {
-        Core::for_tests(EditorFiles {
-            dir: self.directory.path().to_owned(),
-        })
-        .expect("core opens")
+        test_support::editor::core::test_core(self.directory.path())
     }
 
     fn settings(&self) -> PathBuf {

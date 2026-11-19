@@ -2,7 +2,7 @@ use artisan_api::{
     ContentId, ContentRef, Item, ItemId, ItemKind, NoticeKind, Status, TextContent, ThreadId,
 };
 use editor_aqua::conversation::content::{SourceField, SourceOwners};
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
 use std::sync::Arc;
 
 fn source(digit: char) -> ContentRef {
@@ -34,10 +34,7 @@ fn notice(reference: ContentRef) -> Item {
 #[test]
 fn source_owner_updates_revision_and_drops_recreated_host() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
     let config = HostConfig {
         id: HostId("source-host".into()),
         name: "Forge".into(),
@@ -51,7 +48,7 @@ fn source_owner_updates_revision_and_drops_recreated_host() {
         core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let instance = core.host(&config.id).unwrap().instance();
     let first = notice(source('1'));
     let mut owners = SourceOwners::default();
@@ -74,7 +71,8 @@ fn source_owner_updates_revision_and_drops_recreated_host() {
             .source(),
         &source('2')
     );
-    core.add_test_host(&config, client);
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     owners.retain(&core, |_| Some(Arc::clone(&next)));
     assert!(owners.get(&first.id, &SourceField::Notice).is_none());
     assert!(!owners.open(&core, &config.id, instance, &next, SourceField::Notice));

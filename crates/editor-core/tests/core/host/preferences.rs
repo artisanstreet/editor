@@ -2,16 +2,13 @@ use artisan_api::{
     EngineConfig, EngineId,
     tls::{Identity, fingerprint},
 };
-use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
 use std::time::{Duration, Instant};
 
 #[test]
 fn a_model_choice_forge_did_not_save_stays_chosen_with_a_retry() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .expect("core opens");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let identity = Identity::generate("picker-test").expect("identity");
     let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
     let config = HostConfig {
@@ -22,7 +19,7 @@ fn a_model_choice_forge_did_not_save_stays_chosen_with_a_retry() {
         kind: HostKind::Remote,
     };
     let client = ForgeClient::new(&config.address, &pin, &identity).expect("client");
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let chosen: EngineConfig = serde_json::from_value(serde_json::json!({
         "engine": "claude",
         "model": "chosen-model",

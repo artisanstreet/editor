@@ -1,5 +1,5 @@
 use editor_core::mcp_sign_in::{CallbackError, wait_for_code};
-use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_core::{EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use std::time::Duration;
 use test_support::wait::{wait_for, within};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -161,8 +161,8 @@ fn removing_a_host_abandons_its_sign_ins() {
     };
     let client =
         || ForgeClient::new(&config.address, &config.fingerprint, &identity).expect("client");
-    let mut core = Core::for_tests(files).expect("core opens");
-    core.add_test_host(&config, client());
+    let mut core = test_support::editor::core::test_core(&files.dir);
+    test_support::editor::core::connect_client(&mut core, &config, client());
     let mut started = core.start_mcp_sign_in(&config.id, "linear", false);
     assert!(core.mcp_sign_in(&config.id, "linear").is_some());
 
@@ -177,7 +177,7 @@ fn removing_a_host_abandons_its_sign_ins() {
         },
     );
 
-    core.add_test_host(&config, client());
+    test_support::editor::core::connect_client(&mut core, &config, client());
     assert!(
         core.mcp_sign_in(&config.id, "linear").is_none(),
         "a new host inherited the removed host's sign-in"

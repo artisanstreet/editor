@@ -39,7 +39,7 @@ pub enum LaunchError {
     Bootstrap(#[source] crate::qualification::bootstrap::BootstrapError),
     #[cfg(feature = "qualification")]
     #[error("open the qualification Editor's core")]
-    QualificationCore(#[source] crate::core::OpenCoreError),
+    QualificationCore(#[source] crate::qualification::sign_in::OpenSignedInError),
     #[error("ARTISAN_AQUA_FIXTURE_DIR names no fixture directory")]
     FixtureDir,
     #[error("read {name}")]

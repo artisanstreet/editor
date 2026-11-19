@@ -1,11 +1,11 @@
 use artisan_api::{
     EngineConfig, EngineId, Item, ItemsPage, ProjectId, Run, RunId, RunOutcome, RunState, Thread,
-    ThreadId, Usage,
+    ThreadId, UpdateThread, Usage,
 };
 use editor_aqua::conversation::fold::{Row, Slot};
 use editor_aqua::shell::application::SectionViews;
-use editor_aqua::shell::host::Shell;
 use editor_aqua::shell::root::RootViews;
+use test_support::editor::forge::{StubForge, empty_state};
 use test_support::editor::shell::{Motion, RootFrames, ThreadShell, headless, window_id};
 use test_support::items::{assistant_reply, item};
 
@@ -20,52 +20,47 @@ const RUN_SEQ: u64 = 5;
 fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
     let thread = ThreadId("read-thread".into());
     let run = RunId("read-run".into());
-    let mut opened =
-        ThreadShell::open_with("read-host", "read-thread", Motion::Full, |core, config| {
-            let host = core.host_mut(&config.id).unwrap();
-            host.threads.insert(
-                thread.clone(),
-                Thread {
-                    id: thread.clone(),
-                    project_id: ProjectId::scratch(),
-                    title: Some("Unread reply".into()),
-                    config: EngineConfig::new(EngineId::Claude),
-                    activity_seq: RUN_SEQ,
-                    activity_at: 0,
-                    read_seq: 1,
-                    marked_unread: false,
-                    settled_seq: 0,
-                    seq: RUN_SEQ,
-                    created_at: 0,
-                    updated_at: 0,
-                    archived: false,
-                    parent_thread_id: None,
-                    spawned_by: None,
-                    parked_until: None,
-                },
-            );
-            host.runs.insert(
-                thread.clone(),
-                Run {
-                    config: None,
-                    id: run.clone(),
-                    thread_id: thread.clone(),
-                    engine: EngineId::Claude,
-                    model: None,
-                    input_cutoff: 0,
-                    state: RunState::Finished {
-                        outcome: RunOutcome::Done,
-                        error: None,
-                        ended_at: 0,
-                    },
-                    usage: Usage::default(),
-                    session_id: None,
-                    seq: RUN_SEQ,
-                    started_at: 0,
-                    continuation: None,
-                },
-            );
-        });
+    let mut state = empty_state();
+    state.threads.push(Thread {
+        id: thread.clone(),
+        project_id: ProjectId::scratch(),
+        title: Some("Unread reply".into()),
+        config: EngineConfig::new(EngineId::Claude),
+        activity_seq: RUN_SEQ,
+        activity_at: 0,
+        read_seq: 1,
+        marked_unread: false,
+        settled_seq: 0,
+        seq: RUN_SEQ,
+        created_at: 0,
+        updated_at: 0,
+        archived: false,
+        parent_thread_id: None,
+        spawned_by: None,
+        parked_until: None,
+    });
+    state.runs.push(Run {
+        config: None,
+        id: run.clone(),
+        thread_id: thread.clone(),
+        engine: EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state: RunState::Finished {
+            outcome: RunOutcome::Done,
+            error: None,
+            ended_at: 0,
+        },
+        usage: Usage::default(),
+        session_id: None,
+        seq: RUN_SEQ,
+        started_at: 0,
+        continuation: None,
+    });
+    state.head = RUN_SEQ;
+    let forge = editor_aqua::core::runtime::runtime()
+        .block_on(StubForge::serve(state, axum::Router::new()));
+    let mut opened = ThreadShell::open_stubbed(&forge, "read-host", "read-thread", Motion::Full);
     let reply = Item {
         position: 1,
         run_id: Some(run),
@@ -77,7 +72,7 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
         )
     };
     let window = opened.window("read");
-    let config = opened.host.clone();
+    let host = opened.host.id.clone();
     let ThreadShell {
         mut shell,
         mut resources,
@@ -115,16 +110,21 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
     resources.ui.build_frame().unwrap();
     let mut runtime = headless(window);
     let id = window_id();
-    let pending = |shell: &Shell| shell.core.host(&config.id).unwrap().pending_read(&thread);
+    let acknowledgement = format!("/threads/{thread}");
     let mut frame = RootFrames {
         root: &mut root,
         shell: &mut shell,
         ui: &mut resources.ui,
     };
     runtime.dispatch_frame_completed(&mut frame, id, 1);
-    assert_eq!(
-        pending(frame.shell),
-        None,
+    assert!(
+        !frame
+            .shell
+            .core
+            .host(&host)
+            .unwrap()
+            .has_requests_in_flight()
+            && !forge.asked("PATCH", &acknowledgement),
         "a reply painted behind an unfocused window has not been read"
     );
     runtime.dispatch_window_event(
@@ -133,8 +133,9 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
         &aqua::prelude::WindowEvent::Focused(id, true),
     );
     runtime.dispatch_frame_completed(&mut frame, id, 2);
+    let read = forge.take("PATCH", &acknowledgement).json::<UpdateThread>();
     assert_eq!(
-        pending(frame.shell),
+        read.read_seq,
         Some(RUN_SEQ),
         "focusing the window over an unchanged reply must mark the finished run read"
     );
