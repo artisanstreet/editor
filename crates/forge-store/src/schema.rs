@@ -98,13 +98,8 @@ const MIGRATIONS: &[&[Step]] = &[
         Step::Sql(include_str!("sql/migrations/v17.sql")),
     ],
     &[Step::Sql(include_str!("sql/migrations/v18.sql"))],
-    &[
-        Step::Sql(include_str!("sql/migrations/v19.sql")),
-        Step::Sql(include_str!("sql/migrations/folded_column.sql")),
-        Step::Sql(include_str!("sql/migrations/message_search.sql")),
-        Step::Rust(backfill_recall),
-    ],
-    &[Step::Rust(forget_artisan_calls)],
+    &[Step::Sql(include_str!("sql/migrations/v19.sql"))],
+    &[],
     &[Step::Sql(include_str!("sql/migrations/v21.sql"))],
     &[
         Step::Sql(include_str!("sql/migrations/v22_a.sql")),
@@ -122,12 +117,7 @@ const MIGRATIONS: &[&[Step]] = &[
         Step::Sql(include_str!("sql/migrations/v28_b.sql")),
     ],
     &[Step::Sql(include_str!("sql/pairing/track_revisions.sql"))],
-    &[
-        Step::Rust(add_folded_column),
-        Step::Sql(include_str!("sql/migrations/message_search.sql")),
-        Step::Rust(backfill_folded_messages),
-        Step::Sql(include_str!("sql/migrations/rebuild_message_search.sql")),
-    ],
+    &[],
 ];
 
 pub const fn version() -> usize {
@@ -178,32 +168,6 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
         include_str!("sql/migrations/set_kv_value.sql"),
         rusqlite::params![artisan_api::MODEL_CONFIGS_KEY, configs.to_string()],
     )?;
-    Ok(())
-}
-
-fn add_folded_column(conn: &Connection) -> Result<()> {
-    let present: bool = conn.query_row(
-        include_str!("sql/migrations/has_folded_column.sql"),
-        [],
-        |row| row.get(0),
-    )?;
-    if !present {
-        conn.execute_batch(include_str!("sql/migrations/folded_column.sql"))?;
-    }
-    Ok(())
-}
-
-fn backfill_folded_messages(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/message_texts.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/set_folded.sql"))?;
-    while let Some(row) = rows.next()? {
-        let text = row.get_ref(1)?.as_str().map_err(rusqlite::Error::from)?;
-        update.execute(rusqlite::params![
-            row.get::<_, i64>(0)?,
-            crate::text_search::folded::text(text)
-        ])?;
-    }
     Ok(())
 }
 
@@ -368,14 +332,6 @@ fn backfill_outline(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn backfill_recall(conn: &Connection) -> Result<()> {
-    Ok(crate::recall::backfill(conn)?)
-}
-
-fn forget_artisan_calls(conn: &Connection) -> Result<()> {
-    Ok(crate::recall::forget_artisan_calls(conn)?)
 }
 
 fn migrate_sources(conn: &Connection) -> Result<()> {

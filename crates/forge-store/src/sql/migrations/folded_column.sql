@@ -1,1 +1,0 @@
-ALTER TABLE item_text ADD COLUMN folded TEXT NOT NULL DEFAULT '';

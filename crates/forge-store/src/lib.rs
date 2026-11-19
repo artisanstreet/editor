@@ -86,8 +86,8 @@ pub use pairing::{
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
     GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
-    RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor, SearchHit,
-    SearchPage, Touch,
+    RecallKind, RecallScope, RecallSearchError, RecallTouchingError, RefreshIndexError,
+    SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
@@ -358,6 +358,12 @@ pub enum OpenStoreError {
     },
     #[error("there is no running Forge store to join at {}", database.display())]
     NotRunning { database: PathBuf },
+    #[error("rebuild the recall index of {}", database.display())]
+    RecallIndex {
+        database: PathBuf,
+        #[source]
+        source: recall::RefreshIndexError,
+    },
     #[error(
         "online upgrade requires database schema {expected}, the running store uses {found}; the current Forge was left running"
     )]
@@ -456,6 +462,17 @@ fn secure_database(dir: &Path, database: &Path) -> Result<(), SecureDatabaseErro
     Ok(())
 }
 
+fn upgrade(conn: &mut Connection, database: &Path) -> Result<(), OpenStoreError> {
+    schema::migrate(conn).map_err(|source| OpenStoreError::Migrate {
+        database: database.to_owned(),
+        source,
+    })?;
+    recall::refresh_index(conn).map_err(|source| OpenStoreError::RecallIndex {
+        database: database.to_owned(),
+        source,
+    })
+}
+
 pub struct PendingInputs {
     pub items: Vec<Item>,
     pub cutoff: Seq,
@@ -548,10 +565,7 @@ impl Store {
         conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
             .map_err(sql)?;
         if recover {
-            schema::migrate(&mut conn).map_err(|source| OpenStoreError::Migrate {
-                database: database.clone(),
-                source,
-            })?;
+            upgrade(&mut conn, &database)?;
         }
 
         let events = feed::Feed::new(CHANGES);
