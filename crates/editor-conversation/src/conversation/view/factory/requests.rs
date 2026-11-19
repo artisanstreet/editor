@@ -153,7 +153,7 @@ impl RowFactory {
         }
         let stored_detail = if let Some(browser) = owner.questions.borrow().browser() {
             let browser = browser.borrow();
-            if let Some(detail) = &browser.detail {
+            if let Some(detail) = browser.detail() {
                 let detail_key = ResourceKey::QuestionDetail(item.id.clone());
                 used.borrow_mut().insert(detail_key.clone());
                 let detail_id = *owner
@@ -170,7 +170,7 @@ impl RowFactory {
                 let weak = Rc::downgrade(owner);
                 let item_id = item.id.clone();
                 let seq = item.seq;
-                let callback = Rc::new(move |action| {
+                let callback: Rc<dyn Fn(editor_sources::ContentAction)> = Rc::new(move |action| {
                     emit(RowSourceAction {
                         item: item_id.clone(),
                         seq,
@@ -187,10 +187,10 @@ impl RowFactory {
                 });
                 let view = editor_sources::content_view(
                     detail,
-                    theme,
+                    &theme,
                     services.document,
                     detail_id,
-                    callback,
+                    &callback,
                 );
                 let row = self.retained_row(
                     owner,

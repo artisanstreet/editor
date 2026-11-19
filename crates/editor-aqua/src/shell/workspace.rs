@@ -1064,12 +1064,9 @@ impl Workspace {
         };
         let actions = Rc::clone(&self.question_source_actions);
         service
-            .render(
-                ui,
-                content,
-                theme,
-                Rc::new(move |action| actions.borrow_mut().push_back(action)),
-            )
+            .render(ui, content, &theme, move |action| {
+                actions.borrow_mut().push_back(action)
+            })
             .map(Some)
     }
 
@@ -1118,7 +1115,7 @@ impl Workspace {
         let browser = self.conversation.question_pages.options_browser();
         let identity = browser.as_ref().and_then(|browser| {
             let browser = browser.borrow();
-            Some((browser.identity(), browser.detail.as_ref()?.identity()))
+            Some((browser.identity(), browser.detail()?.identity()))
         });
         if self
             .question_option_detail
@@ -1142,19 +1139,14 @@ impl Workspace {
             (&browser, &self.question_option_detail)
         {
             let browser = browser.borrow();
-            if let Some(content) = browser.detail.as_ref() {
+            if let Some(content) = browser.detail() {
                 let identity = identity.clone();
                 let actions = Rc::clone(&self.question_option_detail_actions);
                 Some(
                     service
-                        .render(
-                            ui,
-                            content,
-                            theme,
-                            Rc::new(move |action| {
-                                actions.borrow_mut().push_back((identity.clone(), action))
-                            }),
-                        )
+                        .render(ui, content, &theme, move |action| {
+                            actions.borrow_mut().push_back((identity.clone(), action));
+                        })
                         .map_err(|source| BuildError::Selection {
                             surface: "question option detail",
                             source,
@@ -1237,8 +1229,7 @@ impl Workspace {
             let browser = browser.borrow();
             if browser.identity() == identity.0 {
                 if let Some(content) = browser
-                    .detail
-                    .as_ref()
+                    .detail()
                     .filter(|content| content.identity() == identity.1)
                 {
                     service.bind(content, ctx, window);
@@ -1273,8 +1264,7 @@ impl Workspace {
             let mut browser = browser.borrow_mut();
             if browser.identity() == identity.0 {
                 if let Some(content) = browser
-                    .detail
-                    .as_mut()
+                    .detail_mut()
                     .filter(|content| content.identity() == identity.1)
                 {
                     for (origin, action) in actions {

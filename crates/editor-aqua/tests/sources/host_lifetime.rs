@@ -47,8 +47,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     assert!(current.drain(&core).is_none());
     assert!(
         current
-            .error
-            .as_deref()
+            .error()
             .is_some_and(|error| error.starts_with("Couldn't copy source:"))
     );
 
@@ -56,7 +55,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     let old = core.host(&config.id).unwrap().instance();
     core.remove_host(&config.id).unwrap();
     assert!(removed.drain(&core).is_none());
-    assert!(removed.error.is_none());
+    assert!(removed.error().is_none());
     assert!(
         matches!(removed.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
     );
@@ -66,7 +65,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     let mut replaced = pending_copy(&core, &config);
     core.add_test_host(&config, client(&core));
     assert!(replaced.drain(&core).is_none());
-    assert!(replaced.error.is_none());
+    assert!(replaced.error().is_none());
     assert!(
         matches!(replaced.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
     );
@@ -80,7 +79,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
         switched.busy(),
         "a copy that finished before switching away and back must not end the copy started after it"
     );
-    assert!(switched.error.is_none());
+    assert!(switched.error().is_none());
 }
 
 #[test]
@@ -165,23 +164,20 @@ fn picker_failures_only_apply_to_the_current_source_and_host() {
     );
     let first = view.begin_export(&core).unwrap();
     view.finish_export_result(&core, first, Err("picker failed".into()));
-    assert_eq!(
-        view.error.as_deref(),
-        Some("Couldn't export source: picker failed")
-    );
+    assert_eq!(view.error(), Some("Couldn't export source: picker failed"));
     let old = view.begin_export(&core).unwrap();
     view.set_source(ContentRef::from_text("second"));
     let current = view.begin_export(&core).unwrap();
     view.finish_export_result(&core, old, Err("old picker".into()));
-    assert!(view.error.is_none());
+    assert!(view.error().is_none());
     assert!(view.busy());
     view.finish_export_result(&core, current, Ok(None));
-    assert!(view.error.is_none());
+    assert!(view.error().is_none());
     assert!(!view.busy());
     let replaced = view.begin_export(&core).unwrap();
     core.add_test_host(&config, client(&core));
     view.finish_export_result(&core, replaced, Err("removed host".into()));
-    assert!(view.error.is_none());
+    assert!(view.error().is_none());
     assert!(!view.busy());
 }
 
@@ -301,12 +297,13 @@ fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
         ))
     });
     assert_eq!(refused, Copied::Failed);
+    let ignore: std::rc::Rc<dyn Fn(_)> = std::rc::Rc::new(|_| {});
     let rendered = content_view(
         &view,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         SelectionDocumentId(1),
         SelectionSourceId(1),
-        std::rc::Rc::new(|_| {}),
+        &ignore,
     );
     let app = test_support::editor::ui::mounted(600.0, 400.0, rendered.element);
     assert!(

@@ -1,10 +1,9 @@
 use artisan_api::{CollectionRange, CollectionRef};
 
 fn valid_page<T>(source: &CollectionRef, page: &CollectionRange<T>, index: u64) -> bool {
-    page.source == source.source
-        && page.total == source.count
-        && index >= page.start
-        && index < page.end
+    let same_source = page.source == source.source;
+    let same_count = page.total == source.count;
+    same_source && same_count && (page.start..page.end).contains(&index)
 }
 
 pub fn page_record<'a, T>(

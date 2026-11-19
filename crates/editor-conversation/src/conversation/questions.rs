@@ -445,35 +445,36 @@ impl QuestionCollection {
         let instance = owner.instance;
         let item = owner.item.clone();
         let source = owner.source.clone();
-        let action = Rc::new(move |action| {
-            emit(QuestionCollectionAction {
-                host: host.clone(),
-                instance,
-                item: item.clone(),
-                source: source.clone(),
-                action,
-            })
-        });
-        if browser.borrow().selected.is_some() {
+        let action: Rc<dyn Fn(editor_sources::CollectionAction<Question>)> =
+            Rc::new(move |action| {
+                emit(QuestionCollectionAction {
+                    host: host.clone(),
+                    instance,
+                    item: item.clone(),
+                    source: source.clone(),
+                    action,
+                })
+            });
+        if browser.borrow().selected().is_some() {
             return Some(editor_sources::collection_detail(
                 &browser.borrow(),
-                theme,
+                &theme,
                 None,
                 document,
                 source_id,
                 stored_detail,
-                action,
+                &action,
             ));
         }
         Some(editor_sources::ContentView {
             element: editor_sources::collection_list(
-                browser,
+                &browser,
                 "Questions",
-                theme,
+                &theme,
                 None,
                 Rc::new(question_preview),
                 false,
-                action,
+                &action,
             ),
             selection: None,
         })
@@ -568,15 +569,15 @@ pub fn stored_options(
                 action,
             });
         });
-    if browser.borrow().selected.is_some() {
+    if browser.borrow().selected().is_some() {
         return Some(editor_sources::collection_detail(
             &browser.borrow(),
-            theme,
+            &theme,
             None,
             document,
             source_id,
             stored_detail,
-            dispatch,
+            &dispatch,
         ));
     }
     let ticked = panel.ticked.clone();
@@ -591,7 +592,7 @@ pub fn stored_options(
     );
     Some(editor_sources::ContentView {
         element: editor_sources::collection_list(
-            browser, "Choices", theme, None, present, true, dispatch,
+            &browser, "Choices", &theme, None, present, true, &dispatch,
         ),
         selection: None,
     })

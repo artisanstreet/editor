@@ -10,6 +10,7 @@ use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
 
 static COPIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+#[derive(Debug)]
 enum Completion {
     Copy(
         CompletionKey,
@@ -19,6 +20,7 @@ enum Completion {
     Export(CompletionKey, Result<(), ExportContentError>),
 }
 
+#[derive(Debug)]
 pub struct CopiedSource {
     text: String,
     host: HostId,
@@ -101,12 +103,13 @@ pub struct CollectionViewState {
     inline: bool,
 }
 
+#[derive(Debug)]
 pub struct ContentText {
     identity: u64,
     window: ContentWindow,
     pub(crate) rows: Vec<Range<usize>>,
     page: Option<Arc<ContentRange>>,
-    pub error: Option<String>,
+    error: Option<String>,
     clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     client: ForgeClient,
     host: HostId,
@@ -119,9 +122,7 @@ pub struct ContentText {
 
 impl ContentText {
     #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(
-        &mut self,
-    ) -> editor_core::RangeCompletion<artisan_api::ContentRange> {
+    pub fn completion_for_tests(&mut self) -> editor_core::RangeCompletion<ContentRange> {
         self.window.completion_for_tests()
     }
     pub fn new(host: &HostData, source: ContentRef) -> Self {
@@ -169,6 +170,10 @@ impl ContentText {
             busy: self.busy(),
             error: self.shown_error(),
         }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     pub fn shown_error(&self) -> Option<String> {
@@ -274,7 +279,7 @@ impl ContentText {
             .spawn(&self.host, self.instance, move |key| async move {
                 let permit = COPIES.acquire().await.expect("copy semaphore stays open");
                 let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-                let _ = sender.send(Completion::Copy(key, result, permit)).await;
+                sender.offer(Completion::Copy(key, result, permit)).await;
             });
     }
 
@@ -320,7 +325,7 @@ impl ContentText {
         self.action
             .spawn(&self.host, self.instance, move |key| async move {
                 let result = client.export_content(&source, path).await;
-                let _ = sender.send(Completion::Export(key, result)).await;
+                sender.offer(Completion::Export(key, result)).await;
             });
     }
 
@@ -343,13 +348,13 @@ impl ContentText {
                                 instance: self.instance,
                                 failure: std::rc::Rc::downgrade(&self.clipboard_failure),
                                 _permit: permit,
-                            })
+                            });
                         }
                         Err(error) => {
                             self.error = Some(format!(
                                 "Couldn't copy source: {}",
                                 diagnostics::chain(&error)
-                            ))
+                            ));
                         }
                     }
                 }
@@ -368,6 +373,7 @@ impl ContentText {
     }
 }
 
+#[derive(Debug)]
 pub struct CollectionPreview {
     pub label: String,
     pub detail: Option<TextContent>,
@@ -375,21 +381,20 @@ pub struct CollectionPreview {
     pub disabled: bool,
 }
 
+#[derive(Debug)]
 pub struct CollectionBrowser<T: serde::de::DeserializeOwned + Send + 'static> {
     identity: u64,
     window: CollectionWindow<T>,
-    pub selected: Option<(u64, Arc<CollectionRange<T>>)>,
-    pub detail: Option<ContentText>,
-    pub inline_text: Option<String>,
+    selected: Option<(u64, Arc<CollectionRange<T>>)>,
+    detail: Option<ContentText>,
+    inline_text: Option<String>,
     host: HostId,
     instance: HostInstance,
 }
 
 impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
     #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(
-        &mut self,
-    ) -> editor_core::RangeCompletion<artisan_api::CollectionRange<T>> {
+    pub fn completion_for_tests(&mut self) -> editor_core::RangeCompletion<CollectionRange<T>> {
         self.window.completion_for_tests()
     }
     pub fn new(host: &HostData, source: CollectionRef) -> Self {
@@ -443,6 +448,22 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
             detail: self.detail.as_ref().map(ContentText::view_state),
             inline: self.inline_text.is_some(),
         }
+    }
+
+    pub const fn selected(&self) -> Option<&(u64, Arc<CollectionRange<T>>)> {
+        self.selected.as_ref()
+    }
+
+    pub const fn detail(&self) -> Option<&ContentText> {
+        self.detail.as_ref()
+    }
+
+    pub const fn detail_mut(&mut self) -> Option<&mut ContentText> {
+        self.detail.as_mut()
+    }
+
+    pub fn inline_text(&self) -> Option<&str> {
+        self.inline_text.as_deref()
     }
 
     pub fn window(&self) -> &CollectionWindow<T> {

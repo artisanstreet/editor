@@ -6,6 +6,7 @@ use editor_core::Core;
 use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
+#[derive(Debug)]
 pub struct SourceView {
     document: SelectionDocumentId,
     source: SelectionSourceId,
@@ -33,11 +34,12 @@ impl SourceView {
         &self,
         ui: &mut UiApp,
         content: &ContentText,
-        theme: ArtisanTheme,
-        action: Rc<dyn Fn(ContentAction)>,
+        theme: &ArtisanTheme,
+        action: impl Fn(ContentAction) + 'static,
     ) -> Result<aqua_ui::element::Element, SelectionSourceError> {
+        let action: Rc<dyn Fn(ContentAction)> = Rc::new(action);
         let ContentView { element, selection } =
-            crate::sources::content_view(content, theme, self.document, self.source, action);
+            crate::sources::content_view(content, theme, self.document, self.source, &action);
         if let Some(selection) = selection {
             ui.register_selection_source_in(self.document, selection)?;
         } else {
@@ -51,7 +53,7 @@ impl SourceView {
     }
 
     pub fn action(
-        &mut self,
+        &self,
         core: &Core,
         content: &mut ContentText,
         ctx: &mut AppCtx<'_>,
@@ -67,7 +69,7 @@ impl SourceView {
             routes.route(request, move |outcome| {
                 let result = editor_ui::dialogs::chosen_path(outcome);
                 editor_core::runtime::runtime().spawn(async move {
-                    let _ = sender.send((generation, result)).await;
+                    sender.offer((generation, result)).await;
                 });
             });
         }

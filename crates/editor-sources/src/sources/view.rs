@@ -21,6 +21,7 @@ pub enum ContentAction {
     Export,
 }
 
+#[derive(Debug)]
 pub struct ContentView {
     pub element: Element,
     pub selection: Option<SelectionSource>,
@@ -35,7 +36,7 @@ pub(crate) fn stack() -> UiBox {
     UiBox::new().layout("column").spaced(Space::S4)
 }
 
-fn retry_button(theme: ArtisanTheme, action: Rc<dyn Fn(ContentAction)>) -> Element {
+fn retry_button(theme: &ArtisanTheme, action: Rc<dyn Fn(ContentAction)>) -> Element {
     button(
         "source-retry",
         theme,
@@ -50,31 +51,35 @@ fn retry_button(theme: ArtisanTheme, action: Rc<dyn Fn(ContentAction)>) -> Eleme
 
 pub(crate) fn button(
     key: &str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     tone: ButtonTone,
     label: &str,
     action: impl Fn() + 'static,
 ) -> Button {
-    Button::text(key.to_owned(), theme, tone, label)
+    Button::text(key.to_owned(), *theme, tone, label)
         .within(Surface::Inset)
         .on_activate(move |_| action())
 }
 
 pub(crate) fn source_lines(
     key: &'static str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     text: Arc<str>,
     rows: Vec<std::ops::Range<usize>>,
     height: f32,
     document: SelectionDocumentId,
     source_id: SelectionSourceId,
 ) -> Element {
+    let theme = *theme;
     List::new()
         .items(rows.into_iter().enumerate())
         .key(move |(index, _)| format!("{key}-{index}"))
         .row(move |(_, range)| {
+            let line = text
+                .get(range.clone())
+                .expect("invariant: raw source rows split the page on character boundaries");
             TextRole::Code
-                .text(&theme, text[range.clone()].to_owned())
+                .text(&theme, line.to_owned())
                 .selection_source_in(document, source_slice(source_id, range.clone()))
                 .build()
         })
@@ -90,21 +95,21 @@ pub(crate) fn source_lines(
 
 pub fn content_view(
     view: &ContentText,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     document: SelectionDocumentId,
     source_id: SelectionSourceId,
-    action: Rc<dyn Fn(ContentAction)>,
+    action: &Rc<dyn Fn(ContentAction)>,
 ) -> ContentView {
     let mut body = stack().width(Length::Pct(100.0));
     let mut selection = None;
     match view.window().state() {
         RangeState::Loading => {
-            body = body.child(TextRole::Label.text(&theme, "Loading source…").build())
+            body = body.child(TextRole::Label.text(theme, "Loading source…").build());
         }
         RangeState::Failed(error) => {
             body = body
-                .child(TextRole::Label.text(&theme, error.clone()).build())
-                .child(retry_button(theme, Rc::clone(&action)));
+                .child(TextRole::Label.text(theme, error.clone()).build())
+                .child(retry_button(theme, Rc::clone(action)));
         }
         RangeState::Ready(page) => {
             let start = page.start;
@@ -113,7 +118,7 @@ pub fn content_view(
             body = body.child(
                 TextRole::Caption
                     .text(
-                        &theme,
+                        theme,
                         format!(
                             "Raw source bytes {start}–{end} of {total}. Selection copies this loaded page."
                         ),
@@ -132,8 +137,8 @@ pub fn content_view(
                 document,
                 source_id,
             );
-            let previous = Rc::clone(&action);
-            let next = Rc::clone(&action);
+            let previous = Rc::clone(action);
+            let next = Rc::clone(action);
             body = body.child(list).child(
                 UiBox::new()
                     .spaced(Space::S4)
@@ -150,7 +155,7 @@ pub fn content_view(
                     )
                     .child(
                         button("source-next", theme, ButtonTone::Quiet, "Next", move || {
-                            next(ContentAction::Next)
+                            next(ContentAction::Next);
                         })
                         .disabled(end == total)
                         .build(),
@@ -159,8 +164,8 @@ pub fn content_view(
             );
         }
     }
-    let copy = Rc::clone(&action);
-    let export = Rc::clone(&action);
+    let copy = Rc::clone(action);
+    let export = Rc::clone(action);
     body = body.child(
         UiBox::new()
             .spaced(Space::S4)
@@ -189,7 +194,7 @@ pub fn content_view(
             .build(),
     );
     if let Some(error) = view.shown_error() {
-        body = body.child(TextRole::Label.text(&theme, error).build());
+        body = body.child(TextRole::Label.text(theme, error).build());
     }
     ContentView {
         element: code_card(theme, body.build()),
@@ -197,9 +202,9 @@ pub fn content_view(
     }
 }
 
-pub(crate) fn code_card(theme: ArtisanTheme, content: Element) -> Element {
+pub(crate) fn code_card(theme: &ArtisanTheme, content: Element) -> Element {
     Surface::Card
-        .build(&theme, vec![Surface::Inset.build(&theme, vec![content])])
+        .build(theme, vec![Surface::Inset.build(theme, vec![content])])
         .style(
             Style::new()
                 .width(Length::Pct(100.0))
@@ -207,6 +212,7 @@ pub(crate) fn code_card(theme: ArtisanTheme, content: Element) -> Element {
         )
 }
 
+#[derive(Debug)]
 pub enum ContentEffect {
     SavePath(u64),
     Clipboard(super::CopiedSource),

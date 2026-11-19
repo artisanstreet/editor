@@ -257,18 +257,13 @@ impl InspectorOwner {
                 let identity = content.identity();
                 Some(
                     self.source
-                        .render(
-                            ui,
-                            content,
-                            theme,
-                            Rc::new(move |event| {
-                                callback(OwnerAction::Source {
-                                    target: SourceTarget::Inspector,
-                                    identity,
-                                    action: event,
-                                })
-                            }),
-                        )
+                        .render(ui, content, &theme, move |event| {
+                            callback(OwnerAction::Source {
+                                target: SourceTarget::Inspector,
+                                identity,
+                                action: event,
+                            })
+                        })
                         .map_err(|source| BuildInspectorError::Source {
                             target: SourceTarget::Inspector,
                             source,
@@ -281,35 +276,31 @@ impl InspectorOwner {
             }
         };
         let plan = if let Some(plan) = &self.inspector.plan {
-            let selected = plan.borrow().selected.is_some();
+            let selected = plan.borrow().selected().is_some();
             let plan_callback = Rc::clone(&action);
             let identity = plan.borrow().identity();
-            let callback = Rc::new(move |event| {
-                plan_callback(OwnerAction::Plan {
-                    identity,
-                    action: event,
-                })
-            });
+            let callback: Rc<dyn Fn(editor_sources::CollectionAction<artisan_api::PlanStep>)> =
+                Rc::new(move |event| {
+                    plan_callback(OwnerAction::Plan {
+                        identity,
+                        action: event,
+                    })
+                });
             if selected {
                 let browser = plan.borrow();
-                let stored = match &browser.detail {
+                let stored = match browser.detail() {
                     Some(content) => {
                         let callback = Rc::clone(&action);
                         let identity = content.identity();
                         Some(
                             self.detail
-                                .render(
-                                    ui,
-                                    content,
-                                    theme,
-                                    Rc::new(move |event| {
-                                        callback(OwnerAction::Source {
-                                            target: SourceTarget::Detail,
-                                            identity,
-                                            action: event,
-                                        })
-                                    }),
-                                )
+                                .render(ui, content, &theme, move |event| {
+                                    callback(OwnerAction::Source {
+                                        target: SourceTarget::Detail,
+                                        identity,
+                                        action: event,
+                                    })
+                                })
                                 .map_err(|source| BuildInspectorError::Source {
                                     target: SourceTarget::Detail,
                                     source,
@@ -323,12 +314,12 @@ impl InspectorOwner {
                 };
                 let detail = editor_sources::collection_detail(
                     &browser,
-                    theme,
+                    &theme,
                     Some(viewport_height * 0.4),
                     self.ids.detail_document,
                     self.ids.detail,
                     stored,
-                    callback,
+                    &callback,
                 );
                 if let Some(selection) = detail.selection {
                     ui.register_selection_source_in(self.ids.detail_document, selection)
@@ -338,13 +329,13 @@ impl InspectorOwner {
             } else {
                 self.detail.release(ui);
                 Some(editor_sources::collection_list(
-                    Rc::clone(plan),
+                    plan,
                     "Checklist",
-                    theme,
+                    &theme,
                     Some(viewport_height * 0.4),
                     Rc::new(present_step),
                     false,
-                    callback,
+                    &callback,
                 ))
             }
         } else {
@@ -387,18 +378,13 @@ impl InspectorOwner {
                             let identity = content.identity();
                             Some(
                                 self.command
-                                    .render(
-                                        ui,
-                                        content,
-                                        theme,
-                                        Rc::new(move |event| {
-                                            callback(OwnerAction::Source {
-                                                target: SourceTarget::Command,
-                                                identity,
-                                                action: event,
-                                            })
-                                        }),
-                                    )
+                                    .render(ui, content, &theme, move |event| {
+                                        callback(OwnerAction::Source {
+                                            target: SourceTarget::Command,
+                                            identity,
+                                            action: event,
+                                        })
+                                    })
                                     .map_err(|source| BuildInspectorError::Source {
                                         target: SourceTarget::Command,
                                         source,
@@ -416,18 +402,13 @@ impl InspectorOwner {
                             let identity = content.identity();
                             Some(
                                 self.output
-                                    .render(
-                                        ui,
-                                        content,
-                                        theme,
-                                        Rc::new(move |event| {
-                                            callback(OwnerAction::Source {
-                                                target: SourceTarget::Output,
-                                                identity,
-                                                action: event,
-                                            })
-                                        }),
-                                    )
+                                    .render(ui, content, &theme, move |event| {
+                                        callback(OwnerAction::Source {
+                                            target: SourceTarget::Output,
+                                            identity,
+                                            action: event,
+                                        })
+                                    })
                                     .map_err(|source| BuildInspectorError::Source {
                                         target: SourceTarget::Output,
                                         source,
@@ -479,7 +460,7 @@ impl InspectorOwner {
         if let Some(plan) = &self.inspector.plan {
             let plan = plan.borrow();
             ctx.bind_mailbox(window, plan.window().wake_mailbox());
-            if let Some(content) = &plan.detail {
+            if let Some(content) = plan.detail() {
                 self.detail.bind(content, ctx, window);
             }
         }
@@ -501,7 +482,7 @@ impl InspectorOwner {
         if let Some(plan) = &self.inspector.plan {
             let mut plan = plan.borrow_mut();
             plan.drain(core);
-            if let Some(content) = &mut plan.detail {
+            if let Some(content) = plan.detail_mut() {
                 self.detail.drain(core, content, ctx);
             }
         }
@@ -556,13 +537,9 @@ impl InspectorOwner {
                 {
                     let mut plan = plan.borrow_mut();
                     let selected = plan
-                        .selected
-                        .as_ref()
+                        .selected()
                         .map(|(index, page)| (*index, std::sync::Arc::as_ptr(page) as usize));
-                    let detail = plan
-                        .detail
-                        .as_ref()
-                        .map(editor_sources::ContentText::identity);
+                    let detail = plan.detail().map(editor_sources::ContentText::identity);
                     editor_sources::dispatch_collection(
                         &mut plan,
                         core,
@@ -571,13 +548,9 @@ impl InspectorOwner {
                         None,
                     );
                     let next_selected = plan
-                        .selected
-                        .as_ref()
+                        .selected()
                         .map(|(index, page)| (*index, std::sync::Arc::as_ptr(page) as usize));
-                    let next_detail = plan
-                        .detail
-                        .as_ref()
-                        .map(editor_sources::ContentText::identity);
+                    let next_detail = plan.detail().map(editor_sources::ContentText::identity);
                     if selected != next_selected || detail != next_detail {
                         self.detail.release(ui);
                         self.detail = SourceView::new(self.ids.detail_document, self.ids.detail);
@@ -599,7 +572,7 @@ impl InspectorOwner {
                 }
                 SourceTarget::Detail => {
                     if let Some(plan) = &self.inspector.plan {
-                        if let Some(content) = &mut plan.borrow_mut().detail
+                        if let Some(content) = plan.borrow_mut().detail_mut()
                             && content.identity() == identity
                         {
                             self.detail

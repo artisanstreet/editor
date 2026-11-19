@@ -110,7 +110,7 @@ impl RowSourceAction {
                 if browser.window().source() != &collection {
                     return (false, None);
                 }
-                let Some(detail) = browser.detail.as_mut() else {
+                let Some(detail) = browser.detail_mut() else {
                     return (false, None);
                 };
                 if detail.identity() != identity || detail.window().source() != &source {
@@ -172,7 +172,7 @@ impl RowSourceExport {
                                 && owner.questions.borrow().browser().is_some_and(|browser| {
                                     let browser = browser.borrow();
                                     browser.window().source() == collection
-                                        && browser.detail.as_ref().is_some_and(|detail| {
+                                        && browser.detail().is_some_and(|detail| {
                                             detail.identity() == *identity
                                                 && detail.window().source() == source
                                                 && detail.is_export_pending(*generation)
@@ -201,7 +201,7 @@ impl RowSourceExport {
                     .finish_export_result(core, export, result),
                 ExportKind::QuestionDetail { generation, .. } => {
                     if let Some(browser) = owner.questions.borrow().browser()
-                        && let Some(detail) = browser.borrow_mut().detail.as_mut()
+                        && let Some(detail) = browser.borrow_mut().detail_mut()
                     {
                         detail.finish_export_result(core, generation, result);
                     }
@@ -220,7 +220,7 @@ impl RowOwner {
         if let Some(browser) = self.questions.borrow().browser() {
             let browser = browser.borrow();
             ctx.bind_mailbox(window, browser.window().wake_mailbox());
-            if let Some(content) = &browser.detail {
+            if let Some(content) = browser.detail() {
                 ctx.bind_mailbox(window, content.action_wake());
                 ctx.bind_mailbox(window, content.window().wake_mailbox());
             }
@@ -266,7 +266,7 @@ impl RowOwner {
         };
         if let (Some((item, collection)), Some(browser)) = (identity, browser) {
             let mut browser = browser.borrow_mut();
-            if let Some(detail) = browser.detail.as_mut() {
+            if let Some(detail) = browser.detail_mut() {
                 let source = detail.window().source().clone();
                 let identity = detail.identity();
                 let (changed, effect) = editor_sources::drain_content_changed(detail, core);

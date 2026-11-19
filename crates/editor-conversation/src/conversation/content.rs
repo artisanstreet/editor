@@ -345,7 +345,7 @@ impl SourceOwners {
         let item = id.clone();
         let field = field.clone();
         let source = owner.text.window().source().clone();
-        let callback = Rc::new(move |action| {
+        let callback: Rc<dyn Fn(editor_sources::ContentAction)> = Rc::new(move |action| {
             emit(SourceAction {
                 host: host.clone(),
                 instance,
@@ -357,10 +357,10 @@ impl SourceOwners {
         });
         Some(editor_sources::content_view(
             &owner.text,
-            theme,
+            &theme,
             document,
             source_id,
-            callback,
+            &callback,
         ))
     }
 

@@ -186,10 +186,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     click(&mut ready_app, "collection-entry-0");
     let choose = emitted.borrow_mut().pop().expect("question row action");
     assert!(choose.dispatch(&core, &scope, &items[0]).0);
-    assert_eq!(
-        browser.borrow().inline_text.as_deref(),
-        Some("Ready question")
-    );
+    assert_eq!(browser.borrow().inline_text(), Some("Ready question"));
     let mut detail_app = mounted(
         800.0,
         600.0,
