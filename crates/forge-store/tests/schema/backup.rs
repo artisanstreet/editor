@@ -1,6 +1,6 @@
 use super::*;
-use rusqlite::config::DbConfig;
 use crate::schema::{MIGRATIONS, migrate_to};
+use rusqlite::config::DbConfig;
 
 fn open(path: &Path) -> Connection {
     let conn = Connection::open(path).expect("open the database");

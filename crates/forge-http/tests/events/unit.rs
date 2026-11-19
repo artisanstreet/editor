@@ -34,7 +34,8 @@ async fn byte_budget_blocks_even_when_the_entry_queue_has_space() {
     };
     queue.send(envelope.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_millis(10), queue.send(envelope.clone()))
-            .await.unwrap_err();
+        .await
+        .unwrap_err();
     drop(receiver.recv().await.unwrap());
     queue.send(envelope).await.unwrap();
 }

@@ -323,7 +323,10 @@ pub(crate) fn tools() -> Vec<Tool> {
     ]
 }
 
-pub(crate) async fn all_records(hub: &Hub, mut query: Query) -> Result<Vec<Record>, ListRecordsError> {
+pub(crate) async fn all_records(
+    hub: &Hub,
+    mut query: Query,
+) -> Result<Vec<Record>, ListRecordsError> {
     let mut records = Vec::new();
     loop {
         query.limit = 200;
@@ -388,7 +391,12 @@ async fn send(
         .map_err(forge("deliver the coordination message"))
 }
 
-pub(crate) async fn call(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Result<Option<Value>> {
+pub(crate) async fn call(
+    hub: &Hub,
+    caller: &ThreadId,
+    name: &str,
+    args: Value,
+) -> Result<Option<Value>> {
     let value = match name {
         "publish_work" => publish_work(hub, caller, name, args).await?,
         "get_work" => get_work(hub, caller, name, args).await?,

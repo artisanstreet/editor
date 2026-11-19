@@ -1,6 +1,11 @@
 use serde_json::Value;
 
-pub(crate) fn validate(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), String> {
+pub(crate) fn validate(
+    schema: &Value,
+    value: &Value,
+    path: &str,
+    depth: usize,
+) -> Result<(), String> {
     if depth > 32 {
         return Err(format!("{path}: input nesting exceeds 32 levels"));
     }

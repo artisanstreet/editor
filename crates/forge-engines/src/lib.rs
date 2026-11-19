@@ -36,8 +36,12 @@ pub use account::{SignIn, SubmitCodeError};
 pub use claude::{CLAUDE_AI_TRANSPORT, CLAUDE_AI_UNAVAILABLE};
 pub use commands::{MissingPrompt, normalize_command};
 pub use compaction::{COMPACTION_NUDGE, compaction_prompt, is_compaction_summary};
-pub use customise::{ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill, apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill, normalize_prompt, prompt_digest, read_prompt_file, reconcile_skills, skill_catalog, with_gateway_mcp};
 pub(crate) use customise::materialize;
+pub use customise::{
+    ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill,
+    apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill, normalize_prompt,
+    prompt_digest, read_prompt_file, reconcile_skills, skill_catalog, with_gateway_mcp,
+};
 pub use customise::{
     AdoptSkillError, ApplyPromptError, DiscardSkillError, FindSkillError, ImportError,
     InstallSkillError, LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
@@ -49,12 +53,15 @@ pub use harness::{
     SetTitleError, SideQueryError, SideReply, SideUsage, Turn, UserInput,
 };
 pub use manager::{BinaryLease, EngineChange, Engines};
-pub use manager::{ClaudeAiSignInError, InstallError, ListVersionsError, NoBuild, NotInstalled, ValidateVersionError};
+pub use manager::{
+    ClaudeAiSignInError, InstallError, ListVersionsError, NoBuild, NotInstalled,
+    ValidateVersionError,
+};
 pub use marketplace::{
     FetchSkillError, SKILLS_SH_URL, SearchSkillsError, fetch_skill, search_skills,
 };
 pub use mentions::{with_skill_mentions, with_thread_mentions};
-pub use usage::{UsageCache};
+pub use usage::UsageCache;
 pub(crate) use usage::has_usage_reader;
 
 use artisan_api::EngineId;

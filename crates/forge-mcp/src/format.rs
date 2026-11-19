@@ -41,7 +41,8 @@ fn title(title: Option<&str>) -> &str {
 
 fn group(out: &mut String, last: &mut Option<ThreadId>, thread: &ThreadId, name: Option<&str>) {
     if last.as_ref() != Some(thread) {
-        writeln!(out, "\n### {}\n", title(name)).expect("invariant: writing to a String cannot fail");
+        writeln!(out, "\n### {}\n", title(name))
+            .expect("invariant: writing to a String cannot fail");
         *last = Some(thread.clone());
     }
 }
@@ -67,7 +68,8 @@ pub(crate) fn search(page: &SearchPage, continued: bool) -> String {
         .expect("invariant: writing to a String cannot fail");
     }
     if let Some(next) = page.next {
-        writeln!(out, "\nMore hits: call again with cursor {next}.").expect("invariant: writing to a String cannot fail");
+        writeln!(out, "\nMore hits: call again with cursor {next}.")
+            .expect("invariant: writing to a String cannot fail");
     } else if continued {
         out.push_str("\nNo more hits.\n");
     }
@@ -100,7 +102,8 @@ pub(crate) fn grep(page: &GrepPage) -> String {
         out.push('\n');
     }
     if let Some(next) = page.next {
-        writeln!(out, "More matches: call again with cursor {next}.").expect("invariant: writing to a String cannot fail");
+        writeln!(out, "More matches: call again with cursor {next}.")
+            .expect("invariant: writing to a String cannot fail");
     }
     out.trim().to_owned()
 }

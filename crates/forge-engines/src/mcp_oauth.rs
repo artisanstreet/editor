@@ -150,7 +150,6 @@ impl Client {
             && self.issuer == discovery.issuer
             && self.resource == discovery.resource
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

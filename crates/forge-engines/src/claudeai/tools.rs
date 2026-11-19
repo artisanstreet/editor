@@ -75,7 +75,12 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub(crate) async fn build(home: &Path, cwd: &Path, servers: &[McpServer], sandbox: Sandbox) -> Self {
+    pub(crate) async fn build(
+        home: &Path,
+        cwd: &Path,
+        servers: &[McpServer],
+        sandbox: Sandbox,
+    ) -> Self {
         let mut servers = servers.to_vec();
         for project in mcp::project_servers(cwd) {
             if !servers.iter().any(|known| known.name == project.name) {

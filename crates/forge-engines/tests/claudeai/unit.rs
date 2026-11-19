@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::transport::DeleteConversationError;
 use super::{
-    Backend, CompleteError, CreateConversationError, Events, Refusal,
-    Request, RequestError, StopError, UploadError, drive,
+    Backend, CompleteError, CreateConversationError, Events, Refusal, Request, RequestError,
+    StopError, UploadError, drive,
 };
 #[path = "cancellation.rs"]
 mod cancellation;

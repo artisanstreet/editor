@@ -666,10 +666,7 @@ impl Engines {
         self.finish(engine, result).await
     }
 
-    async fn refresh_models(
-        &self,
-        engine: EngineId,
-    ) -> Result<Arc<[Model]>, RefreshModelsError> {
+    async fn refresh_models(&self, engine: EngineId) -> Result<Arc<[Model]>, RefreshModelsError> {
         let slot = self.slot(engine);
         let observed = {
             let cache = lock(&slot.models);

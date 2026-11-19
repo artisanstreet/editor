@@ -1277,10 +1277,7 @@ async fn set_draft(
     Ok(Json(app.hub.store().set_draft(scope, request).await?))
 }
 
-async fn put_blob(
-    AppState(app): AppState<App>,
-    body: axum::body::Body,
-) -> Result<Json<BlobRef>> {
+async fn put_blob(AppState(app): AppState<App>, body: axum::body::Body) -> Result<Json<BlobRef>> {
     let upload = app.hub.store().admit_blob().await;
     let bytes = axum::body::to_bytes(body, forge_store::MAX_BLOB_BYTES + 1024)
         .await

@@ -50,4 +50,3 @@ fn a_failed_replacement_keeps_the_serving_version_and_retry_replaces_it() {
         }
     );
 }
-

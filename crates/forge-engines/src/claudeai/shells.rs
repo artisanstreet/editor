@@ -92,7 +92,12 @@ enum Ended {
 }
 
 impl Shells {
-    pub(crate) fn start(&self, command: &str, cwd: &Path, sandbox: &Sandbox) -> Result<String, String> {
+    pub(crate) fn start(
+        &self,
+        command: &str,
+        cwd: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<String, String> {
         let mut shells = self
             .shells
             .lock()

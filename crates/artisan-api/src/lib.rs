@@ -51,9 +51,22 @@ pub use item::{
     Question, QuestionAnswer, QuestionOption, SearchMode, Sender, Status, StepStatus, ToolKind,
     UnsandboxedReason,
 };
-pub use model::{Capability, ChoiceSemantic, ConfigBinding, CustomizationScope, DiscoveryState, FieldSource, HIDE_BAD_MODEL_OPTIONS_KEY, MODEL_CUSTOMIZATIONS_KEY, ModelAxis, ModelChoice, ModelControl, ModelCustomization, ModelCustomizationsError, ModelEvidence, ModelIdentity, ModelSpecification, OptionOrigin, ResolutionChange, ResolvedModelConfig, SpeedLevel, ThinkingLevel, model_customizations};
+pub use model::{
+    Capability, ChoiceSemantic, ConfigBinding, CustomizationScope, DiscoveryState, FieldSource,
+    HIDE_BAD_MODEL_OPTIONS_KEY, MODEL_CUSTOMIZATIONS_KEY, ModelAxis, ModelChoice, ModelControl,
+    ModelCustomization, ModelCustomizationsError, ModelEvidence, ModelIdentity, ModelSpecification,
+    OptionOrigin, ResolutionChange, ResolvedModelConfig, SpeedLevel, ThinkingLevel,
+    model_customizations,
+};
 pub use reassembly::{Reassembly, ReassemblyError};
-pub use request::{Account, Answer, BlobRef, CreateProject, CreateThread, DatabaseRollback, DirEntry, DirListing, DraftRevision, DraftSnapshot, DraftWriteResult, EditTotals, ErrorCode, InspectorAgent, InspectorSummary, InspectorTerminal, InspectorWorkflow, ItemsPage, ItemsQuery, ModelGroup, OutlineEntry, PairRequest, PairResponse, PendingItem, ProjectRepository, SendMessage, SettleThread, Skill, State, ThreadCursor, ThreadGoal, ThreadGoalState, ThreadQuestionnaire, ThreadWindow, ThreadsPage, ThreadsQuery, UpdateThread, WorkSpan, WriteDraft};
+pub use request::{
+    Account, Answer, BlobRef, CreateProject, CreateThread, DatabaseRollback, DirEntry, DirListing,
+    DraftRevision, DraftSnapshot, DraftWriteResult, EditTotals, ErrorCode, InspectorAgent,
+    InspectorSummary, InspectorTerminal, InspectorWorkflow, ItemsPage, ItemsQuery, ModelGroup,
+    OutlineEntry, PairRequest, PairResponse, PendingItem, ProjectRepository, SendMessage,
+    SettleThread, Skill, State, ThreadCursor, ThreadGoal, ThreadGoalState, ThreadQuestionnaire,
+    ThreadWindow, ThreadsPage, ThreadsQuery, UpdateThread, WorkSpan, WriteDraft,
+};
 pub use search::{TextHit, TextSearchQuery};
 pub use secret::Secret;
 pub use settings::{
@@ -64,7 +77,9 @@ pub use source_index::{
     SOURCE_INDEX_PAGE_LEAVES, SOURCE_INDEX_VERSION, SourceIndexFormat, SourceIndexHeader,
     SourceIndexQuery, SourceIndexRange, SourceLeafDescriptor,
 };
-pub use thread::{Continuation, Project, Run, RunAlreadyFinished, RunOutcome, RunState, RunStatus, Thread, Usage};
+pub use thread::{
+    Continuation, Project, Run, RunAlreadyFinished, RunOutcome, RunState, RunStatus, Thread, Usage,
+};
 pub use transport::{
     CLAUDE_AI, CLAUDE_AI_SESSION_PREFIX, CLAUDE_CODE, ClaudeAiSession, ClaudeAiState,
     TRANSPORT_KEY, transport_of, transport_of_session,

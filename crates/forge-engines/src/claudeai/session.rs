@@ -175,7 +175,10 @@ impl Session {
             .map_err(|source| SaveSessionError::Write { path, source })
     }
 
-    pub(crate) fn update(home: &Path, change: impl FnOnce(&mut Self)) -> Result<(), UpdateSessionError> {
+    pub(crate) fn update(
+        home: &Path,
+        change: impl FnOnce(&mut Self),
+    ) -> Result<(), UpdateSessionError> {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -220,7 +223,10 @@ impl Session {
 }
 
 #[must_use]
-pub(super) fn cookie_change(header: &str, now: chrono::DateTime<chrono::Utc>) -> Option<CookieChange> {
+pub(super) fn cookie_change(
+    header: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<CookieChange> {
     let mut parts = header.split(';');
     let (name, value) = parts.next()?.trim().split_once('=')?;
     let name = name.trim();

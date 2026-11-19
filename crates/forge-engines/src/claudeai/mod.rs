@@ -14,10 +14,13 @@ pub use decoder::{ClaudeAiDecoder, ProtocolError, Stop};
 pub use rules::{ReadRefusal, Rules};
 pub use session::{LoadSessionError, RemoveSessionError, SaveSessionError, Session};
 pub use side::SideQueryError;
-pub use tools::{Call, html_to_text};
 pub(crate) use tools::{Allowed, Answer, Plan, Runtime};
-pub use transport::{BuildClientError, CompleteError, CreateConversationError, OpenTransportError, Refusal, RenameConversationError, RequestError, StopError, StreamError};
+pub use tools::{Call, html_to_text};
 pub(crate) use transport::{Backend, Events, Refused, Request, Transport, UploadError};
+pub use transport::{
+    BuildClientError, CompleteError, CreateConversationError, OpenTransportError, Refusal,
+    RenameConversationError, RequestError, StopError, StreamError,
+};
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -212,12 +215,7 @@ pub(crate) async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outco
     drive_with(&runtime, backend, turn, io).await
 }
 
-async fn drive_with(
-    runtime: &Runtime,
-    backend: &dyn Backend,
-    turn: Turn,
-    io: RunIo,
-) -> Outcome {
+async fn drive_with(runtime: &Runtime, backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
     let allowed = Mutex::new(Allowed::default());
     let scope = Scope {
         allowed: &allowed,

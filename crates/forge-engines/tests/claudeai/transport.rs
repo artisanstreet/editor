@@ -151,11 +151,7 @@ async fn a_response_repeating_the_current_cookie_does_not_rewrite_the_session() 
         written
     );
     assert_eq!(
-        cookie(
-            &Session::load(home.path()).unwrap().unwrap(),
-            "sessionKey"
-        )
-        .as_deref(),
+        cookie(&Session::load(home.path()).unwrap().unwrap(), "sessionKey").as_deref(),
         Some("new")
     );
 }

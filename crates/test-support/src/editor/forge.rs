@@ -21,7 +21,6 @@ pub struct HeldRequest {
 }
 
 impl HeldRequest {
-
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
     }
