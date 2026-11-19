@@ -63,20 +63,26 @@ impl Job {
     }
 }
 
-impl TerminalDialog {
-    pub const fn job(&self) -> Option<&Job> {
-        self.job.as_ref()
-    }
-
-    pub fn new(core: &Core) -> Self {
+impl Default for TerminalDialog {
+    fn default() -> Self {
         Self {
             job: None,
             error: None,
             following: true,
             generation: 0,
             fetch: CompletionSlot::default(),
-            delivery: Delivery::with_wake(NonZeroUsize::MIN, core.wake_mailbox().sender()),
+            delivery: Delivery::new(NonZeroUsize::MIN),
         }
+    }
+}
+
+impl TerminalDialog {
+    pub const fn job(&self) -> Option<&Job> {
+        self.job.as_ref()
+    }
+
+    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+        self.delivery.wake_mailbox()
     }
 
     pub fn open(&mut self, core: &Core, open: Option<&(HostId, ThreadId)>, item: &ItemId) -> bool {
@@ -137,11 +143,6 @@ impl TerminalDialog {
         {
             self.close();
         }
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn fetch_finished(&self) -> bool {
-        self.fetch.is_finished()
     }
 
     pub fn fetch(&mut self, core: &Core) {

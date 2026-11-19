@@ -3,7 +3,8 @@ use editor_aqua::{
     core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind},
     inspector::TerminalDialog,
 };
-use std::time::{Duration, Instant};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 fn config() -> HostConfig {
     HostConfig {
@@ -20,14 +21,19 @@ fn client(core: &Core) -> ForgeClient {
 }
 
 fn pending_dialog(core: &Core, config: &HostConfig) -> TerminalDialog {
-    let mut dialog = TerminalDialog::new(core);
+    let mut dialog = TerminalDialog::default();
+    let (wake, woken) = mpsc::channel();
+    dialog
+        .wake_mailbox()
+        .expect("the terminal dialog owns its wake mailbox")
+        .set_waker(Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
     let open = (config.id.clone(), ThreadId("thread".into()));
     assert!(dialog.open(core, Some(&open), &ItemId("item".into())));
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !dialog.fetch_finished() {
-        assert!(Instant::now() < deadline, "terminal fetch did not finish");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    woken
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the terminal fetch delivers its completion");
     dialog
 }
 

@@ -244,7 +244,7 @@ impl Workspace {
     ) -> (Self, NotificationEffects) {
         let marketplace_actions = Rc::new(RefCell::new(VecDeque::new()));
         let sink = Rc::clone(&marketplace_actions);
-        let inspector = crate::inspector::InspectorOwner::new(core, selections.inspector);
+        let inspector = crate::inspector::InspectorOwner::new(selections.inspector);
         let conversation_selection =
             crate::conversation::presentation::SelectionOwners::new(selections.conversation);
         let markdown = Rc::new(RefCell::new(

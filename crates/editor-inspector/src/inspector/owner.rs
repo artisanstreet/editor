@@ -44,10 +44,10 @@ impl InspectorOwner {
         &self.inspector
     }
 
-    pub fn new(core: &Core, ids: SourceIds) -> Self {
+    pub fn new(ids: SourceIds) -> Self {
         Self {
             inspector: Inspector::default(),
-            terminal: Rc::new(RefCell::new(TerminalDialog::new(core))),
+            terminal: Rc::default(),
             source: SourceView::new(ids.source_document, ids.source),
             command: SourceView::new(ids.command_document, ids.command),
             output: SourceView::new(ids.output_document, ids.output),
@@ -463,6 +463,9 @@ impl InspectorOwner {
 
 impl InspectorOwner {
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
+        if let Some(mailbox) = self.terminal.borrow().wake_mailbox() {
+            ctx.bind_mailbox(window, mailbox);
+        }
         if let Some(content) = &self.inspector.source {
             self.source.bind(content, ctx, window);
         }
