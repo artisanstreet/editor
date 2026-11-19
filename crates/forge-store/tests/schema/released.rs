@@ -186,6 +186,12 @@ async fn an_upgrade_interrupted_after_schema_19_finishes_and_finds_its_messages(
         let store = crate::Store::open(dir.path()).unwrap_or_else(|error| {
             panic!("Forge starts after an upgrade stopped at schema {stopped}: {error:#?}")
         });
+        let built = *store
+            .recall_index()
+            .wait_for(|index| *index != crate::RecallIndex::Building)
+            .await
+            .expect("the recall index build reports how it ended");
+        assert_eq!(built, crate::RecallIndex::Built);
         let state = store.state().await.expect("read the state");
         assert_eq!(
             state

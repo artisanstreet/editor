@@ -9,6 +9,7 @@ pub(crate) enum Step {
     SetAside { found: usize },
     ListImages,
     Migration { next: usize },
+    RecallIndex,
 }
 
 impl std::fmt::Display for Step {
@@ -18,6 +19,7 @@ impl std::fmt::Display for Step {
             Self::SetAside { found } => write!(f, "setting schema {found} aside"),
             Self::ListImages => f.write_str("listing the images a kept database uses"),
             Self::Migration { next } => write!(f, "upgrading to schema {next}"),
+            Self::RecallIndex => f.write_str("preparing the recall index"),
         }
     }
 }

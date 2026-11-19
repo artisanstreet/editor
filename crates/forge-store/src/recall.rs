@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
 use std::ops::Range;
 
+pub(crate) mod build;
+
+pub use build::{BuildIndexError, PrepareIndexError, RecallIndex};
+pub(crate) use build::{Builder, INDEX_VERSION, IndexState, index_state, prepare_index};
+
 type Result<T, E = ContentError> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
@@ -377,83 +382,6 @@ impl rusqlite::types::FromSql for RecallKind {
                 rusqlite::types::FromSqlError::Other(format!("unknown recall kind {name:?}").into())
             })
     }
-}
-
-const INDEX_VERSION: i64 = 1;
-
-#[derive(Debug, thiserror::Error)]
-pub enum RefreshIndexError {
-    #[error("read the recall index version")]
-    Version(#[source] rusqlite::Error),
-    #[error("rebuild the recall index at version {version}")]
-    Rebuild {
-        version: i64,
-        #[source]
-        source: ContentError,
-    },
-}
-
-fn index_version(conn: &Connection) -> rusqlite::Result<Option<i64>> {
-    let present: bool = conn.query_row(
-        include_str!("sql/recall/has_index_version.sql"),
-        [],
-        |row| row.get(0),
-    )?;
-    if !present {
-        return Ok(None);
-    }
-    conn.query_row(include_str!("sql/recall/index_version.sql"), [], |row| {
-        row.get(0)
-    })
-    .optional()
-}
-
-pub(crate) fn refresh_index(conn: &mut Connection) -> Result<(), RefreshIndexError> {
-    let built = index_version(conn).map_err(RefreshIndexError::Version)?;
-    if built == Some(INDEX_VERSION) {
-        return Ok(());
-    }
-    tracing::info!(
-        built,
-        version = INDEX_VERSION,
-        "rebuilding the recall index"
-    );
-    let rebuild = |source| RefreshIndexError::Rebuild {
-        version: INDEX_VERSION,
-        source,
-    };
-    let sql = |source: rusqlite::Error| rebuild(source.into());
-    let tx = conn.transaction().map_err(sql)?;
-    tx.execute_batch(include_str!("sql/recall/rebuild.sql"))
-        .map_err(sql)?;
-    backfill(&tx).map_err(rebuild)?;
-    tx.execute(
-        include_str!("sql/recall/set_index_version.sql"),
-        [INDEX_VERSION],
-    )
-    .map_err(sql)?;
-    tx.commit().map_err(sql)
-}
-
-fn backfill(conn: &Connection) -> Result<()> {
-    let mut rows = conn.prepare(include_str!("sql/recall/items.sql"))?;
-    let bodies = rows.query_map([], |row| row.get::<_, String>(0))?;
-    let mut skipped = 0_u64;
-    for body in bodies {
-        let body = body?;
-        let Ok(item) = serde_json::from_str::<Item>(&body) else {
-            skipped += 1;
-            continue;
-        };
-        index(conn, &item)?;
-    }
-    if skipped > 0 {
-        tracing::warn!(
-            skipped,
-            "items left out of recall: their bodies didn't read"
-        );
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

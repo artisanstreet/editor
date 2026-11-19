@@ -404,3 +404,51 @@ async fn search_filters_items_by_the_engine_that_wrote_them() {
     assert_eq!(search(EngineId::Claude).await.unwrap().hits.len(), 1);
     assert!(search(EngineId::Codex).await.unwrap().hits.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forge_starts_with_a_damaged_item_and_still_finds_the_rest() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    store
+        .upsert_item(said(&notes, "The scene bound stops at 512 items."))
+        .await
+        .expect("save the healthy note");
+    let damaged = store
+        .upsert_item(said(&notes, "This note loses its text."))
+        .await
+        .expect("save the note that gets damaged")
+        .id;
+    drop(store);
+    let raw = rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database beside the store");
+    let lost = serde_json::to_string(&artisan_api::ContentRef::from_text("words never stored"))
+        .expect("encode a reference to missing content");
+    raw.execute(
+        include_str!("recall/damage_item.sql"),
+        [damaged.as_str(), lost.as_str()],
+    )
+    .expect("point the note at content that is not stored");
+    raw.execute_batch(include_str!("recall/forget_index.sql"))
+        .expect("make the next start rebuild the recall index");
+    drop(raw);
+
+    let store = Store::open(dir.path()).expect("Forge starts despite the damaged item");
+    let mut index = store.recall_index();
+    let built = *index
+        .wait_for(|index| *index != forge_store::RecallIndex::Building)
+        .await
+        .expect("the recall index build reports how it ended");
+    assert_eq!(built, forge_store::RecallIndex::Built);
+    let found = store
+        .recall_search(
+            RecallScope::default(),
+            "scene bound".into(),
+            false,
+            10,
+            None,
+        )
+        .await
+        .expect("search recall");
+    assert_eq!(found.hits.len(), 1, "{found:?}");
+}

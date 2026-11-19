@@ -46,7 +46,11 @@ fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
 
     migrate(&mut conn, Upgrade::of(&crate::Environment::system()))
         .expect("migrate to today's schema");
-    crate::recall::refresh_index(&mut conn).expect("rebuild the recall index");
+    crate::recall::prepare_index(&mut conn).expect("start rebuilding the recall index");
+    while !matches!(
+        crate::recall::build::build_batch(&conn).expect("index a batch"),
+        crate::recall::build::Batch::Finished { .. }
+    ) {}
 
     assert_eq!(
         found(&conn, "smør"),

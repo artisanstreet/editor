@@ -1,0 +1,1 @@
+SELECT building_after FROM recall_index

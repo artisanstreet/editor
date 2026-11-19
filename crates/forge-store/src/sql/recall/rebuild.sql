@@ -14,4 +14,4 @@ CREATE TRIGGER item_text_owner_delete AFTER DELETE ON items BEGIN
   INSERT INTO message_search(message_search,rowid,folded) SELECT 'delete',rowid,folded FROM item_text WHERE rowid=OLD.rowid;
   DELETE FROM item_text WHERE rowid=OLD.rowid;
 END;
-CREATE TABLE recall_index(version INTEGER NOT NULL);
+CREATE TABLE recall_index(version INTEGER NOT NULL, building_after INTEGER);

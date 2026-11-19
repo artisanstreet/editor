@@ -183,6 +183,10 @@ impl Writer {
         }
     }
 
+    pub(crate) const fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     pub(crate) fn transact<R, E: From<StorageError>>(
         &mut self,
         durability: Durability,

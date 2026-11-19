@@ -73,9 +73,9 @@ pub use pairing::{
 };
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
-    RecallKind, RecallScope, RecallSearchError, RecallTouchingError, RefreshIndexError,
-    SearchCursor, SearchHit, SearchPage, Touch,
+    BuildIndexError, GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery,
+    PrepareIndexError, RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError,
+    RecallTouchingError, SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
@@ -289,6 +289,7 @@ struct Inner {
     scan_slots: Arc<Semaphore>,
     hot: Arc<hot::HotPages>,
     index_build: Arc<Semaphore>,
+    recall_index: watch::Receiver<RecallIndex>,
     authorizer: Authorizer,
     device_watch: pairing::DeviceWatch,
     database: PathBuf,
@@ -303,6 +304,7 @@ struct Inner {
 
 #[derive(Default)]
 struct Threads {
+    recall: Option<recall::Builder>,
     writer: Option<std::thread::JoinHandle<()>>,
     checkpointer: Option<std::thread::JoinHandle<()>>,
 }
@@ -310,6 +312,11 @@ struct Threads {
 impl Threads {
     fn join(&mut self) -> Result<(), ShutdownError> {
         let here = std::thread::current().id();
+        if let Some(recall) = self.recall.take() {
+            recall
+                .stop()
+                .map_err(|_panic| ShutdownError::RecallBuilderPanicked)?;
+        }
         for (thread, panicked) in [
             (self.writer.take(), ShutdownError::WriterPanicked),
             (
@@ -408,12 +415,6 @@ pub enum OpenStoreError {
         #[source]
         source: StorageError,
     },
-    #[error("rebuild the recall index of {}", database.display())]
-    RecallIndex {
-        database: PathBuf,
-        #[source]
-        source: RefreshIndexError,
-    },
     #[error("read whether a rollback of {} is still to be reported", database.display())]
     PendingRollback {
         database: PathBuf,
@@ -452,6 +453,8 @@ pub enum ShutdownError {
     WriterPanicked,
     #[error("the Forge store checkpointer panicked")]
     CheckpointerPanicked,
+    #[error("the Forge store's recall index builder panicked")]
+    RecallBuilderPanicked,
 }
 
 error::operation_error!(SynchronizeError(StorageError), "catch up from seq {cursor}", cursor: Seq);
@@ -565,6 +568,32 @@ fn stored_version(connections: &Connections, database: &Path) -> Result<usize, O
         .map_err(|source| prepare(source.into()))
 }
 
+fn writer_connection(
+    connections: &Connections,
+    database: &Path,
+) -> Result<Connection, OpenStoreError> {
+    let prepare = |source| OpenStoreError::Database {
+        database: database.to_owned(),
+        source,
+    };
+    let sql = |source: rusqlite::Error| prepare(source.into());
+    let conn = open_database(connections, database).map_err(prepare)?;
+    let mode: String = conn
+        .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+        .map_err(sql)?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(OpenStoreError::Wal {
+            database: database.to_owned(),
+            mode,
+        });
+    }
+    conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
+        .map_err(sql)?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
+        .map_err(sql)?;
+    Ok(conn)
+}
+
 fn upgrade(
     conn: &mut Connection,
     database: &Path,
@@ -574,10 +603,55 @@ fn upgrade(
         database: database.to_owned(),
         source: Box::new(source),
     })?;
-    recall::refresh_index(conn).map_err(|source| OpenStoreError::RecallIndex {
+    let progress = |source| OpenStoreError::Database {
         database: database.to_owned(),
-        source,
-    })
+        source: StorageError::from(source),
+    };
+    progress::watch(conn, progress::Step::RecallIndex, upgrade.every).map_err(progress)?;
+    let prepared = recall::prepare_index(conn);
+    progress::unwatch(conn).map_err(progress)?;
+    if let Err(error) = prepared {
+        tracing::warn!(
+            database = %database.display(),
+            error = %diagnostics::chain(&error),
+            "Forge starts with the recall index it has; search may miss items until it can be rebuilt"
+        );
+    }
+    Ok(())
+}
+
+fn recall_builder(
+    conn: &Connection,
+    jobs: &mpsc::Sender<Job>,
+    database: &Path,
+) -> Result<(Option<recall::Builder>, watch::Receiver<RecallIndex>), OpenStoreError> {
+    let unavailable = |reason: &dyn std::fmt::Display| {
+        tracing::warn!(
+            database = %database.display(),
+            reason = %reason,
+            "search may miss items until the recall index is rebuilt when Forge next starts"
+        );
+        Ok((None, watch::channel(RecallIndex::Incomplete).1))
+    };
+    match recall::index_state(conn) {
+        Ok(recall::IndexState::Building { .. }) => {
+            let (status, watching) = watch::channel(RecallIndex::Building);
+            recall::Builder::spawn(jobs.clone(), status)
+                .map(|builder| (Some(builder), watching))
+                .map_err(|source| OpenStoreError::Spawn {
+                    thread: "recall index builder",
+                    source,
+                })
+        }
+        Ok(recall::IndexState::Built) => Ok((None, watch::channel(RecallIndex::Built).1)),
+        Ok(recall::IndexState::Stale { built }) => unavailable(&format_args!(
+            "the recall index is at version {built:?}, not {}",
+            recall::INDEX_VERSION
+        )),
+        Err(error) => unavailable(&format_args!(
+            "reading the recall index state failed: {error}"
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -730,18 +804,7 @@ impl Store {
             database: database.clone(),
             source,
         };
-        let sql = |source: rusqlite::Error| prepare(source.into());
-        let mut conn = open_database(&connections, &database).map_err(prepare)?;
-        let mode: String = conn
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-            .map_err(sql)?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(OpenStoreError::Wal { database, mode });
-        }
-        conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
-            .map_err(sql)?;
-        conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)
-            .map_err(sql)?;
+        let mut conn = writer_connection(&connections, &database)?;
         if recover {
             upgrade(&mut conn, &database, upgrading)?;
         }
@@ -767,6 +830,7 @@ impl Store {
 
         let mut threads = Threads::default();
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
+        let (builder, recall_index) = recall_builder(writer.connection(), &jobs, &database)?;
         threads.writer = Some(
             std::thread::Builder::new()
                 .name("forge-store-writer".into())
@@ -776,6 +840,7 @@ impl Store {
                     source,
                 })?,
         );
+        threads.recall = builder;
 
         let checkpoint_conn = open_database(&connections, &database).map_err(prepare)?;
         threads.checkpointer = Some(
@@ -812,6 +877,7 @@ impl Store {
                 scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
                 hot,
                 index_build: Arc::new(Semaphore::new(1)),
+                recall_index,
                 authorizer,
                 device_watch,
                 database,
@@ -845,6 +911,16 @@ impl Store {
         drop(authorizer);
         drop(jobs);
         threads.join()
+    }
+
+    #[must_use]
+    pub fn recall_index(&self) -> watch::Receiver<RecallIndex> {
+        self.inner.recall_index.clone()
+    }
+
+    #[must_use]
+    pub const fn recall_index_version() -> i64 {
+        recall::INDEX_VERSION
     }
 
     #[must_use]
