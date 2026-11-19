@@ -1,6 +1,7 @@
 use super::*;
 use aqua_text::{SharedFonts, SharedRuns};
 use aqua_ui::tree::{ActionEvent, ActionKind};
+use std::rc::Rc;
 
 #[test]
 fn assistive_tech_reads_and_sets_the_slider_range() {
@@ -15,7 +16,7 @@ fn assistive_tech_reads_and_sets_the_slider_range() {
         ArtisanTheme::resolved(),
         "Threshold",
         "4",
-        state.clone(),
+        Rc::clone(&state),
     )
     .on_change(move |value| sink.borrow_mut().push(value))
     .build();

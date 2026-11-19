@@ -128,7 +128,7 @@ impl Button {
     pub fn within(mut self, surface: Surface) -> Self {
         self.radius = surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            Radius::px,
         );
         self
     }
@@ -289,10 +289,7 @@ impl Button {
                 .cursor(CursorIcon::Pointer)
                 .focus_visible_style(focus_ring(&theme))
                 .hover_style(hover);
-            let element = match fills {
-                true => live::track(element),
-                false => element,
-            };
+            let element = if fills { live::track(element) } else { element };
             pressable(element, &theme, PRESS)
         })
     }

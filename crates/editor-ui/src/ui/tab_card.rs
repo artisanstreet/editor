@@ -36,7 +36,7 @@ impl TabCard {
             .map_or(0.0, |strip| strip.reveal.clamp(0.0, 1.0));
         let tab_key = aqua_ui::tree::hash_key(Key::from(format!("{}-tab", self.id)));
         let width = Rc::new(std::cell::Cell::new(None));
-        let prepaint_width = width.clone();
+        let prepaint_width = Rc::clone(&width);
         let probe = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |tree, canvas| {
@@ -149,7 +149,7 @@ impl GeometryCache {
             self.paths = Rc::new(Geometry::new(key));
             self.key = Some(key);
         }
-        self.paths.clone()
+        Rc::clone(&self.paths)
     }
 }
 
@@ -303,14 +303,13 @@ fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
 fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
     let glass =
         crate::ui::kit::surface::glass::fills(theme, crate::ui::kit::surface::glass::Shade::Clear);
-    let settle = match theme.colors.mode.is_dark() {
-        true => Some(GpuiBackground::Solid(
+    let settle = theme.colors.mode.is_dark().then(|| {
+        GpuiBackground::Solid(
             Oklch::new(0.0, 0.0, 0.0)
                 .with_alpha(SHEET_TO_SIDEBAR)
                 .to_reference_paint(),
-        )),
-        false => None,
-    };
+        )
+    });
     settle
         .into_iter()
         .chain(glass.into_iter().take(2))
@@ -353,7 +352,7 @@ impl PreparedTabCard {
         for path in &self.paths {
             items.push(DisplayItem::GpuiPath {
                 transformed_window_logical_bounds: path.transformed_window_logical_bounds,
-                path: path.path.clone(),
+                path: Arc::clone(&path.path),
             });
         }
         items

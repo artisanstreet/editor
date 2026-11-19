@@ -310,14 +310,8 @@ fn ready_only_preview_retains_image_and_ignores_gallery_navigation() {
     let image = gallery.image.as_ref().unwrap().clone();
     let weak = image.downgrade();
     let now = Instant::now();
-    let mut preview = Preview::from_ready(
-        11,
-        config.id.clone(),
-        instance,
-        image,
-        "attachment-1".into(),
-        now,
-    );
+    let mut preview =
+        Preview::from_ready(11, config.id, instance, image, "attachment-1".into(), now);
     drop(gallery);
     assert!(weak.upgrade().is_some());
     assert_eq!(preview.opener_key(), Some("attachment-1"));

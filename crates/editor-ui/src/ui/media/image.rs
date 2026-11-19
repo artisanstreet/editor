@@ -150,10 +150,9 @@ impl Images {
                     .jobs
                     .values_mut()
                     .find(|job| job.cache_id == fetcher.resources().id() && job.key == key)
+                    && !job.owners.iter().any(|owner| owner == fetcher.owner())
                 {
-                    if !job.owners.iter().any(|owner| owner == fetcher.owner()) {
-                        job.owners.push(Arc::clone(fetcher.owner()));
-                    }
+                    job.owners.push(Arc::clone(fetcher.owner()));
                 }
                 None
             }

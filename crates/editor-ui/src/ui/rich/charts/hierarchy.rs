@@ -54,8 +54,8 @@ pub(crate) struct Prepared {
 impl Prepared {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<Tree>()
+        size_of::<Self>()
+            + size_of::<Tree>()
             + retained_optional(self.unit.as_ref())
             + retained_vec(&self.tree.nodes)
             + self
@@ -109,7 +109,7 @@ impl Tree {
         let index = self.nodes.len();
         let name = spec.name.trim();
         self.nodes.push(TreeNode {
-            name: String::from(if name.is_empty() && parent.is_none() {
+            name: (if name.is_empty() && parent.is_none() {
                 "All".to_owned()
             } else {
                 name.to_owned()

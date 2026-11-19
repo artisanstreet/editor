@@ -527,8 +527,7 @@ impl Preview {
         let slide = self
             .slide_started
             .filter(|_| !reduced_motion)
-            .map(progress)
-            .unwrap_or(1.0);
+            .map_or(1.0, progress);
         let mut stage = UiBox::new().width(width).height(height).style(
             Style::new()
                 .absolute_at(Some(left), Some(top), None, None)
@@ -698,7 +697,7 @@ impl Preview {
                         .style(Style::new().absolute_at(
                             if forward { None } else { Some(Space::S8.px()) },
                             Some((viewport.h - nav_size.edge()) / 2.0),
-                            if forward { Some(Space::S8.px()) } else { None },
+                            forward.then(|| Space::S8.px()),
                             None,
                         ))
                         .child(button)

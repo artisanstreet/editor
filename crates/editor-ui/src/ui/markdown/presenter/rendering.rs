@@ -16,6 +16,7 @@ use editor_assets::AssetId;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 impl MarkdownPresenter {
     pub fn render(
@@ -206,8 +207,8 @@ impl MarkdownPresenter {
                         entry,
                         id,
                         theme,
-                        glyph.clone(),
-                        invalidate.clone(),
+                        Rc::clone(&glyph),
+                        Rc::clone(&invalidate),
                         heatmap,
                         None,
                         reference_scope.clone(),
@@ -335,7 +336,7 @@ impl MarkdownPresenter {
         Ok(RenderedMarkdown {
             element: column.build(),
             selection_sources: sources,
-            proof: PreparationProof(self.proof.clone()),
+            proof: PreparationProof(Arc::clone(&self.proof)),
         })
     }
 
@@ -376,7 +377,7 @@ impl MarkdownPresenter {
         ) {
             self.media_invalidations
                 .borrow_mut()
-                .insert(id.to_owned(), invalidate.clone());
+                .insert(id.to_owned(), Rc::clone(&invalidate));
         }
         let element = match &envelope.block {
             Prepared::Model(model) => {

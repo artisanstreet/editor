@@ -399,7 +399,7 @@ pub async fn load_image_bytes(
                 _ => Err(MediaLoadError::Fetch(MediaFailure::Unreadable)),
             }
         }
-        Parsed::Data(payload) => Ok(payload.bytes.clone()),
+        Parsed::Data(payload) => Ok(Arc::clone(&payload.bytes)),
         Parsed::File { path, from_home } => {
             let fetcher = fetcher.ok_or(MediaLoadError::Invalid)?;
             fetcher

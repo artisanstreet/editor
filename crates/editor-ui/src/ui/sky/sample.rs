@@ -8,9 +8,10 @@ fn mix(a: f32, b: f32, t: f32) -> f32 {
 }
 
 fn srgb(value: f32) -> f32 {
-    match value <= 0.0031308 {
-        true => value * 12.92,
-        false => 1.055 * value.max(0.0).powf(1.0 / 2.4) - 0.055,
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.max(0.0).powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -33,7 +34,7 @@ fn gradient_segment(
     })
 }
 
-pub fn sky_color(p: &[f32], altitude: f32) -> [f32; 3] {
+pub(super) fn sky_color(p: &[f32], altitude: f32) -> [f32; 3] {
     let colors: [[f32; 3]; 5] = std::array::from_fn(|i| std::array::from_fn(|c| p[8 + i * 4 + c]));
     let slope = |a: usize, b: usize, width: f32| {
         std::array::from_fn(|c| (colors[b][c] - colors[a][c]) / width)
@@ -102,7 +103,7 @@ fn noise(p: [f32; 2]) -> f32 {
     )
 }
 
-pub fn dither(pixel: [f32; 2]) -> [f32; 3] {
+pub(super) fn dither(pixel: [f32; 2]) -> [f32; 3] {
     let screen_noise = |x: f32, y: f32| {
         let a = x * 0.06711056 + y * 0.00583715;
         let b = 52.982_918 * (a - a.floor());
@@ -115,7 +116,7 @@ pub fn dither(pixel: [f32; 2]) -> [f32; 3] {
     ]
 }
 
-pub fn shade(p: &[f32], uv: [f32; 2]) -> [f32; 4] {
+pub(super) fn shade(p: &[f32], uv: [f32; 2]) -> [f32; 4] {
     let unit = p[0].min(p[1] * 1.4);
     let x = (uv[0] - 0.5) * p[0] / unit;
     let y = (uv[1] - p[32]) * p[1] / unit;

@@ -95,7 +95,12 @@ impl AudioState {
             transcript: Disclosure::Closed,
             timer: None,
         });
-        (row.waiter, row.line.clone(), row.hovered, row.transcript)
+        (
+            row.waiter,
+            Rc::clone(&row.line),
+            row.hovered,
+            row.transcript,
+        )
     }
     fn toggle_transcript(&self, id: &str) {
         if let Some(row) = self.0.borrow_mut().rows.get_mut(id) {
@@ -413,7 +418,7 @@ impl AudioBlock {
                     transcript,
                     disclosure,
                     state.clone(),
-                    invalidate.clone(),
+                    Rc::clone(&invalidate),
                 )
             });
             let sender = state.0.borrow().wake.sender();
@@ -496,12 +501,12 @@ impl AudioBlock {
             );
             let hovering = state.clone();
             let hover_id = row_id.clone();
-            let hover_invalidate = invalidate.clone();
+            let hover_invalidate = Rc::clone(&invalidate);
             let toggle_player = player.clone();
             let toggle_shown = shown.clone();
             let toggle_path = path.clone();
-            let toggle_bytes = bytes.clone();
-            let toggle_invalidate = invalidate.clone();
+            let toggle_bytes = Arc::clone(&bytes);
+            let toggle_invalidate = Rc::clone(&invalidate);
             let button = play_button(
                 &row_id,
                 &theme,
@@ -520,7 +525,7 @@ impl AudioBlock {
                         Shown::Playing { .. } | Shown::Loading => toggle_player.pause(),
                         Shown::Paused { .. } | Shown::Ended { .. } => toggle_player.resume(),
                         Shown::Idle | Shown::Failed(_) => {
-                            toggle_player.play_bytes(&toggle_path, toggle_bytes.clone())
+                            toggle_player.play_bytes(&toggle_path, Arc::clone(&toggle_bytes));
                         }
                     }
                     toggle_invalidate();
@@ -560,7 +565,7 @@ impl AudioBlock {
                     },
                     state.clone(),
                     line,
-                    invalidate.clone(),
+                    Rc::clone(&invalidate),
                 ),
             };
             let time = match shown {
@@ -606,7 +611,7 @@ fn progress_line(
     let progress = shown.progress();
     let background = theme.colors.text.at(Opacity::Rule).to_reference_paint();
     let foreground = theme.colors.text_muted.to_reference_paint();
-    let draw_line = line.clone();
+    let draw_line = Rc::clone(&line);
     let track = ui::Canvas::new()
         .style(
             Style::new()
@@ -647,10 +652,10 @@ fn progress_line(
         .with_key(format!("{id}-line"));
     if let Some(length) = duration {
         let position = shown.position();
-        let key_seek = seek.clone();
-        let key_invalidate = invalidate.clone();
-        let request_seek = seek.clone();
-        let request_invalidate = invalidate.clone();
+        let key_seek = Rc::clone(&seek);
+        let key_invalidate = Rc::clone(&invalidate);
+        let request_seek = Rc::clone(&seek);
+        let request_invalidate = Rc::clone(&invalidate);
         element = element
             .role(Role::Slider)
             .aria_label(format!("Seek {name}"))
@@ -685,15 +690,15 @@ fn progress_line(
             });
         let pressing = state.clone();
         let press_id = id.to_owned();
-        let press_seek = seek.clone();
-        let press_line = line.clone();
-        let press_invalidate = invalidate.clone();
+        let press_seek = Rc::clone(&seek);
+        let press_line = Rc::clone(&line);
+        let press_invalidate = Rc::clone(&invalidate);
         let moving = state.clone();
         let move_id = id.to_owned();
         let move_seek = seek;
-        let move_line = line.clone();
-        let move_invalidate = invalidate.clone();
-        let releasing = state.clone();
+        let move_line = line;
+        let move_invalidate = Rc::clone(&invalidate);
+        let releasing = state;
         let release_id = id.to_owned();
         element = element
             .cursor(aqua_core::CursorIcon::Pointer)

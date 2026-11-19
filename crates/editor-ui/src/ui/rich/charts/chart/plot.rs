@@ -224,7 +224,7 @@ pub(super) fn layout(
             x: 0.0,
             y: at,
             below: false,
-            text: String::from(format!("{label} {}", reading(*value, axis.unit.as_deref()))),
+            text: format!("{label} {}", reading(*value, axis.unit.as_deref())),
             color: warning,
         });
     }
@@ -347,7 +347,7 @@ fn end_labels(
             };
             Some(EndLabel {
                 y: y.domain.fraction_down(anchor).clamp(0.0, 1.0),
-                text: String::from(format!("{name} {value}")),
+                text: format!("{name} {value}"),
                 color: series_color(theme, index).to_reference_paint(),
             })
         })
@@ -368,7 +368,7 @@ fn x_ticks(model: &Model, view: Domain, width: f32) -> Vec<Tick> {
                     let index = inside[at];
                     Tick {
                         at: view.fraction(f64_of(index)),
-                        label: String::from(names[index].clone()),
+                        label: names[index].clone(),
                     }
                 })
                 .collect()
@@ -380,7 +380,7 @@ fn x_ticks(model: &Model, view: Domain, width: f32) -> Vec<Tick> {
                 .iter()
                 .map(|value| Tick {
                     at: view.fraction(*value),
-                    label: String::from(model.x_tick(*value)),
+                    label: model.x_tick(*value),
                 })
                 .collect()
         }
@@ -409,7 +409,7 @@ fn annotations(
         .to_reference_paint();
     let event = theme.colors.text.to_reference_paint();
     for annotation in &spec.annotations {
-        let text = String::from(annotation.label.trim().to_owned());
+        let text = annotation.label.trim().to_owned();
         let start = annotation.x.as_ref().and_then(|x| model.resolve_x(x));
         let end = annotation.x_end.as_ref().and_then(|x| model.resolve_x(x));
         let label = |x: f32, y: f32, below: bool| PlotLabel {

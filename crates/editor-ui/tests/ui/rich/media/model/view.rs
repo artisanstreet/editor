@@ -21,7 +21,7 @@ fn loading_gap_recreates_camera_but_consecutive_ready_retarget_keeps_it() {
     assert_eq!(state.0.borrow().entries["model"].camera.yaw, 40.0);
     assert_ne!(state.0.borrow().entries["model"].generation, generation);
     state.suspend("model");
-    state.ready("model", initial, Shading::Wireframe, owner.clone(), 2);
+    state.ready("model", initial, Shading::Wireframe, owner, 2);
     assert_eq!(state.0.borrow().entries["model"].camera, initial);
     assert_eq!(
         state.0.borrow().entries["model"].shading,
@@ -115,21 +115,19 @@ fn released_view_rejects_old_software_completion_for_reused_id() {
     assert_ne!(generation, old_generation);
     let sender = state.0.borrow().delivery.sender();
     runtime::runtime().spawn(async move {
-        assert!(
-            sender
-                .send(Completion {
-                    id: "model".to_owned(),
-                    generation: old_generation,
-                    key,
-                    frame: crate::ui::media::model::Frame {
-                        width: 1,
-                        height: 1,
-                        pixels: vec![255, 0, 0, 255],
-                    },
-                })
-                .await
-                .is_ok()
-        );
+        sender
+            .send(Completion {
+                id: "model".to_owned(),
+                generation: old_generation,
+                key,
+                frame: crate::ui::media::model::Frame {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![255, 0, 0, 255],
+                },
+            })
+            .await
+            .unwrap();
     });
     received.recv_timeout(Duration::from_secs(10)).unwrap();
     let images = ImageAssets::new(aqua::images::ImageAssetBudget::editor());

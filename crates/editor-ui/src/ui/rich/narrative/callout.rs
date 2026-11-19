@@ -40,7 +40,7 @@ pub(crate) struct Callout {
 }
 impl Callout {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + crate::ui::rich::kit::retained_optional(self.title.as_ref())
             + self.body.capacity()
     }
@@ -162,7 +162,7 @@ impl Callout {
                 Some(title) => format!("{label}: {title}"),
                 None => label.to_owned(),
             };
-            let state = states.clone();
+            let state = states;
             let key = id.clone();
             ui::Button::new()
                 .layout("row")

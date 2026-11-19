@@ -129,11 +129,11 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             if self.disabled {
                 button = button.opacity(Opacity::Disabled.alpha());
             }
-            if !self.disabled {
-                if let Some(change) = self.change.clone() {
-                    let value = option.value.clone();
-                    button = button.on_activate(move || change(value.clone()));
-                }
+            if !self.disabled
+                && let Some(change) = self.change.clone()
+            {
+                let value = option.value.clone();
+                button = button.on_activate(move || change(value.clone()));
             }
             let mut item = button
                 .build()

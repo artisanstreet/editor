@@ -107,7 +107,7 @@ fn mounted() -> (UiTree, Shared, aqua_core::NodeId) {
         .set_content(
             &mut tree,
             vec![view(
-                &ArtisanTheme::for_mode(ThemeMode::Dark),
+                ArtisanTheme::for_mode(ThemeMode::Dark),
                 "diagram",
                 &diagram(400.0, 200.0),
                 &state,

@@ -219,7 +219,7 @@ pub fn cached_scene(bounds: Rect, shapes: &[Shape], cache: &SceneCache) -> Vec<D
                 items.push(DisplayItem::GpuiBackground {
                     bounds: band,
                     corners,
-                    background: fill.clone(),
+                    background: *fill,
                 });
                 items.push(DisplayItem::GpuiBorder {
                     bounds: band,

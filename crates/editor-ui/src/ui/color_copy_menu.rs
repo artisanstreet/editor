@@ -68,11 +68,11 @@ impl Panel {
                 (CopyKind::Alternative, _) => icon,
             };
             let text = entry.text.clone();
-            let select_alive = self.alive.clone();
-            let select_pending = self.pending_close.clone();
-            let select_effect = self.effect.clone();
-            let hover_alive = self.alive.clone();
-            let hover_effect = self.effect.clone();
+            let select_alive = Rc::clone(&self.alive);
+            let select_pending = Rc::clone(&self.pending_close);
+            let select_effect = Rc::clone(&self.effect);
+            let hover_alive = Rc::clone(&self.alive);
+            let hover_effect = Rc::clone(&self.effect);
             let row = RowItem::new(
                 format!("copy-value-{index}"),
                 theme,
@@ -107,9 +107,9 @@ impl Panel {
     }
 
     fn popover(&self, viewport: aqua_core::Size) -> Popover {
-        let dismiss_pending = self.pending_close.clone();
-        let dismiss_alive = self.alive.clone();
-        let dismiss_effect = self.effect.clone();
+        let dismiss_pending = Rc::clone(&self.pending_close);
+        let dismiss_alive = Rc::clone(&self.alive);
+        let dismiss_effect = Rc::clone(&self.effect);
         Popover::new(
             "copy-menu",
             "Copy value",
@@ -157,8 +157,8 @@ impl ColorCopyMenuHost {
             pending_close: Rc::new(Cell::new(false)),
         };
         let (element, mut options) = panel.popover(app.viewport()).into_parts();
-        let closed_alive = panel.alive.clone();
-        let closed_effect = panel.effect.clone();
+        let closed_alive = Rc::clone(&panel.alive);
+        let closed_effect = Rc::clone(&panel.effect);
         options.on_close = Some(Rc::new(move |_| {
             if closed_alive.replace(false) {
                 closed_effect(ColorCopyEffect::Dismissed);

@@ -56,7 +56,7 @@ impl Format {
 }
 
 #[derive(Debug)]
-pub struct Model {
+pub(crate) struct Model {
     pub mesh: Mesh,
     pub triangles: usize,
     pub format: Format,
@@ -64,7 +64,7 @@ pub struct Model {
 
 impl Model {}
 
-pub fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
+pub(crate) fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
     let format = format
         .or_else(|| Format::sniff(bytes))
         .ok_or("the file is not a model format the viewer reads (OBJ, FBX, STL, PLY, glTF)")?;

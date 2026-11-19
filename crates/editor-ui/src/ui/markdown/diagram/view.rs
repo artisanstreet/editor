@@ -185,9 +185,10 @@ pub(crate) fn view(
         .focusable(true)
         .focus_visible_style(focus_ring(theme))
         .aria_label("Mermaid diagram")
-        .aria_description(match diagram.summary.is_empty() {
-            true => INSTRUCTIONS.to_owned(),
-            false => format!("{}. {INSTRUCTIONS}", diagram.summary),
+        .aria_description(if diagram.summary.is_empty() {
+            INSTRUCTIONS.to_owned()
+        } else {
+            format!("{}. {INSTRUCTIONS}", diagram.summary)
         })
         .cursor(if dragging {
             CursorIcon::Grabbing

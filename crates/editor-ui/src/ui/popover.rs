@@ -4,6 +4,7 @@ use aqua_ui::{
 };
 
 use super::{kit::Surface, theme::ArtisanTheme};
+use std::rc::Rc;
 
 const VIEWPORT_MARGIN: f32 = 16.0;
 
@@ -97,7 +98,7 @@ impl Popover {
             self.viewport.w,
             self.viewport.h,
         );
-        let tab_dismiss = self.dismiss.clone();
+        let tab_dismiss = Rc::clone(&self.dismiss);
         let panel = panel.build().role(Role::Menu).aria_label(self.label).debug_selector(crate::ui::menu_keys::POPOVER_MENU).on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if key.key == InputKey::Named(NamedKey::Tab)) {
                 tab_dismiss();

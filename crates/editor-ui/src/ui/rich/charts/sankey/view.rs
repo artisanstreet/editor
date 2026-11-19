@@ -52,7 +52,7 @@ impl SankeyState {
     fn sync(&self, id: &str, graph: &Arc<Graph>) -> (Option<Hover>, Probe, Rc<Layout>) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            graph: graph.clone(),
+            graph: Arc::clone(graph),
             layout: None,
             hover: None,
             probe: Rc::new(Cell::new(None)),
@@ -62,14 +62,15 @@ impl SankeyState {
                 entry.layout = None;
                 entry.hover = None;
             }
-            entry.graph = graph.clone();
+            entry.graph = Arc::clone(graph);
         }
         let height = (f32_of_count(graph.tallest) * 44.0).clamp(200.0, 380.0);
-        let laid = entry
-            .layout
-            .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP)))
-            .clone();
-        (entry.hover, entry.probe.clone(), laid)
+        let laid = Rc::clone(
+            entry
+                .layout
+                .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP))),
+        );
+        (entry.hover, Rc::clone(&entry.probe), laid)
     }
     fn set(&self, id: &str, hover: Option<Hover>) -> bool {
         let mut entries = self.0.borrow_mut();
@@ -331,9 +332,9 @@ pub(crate) fn view(
                 .to_reference_paint()
         })
         .collect::<Vec<_>>();
-    let draw_graph = graph.clone();
-    let draw_layout = laid.clone();
-    let draw_probe = probe.clone();
+    let draw_graph = Arc::clone(&graph);
+    let draw_layout = Rc::clone(&laid);
+    let draw_probe = Rc::clone(&probe);
     let canvas = ui::Canvas::new()
         .style(
             Style::new()
@@ -429,12 +430,12 @@ pub(crate) fn view(
     }
     let moving = state.clone();
     let moving_id = id.clone();
-    let moving_probe = probe.clone();
-    let moving_layout = laid.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_probe = probe;
+    let moving_layout = laid;
+    let moving_invalidate = Rc::clone(&invalidate);
     let leaving = state.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let content = content
         .build()
         .with_key(format!("{id}-plot"))
@@ -465,9 +466,9 @@ pub(crate) fn view(
         aria.push(' ');
         aria.push_str(selection);
     }
-    let keyboard = state.clone();
+    let keyboard = state;
     let keyboard_id = id.clone();
-    let keyboard_graph = graph.clone();
+    let keyboard_graph = Arc::clone(&graph);
     let nav = navigation_group(
         ui::Box::new()
             .width(Length::Pct(100.0))

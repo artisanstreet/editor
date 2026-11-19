@@ -87,8 +87,8 @@ impl LiteralLeaf {
         separator: &str,
     ) -> LiteralSelection {
         LiteralSelection {
-            source: selection_source(self.text.clone(), id, order, separator),
-            _leaf: self.clone(),
+            source: selection_source(Arc::clone(&self.text), id, order, separator),
+            _leaf: Arc::clone(self),
         }
     }
 }
@@ -241,7 +241,7 @@ impl LiteralOwner {
             if same {
                 let entry = self.entries.remove(index).unwrap();
                 let result = match &entry.phase {
-                    Phase::Ready(leaf) => LiteralPreparation::Ready(leaf.clone()),
+                    Phase::Ready(leaf) => LiteralPreparation::Ready(Arc::clone(leaf)),
                     Phase::Failed(error) => LiteralPreparation::Failed(error.clone()),
                     Phase::Loading { .. } => LiteralPreparation::Pending,
                 };
@@ -267,10 +267,7 @@ impl LiteralOwner {
         }
         let requested = (end - start) * 2 + FETCH_HEADROOM;
         let capacity = loop {
-            if let Ok(permit) = self
-                .capacity
-                .clone()
-                .try_acquire_many_owned(requested as u32)
+            if let Ok(permit) = Arc::clone(&self.capacity).try_acquire_many_owned(requested as u32)
             {
                 break permit;
             }
@@ -327,7 +324,7 @@ impl LiteralOwner {
             .find(|entry| entry.key == key)
             .map(|entry| &entry.phase)
         {
-            Some(Phase::Ready(leaf)) => LiteralPreparation::Ready(leaf.clone()),
+            Some(Phase::Ready(leaf)) => LiteralPreparation::Ready(Arc::clone(leaf)),
             Some(Phase::Failed(error)) => LiteralPreparation::Failed(error.clone()),
             _ => LiteralPreparation::Pending,
         }

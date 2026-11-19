@@ -104,7 +104,7 @@ impl AnnotatedCode {
                 path: path.clone(),
                 line: Some(model.start),
             };
-            let open = open.clone();
+            let open = Rc::clone(&open);
             let owner = Rc::downgrade(&state);
             let rendered = Arc::downgrade(&model);
             body = body.child(
@@ -140,8 +140,8 @@ impl AnnotatedCode {
             + if model.notes.is_empty() { 0.0 } else { MARKER };
         let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18)) * LINE_HEIGHT;
         let row_model = Arc::clone(&model);
-        let row_state = state.clone();
-        let row_invalidate = invalidate.clone();
+        let row_state = Rc::clone(&state);
+        let row_invalidate = Rc::clone(&invalidate);
         let row_theme = *theme;
         let row_id = id.to_owned();
         let widest = model
@@ -170,8 +170,8 @@ impl AnnotatedCode {
                     *index,
                     gutter,
                     active,
-                    row_state.clone(),
-                    row_invalidate.clone(),
+                    Rc::clone(&row_state),
+                    Rc::clone(&row_invalidate),
                 )
             })
             .build()
@@ -211,9 +211,9 @@ impl AnnotatedCode {
                         active,
                         scope.clone(),
                         instance,
-                        open.clone(),
-                        state.clone(),
-                        invalidate.clone(),
+                        Rc::clone(&open),
+                        Rc::clone(&state),
+                        Rc::clone(&invalidate),
                     )
                 })
                 .build()

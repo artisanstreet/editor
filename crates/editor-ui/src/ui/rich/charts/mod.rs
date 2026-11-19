@@ -110,10 +110,10 @@ fn preparation_budget(value: &serde_json::Value) -> Result<(), String> {
         }
         match value {
             serde_json::Value::Array(values) => {
-                stack.extend(values.iter().map(|value| (value, depth + 1)))
+                stack.extend(values.iter().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Object(fields) => {
-                stack.extend(fields.values().map(|value| (value, depth + 1)))
+                stack.extend(fields.values().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)

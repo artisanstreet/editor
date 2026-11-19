@@ -28,7 +28,7 @@ pub struct Model {
 impl Model {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + match &self.x {
                 XScale::Category(names) => retained_strings(names),
                 XScale::Number => 0,
@@ -122,7 +122,7 @@ impl Model {
                     .collect(),
             };
             series.push(Series {
-                name: series_name(&spec.name, position).to_string(),
+                name: series_name(&spec.name, position).clone(),
                 points,
             });
         }
@@ -139,7 +139,7 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(position, spec)| Series {
-                name: series_name(&spec.name, position).to_string(),
+                name: series_name(&spec.name, position),
                 points: match &spec.data {
                     SeriesData::Points(points) => points.as_slice(),
                     SeriesData::Values(_) => &[],

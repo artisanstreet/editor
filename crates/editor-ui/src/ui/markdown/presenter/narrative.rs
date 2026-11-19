@@ -11,7 +11,7 @@ use std::rc::Rc;
 impl MarkdownPresenter {
     pub(super) fn render_compare(
         &self,
-        compare: &crate::ui::rich::narrative::compare::Compare,
+        compare: &rich::narrative::compare::Compare,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -30,15 +30,15 @@ impl MarkdownPresenter {
             block_id,
             theme,
             self.comparisons.clone(),
-            services.navigation_frame.clone(),
-            invalidate.clone(),
+            Rc::clone(&services.navigation_frame),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
 
     pub(super) fn render_stats(
         &self,
-        stats: &crate::ui::rich::data::stats::Stats,
+        stats: &rich::data::stats::Stats,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -56,16 +56,16 @@ impl MarkdownPresenter {
             block_id,
             theme,
             self.stats.clone(),
-            glyph.clone(),
+            Rc::clone(&glyph),
             Rc::new(charts::frame::stats_hint),
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         enveloped(theme, envelope, content)
     }
 
     pub(super) fn render_callout(
         &self,
-        callout: &crate::ui::rich::narrative::callout::Callout,
+        callout: &rich::narrative::callout::Callout,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -73,7 +73,7 @@ impl MarkdownPresenter {
         glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
-        let glyph: GlyphFactory = glyph.clone();
+        let glyph: GlyphFactory = Rc::clone(&glyph);
         let block_id = format!("{id}-rich-{}-callout", entry.id);
         self.callout_ids
             .borrow_mut()
@@ -83,13 +83,13 @@ impl MarkdownPresenter {
         callout.view(
             block_id,
             theme,
-            crate::ui::rich::narrative::callout::CalloutNotes {
+            rich::narrative::callout::CalloutNotes {
                 subtitle: envelope.subtitle.as_deref(),
                 caption: envelope.caption.as_deref(),
             },
             self.callouts.clone(),
             glyph,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         )
     }
 }

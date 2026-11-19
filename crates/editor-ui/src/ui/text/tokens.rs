@@ -41,21 +41,21 @@ pub fn compile_tokens(
             style.weight = weight;
         }
         let mut start = range.start;
-        if let Some(asset) = token.glyph {
-            if let Some(sigil) = text[range.clone()].chars().next() {
-                let sigil_end = start + sigil.len_utf8();
-                let cell = 20.0_f32.max(sigil_advance(sigil));
-                let span = StyledSpan::new(&text[start..sigil_end], style.clone())
-                    .gpui_source_color([0.0, 0.0, 0.0, 0.0])
-                    .inline_cell(cell)?;
-                spans.push(span);
-                glyphs.push(GlyphToken {
-                    range: start..sigil_end,
-                    asset,
-                    color: token.color.unwrap_or(foreground).at(Opacity::MentionGlyph),
-                });
-                start = sigil_end;
-            }
+        if let Some(asset) = token.glyph
+            && let Some(sigil) = text[range.clone()].chars().next()
+        {
+            let sigil_end = start + sigil.len_utf8();
+            let cell = 20.0_f32.max(sigil_advance(sigil));
+            let span = StyledSpan::new(&text[start..sigil_end], style.clone())
+                .gpui_source_color([0.0, 0.0, 0.0, 0.0])
+                .inline_cell(cell)?;
+            spans.push(span);
+            glyphs.push(GlyphToken {
+                range: start..sigil_end,
+                asset,
+                color: token.color.unwrap_or(foreground).at(Opacity::MentionGlyph),
+            });
+            start = sigil_end;
         }
         if start < range.end {
             let mut span = StyledSpan::new(&text[start..range.end], style);

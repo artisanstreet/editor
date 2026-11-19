@@ -39,7 +39,7 @@ pub(crate) struct ImageCompare {
 impl ImageCompare {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::retained_optional;
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.before.src.resident_bytes()
             + self.after.src.resident_bytes()
             + retained_optional(self.before.label.as_ref())
@@ -56,13 +56,11 @@ struct Side {
 
 impl Side {
     fn label_or(&self, default: &str) -> String {
-        String::from(
-            self.label
-                .as_deref()
-                .map(str::trim)
-                .filter(|label| !label.is_empty())
-                .unwrap_or(default)
-                .to_owned(),
-        )
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(default)
+            .to_owned()
     }
 }

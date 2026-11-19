@@ -71,9 +71,10 @@ impl Formats {
 
     fn count(&self, value: impl Into<Decimal>, one: &str, other: &str) -> String {
         let value = value.into();
-        let noun = match value == Decimal::from(1_u8) {
-            true => one,
-            false => other,
+        let noun = if value == Decimal::from(1_u8) {
+            one
+        } else {
+            other
         };
         format!("{} {noun}", self.decimal.format(&value))
     }

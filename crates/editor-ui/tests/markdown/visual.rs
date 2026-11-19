@@ -4,6 +4,7 @@ use crate::ui::markdown::presenter::MarkdownPresenter;
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role, SemanticNode};
 use aqua_text::{SharedFonts, SharedRuns};
 use std::cell::RefCell;
+use std::rc::Rc;
 
 fn answer(source: &str, on_link: Rc<dyn Fn(LinkAction)>) -> aqua::UiApp {
     let engine = MarkdownEngine::new().unwrap();
@@ -61,7 +62,7 @@ fn links(app: &aqua::UiApp) -> Vec<(String, bool)> {
 #[test]
 fn answer_links_are_announced_and_open_from_the_keyboard() {
     let opened = Rc::new(RefCell::new(Vec::new()));
-    let sink = opened.clone();
+    let sink = Rc::clone(&opened);
     let mut app = answer(
         "Read [the docs](https://docs.example) or [the guide](https://guide.example).",
         Rc::new(move |action| sink.borrow_mut().push(action)),

@@ -30,7 +30,7 @@ impl ConcentrationState {
             hover: None,
             probe: Rc::new(Cell::new(None)),
         });
-        (entry.hover, entry.probe.clone())
+        (entry.hover, Rc::clone(&entry.probe))
     }
     fn hover(&self, id: &str, x: f32, y: f32) -> bool {
         let selected =
@@ -187,9 +187,9 @@ impl Concentration {
         };
         let (hover, probe) = states.ensure(&id);
         let cutoff = self.highlight();
-        let held = Concentration::share_of_total(&curve, cutoff);
+        let held = Self::share_of_total(&curve, cutoff);
         let shape_list: Rc<[Shape]> = shapes(theme, &curve, cutoff, hover).into();
-        let paint_probe = probe.clone();
+        let paint_probe = Rc::clone(&probe);
         let canvas = ui::Canvas::new()
             .style(
                 Style::new()
@@ -225,7 +225,7 @@ impl Concentration {
             .child(marker);
         let mut selection_label = None;
         if let Some(share) = hover {
-            let held = Concentration::share_of_total(&curve, share);
+            let held = Self::share_of_total(&curve, share);
             let heading = format!("Top {} of {}", percent(share), self.items());
             selection_label = Some(format!("{heading}: {} of {}", percent(held), self.total()));
             plot = plot.child(readout(
@@ -238,11 +238,11 @@ impl Concentration {
         }
         let moving = states.clone();
         let move_id = id.clone();
-        let move_probe = probe.clone();
-        let move_invalidate = invalidate.clone();
+        let move_probe = probe;
+        let move_invalidate = Rc::clone(&invalidate);
         let leaving = states.clone();
         let leave_id = id.clone();
-        let leave_invalidate = invalidate.clone();
+        let leave_invalidate = Rc::clone(&invalidate);
         let plot = plot
             .build()
             .with_key(format!("{id}-plot"))
@@ -270,7 +270,7 @@ impl Concentration {
             label.push(' ');
             label.push_str(selection);
         }
-        let keyboard = states.clone();
+        let keyboard = states;
         let key = id.clone();
         let nav = navigation_group(
             ui::Box::new()

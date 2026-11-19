@@ -214,9 +214,9 @@ struct Grid {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Cancelled;
+pub(crate) struct Cancelled;
 
-pub fn render(
+pub(crate) fn render(
     mesh: &Mesh,
     camera: &Camera,
     look: &Look,

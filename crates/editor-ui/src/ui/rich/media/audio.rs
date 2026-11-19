@@ -14,7 +14,7 @@ pub(crate) struct AudioBlock {
 impl AudioBlock {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_vec(&self.tracks)
             + self
                 .tracks
@@ -60,7 +60,7 @@ impl Track {
             let src = self.src.trim().trim_end_matches('/');
             src.rsplit(['/', '\\']).next().unwrap_or(src).to_owned()
         };
-        String::from(named.map_or_else(file, str::to_owned))
+        named.map_or_else(file, str::to_owned)
     }
 }
 

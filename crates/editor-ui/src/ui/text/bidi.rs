@@ -29,7 +29,7 @@ fn char_is_rtl(text: &str, offset: usize) -> bool {
         && ParagraphBidiInfo::new(paragraph, None)
             .levels
             .get(offset - range.start)
-            .is_some_and(|level| level.is_rtl())
+            .is_some_and(unicode_bidi::Level::is_rtl)
 }
 
 pub(crate) fn selection_is_rtl(text: &str, selection: Range<usize>, focus: usize) -> bool {

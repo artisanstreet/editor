@@ -136,9 +136,10 @@ impl Dialog {
             frame = frame.child(page::note(&theme, description).build());
         }
         let frame = frame.child(self.content).build();
-        let panel = match self.bare {
-            true => frame,
-            false => SURFACE.build(&theme, vec![frame]),
+        let panel = if self.bare {
+            frame
+        } else {
+            SURFACE.build(&theme, vec![frame])
         };
         Scroll::new()
             .width(width)
@@ -195,10 +196,10 @@ impl DialogHost {
         let description = dialog.description.clone();
         let max_width = dialog.max_width;
         let viewport_width = dialog.viewport_width;
-        let render_pending = pending.clone();
+        let render_pending = Rc::clone(&pending);
         let render_theme = Rc::clone(&theme);
         let rebuild: DialogRebuild = Rc::new(move |content, viewport| {
-            let queue = render_pending.clone();
+            let queue = Rc::clone(&render_pending);
             let dialog = Dialog {
                 id: id.clone(),
                 theme: render_theme.get(),
@@ -212,10 +213,10 @@ impl DialogHost {
                 bare,
                 soft_backdrop: soft,
             };
-            dialog_root(dialog, viewport, render_pending.clone())
+            dialog_root(dialog, viewport, Rc::clone(&render_pending))
         });
         let root = rebuild(dialog.content, viewport);
-        let reason = closing.clone();
+        let reason = Rc::clone(&closing);
         let mut options = popup_options();
         options.dismiss = if dismissible {
             DismissPolicy::ESCAPE_ONLY
@@ -327,7 +328,7 @@ fn dialog_root(
             })
             .build();
         let backdrop = if dismissible {
-            backdrop_events(backdrop, pending.clone())
+            backdrop_events(backdrop, Rc::clone(&pending))
         } else {
             backdrop
         };
@@ -335,7 +336,7 @@ fn dialog_root(
     }
     let mut root = root.child(panel).build();
     if dismissible {
-        root = backdrop_events(root, pending.clone());
+        root = backdrop_events(root, pending);
     }
     root
 }
@@ -347,7 +348,7 @@ fn backdrop_events(
     use aqua_core::{InputEvent, PointerButton};
     use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
     let pressed = Rc::new(std::cell::Cell::new(false));
-    let down = pressed.clone();
+    let down = Rc::clone(&pressed);
     element
         .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
             if event.target == event.current_target

@@ -67,8 +67,8 @@ impl ChartState {
     fn sync(&self, id: &str, spec: &Arc<ChartStyle>, model: &Arc<Model>) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            spec: spec.clone(),
-            model: model.clone(),
+            spec: Arc::clone(spec),
+            model: Arc::clone(model),
             geometry: None,
             hidden: vec![false; model.series.len()],
             hover: None,
@@ -80,8 +80,8 @@ impl ChartState {
         let replaced = (!Arc::ptr_eq(&entry.spec, spec) || !Arc::ptr_eq(&entry.model, model))
             && (*entry.spec != **spec || !Arc::ptr_eq(&entry.model, model));
         if !Arc::ptr_eq(&entry.spec, spec) || !Arc::ptr_eq(&entry.model, model) {
-            entry.spec = spec.clone();
-            entry.model = model.clone();
+            entry.spec = Arc::clone(spec);
+            entry.model = Arc::clone(model);
         }
         if replaced {
             entry.geometry = None;
@@ -215,7 +215,7 @@ pub(crate) fn view(
                 } else {
                     param.id.trim().to_owned()
                 };
-                (label, entry.sliders[&key].clone())
+                (label, Rc::clone(&entry.sliders[&key]))
             })
             .collect::<Vec<_>>();
         (
@@ -223,7 +223,7 @@ pub(crate) fn view(
             entry.hover,
             entry.zoom,
             entry.drag,
-            entry.probe.clone(),
+            Rc::clone(&entry.probe),
             sliders,
         )
     };
@@ -253,18 +253,18 @@ pub(crate) fn view(
         if let Some((known, geometry)) = &entry.geometry
             && *known == key
         {
-            geometry.clone()
+            Rc::clone(geometry)
         } else {
             let stable = Snapshot {
                 hidden: &hidden,
                 hover: None,
                 zoom,
                 drag: None,
-                thresholds: thresholds.clone(),
+                thresholds,
                 width,
             };
             let geometry = Rc::new(plot::layout(&theme, &spec, &model, &stable));
-            entry.geometry = Some((key, geometry.clone()));
+            entry.geometry = Some((key, Rc::clone(&geometry)));
             geometry
         }
     };
@@ -279,8 +279,8 @@ pub(crate) fn view(
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0)),
         )
-        .child(canvas(geometry.shapes.clone(), probe.clone()))
-        .child(canvas(interaction, probe.clone()));
+        .child(canvas(Rc::clone(&geometry.shapes), Rc::clone(&probe)))
+        .child(canvas(interaction, Rc::clone(&probe)));
     for label in &geometry.labels {
         plot = plot.child((services.label)(label.clone()));
     }
@@ -350,14 +350,14 @@ pub(crate) fn view(
     let view = geometry.view;
     let moving = states.clone();
     let moving_id = id.clone();
-    let moving_probe = probe.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_probe = Rc::clone(&probe);
+    let moving_invalidate = Rc::clone(&invalidate);
     let releasing = states.clone();
     let releasing_id = id.clone();
-    let releasing_invalidate = invalidate.clone();
+    let releasing_invalidate = Rc::clone(&invalidate);
     let leaving = states.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -419,8 +419,8 @@ pub(crate) fn view(
         });
     let pressing = states.clone();
     let pressing_id = id.clone();
-    let pressing_probe = probe.clone();
-    let pressing_invalidate = invalidate.clone();
+    let pressing_probe = probe;
+    let pressing_invalidate = Rc::clone(&invalidate);
     let plot = (services.press)(
         plot,
         Rc::new(move |position, click_count| {
@@ -452,7 +452,7 @@ pub(crate) fn view(
     }
     let keyboard = states.clone();
     let keyboard_id = id.clone();
-    let keyboard_invalidate = invalidate.clone();
+    let keyboard_invalidate = Rc::clone(&invalidate);
     let nav = navigation_group(
         ui::Box::new()
             .style(
@@ -484,7 +484,7 @@ pub(crate) fn view(
     );
     let toggling = states.clone();
     let toggle_id = id.clone();
-    let toggle_invalidate = invalidate.clone();
+    let toggle_invalidate = Rc::clone(&invalidate);
     let toggle = Rc::new(move |index: usize| {
         let mut entries = toggling.0.borrow_mut();
         if let Some(value) = entries
@@ -519,9 +519,9 @@ pub(crate) fn view(
         .child((services.legend)(entries, toggle))
         .child(ui::Box::new().style(Style::new().flex_grow(1.0)).build());
     if zoom.is_some() {
-        let resetting = states.clone();
+        let resetting = states;
         let reset_id = id.clone();
-        let reset_invalidate = invalidate.clone();
+        let reset_invalidate = Rc::clone(&invalidate);
         header = header.child((services.reset)(Rc::new(move || {
             if let Some(entry) = resetting.0.borrow_mut().get_mut(&reset_id) {
                 entry.zoom = None;
@@ -547,7 +547,7 @@ pub(crate) fn view(
             "{} · {share} of points at or above ({above} of {all})",
             reading(value, unit.as_deref())
         );
-        let refresh = invalidate.clone();
+        let refresh = Rc::clone(&invalidate);
         root = root.child(
             Slider::new(
                 format!("{id}-slider-{index}"),

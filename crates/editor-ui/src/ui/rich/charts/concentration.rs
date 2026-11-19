@@ -37,11 +37,11 @@ impl std::ops::Deref for Concentration {
 impl Concentration {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::retained_optional;
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<ConcentrationData>()
+        size_of::<Self>()
+            + size_of::<ConcentrationData>()
             + retained_optional(self.items.as_ref())
             + retained_optional(self.total.as_ref())
-            + self.curve.as_deref().map_or(0, std::mem::size_of_val)
+            + self.curve.as_deref().map_or(0, size_of_val)
     }
 }
 impl From<ConcentrationSpec> for Concentration {
@@ -53,7 +53,7 @@ impl From<ConcentrationSpec> for Concentration {
             .collect();
         values.sort_by(|a, b| b.total_cmp(a));
         let scale = values.first().copied().unwrap_or(0.0);
-        let curve = if scale > 0.0 {
+        let curve = (scale > 0.0).then(|| {
             let total: f64 = values.iter().map(|value| value / scale).sum();
             let mut running = 0.0;
             let mut points = Vec::with_capacity(values.len() + 1);
@@ -62,10 +62,8 @@ impl From<ConcentrationSpec> for Concentration {
                 running += value / scale;
                 points.push((f64_of(index + 1) / f64_of(values.len()), running / total));
             }
-            Some(Arc::from(points))
-        } else {
-            None
-        };
+            Arc::from(points)
+        });
         Self(Arc::new(ConcentrationData {
             items: spec.items,
             total: spec.total,

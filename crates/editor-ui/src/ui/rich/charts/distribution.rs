@@ -72,7 +72,7 @@ pub(crate) fn prepare(value: &serde_json::Value) -> Result<Distribution, String>
 impl Distribution {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_optional(self.unit.as_ref())
             + retained_vec(&self.samples)
             + self
@@ -95,7 +95,7 @@ impl Distribution {
             .into_iter()
             .enumerate()
             .map(|(index, series)| Sample {
-                name: series_name(&series.name, index).to_string(),
+                name: series_name(&series.name, index),
                 sorted: sorted_finite(series.values.into_iter().flatten()),
                 summary: None,
                 counts: Vec::new(),

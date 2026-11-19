@@ -164,7 +164,7 @@ impl ChartStyle {
             XValue::Text(text) => text.capacity(),
             XValue::Number(_) => 0,
         };
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + axis(&self.x)
             + axis(&self.y)
             + retained_vec(&self.annotations)

@@ -107,7 +107,7 @@ impl IconButton {
     pub fn within(mut self, surface: Surface) -> Self {
         self.radius = surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            Radius::px,
         );
         self
     }

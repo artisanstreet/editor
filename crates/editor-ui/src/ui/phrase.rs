@@ -131,13 +131,12 @@ fn word_motion(previous: Option<&str>, word: &str) -> WordMotion {
     }
     if let (Some((from_suffix, from_value)), Some((to_suffix, to_value))) =
         (number_word(previous), number_word(word))
+        && from_suffix == to_suffix
     {
-        if from_suffix == to_suffix {
-            return WordMotion::Roll {
-                from: previous.to_owned(),
-                up: to_value >= from_value,
-            };
-        }
+        return WordMotion::Roll {
+            from: previous.to_owned(),
+            up: to_value >= from_value,
+        };
     }
     if word.starts_with(previous) {
         return WordMotion::Extend {

@@ -164,9 +164,10 @@ impl MediaFrame {
     }
 
     pub fn build(self) -> Element {
-        let edge = match self.error {
-            true => self.theme.colors.destructive,
-            false => self.theme.colors.text.at(Opacity::MediaEdge),
+        let edge = if self.error {
+            self.theme.colors.destructive
+        } else {
+            self.theme.colors.text.at(Opacity::MediaEdge)
         };
         let (width, height, surface, border) = match self.size {
             FrameSize::Aspect { aspect, width } => (width, width / aspect, FRAME, None),

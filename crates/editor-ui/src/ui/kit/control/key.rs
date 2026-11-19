@@ -101,9 +101,10 @@ impl Key {
         } else {
             Length::Px(edge)
         };
-        let ink = match self.primary {
-            true => POLAR_INK,
-            false => surfaces.ink,
+        let ink = if self.primary {
+            POLAR_INK
+        } else {
+            surfaces.ink
         };
         let content = match self.face {
             KeyFace::Glyph(icon) => {
@@ -111,16 +112,17 @@ impl Key {
             }
             KeyFace::Content(element) => element,
         };
-        let face = match self.primary {
-            true => Canvas::new()
+        let face = if self.primary {
+            Canvas::new()
                 .style(
                     Style::new()
                         .width(Length::Pct(100.0))
                         .height(Length::Pct(100.0)),
                 )
                 .on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
-                .build(),
-            false => key_face(&theme, radius, edge),
+                .build()
+        } else {
+            key_face(&theme, radius, edge)
         };
         let button = Button::new()
             .style(

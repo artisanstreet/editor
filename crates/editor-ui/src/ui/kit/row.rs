@@ -99,7 +99,7 @@ impl Row {
     pub fn radius_in(self, surface: Surface) -> f32 {
         surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            super::tokens::radius::Radius::px,
         )
     }
 
@@ -257,12 +257,12 @@ impl RowItem {
         let text = Text::new(words)
             .text_style(role.style(theme))
             .gpui_source_color(color.to_reference_text_color());
-        match wraps {
-            true => text.wrap(true).build(),
-            false => text
-                .overflow(OverflowMode::EndEllipsis)
+        if wraps {
+            text.wrap(true).build()
+        } else {
+            text.overflow(OverflowMode::EndEllipsis)
                 .style(Style::new().min_width(Length::Px(0.0)).text_wrap(false))
-                .build(),
+                .build()
         }
     }
 

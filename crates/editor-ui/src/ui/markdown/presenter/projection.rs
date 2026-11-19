@@ -10,6 +10,7 @@ use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceI
 use aqua_ui::element::Element;
 use editor_assets::AssetId;
 use std::rc::Rc;
+use std::sync::Arc;
 
 impl MarkdownPresenter {
     pub fn projected_count(&self) -> Option<usize> {
@@ -34,7 +35,7 @@ impl MarkdownPresenter {
     fn leaf_proof(&self, row: usize) -> Option<PreparationProof> {
         self.leaf_proofs
             .get(row)
-            .map(|(_, proof)| PreparationProof(proof.clone()))
+            .map(|(_, proof)| PreparationProof(Arc::clone(proof)))
     }
 
     pub fn projected_leaf_is_current(&self, row: usize, info: &ProjectedLeafInfo) -> bool {
@@ -162,8 +163,8 @@ impl MarkdownPresenter {
                 entry,
                 id,
                 theme,
-                glyph.clone(),
-                invalidate.clone(),
+                Rc::clone(&glyph),
+                Rc::clone(&invalidate),
                 charts,
                 code,
                 reference_scope.clone(),

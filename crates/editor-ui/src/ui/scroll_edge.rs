@@ -268,12 +268,12 @@ impl ScrollEdges {
         let (fade, moving) = self.advance_fade(edge, target(hidden), reduced, now);
         let previous = self.fade(edge);
         self.fades[slot(edge)].set(fade);
-        if previous.shown() != fade.shown() {
-            if let Some(mut paint) = ui.tree().paint(band) {
-                edge_style(paint_kind, edge, color, fade.shown())
-                    .apply_to(&mut LayoutStyle::default(), &mut paint);
-                ui.tree_mut().set_paint(band, paint);
-            }
+        if previous.shown() != fade.shown()
+            && let Some(mut paint) = ui.tree().paint(band)
+        {
+            edge_style(paint_kind, edge, color, fade.shown())
+                .apply_to(&mut LayoutStyle::default(), &mut paint);
+            ui.tree_mut().set_paint(band, paint);
         }
         moving
     }

@@ -107,9 +107,10 @@ fn shade(offset: f32) -> Oklch {
 
 fn gray(percent: f32) -> Oklch {
     let value = (percent / 100.0).clamp(0.0, 1.0);
-    let linear = match value <= 0.04045 {
-        true => value / 12.92,
-        false => ((value + 0.055) / 1.055).powf(2.4),
+    let linear = if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
     };
     Oklch::new(linear.cbrt(), 0.0, 0.0)
 }

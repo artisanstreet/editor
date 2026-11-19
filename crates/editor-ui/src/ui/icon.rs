@@ -1,5 +1,6 @@
 use aqua_ui::element::Element;
 use editor_assets::AssetId;
+use std::sync::Arc;
 
 pub fn disclosure_chevron(fraction: f32, edge: f32, color: aqua_core::GpuiHsla) -> Element {
     let source: std::sync::Arc<str> = editor_assets::get(AssetId::TABLER_CHEVRON_RIGHT)
@@ -13,7 +14,7 @@ pub fn disclosure_chevron(fraction: f32, edge: f32, color: aqua_core::GpuiHsla) 
         .on_paint(move |bounds| {
             vec![aqua_core::DisplayItem::GpuiTransformedSvg {
                 bounds,
-                source: source.clone(),
+                source: Arc::clone(&source),
                 tint: color,
                 opacity: 1.0,
                 transform: aqua_core::scene::GpuiSvgTransform {

@@ -2,7 +2,7 @@ use super::FALLBACK;
 use icu_locale_core::Locale;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SystemLocales {
+pub(crate) struct SystemLocales {
     pub numbers: Locale,
     pub time: Locale,
 }
@@ -33,7 +33,7 @@ impl SystemLocales {
 }
 
 #[cfg(any(not(windows), test))]
-pub fn posix_locale(value: &str) -> Option<Locale> {
+pub(super) fn posix_locale(value: &str) -> Option<Locale> {
     let name = value
         .split(['.', '@'])
         .next()

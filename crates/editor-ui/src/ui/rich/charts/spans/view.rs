@@ -59,7 +59,7 @@ impl SpansState {
     fn sync(&self, id: &str, model: &Arc<Layout>) -> (Option<usize>, Probe, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.clone(),
+            model: Arc::clone(model),
             hover: None,
             probe: Rc::new(Cell::new(None)),
             reveal: None,
@@ -71,9 +71,9 @@ impl SpansState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.clone();
+            entry.model = Arc::clone(model);
         }
-        (entry.hover, entry.probe.clone(), entry.reset)
+        (entry.hover, Rc::clone(&entry.probe), entry.reset)
     }
     fn hover(&self, id: &str, value: Option<usize>) -> bool {
         let mut entries = self.0.borrow_mut();
@@ -284,13 +284,13 @@ pub(crate) fn view(
     let width = probe.get().map_or(560.0, |bounds| bounds.w);
     let (domain, ticks) = tick_values(&layout, width);
     let pitch = theme.density.control_sm;
-    let model = layout.clone();
+    let model = Arc::clone(&layout);
     let row_id = id.clone();
     let row_ticks = ticks.clone();
     let row_state = state.clone();
-    let row_invalidate = invalidate.clone();
-    let text = services.text.clone();
-    let bar_label = services.bar_label.clone();
+    let row_invalidate = Rc::clone(&invalidate);
+    let text = Rc::clone(&services.text);
+    let bar_label = Rc::clone(&services.bar_label);
     let rows = List::new()
         .items(0..layout.rows)
         .key(|row| *row)
@@ -337,8 +337,8 @@ pub(crate) fn view(
                 ))
                 .build();
             let row_probe: Probe = Rc::new(Cell::new(None));
-            let draw_probe = row_probe.clone();
-            let draw_model = model.clone();
+            let draw_probe = Rc::clone(&row_probe);
+            let draw_model = Arc::clone(&model);
             let draw_ticks = row_ticks.clone();
             let canvas = ui::Canvas::new()
                 .style(
@@ -380,13 +380,13 @@ pub(crate) fn view(
             }
             let moving = row_state.clone();
             let moving_id = row_id.clone();
-            let moving_probe = row_probe.clone();
-            let moving_model = model.clone();
-            let moving_invalidate = row_invalidate.clone();
+            let moving_probe = row_probe;
+            let moving_model = Arc::clone(&model);
+            let moving_invalidate = Rc::clone(&row_invalidate);
             let leaving = row_state.clone();
             let leaving_id = row_id.clone();
-            let leaving_model = model.clone();
-            let leaving_invalidate = row_invalidate.clone();
+            let leaving_model = Arc::clone(&model);
+            let leaving_invalidate = Rc::clone(&row_invalidate);
             let content = content
                 .build()
                 .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
@@ -466,7 +466,7 @@ pub(crate) fn view(
             .child((services.ticks)(ticks))
             .build(),
     );
-    let plot_probe = probe.clone();
+    let plot_probe = probe;
     plot = plot.child(
         ui::Canvas::new()
             .style(
@@ -517,7 +517,7 @@ pub(crate) fn view(
         aria.push(' ');
         aria.push_str(value);
     }
-    let keyboard = state.clone();
+    let keyboard = state;
     let keyboard_id = id.clone();
     let navigation = navigation_group(plot.build(), &id, aria, selection, move |code, alt| {
         let handled = keyboard.key(&keyboard_id, code, alt);

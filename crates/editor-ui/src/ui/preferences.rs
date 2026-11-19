@@ -102,17 +102,19 @@ impl Preferences {
 
     #[must_use]
     pub fn motion(&self) -> Motion {
-        match self.reduced_motion.unwrap_or(self.system.reduced_motion) {
-            true => Motion::Reduced,
-            false => Motion::Full,
+        if self.reduced_motion.unwrap_or(self.system.reduced_motion) {
+            Motion::Reduced
+        } else {
+            Motion::Full
         }
     }
 
     #[must_use]
     fn contrast(&self) -> Contrast {
-        match self.high_contrast.unwrap_or(self.system.high_contrast) {
-            true => Contrast::High,
-            false => Contrast::Standard,
+        if self.high_contrast.unwrap_or(self.system.high_contrast) {
+            Contrast::High
+        } else {
+            Contrast::Standard
         }
     }
 

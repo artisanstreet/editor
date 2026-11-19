@@ -79,7 +79,7 @@ impl FileTreeState {
                 .iter()
                 .any(|row| matches!(&row.kind, RowKind::Dir { key: current, .. } if current == key))
         });
-        self.model = Some(tree.0.clone());
+        self.model = Some(Arc::clone(&tree.0));
         true
     }
 
@@ -94,10 +94,10 @@ impl FileTreeState {
                 hidden_below = None;
             }
             visible.push(index);
-            if let RowKind::Dir { key, .. } = &row.kind {
-                if self.collapsed.contains(key) {
-                    hidden_below = Some(row.depth);
-                }
+            if let RowKind::Dir { key, .. } = &row.kind
+                && self.collapsed.contains(key)
+            {
+                hidden_below = Some(row.depth);
             }
         }
         visible
@@ -364,10 +364,10 @@ fn row(
         );
     }
     let pressed = Rc::new(Cell::new(None));
-    let down = pressed.clone();
-    let cancelled = pressed.clone();
-    let click = emit.clone();
-    let accessibility = emit.clone();
+    let down = Rc::clone(&pressed);
+    let cancelled = Rc::clone(&pressed);
+    let click = Rc::clone(&emit);
+    let accessibility = Rc::clone(&emit);
     let key_emit = emit;
     let mut element = live::track(content.build())
         .with_key(node_id(id, index, row, &tree.0))
@@ -391,10 +391,10 @@ fn row(
             let was_pressed = pressed.take();
             if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) =
                 &event.input
+                && was_pressed == Some(pointer.contact)
+                && event.bounds.contains(pointer.position)
             {
-                if was_pressed == Some(pointer.contact) && event.bounds.contains(pointer.position) {
-                    click(Action::Activate(index));
-                }
+                click(Action::Activate(index));
             }
             InputResponse {
                 pointer_capture: CaptureRequest::Release,
@@ -495,13 +495,13 @@ impl FileTree {
             }
         }
         let height = f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height();
-        let tree = FileTree(self.0.clone());
+        let tree = Self(Arc::clone(&self.0));
         let row_id = id.to_owned();
         let theme = *theme;
         let list = List::new()
             .items(visible)
             .key(|index| *index)
-            .row(move |index| row(&tree, &row_id, *index, &theme, &collapsed, emit.clone()))
+            .row(move |index| row(&tree, &row_id, *index, &theme, &collapsed, Rc::clone(&emit)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))

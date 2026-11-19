@@ -1,4 +1,5 @@
 use super::*;
+use std::rc::Rc;
 
 fn tree(json: &str) -> FileTree {
     serde_json::from_str(json).unwrap()
@@ -113,13 +114,13 @@ fn rows_expose_tree_levels_and_open_from_enter_space_pointer_and_assistive_tech(
     let tree = tree(r#"{"entries":[{"path":"src/a.rs"},{"path":"src/b.rs"}]}"#);
     let state = Rc::new(RefCell::new(FileTreeState::default()));
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
+    let sink = Rc::clone(&actions);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         tree.render(
             &ArtisanTheme::resolved(),
             "block",
-            state.clone(),
+            Rc::clone(&state),
             Rc::new(move |action| sink.borrow_mut().push(action)),
         )
     })

@@ -408,7 +408,7 @@ pub(crate) fn readout_rows_at(
                 Some(0.0),
                 if low { None } else { Some(6.0) },
                 Some(0.0),
-                if low { Some(6.0) } else { None },
+                low.then_some(6.0),
             )
             .width(Length::Pct(100.0)),
     );

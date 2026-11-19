@@ -94,7 +94,7 @@ impl MarkdownPresenter {
             rich_without_source,
         )?;
         let bytes = bytes.saturating_add(rich.as_ref().map_or(0, |rich| {
-            std::mem::size_of::<RetainedRich>()
+            size_of::<RetainedRich>()
                 + rich.source.source.capacity()
                 + rich.source.language.as_ref().map_or(0, String::capacity)
                 + rich.prepared.resident_bytes()
@@ -109,7 +109,7 @@ impl MarkdownPresenter {
             document,
             selection_owner,
             1,
-            sources.clone(),
+            Arc::clone(&sources),
         ));
         let previous = self.stored_leaves.borrow_mut().insert(
             key,
@@ -143,8 +143,8 @@ impl MarkdownPresenter {
         glyph: Rc<dyn Fn(AssetId, f32, GpuiHsla) -> Element>,
         invalidate: Rc<dyn Fn()>,
         on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>>,
-        scope: Option<crate::ui::rich::actions::ResourceScope>,
+        on_color: Option<Rc<dyn Fn(rich::actions::ShowCopyMenu)>>,
+        scope: Option<rich::actions::ResourceScope>,
         charts: Option<&HeatmapServices>,
         code: Option<&CodeServices>,
     ) -> Result<StoredProjectedMarkdown, PresenterError> {
@@ -167,8 +167,8 @@ impl MarkdownPresenter {
                     .ok_or(PresenterError::Unavailable("nested rich block"))?,
                 id,
                 theme,
-                glyph.clone(),
-                invalidate.clone(),
+                Rc::clone(&glyph),
+                Rc::clone(&invalidate),
                 charts,
                 code,
                 rich_scope.clone(),
@@ -218,7 +218,7 @@ impl MarkdownPresenter {
         )?;
         Ok(StoredProjectedMarkdown {
             element,
-            selection_batch: entry.selection_batch.clone(),
+            selection_batch: Arc::clone(&entry.selection_batch),
             geometry,
             #[cfg(test)]
             list_depth: entry.leaf.context.lists.len(),

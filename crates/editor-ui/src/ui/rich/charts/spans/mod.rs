@@ -80,7 +80,7 @@ pub(crate) struct Layout {
 impl Layout {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_vec(&self.spans)
             + self
                 .spans
@@ -143,7 +143,7 @@ fn resolve(spec: &SpansSpec) -> Result<(Vec<Timed<'_>>, Vec<Marker>, bool), Stri
         .map(|(index, marker)| {
             Ok(Marker {
                 at: time(&marker.at, &format!("markers[{index}].at"))?,
-                label: String::from(marker.label.trim().to_owned()),
+                label: marker.label.trim().to_owned(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -201,7 +201,7 @@ fn place(timed: &[Timed<'_>]) -> Rows {
         .iter()
         .zip(&stack_ends)
         .map(|(name, ends)| Lane {
-            name: String::from((*name).to_owned()),
+            name: (*name).to_owned(),
             first_row: 0,
             rows: ends.used.max(1),
         })
@@ -209,7 +209,7 @@ fn place(timed: &[Timed<'_>]) -> Rows {
     for (index, (span, _, _)) in timed.iter().enumerate() {
         if placed[index].1.is_none() {
             lanes.push(Lane {
-                name: String::from(span.label.trim().to_owned()),
+                name: span.label.trim().to_owned(),
                 first_row: 0,
                 rows: 1,
             });
@@ -257,13 +257,13 @@ impl Layout {
                     *groups.entry(group).or_insert(next)
                 });
                 Span {
-                    label: String::from(span.label.trim().to_owned()),
+                    label: span.label.trim().to_owned(),
                     start: *start,
                     end: *end,
                     row: lane.map_or(*row, |lane| lanes[lane].first_row + row),
                     lane: *lane,
                     color: group_color.or(*lane).unwrap_or(0),
-                    group: group.map(|group| String::from(group.to_owned())),
+                    group: group.map(ToOwned::to_owned),
                 }
             })
             .collect::<Vec<_>>();
@@ -304,7 +304,7 @@ impl Layout {
             rows: count,
             domain,
             dates,
-            unit: spec.unit.clone().map(String::from),
+            unit: spec.unit.clone(),
         })
     }
 

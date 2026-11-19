@@ -67,7 +67,7 @@ impl DistributionState {
         let mut entries = self.0.borrow_mut();
         let (domain, step, start) = model.slider();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.clone(),
+            model: Arc::clone(model),
             hover: None,
             probe: Rc::new(Cell::new(None)),
             slider: Rc::new(RefCell::new(SliderState::new(
@@ -87,12 +87,12 @@ impl DistributionState {
                     .borrow_mut()
                     .reset(SliderRange::new(domain.lo, domain.hi, Some(step)), start);
             }
-            entry.model = model.clone();
+            entry.model = Arc::clone(model);
         }
         (
             entry.hover,
-            entry.probe.clone(),
-            entry.slider.clone(),
+            Rc::clone(&entry.probe),
+            Rc::clone(&entry.slider),
             entry.reset,
         )
     }
@@ -444,7 +444,7 @@ pub(crate) fn view(
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0)),
         )
-        .child(canvas(shapes, probe.clone()))
+        .child(canvas(shapes, Rc::clone(&probe)))
         .child((services.plot_label)(
             at,
             0.0,
@@ -457,11 +457,11 @@ pub(crate) fn view(
     }
     let moving = states.clone();
     let moving_id = id.clone();
-    let moving_probe = probe.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_probe = probe;
+    let moving_invalidate = Rc::clone(&invalidate);
     let leaving = states.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -493,10 +493,10 @@ pub(crate) fn view(
         data.mode,
         count,
         selection,
-        states.clone(),
+        states,
         theme.colors.ring.to_reference_paint(),
-        services.navigation.clone(),
-        invalidate.clone(),
+        Rc::clone(&services.navigation),
+        Rc::clone(&invalidate),
     );
     let framed = (services.frame)(
         nav,
@@ -586,7 +586,7 @@ fn navigation(
     }
     let element = navigation_group(
         wrapper.child(content).build(),
-        &id,
+        id,
         label,
         selection,
         move |code, alt| {
@@ -636,11 +636,11 @@ fn boxes(
             )
         })
         .collect();
-    let model = data.clone();
+    let model = Arc::clone(&data);
     let row_states = states.clone();
     let row_id = id.clone();
-    let row_invalidate = invalidate.clone();
-    let row_text = services.text.clone();
+    let row_invalidate = Rc::clone(&invalidate);
+    let row_text = Rc::clone(&services.text);
     let pitch = theme.density.control_sm;
     let rows = List::new()
         .items(0..count)
@@ -697,7 +697,7 @@ fn boxes(
                 .build();
             let state = row_states.clone();
             let key = row_id.clone();
-            let invalidate = row_invalidate.clone();
+            let invalidate = Rc::clone(&row_invalidate);
             ui::Box::new()
                 .layout("row")
                 .style(
@@ -748,7 +748,7 @@ fn boxes(
                 )
                 .build(),
         );
-    let plot_probe = probe.clone();
+    let plot_probe = probe;
     content = content.child(
         ui::Canvas::new()
             .style(
@@ -797,7 +797,7 @@ fn boxes(
         selection,
         states,
         theme.colors.ring.to_reference_paint(),
-        services.navigation.clone(),
+        Rc::clone(&services.navigation),
         invalidate,
     )
 }

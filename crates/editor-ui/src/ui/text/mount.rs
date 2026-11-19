@@ -372,7 +372,7 @@ impl EditorController {
             RoutedInput::TextPointer { byte, phase, .. } => {
                 match phase {
                     TextPointerPhase::Down { click_count, shift } => {
-                        state.pointer_down(*byte, *shift, *click_count)
+                        state.pointer_down(*byte, *shift, *click_count);
                     }
                     TextPointerPhase::Drag => state.pointer_drag(*byte),
                     TextPointerPhase::Up => state.pointer_up(),
@@ -404,8 +404,7 @@ impl EditorController {
         }
         let follow = matches!(
             &outcome,
-            CommandOutcome::Edit(EditOutcome::Changed)
-                | CommandOutcome::Edit(EditOutcome::Unchanged)
+            CommandOutcome::Edit(EditOutcome::Changed | EditOutcome::Unchanged)
         ) || matches!(
             &event.input,
             RoutedInput::TextVertical { .. }
@@ -653,8 +652,8 @@ impl EditorController {
             .external_text_input(true)
             .native_text_model(Rc::new(NativeEditorModel {
                 state: Rc::downgrade(&self.state),
-                event: self.event.clone(),
-                follow_caret: self.native_follow_caret.clone(),
+                event: Rc::clone(&self.event),
+                follow_caret: Rc::clone(&self.native_follow_caret),
             }))
             .initial_external_selection(selection, marked)
             .multiline(mode != Mode::SingleLine)

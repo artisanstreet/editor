@@ -44,7 +44,7 @@ pub struct PreparedInline {
     pub colors: Vec<InlineSwatch>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSwatch {
     pub range: Range<usize>,
     pub slot: Range<usize>,
@@ -52,7 +52,7 @@ pub struct InlineSwatch {
     pub alone: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkAction {
     OpenReference(OpenReference),
     OpenUrl(String),
@@ -60,29 +60,29 @@ pub enum LinkAction {
 
 impl PreparedInline {
     pub(super) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.source.text.len()
             + self.source.separator.len()
-            + self.source.order.capacity() * std::mem::size_of::<u64>()
-            + self.source.copies.capacity() * std::mem::size_of::<CopySubstitution>()
+            + self.source.order.capacity() * size_of::<u64>()
+            + self.source.copies.capacity() * size_of::<CopySubstitution>()
             + self
                 .source
                 .copies
                 .iter()
                 .map(|copy| copy.replacement.len())
                 .sum::<usize>()
-            + self.runs.capacity() * std::mem::size_of::<InlineRun>()
-            + self.links.capacity() * std::mem::size_of::<InlineLink>()
+            + self.runs.capacity() * size_of::<InlineRun>()
+            + self.links.capacity() * size_of::<InlineLink>()
             + self
                 .links
                 .iter()
                 .map(|link| link.destination.capacity())
                 .sum::<usize>()
-            + self.interactions.capacity() * std::mem::size_of::<TextInteractionRange>()
-            + self.code_ranges.capacity() * std::mem::size_of::<Range<usize>>()
+            + self.interactions.capacity() * size_of::<TextInteractionRange>()
+            + self.code_ranges.capacity() * size_of::<Range<usize>>()
             + self.file_icons.capacity()
-                * std::mem::size_of::<(usize, (editor_assets::AssetId, editor_assets::AssetId))>()
-            + self.colors.capacity() * std::mem::size_of::<InlineSwatch>()
+                * size_of::<(usize, (editor_assets::AssetId, editor_assets::AssetId))>()
+            + self.colors.capacity() * size_of::<InlineSwatch>()
             + self
                 .colors
                 .iter()
@@ -649,7 +649,7 @@ fn interactive_leaf_impl(
         element = element.focusable(true).focus_visible_style(ring);
     }
     if let Some(on_link) = on_link {
-        let prepared = prepared.clone();
+        let prepared = Rc::clone(&prepared);
         element = element.on_input(
             aqua_ui::input::InputKind::TextRangeActivated,
             aqua_ui::input::EventPhase::Bubble,

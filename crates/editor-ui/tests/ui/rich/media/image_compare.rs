@@ -77,7 +77,7 @@ fn data_images_use_asset_decoder_and_release_leases_on_scope_change() {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
     );
-    let value = serde_json::json!({"before": {"src": data.clone()}, "after": {"src": data}});
+    let value = serde_json::json!({"before": {"src": data}, "after": {"src": data}});
     let model: ImageCompare = serde_json::from_value(value).unwrap();
     let assets = ImageAssets::new(aqua::images::ImageAssetBudget::editor());
     let loader = Images::new();

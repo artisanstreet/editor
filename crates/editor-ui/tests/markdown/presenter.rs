@@ -119,22 +119,20 @@ fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
             .expect("streamed prepare");
     }
     streamed.prepare_document(&engine).expect("whole document");
-    assert!(
-        streamed
-            .render_with_services(
-                "item",
-                theme,
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[1],
-                |index| SelectionSourceId(index as u64),
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
-                None,
-                None,
-                Some(&HeatmapServices::new(*theme)),
-                None,
-            )
-            .is_ok()
-    );
+    streamed
+        .render_with_services(
+            "item",
+            theme,
+            BodyTone::Foreground,
+            SelectionDocumentId(1),
+            &[1],
+            |index| SelectionSourceId(index as u64),
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
+            Rc::new(|| {}),
+            None,
+            None,
+            Some(&HeatmapServices::new(*theme)),
+            None,
+        )
+        .unwrap();
 }

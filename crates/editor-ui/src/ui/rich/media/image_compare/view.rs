@@ -362,7 +362,7 @@ impl CompareState {
                 consent: true,
                 before: before_label.clone(),
                 after: after_label.clone(),
-                emit: emit.clone(),
+                emit: Rc::clone(&emit),
             });
             let width = available_width.min(max_width * 2.0 + 8.0);
             let half = ((width - 8.0) / 2.0).max(0.0);
@@ -374,7 +374,7 @@ impl CompareState {
                     half,
                     aspect,
                     self.layer(Side::Before, &theme, id, half, half / aspect, &emit),
-                    vec![corner(&theme, before_label.clone(), true, false, half)],
+                    vec![corner(&theme, before_label, true, false, half)],
                     consent.clone(),
                 ))
                 .child(frame(
@@ -382,7 +382,7 @@ impl CompareState {
                     half,
                     aspect,
                     self.layer(Side::After, &theme, id, half, half / aspect, &emit),
-                    vec![corner(&theme, after_label.clone(), true, false, half)],
+                    vec![corner(&theme, after_label, true, false, half)],
                     consent,
                 ))
                 .build()
@@ -396,7 +396,7 @@ impl CompareState {
                 consent: self.waits_for_consent(),
                 before: before_label.clone(),
                 after: after_label.clone(),
-                emit: emit.clone(),
+                emit: Rc::clone(&emit),
             };
             let mut layers = Vec::new();
             match self.mode {
@@ -682,7 +682,7 @@ fn corner(
     UiBox::new()
         .opacity(if hidden { 0.0 } else { 1.0 })
         .style(Style::new().absolute_at(
-            if left { Some(Space::S8.px()) } else { None },
+            left.then(|| Space::S8.px()),
             Some(Space::S8.px()),
             if left { None } else { Some(Space::S8.px()) },
             None,

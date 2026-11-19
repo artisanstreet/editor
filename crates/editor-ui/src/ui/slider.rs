@@ -176,7 +176,7 @@ impl Slider {
                 step: state.range.step,
             }
         };
-        let state = self.state.clone();
+        let state = Rc::clone(&self.state);
         let layout = LayoutStyle {
             height: Length::Px(20.0),
             min_width: Length::Px(80.0),
@@ -252,7 +252,7 @@ impl Slider {
             track = track
                 .cursor(aqua_core::CursorIcon::EwResize)
                 .focus_visible_style(focus);
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change.clone();
             let next_layout = layout.clone();
             track = track.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
@@ -280,7 +280,7 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change.clone();
             let next_layout = layout.clone();
             track = track.on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
@@ -306,7 +306,7 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             track = track.on_input(InputKind::PointerUp, EventPhase::Bubble, move |_| {
                 state.borrow_mut().dragging = false;
                 InputResponse {
@@ -314,12 +314,12 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             track = track.on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
                 state.borrow_mut().dragging = false;
                 InputResponse::default()
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change.clone();
             track = track.on_accessibility_request(move |request| {
                 let mut state = state.borrow_mut();
@@ -339,7 +339,7 @@ impl Slider {
                     change(value);
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change;
             track = track.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
                 let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {

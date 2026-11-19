@@ -65,7 +65,7 @@ pub(crate) fn format_number(value: f64) -> String {
 
 const SUFFIXES: [&str; 4] = ["", "k", "M", "B"];
 
-pub fn compact_number(formats: &crate::ui::locale::Formats, value: f64) -> String {
+pub(super) fn compact_number(formats: &crate::ui::locale::Formats, value: f64) -> String {
     if !value.is_finite() {
         return "–".to_owned();
     }
@@ -129,12 +129,11 @@ impl CodeRef {
     fn parse(text: &str) -> Result<Self, CodeRefError> {
         let text = text.trim();
         let numbered = text.rsplit_once(':').and_then(|(path, lines)| {
-            let (start, end): (u32, u32) = match lines.split_once('-') {
-                Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
-                None => {
-                    let line = lines.parse().ok()?;
-                    (line, line)
-                }
+            let (start, end): (u32, u32) = if let Some((start, end)) = lines.split_once('-') {
+                (start.parse().ok()?, end.parse().ok()?)
+            } else {
+                let line = lines.parse().ok()?;
+                (line, line)
             };
             Some((path, start, end))
         });
@@ -231,7 +230,7 @@ impl<'de> Deserialize<'de> for LineSpan {
     }
 }
 pub(crate) fn retained_vec<T>(values: &Vec<T>) -> usize {
-    values.capacity() * std::mem::size_of::<T>()
+    values.capacity() * size_of::<T>()
 }
 
 pub(crate) fn retained_strings(values: &Vec<String>) -> usize {

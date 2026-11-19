@@ -32,7 +32,7 @@ impl MarkdownPresenter {
         command: Option<String>,
     ) -> Result<PreparationProof, PresenterError> {
         if self.projected.is_some() && self.source == source && self.command == command {
-            return Ok(PreparationProof(self.proof.clone()));
+            return Ok(PreparationProof(Arc::clone(&self.proof)));
         }
         self.proof = Arc::new(());
         self.document = None;
@@ -140,7 +140,9 @@ impl MarkdownPresenter {
             .map(|row| {
                 let signature = projected.signature(row).unwrap_or_default();
                 match previous_proofs.get(row) {
-                    Some((previous, proof)) if *previous == signature => (signature, proof.clone()),
+                    Some((previous, proof)) if *previous == signature => {
+                        (signature, Arc::clone(proof))
+                    }
                     _ => (signature, Arc::new(())),
                 }
             })
@@ -153,7 +155,7 @@ impl MarkdownPresenter {
         }
         self.command = command;
         self.projected = Some(projected);
-        Ok(PreparationProof(self.proof.clone()))
+        Ok(PreparationProof(Arc::clone(&self.proof)))
     }
 
     pub fn prepare_document(&mut self, engine: &MarkdownEngine) -> Result<(), PresenterError> {
@@ -193,30 +195,30 @@ impl MarkdownPresenter {
             self.annotated.borrow_mut().remove(key);
         });
         remove(&self.file_tree_ids, "file-tree", &|key| {
-            self.remove_file_tree(key)
+            self.remove_file_tree(key);
         });
         remove(&self.comparison_ids, "compare", &|key| {
-            self.comparisons.remove(key)
+            self.comparisons.remove(key);
         });
         remove(&self.stats_ids, "stats", &|key| self.stats.remove(key));
         remove(&self.callout_ids, "callout", &|key| {
-            self.callouts.remove(key)
+            self.callouts.remove(key);
         });
         remove(&self.heatmap_ids, "heatmap", &|key| {
-            self.heatmaps.remove(key)
+            self.heatmaps.remove(key);
         });
         remove(&self.funnel_ids, "funnel", &|key| self.funnels.remove(key));
         remove(&self.spans_ids, "spans", &|key| self.spans.remove(key));
         remove(&self.hierarchy_ids, "hierarchy", &|key| {
-            self.hierarchies.remove(key)
+            self.hierarchies.remove(key);
         });
         remove(&self.sankey_ids, "sankey", &|key| self.sankeys.remove(key));
         remove(&self.chart_ids, "chart", &|key| self.charts.remove(key));
         remove(&self.distribution_ids, "distribution", &|key| {
-            self.distributions.remove(key)
+            self.distributions.remove(key);
         });
         remove(&self.concentration_ids, "concentration", &|key| {
-            self.concentrations.remove(key)
+            self.concentrations.remove(key);
         });
     }
 }

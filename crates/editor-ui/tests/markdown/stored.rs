@@ -2,6 +2,7 @@ use super::*;
 use crate::ui::markdown::presenter::{MarkdownPresenter, PresenterError, StoredProjectedMarkdown};
 use crate::ui::markdown::visual::BodyTone;
 use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
+use std::sync::Arc;
 
 fn page(source: &ContentRef, metadata: &ContentRef) -> SourceIndexRange {
     SourceIndexRange {
@@ -72,17 +73,15 @@ fn prepared(
         phase: LeafPhase::Working,
         task: None,
     });
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: key.into(),
-                generation,
-                _worker: None,
-                _capacity: None,
-                result: Ok(result),
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: key.into(),
+            generation,
+            _worker: None,
+            _capacity: None,
+            result: Ok(result),
+        }))
+        .unwrap();
     owner.drain();
     owner.leaf(key, source, ordinal)
 }
@@ -116,7 +115,7 @@ fn descriptor_page_rejects_identity_offsets_and_metadata_corruption() {
     let source = ContentRef::from_text("αx");
     let metadata = ContentRef::from_text("{}");
     let valid = page(&source, &metadata);
-    assert!(validate_page(&source, SourceIndexFormat::Markdown, None, &valid).is_ok());
+    validate_page(&source, SourceIndexFormat::Markdown, None, &valid).unwrap();
     let mut corrupted = valid.clone();
     corrupted.leaves[1].ordinal = 0;
     assert!(validate_page(&source, SourceIndexFormat::Markdown, None, &corrupted).is_err());
@@ -215,7 +214,7 @@ fn long_page(
     source: &ContentRef,
     metadata: &ContentRef,
     leaves: u64,
-    range: std::ops::Range<u64>,
+    range: Range<u64>,
 ) -> SourceIndexRange {
     SourceIndexRange {
         index: SourceIndexHeader {
@@ -258,16 +257,14 @@ fn deliver_page(
     offset: u64,
     result: Result<SourceIndexRange, String>,
 ) -> Vec<StoredUpdate> {
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Index {
-                owner: "row".into(),
-                revision,
-                offset: Some(offset),
-                result,
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Index {
+            owner: "row".into(),
+            revision,
+            offset: Some(offset),
+            result,
+        }))
+        .unwrap();
     owner.drain()
 }
 
@@ -310,12 +307,9 @@ fn a_failed_page_reports_its_offset_and_cause_until_retried() {
         provider.clone(),
         Arc::new(long_page(&source, &metadata, 130, 66..130)),
     );
-    let StoredPreparation::Ready(tail) = owner.ensure(
-        "row",
-        provider.clone(),
-        source.clone(),
-        SourceIndexFormat::Markdown,
-    ) else {
+    let StoredPreparation::Ready(tail) =
+        owner.ensure("row", provider, source.clone(), SourceIndexFormat::Markdown)
+    else {
         panic!("expected the cached tail page")
     };
     assert_eq!(tail.block_count(), 130);
@@ -381,9 +375,7 @@ fn leaf_admission_precedes_collector_allocation() {
     else {
         panic!("expected cached page")
     };
-    let held = owner
-        .capacity
-        .clone()
+    let held = Arc::clone(&owner.capacity)
         .try_acquire_many_owned(PREPARED_BYTES as u32)
         .unwrap();
     assert!(matches!(
@@ -419,30 +411,26 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
             123,
         ))
     };
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 8,
-                result: make_result(),
-                _worker: None,
-                _capacity: None,
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: "leaf".into(),
+            generation: 8,
+            result: make_result(),
+            _worker: None,
+            _capacity: None,
+        }))
+        .unwrap();
     assert!(owner.drain().is_empty());
     assert_eq!(owner.prepared_capacity.available_permits(), PREPARED_BYTES);
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 9,
-                result: make_result(),
-                _worker: None,
-                _capacity: None,
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: "leaf".into(),
+            generation: 9,
+            result: make_result(),
+            _worker: None,
+            _capacity: None,
+        }))
+        .unwrap();
     assert_eq!(
         owner.drain(),
         vec![StoredUpdate::Leaf {
@@ -472,14 +460,12 @@ fn worker_reuses_engine_across_jobs() {
     let (send, receive) = std::sync::mpsc::channel();
     for _ in 0..2 {
         let send = send.clone();
-        assert!(
-            worker
-                .try_send(Box::new(move |engine| {
-                    let engine = engine.as_ref().unwrap();
-                    send.send(std::ptr::from_ref(engine) as usize).unwrap();
-                }))
-                .is_ok()
-        );
+        worker
+            .try_send(Box::new(move |engine| {
+                let engine = engine.as_ref().unwrap();
+                send.send(std::ptr::from_ref(engine) as usize).unwrap();
+            }))
+            .unwrap();
     }
     assert_eq!(receive.recv().unwrap(), receive.recv().unwrap());
 }
@@ -515,15 +501,13 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
     let StoredPreparation::Ready(source) = owner.ensure(
         "row",
         provider,
-        page.index.source.clone(),
+        page.index.source,
         SourceIndexFormat::Markdown,
     ) else {
         panic!("expected cached page")
     };
     let permit = Arc::new(
-        owner
-            .capacity
-            .clone()
+        Arc::clone(&owner.capacity)
             .try_acquire_many_owned((metadata.len() + RANGE_BYTES as usize) as u32)
             .unwrap(),
     );
@@ -549,11 +533,9 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
             text: metadata,
         }),
     };
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(completion))
+        .unwrap();
     owner.drain();
     assert!(matches!(
         owner.leaves[0].phase,
@@ -598,8 +580,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             &owner,
             "row",
             0,
-            leaf.clone(),
-            &theme,
+            leaf,
+            theme,
             SelectionDocumentId(9),
             &[7],
             |part| SelectionSourceId(100 + part as u64),
@@ -619,7 +601,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     let reveal = Rc::new(crate::ui::markdown::reveal::PreparedReveal::default());
     let now = std::time::Instant::now();
     reveal.begin_frame(now, true, true, false, false);
-    presenter.set_projected_reveal("row", 0, Some(reveal.clone()));
+    presenter.set_projected_reveal("row", 0, Some(Rc::clone(&reveal)));
     let initial = render(&presenter, &owner).unwrap();
     assert!(Arc::ptr_eq(
         &first.selection_batch,
@@ -638,7 +620,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
                 let node = app.tree().get(id)?;
                 match &node.kind {
                     aqua_ui::tree::NodeKind::Text(text) if text.text() == "abc" => {
-                        Some(text.gpui_text_opacity.clone())
+                        Some(Arc::clone(&text.gpui_text_opacity))
                     }
                     _ => None,
                 }
@@ -717,7 +699,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             "row",
             1,
             table,
-            &theme,
+            theme,
             SelectionDocumentId(9),
             &[7],
             |part| SelectionSourceId(200 + part as u64),
@@ -770,7 +752,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
                 "row",
                 0,
                 oversized,
-                &theme,
+                theme,
                 SelectionDocumentId(9),
                 &[7],
                 |part| SelectionSourceId(300 + part as u64)

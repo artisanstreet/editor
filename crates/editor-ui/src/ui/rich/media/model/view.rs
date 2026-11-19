@@ -154,10 +154,9 @@ impl ModelState {
             let frame = completed.frame;
             if let Ok(decoded) =
                 aqua::images::DecodedImage::from_rgba(frame.width, frame.height, frame.pixels)
+                && let Ok(image) = images.insert(decoded)
             {
-                if let Ok(image) = images.insert(decoded) {
-                    entry.shown = Some((image, completed.key));
-                }
+                entry.shown = Some((image, completed.key));
             }
             changed = true;
         }
@@ -403,7 +402,7 @@ impl ModelBlock {
                 entry.shading,
                 entry.drag.is_some(),
                 entry.camera != entry.initial,
-                entry.bounds.clone(),
+                Rc::clone(&entry.bounds),
                 entry.shown.as_ref().map(|(image, _)| image.clone()),
             )
         };
@@ -413,8 +412,8 @@ impl ModelBlock {
         let look = Look { base, edges };
         let drawing = match &model.geometry {
             Geometry::Mesh(mesh) => {
-                let mesh = mesh.clone();
-                let measured = bounds.clone();
+                let mesh = Arc::clone(mesh);
+                let measured = Rc::clone(&bounds);
                 ui::Canvas::new()
                     .style(
                         Style::new()
@@ -431,7 +430,7 @@ impl ModelBlock {
                                 ) - 1.0)
                                     .max(0.0),
                             ),
-                            mesh: mesh.clone(),
+                            mesh: Arc::clone(&mesh),
                             style: GpuiMeshStyle {
                                 view: camera.view_matrix(),
                                 projection: Camera::projection_matrix(
@@ -463,8 +462,8 @@ impl ModelBlock {
                     height: pixel_height,
                     samples,
                 };
-                state.render_software(id, key, model.clone());
-                let measured = bounds.clone();
+                state.render_software(id, key, Arc::clone(&model));
+                let measured = Rc::clone(&bounds);
                 let probe = ui::Canvas::new()
                     .style(
                         Style::new()
@@ -492,29 +491,29 @@ impl ModelBlock {
         };
         let down_state = state.clone();
         let down_id = id.to_owned();
-        let down_invalidate = services.invalidate.clone();
-        let copy = services.copy.clone();
+        let down_invalidate = Rc::clone(&services.invalidate);
+        let copy = Rc::clone(&services.copy);
         let source = self.src.raw().to_owned();
         let move_state = state.clone();
         let move_id = id.to_owned();
-        let move_invalidate = services.invalidate.clone();
+        let move_invalidate = Rc::clone(&services.invalidate);
         let up_state = state.clone();
         let up_id = id.to_owned();
-        let up_invalidate = services.invalidate.clone();
+        let up_invalidate = Rc::clone(&services.invalidate);
         let cancel_state = state.clone();
         let cancel_id = id.to_owned();
-        let cancel_invalidate = services.invalidate.clone();
+        let cancel_invalidate = Rc::clone(&services.invalidate);
         let wheel_state = state.clone();
         let wheel_id = id.to_owned();
-        let wheel_invalidate = services.invalidate.clone();
+        let wheel_invalidate = Rc::clone(&services.invalidate);
         let key_state = state.clone();
         let key_id = id.to_owned();
-        let key_invalidate = services.invalidate.clone();
-        let key_copy = services.copy.clone();
+        let key_invalidate = Rc::clone(&services.invalidate);
+        let key_copy = Rc::clone(&services.copy);
         let key_source = self.src.raw().to_owned();
-        let request_copy = services.copy.clone();
+        let request_copy = Rc::clone(&services.copy);
         let request_source = self.src.raw().to_owned();
-        let request_bounds = bounds.clone();
+        let request_bounds = bounds;
         let canvas = drawing
             .with_key(format!("{id}-frame"))
             .focusable(true)
@@ -658,16 +657,16 @@ impl ModelBlock {
             });
         let shade_state = state.clone();
         let shade_id = id.to_owned();
-        let shade_invalidate = services.invalidate.clone();
+        let shade_invalidate = Rc::clone(&services.invalidate);
         let change_shading: Rc<dyn Fn(Shading)> = Rc::new(move |chosen| {
             if let Some(entry) = shade_state.0.borrow_mut().entries.get_mut(&shade_id) {
                 entry.shading = chosen;
             }
             shade_invalidate();
         });
-        let reset_state = state.clone();
+        let reset_state = state;
         let reset_id = id.to_owned();
-        let reset_invalidate = services.invalidate.clone();
+        let reset_invalidate = Rc::clone(&services.invalidate);
         let reset: Rc<dyn Fn()> = Rc::new(move || {
             if let Some(entry) = reset_state.0.borrow_mut().entries.get_mut(&reset_id) {
                 entry.reset();

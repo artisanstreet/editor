@@ -63,8 +63,9 @@ pub(crate) fn activatable(
 }
 
 pub(crate) fn pressable(element: Element, theme: &ArtisanTheme, travel: f32) -> Element {
-    match theme.reduced_motion() {
-        true => element,
-        false => element.pressed_style(Style::new().transform(Transform2D::translate(0.0, travel))),
+    if theme.reduced_motion() {
+        element
+    } else {
+        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, travel)))
     }
 }

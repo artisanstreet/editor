@@ -74,7 +74,7 @@ impl HeatmapState {
     fn sync(&self, id: &str, model: &Heatmap) -> (Option<(usize, usize)>, Probe, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.0.clone(),
+            model: Arc::clone(&model.0),
             selected: None,
             plot: Rc::new(Cell::new(None)),
             reveal: None,
@@ -86,20 +86,19 @@ impl HeatmapState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.0.clone();
+            entry.model = Arc::clone(&model.0);
         }
-        (entry.selected, entry.plot.clone(), entry.reset)
+        (entry.selected, Rc::clone(&entry.plot), entry.reset)
     }
 
     fn hover(&self, id: &str, row: usize, columns: usize, x: f32, y: f32) -> bool {
-        let selected = if columns > 0 && (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y) {
-            Some((
-                row,
-                super::super::scale::index_of(f64::from(x) * f64_of(columns)).min(columns - 1),
-            ))
-        } else {
-            None
-        };
+        let selected =
+            (columns > 0 && (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)).then(|| {
+                (
+                    row,
+                    super::super::scale::index_of(f64::from(x) * f64_of(columns)).min(columns - 1),
+                )
+            });
         let mut entries = self.0.borrow_mut();
         let Some(entry) = entries.get_mut(id) else {
             return false;
@@ -179,8 +178,8 @@ impl Heatmap {
         let model = self.clone();
         let row_states = states.clone();
         let row_id = id.clone();
-        let row_text = text.clone();
-        let row_invalidate = invalidate.clone();
+        let row_text = Rc::clone(&text);
+        let row_invalidate = Rc::clone(&invalidate);
         let height = theme.density.control_sm;
         let list = List::new()
             .items(0..rows)
@@ -195,10 +194,10 @@ impl Heatmap {
             .row(move |row| {
                 let row = *row;
                 let probe: Probe = Rc::new(Cell::new(None));
-                let moving = probe.clone();
+                let moving = Rc::clone(&probe);
                 let state = row_states.clone();
                 let key = row_id.clone();
-                let invalidate = row_invalidate.clone();
+                let invalidate = Rc::clone(&row_invalidate);
                 let content = row_canvas(&model, &theme, row, selected, probe);
                 let plot = ui::Box::new()
                     .style(
@@ -287,7 +286,7 @@ impl Heatmap {
                     .build(),
             );
         }
-        let plot_probe = plot.clone();
+        let plot_probe = plot;
         let mut content = ui::Box::new()
             .layout("column")
             .width(Length::Pct(100.0))
@@ -333,9 +332,9 @@ impl Heatmap {
             label.push(' ');
             label.push_str(selection);
         }
-        let keyboard = states.clone();
+        let keyboard = states;
         let key = id.clone();
-        let keyboard_invalidate = invalidate.clone();
+        let keyboard_invalidate = Rc::clone(&invalidate);
         let navigation = navigation_group(
             content.build(),
             &id,

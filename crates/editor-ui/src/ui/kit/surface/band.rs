@@ -107,9 +107,10 @@ impl Band {
     pub fn build(self, theme: &ArtisanTheme, selected: bool, content: Element) -> Element {
         let surfaces = Surfaces::of(theme);
         let edge = Edge::of(surfaces.bg, surfaces.ink);
-        let highlight = match self.opens() {
-            true => vertical(edge.highlight_top, edge.highlight_bottom),
-            false => GpuiBackground::Solid(surfaces.bg.to_reference_paint()),
+        let highlight = if self.opens() {
+            vertical(edge.highlight_top, edge.highlight_bottom)
+        } else {
+            GpuiBackground::Solid(surfaces.bg.to_reference_paint())
         };
         let padding = self.padding();
         let pad = Row::FormRow.pad();

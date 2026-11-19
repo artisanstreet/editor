@@ -45,9 +45,10 @@ fn light(owner: NodeId, hovered: bool) {
 
 #[must_use]
 pub fn layer(hover: Hover, theme: &ArtisanTheme, radius: f32, selected: bool) -> Element {
-    let (opacity, transform) = match selected {
-        true => (1.0, Transform2D::IDENTITY),
-        false => pose(Highlight::default(), Instant::now(), 0.0),
+    let (opacity, transform) = if selected {
+        (1.0, Transform2D::IDENTITY)
+    } else {
+        pose(Highlight::default(), Instant::now(), 0.0)
     };
     UiBox::new()
         .style(hover.style(theme))
@@ -95,9 +96,10 @@ pub fn advance(app: &mut aqua::UiApp, now: Instant, reduced: bool) -> Frame {
     let mut frame = Frame::default();
     let mut kept = HashMap::new();
     for (owner, highlight) in entries {
-        let highlight = match reduced {
-            true => Highlight::default().light(highlight.lit(), now, true),
-            false => highlight.settle(now),
+        let highlight = if reduced {
+            Highlight::default().light(highlight.lit(), now, true)
+        } else {
+            highlight.settle(now)
         };
         let Some(node) = layer_of(app, owner) else {
             continue;

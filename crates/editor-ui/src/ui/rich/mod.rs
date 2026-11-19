@@ -181,10 +181,10 @@ fn validate_value_budget(root: &serde_json::Value) -> Result<(), String> {
         }
         match value {
             serde_json::Value::Array(values) => {
-                pending.extend(values.iter().map(|value| (value, depth + 1)))
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)))
+                pending.extend(values.values().map(|value| (value, depth + 1)));
             }
             _ => {}
         }

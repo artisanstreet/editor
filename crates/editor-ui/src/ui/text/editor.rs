@@ -538,13 +538,15 @@ impl Editor {
             .text
             .as_deref()
             .filter(|text| !text.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                item.paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect()
-            });
+            .map_or_else(
+                || {
+                    item.paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect()
+                },
+                str::to_owned,
+            );
         if text.is_empty() {
             return PasteOutcome::Edit(EditOutcome::Unchanged);
         }
@@ -799,9 +801,10 @@ impl Editor {
         let column = *self
             .vertical_goal_column
             .get_or_insert_with(|| self.text[start..cursor].encode_utf16().count());
-        let mut target = visual_target
-            .map(|index| self.text.floor_char_boundary(index.min(self.text.len())))
-            .unwrap_or_else(|| logical_vertical_target(&self.text, cursor, up, column));
+        let mut target = visual_target.map_or_else(
+            || logical_vertical_target(&self.text, cursor, up, column),
+            |index| self.text.floor_char_boundary(index.min(self.text.len())),
+        );
         if target == cursor {
             target = if up { 0 } else { self.text.len() };
         }
@@ -981,7 +984,7 @@ impl aqua_text::input_service::TextInputService for Editor {
     }
 
     fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
-        Editor::text_for_utf16_range(self, range)
+        Self::text_for_utf16_range(self, range)
     }
 
     fn selected_utf16_range(&self, ignore_disabled: bool) -> Option<(Range<usize>, bool)> {
@@ -1009,7 +1012,7 @@ impl aqua_text::input_service::TextInputService for Editor {
     }
 
     fn unmark_text(&mut self) {
-        Editor::unmark_text(self);
+        Self::unmark_text(self);
     }
 }
 

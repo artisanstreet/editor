@@ -53,8 +53,8 @@ impl std::ops::Deref for Heatmap {
 impl Heatmap {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<HeatmapData>()
+        size_of::<Self>()
+            + size_of::<HeatmapData>()
             + retained_strings(&self.x)
             + retained_strings(&self.y)
             + retained_vec(&self.values)

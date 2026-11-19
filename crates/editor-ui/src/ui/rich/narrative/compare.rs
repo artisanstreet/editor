@@ -46,8 +46,8 @@ struct Row {
 impl Compare {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<CompareData>()
+        size_of::<Self>()
+            + size_of::<CompareData>()
             + retained_strings(&self.0.options)
             + retained_vec(&self.0.rows)
             + self
@@ -172,13 +172,13 @@ impl Compare {
                 theme,
                 states.clone(),
                 id.clone(),
-                invalidate.clone(),
+                Rc::clone(&invalidate),
             ));
         }
-        let data = self.0.clone();
+        let data = Arc::clone(&self.0);
         let row_states = states.clone();
         let row_id = id.clone();
-        let row_invalidate = invalidate.clone();
+        let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..data.rows.len())
             .key(|index| *index)
@@ -218,7 +218,7 @@ impl Compare {
                     })
                     .child(criterion(&theme, &row.criterion));
                 for column in 0..count {
-                    let value = row.values.get(column).map(String::as_str).unwrap_or("");
+                    let value = row.values.get(column).map_or("", String::as_str);
                     let (value, color) = if value.is_empty() {
                         ("–", theme.colors.text_muted)
                     } else {
@@ -233,7 +233,7 @@ impl Compare {
                         theme,
                         row_states.clone(),
                         row_id.clone(),
-                        row_invalidate.clone(),
+                        Rc::clone(&row_invalidate),
                     ));
                 }
                 view.build()
@@ -261,7 +261,7 @@ impl Compare {
             label.push(' ');
             label.push_str(option);
         }
-        let state = states.clone();
+        let state = states;
         let key = id.clone();
         let mut root = ui::Box::new()
             .width(Length::Pct(100.0))
@@ -322,7 +322,7 @@ impl TryFrom<CompareSpec> for Compare {
                 .iter()
                 .position(|option| option.trim().eq_ignore_ascii_case(wanted.trim()))
         });
-        let text = |text: String| String::from(text.trim().to_owned());
+        let text = |text: String| text.trim().to_owned();
         Ok(Self(Arc::new(CompareData {
             options: spec.options.into_iter().map(text).collect(),
             rows: spec

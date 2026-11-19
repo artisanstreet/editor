@@ -116,7 +116,7 @@ fn press(app: &mut aqua::UiApp, key: Key) {
     app.handle_input(&InputEvent::KeyUp(event));
 }
 
-fn node(app: &aqua::UiApp, role: aqua_core::Role, label: &str) -> aqua_core::SemanticNode {
+fn node(app: &aqua::UiApp, role: Role, label: &str) -> aqua_core::SemanticNode {
     app.tree()
         .emit_semantics()
         .into_iter()
@@ -166,9 +166,9 @@ fn the_play_button_is_named_and_toggles_from_keyboard_and_assistive_tech() {
         position: Duration::ZERO,
         duration: Duration::from_secs(1),
     }));
-    node(&playing, aqua_core::Role::Button, "Pause intro.ogg");
+    node(&playing, Role::Button, "Pause intro.ogg");
     let mut app = mounted(button(&Shown::Idle));
-    let play = node(&app, aqua_core::Role::Button, "Play intro.ogg");
+    let play = node(&app, Role::Button, "Play intro.ogg");
     assert!(play.focusable);
     assert!(app.focus_key("row-button"));
     press(&mut app, Key::Named(NamedKey::Enter));
@@ -196,11 +196,11 @@ fn the_progress_line_is_a_slider_that_keyboard_and_assistive_tech_seek() {
         Rc::new(Cell::new(None)),
         Rc::new(|| {}),
     ));
-    let slider = node(&app, aqua_core::Role::Slider, "Seek intro.ogg");
+    let slider = node(&app, Role::Slider, "Seek intro.ogg");
     assert!(slider.focusable);
     assert_eq!(
         slider.numeric_range,
-        Some(aqua_core::NumericRangeSemantics {
+        Some(NumericRangeSemantics {
             min: 0.0,
             max: 60.0,
             value: 20.0,
@@ -265,7 +265,7 @@ fn a_track_transcript_is_parsed_and_disclosed_to_the_accessibility_tree() {
         ))
     };
     let mut app = render();
-    let closed = node(&app, aqua_core::Role::Button, "Show transcript");
+    let closed = node(&app, Role::Button, "Show transcript");
     assert_eq!(closed.expanded, Some(false));
     assert!(
         !app.tree()
@@ -276,7 +276,7 @@ fn a_track_transcript_is_parsed_and_disclosed_to_the_accessibility_tree() {
     assert!(app.focus_key("row-transcript"));
     press(&mut app, Key::Named(NamedKey::Enter));
     let app = render();
-    let open = node(&app, aqua_core::Role::Button, "Hide transcript");
+    let open = node(&app, Role::Button, "Hide transcript");
     assert_eq!(open.expanded, Some(true));
     assert!(
         app.tree()

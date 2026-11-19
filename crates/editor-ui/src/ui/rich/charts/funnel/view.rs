@@ -37,7 +37,7 @@ impl FunnelState {
     fn sync(&self, id: &str, model: &Funnel) -> (Option<usize>, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.steps.clone(),
+            model: Arc::clone(&model.steps),
             selected: None,
             reveal: None,
             reset: 0,
@@ -48,7 +48,7 @@ impl FunnelState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.steps.clone();
+            entry.model = Arc::clone(&model.steps);
         }
         (entry.selected, entry.reset)
     }
@@ -175,8 +175,8 @@ impl Funnel {
         let model = self.clone();
         let row_state = states.clone();
         let row_id = id.clone();
-        let row_text = text.clone();
-        let row_invalidate = invalidate.clone();
+        let row_text = Rc::clone(&text);
+        let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..count)
             .key(|index| *index)
@@ -199,7 +199,7 @@ impl Funnel {
                     .to_reference_paint();
                 let state = row_state.clone();
                 let key = row_id.clone();
-                let invalidate = row_invalidate.clone();
+                let invalidate = Rc::clone(&row_invalidate);
                 let name = ui::Box::new()
                     .style(
                         Style::new()
@@ -323,7 +323,7 @@ impl Funnel {
             label.push(' ');
             label.push_str(value);
         }
-        let keyboard = states.clone();
+        let keyboard = states;
         let key = id.clone();
         let navigation = navigation_group(
             ui::Box::new()

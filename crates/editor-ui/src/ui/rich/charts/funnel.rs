@@ -54,8 +54,8 @@ pub(crate) struct StepReading {
 
 impl Funnel {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + std::mem::size_of_val(self.steps.as_ref())
+        size_of::<Self>()
+            + size_of_val(self.steps.as_ref())
             + self
                 .steps
                 .iter()

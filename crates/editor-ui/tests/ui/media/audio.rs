@@ -96,7 +96,7 @@ fn a_remote_track_is_refused_without_fetching() {
         fixture.request("https://example.com/intro.ogg"),
         Some(Err(AudioLoadError::Remote))
     );
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]

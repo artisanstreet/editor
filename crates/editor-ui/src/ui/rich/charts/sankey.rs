@@ -98,7 +98,7 @@ pub(crate) struct Graph {
 impl Graph {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_strings(&self.labels)
             + retained_vec(&self.links)
             + retained_vec(&self.ranks)

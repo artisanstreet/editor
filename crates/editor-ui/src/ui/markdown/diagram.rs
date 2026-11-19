@@ -163,10 +163,7 @@ fn summary(graph: &Graph) -> String {
             .edges
             .iter()
             .map(|edge| {
-                let arrow = match edge.directed {
-                    true => "→",
-                    false => "—",
-                };
+                let arrow = if edge.directed { "→" } else { "—" };
                 let relation = format!("{} {arrow} {}", name(&edge.from), name(&edge.to));
                 match edge.label.as_deref().map(str::trim) {
                     Some(label) if !label.is_empty() => format!("{relation}: {label}"),

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
+const OPTION_HEIGHT: f32 = match Row::MenuItem.height() {
     Some(height) => height,
     None => 0.0,
 };
@@ -356,7 +356,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
             AssetId::TABLER_SELECTOR,
             theme.colors.text_muted.to_reference_paint(),
         );
-        let state = self.state.clone();
+        let state = Rc::clone(&self.state);
         let open_change = self.open_change.clone();
         let tone = |open_opacity, rest_opacity| {
             theme
@@ -439,15 +439,15 @@ impl<V: Clone + Eq + 'static> Select<V> {
                         }
                         (result, before, state.open)
                     };
-                    if before != after {
-                        if let Some(change) = &open_change {
-                            change(after);
-                        }
+                    if before != after
+                        && let Some(change) = &open_change
+                    {
+                        change(after);
                     }
-                    if let Some(value) = result.commit {
-                        if let Some(change) = &change {
-                            change(value);
-                        }
+                    if let Some(value) = result.commit
+                        && let Some(change) = &change
+                    {
+                        change(value);
                     }
                     if result.handled {
                         InputResponse {
@@ -502,7 +502,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
     }
 
     pub fn into_parts(self) -> (Element, aqua_ui::popup::PopupOptions) {
-        let state = self.state.clone();
+        let state = Rc::clone(&self.state);
         let open_change = self.open_change.clone();
         let mut options = aqua_ui::popup::PopupOptions::menu();
         options.kind = aqua_ui::overlay::OverlayKind::Popover;
@@ -515,10 +515,8 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             let was_open = state.open;
             state.set_open(false);
             drop(state);
-            if was_open {
-                if let Some(change) = &open_change {
-                    change(false);
-                }
+            if was_open && let Some(change) = &open_change {
+                change(false);
             }
         }));
         (self.build(), options)
@@ -537,12 +535,13 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         for (index, entry) in self.entries.into_iter().enumerate() {
             let chosen = self.selected.as_ref() == Some(&entry.value);
             let highlighted = keyed && highlighted.as_ref() == Some(&entry.value);
-            let mark = match chosen {
-                true => check.glyph(
+            let mark = if chosen {
+                check.glyph(
                     AssetId::TABLER_CHECK,
                     theme.colors.text_muted.to_reference_paint(),
-                ),
-                false => UiBox::new().width(check.px()).height(check.px()).build(),
+                )
+            } else {
+                UiBox::new().width(check.px()).height(check.px()).build()
             };
             let mut row = RowItem::new(
                 index.to_string(),
@@ -556,11 +555,11 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .disabled(entry.disabled)
             .role(Role::Option);
             if !entry.disabled {
-                let state = self.state.clone();
+                let state = Rc::clone(&self.state);
                 let change = self.change.clone();
                 let open_change = self.open_change.clone();
                 let value = entry.value.clone();
-                let hover_state = self.state.clone();
+                let hover_state = Rc::clone(&self.state);
                 row = row
                     .on_activate(move || {
                         state.borrow_mut().set_open(false);
@@ -578,9 +577,10 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
                     });
             }
             let row = row.build().aria_selected(chosen).focusable(false);
-            rows = rows.child(match highlighted {
-                true => row.aria_active_descendant(),
-                false => row,
+            rows = rows.child(if highlighted {
+                row.aria_active_descendant()
+            } else {
+                row
             });
         }
         let scroll = Scroll::new()

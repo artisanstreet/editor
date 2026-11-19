@@ -106,11 +106,11 @@ impl ProjectedMarkdown {
             .text
             .iter()
             .map(|leaf| {
-                let fades = reveal.fades(leaf.slot, leaf.text.clone());
+                let fades = reveal.fades(leaf.slot, Arc::clone(&leaf.text));
                 let end = reveal.visible_end(leaf.slot, &leaf.text);
                 ProjectedRevealText {
                     key: leaf.key.clone(),
-                    text: leaf.text.clone(),
+                    text: Arc::clone(&leaf.text),
                     end,
                     fades,
                 }
@@ -136,9 +136,9 @@ impl StoredProjectedMarkdown {
             .iter()
             .map(|leaf| ProjectedRevealText {
                 key: leaf.key.clone(),
-                text: leaf.text.clone(),
+                text: Arc::clone(&leaf.text),
                 end: reveal.visible_end(leaf.slot, &leaf.text),
-                fades: reveal.fades(leaf.slot, leaf.text.clone()),
+                fades: reveal.fades(leaf.slot, Arc::clone(&leaf.text)),
             })
             .collect()
     }
@@ -164,8 +164,7 @@ pub struct CodeServices {
 
 pub struct ReferenceServices {
     pub instance: Option<editor_core::HostInstance>,
-    pub open:
-        Rc<dyn Fn(crate::ui::rich::actions::OpenReference, Option<editor_core::HostInstance>)>,
+    pub open: Rc<dyn Fn(rich::actions::OpenReference, Option<editor_core::HostInstance>)>,
 }
 
 #[derive(Clone)]
@@ -252,10 +251,10 @@ pub struct MarkdownPresenter {
     leaf_proofs: Vec<(u64, Arc<()>)>,
     wake: Mailbox<()>,
     reveals: RefCell<HashMap<String, HashMap<usize, Rc<super::reveal::PreparedReveal>>>>,
-    models: crate::ui::rich::media::model::ModelState,
+    models: rich::media::model::ModelState,
     model_ids: RefCell<HashMap<String, HashSet<String>>>,
     model_hover: RefCell<HashMap<String, Rc<Cell<bool>>>>,
-    audio: crate::ui::rich::media::audio::AudioState,
+    audio: rich::media::audio::AudioState,
     audio_ids: RefCell<HashMap<String, HashSet<String>>>,
     media_services: RefCell<HashMap<String, MediaServices>>,
     media_invalidations: RefCell<HashMap<String, Rc<dyn Fn()>>>,
@@ -263,9 +262,9 @@ pub struct MarkdownPresenter {
         HashMap<
             String,
             (
-                Arc<crate::ui::rich::media::image::ImageBlock>,
+                Arc<rich::media::image::ImageBlock>,
                 String,
-                Rc<RefCell<crate::ui::rich::media::image::ImageState>>,
+                Rc<RefCell<rich::media::image::ImageState>>,
             ),
         >,
     >,
@@ -275,17 +274,14 @@ pub struct MarkdownPresenter {
             String,
             (
                 String,
-                Rc<RefCell<crate::ui::rich::media::image_compare::view::CompareState>>,
+                Rc<RefCell<rich::media::image_compare::view::CompareState>>,
             ),
         >,
     >,
     image_comparison_ids: RefCell<HashMap<String, HashSet<String>>>,
-    annotated: RefCell<
-        HashMap<String, Rc<RefCell<crate::ui::rich::code::annotated::view::AnnotatedState>>>,
-    >,
+    annotated: RefCell<HashMap<String, Rc<RefCell<rich::code::annotated::view::AnnotatedState>>>>,
     annotated_ids: RefCell<HashMap<String, HashSet<String>>>,
-    file_trees:
-        RefCell<HashMap<String, Rc<RefCell<crate::ui::rich::code::file_tree::FileTreeState>>>>,
+    file_trees: RefCell<HashMap<String, Rc<RefCell<rich::code::file_tree::FileTreeState>>>>,
     file_tree_ids: RefCell<HashMap<String, HashSet<String>>>,
     file_tree_focus: Rc<RefCell<HashMap<String, (String, String, usize)>>>,
     comparisons: CompareState,
@@ -337,10 +333,10 @@ impl Default for MarkdownPresenter {
             leaf_proofs: Vec::new(),
             wake: Mailbox::new(NonZeroUsize::MIN),
             reveals: RefCell::new(HashMap::new()),
-            models: crate::ui::rich::media::model::ModelState::default(),
+            models: rich::media::model::ModelState::default(),
             model_ids: RefCell::new(HashMap::new()),
             model_hover: RefCell::new(HashMap::new()),
-            audio: crate::ui::rich::media::audio::AudioState::default(),
+            audio: rich::media::audio::AudioState::default(),
             audio_ids: RefCell::new(HashMap::new()),
             media_services: RefCell::new(HashMap::new()),
             media_invalidations: RefCell::new(HashMap::new()),
@@ -506,7 +502,7 @@ impl MarkdownPresenter {
 fn enveloped(theme: &ArtisanTheme, envelope: &rich::Envelope, content: Element) -> Element {
     let current_theme = *theme;
     let text = Rc::new(move |value: &str, role, color| {
-        crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
+        rich::narrative::callout::text(&current_theme, value, role, color)
     });
     charts::heatmap::envelope(
         theme,

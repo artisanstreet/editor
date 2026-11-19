@@ -44,11 +44,12 @@ impl LoadedModel {
         } = model;
         let (geometry, resident_bytes) = match renderer {
             RendererCapability::Software => {
-                let bytes = mesh.positions.capacity() * std::mem::size_of::<glam::Vec3>()
-                    + mesh.normals.capacity() * std::mem::size_of::<glam::Vec3>()
-                    + mesh.colors.as_ref().map_or(0, |colors| {
-                        colors.capacity() * std::mem::size_of::<glam::Vec3>()
-                    });
+                let bytes = mesh.positions.capacity() * size_of::<glam::Vec3>()
+                    + mesh.normals.capacity() * size_of::<glam::Vec3>()
+                    + mesh
+                        .colors
+                        .as_ref()
+                        .map_or(0, |colors| colors.capacity() * size_of::<glam::Vec3>());
                 (Geometry::Software(mesh), bytes)
             }
             RendererCapability::Mesh => {
@@ -65,7 +66,7 @@ impl LoadedModel {
                         )
                     })
                     .collect();
-                let bytes = vertices.capacity() * std::mem::size_of::<GpuiMeshVertex>();
+                let bytes = vertices.capacity() * size_of::<GpuiMeshVertex>();
                 (Geometry::Mesh(Arc::new(GpuiMesh::new(vertices))), bytes)
             }
         };

@@ -229,7 +229,7 @@ impl PreparedReveal {
         }
         let now = self.now.get();
         let leaf = leaves.entry(slot).or_insert_with(|| Leaf {
-            text: text.clone(),
+            text: Arc::clone(&text),
             visible: if self.fresh.get() { 0 } else { text.len() },
             marks: VecDeque::new(),
         });
@@ -238,7 +238,7 @@ impl PreparedReveal {
                 leaf.visible = text.len();
                 leaf.marks.clear();
             }
-            leaf.text = text.clone();
+            leaf.text = Arc::clone(&text);
         }
         if !self.paused.get() && leaf.visible < text.len() {
             leaf.marks.push_back((leaf.visible..text.len(), now));

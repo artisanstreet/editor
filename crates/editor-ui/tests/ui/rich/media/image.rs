@@ -87,7 +87,7 @@ fn a_new_item_revision_fetches_fresh_image_pixels() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(2));
     }
-    let mut second = ImageState::new(&block, fetcher.clone().owned_by(&[42], 2), loader.clone());
+    let mut second = ImageState::new(&block, fetcher.owned_by(&[42], 2), loader.clone());
     loop {
         loader.drain(&assets);
         second.refresh();

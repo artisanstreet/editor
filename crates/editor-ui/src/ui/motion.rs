@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Clone, Default)]
@@ -16,8 +17,8 @@ impl WorkingPulse {
             element::{Canvas, Element},
             style::Style,
         };
-        let started = self.started.clone();
-        let prepaint = started.clone();
+        let started = Rc::clone(&self.started);
+        let prepaint = Rc::clone(&started);
         let before = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |_, _| {

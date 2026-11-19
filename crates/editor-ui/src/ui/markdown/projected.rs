@@ -311,13 +311,12 @@ impl ProjectedDocument {
         prefix: &[u64],
         source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
     ) -> Result<Rc<CachedSources>, PresenterError> {
-        if let Some(cached) = self.cached_sources.borrow().as_ref() {
-            if cached.document == document
-                && cached.owner.as_deref() == owner
-                && cached.prefix == prefix
-            {
-                return Ok(cached.clone());
-            }
+        if let Some(cached) = self.cached_sources.borrow().as_ref()
+            && cached.document == document
+            && cached.owner.as_deref() == owner
+            && cached.prefix == prefix
+        {
+            return Ok(Rc::clone(cached));
         }
         let mut sources = Vec::new();
         let mut rows = Vec::with_capacity(self.leaves.len());
@@ -400,7 +399,7 @@ impl ProjectedDocument {
             document,
             batch_owner,
             next_revision,
-            sources.clone(),
+            Arc::clone(&sources),
         ));
         let cached = Rc::new(CachedSources {
             document,
@@ -410,7 +409,7 @@ impl ProjectedDocument {
             batch,
             rows,
         });
-        *self.cached_sources.borrow_mut() = Some(cached.clone());
+        *self.cached_sources.borrow_mut() = Some(Rc::clone(&cached));
         Ok(cached)
     }
 
@@ -480,8 +479,8 @@ impl ProjectedDocument {
         )?;
         Ok((
             element,
-            cached.sources.clone(),
-            cached.batch.clone(),
+            Arc::clone(&cached.sources),
+            Arc::clone(&cached.batch),
             geometry,
         ))
     }
@@ -536,7 +535,7 @@ fn render_leaf(
             .map(|(index, source)| ProjectedTextLeaf {
                 key: text_key(source.id),
                 slot: slot_start + index,
-                text: source.text.clone(),
+                text: Arc::clone(&source.text),
             })
             .collect()
     } else {
@@ -552,7 +551,7 @@ fn render_leaf(
         text.iter()
             .map(|leaf| {
                 reveal
-                    .fades(leaf.slot, leaf.text.clone())
+                    .fades(leaf.slot, Arc::clone(&leaf.text))
                     .into_iter()
                     .map(|fade| aqua_core::scene::GpuiTextOpacityRange {
                         bytes: fade.range,
@@ -1016,9 +1015,10 @@ fn table_row(
                 .with_key(text_key(*id)),
             );
         }
-        let role = match header {
-            true => aqua_core::Role::ColumnHeader,
-            false => aqua_core::Role::Cell,
+        let role = if header {
+            aqua_core::Role::ColumnHeader
+        } else {
+            aqua_core::Role::Cell
         };
         grid = grid.child(cell.build().role(role).collection_semantics(
             aqua_core::CollectionSemantics {

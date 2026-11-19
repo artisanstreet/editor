@@ -12,6 +12,7 @@ use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 use std::rc::Rc;
+use std::sync::Arc;
 
 fn legend_toggle(
     key: String,
@@ -21,9 +22,10 @@ fn legend_toggle(
     hidden: bool,
     activate: impl Fn() + 'static,
 ) -> Element {
-    let ink = match hidden {
-        true => theme.colors.text_muted,
-        false => theme.colors.text,
+    let ink = if hidden {
+        theme.colors.text_muted
+    } else {
+        theme.colors.text
     };
     let element = ui::Button::new()
         .gap(Space::S6.px())
@@ -80,7 +82,7 @@ impl MarkdownPresenter {
                   weight,
                   color: crate::ui::theme::Oklch| {
                 if role == HeatmapTextRole::Ramp {
-                    return crate::ui::rich::charts::frame::mark_text(
+                    return charts::frame::mark_text(
                         &current_theme,
                         value,
                         size,
@@ -122,10 +124,10 @@ impl MarkdownPresenter {
             theme,
             self.heatmaps.clone(),
             text,
-            services.empty.clone(),
-            services.readout.clone(),
-            services.navigation_frame.clone(),
-            invalidate.clone(),
+            Rc::clone(&services.empty),
+            Rc::clone(&services.readout),
+            Rc::clone(&services.navigation_frame),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -144,7 +146,7 @@ impl MarkdownPresenter {
         let current_theme = *theme;
         let text = Rc::new(
             move |role: FunnelTextRole, value: &str, size, line, weight, color| {
-                let text = crate::ui::rich::charts::frame::mark_text(
+                let text = charts::frame::mark_text(
                     &current_theme,
                     value,
                     size,
@@ -171,9 +173,9 @@ impl MarkdownPresenter {
             theme,
             self.funnels.clone(),
             text,
-            services.empty.clone(),
-            services.navigation_frame.clone(),
-            invalidate.clone(),
+            Rc::clone(&services.empty),
+            Rc::clone(&services.navigation_frame),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -287,16 +289,16 @@ impl MarkdownPresenter {
                         .collect(),
                 )
             }),
-            empty: shared.empty.clone(),
-            navigation: shared.navigation_frame.clone(),
+            empty: Rc::clone(&shared.empty),
+            navigation: Rc::clone(&shared.navigation_frame),
         };
         let content = charts::spans::view(
             block_id,
             theme,
-            layout.clone(),
+            Arc::clone(layout),
             self.spans.clone(),
             &services,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -424,14 +426,14 @@ impl MarkdownPresenter {
                     .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
                 for (step, (node, name, current)) in entries.into_iter().enumerate() {
                     if step > 0 {
-                        trail = trail.child(crate::ui::rich::narrative::callout::text(
+                        trail = trail.child(rich::narrative::callout::text(
                             &current_theme,
                             "/",
                             TextRole::Caption,
                             current_theme.colors.text_muted,
                         ));
                     }
-                    let choose = select.clone();
+                    let choose = Rc::clone(&select);
                     trail = trail.child(
                         Button::text(
                             format!("{trail_id}-trail-{node}"),
@@ -465,18 +467,18 @@ impl MarkdownPresenter {
                     .build()
                     .focusable(false)
             }),
-            navigation: shared.navigation_frame.clone(),
+            navigation: Rc::clone(&shared.navigation_frame),
         };
         let content = charts::hierarchy::view(
             block_id,
             theme,
-            spec.tree.clone(),
+            Arc::clone(&spec.tree),
             spec.layout,
             spec.unit.clone(),
             charts::hierarchy::levels(spec.layout, spec.depth),
             self.hierarchies.clone(),
             &services,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -569,13 +571,13 @@ impl MarkdownPresenter {
         let content = charts::sankey::view(
             block_id,
             theme,
-            graph.clone(),
+            Arc::clone(graph),
             self.sankeys.clone(),
             label,
             readout,
-            shared.empty.clone(),
-            shared.navigation_frame.clone(),
-            invalidate.clone(),
+            Rc::clone(&shared.empty),
+            Rc::clone(&shared.navigation_frame),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -684,7 +686,7 @@ impl MarkdownPresenter {
                                 .gpui_background(aqua_core::GpuiBackground::Solid(color)),
                         )
                         .build();
-                    let activate = toggle.clone();
+                    let activate = Rc::clone(&toggle);
                     let button = legend_toggle(
                         format!("{legend_id}-legend-{index}"),
                         &current_theme,
@@ -708,17 +710,17 @@ impl MarkdownPresenter {
                 .on_activate(move |_| reset())
                 .build()
             }),
-            empty: shared.empty.clone(),
-            navigation: shared.navigation_frame.clone(),
+            empty: Rc::clone(&shared.empty),
+            navigation: Rc::clone(&shared.navigation_frame),
         };
         let content = charts::chart::view(
             block_id,
             theme,
-            style.clone(),
-            model.clone(),
+            Arc::clone(style),
+            Arc::clone(model),
             self.charts.clone(),
             &services,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -773,8 +775,8 @@ impl MarkdownPresenter {
                     text.clip(true).build()
                 }
             }),
-            empty: shared.empty.clone(),
-            navigation: shared.navigation_frame.clone(),
+            empty: Rc::clone(&shared.empty),
+            navigation: Rc::clone(&shared.navigation_frame),
             hover_fill: Rc::new(move || {
                 let (top, bottom) =
                     crate::ui::hover::hover_fill_stops(&current_theme, current_theme.colors.text);
@@ -798,10 +800,10 @@ impl MarkdownPresenter {
         let content = charts::distribution::view(
             block_id,
             theme,
-            spec.clone(),
+            Arc::clone(spec),
             self.distributions.clone(),
             &services,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
@@ -827,12 +829,12 @@ impl MarkdownPresenter {
             block_id,
             theme,
             self.concentrations.clone(),
-            services.concentration.frame.clone(),
-            services.concentration.plot_label.clone(),
-            services.concentration.readout.clone(),
-            services.empty.clone(),
-            services.navigation_frame.clone(),
-            invalidate.clone(),
+            Rc::clone(&services.concentration.frame),
+            Rc::clone(&services.concentration.plot_label),
+            Rc::clone(&services.concentration.readout),
+            Rc::clone(&services.empty),
+            Rc::clone(&services.navigation_frame),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }

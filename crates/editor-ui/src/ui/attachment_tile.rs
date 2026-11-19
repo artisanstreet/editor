@@ -217,12 +217,11 @@ impl AttachmentTile {
         let mut element = MediaFrame::attachment(self.id, theme, layers.build())
             .error(failed)
             .build();
-        if !self.reduced_motion {
-            if let Some(elapsed) = self.shake_elapsed.filter(|elapsed| *elapsed < SHAKE) {
-                element = element.style(
-                    Style::new().transform(Transform2D::translate(shake_offset(elapsed), 0.0)),
-                );
-            }
+        if !self.reduced_motion
+            && let Some(elapsed) = self.shake_elapsed.filter(|elapsed| *elapsed < SHAKE)
+        {
+            element = element
+                .style(Style::new().transform(Transform2D::translate(shake_offset(elapsed), 0.0)));
         }
         element
     }

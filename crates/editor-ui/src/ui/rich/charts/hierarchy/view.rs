@@ -94,7 +94,7 @@ impl HierarchyState {
     fn sync(&self, id: &str, tree: &Arc<Tree>) -> (usize, Option<usize>, Probe) {
         let mut states = self.0.borrow_mut();
         let entry = states.entry(id.to_owned()).or_insert_with(|| Entry {
-            tree: tree.clone(),
+            tree: Arc::clone(tree),
             focus: 0,
             hover: None,
             probe: Rc::new(Cell::new(None)),
@@ -106,9 +106,9 @@ impl HierarchyState {
                 entry.focus = 0;
                 entry.hover = None;
             }
-            entry.tree = tree.clone();
+            entry.tree = Arc::clone(tree);
         }
-        (entry.focus, entry.hover, entry.probe.clone())
+        (entry.focus, entry.hover, Rc::clone(&entry.probe))
     }
     fn geometry(
         &self,
@@ -126,7 +126,7 @@ impl HierarchyState {
             && geometry.levels == levels
             && geometry.width == width
         {
-            return geometry.clone();
+            return Arc::clone(geometry);
         }
         let focus = entry.focus;
         let (height, parts) = match layout {
@@ -193,7 +193,7 @@ impl HierarchyState {
             parts,
             nodes,
         });
-        entry.geometry = Some(geometry.clone());
+        entry.geometry = Some(Arc::clone(&geometry));
         geometry
     }
     fn hover(&self, id: &str, value: Option<usize>) -> bool {
@@ -415,9 +415,9 @@ pub(crate) fn view(
     let width = probe.get().map_or(640.0, |bounds| bounds.w);
     let geometry = state.geometry(&id, &tree, layout, levels, width);
     let height = geometry.height;
-    let draw_geometry = geometry.clone();
-    let draw_tree = tree.clone();
-    let draw_probe = probe.clone();
+    let draw_geometry = Arc::clone(&geometry);
+    let draw_tree = Arc::clone(&tree);
+    let draw_probe = Rc::clone(&probe);
     let canvas = ui::Canvas::new()
         .style(
             Style::new()
@@ -524,12 +524,12 @@ pub(crate) fn view(
     }
     let moving = state.clone();
     let moving_id = id.clone();
-    let moving_geometry = geometry.clone();
-    let moving_probe = probe.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_geometry = Arc::clone(&geometry);
+    let moving_probe = Rc::clone(&probe);
+    let moving_invalidate = Rc::clone(&invalidate);
     let leaving = state.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -557,9 +557,9 @@ pub(crate) fn view(
         });
     let clicked = state.clone();
     let clicked_id = id.clone();
-    let clicked_geometry = geometry.clone();
-    let clicked_probe = probe.clone();
-    let clicked_invalidate = invalidate.clone();
+    let clicked_geometry = Arc::clone(&geometry);
+    let clicked_probe = probe;
+    let clicked_invalidate = Rc::clone(&invalidate);
     let plot = (services.click)(
         plot,
         Rc::new(move |position| {
@@ -586,8 +586,8 @@ pub(crate) fn view(
     }
     let keyboard = state.clone();
     let keyboard_id = id.clone();
-    let keyboard_nodes = geometry.nodes.clone();
-    let keyboard_invalidate = invalidate.clone();
+    let keyboard_nodes = Arc::clone(&geometry.nodes);
+    let keyboard_invalidate = Rc::clone(&invalidate);
     let nav = navigation_group(
         ui::Box::new()
             .width(Length::Pct(100.0))
@@ -613,9 +613,9 @@ pub(crate) fn view(
         .enumerate()
         .map(|(i, node)| (node, tree.node(node).name.clone(), i == last))
         .collect();
-    let trail_state = state.clone();
-    let trail_id = id.clone();
-    let trail_invalidate = invalidate.clone();
+    let trail_state = state;
+    let trail_id = id;
+    let trail_invalidate = Rc::clone(&invalidate);
     let trail = (services.trail)(
         entries,
         Rc::new(move |node| {

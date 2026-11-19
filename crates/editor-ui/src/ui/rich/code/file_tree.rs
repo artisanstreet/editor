@@ -96,8 +96,8 @@ pub(crate) struct FileTree(Arc<Model>);
 impl FileTree {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<Model>()
+        size_of::<Self>()
+            + size_of::<Model>()
             + retained_vec(&self.0.entries)
             + self
                 .0
@@ -187,9 +187,9 @@ impl Dir {
             let key = format!("{prefix}{}/", dir.name);
             rows.push(Row {
                 depth,
-                name: String::from(format!("{}/", dir.name)),
+                name: format!("{}/", dir.name),
                 kind: RowKind::Dir {
-                    key: String::from(key.clone()),
+                    key: key.clone(),
                     files: dir.file_count(),
                 },
             });
@@ -198,7 +198,7 @@ impl Dir {
         for (name, entry) in &self.files {
             rows.push(Row {
                 depth,
-                name: String::from(name.clone()),
+                name: name.clone(),
                 kind: RowKind::File { entry: *entry },
             });
         }
@@ -224,13 +224,12 @@ impl TryFrom<Spec> for FileTree {
             }
             root.insert(&parts, entries.len());
             entries.push(Entry {
-                path: String::from(entry.path.trim().to_owned()),
+                path: entry.path.trim().to_owned(),
                 change: entry.change,
                 note: entry
                     .note
                     .map(|note| note.trim().to_owned())
-                    .filter(|note| !note.is_empty())
-                    .map(String::from),
+                    .filter(|note| !note.is_empty()),
             });
         }
         if entries.is_empty() {

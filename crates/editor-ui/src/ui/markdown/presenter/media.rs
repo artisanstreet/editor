@@ -11,7 +11,7 @@ use std::sync::Arc;
 impl MarkdownPresenter {
     pub(super) fn render_model(
         &self,
-        model: &crate::ui::rich::media::model::ModelBlock,
+        model: &rich::media::model::ModelBlock,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -34,21 +34,21 @@ impl MarkdownPresenter {
             .entry(id.to_owned())
             .or_default()
             .insert(block_id.clone());
-        let hovered = self
-            .model_hover
-            .borrow_mut()
-            .entry(block_id.clone())
-            .or_insert_with(|| Rc::new(Cell::new(false)))
-            .clone();
-        let services = crate::ui::rich::media::model::services(
+        let hovered = Rc::clone(
+            self.model_hover
+                .borrow_mut()
+                .entry(block_id.clone())
+                .or_insert_with(|| Rc::new(Cell::new(false))),
+        );
+        let services = rich::media::model::services(
             &block_id,
             *theme,
             media.model_assets.clone(),
-            media.model_capability.clone(),
-            glyph.clone(),
-            media.effect.clone(),
+            Rc::clone(&media.model_capability),
+            Rc::clone(&glyph),
+            Rc::clone(&media.effect),
             hovered,
-            invalidate.clone(),
+            Rc::clone(&invalidate),
         );
         let content = model.view(
             &block_id,
@@ -63,7 +63,7 @@ impl MarkdownPresenter {
 
     pub(super) fn render_image(
         &self,
-        model: &std::sync::Arc<crate::ui::rich::media::image::ImageBlock>,
+        model: &Arc<rich::media::image::ImageBlock>,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -90,45 +90,51 @@ impl MarkdownPresenter {
         let state = {
             let mut states = self.images.borrow_mut();
             let state = states.entry(block_id.clone()).or_insert_with(|| {
-                let state = crate::ui::rich::media::image::ImageState::new(
+                let state = rich::media::image::ImageState::new(
                     model,
                     services.fetcher.clone(),
                     services.images.clone(),
                 );
-                state.wake_mailbox().set_waker(services.wake.clone());
+                state.wake_mailbox().set_waker(Arc::clone(&services.wake));
                 (
-                    model.clone(),
+                    Arc::clone(model),
                     scope_key.clone(),
                     Rc::new(RefCell::new(state)),
                 )
             });
             if !Arc::ptr_eq(&state.0, model) || state.1 != scope_key {
-                let replacement = crate::ui::rich::media::image::ImageState::new(
+                let replacement = rich::media::image::ImageState::new(
                     model,
                     services.fetcher.clone(),
                     services.images.clone(),
                 );
-                replacement.wake_mailbox().set_waker(services.wake.clone());
-                *state = (model.clone(), scope_key, Rc::new(RefCell::new(replacement)));
+                replacement
+                    .wake_mailbox()
+                    .set_waker(Arc::clone(&services.wake));
+                *state = (
+                    Arc::clone(model),
+                    scope_key,
+                    Rc::new(RefCell::new(replacement)),
+                );
             }
             state
                 .2
                 .borrow()
                 .wake_mailbox()
-                .set_waker(services.wake.clone());
-            state.2.clone()
+                .set_waker(Arc::clone(&services.wake));
+            Rc::clone(&state.2)
         };
         state.borrow_mut().refresh();
         let event_state = Rc::downgrade(&state);
         let event_id = block_id.clone();
-        let effect = services.effect.clone();
-        let refresh = invalidate.clone();
+        let effect = Rc::clone(&services.effect);
+        let refresh = Rc::clone(&invalidate);
         let emit = Rc::new(move |action| {
             let Some(state) = event_state.upgrade() else {
                 return;
             };
             match action {
-                crate::ui::rich::media::image::Action::Open { index, image } => {
+                rich::media::image::Action::Open { index, image } => {
                     let (fetcher, sources) = state.borrow().preview_sources();
                     effect(crate::ui::media::preview::Effect::Open(
                         crate::ui::media::preview::OpenPreview {
@@ -140,21 +146,21 @@ impl MarkdownPresenter {
                         },
                     ));
                 }
-                crate::ui::rich::media::image::Action::Retry(index) => {
+                rich::media::image::Action::Retry(index) => {
                     if state.borrow_mut().retry(index) {
                         refresh();
                     }
                 }
-                crate::ui::rich::media::image::Action::AllowRemote => {
+                rich::media::image::Action::AllowRemote => {
                     state.borrow_mut().allow_remote();
                     refresh();
                 }
-                crate::ui::rich::media::image::Action::CopyPath { index, position } => {
+                rich::media::image::Action::CopyPath { index, position } => {
                     if let Some(source) = state.borrow().preview_sources().1.get(index) {
                         effect(crate::ui::media::preview::Effect::ShowCopyMenu(
-                            crate::ui::rich::actions::ShowCopyMenu {
+                            rich::actions::ShowCopyMenu {
                                 position,
-                                entries: vec![crate::ui::rich::actions::CopyEntry::primary(
+                                entries: vec![rich::actions::CopyEntry::primary(
                                     "Copy Image Path",
                                     source.raw().to_owned(),
                                 )],
@@ -173,7 +179,7 @@ impl MarkdownPresenter {
 
     pub(super) fn render_audio(
         &self,
-        block: &crate::ui::rich::media::audio::AudioBlock,
+        block: &rich::media::audio::AudioBlock,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -200,15 +206,15 @@ impl MarkdownPresenter {
             &services.audio_assets,
             &services.player,
             self.audio.clone(),
-            glyph.clone(),
-            invalidate.clone(),
+            Rc::clone(&glyph),
+            Rc::clone(&invalidate),
         );
         Ok(enveloped(theme, envelope, content))
     }
 
     pub(super) fn render_image_compare(
         &self,
-        model: &crate::ui::rich::media::image_compare::ImageCompare,
+        model: &rich::media::image_compare::ImageCompare,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -235,12 +241,12 @@ impl MarkdownPresenter {
         let state = {
             let mut states = self.image_comparisons.borrow_mut();
             let entry = states.entry(block_id.clone()).or_insert_with(|| {
-                let state = crate::ui::rich::media::image_compare::view::CompareState::new(
+                let state = rich::media::image_compare::view::CompareState::new(
                     model,
                     services.fetcher.clone(),
                     services.images.clone(),
                 );
-                state.wake_mailbox().set_waker(services.wake.clone());
+                state.wake_mailbox().set_waker(Arc::clone(&services.wake));
                 (scope_key.clone(), Rc::new(RefCell::new(state)))
             });
             let changed = entry.0 != scope_key;
@@ -253,12 +259,12 @@ impl MarkdownPresenter {
                 .1
                 .borrow()
                 .wake_mailbox()
-                .set_waker(services.wake.clone());
-            entry.1.clone()
+                .set_waker(Arc::clone(&services.wake));
+            Rc::clone(&entry.1)
         };
         state.borrow_mut().refresh();
         let state_for_events = Rc::downgrade(&state);
-        let refresh = invalidate.clone();
+        let refresh = Rc::clone(&invalidate);
         let emit = Rc::new(move |action| {
             if let Some(state) = state_for_events.upgrade()
                 && state.borrow_mut().dispatch(action)

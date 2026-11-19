@@ -44,12 +44,13 @@ impl Surfaces {
     #[must_use]
     pub fn of(theme: &ArtisanTheme) -> Self {
         let colors = &theme.colors;
-        let (bg, inner) = match colors.mode.is_dark() {
-            true => (
+        let (bg, inner) = if colors.mode.is_dark() {
+            (
                 colors.background,
                 colors.surface.animate_to(colors.white, 0.06),
-            ),
-            false => (colors.white, colors.raised),
+            )
+        } else {
+            (colors.white, colors.raised)
         };
         let (ink, ink_dim) = (colors.text, colors.text_muted);
         Self {

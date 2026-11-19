@@ -94,7 +94,7 @@ fn concurrent_waiters_share_one_real_obj_parse() {
         panic!("expected software geometry")
     };
     assert_eq!(mesh.positions.len(), 3);
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn capability_format_and_up_select_distinct_cached_results() {
             .unwrap()
             .is_err()
     );
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn failure_is_cached_and_a_new_revision_fetches_fresh_data() {
             .triangles,
         1
     );
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]

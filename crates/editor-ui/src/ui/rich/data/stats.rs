@@ -92,8 +92,8 @@ impl Stats {
             Figure::Text(text) => text.capacity(),
             Figure::Number(_) => 0,
         };
-        std::mem::size_of::<Self>()
-            + std::mem::size_of_val(self.tiles.as_ref())
+        size_of::<Self>()
+            + size_of_val(self.tiles.as_ref())
             + self
                 .tiles
                 .iter()
@@ -101,8 +101,8 @@ impl Stats {
                     tile.label.capacity()
                         + figure(&tile.value)
                         + tile.delta.as_ref().map_or(0, &figure)
-                        + std::mem::size_of_val(tile.sparkline.0.as_ref())
-                        + crate::ui::rich::kit::retained_optional(tile.hint.as_ref())
+                        + size_of_val(tile.sparkline.0.as_ref())
+                        + kit::retained_optional(tile.hint.as_ref())
                 })
                 .sum::<usize>()
     }
@@ -258,7 +258,7 @@ impl Stats {
             if tile.hint().is_some() {
                 let state = states.clone();
                 let key = id.clone();
-                let invalidate = invalidate.clone();
+                let invalidate = Rc::clone(&invalidate);
                 cell = cell.on_hover_change(move |over| {
                     let mut state = state.0.borrow_mut();
                     if over {

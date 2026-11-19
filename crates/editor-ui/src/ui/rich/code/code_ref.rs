@@ -27,11 +27,11 @@ pub(crate) struct CodeRefBlock {
 impl CodeRefBlock {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::retained_optional;
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.reference.path.capacity()
             + retained_optional(self.excerpt.as_ref())
             + retained_optional(self.note.as_ref())
-            + std::mem::size_of_val(self.lines.as_ref())
+            + size_of_val(self.lines.as_ref())
             + self.lines.iter().map(String::capacity).sum::<usize>()
     }
 }

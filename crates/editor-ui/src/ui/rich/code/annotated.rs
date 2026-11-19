@@ -56,8 +56,8 @@ pub(crate) struct AnnotatedCode(Arc<Model>);
 impl AnnotatedCode {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<Model>()
+        size_of::<Self>()
+            + size_of::<Model>()
             + retained_strings(&self.0.lines)
             + retained_optional(self.0.path.as_ref())
             + retained_vec(&self.0.notes)
@@ -146,8 +146,7 @@ impl From<Spec> for AnnotatedCode {
             path: spec
                 .path
                 .map(|path| path.trim().to_owned())
-                .filter(|path| !path.is_empty())
-                .map(String::from),
+                .filter(|path| !path.is_empty()),
             notes,
             owner,
             marker,

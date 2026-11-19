@@ -197,7 +197,7 @@ fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
 impl MarkdownDocument {
     fn resident_bytes(&self) -> usize {
         fn spans_bytes(spans: &Vec<Span>) -> usize {
-            spans.capacity() * std::mem::size_of::<Span>()
+            spans.capacity() * size_of::<Span>()
                 + spans
                     .iter()
                     .map(|span| match span {
@@ -213,7 +213,7 @@ impl MarkdownDocument {
                     .sum::<usize>()
         }
         fn blocks_bytes(blocks: &Vec<Block>) -> usize {
-            blocks.capacity() * std::mem::size_of::<Block>()
+            blocks.capacity() * size_of::<Block>()
                 + blocks
                     .iter()
                     .map(|block| match block {
@@ -230,24 +230,24 @@ impl MarkdownDocument {
                                 + fence
                                     .tokens
                                     .as_ref()
-                                    .map_or(0, |tokens| std::mem::size_of_val(tokens.as_ref()))
+                                    .map_or(0, |tokens| size_of_val(tokens.as_ref()))
                         }
                         Block::Html { source } => source.capacity(),
                         Block::List { items, .. } => {
-                            items.capacity() * std::mem::size_of::<ListItem>()
+                            items.capacity() * size_of::<ListItem>()
                                 + items
                                     .iter()
                                     .map(|item| blocks_bytes(&item.blocks))
                                     .sum::<usize>()
                         }
                         Block::Table(table) => {
-                            table.alignments.capacity() * std::mem::size_of::<TableAlignment>()
-                                + table.header.capacity() * std::mem::size_of::<TableCell>()
-                                + table.rows.capacity() * std::mem::size_of::<Vec<TableCell>>()
+                            table.alignments.capacity() * size_of::<TableAlignment>()
+                                + table.header.capacity() * size_of::<TableCell>()
+                                + table.rows.capacity() * size_of::<Vec<TableCell>>()
                                 + table
                                     .rows
                                     .iter()
-                                    .map(|row| row.capacity() * std::mem::size_of::<TableCell>())
+                                    .map(|row| row.capacity() * size_of::<TableCell>())
                                     .sum::<usize>()
                                 + table
                                     .header
@@ -259,7 +259,7 @@ impl MarkdownDocument {
                     })
                     .sum::<usize>()
         }
-        std::mem::size_of::<Self>() + blocks_bytes(&self.blocks)
+        size_of::<Self>() + blocks_bytes(&self.blocks)
     }
 
     #[must_use]
@@ -333,7 +333,7 @@ impl MarkdownEngine {
                         fence.diagram = self
                             .diagrams
                             .lock()
-                            .map_or_else(|poisoned| poisoned.into_inner(), |cache| cache)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .get(&fence.source);
                     }
                     if self.highlight_fence(fence, memo).is_err() {

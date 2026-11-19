@@ -154,9 +154,10 @@ impl ComposerFrame {
     pub fn build(self) -> Element {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
-        match self.nested {
-            true => on_glass(self.content),
-            false => UiBox::new()
+        if self.nested {
+            on_glass(self.content)
+        } else {
+            UiBox::new()
                 .width(Length::Pct(100.0))
                 .padding(COMPOSER_PADDING)
                 .radius(radius)
@@ -171,7 +172,7 @@ impl ComposerFrame {
                     radius,
                 ))
                 .child(self.content)
-                .build(),
+                .build()
         }
     }
 }

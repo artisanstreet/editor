@@ -44,17 +44,16 @@ pub(super) type CopyFactory = Rc<dyn Fn(&str, &str) -> Element>;
 
 impl Fence {
     pub(super) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.source.capacity()
-            + self.lines.len() * std::mem::size_of::<Line>()
+            + self.lines.len() * size_of::<Line>()
             + self
                 .lines
                 .iter()
                 .map(|line| {
                     line.text.len()
-                        + line.tokens.capacity()
-                            * std::mem::size_of::<(Range<usize>, CodeTokenKind)>()
-                        + line.colors.capacity() * std::mem::size_of::<Swatch>()
+                        + line.tokens.capacity() * size_of::<(Range<usize>, CodeTokenKind)>()
+                        + line.colors.capacity() * size_of::<Swatch>()
                         + line
                             .colors
                             .iter()
@@ -179,7 +178,7 @@ impl Fence {
                 SelectionSource {
                     id: source_id(offset + line),
                     order,
-                    text: entry.text.clone(),
+                    text: Arc::clone(&entry.text),
                     separator: Arc::from("\n"),
                     copies: entry
                         .colors
@@ -203,7 +202,7 @@ impl Fence {
         copy: Option<CopyFactory>,
         on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
     ) -> Element {
-        let lines = self.lines.clone();
+        let lines = Arc::clone(&self.lines);
         let ids: Arc<[SelectionSourceId]> = sources.iter().map(|source| source.id).collect();
         let theme = *theme;
         let count = lines.len();

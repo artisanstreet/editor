@@ -312,7 +312,7 @@ impl ImageState {
                                 access(Action::Open {
                                     index: slot,
                                     image: accessible_image.clone(),
-                                })
+                                });
                             })
                             .on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
                                 cancelled.set(None);
@@ -327,15 +327,13 @@ impl ImageState {
                                     pointer,
                                     PointerButton::Primary,
                                 )) = &event.input
+                                    && pressed == Some(pointer.contact)
+                                    && event.bounds.contains(pointer.position)
                                 {
-                                    if pressed == Some(pointer.contact)
-                                        && event.bounds.contains(pointer.position)
-                                    {
-                                        activate(Action::Open {
-                                            index: slot,
-                                            image: image.clone(),
-                                        });
-                                    }
+                                    activate(Action::Open {
+                                        index: slot,
+                                        image: image.clone(),
+                                    });
                                 }
                                 InputResponse {
                                     pointer_capture: aqua_ui::input::CaptureRequest::Release,
@@ -409,12 +407,12 @@ impl ImageState {
     reason = "image dimensions are bounded by the decoder"
 )]
 fn image_aspect(image: &Loaded, hint: super::super::SizeHint) -> f32 {
-    if let Loaded::Ready(image) = image {
-        if let ImageStatus::Ready { width, height } = image.status() {
-            if width > 0 && height > 0 {
-                return (width as f32 / height as f32).clamp(0.05, 20.0);
-            }
-        }
+    if let Loaded::Ready(image) = image
+        && let ImageStatus::Ready { width, height } = image.status()
+        && width > 0
+        && height > 0
+    {
+        return (width as f32 / height as f32).clamp(0.05, 20.0);
     }
     hint.aspect().unwrap_or(16.0 / 9.0)
 }
@@ -488,8 +486,11 @@ fn content(
                         editor_assets::AssetId::TABLER_WORLD,
                         Some("Load remote images"),
                     ),
-                    ImageError::Load(MediaLoadError::Invalid | MediaLoadError::TooLarge)
-                    | ImageError::Load(MediaLoadError::Fetch(_))
+                    ImageError::Load(
+                        MediaLoadError::Invalid
+                        | MediaLoadError::TooLarge
+                        | MediaLoadError::Fetch(_),
+                    )
                     | ImageError::Decode => (editor_assets::AssetId::TABLER_FILE_OFF, None),
                 };
                 panel = panel

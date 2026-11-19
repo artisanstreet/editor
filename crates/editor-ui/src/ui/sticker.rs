@@ -59,7 +59,7 @@ impl StickerFrame {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sticker {
     pub elapsed: Duration,
 }
@@ -116,9 +116,10 @@ impl Sticker {
         corners: CornerRadii,
         curl: bool,
     ) -> Vec<Element> {
-        let air = match theme.colors.mode.is_dark() {
-            true => Oklch::new(1.0, 0.0, 0.0),
-            false => Oklch::new(0.0, 0.0, 0.0),
+        let air = if theme.colors.mode.is_dark() {
+            Oklch::new(1.0, 0.0, 0.0)
+        } else {
+            Oklch::new(0.0, 0.0, 0.0)
         };
         let sweep = self
             .timeline()
@@ -191,14 +192,14 @@ fn triangle(bounds: Rect, points: [Point; 3], background: GpuiBackground) -> Dis
 fn dog_ear(theme: &ArtisanTheme, curl: Timeline) -> Element {
     let edge = CURL_EDGE;
     let page = theme.colors.background;
-    let face = theme.colors.gray.step(match theme.colors.mode.is_dark() {
-        true => 6,
-        false => 2,
-    });
-    let fold = theme.colors.gray.step(match theme.colors.mode.is_dark() {
-        true => 3,
-        false => 5,
-    });
+    let face = theme
+        .colors
+        .gray
+        .step(if theme.colors.mode.is_dark() { 6 } else { 2 });
+    let fold = theme
+        .colors
+        .gray
+        .step(if theme.colors.mode.is_dark() { 3 } else { 5 });
     Canvas::new()
         .style(
             Style::new()

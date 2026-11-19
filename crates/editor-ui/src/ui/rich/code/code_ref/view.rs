@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use aqua_text::TextStyle;
 use aqua_ui::{
@@ -80,9 +81,10 @@ impl CodeRefBlock {
 }
 
 fn text_style(theme: &ArtisanTheme, mono: bool) -> TextStyle {
-    match mono {
-        true => TextRole::Code.style(theme),
-        false => TextRole::Label.style(theme),
+    if mono {
+        TextRole::Code.style(theme)
+    } else {
+        TextRole::Label.style(theme)
     }
 }
 
@@ -94,7 +96,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
         .mul_add(Space::S8.px(), Space::S8.px());
     let width = block.width + gutter + Space::S12.px();
     let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * LINE_PX;
-    let lines = block.lines.clone();
+    let lines = Arc::clone(&block.lines);
     let theme = *theme;
     let rows = List::new()
         .items(0..count)

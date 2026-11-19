@@ -487,7 +487,7 @@ impl StoredOwner {
                     && page.index.format == format
                     && page.end == page.index.leaves
             })
-            .map(|(_, page)| page.clone());
+            .map(|(_, page)| Arc::clone(page));
         let phase = if let Some(page) = cached {
             IndexPhase::Ready(StoredSource {
                 provider: provider.clone(),
@@ -715,7 +715,7 @@ impl StoredOwner {
             if same {
                 let entry = self.leaves.remove(index).unwrap();
                 let result = match &entry.phase {
-                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(leaf.clone()),
+                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(Arc::clone(leaf)),
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
                     _ => LeafPreparation::Pending,
                 };
@@ -759,9 +759,7 @@ impl StoredOwner {
             self.leaves.remove(index);
         }
         let capacity = loop {
-            if let Ok(capacity) = self
-                .capacity
-                .clone()
+            if let Ok(capacity) = Arc::clone(&self.capacity)
                 .try_acquire_many_owned(u32::try_from(bytes).unwrap_or(u32::MAX))
             {
                 break Arc::new(capacity);
@@ -833,7 +831,7 @@ impl StoredOwner {
             let generation = entry.generation;
             let key = key.to_owned();
             let sender = self.delivery.sender();
-            let capacity = entry.capacity.as_ref().unwrap().clone();
+            let capacity = Arc::clone(entry.capacity.as_ref().unwrap());
             entry.task = Some(
                 runtime::runtime()
                     .spawn(async move {
@@ -854,15 +852,15 @@ impl StoredOwner {
         let LeafPhase::WaitingWorker { .. } = &entry.phase else {
             return false;
         };
-        let Some(queue) = self.worker.as_ref().cloned() else {
+        let Some(queue) = self.worker.clone() else {
             entry.phase = LeafPhase::Failed("Couldn't start Markdown preparation".to_owned());
             entry.capacity = None;
             return true;
         };
         let slot = match queue.try_reserve() {
             Ok(slot) => slot,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => return false,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return false,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                 entry.phase = LeafPhase::Failed("Markdown preparation worker stopped".to_owned());
                 entry.capacity = None;
                 return true;
@@ -877,7 +875,7 @@ impl StoredOwner {
         let generation = entry.generation;
         let key = key.to_owned();
         let sender = self.delivery.sender();
-        let capacity = entry.capacity.as_ref().unwrap().clone();
+        let capacity = Arc::clone(entry.capacity.as_ref().unwrap());
         let (reply, receiver) = tokio::sync::oneshot::channel();
         let job: WorkerJob = Box::new(move |engine| {
             if reply.is_closed() {
@@ -947,15 +945,14 @@ impl StoredOwner {
                 };
                 let context = record.context;
                 let context_bytes = context.lists.capacity()
-                    * std::mem::size_of::<artisan_markdown_index::ListLevel>()
+                    * size_of::<artisan_markdown_index::ListLevel>()
                     + context.table_alignments.capacity()
-                        * std::mem::size_of::<artisan_markdown_index::TableAlignment>()
-                    + context.spacing.capacity()
-                        * std::mem::size_of::<artisan_markdown_index::LeafSpacing>();
+                        * size_of::<artisan_markdown_index::TableAlignment>()
+                    + context.spacing.capacity() * size_of::<artisan_markdown_index::LeafSpacing>();
                 let retained_bytes = syntax_bytes
                     .saturating_add(context_bytes)
                     .saturating_add(source.len())
-                    .saturating_add(std::mem::size_of::<StoredLeaf>());
+                    .saturating_add(size_of::<StoredLeaf>());
                 Ok((
                     context,
                     record.table_continues,
@@ -1164,7 +1161,7 @@ impl StoredOwner {
                             return Err("Markdown preview exceeds its presentation-memory budget; open the full source".to_owned());
                         }
                         let permit = loop {
-                            if let Ok(permit) = self.prepared_capacity.clone().try_acquire_many_owned(bytes as u32) {
+                            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(bytes as u32) {
                                 break permit;
                             }
                             let Some(oldest) = self.leaves.iter().position(|entry| entry.key != key && matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))) else {

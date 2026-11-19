@@ -72,9 +72,10 @@ impl Material {
 
 #[must_use]
 pub(crate) fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
-    match theme.colors.mode.is_dark() {
-        true => (ink.with_alpha(0.09), ink.with_alpha(0.03)),
-        false => (ink.with_alpha(0.02), ink.with_alpha(0.06)),
+    if theme.colors.mode.is_dark() {
+        (ink.with_alpha(0.09), ink.with_alpha(0.03))
+    } else {
+        (ink.with_alpha(0.02), ink.with_alpha(0.06))
     }
 }
 

@@ -66,7 +66,7 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
         thread: ThreadId("thread-a".into()),
     };
     let received = Rc::new(RefCell::new(Vec::new()));
-    let sink = received.clone();
+    let sink = Rc::clone(&received);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         value.render(

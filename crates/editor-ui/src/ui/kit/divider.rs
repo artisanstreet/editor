@@ -18,9 +18,10 @@ pub enum Divider {
 }
 
 fn shades(theme: &ArtisanTheme) -> (Oklch, Oklch) {
-    match theme.colors.mode.is_dark() {
-        true => (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08)),
-        false => (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9)),
+    if theme.colors.mode.is_dark() {
+        (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08))
+    } else {
+        (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9))
     }
 }
 

@@ -113,7 +113,7 @@ fn streamed_table_rows_keep_rows_and_column_headers() {
                     None,
                 )
                 .unwrap();
-            self::rows(&semantics(rendered.element))
+            rows(&semantics(rendered.element))
         })
         .collect();
     assert_eq!(rows, expected());

@@ -10,6 +10,7 @@ use crate::ui::media::{
 };
 use glam::Vec3;
 use serde::Deserialize;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -108,7 +109,7 @@ impl TryFrom<Spec> for ModelBlock {
 
 impl ModelBlock {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.src.resident_bytes()
             + crate::ui::rich::kit::retained_optional(self.name.as_ref())
     }
@@ -140,8 +141,8 @@ pub(crate) fn services(
         element::{Element, ui},
         style::{Length, Style},
     };
-    let frame_hover = hovered.clone();
-    let frame_invalidate = invalidate.clone();
+    let frame_hover = hovered;
+    let frame_invalidate = Rc::clone(&invalidate);
     let frame = std::rc::Rc::new(
         move |content: Element, width: f32, aspect: f32, _name: &str, dragging: Option<bool>| {
             let mut layers = vec![content];
@@ -168,8 +169,8 @@ pub(crate) fn services(
                         .exclude_from_hit_testing(),
                 );
             }
-            let hover = frame_hover.clone();
-            let notify = frame_invalidate.clone();
+            let hover = Rc::clone(&frame_hover);
+            let notify = Rc::clone(&frame_invalidate);
             let frame = Surface::Media(Media::Frame).build(&theme, layers).style(
                 Style::new()
                     .width(Length::Px(width))
@@ -182,7 +183,7 @@ pub(crate) fn services(
             })
         },
     );
-    let placeholder_glyph = glyph.clone();
+    let placeholder_glyph = Rc::clone(&glyph);
     let placeholder = std::rc::Rc::new(move |message: &str, failed: bool| {
         let mut content = ui::Box::new()
             .layout("column")
@@ -285,7 +286,7 @@ pub(crate) fn services(
                     path.to_owned(),
                 )],
             },
-        ))
+        ));
     });
     ModelServices {
         assets,
