@@ -27,6 +27,10 @@ impl std::fmt::Debug for Switch {
 }
 
 impl Switch {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the switch stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,

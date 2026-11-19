@@ -42,6 +42,10 @@ impl std::fmt::Debug for MediaFrame {
 }
 
 impl MediaFrame {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn new(theme: ArtisanTheme, aspect: f32, measured_width: f32, content: Element) -> Self {
         let aspect = if aspect.is_finite() && aspect > 0.0 {
             aspect.clamp(0.05, 20.0)
@@ -63,6 +67,10 @@ impl MediaFrame {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn sent_attachment(theme: ArtisanTheme, content: Element) -> Self {
         Self {
             size: FrameSize::SentAttachment,
@@ -70,6 +78,10 @@ impl MediaFrame {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn attachment(id: impl Into<Key>, theme: ArtisanTheme, content: Element) -> Self {
         Self {
             size: FrameSize::Attachment,
@@ -78,6 +90,10 @@ impl MediaFrame {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn transcript_image(
         theme: ArtisanTheme,
         aspect: f32,

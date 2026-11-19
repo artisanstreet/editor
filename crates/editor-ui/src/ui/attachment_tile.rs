@@ -46,6 +46,10 @@ impl std::fmt::Debug for AttachmentTile {
 }
 
 impl AttachmentTile {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the attachment tile stores this theme copy and paints from it when built"
+    )]
     pub fn new(id: impl Into<Key>, theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),

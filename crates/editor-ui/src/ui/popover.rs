@@ -17,6 +17,10 @@ struct PopoverPanel {
 }
 
 impl PopoverPanel {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the popover panel stores this theme copy and paints from it when built"
+    )]
     fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
@@ -80,6 +84,10 @@ impl std::fmt::Debug for Popover {
 }
 
 impl Popover {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the popover stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         label: impl Into<String>,

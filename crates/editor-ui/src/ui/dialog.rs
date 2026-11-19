@@ -47,6 +47,10 @@ impl std::fmt::Debug for Dialog {
 }
 
 impl Dialog {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the dialog stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
@@ -265,6 +269,10 @@ impl DialogHost {
         })
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the dialog host's theme cell stores this copy for its next rebuild"
+    )]
     pub fn set_theme(&self, theme: ArtisanTheme) {
         self.theme.set(theme);
     }

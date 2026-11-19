@@ -261,6 +261,10 @@ impl std::fmt::Debug for ConcentrationServices {
 }
 
 impl ConcentrationServices {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "each concentration chart factory closure captures its own theme copy"
+    )]
     fn new(theme: ArtisanTheme) -> Self {
         Self {
             frame: Rc::new(move |plot, y, x| {
@@ -277,6 +281,10 @@ impl ConcentrationServices {
 }
 
 impl HeatmapServices {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "each chart factory closure and the nested concentration services capture a theme copy"
+    )]
     pub fn new(theme: ArtisanTheme) -> Self {
         Self {
             empty: Rc::new(move |label| charts::frame::empty(&theme, label)),

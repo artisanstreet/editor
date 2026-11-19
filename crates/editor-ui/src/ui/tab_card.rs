@@ -25,6 +25,10 @@ pub struct TabCard {
 }
 
 impl TabCard {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the tab card's prepaint and paint closures capture this theme copy"
+    )]
     pub fn build(
         self,
         theme: ArtisanTheme,

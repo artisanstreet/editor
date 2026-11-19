@@ -42,6 +42,10 @@ pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
 }
 
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the segmented control stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,

@@ -325,6 +325,10 @@ impl<V: Clone + Eq + 'static> std::fmt::Debug for Select<V> {
 }
 
 impl<V: Clone + Eq + 'static> Select<V> {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the select stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
@@ -529,6 +533,10 @@ impl<V: Clone + Eq + 'static> std::fmt::Debug for SelectMenu<V> {
 }
 
 impl<V: Clone + Eq + 'static> SelectMenu<V> {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the select menu stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         theme: ArtisanTheme,
         selected: Option<V>,

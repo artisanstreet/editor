@@ -20,6 +20,10 @@ pub(crate) struct Button {
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 impl Button {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn icon(
         id: impl Into<Key>,
         theme: ArtisanTheme,

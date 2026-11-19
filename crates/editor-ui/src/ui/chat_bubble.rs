@@ -54,6 +54,10 @@ pub struct ChatBubbleSegment {
 impl ChatBubbleSegment {
     pub const MAX_WIDTH: f32 = 576.0;
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the bubble segment stores this theme copy and paints from it when built"
+    )]
     pub fn new(theme: ArtisanTheme, position: SegmentPosition, content: Element) -> Self {
         Self {
             theme,

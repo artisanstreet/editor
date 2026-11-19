@@ -59,6 +59,10 @@ pub struct ShimmerText {
 }
 
 impl ShimmerText {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the shimmer text stores this theme copy and paints from it when built"
+    )]
     pub fn new(id: impl Into<Key>, content: impl Into<String>, theme: ArtisanTheme) -> Self {
         Self {
             id: id.into(),

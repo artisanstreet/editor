@@ -145,6 +145,10 @@ impl ColorCopyMenuHost {
         clippy::too_many_arguments,
         reason = "opening the menu needs its owner, colour, search icon, theme, motion and effect sink"
     )]
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the open colour menu keeps this theme copy to rebuild its rows"
+    )]
     pub fn open(
         app: &mut aqua::UiApp,
         owner: NodeId,

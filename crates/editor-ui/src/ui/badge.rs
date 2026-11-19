@@ -27,6 +27,10 @@ pub(crate) struct Badge {
 }
 
 impl Badge {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the badge stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn new(theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {
             theme,

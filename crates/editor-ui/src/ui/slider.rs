@@ -146,6 +146,10 @@ pub(crate) struct Slider {
 }
 
 impl Slider {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the slider stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,

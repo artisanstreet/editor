@@ -52,6 +52,10 @@ impl std::fmt::Debug for Trigger {
 }
 
 impl Trigger {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the trigger stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,

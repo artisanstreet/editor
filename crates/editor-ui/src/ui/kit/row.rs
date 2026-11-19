@@ -146,6 +146,10 @@ impl std::fmt::Debug for RowItem {
 }
 
 impl RowItem {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the row stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,

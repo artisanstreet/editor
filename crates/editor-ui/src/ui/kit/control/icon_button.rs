@@ -67,6 +67,10 @@ impl std::fmt::Debug for IconButton {
 }
 
 impl IconButton {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
@@ -91,6 +95,10 @@ impl IconButton {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
     pub(crate) fn corner_close(
         key: impl Into<Key>,
         theme: ArtisanTheme,

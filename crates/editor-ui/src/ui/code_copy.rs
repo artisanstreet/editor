@@ -100,6 +100,10 @@ impl std::fmt::Debug for CodeCopyButton {
 }
 
 impl CodeCopyButton {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the copy button stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         source: impl Into<String>,

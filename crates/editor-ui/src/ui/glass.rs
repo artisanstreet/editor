@@ -139,6 +139,10 @@ pub struct ComposerFrame {
 }
 
 impl ComposerFrame {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the composer frame stores this theme copy and paints from it when built"
+    )]
     pub fn new(theme: ArtisanTheme, content: Element) -> Self {
         Self {
             theme,
