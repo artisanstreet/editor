@@ -923,15 +923,15 @@ async fn a_steer_reaches_the_live_run() {
         .send_message(&fixture.thread_id, message("start"))
         .await
         .unwrap();
-    while !fixture
-        .hub
-        .live_snapshot()
-        .1
-        .iter()
-        .any(|event| matches!(event, Event::Live { .. }))
-    {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    test_support::wait::eventually("live text", test_support::wait::LIVENESS, || async {
+        fixture
+            .hub
+            .live_snapshot()
+            .1
+            .iter()
+            .any(|event| matches!(event, Event::Live { .. }))
+    })
+    .await;
     let steer = fixture
         .hub
         .send_message(&fixture.thread_id, message("also add tests"))
@@ -1012,9 +1012,10 @@ async fn the_thinking_line_ends_when_the_reply_starts() {
             }
         })
     };
-    while live(|t| matches!(t, LiveTarget::Text { .. })).is_none() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    test_support::wait::eventually("live reply text", test_support::wait::LIVENESS, || async {
+        live(|t| matches!(t, LiveTarget::Text { .. })).is_some()
+    })
+    .await;
     assert_eq!(
         live(|t| matches!(t, LiveTarget::Reasoning { .. })).as_deref(),
         Some(""),
@@ -1030,10 +1031,13 @@ async fn the_thinking_line_ends_when_the_reply_starts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_the_ending_run_never_took_starts_the_next_run() {
-    let fixture = fixture(Arc::new(|turn, _io| {
+    let release = Arc::new(Notify::new());
+    let script_release = Arc::clone(&release);
+    let fixture = fixture(Arc::new(move |turn, _io| {
+        let release = Arc::clone(&script_release);
         Box::pin(async move {
             if turn.input.text == "first" {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                release.notified().await;
             }
             Outcome::done()
         })
@@ -1052,6 +1056,7 @@ async fn a_message_the_ending_run_never_took_starts_the_next_run() {
         .send_message(&fixture.thread_id, message("second"))
         .await
         .unwrap();
+    release.notify_one();
     fixture
         .wait_for(|items| texts(items).contains(&("second".to_owned(), Status::Done)))
         .await;
@@ -2231,24 +2236,23 @@ async fn at_most_eight_harnesses_execute_at_once() {
             .await
             .unwrap();
     }
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while started.load(Ordering::SeqCst) < 8 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "eight runs to start",
+        test_support::wait::LIVENESS,
+        || async { started.load(Ordering::SeqCst) >= 8 },
+    )
+    .await;
     assert_eq!(started.load(Ordering::SeqCst), 8);
     release.add_permits(10);
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while started.load(Ordering::SeqCst) < 10
-            || threads.iter().any(|thread| fixture.hub.is_live(thread))
-        {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "every run to start and end",
+        test_support::wait::LIVENESS,
+        || async {
+            started.load(Ordering::SeqCst) >= 10
+                && !threads.iter().any(|thread| fixture.hub.is_live(thread))
+        },
+    )
+    .await;
     assert_eq!(started.load(Ordering::SeqCst), 10);
     assert!(maximum.load(Ordering::SeqCst) <= 8);
 }
@@ -4052,13 +4056,12 @@ async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
         .await
         .unwrap();
     fixture.settled().await;
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while asked.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a side query after the first turn");
+    test_support::wait::eventually(
+        "a side query after the first turn",
+        test_support::wait::LIVENESS,
+        || async { !asked.lock().unwrap().is_empty() },
+    )
+    .await;
     assert!(
         !asked.lock().unwrap()[0].contains("## Note"),
         "looking around asks only for a suggestion"
@@ -4405,20 +4408,20 @@ async fn a_thread_without_a_project_works_in_its_own_folder() {
     for text in ["Sketch a parser", "And test it"] {
         for thread in &threads {
             hub.send_message(thread, message(text)).await.unwrap();
-            tokio::time::timeout(test_support::wait::LIVENESS, async {
-                while hub.is_live(thread)
-                    || hub
-                        .store()
-                        .pending_threads(8, Vec::new())
-                        .await
-                        .unwrap()
-                        .contains(thread)
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("run settles");
+            test_support::wait::eventually(
+                "the run to settle",
+                test_support::wait::LIVENESS,
+                || async {
+                    !hub.is_live(thread)
+                        && !hub
+                            .store()
+                            .pending_threads(8, Vec::new())
+                            .await
+                            .unwrap()
+                            .contains(thread)
+                },
+            )
+            .await;
         }
     }
     let folders = folders.lock().unwrap().clone();
@@ -4519,13 +4522,12 @@ async fn a_stopped_turn_continues_without_a_message() {
     assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while asked.lock().unwrap().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the continued turn reaches the engine");
+    test_support::wait::eventually(
+        "the continued turn to reach the engine",
+        test_support::wait::LIVENESS,
+        || async { asked.lock().unwrap().len() >= 2 },
+    )
+    .await;
     let continued = fixture.settled().await.remove(0);
     assert_eq!(
         continued.continuation,
@@ -4588,9 +4590,12 @@ async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
         .send_message(&fixture.thread_id, message("where should the wheel go?"))
         .await
         .unwrap();
-    while asked.lock().unwrap().is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    test_support::wait::eventually(
+        "the engine to start the turn",
+        test_support::wait::LIVENESS,
+        || async { !asked.lock().unwrap().is_empty() },
+    )
+    .await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
     let stopped = fixture.items().await;
@@ -4649,17 +4654,19 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
         Arc::new(move |_| Arc::clone(&harness)),
     );
     hub.resume_pending();
-    let continued = tokio::time::timeout(test_support::wait::LIVENESS, async {
-        loop {
-            let latest = hub.store().latest_run(&thread_id).await.unwrap().unwrap();
-            if latest.status() == RunStatus::Done {
-                return latest;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the interrupted turn carries on");
+    test_support::wait::eventually(
+        "the interrupted turn to carry on",
+        test_support::wait::LIVENESS,
+        || async {
+            hub.store()
+                .latest_run(&thread_id)
+                .await
+                .unwrap()
+                .is_some_and(|run| run.status() == RunStatus::Done)
+        },
+    )
+    .await;
+    let continued = hub.store().latest_run(&thread_id).await.unwrap().unwrap();
     assert_eq!(
         continued.continuation,
         Some(artisan_api::Continuation::Restart)
@@ -4987,20 +4994,17 @@ async fn items_of(hub: &Hub, thread: &ThreadId) -> Vec<Item> {
 }
 
 async fn approval_card(hub: &Hub, thread: &ThreadId) -> Item {
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        loop {
-            if let Some(card) = items_of(hub, thread)
-                .await
-                .into_iter()
-                .find(|item| item.status == Status::AwaitingUser)
-            {
-                return card;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    let waiting = || async {
+        items_of(hub, thread)
+            .await
+            .into_iter()
+            .find(|item| item.status == Status::AwaitingUser)
+    };
+    test_support::wait::eventually("an approval card", test_support::wait::LIVENESS, || async {
+        waiting().await.is_some()
     })
-    .await
-    .expect("an approval card")
+    .await;
+    waiting().await.expect("an approval card")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5046,13 +5050,12 @@ async fn an_agents_message_to_a_full_access_thread_waits_for_the_user_and_names_
     let sender = sender.as_ref().expect("the message names its sender");
     assert_eq!(sender.thread, caller);
     assert_eq!(sender.engine, EngineId::Claude);
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        while heard.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the target's engine runs");
+    test_support::wait::eventually(
+        "the target's engine to run",
+        test_support::wait::LIVENESS,
+        || async { !heard.lock().unwrap().is_empty() },
+    )
+    .await;
     let heard = heard.lock().unwrap()[0].clone();
     assert!(
         heard.starts_with("[A Claude Code agent in the Artisan thread"),
@@ -5739,7 +5742,9 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
             Box::pin(async move {
                 entered.notify_one();
                 cancel.cancelled().await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
                 cleaned.store(true, Ordering::SeqCst);
                 Err(forge_engines::SideQueryError::Cancelled {
                     engine: turn.engine,

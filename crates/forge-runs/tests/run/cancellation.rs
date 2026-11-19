@@ -130,13 +130,12 @@ async fn a_stop_the_engine_never_confirms_stays_a_stop_that_says_so() {
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(120), async {
-        while fixture.hub.is_live(&fixture.thread_id) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "the stop deadline to end the run",
+        Duration::from_secs(120),
+        || async { !fixture.hub.is_live(&fixture.thread_id) },
+    )
+    .await;
     let run = fixture
         .hub
         .store()
