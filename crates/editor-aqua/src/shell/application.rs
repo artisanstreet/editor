@@ -1380,14 +1380,21 @@ pub(crate) struct Tm(
     aqua::profile::alloc::HeapCounts,
     crate::core::diagnostics::rebuild_stats::Span,
 );
+const DEFAULT_THRESHOLD_MS: f64 = 3.0;
+
 impl Tm {
     fn threshold_ms() -> f64 {
         static VALUE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-        *VALUE.get_or_init(|| {
-            std::env::var("AQUA_TM_MS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(3.0)
+        *VALUE.get_or_init(|| match std::env::var("AQUA_TM_MS") {
+            Err(std::env::VarError::NotPresent) => DEFAULT_THRESHOLD_MS,
+            Err(error) => {
+                tracing::warn!(%error, "AQUA_TM_MS is unreadable; timing spans over 3 ms");
+                DEFAULT_THRESHOLD_MS
+            }
+            Ok(value) => value.parse().unwrap_or_else(|error| {
+                tracing::warn!(%error, value, "AQUA_TM_MS is not a number; timing spans over 3 ms");
+                DEFAULT_THRESHOLD_MS
+            }),
         })
     }
 

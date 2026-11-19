@@ -197,7 +197,9 @@ impl ResourcePreview {
                         source,
                     }),
                 };
-                let _ = sender.send(result).await;
+                if sender.send(result).await.is_err() {
+                    tracing::debug!("the source preview closed before its file was read");
+                }
             }),
         ));
     }

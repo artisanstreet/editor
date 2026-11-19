@@ -48,7 +48,9 @@ impl RowSourceDialogs {
         routes.route(request, move |outcome| {
             let result = crate::ui::dialogs::chosen_path(outcome);
             crate::core::runtime::runtime().spawn(async move {
-                let _ = sender.send((generation, result)).await;
+                if sender.send((generation, result)).await.is_err() {
+                    tracing::debug!(generation, "the source export closed before a path was chosen");
+                }
             });
         });
         self.pending.insert(generation, export);

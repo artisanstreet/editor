@@ -38,7 +38,10 @@ impl NotificationCenter {
 static COLD_LAUNCH: std::sync::OnceLock<NotificationResponse> = std::sync::OnceLock::new();
 
 pub fn record_cold_launch(response: NotificationResponse) {
-    let _ = COLD_LAUNCH.set(response);
+    assert!(
+        COLD_LAUNCH.set(response).is_ok(),
+        "invariant: the cold launch response is recorded once per process"
+    );
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,7 +75,12 @@ impl NativeNotifications {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .push_back(response);
-                let _ = sender.send(());
+                match sender.send(()) {
+                    Ok(()) | Err(aqua::mailbox::SendError::Full(())) => {}
+                    Err(aqua::mailbox::SendError::Closed(())) => {
+                        tracing::debug!("a notification answer arrived after the Editor closed its notifications");
+                    }
+                }
             }),
         )?;
         Ok(Self {
