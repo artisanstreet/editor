@@ -12,7 +12,12 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(15);
 const LOGIN_OUTPUT_CAP: usize = 64 * 1024;
 
-pub fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Command {
+pub fn engine_command(
+    engine: EngineId,
+    binary: &Path,
+    home: &Path,
+) -> Result<Command, crate::sandbox::GuardError> {
+    crate::sandbox::guard::restore(engine, home)?;
     if let Err(error) = std::fs::create_dir_all(home) {
         tracing::warn!(home = %home.display(), error = %error, "couldn't create the engine home");
     }
@@ -31,11 +36,17 @@ pub fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Command {
     {
         tracing::warn!(home = %home.display(), %error, "couldn't create engine configuration directory");
     }
-    command
+    Ok(command)
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunShortError {
+    #[error("restore the configuration of {} before running it", engine.display_name())]
+    Guard {
+        engine: EngineId,
+        #[source]
+        source: crate::sandbox::GuardError,
+    },
     #[error("open the usage lock of {}", engine.display_name())]
     UsageLock {
         engine: EngineId,
@@ -67,7 +78,8 @@ pub async fn run_short(
     let usage = crate::install::usage_lock(home)
         .map_err(|source| RunShortError::UsageLock { engine, source })?;
     fs2::FileExt::lock_shared(&usage).map_err(|source| RunShortError::Share { engine, source })?;
-    let mut command = engine_command(engine, binary, home);
+    let mut command = engine_command(engine, binary, home)
+        .map_err(|source| RunShortError::Guard { engine, source })?;
     command.args(args);
     let output = crate::process::probe(command, timeout, 1024 * 1024)
         .await
@@ -843,7 +855,8 @@ impl SignIn {
             return Ok(());
         }
         let args = login_args(engine).map_err(LoginError::NoDeviceLogin)?;
-        let mut command = engine_command(self.engine, &binary, &self.home);
+        let mut command = engine_command(self.engine, &binary, &self.home)
+            .map_err(|source| LoginError::Guard { engine, source })?;
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -952,6 +965,12 @@ pub enum SubmitCodeError {
 
 #[derive(Debug, thiserror::Error)]
 enum LoginError {
+    #[error("restore the configuration of {} before signing in", engine.display_name())]
+    Guard {
+        engine: EngineId,
+        #[source]
+        source: crate::sandbox::GuardError,
+    },
     #[error("open the usage lock of {}", engine.display_name())]
     UsageLock {
         engine: EngineId,

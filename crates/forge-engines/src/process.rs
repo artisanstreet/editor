@@ -14,6 +14,13 @@ const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
+    #[error("restore {engine}'s configuration before starting thread {thread}")]
+    Guard {
+        engine: EngineId,
+        thread: ThreadId,
+        #[source]
+        source: crate::sandbox::GuardError,
+    },
     #[error("sandbox {engine} thread {thread}")]
     Sandbox {
         engine: EngineId,
@@ -147,7 +154,12 @@ pub(crate) fn spawn_in(
         || turn.launch.args.clone(),
         |gateway| gateway.claude_args(&turn.launch.args),
     );
-    let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home);
+    let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home)
+        .map_err(|source| SpawnError::Guard {
+            engine: turn.engine,
+            thread: turn.thread_id.clone(),
+            source,
+        })?;
     command
         .args(args)
         .args(&launch_args)

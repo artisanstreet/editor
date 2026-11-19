@@ -34,13 +34,15 @@ async fn oversized_probe_fails_without_waiting_for_a_blocked_pipe() {
 
 #[tokio::test]
 async fn oversized_engine_line_is_a_protocol_error() {
-    let home = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let home = base.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let turn = Turn {
         thread_id: artisan_api::ThreadId::from("bounded-output"),
         engine: artisan_api::EngineId::Codex,
         binary: "/bin/sh".into(),
-        home: home.path().into(),
-        cwd: home.path().into(),
+        home: home.clone(),
+        cwd: home.clone(),
         config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
         session_id: None,
         input: crate::UserInput::default(),

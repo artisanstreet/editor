@@ -98,6 +98,12 @@ pub fn reconcile_skills(
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
+    #[error("restore {engine}'s configuration before changing it")]
+    Guard {
+        engine: EngineId,
+        #[source]
+        source: crate::sandbox::GuardError,
+    },
     #[error("bringing the global prompt in line for {engine}")]
     Prompt {
         engine: EngineId,
@@ -130,6 +136,8 @@ pub fn materialize(
     home: &Path,
     c: &Customisation,
 ) -> Result<Launch, MaterializeError> {
+    crate::sandbox::guard::restore(engine, home)
+        .map_err(|source| MaterializeError::Guard { engine, source })?;
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
             match prompt::reconcile(engine, home, prompt, false) {
@@ -494,6 +502,8 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
+    #[error("record Forge's own change to the guarded engine configuration")]
+    Guard(#[source] crate::sandbox::GuardError),
     #[error("remove {}", path.display())]
     Remove {
         path: PathBuf,
@@ -637,6 +647,8 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 })?;
             write_private_if_changed(&path, text.as_bytes())
                 .map_err(|source| LaunchError::Write { path, source })?;
+            crate::sandbox::guard::adopt(engine, home, ".codex/config.toml")
+                .map_err(LaunchError::Guard)?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {

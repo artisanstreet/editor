@@ -27,11 +27,56 @@ pub enum Sandbox {
     Confined(Arc<Confined>),
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) mod guard;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod guard {
+    use artisan_api::EngineId;
+    use std::path::Path;
+
+    pub type GuardError = std::convert::Infallible;
+
+    #[derive(Debug)]
+    pub(crate) struct Exposure;
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as Linux, where guarding the engine's configuration can fail"
+    )]
+    pub(crate) const fn expose(_engine: EngineId, _home: &Path) -> Result<Exposure, GuardError> {
+        Ok(Exposure)
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as Linux, where guarding the engine's configuration can fail"
+    )]
+    pub(crate) const fn restore(_engine: EngineId, _home: &Path) -> Result<(), GuardError> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as Linux, where guarding the engine's configuration can fail"
+    )]
+    pub(crate) const fn adopt(
+        _engine: EngineId,
+        _home: &Path,
+        _relative: &str,
+    ) -> Result<(), GuardError> {
+        Ok(())
+    }
+}
+
+pub use guard::GuardError;
+
 #[derive(Debug)]
 pub struct Confined {
     temporary: tempfile::TempDir,
     ruleset: Ruleset,
     redirects: Vec<(String, OsString)>,
+    _exposure: guard::Exposure,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +95,13 @@ pub enum SandboxError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("guard {engine}'s configuration from thread {thread}'s sandbox")]
+    Guard {
+        engine: EngineId,
+        thread: ThreadId,
+        #[source]
+        source: GuardError,
     },
     #[error("confine {engine} thread {thread} to its writable folders")]
     Ruleset {
@@ -97,10 +149,18 @@ impl Sandbox {
                         thread: turn.thread_id.clone(),
                         source,
                     })?;
+                let exposure = guard::expose(turn.engine, &turn.home).map_err(|source| {
+                    SandboxError::Guard {
+                        engine: turn.engine,
+                        thread: turn.thread_id.clone(),
+                        source,
+                    }
+                })?;
                 Ok(Self::Confined(Arc::new(Confined {
                     temporary,
                     ruleset,
                     redirects,
+                    _exposure: exposure,
                 })))
             }
         }

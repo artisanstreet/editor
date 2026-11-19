@@ -86,15 +86,17 @@ async fn a_sandboxed_run_cannot_read_another_runs_gateway_credential() {
         eprintln!("SKIPPED: this kernel can't enforce the sandbox ({reason:?})");
         return;
     }
-    let home = tempfile::tempdir().unwrap();
-    let holder = claude_turn(home.path(), artisan_api::Permissions::Full);
+    let base = tempfile::tempdir().unwrap();
+    let home = base.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let holder = claude_turn(&home, artisan_api::Permissions::Full);
     let mut holder = spawn(
         &holder,
         &["-c".into(), "echo $$; read _".into(), "sh".into()],
     )
     .unwrap();
     let holder_pid = line(&mut holder).await;
-    let mut reader = claude_turn(home.path(), artisan_api::Permissions::Auto);
+    let mut reader = claude_turn(&home, artisan_api::Permissions::Auto);
     reader.launch = crate::Launch::default();
     let probe = r#"tr '\0' '\n' < "/proc/$1/environ" 2>&1 | grep -c gateway-token; grep -rl gateway-token . ; echo done"#;
     let read = |permissions| {
