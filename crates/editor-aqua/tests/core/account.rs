@@ -1,7 +1,7 @@
 use editor_aqua::core::{AccountPhase, Core, EditorFiles, Services};
 use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::TcpListener,
+    io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _},
+    net::{TcpListener, TcpStream},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -15,6 +15,29 @@ fn wait_for(core: &mut Core, phase: impl Fn(&AccountPhase) -> bool) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Asker {
+    Cancelled,
+    Waiting,
+}
+
+fn reply_to(stream: &mut TcpStream, asker: Asker, status: u16, body: &str) {
+    let written = write!(
+        stream,
+        "HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    match (written, asker) {
+        (Ok(()), _) => {}
+        (Err(error), Asker::Cancelled)
+            if matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+            ) => {}
+        (Err(error), _) => panic!("the test server writes its reply: {error}"),
+    }
+}
+
 #[test]
 fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -22,7 +45,12 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
     let (seen, requests) = mpsc::channel();
     let (reply, replies) = mpsc::channel::<(u16, String)>();
     let server = std::thread::spawn(move || {
-        for stream in listener.incoming().take(3) {
+        for (index, stream) in listener.incoming().take(3).enumerate() {
+            let asker = if index == 0 {
+                Asker::Cancelled
+            } else {
+                Asker::Waiting
+            };
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
@@ -46,12 +74,7 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
             seen.send(serde_json::from_slice::<serde_json::Value>(&body).unwrap())
                 .unwrap();
             let (status, body) = replies.recv_timeout(Duration::from_secs(5)).unwrap();
-            write!(
-                stream,
-                "HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("the test server writes its reply");
+            reply_to(&mut stream, asker, status, &body);
         }
     });
     let directory = tempfile::tempdir().unwrap();
