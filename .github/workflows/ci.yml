@@ -61,6 +61,7 @@ jobs:
       - name: Benchmark gate tests
         run: python3 tests/benches.py
       - name: Present a WSL interop registration to the dev launcher
+        shell: bash
         run: |
           mountpoint -q /proc/sys/fs/binfmt_misc || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
           echo ':WSLInterop:M::MZ::/bin/false:' | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null

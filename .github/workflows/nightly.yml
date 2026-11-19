@@ -36,6 +36,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
       - name: Sweep random seeds through Forge's fault simulation
+        shell: bash
         env:
           SIMULATION_SWEEP: ${{ inputs.seeds || '400' }}
         run: |

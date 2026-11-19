@@ -242,6 +242,7 @@ jobs:
           ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
         run: python3 src/release.py sign --output dist
       - name: Publish the verified release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.select.outputs.tag }}
