@@ -151,17 +151,19 @@ fn log_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
-async fn logged(path: &Path, line: &str) -> bool {
-    for _ in 0..40 {
-        if log_lines(path)
-            .iter()
-            .any(|logged| logged.starts_with(line))
-        {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
+async fn logged(path: &Path, line: &str, times: usize) {
+    test_support::wait::eventually(
+        &format!("the fake server to log `{line}` {times} times"),
+        test_support::wait::LIVENESS,
+        || {
+            let count = log_lines(path)
+                .iter()
+                .filter(|logged| logged.starts_with(line))
+                .count();
+            std::future::ready(count == times)
+        },
+    )
+    .await;
 }
 
 #[test]
@@ -319,44 +321,17 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
         matches!(&error, RequestError::TimedOut { method, .. } if method == "tools/call"),
         "{error}"
     );
-    assert!(
-        logged(&log, "cancelled").await,
-        "the server was not told: {:?}",
-        log_lines(&log)
-    );
+    logged(&log, "cancelled", 1).await;
 
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let stopper = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        stopper.cancel();
-    });
     let (client, tool) = servers.find("mcp__slow__slow").expect("the tool");
     let input = json!({});
-    tokio::select! {
-        _ = servers.call(client, tool, &input) => panic!("the call finished before the stop"),
-        () = cancel.cancelled() => {}
-    }
-    for _ in 0..40 {
-        if log_lines(&log)
-            .iter()
-            .filter(|line| line.starts_with("cancelled"))
-            .count()
-            == 2
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        log_lines(&log)
-            .iter()
-            .filter(|line| line.starts_with("cancelled"))
-            .count(),
-        2,
-        "the stopped call was not cancelled: {:?}",
-        log_lines(&log)
+    let mut call = Box::pin(servers.call(client, tool, &input));
+    assert!(
+        futures::poll!(call.as_mut()).is_pending(),
+        "the slow call finished before it was stopped"
     );
+    drop(call);
+    logged(&log, "cancelled", 2).await;
 }
 
 #[tokio::test]
@@ -686,7 +661,7 @@ async fn serve_http(listener: tokio::net::TcpListener, fake: Arc<FakeHttp>) {
                     )
                     .await;
                 let _peer_gone = socket.flush().await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let _closed_by_the_client = socket.read(&mut [0_u8; 1]).await;
             } else {
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
