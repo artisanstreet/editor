@@ -164,16 +164,19 @@ impl Hub {
                 }),
             },
         };
-        store
-            .upsert_item(card(Status::AwaitingUser, None))
-            .await
-            .map_err(|source| ApprovalError::ShowCard {
+        waiting.shown(card(Status::Cancelled, Some(Decision::Cancelled)));
+        if let Err(source) = store.upsert_item(card(Status::AwaitingUser, None)).await {
+            waiting.settled();
+            return Err(ApprovalError::ShowCard {
                 tool: tool.to_owned(),
                 source,
-            })?;
-        waiting.shown(card(Status::Cancelled, Some(Decision::Cancelled)));
+            });
+        }
         let decision = tokio::select! {
-            decision = answered => decision.unwrap_or(Decision::Cancelled),
+            decision = answered => match decision {
+                Ok(decision) => decision,
+                Err(_withdrawn) => Decision::Cancelled,
+            },
             () = tokio::time::sleep(ANSWER_WITHIN) => Decision::Cancelled,
             () = self.inner.shutdown.cancelled() => Decision::Cancelled,
             () = stopped.cancelled() => Decision::Cancelled,
