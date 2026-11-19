@@ -74,9 +74,9 @@ pub use pairing::{
 };
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, RecallGrepError,
-    RecallIndex, RecallKind, RecallScope, RecallSearchError, RecallTouchingError, SearchCursor,
-    SearchHit, SearchPage, Touch,
+    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, PrepareIndexError,
+    RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError, RecallTouchingError,
+    SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
@@ -438,6 +438,27 @@ pub enum OpenStoreError {
     },
     #[error("recover the runs the last Forge left live")]
     Recover(#[source] WriteFailure),
+    #[error("prepare the recall index of {}", database.display())]
+    PrepareRecall {
+        database: PathBuf,
+        #[source]
+        source: Box<PrepareIndexError>,
+    },
+    #[error("read the recall index state of {}", database.display())]
+    RecallState {
+        database: PathBuf,
+        #[source]
+        source: StorageError,
+    },
+    #[error(
+        "the recall index of {} is at version {built:?}, not {expected}; start the Forge that owns it so it rebuilds the index",
+        database.display()
+    )]
+    RecallStale {
+        database: PathBuf,
+        built: Option<i64>,
+        expected: i64,
+    },
     #[error("prepare the database {}", database.display())]
     Database {
         database: PathBuf,
@@ -618,14 +639,12 @@ fn upgrade(
     progress::unwatch(conn)
         .at("stop watching the recall index preparation")
         .map_err(progress)?;
-    if let Err(error) = prepared {
-        tracing::warn!(
-            database = %database.display(),
-            error = %diagnostics::chain(&error),
-            "Forge starts with the recall index it has; search may miss items until it can be rebuilt"
-        );
-    }
-    Ok(())
+    prepared
+        .map(drop)
+        .map_err(|source| OpenStoreError::PrepareRecall {
+            database: database.to_owned(),
+            source: Box::new(source),
+        })
 }
 
 fn recall_builder(
@@ -633,16 +652,12 @@ fn recall_builder(
     jobs: &mpsc::Sender<Job>,
     database: &Path,
 ) -> Result<(Option<recall::Builder>, watch::Receiver<RecallIndex>), OpenStoreError> {
-    let unavailable = |reason: &dyn std::fmt::Display| {
-        tracing::warn!(
-            database = %database.display(),
-            reason = %reason,
-            "search may miss items until the recall index is rebuilt when Forge next starts"
-        );
-        Ok((None, watch::channel(RecallIndex::Incomplete).1))
-    };
-    match recall::index_state(conn) {
-        Ok(recall::IndexState::Building { .. }) => {
+    let state = recall::index_state(conn).map_err(|source| OpenStoreError::RecallState {
+        database: database.to_owned(),
+        source,
+    })?;
+    match state {
+        recall::IndexState::Building { .. } => {
             let (status, watching) = watch::channel(RecallIndex::Building);
             recall::Builder::spawn(jobs.clone(), status)
                 .map(|builder| (Some(builder), watching))
@@ -651,14 +666,12 @@ fn recall_builder(
                     source,
                 })
         }
-        Ok(recall::IndexState::Built) => Ok((None, watch::channel(RecallIndex::Built).1)),
-        Ok(recall::IndexState::Stale { built }) => unavailable(&format_args!(
-            "the recall index is at version {built:?}, not {}",
-            recall::INDEX_VERSION
-        )),
-        Err(error) => unavailable(&format_args!(
-            "reading the recall index state failed: {error}"
-        )),
+        recall::IndexState::Built => Ok((None, watch::channel(RecallIndex::Built).1)),
+        recall::IndexState::Stale { built } => Err(OpenStoreError::RecallStale {
+            database: database.to_owned(),
+            built,
+            expected: recall::INDEX_VERSION,
+        }),
     }
 }
 

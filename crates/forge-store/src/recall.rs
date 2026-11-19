@@ -12,8 +12,8 @@ use std::ops::Range;
 
 pub(crate) mod build;
 
-pub use build::RecallIndex;
 pub(crate) use build::{Builder, INDEX_VERSION, IndexState, index_state, prepare_index};
+pub use build::{PrepareIndexError, RecallIndex};
 
 type Result<T, E = ContentError> = std::result::Result<T, E>;
 

@@ -28,7 +28,7 @@ pub(crate) enum IndexState {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum PrepareIndexError {
+pub enum PrepareIndexError {
     #[error("read which recall index the database holds")]
     State(#[source] StorageError),
     #[error("start rebuilding the recall index at version {version}")]

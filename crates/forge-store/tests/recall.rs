@@ -452,3 +452,114 @@ async fn forge_starts_with_a_damaged_item_and_still_finds_the_rest() {
         .expect("search recall");
     assert_eq!(found.hits.len(), 1, "{found:?}");
 }
+
+const UNLIMITED: usize = usize::MAX;
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "every other statement is authorised as usual"
+)]
+fn store_counting_advances(
+    dir: &std::path::Path,
+    advances: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    refuse_index_tables: bool,
+) -> Result<(Store, forge_store::DataLock), forge_store::OpenStoreError> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::Ordering;
+    let budget = std::sync::Arc::clone(advances);
+    let connections = forge_store::Connections::new(move |path| {
+        let mut conn = rusqlite::Connection::open(path)?;
+        let budget = std::sync::Arc::clone(&budget);
+        conn.authorizer(Some(move |context: AuthContext<'_>| match context.action {
+            AuthAction::CreateTable {
+                table_name: "item_text",
+            } if refuse_index_tables => Authorization::Deny,
+            AuthAction::Update {
+                table_name: "recall_index",
+                column_name: "building_after",
+            } => {
+                let spent = budget.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    (left != UNLIMITED).then(|| left.saturating_sub(1))
+                });
+                match spent {
+                    Ok(0) => Authorization::Deny,
+                    Ok(_) | Err(_) => Authorization::Allow,
+                }
+            }
+            _ => Authorization::Allow,
+        }))?;
+        Ok(conn)
+    });
+    let lock = forge_store::DataLock::acquire(dir).expect("hold the data folder");
+    let store = Store::open_restoring_in(
+        dir,
+        &lock,
+        forge_store::Environment {
+            connections,
+            ..forge_store::Environment::system()
+        },
+    )?;
+    Ok((store, lock))
+}
+
+fn forget_recall_index(dir: &std::path::Path) {
+    rusqlite::Connection::open(dir.join("forge.sqlite3"))
+        .expect("open the database beside the store")
+        .execute_batch(include_str!("recall/forget_index.sql"))
+        .expect("make the next start rebuild the recall index");
+}
+
+async fn found(store: &Store, text: &str) -> Vec<ItemId> {
+    store
+        .recall_search(RecallScope::default(), text.into(), false, 100, None)
+        .await
+        .expect("search recall")
+        .hits
+        .into_iter()
+        .map(|hit| hit.item_id)
+        .collect()
+}
+
+async fn index_built(store: &Store) -> forge_store::RecallIndex {
+    let mut index = store.recall_index();
+    *tokio::time::timeout(
+        test_support::wait::LIVENESS,
+        index.wait_for(|index| *index != forge_store::RecallIndex::Building),
+    )
+    .await
+    .expect("the recall index build ends in time")
+    .expect("the recall index build reports how it ended")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forge_that_cannot_prepare_its_search_index_refuses_to_start_instead_of_failing_every_message()
+ {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    store
+        .upsert_item(said(&notes, "the heron count is due on Friday"))
+        .await
+        .expect("save a note");
+    drop(store);
+    forget_recall_index(dir.path());
+    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(UNLIMITED));
+
+    let refused = store_counting_advances(dir.path(), &advances, true)
+        .map(drop)
+        .expect_err("Forge must not serve with a search index it couldn't prepare");
+
+    assert!(
+        matches!(refused, forge_store::OpenStoreError::PrepareRecall { .. }),
+        "{}",
+        diagnostics::chain(&refused)
+    );
+    let (store, _lock) =
+        store_counting_advances(dir.path(), &advances, false).expect("the next start prepares it");
+    store
+        .upsert_item(said(&notes, "the heron count moved to Monday"))
+        .await
+        .expect("messages save once the index is prepared");
+    assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
+    assert_eq!(found(&store, "heron count").await.len(), 2);
+}
