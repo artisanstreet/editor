@@ -190,26 +190,29 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
     let mut peers = HashSet::new();
     let peer_active = Arc::new(Notify::new());
     let mut quiet = 0_u32;
-    let mut last = tokio::time::Instant::now();
+    let mut last: Option<tokio::time::Instant> = None;
     loop {
-        if overlap.borrow_and_update().overlapping() {
-            tokio::select! {
-                () = stop.cancelled() => break,
-                () = peer_active.notified() => {}
-                () = tokio::time::sleep_until(last + quiet_sync(quiet)) => {}
-            }
-        } else {
+        if !overlap.borrow_and_update().overlapping() {
             tokio::select! {
                 () = stop.cancelled() => break,
                 watching = settled(&mut overlap, Overlap::overlapping) => if !watching { break },
             }
             quiet = 0;
+        } else if let Some(previous) = last {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                () = peer_active.notified() => {}
+                changed = overlap.changed() => if changed.is_err() { break },
+                () = tokio::time::sleep_until(previous + quiet_sync(quiet)) => {}
+            }
         }
-        tokio::select! {
-            () = stop.cancelled() => break,
-            () = tokio::time::sleep_until(last + SYNC_SOONEST) => {}
+        if let Some(previous) = last {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                () = tokio::time::sleep_until(previous + SYNC_SOONEST) => {}
+            }
         }
-        last = tokio::time::Instant::now();
+        last = Some(tokio::time::Instant::now());
         let before = cursor;
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
             tracing::warn!(
