@@ -8,5 +8,5 @@ fn oversized_copy_marker_does_not_read_unbounded_data() {
     fs::create_dir_all(&target).unwrap();
     let file = fs::File::create(link.join(COPY_MARKER)).unwrap();
     file.set_len(64 * 1024 + 1).unwrap();
-    assert!(!copied_skill_matches(&link, &target));
+    assert!(!copied_skill_matches(&link, &target).unwrap());
 }

@@ -1,7 +1,7 @@
 use crate::sandbox::Sandbox;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -1182,7 +1182,11 @@ impl Transport {
             return None;
         };
         for _ in 0..20 {
-            let status = lock(child).try_wait().ok().flatten();
+            let waited = lock(child).try_wait();
+            let status = match waited {
+                Ok(status) => status,
+                Err(error) => return Some(format!("its exit could not be read: {error}")),
+            };
             if let Some(status) = status {
                 return Some(status.code().map_or_else(
                     || "it was stopped by a signal".to_owned(),
@@ -1557,8 +1561,12 @@ async fn read_lines(
     loop {
         match lines.next().await {
             Ok(Some(Line::Message(line))) => {
-                let Ok(value) = serde_json::from_slice::<Value>(&line) else {
-                    continue;
+                let value = match serde_json::from_slice::<Value>(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "an MCP server wrote a line that isn't JSON; it was skipped");
+                        continue;
+                    }
                 };
                 if !answer_all(&rpc, &outgoing, value) {
                     break;
@@ -1589,10 +1597,15 @@ async fn read_lines(
 
 async fn keep_tail(mut pipe: tokio::process::ChildStderr, tail: Arc<Mutex<String>>) {
     let mut buffer = vec![0_u8; 4096];
-    while let Ok(read) = pipe.read(&mut buffer).await {
-        if read == 0 {
-            break;
-        }
+    loop {
+        let read = match pipe.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(%error, "an MCP server's error output stopped being read");
+                break;
+            }
+        };
         let text = String::from_utf8_lossy(&buffer[..read]);
         let mut tail = lock(&tail);
         tail.push_str(&text);
@@ -1776,8 +1789,12 @@ async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: Outbox) {
     while let Some(event) = events.next().await {
         match event {
             Ok(SseEvent::Message(message)) if message.event == "message" => {
-                let Ok(value) = serde_json::from_str::<Value>(&message.data) else {
-                    continue;
+                let value = match serde_json::from_str::<Value>(&message.data) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "an MCP server sent an event that isn't JSON; it was skipped");
+                        continue;
+                    }
                 };
                 if !answer_all(&rpc, &outgoing, value) {
                     return;
@@ -2000,8 +2017,12 @@ impl Http {
         while let Some(event) = events.next().await {
             match event {
                 Ok(SseEvent::Message(message)) => {
-                    let Ok(value) = serde_json::from_str::<Value>(&message.data) else {
-                        continue;
+                    let value = match serde_json::from_str::<Value>(&message.data) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(%error, "an MCP server answered with an event that isn't JSON; it was skipped");
+                            continue;
+                        }
                     };
                     for message in batch(value) {
                         if let Some(answer) = answer_to(&message) {
@@ -2144,7 +2165,14 @@ pub(super) fn project_servers(cwd: &Path) -> Vec<McpServer> {
     }
     let mut servers: Vec<McpServer> = Vec::new();
     for dir in dirs.into_iter().rev() {
-        for server in from_file(&dir.join(".mcp.json")) {
+        let found = from_file(&dir.join(".mcp.json")).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "a project's MCP servers are skipped"
+            );
+            Vec::new()
+        });
+        for server in found {
             if servers.len() >= MAX_PROJECT_SERVERS {
                 return servers;
             }
@@ -2167,22 +2195,46 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn from_file(path: &Path) -> Vec<McpServer> {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Vec::new();
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProjectServersError {
+    #[error("read the project MCP config {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the project MCP config {} exceeds {MAX_MCP_JSON_BYTES} bytes", path.display())]
+    TooLarge { path: PathBuf },
+    #[error("parse the project MCP config {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn from_file(path: &Path) -> Result<Vec<McpServer>, ProjectServersError> {
+    let read = |source| ProjectServersError::Read {
+        path: path.to_owned(),
+        source,
+    };
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(read(error)),
     };
     if metadata.len() > MAX_MCP_JSON_BYTES {
-        tracing::warn!(file = %path.display(), "a project .mcp.json is too large to read");
-        return Vec::new();
+        return Err(ProjectServersError::TooLarge {
+            path: path.to_owned(),
+        });
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        tracing::warn!(file = %path.display(), "a project .mcp.json is not valid JSON");
-        return Vec::new();
-    };
-    value["mcpServers"]
+    let text = std::fs::read_to_string(path).map_err(read)?;
+    let value =
+        serde_json::from_str::<Value>(&text).map_err(|source| ProjectServersError::Decode {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(value["mcpServers"]
         .as_object()
         .into_iter()
         .flatten()
@@ -2214,7 +2266,7 @@ fn from_file(path: &Path) -> Vec<McpServer> {
                 ..McpServer::default()
             })
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

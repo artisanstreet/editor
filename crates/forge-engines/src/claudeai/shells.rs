@@ -88,6 +88,7 @@ impl Unread {
 enum Ended {
     Code(i32),
     WithoutCode,
+    Unwaited(std::io::ErrorKind),
     Stopped,
 }
 
@@ -139,11 +140,18 @@ impl Shells {
         });
         shells.insert(id.clone(), Arc::clone(&shell));
         drop(shells);
+        let shell_id = id.clone();
         tokio::spawn(async move {
             let legacy = legacy_encoding().await;
             let watch = async {
                 let ended = tokio::select! {
-                    status = leader(&mut *child).wait() => status.ok().and_then(|status| status.code()).map_or(Ended::WithoutCode, Ended::Code),
+                    status = leader(&mut *child).wait() => match status {
+                        Ok(status) => status.code().map_or(Ended::WithoutCode, Ended::Code),
+                        Err(error) => {
+                            tracing::warn!(shell = %shell_id, %error, "a background shell's exit could not be read");
+                            Ended::Unwaited(error.kind())
+                        }
+                    },
                     () = shell.cancel.cancelled() => {
                         if let Err(error) = child.start_kill() {
                             tracing::debug!(%error, "stopping a background shell");
@@ -190,6 +198,10 @@ impl Shells {
                 }
                 Ended::Stopped => out.push_str("[stopped]"),
                 Ended::WithoutCode => out.push_str("[ended without an exit code]"),
+                Ended::Unwaited(kind) => {
+                    write!(out, "[ended, but its exit could not be read: {kind}]")
+                        .expect("invariant: writing to a String cannot fail");
+                }
             },
         }
         drop(state);
@@ -357,10 +369,13 @@ pub(super) async fn legacy_encoding() -> Option<&'static Encoding> {
         if let Some(known) = OEM.get() {
             return *known;
         }
-        tokio::task::spawn_blocking(|| *OEM.get_or_init(oem_code_page))
-            .await
-            .ok()
-            .flatten()
+        match tokio::task::spawn_blocking(|| *OEM.get_or_init(oem_code_page)).await {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                tracing::warn!(%error, "the Windows OEM code page lookup failed; shell output is read as UTF-8");
+                None
+            }
+        }
     }
     #[cfg(not(windows))]
     {
@@ -380,8 +395,14 @@ fn oem_code_page() -> Option<&'static Encoding> {
             "OEMCP",
         ])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::warn!(%error, "the Windows OEM code page could not be queried; shell output is read as UTF-8");
+            return None;
+        }
+    };
     let page: u16 = String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .last()?

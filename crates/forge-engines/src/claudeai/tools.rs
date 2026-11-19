@@ -960,10 +960,14 @@ async fn grep(call: &Call, cwd: &Path, rules: &Rules, cancel: &CancellationToken
         .map_or_else(|| cwd.to_path_buf(), |path| resolve(cwd, path));
     let rules = rules.clone();
     let stop = cancel.clone();
-    let hits =
-        tokio::task::spawn_blocking(move || search(&root, &regex, only.as_ref(), &rules, &stop))
-            .await
-            .unwrap_or_default();
+    let hits = match tokio::task::spawn_blocking(move || {
+        search(&root, &regex, only.as_ref(), &rules, &stop)
+    })
+    .await
+    {
+        Ok(hits) => hits,
+        Err(error) => return Answer::error(format!("The search failed: {error}")),
+    };
     if cancel.is_cancelled() {
         return Answer::error("The search was stopped.");
     }
@@ -1106,10 +1110,10 @@ async fn web_fetch(
     };
     let status = response.status();
     if !status.is_success() {
-        let body = read_body(&mut response, 4096)
-            .await
-            .map(|(body, _)| String::from_utf8_lossy(&body).into_owned())
-            .unwrap_or_default();
+        let body = match read_body(&mut response, 4096).await {
+            Ok((body, _)) => String::from_utf8_lossy(&body).into_owned(),
+            Err((_, error)) => format!("[the body could not be read: {error}]"),
+        };
         return Answer::error(format!(
             "The server answered {status}{}",
             if body.trim().is_empty() {

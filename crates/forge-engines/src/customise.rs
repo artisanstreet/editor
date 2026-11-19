@@ -247,23 +247,23 @@ enum Entry {
     Theirs,
 }
 
-fn inspect(path: &Path, owned: &[PathBuf]) -> Entry {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return Entry::Missing;
+fn inspect(path: &Path, owned: &[PathBuf]) -> io::Result<Entry> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
+        Err(error) => return Err(error),
     };
     if metadata.file_type().is_symlink() {
-        let Ok(target) = fs::read_link(path) else {
-            return Entry::Theirs;
-        };
+        let target = fs::read_link(path)?;
         if owned.iter().any(|root| target.starts_with(root)) {
-            return Entry::Ours(Some(target));
+            return Ok(Entry::Ours(Some(target)));
         }
-        return Entry::Theirs;
+        return Ok(Entry::Theirs);
     }
     if metadata.is_dir() && path.join(COPY_MARKER).is_file() {
-        return Entry::Ours(None);
+        return Ok(Entry::Ours(None));
     }
-    Entry::Theirs
+    Ok(Entry::Theirs)
 }
 
 fn sync_skills(
@@ -282,7 +282,7 @@ fn sync_skills(
         let keep = path
             .file_name()
             .is_some_and(|name| wanted.contains_key(&*name.to_string_lossy()));
-        if !keep && let Entry::Ours(_) = inspect(&path, owned) {
+        if !keep && let Entry::Ours(_) = inspect(&path, owned)? {
             remove_entry(&path)?;
             tracing::debug!(link = %path.display(), "removed a stale skill link");
         }
@@ -290,13 +290,13 @@ fn sync_skills(
     for (name, target) in wanted {
         let target = target.clone();
         let link = engine_skills.join(name);
-        match inspect(&link, owned) {
+        match inspect(&link, owned)? {
             Entry::Theirs => {
                 tracing::debug!(skill = %name, folder = %link.display(), "a skill folder of the user's has this name; leaving it");
                 continue;
             }
             Entry::Ours(Some(current)) if current == target => continue,
-            Entry::Ours(None) if copied_skill_matches(&link, &target) => continue,
+            Entry::Ours(None) if copied_skill_matches(&link, &target)? => continue,
             Entry::Ours(_) | Entry::Missing => {}
         }
         place(&target, &link, &staging)?;
@@ -304,32 +304,29 @@ fn sync_skills(
     Ok(())
 }
 
-fn copied_skill_matches(link: &Path, target: &Path) -> bool {
+fn copied_skill_matches(link: &Path, target: &Path) -> io::Result<bool> {
     use std::io::Read as _;
     let path = link.join(COPY_MARKER);
-    let Ok(metadata) = fs::metadata(&path) else {
-        return false;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
     if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return false;
+        return Ok(false);
     }
-    let Ok(file) = fs::File::open(&path) else {
-        return false;
-    };
-    let mut marker = String::new();
-    if file
+    let mut marker = Vec::new();
+    fs::File::open(&path)?
         .take(64 * 1024 + 1)
-        .read_to_string(&mut marker)
-        .is_err()
-        || marker.len() > 64 * 1024
-    {
-        return false;
-    }
-
-    let Ok((digest, _, _)) = skills::measure_inner(target, true) else {
-        return false;
+        .read_to_end(&mut marker)?;
+    let Ok(marker) = String::from_utf8(marker) else {
+        return Ok(false);
     };
-    marker == format!("{}\n{digest}", target.display())
+    if marker.len() > 64 * 1024 {
+        return Ok(false);
+    }
+    let (digest, _, _) = skills::measure_inner(target, true)?;
+    Ok(marker == format!("{}\n{digest}", target.display()))
 }
 
 fn remove_entry(path: &Path) -> io::Result<()> {

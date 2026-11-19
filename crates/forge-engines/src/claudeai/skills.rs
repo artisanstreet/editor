@@ -69,8 +69,13 @@ fn same_dir(left: &Path, right: &Path) -> bool {
 }
 
 fn in_root(root: &Path) -> Vec<Skill> {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(path = %root.display(), step = "listing skills", "the skills folder is skipped: {error}");
+            return Vec::new();
+        }
     };
     let mut skills = Vec::new();
     for entry in entries.flatten() {

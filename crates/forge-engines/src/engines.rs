@@ -344,27 +344,41 @@ pub(crate) fn environment(
             .path_dirs
             .iter()
             .map(|directory| root.join(directory));
-        if let Ok(path) = std::env::join_paths(directories.chain(std::env::split_paths(&inherited)))
-        {
-            env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+        match std::env::join_paths(directories.chain(std::env::split_paths(&inherited))) {
+            Ok(path) => env.push(("PATH".into(), path.to_string_lossy().into_owned())),
+            Err(error) => {
+                tracing::warn!(%engine, root = %root.display(), %error, "the engine's own tools can't be put on its PATH");
+            }
         }
     }
     env
 }
 
 fn understands_opencode_home(root: &std::path::Path) -> bool {
-    std::fs::read(root.join("artisan.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|manifest| {
-            manifest
-                .get("features")?
-                .as_array()?
+    let path = root.join("artisan.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "the OpenCode build manifest can't be read; OpenCode keeps its files in the XDG folders");
+            return false;
+        }
+    };
+    let manifest = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "the OpenCode build manifest isn't JSON; OpenCode keeps its files in the XDG folders");
+            return false;
+        }
+    };
+    manifest
+        .get("features")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| {
+            features
                 .iter()
                 .any(|feature| feature.as_str() == Some("OPENCODE_HOME"))
-                .then_some(())
         })
-        .is_some()
 }
 
 #[cfg(test)]

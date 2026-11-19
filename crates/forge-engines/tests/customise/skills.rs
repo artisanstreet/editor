@@ -97,7 +97,7 @@ fn a_failed_copy_keeps_the_engine_reading_the_previous_copy() {
     fs::remove_file(target.join("loop")).unwrap();
     publish_copy(&target, &link, &staging).unwrap();
     assert!(body(&link).contains("second"));
-    assert!(super::super::copied_skill_matches(&link, &target));
+    assert!(super::super::copied_skill_matches(&link, &target).unwrap());
     assert!(names(&staging).is_empty());
 }
 

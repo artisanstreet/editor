@@ -50,7 +50,7 @@ fn unchanged_real_copied_skill_keeps_files_and_timestamps_on_reconciliation() {
         "---\nname: skill\ndescription: changed\n---\nChanged instructions.\n",
     )
     .unwrap();
-    assert!(!copied_skill_matches(&copy, &source));
+    assert!(!copied_skill_matches(&copy, &source).unwrap());
     sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
     assert_eq!(
         fs::read(copy.join("SKILL.md")).unwrap(),

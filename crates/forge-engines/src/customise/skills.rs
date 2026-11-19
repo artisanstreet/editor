@@ -150,35 +150,61 @@ pub(super) fn quarantine_foreign(
 ) {
     let root = quarantine_root(skills_dir).join(engine.as_str());
     recover_quarantine(engine, &root);
-    if let Ok(entries) = fs::read_dir(engine_skills) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            if name.starts_with('.') || !matches!(inspect(&path, owned), Entry::Theirs) {
+    let entries = match fs::read_dir(engine_skills) {
+        Ok(entries) => entries.collect::<Vec<_>>(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::warn!(%engine, folder = %engine_skills.display(), %error, "couldn't look for skills Artisan didn't install");
+            Vec::new()
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%engine, folder = %engine_skills.display(), %error, "couldn't look for skills Artisan didn't install");
                 continue;
             }
-            let to = root.join(&name);
-            let moved = fs::create_dir_all(&root)
-                .and_then(|()| replace_quarantined(&path, &to, &root))
-                .and_then(|()| fs::write(quarantined_at(&root, &name), unix_seconds().to_string()));
-            match moved {
-                Ok(()) => tracing::info!(
-                    %engine,
-                    skill = %name,
-                    to = %to.display(),
-                    "quarantined a skill Artisan didn't install"
-                ),
-                Err(error) => tracing::warn!(
-                    %engine,
-                    skill = %path.display(),
-                    %error,
-                    "couldn't quarantine a skill Artisan didn't install"
-                ),
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name.starts_with('.') {
+            continue;
+        }
+        match inspect(&path, owned) {
+            Ok(Entry::Theirs) => {}
+            Ok(Entry::Missing | Entry::Ours(_)) => continue,
+            Err(error) => {
+                tracing::warn!(%engine, skill = %path.display(), %error, "couldn't tell who installed a skill; leaving it");
+                continue;
             }
         }
+        let to = root.join(&name);
+        let moved = fs::create_dir_all(&root)
+            .and_then(|()| replace_quarantined(&path, &to, &root))
+            .and_then(|()| fs::write(quarantined_at(&root, &name), unix_seconds().to_string()));
+        match moved {
+            Ok(()) => tracing::info!(
+                %engine,
+                skill = %name,
+                to = %to.display(),
+                "quarantined a skill Artisan didn't install"
+            ),
+            Err(error) => tracing::warn!(
+                %engine,
+                skill = %path.display(),
+                %error,
+                "couldn't quarantine a skill Artisan didn't install"
+            ),
+        }
     }
-    let Ok(entries) = fs::read_dir(&root) else {
-        return;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(%engine, folder = %root.display(), %error, "couldn't look for expired quarantined skills");
+            return;
+        }
     };
     let cutoff = unix_seconds().saturating_sub(QUARANTINE_DAYS * 24 * 60 * 60);
     for entry in entries.flatten() {
@@ -187,9 +213,14 @@ pub(super) fn quarantine_foreign(
             continue;
         }
         let stamp = quarantined_at(&root, &name);
-        let at = fs::read_to_string(&stamp)
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok());
+        let at = match fs::read_to_string(&stamp) {
+            Ok(text) => text.trim().parse::<u64>().ok(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::warn!(%engine, skill = %name, %error, "couldn't read when a skill was quarantined");
+                None
+            }
+        };
         if at.is_some_and(|at| at < cutoff) {
             let removed = super::remove_entry(&entry.path()).and_then(|()| fs::remove_file(&stamp));
             if let Err(error) = removed {
@@ -383,8 +414,13 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>, ReadSkillsError> {
             if folder_name.starts_with('.') || !entry.path().is_dir() {
                 continue;
             }
-            let Ok(text) = read_skill_header(&entry.path().join("SKILL.md")) else {
-                continue;
+            let text = match read_skill_header(&entry.path().join("SKILL.md")) {
+                Ok(text) => text,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    tracing::warn!(folder = %entry.path().display(), %error, "skipped a skill whose SKILL.md can't be read");
+                    continue;
+                }
             };
             let Some((name, description)) = skill_metadata_in(&text, Some(&folder_name)) else {
                 continue;
@@ -489,13 +525,17 @@ fn discovered(
                 continue;
             }
             if folder_name.starts_with('.')
-                || !matches!(inspect(&path, owned), Entry::Theirs)
+                || !matches!(inspect(&path, owned).map_err(read_native)?, Entry::Theirs)
                 || !path.join("SKILL.md").is_file()
             {
                 continue;
             }
-            let Ok(header) = read_skill_header(&path.join("SKILL.md")) else {
-                continue;
+            let header = match read_skill_header(&path.join("SKILL.md")) {
+                Ok(header) => header,
+                Err(error) => {
+                    tracing::warn!(folder = %path.display(), %error, "skipped a native skill whose SKILL.md can't be read");
+                    continue;
+                }
             };
             let Some((name, description)) = skill_metadata_in(&header, Some(&folder_name)) else {
                 tracing::warn!(folder = %path.display(), "invalid native skill metadata");
@@ -504,8 +544,12 @@ fn discovered(
             budget.admit(
                 name.len() + description.len() + folder_name.len() + path.as_os_str().len() + 64,
             )?;
-            let Ok((digest, file_count, byte_count)) = measure_inner(&path, cached) else {
-                continue;
+            let (digest, file_count, byte_count) = match measure_inner(&path, cached) {
+                Ok(measured) => measured,
+                Err(error) => {
+                    tracing::warn!(folder = %path.display(), %error, "skipped a native skill that can't be measured");
+                    continue;
+                }
             };
             found.push(Found {
                 engine: *engine,
@@ -792,19 +836,28 @@ fn managed_state(
             )),
         );
     }
-    match inspect(&paths.skills.join(&link_name), owned) {
-        Entry::Ours(Some(target)) if target == skill.folder => {
+    let link = paths.skills.join(&link_name);
+    match inspect(&link, owned) {
+        Err(error) => state(
+            SkillEngineStatus::Failed,
+            Some(format!(
+                "Artisan could not read {} in {}'s skills folder: {error}",
+                link.display(),
+                engine.display_name()
+            )),
+        ),
+        Ok(Entry::Ours(Some(target))) if target == skill.folder => {
             state(SkillEngineStatus::Synced, None)
         }
-        Entry::Ours(None) => state(SkillEngineStatus::Synced, None),
-        Entry::Theirs => state(
+        Ok(Entry::Ours(None)) => state(SkillEngineStatus::Synced, None),
+        Ok(Entry::Theirs) => state(
             SkillEngineStatus::Conflict,
             Some(format!(
                 "{} has its own skill named {link_name}. Remove it to let Artisan manage it.",
                 engine.display_name()
             )),
         ),
-        Entry::Ours(Some(_)) | Entry::Missing => state(
+        Ok(Entry::Ours(Some(_)) | Entry::Missing) => state(
             SkillEngineStatus::Failed,
             Some(format!(
                 "Artisan could not link the skill in {}'s skills folder.",

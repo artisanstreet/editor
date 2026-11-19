@@ -1325,8 +1325,13 @@ fn instructions(home: &Path, cwd: &Path) -> String {
     }
     let mut text = String::new();
     for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else {
-            continue;
+        let content = match std::fs::read_to_string(&file) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %file.display(), step = "reading the user's instructions", "the instructions file is skipped: {error}");
+                continue;
+            }
         };
         if content.trim().is_empty() {
             continue;

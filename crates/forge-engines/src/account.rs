@@ -1005,12 +1005,19 @@ enum LoginError {
 
 async fn forward(mut stream: impl AsyncRead + Unpin, chunks: mpsc::Sender<String>) {
     let mut buffer = vec![0_u8; 4096];
-    while let Ok(read) = stream.read(&mut buffer).await {
-        if read == 0
-            || chunks
-                .send(String::from_utf8_lossy(&buffer[..read]).into_owned())
-                .await
-                .is_err()
+    loop {
+        let read = match stream.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(%error, "the sign-in output stopped being read");
+                break;
+            }
+        };
+        if chunks
+            .send(String::from_utf8_lossy(&buffer[..read]).into_owned())
+            .await
+            .is_err()
         {
             break;
         }
