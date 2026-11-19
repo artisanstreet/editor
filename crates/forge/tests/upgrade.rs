@@ -1,11 +1,3 @@
-#![cfg_attr(
-    unix,
-    expect(
-        clippy::assertions_on_result_states,
-        clippy::unused_result_ok,
-        reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-    )
-)]
 #![cfg(test)]
 #![cfg(unix)]
 
@@ -44,11 +36,11 @@ impl Drop for Running {
         signal("-TERM", &pids);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while pids.iter().any(|pid| alive(*pid)) && std::time::Instant::now() < deadline {
-            self.child.try_wait().ok();
+            let _reaped = self.child.try_wait();
             std::thread::sleep(Duration::from_millis(50));
         }
         signal("-KILL", &pids);
-        self.child.wait().ok();
+        let _reaped = self.child.wait();
     }
 }
 
@@ -59,7 +51,7 @@ fn signal(name: &str, pids: &[u32]) {
         .map(ToString::to_string)
         .collect();
     if !live.is_empty() {
-        Command::new("kill").arg(name).args(&live).status().ok();
+        let _signalled = Command::new("kill").arg(name).args(&live).status();
     }
 }
 
@@ -211,11 +203,9 @@ async fn rejected_candidate_leaves_the_original_generation_and_connections_servi
     let (_directory, running, original) = start().await;
     let client = device(&running.data, original.address).await;
     let url = format!("https://localhost:{}/state", original.address.port());
-    assert!(
-        upgrade::replace(&running.data, std::path::Path::new("/bin/false"))
-            .await
-            .is_err()
-    );
+    upgrade::replace(&running.data, std::path::Path::new("/bin/false"))
+        .await
+        .expect_err("a candidate that exits at once is rejected");
     let current = upgrade::gateway(&running.data).unwrap().unwrap();
     assert_eq!(current.id, original.id);
     assert_eq!(current.backend.id, original.backend.id);

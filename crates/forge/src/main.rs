@@ -1,7 +1,3 @@
-#![expect(
-    clippy::print_stderr,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use artisan_paths::App;
@@ -74,7 +70,7 @@ fn main() -> std::process::ExitCode {
         ) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("error: print the schema version: {error}");
+                report(format_args!("print the schema version: {error}"));
                 std::process::ExitCode::FAILURE
             }
         };
@@ -89,7 +85,7 @@ fn main() -> std::process::ExitCode {
     let recent = match init_tracing(cli.log.as_deref()) {
         Ok(recent) => recent,
         Err(error) => {
-            eprintln!("error: {}", diagnostics::chain(&error));
+            report(format_args!("{}", diagnostics::chain(&error)));
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -99,7 +95,7 @@ fn main() -> std::process::ExitCode {
             Ok(dir) => dir,
             Err(error) => {
                 tracing::error!("find Forge's data folder: {error}");
-                eprintln!("error: find Forge's data folder: {error}");
+                report(format_args!("find Forge's data folder: {error}"));
                 return std::process::ExitCode::FAILURE;
             }
         },
@@ -116,10 +112,18 @@ fn main() -> std::process::ExitCode {
         Err(error) => {
             let chain = diagnostics::chain(&error);
             tracing::error!(error = chain, "Forge stopped");
-            eprintln!("error: {chain}");
+            report(format_args!("{chain}"));
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the Forge command reports why it could not run on stderr"
+)]
+fn report(error: std::fmt::Arguments<'_>) {
+    eprintln!("error: {error}");
 }
 
 #[derive(Debug, thiserror::Error)]
