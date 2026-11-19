@@ -1,25 +1,20 @@
+use super::attachment::UploadImageError;
 use super::controller::DraftBody;
 use artisan_api::{
-    BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, SendMessage, ThreadId,
-    WriteDraft,
+    BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ItemId, SendMessage,
+    ThreadId, WriteDraft,
 };
+use editor_core::client::CallError;
 use serde_json::Value;
 use std::time::Duration;
 
 pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(400);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Submission {
     pub message: SendMessage,
     pub create: Option<CreateThread>,
     pub thread: ThreadId,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sending {
-    Queued,
-    Running,
-    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,21 +26,77 @@ pub enum Posting {
     Failed,
 }
 
-struct Outgoing {
-    request: Submission,
-    state: Sending,
-    edited: u64,
-}
-
+#[derive(Debug)]
 pub enum Operation {
     Load,
     Write { request: WriteDraft, edited: u64 },
     Post(Submission),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PostMessageError {
+    #[error("create thread {thread}")]
+    CreateThread {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("send message {message} to thread {thread}")]
+    Send {
+        thread: ThreadId,
+        message: ItemId,
+        #[source]
+        source: CallError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptImageError {
+    #[error("the draft closed before the image finished uploading")]
+    Closed,
+    #[error(transparent)]
+    Upload(#[from] UploadImageError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DraftFailure {
+    #[error("Couldn't load the draft")]
+    Load {
+        scope: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("Couldn't save the draft")]
+    Save {
+        scope: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("Couldn't send the message")]
+    Send {
+        scope: String,
+        #[source]
+        source: PostMessageError,
+    },
+    #[error("Couldn't upload an image pasted before leaving this draft")]
+    Upload {
+        scope: String,
+        #[source]
+        source: AdoptImageError,
+    },
+    #[error("Couldn't add an image pasted before leaving this draft")]
+    AddImage {
+        scope: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
 const CONFLICT: &str = "This draft changed on another client. Choose which version to keep.";
 const REMOVED: &str = "This Forge pairing was removed.";
+const NO_BODY: &Value = &Value::Null;
 
+#[derive(Debug)]
 enum Remote {
     Unloaded,
     Loaded(DraftSnapshot),
@@ -55,71 +106,115 @@ enum Remote {
     },
 }
 
+#[derive(Debug)]
 enum Halt {
     Clear,
-    Failed(String),
-    Conflict,
+    Failed(DraftFailure),
+    Conflict { failed: Option<DraftFailure> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Request {
+    Idle,
+    Loading,
+    Writing,
+    Posting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Queued,
+    Running,
+    Released,
+}
+
+#[derive(Debug)]
+struct Outgoing {
+    request: Submission,
+    stage: Stage,
+    edited: u64,
+}
+
+#[derive(Debug)]
+enum Send {
+    Idle,
+    Outgoing(Outgoing),
+    Accepted(ThreadId),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Edits {
+    latest: u64,
+    saved: u64,
+}
+
+impl Edits {
+    const fn unsaved(self) -> bool {
+        self.saved < self.latest
+    }
+
+    fn edit(&mut self) {
+        self.latest = self
+            .latest
+            .checked_add(1)
+            .expect("invariant: a draft is edited fewer than u64::MAX times");
+    }
+
+    fn saved_through(&mut self, edited: u64) {
+        self.saved = self.saved.max(edited);
+    }
+
+    fn settle(&mut self) {
+        self.saved = self.latest;
+    }
+}
+
+#[derive(Debug)]
+struct Draft {
+    body: Value,
+    remote: Remote,
+    edits: Edits,
+    adopting: usize,
+    request: Request,
+    halt: Halt,
+    send: Send,
+}
+
+#[derive(Debug)]
+enum State {
+    Open(Draft),
     Removed,
 }
 
+#[derive(Debug)]
 pub struct DraftSession {
     scope: String,
-    body: Value,
-    remote: Remote,
-    halt: Halt,
-    adopting: usize,
-    edited: u64,
-    saved: u64,
-    dirty: bool,
-    busy: bool,
-    outgoing: Option<Outgoing>,
-    accepted: Option<ThreadId>,
+    state: State,
 }
 
-impl DraftSession {
-    pub fn new(scope: String) -> Self {
-        Self {
-            scope,
-            body: Value::Null,
-            remote: Remote::Unloaded,
-            halt: Halt::Clear,
-            adopting: 0,
-            edited: 0,
-            saved: 0,
-            dirty: false,
-            busy: false,
-            outgoing: None,
-            accepted: None,
-        }
-    }
-
-    pub(crate) fn scope(&self) -> &str {
-        &self.scope
-    }
-
-    pub const fn body(&self) -> &Value {
-        &self.body
-    }
-
-    pub const fn is_loaded(&self) -> bool {
-        !matches!(self.remote, Remote::Unloaded)
-    }
-
-    pub const fn conflict(&self) -> bool {
-        matches!(self.halt, Halt::Conflict)
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        match &self.halt {
-            Halt::Clear => None,
-            Halt::Failed(error) => Some(error),
-            Halt::Conflict => Some(CONFLICT),
-            Halt::Removed => Some(REMOVED),
-        }
-    }
-
+impl Draft {
     const fn halted(&self) -> bool {
         !matches!(self.halt, Halt::Clear)
+    }
+
+    fn outgoing(&self) -> Option<&Outgoing> {
+        match &self.send {
+            Send::Outgoing(outgoing) => Some(outgoing),
+            Send::Idle | Send::Accepted(_) => None,
+        }
+    }
+
+    fn sending(&self) -> bool {
+        !self.halted()
+            && self
+                .outgoing()
+                .is_some_and(|outgoing| outgoing.stage != Stage::Released)
+    }
+
+    fn requeue(&mut self) {
+        if let Send::Outgoing(outgoing) = &mut self.send {
+            outgoing.stage = Stage::Queued;
+        }
     }
 
     fn clear_failure(&mut self) {
@@ -135,52 +230,184 @@ impl DraftSession {
         }
     }
 
+    fn queue(&mut self, body: Value) -> bool {
+        if self.body == body {
+            return false;
+        }
+        self.body = body;
+        self.edits.edit();
+        if !self.sending() && self.request != Request::Posting {
+            if let Send::Outgoing(_) = self.send {
+                self.send = Send::Idle;
+            }
+        }
+        self.clear_failure();
+        true
+    }
+
+    fn release_submission(&mut self) {
+        if let Send::Outgoing(outgoing) = &mut self.send {
+            outgoing.stage = Stage::Released;
+        }
+    }
+
+    fn fail(&mut self, scope: &str, failure: DraftFailure) {
+        tracing::warn!(
+            %scope,
+            error = %diagnostics::chain(&failure),
+            "draft operation failed; releasing queued submission"
+        );
+        self.release_submission();
+        self.halt = match std::mem::replace(&mut self.halt, Halt::Clear) {
+            Halt::Conflict { .. } => Halt::Conflict {
+                failed: Some(failure),
+            },
+            Halt::Clear | Halt::Failed(_) => Halt::Failed(failure),
+        };
+    }
+
+    fn halt_on_conflict(&mut self, scope: &str) {
+        tracing::warn!(%scope, "draft changed on another client; releasing queued submission");
+        self.release_submission();
+        self.halt = match std::mem::replace(&mut self.halt, Halt::Clear) {
+            Halt::Clear => Halt::Conflict { failed: None },
+            Halt::Failed(failure) => Halt::Conflict {
+                failed: Some(failure),
+            },
+            conflict @ Halt::Conflict { .. } => conflict,
+        };
+    }
+
+    fn finish(&mut self, scope: &str, expected: Request) {
+        assert_eq!(
+            self.request, expected,
+            "invariant: draft {scope} finished a request it did not start"
+        );
+        self.request = Request::Idle;
+    }
+}
+
+impl DraftSession {
+    pub fn new(scope: String) -> Self {
+        Self {
+            scope,
+            state: State::Open(Draft {
+                body: Value::Null,
+                remote: Remote::Unloaded,
+                edits: Edits {
+                    latest: 0,
+                    saved: 0,
+                },
+                adopting: 0,
+                request: Request::Idle,
+                halt: Halt::Clear,
+                send: Send::Idle,
+            }),
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    const fn draft(&self) -> Option<&Draft> {
+        match &self.state {
+            State::Open(draft) => Some(draft),
+            State::Removed => None,
+        }
+    }
+
+    pub fn body(&self) -> &Value {
+        self.draft().map_or(NO_BODY, |draft| &draft.body)
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| !matches!(draft.remote, Remote::Unloaded))
+    }
+
+    pub fn conflict(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| matches!(draft.halt, Halt::Conflict { .. }))
+    }
+
+    pub fn halted(&self) -> bool {
+        self.draft().is_none_or(Draft::halted)
+    }
+
+    pub fn error(&self) -> Option<String> {
+        match &self.state {
+            State::Removed => Some(REMOVED.to_owned()),
+            State::Open(draft) => match &draft.halt {
+                Halt::Clear => None,
+                Halt::Failed(failure) => Some(diagnostics::chain(failure)),
+                Halt::Conflict { .. } => Some(CONFLICT.to_owned()),
+            },
+        }
+    }
+
     pub fn evictable(&self) -> bool {
-        !self.busy && !self.dirty && self.outgoing.is_none() && self.adopting == 0
+        self.draft().is_none_or(|draft| {
+            draft.request == Request::Idle
+                && !draft.edits.unsaved()
+                && draft.outgoing().is_none()
+                && draft.adopting == 0
+        })
     }
 
     pub fn pending(&self) -> bool {
-        !self.removed() && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
+        self.draft().is_some_and(|draft| {
+            draft.edits.unsaved() || draft.outgoing().is_some() || draft.adopting > 0
+        })
     }
 
     pub(crate) fn recover(&mut self, body: Value) {
-        if self.removed() || body.is_null() {
-            return;
+        if let State::Open(draft) = &mut self.state
+            && !body.is_null()
+        {
+            draft.body = body;
+            draft.edits.edit();
         }
-        self.body = body;
-        self.edited = self.edited.wrapping_add(1);
-        self.dirty = true;
     }
 
     pub(crate) fn adopting(&mut self) {
-        self.adopting += 1;
+        if let State::Open(draft) = &mut self.state {
+            draft.adopting += 1;
+        }
     }
 
-    pub(crate) fn adopted(&mut self, result: Result<BlobHash, String>) -> Option<BlobHash> {
-        self.adopting = self
+    pub(crate) fn adopted(
+        &mut self,
+        result: Result<BlobHash, AdoptImageError>,
+    ) -> Option<BlobHash> {
+        let State::Open(draft) = &mut self.state else {
+            return None;
+        };
+        draft.adopting = draft
             .adopting
             .checked_sub(1)
             .expect("invariant: an adopted upload was counted when it started");
-        if self.removed() {
-            return None;
-        }
         let hash = match result {
             Ok(hash) => hash,
-            Err(error) => {
-                self.fail(format!(
-                    "Couldn't upload an image pasted before leaving this draft: {error}"
-                ));
+            Err(source) => {
+                let failure = DraftFailure::Upload {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                draft.fail(&self.scope, failure);
                 return None;
             }
         };
-        let mut body = match &self.body {
+        let mut body = match &draft.body {
             Value::Null => DraftBody::default(),
             body => match serde_json::from_value::<DraftBody>(body.clone()) {
                 Ok(body) => body,
-                Err(error) => {
-                    self.fail(format!(
-                        "Couldn't add an image pasted before leaving this draft: {error}"
-                    ));
+                Err(source) => {
+                    let failure = DraftFailure::AddImage {
+                        scope: self.scope.clone(),
+                        source,
+                    };
+                    draft.fail(&self.scope, failure);
                     return None;
                 }
             },
@@ -188,156 +415,153 @@ impl DraftSession {
         if !body.images.contains(&hash) {
             body.images.push(hash.clone());
         }
-        self.queue(serde_json::to_value(body).expect("invariant: DraftBody serializes"));
+        draft.queue(serde_json::to_value(body).expect("invariant: DraftBody serializes"));
         Some(hash)
     }
 
     pub const fn removed(&self) -> bool {
-        matches!(self.halt, Halt::Removed)
+        matches!(self.state, State::Removed)
     }
 
     pub fn sending(&self) -> bool {
-        !self.halted()
-            && self
-                .outgoing
-                .as_ref()
-                .is_some_and(|outgoing| outgoing.state != Sending::Failed)
+        self.draft().is_some_and(Draft::sending)
     }
 
     pub fn posting(&self) -> Posting {
-        match &self.outgoing {
-            Some(outgoing) if self.sending() => Posting::Sending(outgoing.request.thread.clone()),
-            Some(outgoing) if outgoing.state == Sending::Failed => Posting::Failed,
-            Some(outgoing) => Posting::Blocked(outgoing.request.thread.clone()),
-            None => self
-                .accepted
-                .clone()
-                .map_or(Posting::Idle, Posting::Accepted),
+        let Some(draft) = self.draft() else {
+            return Posting::Idle;
+        };
+        match &draft.send {
+            Send::Idle => Posting::Idle,
+            Send::Accepted(thread) => Posting::Accepted(thread.clone()),
+            Send::Outgoing(outgoing) if draft.sending() => {
+                Posting::Sending(outgoing.request.thread.clone())
+            }
+            Send::Outgoing(outgoing) if outgoing.stage == Stage::Released => Posting::Failed,
+            Send::Outgoing(outgoing) => Posting::Blocked(outgoing.request.thread.clone()),
         }
     }
 
     pub fn send_failed(&self) -> bool {
-        self.outgoing
-            .as_ref()
-            .is_some_and(|outgoing| outgoing.state == Sending::Failed)
+        self.draft()
+            .and_then(Draft::outgoing)
+            .is_some_and(|outgoing| outgoing.stage == Stage::Released)
     }
 
     pub fn queue(&mut self, body: Value) -> bool {
-        if self.removed() || self.body == body {
-            return false;
+        match &mut self.state {
+            State::Open(draft) => draft.queue(body),
+            State::Removed => false,
         }
-        self.body = body;
-        self.edited = self.edited.wrapping_add(1);
-        self.dirty = true;
-        if !self.sending() {
-            self.outgoing = None;
-        }
-        self.clear_failure();
-        true
     }
 
     pub fn submit(&mut self, submission: Submission) {
-        if self.removed() || self.sending() {
+        let State::Open(draft) = &mut self.state else {
+            return;
+        };
+        if draft.sending() {
             return;
         }
-        self.accepted = None;
-        match &mut self.outgoing {
-            Some(outgoing) => outgoing.state = Sending::Queued,
-            None => {
-                self.outgoing = Some(Outgoing {
+        match &mut draft.send {
+            Send::Outgoing(outgoing) => outgoing.stage = Stage::Queued,
+            Send::Idle | Send::Accepted(_) => {
+                draft.send = Send::Outgoing(Outgoing {
                     request: submission,
-                    state: Sending::Queued,
-                    edited: self.edited,
-                })
+                    stage: Stage::Queued,
+                    edited: draft.edits.latest,
+                });
             }
         }
-        self.clear_failure();
+        draft.clear_failure();
     }
 
     pub fn retry(&mut self) {
-        if self.removed() {
-            return;
-        }
-        self.clear_failure();
-        if let Some(outgoing) = &mut self.outgoing {
-            outgoing.state = Sending::Queued;
+        if let State::Open(draft) = &mut self.state {
+            draft.clear_failure();
+            draft.requeue();
         }
     }
 
     pub fn keep_local(&mut self) {
-        if self.removed() {
-            return;
-        }
-        self.halt = Halt::Clear;
-        if let Some(outgoing) = &mut self.outgoing {
-            outgoing.state = Sending::Queued;
+        if let State::Open(draft) = &mut self.state {
+            draft.halt = match std::mem::replace(&mut draft.halt, Halt::Clear) {
+                Halt::Conflict {
+                    failed: Some(failure),
+                } => Halt::Failed(failure),
+                Halt::Clear | Halt::Failed(_) | Halt::Conflict { failed: None } => Halt::Clear,
+            };
+            draft.requeue();
         }
     }
 
     pub fn use_remote(&mut self) {
-        if self.removed() {
-            return;
+        if let State::Open(draft) = &mut self.state {
+            draft.body = draft
+                .snapshot()
+                .map_or(Value::Null, |snapshot| snapshot.body.clone());
+            draft.edits.settle();
+            draft.halt = Halt::Clear;
+            if let Send::Outgoing(_) = draft.send {
+                draft.send = Send::Idle;
+            }
         }
-        self.body = self
-            .snapshot()
-            .map_or(Value::Null, |snapshot| snapshot.body.clone());
-        self.dirty = false;
-        self.halt = Halt::Clear;
-        self.outgoing = None;
     }
 
     pub fn remove(&mut self) {
-        self.halt = Halt::Removed;
-        self.busy = false;
-        self.dirty = false;
-        self.outgoing = None;
-        self.accepted = None;
-        self.body = Value::Null;
-        self.remote = Remote::Unloaded;
+        self.state = State::Removed;
     }
 
     pub fn next(&mut self) -> Option<Operation> {
-        if self.busy || self.halted() {
+        let State::Open(draft) = &mut self.state else {
+            return None;
+        };
+        if draft.request != Request::Idle || draft.halted() {
             return None;
         }
-        let posting = self.outgoing.as_ref().is_some_and(|outgoing| {
-            outgoing.state == Sending::Queued && self.saved >= outgoing.edited
-        });
-        let operation = match &self.remote {
-            Remote::Unloaded | Remote::Ambiguous { .. } => Operation::Load,
-            Remote::Loaded(snapshot) if self.dirty && !posting => Operation::Write {
-                request: WriteDraft {
-                    expected_revision: snapshot.revision,
-                    body: self.body.clone(),
+        let saved = draft.edits.saved;
+        let posting = draft
+            .outgoing()
+            .is_some_and(|outgoing| outgoing.stage == Stage::Queued && saved >= outgoing.edited);
+        let (request, operation) = match &draft.remote {
+            Remote::Unloaded | Remote::Ambiguous { .. } => (Request::Loading, Operation::Load),
+            Remote::Loaded(snapshot) if draft.edits.unsaved() && !posting => (
+                Request::Writing,
+                Operation::Write {
+                    request: WriteDraft {
+                        expected_revision: snapshot.revision,
+                        body: draft.body.clone(),
+                    },
+                    edited: draft.edits.latest,
                 },
-                edited: self.edited,
-            },
+            ),
             Remote::Loaded(snapshot) => {
                 let revision = snapshot.revision;
-                let outgoing = self.outgoing.as_mut()?;
-                if outgoing.state != Sending::Queued {
+                let Send::Outgoing(outgoing) = &mut draft.send else {
+                    return None;
+                };
+                if outgoing.stage != Stage::Queued {
                     return None;
                 }
-                outgoing.state = Sending::Running;
+                outgoing.stage = Stage::Running;
                 outgoing.request.message.draft = Some(DraftRevision {
                     scope: self.scope.clone(),
                     revision,
                 });
-                Operation::Post(outgoing.request.clone())
+                (Request::Posting, Operation::Post(outgoing.request.clone()))
             }
         };
-        self.busy = true;
+        draft.request = request;
         Some(operation)
     }
 
-    pub fn loaded(&mut self, result: Result<DraftSnapshot, String>) {
-        if self.removed() {
+    pub fn loaded(&mut self, result: Result<DraftSnapshot, CallError>) {
+        let State::Open(draft) = &mut self.state else {
             return;
-        }
-        self.busy = false;
+        };
+        draft.finish(&self.scope, Request::Loading);
         match result {
             Ok(snapshot) => {
-                let (landed, unchanged) = match &self.remote {
+                let (landed, unchanged) = match &draft.remote {
                     Remote::Unloaded => (false, false),
                     Remote::Loaded(previous) => (false, snapshot.revision == previous.revision),
                     Remote::Ambiguous {
@@ -348,20 +572,27 @@ impl DraftSession {
                         snapshot.revision == previous.revision,
                     ),
                 };
+                let unsaved = draft.edits.unsaved();
                 let unseen = !landed
                     && !unchanged
-                    && self.dirty
+                    && unsaved
                     && !snapshot.body.is_null()
-                    && snapshot.body != self.body;
-                if !self.dirty {
-                    self.body = snapshot.body.clone();
+                    && snapshot.body != draft.body;
+                if !unsaved {
+                    draft.body = snapshot.body.clone();
                 }
-                self.remote = Remote::Loaded(snapshot);
+                draft.remote = Remote::Loaded(snapshot);
                 if unseen {
-                    self.halt_on_conflict();
+                    draft.halt_on_conflict(&self.scope);
                 }
             }
-            Err(error) => self.fail(format!("Couldn't load the draft: {error}")),
+            Err(source) => {
+                let failure = DraftFailure::Load {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                draft.fail(&self.scope, failure);
+            }
         }
     }
 
@@ -369,81 +600,72 @@ impl DraftSession {
         &mut self,
         request: &WriteDraft,
         edited: u64,
-        result: Result<DraftWriteResult, String>,
+        result: Result<DraftWriteResult, CallError>,
     ) {
-        if self.removed() {
+        let State::Open(draft) = &mut self.state else {
             return;
-        }
-        self.busy = false;
+        };
+        draft.finish(&self.scope, Request::Writing);
         match result {
             Ok(result) => {
                 let matched = result.saved || result.current.body == request.body;
-                self.remote = Remote::Loaded(result.current);
+                draft.remote = Remote::Loaded(result.current);
                 if matched {
-                    self.saved = edited;
-                    if self.edited == edited {
-                        self.dirty = false;
-                    }
+                    draft.edits.saved_through(edited);
                 } else {
-                    self.halt_on_conflict();
+                    draft.halt_on_conflict(&self.scope);
                 }
             }
-            Err(error) => {
-                let snapshot = match std::mem::replace(&mut self.remote, Remote::Unloaded) {
+            Err(source) => {
+                let snapshot = match std::mem::replace(&mut draft.remote, Remote::Unloaded) {
                     Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => snapshot,
                     Remote::Unloaded => {
                         unreachable!("invariant: draft {} wrote before it loaded", self.scope)
                     }
                 };
-                self.remote = Remote::Ambiguous {
+                draft.remote = Remote::Ambiguous {
                     snapshot,
                     written: request.body.clone(),
                 };
-                self.fail(format!("Couldn't save the draft: {error}"));
+                let failure = DraftFailure::Save {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                draft.fail(&self.scope, failure);
             }
         }
     }
 
-    fn fail(&mut self, error: String) {
-        tracing::warn!(scope = %self.scope, %error, "draft operation failed; releasing queued submission");
-        self.release_submission();
-        self.halt = Halt::Failed(error);
-    }
-
-    fn halt_on_conflict(&mut self) {
-        tracing::warn!(scope = %self.scope, "draft changed on another client; releasing queued submission");
-        self.release_submission();
-        self.halt = Halt::Conflict;
-    }
-
-    fn release_submission(&mut self) {
-        if let Some(outgoing) = &mut self.outgoing {
-            outgoing.state = Sending::Failed;
-        }
-    }
-
-    pub fn posted(&mut self, result: Result<(), String>, thread: ThreadId) {
-        if self.removed() {
+    pub fn posted(&mut self, result: Result<(), PostMessageError>, thread: ThreadId) {
+        let State::Open(draft) = &mut self.state else {
             return;
-        }
-        self.busy = false;
+        };
+        draft.finish(&self.scope, Request::Posting);
         match result {
             Ok(()) => {
-                let typed_since = self
-                    .outgoing
-                    .take()
-                    .is_some_and(|outgoing| outgoing.edited != self.edited);
-                self.accepted = Some(thread);
-                self.remote = Remote::Unloaded;
-                if typed_since {
-                    self.dirty = true;
+                let Send::Outgoing(outgoing) =
+                    std::mem::replace(&mut draft.send, Send::Accepted(thread))
+                else {
+                    unreachable!(
+                        "invariant: draft {} posted a message it was not sending",
+                        self.scope
+                    );
+                };
+                draft.remote = Remote::Unloaded;
+                if outgoing.edited == draft.edits.latest {
+                    draft.body = Value::Null;
+                    draft.edits.settle();
                 } else {
-                    self.body = Value::Null;
-                    self.dirty = false;
+                    draft.edits.saved = outgoing.edited;
                 }
-                self.halt = Halt::Clear;
             }
-            Err(error) => self.fail(format!("Couldn't send the message: {error}")),
+            Err(source) => {
+                let failure = DraftFailure::Send {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                draft.fail(&self.scope, failure);
+            }
         }
     }
 }

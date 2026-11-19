@@ -28,7 +28,7 @@ Group "Artisan Editor"
   ComboBox "No model" [collapsed]
     Label "No model"
   Group [focused]
-    Label "Couldn't save the draft: PUT /drafts/thread:thread-a"
+    Label "Couldn't save the draft: PUT /drafts/thread:thread-a: reach Forge: [connection refused]"
     Button "Try again"
       Label "Try again"
   ScrollView

@@ -811,7 +811,7 @@ impl ComposerRest {
                     (
                         state.is_loaded(),
                         state.conflict(),
-                        state.error().map(str::to_owned),
+                        state.error(),
                         state.sending(),
                     )
                 })

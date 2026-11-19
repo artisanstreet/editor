@@ -88,6 +88,16 @@ pub enum PrepareImageError {
     Encode(#[from] super::encode::EncodeError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum UploadImageError {
+    #[error("the image preparation task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error("prepare the image")]
+    Prepare(#[source] PrepareImageError),
+    #[error("upload the image to Forge")]
+    Put(#[source] editor_core::client::CallError),
+}
+
 impl Source {
     fn read(&self) -> Result<Vec<u8>, ReadImageError> {
         use std::io::Read as _;
@@ -155,20 +165,20 @@ pub struct PendingUpload {
 }
 
 impl PendingUpload {
-    pub(crate) async fn upload(self) -> Result<BlobHash, String> {
+    pub(crate) async fn upload(self) -> Result<BlobHash, UploadImageError> {
         let origin = self.origin;
         let webp = tokio::task::spawn_blocking(move || {
             let bytes = origin.read()?;
             Ok::<_, PrepareImageError>(super::encode::to_webp(&bytes)?)
         })
         .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| diagnostics::chain(&error))?;
+        .map_err(UploadImageError::Task)?
+        .map_err(UploadImageError::Prepare)?;
         self.client
             .put_blob(webp)
             .await
             .map(|blob| blob.hash)
-            .map_err(|error| diagnostics::chain(&error))
+            .map_err(UploadImageError::Put)
     }
 }
 

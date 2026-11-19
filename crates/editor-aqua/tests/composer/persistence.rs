@@ -779,3 +779,71 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
         drop(directory);
     });
 }
+
+#[test]
+fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
+    use editor_aqua::composer::attachment::{Attachments, Source};
+
+    let (_directory, core, config, _client) = fixture();
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::default();
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        let mut changed = lease.subscribe();
+        lease.queue(json!({"text": "mine"}));
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        respond(
+            &mut socket,
+            json!({"saved": false, "current": {"revision": 3, "body": {"text": "theirs"}}}),
+        )
+        .await;
+        drop(socket);
+        while !lease.read(|state| state.conflict()) {
+            changed.changed().await.unwrap();
+        }
+
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([40, 200, 40, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut attachments = Attachments::new(client);
+        assert!(attachments.add(Source::Bytes(png), "pasted.png".into()));
+        let uploads = attachments.take_unfinished();
+        drop(attachments);
+        for upload in uploads {
+            lease.adopt_image(upload);
+        }
+        changed.borrow_and_update();
+        let (mut socket, route, _) = request_bytes(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        respond_status(
+            &mut socket,
+            "507 Insufficient Storage",
+            json!({"code": "internal", "message": "the disk is full"}),
+        )
+        .await;
+        drop(socket);
+        changed.changed().await.unwrap();
+
+        assert!(
+            lease.read(|state| state.conflict()),
+            "the failed upload does not hide the other client's draft"
+        );
+        lease.queue(json!({"text": "mine, typed after the upload failed"}));
+        assert!(
+            lease.read(|state| state.conflict() && state.halted()),
+            "the next keystroke does not write over the other client's draft"
+        );
+        assert!(
+            lease
+                .read(|state| state.error())
+                .is_some_and(|error| error.contains("another client")),
+            "the choice between the two drafts is still offered"
+        );
+    });
+}

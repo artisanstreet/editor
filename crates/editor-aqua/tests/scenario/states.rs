@@ -21,10 +21,22 @@ fn a_message_sent_while_forge_is_down_stays_in_the_composer_with_a_retry() {
     editor.click(Role::TextInput, "Message");
     editor.type_text("Say hello");
     editor.press(Key::Named(NamedKey::Enter), Modifiers::NONE);
-    insta::assert_snapshot!(editor.settle("the failure to show", |view| {
+    let settled = editor.settle("the failure to show", |view| {
         view.shows("Couldn't") && view.find(Role::Button, "Try again").is_some()
-    }));
+    });
+    insta::assert_snapshot!(with_os_cause_elided(&settled));
     assert_eq!(editor.engine().launches(), 0, "nothing reached the engine");
+}
+
+fn with_os_cause_elided(view: &str) -> String {
+    const STEP: &str = ": reach Forge: ";
+    view.lines()
+        .map(|line| match line.split_once(STEP) {
+            Some((before, _)) => format!("{before}{STEP}[connection refused]\""),
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]

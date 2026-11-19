@@ -1,5 +1,7 @@
 use super::attachment::PendingUpload;
-use super::draft_session::{DraftSession, Operation, SAVE_DELAY, Submission};
+use super::draft_session::{
+    AdoptImageError, DraftSession, Operation, PostMessageError, SAVE_DELAY, Submission,
+};
 use super::spool::DraftSpool;
 use artisan_api::{BlobHash, ItemId, ThreadId};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
@@ -32,28 +34,12 @@ struct Shared {
 
 struct Inner {
     host: HostId,
+    scope: String,
     client: ForgeClient,
     spool: Option<DraftSpool>,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum PostMessageError {
-    #[error("create thread {thread}")]
-    CreateThread {
-        thread: ThreadId,
-        #[source]
-        source: editor_core::client::CallError,
-    },
-    #[error("send message {message} to thread {thread}")]
-    Send {
-        thread: ThreadId,
-        message: ItemId,
-        #[source]
-        source: editor_core::client::CallError,
-    },
 }
 
 #[derive(Clone)]
@@ -157,7 +143,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
     for session in sessions {
         let mut changed = session.subscribe();
         loop {
-            let (pending, error) = session.read(|state| (state.pending(), state.error().is_some()));
+            let (pending, error) = session.read(|state| (state.pending(), state.halted()));
             if !pending {
                 break;
             }
@@ -267,6 +253,7 @@ impl DraftSessions {
         let (changed, _) = watch::channel(0);
         let session = DraftHandle(Arc::new(Inner {
             host,
+            scope,
             client,
             spool: self.spool.clone(),
             shared: Mutex::new(Shared {
@@ -298,7 +285,7 @@ impl DraftSessions {
 
 impl DraftHandle {
     fn deadline_outcome(&self) -> ShutdownOutcome {
-        self.read(|state| match (state.pending(), state.error().is_some()) {
+        self.read(|state| match (state.pending(), state.halted()) {
             (false, _) => ShutdownOutcome::Saved,
             (true, true) => ShutdownOutcome::Incomplete {
                 failed: 1,
@@ -372,12 +359,9 @@ impl DraftHandle {
                 let cancelled = session.0.cancelled.clone();
                 let result = tokio::select! {
                     biased;
-                    () = cancelled.cancelled() => Err("the draft was closed".to_owned()),
-                    result = upload.upload() => result,
+                    () = cancelled.cancelled() => Err(AdoptImageError::Closed),
+                    result = upload.upload() => result.map_err(AdoptImageError::from),
                 };
-                if let Err(error) = &result {
-                    tracing::warn!(%error, "uploading an image handed over by a closed composer failed");
-                }
                 session.mutate(|shared| {
                     if let Some(hash) = shared.state.adopted(result) {
                         shared.emit(SessionEvent::ImageAdopted(hash));
@@ -496,25 +480,11 @@ impl DraftHandle {
         let client = &session.0.client;
         match operation {
             Operation::Load => {
-                let scope = session.read(|state| state.scope().to_owned());
-                let result = client
-                    .draft(&scope)
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                if let Err(error) = &result {
-                    tracing::warn!(%scope, %error, "draft load failed");
-                }
+                let result = client.draft(&session.0.scope).await;
                 session.mutate(|shared| shared.state.loaded(result));
             }
             Operation::Write { request, edited } => {
-                let scope = session.read(|state| state.scope().to_owned());
-                let result = client
-                    .set_draft(&scope, &request)
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                if let Err(error) = &result {
-                    tracing::warn!(%scope, %error, "draft save failed");
-                }
+                let result = client.set_draft(&session.0.scope, &request).await;
                 session.mutate(|shared| {
                     shared.state.written(&request, edited, result);
                     session.forget_recovered(shared);
@@ -546,17 +516,7 @@ impl DraftHandle {
                         })
                 }
                 .instrument(span)
-                .await
-                .map_err(|error| diagnostics::chain(&error));
-                if let Err(error) = &result {
-                    tracing::warn!(
-                        thread = %request.thread,
-                        message = %request.message.id,
-                        creates_thread = request.create.is_some(),
-                        %error,
-                        "message send failed"
-                    );
-                }
+                .await;
                 let accepted = result.is_ok();
                 session.mutate(|shared| {
                     shared.state.posted(result, request.thread.clone());

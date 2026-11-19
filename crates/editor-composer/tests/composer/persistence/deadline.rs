@@ -8,6 +8,7 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
     let pin = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &pin, &identity).unwrap();
     let mut state = DraftSession::new("new".into());
+    assert!(matches!(state.next(), Some(Operation::Load)));
     state.loaded(Ok(DraftSnapshot::default()));
     state.queue(json!({"text": "pending"}));
     let Some(Operation::Write { request, edited }) = state.next() else {
@@ -16,6 +17,7 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
     let (changed, _) = watch::channel(0);
     let handle = DraftHandle(Arc::new(Inner {
         host: HostId("deadline-test".into()),
+        scope: "new".into(),
         client,
         spool: None,
         shared: Mutex::new(Shared {
@@ -57,9 +59,14 @@ fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
     let (handle, request, edited) = pending_write();
     assert!(handle.read(|state| state.pending()));
     handle.mutate(|shared| {
-        shared
-            .state
-            .written(&request, edited, Err("rejected".into()))
+        shared.state.written(
+            &request,
+            edited,
+            Err(editor_core::client::CallError::test_inconsistent(
+                "/drafts/new",
+                "rejected",
+            )),
+        );
     });
     assert_eq!(
         handle.deadline_outcome(),

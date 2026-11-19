@@ -272,11 +272,7 @@ impl ComposerOwner {
             .session
             .as_ref()
             .and_then(|session| {
-                session.read(|state| {
-                    state
-                        .error()
-                        .map(|error| (error.to_owned(), state.conflict()))
-                })
+                session.read(|state| state.error().map(|error| (error, state.conflict())))
             })
             .map(|(error, conflict)| {
                 draft_error(
