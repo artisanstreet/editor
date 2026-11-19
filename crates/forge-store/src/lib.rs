@@ -313,6 +313,18 @@ struct Threads {
 impl Threads {
     fn join(&mut self) -> Result<(), ShutdownError> {
         let here = std::thread::current().id();
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.thread().id() == here)
+        {
+            if let Some(recall) = self.recall.take() {
+                recall.stop_without_waiting();
+            }
+            drop(self.writer.take());
+            drop(self.checkpointer.take());
+            return Ok(());
+        }
         if let Some(recall) = self.recall.take() {
             recall
                 .stop()
@@ -325,7 +337,7 @@ impl Threads {
                 ShutdownError::CheckpointerPanicked,
             ),
         ] {
-            if let Some(thread) = thread.filter(|thread| thread.thread().id() != here) {
+            if let Some(thread) = thread {
                 thread.join().map_err(|_panic| panicked)?;
             }
         }
@@ -1341,3 +1353,7 @@ fn project_name(path: &str) -> String {
         |name| name.to_string_lossy().into_owned(),
     )
 }
+
+#[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
+mod tests;

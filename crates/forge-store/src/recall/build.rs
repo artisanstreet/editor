@@ -215,6 +215,11 @@ impl Builder {
         drop(self.stop);
         self.thread.join()
     }
+
+    pub(crate) fn stop_without_waiting(self) {
+        drop(self.stop);
+        drop(self.thread);
+    }
 }
 
 enum Reply {
