@@ -10,6 +10,11 @@ const BATCH: usize = 8;
 pub enum RemoveInactiveThreadsError {
     #[error("read Forge's {THREAD_RETENTION_DAYS_KEY} setting")]
     Days(#[source] ReadSettingError),
+    #[error(
+        "Forge's {THREAD_RETENTION_DAYS_KEY} setting is not a whole number of days up to {}",
+        u32::MAX
+    )]
+    NotDays,
     #[error("remove the threads inactive since {cutoff}")]
     Remove {
         cutoff: Timestamp,
@@ -72,10 +77,14 @@ impl Hub {
                     .map(artisan_api::SettingDecl::default_value)
             })
             .unwrap_or(serde_json::Value::Null);
-        Ok(value
+        if value.is_null() {
+            return Ok(None);
+        }
+        let days = value
             .as_u64()
             .and_then(|days| u32::try_from(days).ok())
-            .filter(|days| *days > 0))
+            .ok_or(RemoveInactiveThreadsError::NotDays)?;
+        Ok(Some(days).filter(|days| *days > 0))
     }
 
     pub(crate) async fn forget_removed_thread(&self, thread: Thread) {

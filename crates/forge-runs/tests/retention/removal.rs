@@ -37,3 +37,24 @@ async fn a_removed_threads_gateway_address_stops_acting_for_it() {
     let reissued = fixture.hub.gateway_pass(&fixture.thread_id).await.unwrap();
     assert_ne!(reissued.servers()[0].1, servers[0].1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retention_setting_that_is_not_a_number_of_days_is_reported_not_ignored() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    fixture
+        .hub
+        .store()
+        .set_setting(
+            artisan_api::THREAD_RETENTION_DAYS_KEY.to_owned(),
+            serde_json::json!("30"),
+        )
+        .await
+        .unwrap();
+
+    let removed = fixture.hub.remove_inactive_threads().await;
+
+    assert!(
+        matches!(removed, Err(RemoveInactiveThreadsError::NotDays)),
+        "{removed:?}"
+    );
+}
