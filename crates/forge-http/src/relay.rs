@@ -201,6 +201,7 @@ enum StreamMsg {
 }
 
 const QUEUED_BYTES: usize = 64 * 1024 * 1024;
+const STREAM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
 const CHANNEL_REQUESTS: usize = 16;
 
 #[derive(Clone)]
@@ -235,6 +236,21 @@ impl Outbound {
 struct TunnelSink {
     name: String,
     outbound: Outbound,
+}
+
+impl TunnelSink {
+    async fn beat(&self) {
+        let heartbeat = serde_json::to_vec(&serde_json::json!({"$event": {"stream": self.name}}))
+            .expect("invariant: a stream heartbeat encodes");
+        let mut ticks = tokio::time::interval(STREAM_HEARTBEAT);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            if !self.outbound.send(&self.name, heartbeat.clone()).await {
+                return;
+            }
+        }
+    }
 }
 
 impl crate::events::EnvelopeSink for TunnelSink {
@@ -1006,8 +1022,13 @@ async fn subscribe(
     };
     let tx = connection.outbound.tx.clone();
     let pump = tokio::spawn(until_expiry(stream_id, tx, expiry, async move {
-        if let Err(error) = crate::events::forward(&pump_app, &since, &sink).await {
-            tracing::debug!(channel = %sink.name, error = diagnostics::chain(&error), "tunneled event stream ended");
+        tokio::select! {
+            forwarded = crate::events::forward(&pump_app, &since, &sink) => {
+                if let Err(error) = forwarded {
+                    tracing::debug!(channel = %sink.name, error = diagnostics::chain(&error), "tunneled event stream ended");
+                }
+            }
+            () = sink.beat() => {}
         }
     }));
     let channel = channels

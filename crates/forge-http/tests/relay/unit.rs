@@ -539,3 +539,34 @@ async fn a_tunneled_stream_nobody_reads_holds_at_most_the_connection_budget() {
     pump.abort();
     rx.close();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_tunneled_stream_still_sends_a_heartbeat_the_editor_can_time() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let sink = TunnelSink {
+        name: "ch1".into(),
+        outbound: Outbound {
+            tx,
+            budget: Arc::new(tokio::sync::Semaphore::new(QUEUED_BYTES)),
+        },
+    };
+    let beating = tokio::spawn(async move { sink.beat().await });
+    let started = tokio::time::Instant::now();
+    for beat in 0..3_u32 {
+        let (name, frame) = rx.recv().await.expect("the stream keeps beating");
+        assert_eq!(name, "ch1");
+        let StreamMsg::Frame(Charged { bytes, .. }) = frame else {
+            panic!("a heartbeat is an ordinary frame on the stream");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"$event": {"stream": "ch1"}})
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            STREAM_HEARTBEAT * beat,
+            "heartbeat {beat} arrives on schedule"
+        );
+    }
+    beating.abort();
+}

@@ -130,6 +130,14 @@ pub enum EventStreamError {
     },
     #[error("the Forge ended event stream {stream}: {error}")]
     Ended { stream: String, error: String },
+    #[error(
+        "event stream {stream} sent nothing, not even a heartbeat, for {} seconds",
+        silent_for.as_secs()
+    )]
+    Silent {
+        stream: String,
+        silent_for: Duration,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -304,7 +312,7 @@ impl RelayClient {
         Ok(RelayEventStream {
             conn,
             stream_id,
-            ended: false,
+            liveness: Liveness::Unproven,
             cancel,
         })
     }
@@ -375,20 +383,39 @@ struct Subscribed {
     start: StreamStart,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Liveness {
+    Unproven,
+    Heartbeating,
+    Ended,
+}
+
 pub struct RelayEventStream {
     conn: Conn,
     stream_id: String,
-    ended: bool,
+    liveness: Liveness,
     cancel: CancellationToken,
 }
 
 impl RelayEventStream {
-    pub async fn next_event(&mut self) -> Result<Option<Envelope>, EventStreamError> {
-        while !self.ended {
-            let plaintext = self
-                .cancel
-                .run_until_cancelled(self.conn.next_plaintext())
-                .await
+    pub async fn next_event(
+        &mut self,
+        silence: Duration,
+    ) -> Result<Option<Envelope>, EventStreamError> {
+        while self.liveness != Liveness::Ended {
+            let read = self.cancel.run_until_cancelled(self.conn.next_plaintext());
+            let read = match self.liveness {
+                Liveness::Heartbeating => {
+                    tokio::time::timeout(silence, read)
+                        .await
+                        .map_err(|_elapsed| EventStreamError::Silent {
+                            stream: self.stream_id.clone(),
+                            silent_for: silence,
+                        })?
+                }
+                Liveness::Unproven | Liveness::Ended => read.await,
+            };
+            let plaintext = read
                 .ok_or(EventStreamError::Closed)?
                 .map_err(|source| self.exchange(source))?;
             let Message::Event(event) =
@@ -411,7 +438,10 @@ impl RelayEventStream {
             if let Some(envelope) = envelope {
                 return Ok(Some(envelope));
             }
-            self.ended = end.is_some();
+            self.liveness = match end {
+                Some(_) => Liveness::Ended,
+                None => Liveness::Heartbeating,
+            };
         }
         Ok(None)
     }
@@ -433,7 +463,7 @@ impl RelayEventStream {
             .await
             .ok_or(CallFailure::Closed)
             .and_then(|response| response.map_err(CallFailure::Exchange));
-        self.ended = true;
+        self.liveness = Liveness::Ended;
         response
             .and_then(|response| check_tunnel(&response).map_err(CallFailure::Refused))
             .map_err(|failure| failed(method, &path, failure))

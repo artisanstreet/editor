@@ -249,7 +249,7 @@ async fn session(
     };
     if client.is_relay() {
         return relay_session(
-            client, &head, since, updates, retry, observed, live_since, budget,
+            client, &head, since, updates, retry, observed, live_since, budget, deadlines,
         )
         .await;
     }
@@ -422,6 +422,7 @@ async fn relay_session(
     observed: &mut watch::Receiver<Option<ThreadId>>,
     live_since: &mut Option<tokio::time::Instant>,
     budget: &Arc<tokio::sync::Semaphore>,
+    deadlines: Deadlines,
 ) -> Result<End, SessionError> {
     let relay = Arc::clone(
         client
@@ -447,7 +448,7 @@ async fn relay_session(
     *live_since = Some(tokio::time::Instant::now());
     loop {
         let next = tokio::select! {
-            next = stream.next_event() => next,
+            next = stream.next_event(deadlines.heartbeat) => next,
             () = retry.notified() => {
                 unsubscribe(&mut stream).await;
                 return Ok(End::Observation);

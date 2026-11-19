@@ -213,6 +213,10 @@ fn malformed_answers_keep_the_decode_error() {
 }
 
 fn confirmed_pair(channel: &str) -> NoiseChannel {
+    confirmed_ends(channel).0
+}
+
+fn confirmed_ends(channel: &str) -> (NoiseChannel, NoiseChannel) {
     let ctx = ChannelCtx {
         account: "acct_00000000000000000000000000".to_owned(),
         machine: "mch_11111111111111111111111111".to_owned(),
@@ -247,7 +251,7 @@ fn confirmed_pair(channel: &str) -> NoiseChannel {
     editor
         .receive_responder_confirm(&reply, &public(&forge_secret))
         .unwrap();
-    editor
+    (editor, forge)
 }
 
 #[tokio::test]
@@ -307,5 +311,71 @@ async fn a_forge_that_never_answers_frees_the_unary_channel_for_the_next_call() 
         .await
         .expect("the next call waits behind the silent one");
     assert!(unary.is_none(), "the half-used channel is kept for reuse");
+    relay.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heartbeating_event_stream_that_falls_silent_ends_instead_of_hanging() {
+    let (listener, url) = listen().await;
+    let channel = "events-silent";
+    let (editor, mut forge) = confirmed_ends(channel);
+    let relay = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let envelope = Envelope {
+            seq: Some(7),
+            live_revision: 0,
+            event: artisan_api::Event::Reset,
+        };
+        for (seq, event) in [
+            serde_json::json!({"$event": {"stream": channel, "envelope": envelope}}),
+            serde_json::json!({"$event": {"stream": channel}}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sealed = forge.seal(&serde_json::to_vec(&event).unwrap()).unwrap();
+            let frame = ServerFrame::Data(crate::frames::DataFrame {
+                v: 1,
+                channel: channel.to_owned(),
+                seq: u64::try_from(seq).unwrap(),
+                body: URL_SAFE_NO_PAD.encode(sealed),
+            });
+            ws.send(Ws::Text(serde_json::to_string(&frame).unwrap().into()))
+                .await
+                .unwrap();
+        }
+        while let Some(Ok(_)) = ws.next().await {}
+    });
+    let mut stream = RelayEventStream {
+        conn: Conn {
+            socket: connect_socket(&url, CancellationToken::new())
+                .await
+                .unwrap(),
+            channel: channel.to_owned(),
+            noise: editor,
+            send_seq: 0,
+            recv_seq: 0,
+            pending: VecDeque::new(),
+            reassembly: Reassembly::new(),
+            expires_at: now_sec() + 3600,
+        },
+        stream_id: channel.to_owned(),
+        liveness: Liveness::Unproven,
+        cancel: CancellationToken::new(),
+    };
+    let silence = Duration::from_secs(45);
+    let first = stream.next_event(silence).await.unwrap();
+    assert_eq!(first.and_then(|envelope| envelope.seq), Some(7));
+    let started = tokio::time::Instant::now();
+    let error = stream.next_event(silence).await.unwrap_err();
+    assert!(
+        matches!(&error, EventStreamError::Silent { stream, silent_for } if stream == channel && *silent_for == silence),
+        "{error:?}"
+    );
+    assert!(
+        tokio::time::Instant::now() - started >= silence,
+        "the stream is given the whole silence deadline after its heartbeat"
+    );
     relay.abort();
 }
