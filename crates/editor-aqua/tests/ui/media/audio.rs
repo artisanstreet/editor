@@ -27,7 +27,7 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
     .owned_by(&[7], 1);
     let assets = AudioAssets::new();
     let (sender, receiver) = mpsc::channel();
-    assets.set_test_waker(Arc::new(move || match sender.send(()) {
+    assets.wake_mailbox().set_waker(Arc::new(move || match sender.send(()) {
         Ok(()) | Err(mpsc::SendError(())) => {}
     }));
     let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});

@@ -60,11 +60,10 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
         }
     }
     pub(crate) fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
-        ctx.bind_mailbox(window, &self.mailbox.borrow());
+        ctx.bind_mailbox(window, &self.wake_mailbox());
     }
-    #[cfg(feature = "test-support")]
-    pub(crate) fn set_test_waker(&self, wake: aqua::mailbox::Wake) {
-        self.mailbox.borrow().set_waker(wake);
+    pub(crate) fn wake_mailbox(&self) -> std::cell::Ref<'_, aqua::mailbox::Mailbox<()>> {
+        self.mailbox.borrow()
     }
     pub(crate) fn cache<'a>(&'a self, fetcher: Option<&'a MediaFetcher>) -> &'a Arc<ResourceCache> {
         fetcher.map_or(&self.fallback, MediaFetcher::resources)

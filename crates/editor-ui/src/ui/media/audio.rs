@@ -46,11 +46,10 @@ impl AudioAssets {
         }
     }
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
-        self.loads.bind(ctx, window);
+        ctx.bind_mailbox(window, &self.wake_mailbox());
     }
-    #[cfg(feature = "test-support")]
-    pub fn set_test_waker(&self, wake: aqua::mailbox::Wake) {
-        self.loads.set_test_waker(wake);
+    pub fn wake_mailbox(&self) -> std::cell::Ref<'_, aqua::mailbox::Mailbox<()>> {
+        self.loads.wake_mailbox()
     }
     pub fn request(
         &self,

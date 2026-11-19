@@ -28,7 +28,8 @@ impl Fixture {
         let (wake, incoming) = mpsc::channel();
         assets
             .loads
-            .set_test_waker(Arc::new(move || match wake.send(()) {
+            .wake_mailbox()
+            .set_waker(Arc::new(move || match wake.send(()) {
                 Ok(()) | Err(mpsc::SendError(())) => {}
             }));
         Self {
