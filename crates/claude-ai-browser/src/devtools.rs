@@ -17,8 +17,12 @@ pub enum DevToolsError {
         #[source]
         source: std::io::Error,
     },
-    #[error("the DevTools port file {path} is incomplete")]
-    IncompletePortFile { path: PathBuf },
+    #[error("reading the DevTools port file {path}")]
+    MalformedPortFile {
+        path: PathBuf,
+        #[source]
+        reason: PortFileError,
+    },
     #[error("connecting to the browser's DevTools on port {port}")]
     Connect {
         port: u16,
@@ -71,8 +75,9 @@ impl DevTools {
                 source,
             })?;
         let (port, path) =
-            parse_port_file(&text).ok_or_else(|| DevToolsError::IncompletePortFile {
+            parse_port_file(&text).map_err(|reason| DevToolsError::MalformedPortFile {
                 path: port_file.to_path_buf(),
+                reason,
             })?;
         let url = format!("ws://127.0.0.1:{port}{path}");
         let (socket, _) = tokio::time::timeout(
@@ -143,10 +148,35 @@ impl DevTools {
     }
 }
 
-pub(crate) fn parse_port_file(text: &str) -> Option<(u16, String)> {
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PortFileError {
+    #[error("it names no port")]
+    NoPort,
+    #[error("its port {port:?} is not a port number")]
+    Port {
+        port: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("it names no browser endpoint")]
+    NoPath,
+    #[error("{path:?} is not a browser endpoint")]
+    Path { path: String },
+}
+
+pub(crate) fn parse_port_file(text: &str) -> Result<(u16, String), PortFileError> {
     let mut lines = text.lines();
-    let port = lines.next()?.trim().parse().ok()?;
-    let path = lines.next()?.trim();
-    path.starts_with("/devtools/browser/")
-        .then(|| (port, path.to_owned()))
+    let port = lines.next().ok_or(PortFileError::NoPort)?.trim();
+    let port = port.parse().map_err(|source| PortFileError::Port {
+        port: port.to_owned(),
+        source,
+    })?;
+    let path = lines.next().ok_or(PortFileError::NoPath)?.trim();
+    if path.starts_with("/devtools/browser/") {
+        Ok((port, path.to_owned()))
+    } else {
+        Err(PortFileError::Path {
+            path: path.to_owned(),
+        })
+    }
 }

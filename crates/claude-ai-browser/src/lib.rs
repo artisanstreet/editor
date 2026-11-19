@@ -10,7 +10,7 @@ use artisan_api::ClaudeAiSession;
 use serde_json::Value;
 
 pub use authorization::AuthorizationError;
-pub use devtools::DevToolsError;
+pub use devtools::{DevToolsError, PortFileError};
 pub use renewal::{Renewal, Step, Ticket};
 pub use session::OpenError;
 

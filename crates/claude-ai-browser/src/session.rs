@@ -47,8 +47,18 @@ pub enum OpenError {
         browser: PathBuf,
         status: std::process::ExitStatus,
     },
+    #[error("checking whether {browser} is still running")]
+    Wait {
+        browser: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{browser} did not open DevTools")]
-    NoDevTools { browser: PathBuf },
+    NoDevTools {
+        browser: PathBuf,
+        #[source]
+        last: DevToolsError,
+    },
     #[error("opening claude.ai in the browser that already runs on the profile")]
     Attach(#[source] DevToolsError),
 }
@@ -88,16 +98,19 @@ impl BrowserSession {
         let mut child = launch(&browser, profile, url, mode)?;
         let deadline = tokio::time::Instant::now() + START_TIMEOUT;
         loop {
-            if let Ok(devtools) = DevTools::connect(&port_file).await {
-                return Ok(Self::owning(devtools, Some(child), lock));
-            }
-            if let Ok(Some(status)) = child.try_wait()
-                && !status.success()
-            {
-                return Err(OpenError::Exited { browser, status });
+            let last = match DevTools::connect(&port_file).await {
+                Ok(devtools) => return Ok(Self::owning(devtools, Some(child), lock)),
+                Err(error) => error,
+            };
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    return Err(OpenError::Exited { browser, status });
+                }
+                Ok(Some(_) | None) => {}
+                Err(source) => return Err(OpenError::Wait { browser, source }),
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(OpenError::NoDevTools { browser });
+                return Err(OpenError::NoDevTools { browser, last });
             }
             tokio::time::sleep(START_POLL).await;
         }

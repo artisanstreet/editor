@@ -212,8 +212,20 @@ fn only_claude_ai_cookies_leave_the_browser() {
 fn the_port_file_names_the_browser_endpoint() {
     assert_eq!(
         devtools::parse_port_file("9222\n/devtools/browser/abc-123\n"),
-        Some((9222, "/devtools/browser/abc-123".to_owned()))
+        Ok((9222, "/devtools/browser/abc-123".to_owned()))
     );
-    assert_eq!(devtools::parse_port_file("9222\n"), None);
-    assert_eq!(devtools::parse_port_file("x\n/devtools/browser/a"), None);
+    assert_eq!(
+        devtools::parse_port_file("9222\n"),
+        Err(PortFileError::NoPath)
+    );
+    assert!(matches!(
+        devtools::parse_port_file("x\n/devtools/browser/a"),
+        Err(PortFileError::Port { port, .. }) if port == "x"
+    ));
+    assert_eq!(
+        devtools::parse_port_file("9222\n/json/version"),
+        Err(PortFileError::Path {
+            path: "/json/version".to_owned()
+        })
+    );
 }
