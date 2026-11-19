@@ -358,6 +358,20 @@ pub enum InstallInWslError {
     },
     #[error("installing in {distro} failed ({status})")]
     Failed { distro: String, status: ExitStatus },
+    #[error("check for an ae that isn't Artisan's in {distro} (WSL)")]
+    Check {
+        distro: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("checking for an ae that isn't Artisan's in {distro} (WSL) failed ({status})")]
+    CheckFailed { distro: String, status: ExitStatus },
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error(
+        "left ~/.local/bin/ae in {distro} (WSL) alone, so Forge wasn't installed there: the Editor starts Forge through that path"
+    )]
+    ForeignAeKept { distro: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -915,7 +929,7 @@ pub fn install(args: &InstallArgs) -> Result<(), InstallError> {
                 .update_feed()
                 .map_or(Origin::Local, |feed| Origin::Feed(feed.to_owned())),
         };
-        apply(&release, &source, &origin, &plan)?;
+        apply(&release, &source, &origin, &plan, args.yes)?;
     }
 
     let editor_somewhere = plan.editor != EditorTarget::Nowhere;
@@ -946,7 +960,7 @@ fn replace_foreign_ae(args: &InstallArgs) -> Result<bool, InstallError> {
             "{} is a file that isn't Artisan's. Replace it with Artisan's `ae`?",
             file.display()
         ))?
-    } else if args.yes || args.apply {
+    } else if args.yes {
         true
     } else {
         return Err(
@@ -964,13 +978,14 @@ fn apply(
     source: &Source,
     origin: &Origin,
     plan: &Plan,
+    yes: bool,
 ) -> Result<(), ApplyError> {
     let _installing = install_lock()?;
     let here = plan.here();
     legacy::migrate(&here)?;
     install_here(release, origin, &here)?;
     for distro in &plan.distros {
-        install_in_wsl(release, source, origin, distro)?;
+        install_in_wsl(release, source, origin, distro, yes)?;
     }
     if plan.editor == EditorTarget::Windows {
         install_in_windows(release, source)?;
@@ -1643,12 +1658,61 @@ fn clear_leftovers(dir: &Path) -> Result<(), InstallAppError> {
     Ok(())
 }
 
+const FOREIGN_AE_IN_WSL: &str =
+    r#"test -e "$HOME/.local/bin/ae" && ! test -L "$HOME/.local/bin/ae""#;
+
+fn replaces_foreign_ae_in(distro: &str, yes: bool) -> Result<bool, InstallInWslError> {
+    let status = sys::quiet(std::process::Command::new("wsl.exe").args([
+        "-d",
+        distro,
+        "--exec",
+        "sh",
+        "-c",
+        FOREIGN_AE_IN_WSL,
+    ]))
+    .status()
+    .map_err(|source| InstallInWslError::Check {
+        distro: distro.to_owned(),
+        source,
+    })?;
+    match status.code() {
+        Some(1) => Ok(false),
+        Some(0) if ui::interactive() => {
+            let question = format!(
+                "~/.local/bin/ae in {distro} (WSL) is a file that isn't Artisan's. Replace it with Artisan's `ae`?"
+            );
+            if cliclack::confirm(question)
+                .initial_value(true)
+                .interact()
+                .map_err(ui::prompt_error)?
+            {
+                Ok(true)
+            } else {
+                Err(InstallInWslError::ForeignAeKept {
+                    distro: distro.to_owned(),
+                })
+            }
+        }
+        Some(0) if yes => Ok(true),
+        Some(0) => Err(InstallInWslError::Ask(ui::needs_flag(
+            &format!("whether to replace ~/.local/bin/ae in {distro} (WSL)"),
+            "--yes",
+        ))),
+        _ => Err(InstallInWslError::CheckFailed {
+            distro: distro.to_owned(),
+            status,
+        }),
+    }
+}
+
 fn install_in_wsl(
     release: &Release,
     source: &Source,
     origin: &Origin,
     distro: &str,
+    yes: bool,
 ) -> Result<(), InstallInWslError> {
+    let replaces_foreign_ae = replaces_foreign_ae_in(distro, yes)?;
     let stage = tempfile::Builder::new()
         .prefix("artisan-wsl-")
         .tempdir()
@@ -1686,6 +1750,9 @@ fn install_in_wsl(
     }
     if let Origin::Feed(feed) = origin {
         forwarded.extend(["--feed".to_owned(), feed.clone()]);
+    }
+    if replaces_foreign_ae {
+        forwarded.push("--yes".to_owned());
     }
     ui::step(format!("Installing Forge in {distro} (WSL)"));
     let status = sys::quiet(

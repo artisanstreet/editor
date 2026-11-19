@@ -132,4 +132,56 @@ mod tests {
         );
         assert!(sandbox.listening(), "the previous Forge serves again");
     }
+
+    fn ae_only_stage(sandbox: &Sandbox) -> String {
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        std::fs::copy(env!("CARGO_BIN_EXE_ae"), stage.join("ae")).expect("stage ae");
+        sandbox
+            .root
+            .path()
+            .join("stage")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn an_installer_run_for_another_one_never_deletes_an_ae_that_isnt_artisans() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let theirs = sandbox.root.path().join("home/.local/bin/ae");
+        script(&theirs, "#!/bin/sh\necho my own ae\n");
+        let stage = ae_only_stage(&sandbox);
+
+        let applied = sandbox.ae(&[
+            "install", "--apply", "--editor", "none", "--forge", "none", "--from", &stage,
+        ]);
+
+        assert!(!applied.status.success(), "the install stops to ask");
+        assert!(
+            String::from_utf8_lossy(&applied.stderr).contains("--yes"),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("their ae is still there"),
+            "#!/bin/sh\necho my own ae\n"
+        );
+
+        let agreed = sandbox.ae(&[
+            "install", "--apply", "--yes", "--editor", "none", "--forge", "none", "--from", &stage,
+        ]);
+        assert!(
+            agreed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&agreed.stderr)
+        );
+        assert!(
+            theirs
+                .symlink_metadata()
+                .expect("ae is linked")
+                .is_symlink(),
+            "with --yes, Artisan's ae takes the place"
+        );
+    }
 }
