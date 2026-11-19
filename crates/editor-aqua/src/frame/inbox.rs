@@ -17,7 +17,7 @@ pub(crate) fn view(
     mut theme: ArtisanTheme,
     height: f32,
     reduced: bool,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     if !theme.colors.mode.is_dark() {
         theme.colors.text_muted = theme.colors.text_muted.animate_to(theme.colors.text, 0.08);
@@ -66,7 +66,7 @@ pub(crate) fn view(
         inbox_entries,
         ThreadPane::Inbox,
         Rc::clone(&visuals),
-        Rc::clone(&emit),
+        Rc::clone(emit),
     );
     let inbox = Aqua::Box()
         .layout("column")
@@ -101,7 +101,7 @@ pub(crate) fn view(
                 .child(view::history_toggle(
                     &theme,
                     sidebar.history_fraction,
-                    &emit,
+                    emit,
                 ))
                 .build(),
         );
@@ -115,7 +115,7 @@ pub(crate) fn view(
             history_entries,
             ThreadPane::History,
             visuals,
-            Rc::clone(&emit),
+            Rc::clone(emit),
         );
         column = column.child(
             Aqua::Box()
@@ -129,7 +129,7 @@ pub(crate) fn view(
                 .build(),
         );
     }
-    column = column.children(states(sidebar, core, &theme, &emit));
+    column = column.children(states(sidebar, core, &theme, emit));
     Aqua::Box()
         .layout("column")
         .styles([Aqua::Style()

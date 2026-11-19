@@ -2,6 +2,10 @@ use super::*;
 use crate::shell::resource_preview::PreviewText;
 use crate::ui::dialog::Dialog;
 
+fn ignore() -> Rc<dyn Fn(Action)> {
+    Rc::new(|_| {})
+}
+
 fn preview_dialog(
     state: &ViewState,
     preview: &ResourcePreview,
@@ -9,7 +13,7 @@ fn preview_dialog(
     viewport_height: f32,
     emit: Rc<dyn Fn(Action)>,
 ) -> Result<Dialog, UnpreparedError> {
-    let content = state.content(preview, theme, viewport_height, Rc::clone(&emit))?;
+    let content = state.content(preview, theme, viewport_height, &emit)?;
     let generation = state.generation;
     Ok(
         Dialog::new("resource-preview", *theme, preview.path.clone(), content)
@@ -81,7 +85,7 @@ fn an_empty_file_says_it_is_empty_instead_of_an_inverted_range() {
     assert!(!state.prepare(&preview, &mut app).unwrap());
     assert_eq!(state.pending_jump(), None);
     let content = state
-        .content(&preview, &ArtisanTheme::resolved(), 600.0, Rc::new(|_| {}))
+        .content(&preview, &ArtisanTheme::resolved(), 600.0, &ignore())
         .unwrap();
     app.mount(|_| content).unwrap();
     app.set_viewport(800.0, 600.0, 1.0);
@@ -209,7 +213,7 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     let host = DialogHost::open(&mut app, owner, dialog).unwrap();
     assert!(app.focus_key("resource-copy-text"));
     let focused = app.tree().focused();
-    let content = state.content(&preview, &theme, 700.0, emit).unwrap();
+    let content = state.content(&preview, &theme, 700.0, &emit).unwrap();
     host.refresh_content(&mut app, content).unwrap();
     assert!(host.is_open(&app));
     assert_eq!(app.tree().focused(), focused);
@@ -234,7 +238,7 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
     assert_eq!(state.pending_jump(), Some(50));
     assert!(!state.sync_jump(&mut app));
     let content = state
-        .content(&preview, &ArtisanTheme::resolved(), 400.0, Rc::new(|_| {}))
+        .content(&preview, &ArtisanTheme::resolved(), 400.0, &ignore())
         .unwrap();
     app.mount(|_| content).unwrap();
     app.set_viewport(600.0, 400.0, 1.0);
@@ -287,13 +291,9 @@ fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection()
     let state = ViewState::new(5, SelectionDocumentId(51), SelectionSourceId(52));
     let events = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&events);
+    let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));
     let content = state
-        .content(
-            &preview,
-            &ArtisanTheme::resolved(),
-            600.0,
-            Rc::new(move |action| sink.borrow_mut().push(action)),
-        )
+        .content(&preview, &ArtisanTheme::resolved(), 600.0, &emit)
         .unwrap();
     let mut app = test_support::editor::ui::mounted(800.0, 600.0, content);
     let said = test_support::editor::ui::painted_texts(&app);

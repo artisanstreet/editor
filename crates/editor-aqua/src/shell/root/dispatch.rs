@@ -147,7 +147,7 @@ impl RootViews {
             match action {
                 ConversationAction::Media(_, _, _, _) | ConversationAction::Source(_) => {}
                 ConversationAction::Blob(scope, item, revision, action) => {
-                    changed |= self.dispatch_blob(shell, ui, scope, item, revision, action);
+                    changed |= self.dispatch_blob(shell, ui, scope, &item, revision, action);
                 }
                 ConversationAction::RetryControls(scope) => {
                     if let Some(host) = shell.core.host_mut_if_instance(&scope.host, scope.instance)

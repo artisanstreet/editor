@@ -147,8 +147,8 @@ pub struct Overlay {
 }
 
 impl std::fmt::Debug for Overlay {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Overlay").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Overlay").finish_non_exhaustive()
     }
 }
 

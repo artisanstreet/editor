@@ -66,8 +66,8 @@ pub struct Avatar {
 }
 
 impl std::fmt::Debug for Avatar {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Avatar").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Avatar").finish_non_exhaustive()
     }
 }
 

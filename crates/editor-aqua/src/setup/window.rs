@@ -270,8 +270,8 @@ impl Application for SetupApplication {
             self.rebuild(ctx, id);
         }
     }
-    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, input: &InputEvent) {
-        self.ui.on_input(ctx, id, input);
+    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, event: &InputEvent) {
+        self.ui.on_input(ctx, id, event);
         self.drain(ctx, id);
     }
     fn on_a11y_action(

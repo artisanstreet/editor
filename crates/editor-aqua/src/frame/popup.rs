@@ -13,8 +13,8 @@ pub struct Popup {
 }
 
 impl std::fmt::Debug for Popup {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Popup").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popup").finish_non_exhaustive()
     }
 }
 

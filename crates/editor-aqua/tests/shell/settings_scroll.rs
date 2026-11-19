@@ -73,6 +73,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
         true,
         Rc::new(|_| {}),
     );
+    let dismiss: Rc<dyn Fn()> = Rc::new(|| {});
     host.refresh_content(
         app,
         editor_aqua::shell::view::settings_panel(
@@ -80,7 +81,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
             dimensions,
             UiBox::new().build(),
             page,
-            Rc::new(|| {}),
+            &dismiss,
         ),
     )
     .unwrap();

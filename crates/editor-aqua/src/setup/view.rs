@@ -25,8 +25,8 @@ pub struct Props<'a> {
 }
 
 impl std::fmt::Debug for Props<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Props").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Props").finish_non_exhaustive()
     }
 }
 

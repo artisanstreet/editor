@@ -81,7 +81,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         2,
         action(hash.clone())
     ));
@@ -89,7 +89,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         3,
         action(BlobHash("other".into()))
     ));
@@ -98,7 +98,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         3,
         action(hash.clone())
     ));
@@ -107,7 +107,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     assert!(preview.owner.is_none());
     shell.core.remove_host(&config.id).unwrap();
     shell.core.add_test_host(&config, client);
-    assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, id, 3, action(hash)));
+    assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, &id, 3, action(hash)));
     assert!(root.image_preview.is_none());
     assert!(!preview.view.is_live(&shell.core));
 }

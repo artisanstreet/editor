@@ -68,10 +68,8 @@ pub struct SelectionScope {
 }
 
 impl std::fmt::Debug for SelectionScope {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SelectionScope")
-            .finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionScope").finish_non_exhaustive()
     }
 }
 

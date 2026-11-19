@@ -39,8 +39,8 @@ pub struct Subagent {
 }
 
 impl std::fmt::Debug for Subagent {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Subagent").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subagent").finish_non_exhaustive()
     }
 }
 
@@ -109,7 +109,7 @@ pub fn card(
     theme: &ArtisanTheme,
     overview: &Overview,
     reduced: bool,
-    emit: Rc<dyn Fn(InspectorAction)>,
+    emit: &Rc<dyn Fn(InspectorAction)>,
 ) -> Option<Element> {
     if !overview.has_facts() && overview.agents.is_empty() {
         return None;
@@ -142,7 +142,7 @@ pub fn card(
             overview
                 .agents
                 .iter()
-                .map(|agent| subagent(theme, agent, reduced, Rc::clone(&emit))),
+                .map(|agent| subagent(theme, agent, reduced, Rc::clone(emit))),
         );
         let row_height = Row::MenuItem
             .height()

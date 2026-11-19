@@ -230,7 +230,7 @@ impl RootViews {
                         source,
                     })?;
                 let content = state
-                    .content(preview, &theme, viewport.height, emit)
+                    .content(preview, &theme, viewport.height, &emit)
                     .map_err(BuildError::ResourcePreview)?;
                 self.resource_content = Some((content, preview.path.clone()));
             }
@@ -251,13 +251,8 @@ impl RootViews {
             );
             let page = workspace.settings_view(&shell.core, &theme, &shell.build, size, true);
             let dismissed = Rc::clone(&self.settings_dismissed);
-            let panel = view::settings_panel(
-                &theme,
-                viewport,
-                nav,
-                page,
-                Rc::new(move || dismissed.set(true)),
-            );
+            let dismiss: Rc<dyn Fn()> = Rc::new(move || dismissed.set(true));
+            let panel = view::settings_panel(&theme, viewport, nav, page, &dismiss);
             (panel, settings_layout.size.width)
         });
         aqua_core::checkpoint::reach();
@@ -353,7 +348,7 @@ impl RootViews {
                     theme,
                     height,
                     reduced,
-                    self.tree_emit(workspace),
+                    &self.tree_emit(workspace),
                 );
                 let strip =
                     crate::frame::strip::strip(&theme, &tabs, reduced, &self.sidebar.emit());
@@ -374,7 +369,7 @@ impl RootViews {
                     self.context_reading.clone(),
                 ),
                 reduced,
-                workspace.inspector_emit(),
+                &workspace.inspector_emit(),
             ),
             (true, crate::shell::workspace::SidePanel::Inspector) => {
                 let panel = workspace

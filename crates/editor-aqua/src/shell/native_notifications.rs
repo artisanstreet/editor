@@ -71,9 +71,8 @@ pub struct NativeNotifications {
 }
 
 impl std::fmt::Debug for NativeNotifications {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NativeNotifications")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeNotifications")
             .finish_non_exhaustive()
     }
 }

@@ -53,8 +53,8 @@ pub struct Props<'a> {
 }
 
 impl std::fmt::Debug for Props<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Props").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Props").finish_non_exhaustive()
     }
 }
 
@@ -227,7 +227,7 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
             busy_swap,
             props.busy,
             crate::frame::sign_in::model::cancellable(props.view),
-            slot(props.sign_in, Slot::Email, email_reveal, &email_feedback),
+            &slot(props.sign_in, Slot::Email, email_reveal, &email_feedback),
             &props.emit,
         ),
     );
@@ -241,7 +241,7 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
             props.code,
             busy_swap,
             props.busy,
-            slot(props.sign_in, Slot::Code, code_reveal, &code_feedback),
+            &slot(props.sign_in, Slot::Code, code_reveal, &code_feedback),
             &props.emit,
         ),
     );
@@ -310,7 +310,7 @@ fn email_page(
     key: Key,
     busy: bool,
     cancellable: bool,
-    feedback: FeedbackSlot<'_>,
+    feedback: &FeedbackSlot<'_>,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
@@ -361,7 +361,7 @@ fn code_page(
     editor: Element,
     key: Key,
     busy: bool,
-    feedback: FeedbackSlot<'_>,
+    feedback: &FeedbackSlot<'_>,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
@@ -655,7 +655,7 @@ fn provider_key(
         .build()
 }
 
-fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: FeedbackSlot<'_>) -> Element {
+fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: &FeedbackSlot<'_>) -> Element {
     let reveal = feedback.reveal;
     let shown = match feedback.current {
         Feedback::None => feedback.last,

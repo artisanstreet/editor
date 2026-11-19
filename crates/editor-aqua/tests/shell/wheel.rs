@@ -17,9 +17,9 @@ impl aqua_ui::collection::CollectionSource for Rows {
     fn key(&self, index: usize) -> aqua_ui::element::Key {
         index.into()
     }
-    fn layout(&self, width: f32) -> aqua_ui::collection::CollectionLayout {
+    fn layout(&self, available_width: f32) -> aqua_ui::collection::CollectionLayout {
         aqua_ui::collection::CollectionLayout {
-            content_width: width,
+            content_width: available_width,
             column_widths: Vec::new(),
         }
     }

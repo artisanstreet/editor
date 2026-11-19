@@ -200,8 +200,8 @@ pub struct RootViews {
 }
 
 impl std::fmt::Debug for RootViews {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("RootViews").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RootViews").finish_non_exhaustive()
     }
 }
 
@@ -321,7 +321,7 @@ impl SectionViews for RootViews {
                     theme,
                     height,
                     reduced,
-                    self.tree_emit(workspace),
+                    &self.tree_emit(workspace),
                 )
             });
         let (search, tree, overlay) = self.search_parts(workspace, &theme, tree, now);
@@ -361,7 +361,7 @@ impl SectionViews for RootViews {
             shell.preferences.theme(),
             height,
             reduced,
-            self.tree_emit(workspace),
+            &self.tree_emit(workspace),
         );
         match ui.refresh_subtree(crate::sidebar::view::ROOT_KEY, element) {
             Ok(refreshed) => refreshed,

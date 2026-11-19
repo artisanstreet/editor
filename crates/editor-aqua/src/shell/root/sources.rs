@@ -124,7 +124,7 @@ impl RootViews {
         shell: &mut Shell,
         ui: &mut UiApp,
         scope: crate::conversation::presentation::PresentationScope,
-        id: artisan_api::ItemId,
+        id: &artisan_api::ItemId,
         revision: u64,
         action: crate::conversation::view::factory::BlobAction,
     ) -> bool {
@@ -142,7 +142,7 @@ impl RootViews {
             .conversation
             .view
             .as_ref()
-            .and_then(|view| view.item(&id))
+            .and_then(|view| view.item(id))
             .is_some_and(|item| {
                 item.seq == revision
                     && (matches!(&item.kind, artisan_api::ItemKind::UserMessage { images, .. } if images.contains(hash))

@@ -322,12 +322,11 @@ impl aqua::Application for Keys<'_> {
     fn on_input(
         &mut self,
         ctx: &mut aqua::AppCtx<'_>,
-        window: aqua::prelude::AquaWindowId,
-        input: &aqua::prelude::InputEvent,
+        id: aqua::prelude::AquaWindowId,
+        event: &aqua::prelude::InputEvent,
     ) {
-        self.root
-            .input(self.shell, self.ui, ctx, window, input, false);
-        self.root.animate(self.shell, self.ui, ctx, window);
+        self.root.input(self.shell, self.ui, ctx, id, event, false);
+        self.root.animate(self.shell, self.ui, ctx, id);
     }
 
     fn build_scene(

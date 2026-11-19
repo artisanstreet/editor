@@ -31,11 +31,12 @@ fn a_thread_with_dozens_of_agents_keeps_them_in_a_scrolling_list_inside_the_wind
         context: None,
         agents,
     };
+    let emit: Rc<dyn Fn(editor_aqua::inspector::InspectorAction)> = Rc::new(|_| {});
     let element = card(
         &editor_aqua::ui::theme::ArtisanTheme::resolved(),
         &overview,
         true,
-        Rc::new(|_| {}),
+        &emit,
     )
     .expect("the overview shows");
     let app = test_support::editor::ui::mounted(

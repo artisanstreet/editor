@@ -29,8 +29,8 @@ pub struct Shell {
 }
 
 impl std::fmt::Debug for Shell {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Shell").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shell").finish_non_exhaustive()
     }
 }
 
@@ -392,10 +392,8 @@ pub struct ShellResources {
 }
 
 impl std::fmt::Debug for ShellResources {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ShellResources")
-            .finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellResources").finish_non_exhaustive()
     }
 }
 

@@ -248,7 +248,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             .any(|run| run.text.contains("Paragraph 000"))
     );
     assert!(owner.leaf_is_current(&projected.proof));
-    stored_conversation_transaction(&mut core, &config, &client, item, deadline);
+    stored_conversation_transaction(&mut core, &config, &client, &item, deadline);
     assert_eq!(owner.page(&first, 64), PagePreparation::Pending);
     core.add_test_host(&config, client);
     assert!(!provider.is_available());
@@ -266,7 +266,7 @@ fn stored_conversation_transaction(
     core: &mut Core,
     config: &editor_aqua::core::HostConfig,
     client: &ForgeClient,
-    item: artisan_api::Item,
+    item: &artisan_api::Item,
     deadline: Instant,
 ) {
     use aqua_text::{SharedFonts, SharedRuns};

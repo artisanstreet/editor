@@ -49,8 +49,8 @@ pub struct ViewState {
 }
 
 impl std::fmt::Debug for ViewState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("ViewState").finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewState").finish_non_exhaustive()
     }
 }
 
@@ -137,11 +137,11 @@ impl ViewState {
         preview: &ResourcePreview,
         theme: &ArtisanTheme,
         viewport_height: f32,
-        emit: Rc<dyn Fn(Action)>,
+        emit: &Rc<dyn Fn(Action)>,
     ) -> Result<Element, UnpreparedError> {
         let generation = self.generation;
         let path = preview.path.clone();
-        let copy_path = Rc::clone(&emit);
+        let copy_path = Rc::clone(emit);
         let mut body = UiBox::new().layout("column").spaced(Space::S12).child(
             Button::text(
                 "resource-copy-path",
@@ -160,7 +160,7 @@ impl ViewState {
         match &preview.content {
             None => body = body.child(body_text(theme, "Reading source…")),
             Some(Err(error)) if error.retryable() => {
-                let retry = Rc::clone(&emit);
+                let retry = Rc::clone(emit);
                 body = body.child(
                     crate::ui::page::notice(theme, failure(error))
                         .action(
@@ -179,7 +179,7 @@ impl ViewState {
             Some(Err(error)) => body = body.child(body_text(theme, &failure(error))),
             Some(Ok(content)) => {
                 let full = Arc::clone(content.full());
-                let copy_file = Rc::clone(&emit);
+                let copy_file = Rc::clone(emit);
                 body = body
                     .child(
                         Button::text(

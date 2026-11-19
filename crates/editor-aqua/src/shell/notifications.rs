@@ -27,10 +27,8 @@ pub struct Notifications {
 }
 
 impl std::fmt::Debug for Notifications {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Notifications")
-            .finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notifications").finish_non_exhaustive()
     }
 }
 

@@ -161,10 +161,8 @@ pub struct ShellApplication<V> {
 }
 
 impl<V> std::fmt::Debug for ShellApplication<V> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ShellApplication")
-            .finish_non_exhaustive()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellApplication").finish_non_exhaustive()
     }
 }
 
@@ -1110,7 +1108,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             | WindowEvent::Destroyed(_) => {}
         }
     }
-    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, input: &InputEvent) {
+    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, event: &InputEvent) {
         let _tm = Tm::new("input");
         for popup in [
             &mut self.font_popup,
@@ -1120,7 +1118,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         .into_iter()
         .flatten()
         {
-            match popup.request_dismissal(self.ui.ui_mut(), input) {
+            match popup.request_dismissal(self.ui.ui_mut(), event) {
                 Ok(true) => {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                     return;
@@ -1136,7 +1134,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 .workspace_mut()
                 .and_then(|workspace| workspace.composer.as_mut())
                 .is_some_and(|owner| {
-                    match owner.dismiss_popups_for_event(self.ui.ui_mut(), input) {
+                    match owner.dismiss_popups_for_event(self.ui.ui_mut(), event) {
                         Ok(consumed) => consumed,
                         Err(error) => {
                             tracing::warn!(%error, "could not dismiss composer popup");
@@ -1155,14 +1153,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             let _tm = Tm::new("input.route");
             let pre = {
                 let _tm = Tm::new("input.pre");
-                self.views.pre_input(self.ui.ui_mut(), input)
+                self.views.pre_input(self.ui.ui_mut(), event)
             };
             if let Some(consumed) = pre {
-                glided = matches!(input, InputEvent::Scroll { .. });
+                glided = matches!(event, InputEvent::Scroll { .. });
                 consumed
             } else {
                 let _tm = Tm::new("input.ui");
-                self.ui.on_input(ctx, id, input);
+                self.ui.on_input(ctx, id, event);
                 self.ui.ui().last_input_consumed()
             }
         };
@@ -1176,7 +1174,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let changed = terminal_changed | {
             let _tm = Tm::new("input.views");
             self.views
-                .input(&mut self.shell, self.ui.ui_mut(), ctx, id, input, consumed)
+                .input(&mut self.shell, self.ui.ui_mut(), ctx, id, event, consumed)
         };
         if glided && !changed {
             return;

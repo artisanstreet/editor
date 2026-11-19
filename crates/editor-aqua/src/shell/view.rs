@@ -34,7 +34,7 @@ pub fn settings_dialog(
     dismiss: std::rc::Rc<dyn Fn()>,
 ) -> crate::ui::dialog::Dialog {
     let dimensions = layout::settings_layout(viewport);
-    let panel = settings_panel(theme, viewport, sidebar, page, std::rc::Rc::clone(&dismiss));
+    let panel = settings_panel(theme, viewport, sidebar, page, &dismiss);
     crate::ui::dialog::Dialog::new("settings-dialog", *theme, "Settings", panel)
         .bare()
         .soft_backdrop()
@@ -47,10 +47,10 @@ pub fn settings_panel(
     viewport: Size,
     sidebar: Element,
     page: Element,
-    dismiss: std::rc::Rc<dyn Fn()>,
+    dismiss: &std::rc::Rc<dyn Fn()>,
 ) -> Element {
     let dimensions = layout::settings_layout(viewport);
-    let close = std::rc::Rc::clone(&dismiss);
+    let close = std::rc::Rc::clone(dismiss);
     let close = IconButton::new(
         "settings-close",
         *theme,
