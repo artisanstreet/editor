@@ -34,7 +34,13 @@ macro_rules! item_texts {
                             for text in &$($mutable)? change.diff { $visit(text)?; }
                         }
                     }
-                    _ => {}
+                    ToolKind::Edit { changes: Collection::Stored(_) }
+                    | ToolKind::Agents { .. }
+                    | ToolKind::Read { .. }
+                    | ToolKind::Search { .. }
+                    | ToolKind::WebFetch { .. }
+                    | ToolKind::WebSearch { .. }
+                    | ToolKind::ViewImage { .. } => {}
                 }
                 for output in output { $visit(&$($mutable)? output.text)?; }
                 for approval in approval { approval_texts!(approval, $visit $(,$mutable)?); }

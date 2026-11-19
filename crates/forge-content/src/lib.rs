@@ -1,8 +1,3 @@
-#![expect(
-    clippy::renamed_function_params,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 mod texts;
 
 pub use texts::ItemTexts;
@@ -23,13 +18,13 @@ pub fn collection_ref<T: Serialize>(records: &[T]) -> Result<CollectionRef, serd
         bytes: u64,
     }
     impl Write for Writer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.bytes = self
                 .bytes
-                .checked_add(bytes.len() as u64)
+                .checked_add(buf.len() as u64)
                 .ok_or_else(|| std::io::Error::other("collection size overflow"))?;
-            self.digest.update(bytes);
-            Ok(bytes.len())
+            self.digest.update(buf);
+            Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
