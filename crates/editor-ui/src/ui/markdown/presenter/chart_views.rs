@@ -188,6 +188,10 @@ impl MarkdownPresenter {
         Ok(enveloped(theme, envelope, content))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the spans chart wires its text, readout, navigation and hover factories"
+    )]
     pub(super) fn render_spans_chart(
         &self,
         layout: &Arc<charts::spans::Layout>,
@@ -315,6 +319,10 @@ impl MarkdownPresenter {
         Ok(enveloped(theme, envelope, content))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the hierarchy chart wires its label, readout, legend, navigation and empty factories"
+    )]
     pub(super) fn render_hierarchy_chart(
         &self,
         spec: &charts::hierarchy::Prepared,
@@ -603,6 +611,10 @@ impl MarkdownPresenter {
         Ok(enveloped(theme, envelope, content))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the line chart wires its axis, readout, threshold and navigation factories"
+    )]
     pub(super) fn render_line_chart(
         &self,
         style: &Arc<charts::chart::ChartStyle>,

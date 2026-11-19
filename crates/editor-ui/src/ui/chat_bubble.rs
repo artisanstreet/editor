@@ -84,6 +84,10 @@ impl ChatBubbleSegment {
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bubble build with its layers, segment corners and content insets"
+    )]
     pub fn build(self) -> Element {
         let first = self.position.first();
         let last = self.position.last();

@@ -136,6 +136,10 @@ impl ImageState {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one image view across its load, failure and open states"
+    )]
     pub(crate) fn view(
         &self,
         block: &ImageBlock,

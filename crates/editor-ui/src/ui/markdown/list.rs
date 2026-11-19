@@ -132,6 +132,10 @@ fn visit_items<'a>(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one list render: each item's leaf, marker, indent and list semantics"
+)]
 pub(super) fn render(
     ordered: bool,
     start: Option<u64>,

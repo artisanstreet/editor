@@ -161,6 +161,10 @@ impl MountedReveals {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sync pass reconciling mounted reveals with live, Markdown and stored bodies"
+    )]
     pub(crate) fn sync(
         &mut self,
         app: &mut aqua::UiApp,

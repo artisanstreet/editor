@@ -62,6 +62,10 @@ impl MarkdownPresenter {
         Ok(enveloped(theme, envelope, content))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one image block render covering fetch, open, retry and caption"
+    )]
     pub(super) fn render_image(
         &self,
         model: &Arc<rich::media::image::ImageBlock>,

@@ -992,6 +992,10 @@ impl Conversation {
         self.work_reading
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "switching agents resets every per-agent task and reading in one place so none is left behind"
+    )]
     pub fn open_agent(&mut self, core: &Core, agent: Option<ItemId>) {
         if self.agent == agent {
             return;
@@ -1391,6 +1395,10 @@ impl Conversation {
             .is_some_and(AbortOnDropHandle::is_finished)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match routing every kind of completed delivery back into the conversation"
+    )]
     pub fn drain(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {

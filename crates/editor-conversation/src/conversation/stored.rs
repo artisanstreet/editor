@@ -391,6 +391,10 @@ impl StoredConversation {
         changed
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stored leaf render: lease reuse, media, preparation, code services and the 128-leaf eviction"
+    )]
     pub(crate) fn render_leaf(
         &mut self,
         target: StoredLeafTarget<'_>,

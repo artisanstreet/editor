@@ -329,6 +329,10 @@ fn visibility(
 }
 
 #[expect(clippy::cast_precision_loss, reason = "sample coordinates are small")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shading pass reads mesh, projection, winners, look, camera, grid and sample count"
+)]
 fn shade(
     mesh: &Mesh,
     projection: &Projection,

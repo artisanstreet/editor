@@ -1239,6 +1239,10 @@ fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
     children
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass grouping shown items, unloaded spans and the latest run into each run's summary"
+)]
 fn summaries(
     view: &ThreadView,
     shown: &[&Item],

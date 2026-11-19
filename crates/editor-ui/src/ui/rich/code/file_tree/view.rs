@@ -228,6 +228,10 @@ fn text(
         .build()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one file tree row with its indent, disclosure, name and input handling"
+)]
 fn row(
     tree: &FileTree,
     id: &str,

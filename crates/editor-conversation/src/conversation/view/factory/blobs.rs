@@ -49,6 +49,10 @@ impl RowFactory {
         Ok(Some(row.build()))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame per blob state, from loading through failed retry to the opened image"
+    )]
     pub(super) fn blob_frame(
         &self,
         owner: &super::super::row_cache::RowOwner,

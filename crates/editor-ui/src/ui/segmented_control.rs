@@ -76,6 +76,10 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one segmented control build with its segments and keyboard semantics"
+    )]
     pub(crate) fn build(self) -> Element {
         let theme = self.theme;
         let selected = self

@@ -17,6 +17,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 impl RowFactory {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the row factory constructor receives every service the transcript owner hands it"
+    )]
     pub fn new(
         rows: Vec<RealizedRow>,
         scope: PresentationScope,

@@ -48,6 +48,10 @@ impl RowFactory {
         Ok(full)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one source field with its live, stored and failed text paths"
+    )]
     pub(super) fn source_field(
         &self,
         owner: &Rc<super::super::row_cache::RowOwner>,

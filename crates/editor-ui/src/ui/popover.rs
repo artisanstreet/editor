@@ -218,6 +218,10 @@ impl AnimatedPickerHost {
         self.popup.root(app)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the popover opens with its owner, factory, gap, focus, entrance and both durations"
+    )]
     pub fn open_above(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
@@ -248,6 +252,10 @@ impl AnimatedPickerHost {
         Ok(host)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the popover opens with its owner, content, gap, focus, entrance and both durations"
+    )]
     pub fn open_content(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,

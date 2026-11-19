@@ -360,6 +360,10 @@ impl PreparedTabCard {
         items
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one tab card constructor wiring its strip and geometry"
+    )]
     fn new(
         theme: &ArtisanTheme,
         bounds: Rect,

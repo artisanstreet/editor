@@ -44,6 +44,10 @@ pub(super) fn media_width(reading: f32, slot: Slot, lists: usize) -> f32 {
     lists.mul_add(-editor_ui::markdown::LIST_INDENT, width)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the user bubble composes content, segment position, attachments, sender and sticker"
+)]
 pub(super) fn user_bubble(
     content: aqua_ui::element::Element,
     index: usize,

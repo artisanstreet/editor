@@ -80,6 +80,11 @@ impl AnnotatedCode {
         self.0.lines.join("\n")
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the annotated code view takes its reference scope, opener, state and invalidation"
+    )]
     pub(crate) fn render(
         &self,
         theme: &ArtisanTheme,
@@ -278,6 +283,10 @@ fn hover(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a code row reads its model line, gutter, active note, state and invalidation"
+)]
 fn code_row(
     theme: &ArtisanTheme,
     id: &str,
@@ -372,6 +381,10 @@ fn code_row(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a note row reads its model note, active state, reference scope, opener and state"
+)]
 fn note_row(
     theme: &ArtisanTheme,
     id: &str,

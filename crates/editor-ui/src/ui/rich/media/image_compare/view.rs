@@ -328,6 +328,10 @@ impl CompareState {
 }
 
 impl CompareState {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one comparison view: both sides, the divider, mode switch and failures"
+    )]
     pub(crate) fn view(
         &self,
         model: &ImageCompare,
@@ -751,6 +755,10 @@ fn divider(
     vec![line, handle]
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one comparison frame with its slider semantics, drag and keyboard input"
+)]
 fn frame(
     theme: &crate::ui::theme::ArtisanTheme,
     width: f32,

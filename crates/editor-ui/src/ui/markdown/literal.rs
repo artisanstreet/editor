@@ -202,6 +202,10 @@ impl LiteralOwner {
         self.entries.clear();
         self.generation = self.generation.wrapping_add(1);
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one literal preparation walking retention, index, page and leaf states"
+    )]
     pub fn prepare(
         &mut self,
         owner: &StoredOwner,

@@ -342,6 +342,10 @@ impl ProjectedDocument {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pass building every projected row's selection sources and the shared batch"
+    )]
     fn selection_sources(
         &self,
         render: LeafRender<'_>,
@@ -495,6 +499,10 @@ fn prose_measure(is_code_block: bool) -> Length {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one projected leaf render: reveal fades, content per leaf kind, list markers and frame"
+)]
 fn render_leaf(
     target: &LeafView<'_>,
     row: usize,

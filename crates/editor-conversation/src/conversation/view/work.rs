@@ -70,6 +70,10 @@ pub(crate) fn section_title(summary: &RunSummary, now: Timestamp) -> String {
     phase::section_title(summary.phase, summary.worked, elapsed)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the work header takes its run, segment, summary, label, chevron and dispatch"
+)]
 pub(crate) fn header(
     theme: &ArtisanTheme,
     run: Option<&RunId>,
@@ -216,6 +220,10 @@ pub(crate) fn agent(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the activity row takes the item, its agents, and the truncate, failure and details builders"
+)]
 pub(crate) fn activity_row<E>(
     item: &Item,
     expanded: bool,

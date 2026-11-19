@@ -31,6 +31,10 @@ impl SmoothScroll {
         clippy::fn_params_excessive_bools,
         reason = "the flags are independent frame conditions from separate owners; the step is the one place that combines them"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scroll stepper reads every follow, landing and disclosure flag of the current frame"
+    )]
     pub fn step(
         &mut self,
         following: bool,
@@ -86,6 +90,10 @@ pub fn wants_older(viewport_height: f32, scroll_offset: f32) -> bool {
     viewport_height > 0.0 && -scroll_offset < 1200.0
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scroll observation needs the viewport geometry plus the source-prefix and gap flags at once"
+)]
 pub(crate) fn scrolled(
     conversation: &Conversation,
     top: usize,

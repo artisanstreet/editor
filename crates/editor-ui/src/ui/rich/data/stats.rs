@@ -106,6 +106,10 @@ impl Stats {
                 })
                 .sum::<usize>()
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stats view laying out every tile"
+    )]
     pub(crate) fn view(
         &self,
         id: String,

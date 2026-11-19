@@ -260,6 +260,10 @@ pub(crate) struct Services {
     pub tick_strip: TickStripFactory,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one distribution view: mode switch, scales, marks, readout and keyboard navigation"
+)]
 pub(crate) fn view(
     id: &str,
     theme: &ArtisanTheme,
@@ -568,6 +572,10 @@ pub(crate) fn view(
     root.child(slider).build()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "navigation wraps the plot with its mode, count, selection, state, ring and frame"
+)]
 fn navigation(
     id: &str,
     content: Element,
@@ -608,6 +616,11 @@ fn navigation(
     frame(element, ring)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the box plot reads data, state, services, hover, probe, reset and width in one paint"
+)]
 fn boxes(
     id: &str,
     theme: &ArtisanTheme,

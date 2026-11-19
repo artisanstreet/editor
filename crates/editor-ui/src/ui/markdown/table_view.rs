@@ -6,6 +6,10 @@ use aqua_core::{CollectionSemantics, Insets, Role};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table render: column widths, alignment, header row and cell leaves"
+)]
 pub(super) fn render(
     table: &Table,
     body: BodyContext<'_>,

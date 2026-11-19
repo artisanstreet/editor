@@ -125,6 +125,10 @@ impl std::fmt::Debug for Preview {
 }
 
 impl Preview {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a preview starts from its host, fetcher, loader, sources, index, image and clock"
+    )]
     fn new(
         generation: u64,
         host: HostId,
@@ -488,6 +492,10 @@ impl Preview {
         (width * scale, height * scale)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one preview view across its image, controls and load states"
+    )]
     pub fn view(
         &self,
         theme: &ArtisanTheme,

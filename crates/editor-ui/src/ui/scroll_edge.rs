@@ -260,6 +260,10 @@ impl ScrollEdges {
             .exclude_from_hit_testing()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "advancing an edge reads its band, paint kind, colour, hidden amount, motion and clock"
+    )]
     pub fn advance(
         &self,
         ui: &mut aqua::UiApp,

@@ -141,6 +141,10 @@ impl std::fmt::Debug for ColorCopyMenuHost {
 }
 
 impl ColorCopyMenuHost {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "opening the menu needs its owner, colour, search icon, theme, motion and effect sink"
+    )]
     pub fn open(
         app: &mut aqua::UiApp,
         owner: NodeId,

@@ -112,6 +112,10 @@ impl ModelAssets {
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
         self.loads.bind(ctx, window);
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a model load request names its fetcher, source, part, format, axis, renderer, waiter and wake"
+    )]
     pub(crate) fn request(
         &self,
         fetcher: Option<&MediaFetcher>,

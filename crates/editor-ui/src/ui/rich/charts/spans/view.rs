@@ -275,6 +275,10 @@ fn hit_bar(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one spans view laying out lanes, marks, readout and navigation"
+)]
 pub(crate) fn view(
     id: &str,
     theme: &ArtisanTheme,

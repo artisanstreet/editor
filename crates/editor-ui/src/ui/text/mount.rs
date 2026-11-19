@@ -254,6 +254,10 @@ impl EditorController {
         Rc::clone(&self.state)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match handling every routed text input event against the mounted state"
+    )]
     fn handle(
         &self,
         event: &RoutedEvent,
@@ -593,6 +597,10 @@ impl EditorController {
         self.named_leaf(mode, theme, placeholder, placeholder, bare, inset)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one named text leaf: mode, placeholder, bare and inset styling"
+    )]
     fn named_leaf(
         &self,
         mode: Mode,

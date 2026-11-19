@@ -116,6 +116,10 @@ impl AttachmentTile {
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one attachment tile build with its thumbnail, label and controls"
+    )]
     pub fn build(self) -> Element {
         let theme = self.theme;
         let failed = self.error.is_some();

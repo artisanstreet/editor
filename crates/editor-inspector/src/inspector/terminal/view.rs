@@ -148,6 +148,11 @@ impl CollectionSource for Rows {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one terminal pane view built from the session state it is handed"
+)]
 pub(crate) fn terminal_view(
     dialog: Rc<RefCell<TerminalDialog>>,
     theme: &ArtisanTheme,

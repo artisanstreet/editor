@@ -57,6 +57,10 @@ pub(crate) fn navigation(content: Element, ring: GpuiHsla) -> Element {
     content.focus_visible_style(Style::new().gpui_border(Insets::uniform(1.0), ring, false))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one concentration frame laying out the plot, both axes and their labels"
+)]
 pub(crate) fn concentration_frame(
     theme: &ArtisanTheme,
     plot: Element,
@@ -331,6 +335,10 @@ pub(crate) fn readout_rows(
     readout_rows_at(theme, x, heading, rows, false)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one readout layout placing every row's swatch, label and value"
+)]
 pub(crate) fn readout_rows_at(
     theme: &ArtisanTheme,
     x: f32,
@@ -500,6 +508,10 @@ pub(crate) fn numeric_frame(
     numeric_frame_with_labels(theme, plot, frame, Vec::new())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one numeric frame laying out both axes, ticks, labels and the plot area"
+)]
 pub(crate) fn numeric_frame_with_labels(
     theme: &ArtisanTheme,
     plot: Element,

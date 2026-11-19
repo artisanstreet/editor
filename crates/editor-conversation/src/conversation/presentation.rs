@@ -371,6 +371,10 @@ impl MarkdownOwners {
             })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one cached Markdown body render: scope check, preparation, retained element and selection batch"
+    )]
     pub fn render(
         &mut self,
         app: &mut UiApp,

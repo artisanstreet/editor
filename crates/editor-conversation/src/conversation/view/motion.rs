@@ -276,6 +276,10 @@ impl RowMotion {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the chevron reads its key, open state, drag fraction, size, colour and motion clock"
+    )]
     pub(crate) fn chevron(
         &mut self,
         key: &str,

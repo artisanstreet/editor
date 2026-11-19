@@ -125,6 +125,11 @@ impl ModelBlock {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the model services bundle its assets, capability, glyph, effect, hover and invalidation; one wiring of every model callback"
+)]
 pub(crate) fn services(
     id: &str,
     theme: &crate::ui::theme::ArtisanTheme,

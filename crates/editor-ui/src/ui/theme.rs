@@ -601,6 +601,10 @@ impl ColorTokens {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one constructor assigning every palette token for the mode in display order"
+    )]
     fn standard(mode: ThemeMode) -> Self {
         use polar::{
             AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,

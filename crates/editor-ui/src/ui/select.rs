@@ -360,6 +360,10 @@ impl<V: Clone + Eq + 'static> Select<V> {
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one select build: trigger, menu and keyboard handling"
+    )]
     pub fn build(self) -> Element {
         let disabled = self.disabled || self.entries.iter().all(|entry| entry.disabled);
         self.state

@@ -162,6 +162,11 @@ fn summary(funnel: &Funnel, selected: Option<usize>) -> String {
 }
 
 impl Funnel {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the funnel view takes its text, empty and navigation factories with its state"
+    )]
     pub(crate) fn view(
         &self,
         id: &str,

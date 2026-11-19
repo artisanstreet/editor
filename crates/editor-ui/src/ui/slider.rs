@@ -169,6 +169,10 @@ impl Slider {
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one slider build: track, thumb, drag and keyboard semantics"
+    )]
     pub(crate) fn build(self) -> Element {
         let theme = self.theme;
         let accent = theme.colors.amber.solid.to_reference_paint();

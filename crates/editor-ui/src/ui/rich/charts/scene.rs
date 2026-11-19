@@ -157,6 +157,10 @@ pub fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
     cached_scene(bounds, shapes, &SceneCache::default())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match converting every chart shape kind into cached display items"
+)]
 pub fn cached_scene(bounds: Rect, shapes: &[Shape], cache: &SceneCache) -> Vec<DisplayItem> {
     let size = (bounds.w, bounds.h);
     let mut items = vec![DisplayItem::PushClip {

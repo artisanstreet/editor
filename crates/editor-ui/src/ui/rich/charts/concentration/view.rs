@@ -177,6 +177,11 @@ fn shapes(
 }
 
 impl Concentration {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the concentration view takes each of its frame, label, readout and navigation factories"
+    )]
     pub(crate) fn view(
         &self,
         id: &str,

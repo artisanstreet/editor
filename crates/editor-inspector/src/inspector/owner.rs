@@ -258,6 +258,11 @@ fn present_step(step: &artisan_api::PlanStep, index: u64) -> editor_sources::Col
 }
 
 impl InspectorOwner {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one inspector build from core state, viewport, motion and the action sink"
+    )]
     pub fn build(
         &self,
         core: &Core,
@@ -510,6 +515,11 @@ impl InspectorOwner {
         terminal_changed || self.view_state() != before
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one match dispatching every inspector action to core, conversation, UI and dialogs"
+    )]
     pub fn dispatch_action(
         &mut self,
         core: &mut Core,

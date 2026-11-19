@@ -133,6 +133,10 @@ pub(crate) fn text_with_wrap(
 }
 
 impl Callout {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one callout view: tone, glyph, title and body"
+    )]
     pub(crate) fn view(
         &self,
         id: String,

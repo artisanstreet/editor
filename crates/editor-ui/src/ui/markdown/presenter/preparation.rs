@@ -26,6 +26,10 @@ impl MarkdownPresenter {
         self.prepare_with(engine, source, command)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one preparation pass rebuilding the document, projection, rich fences and proofs together"
+    )]
     fn prepare_with(
         &mut self,
         engine: &MarkdownEngine,

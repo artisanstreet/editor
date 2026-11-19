@@ -291,6 +291,10 @@ impl SeekCommand {
         }
     }
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the play button reads its row, state, name, hover, glyph and both callbacks"
+)]
 fn play_button(
     row_id: &str,
     theme: &ArtisanTheme,
@@ -393,6 +397,11 @@ fn transcript_view(
 }
 
 impl AudioBlock {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the audio view takes fetcher, assets, player, state and glyph; one view of every track state"
+    )]
     pub(crate) fn view(
         &self,
         id: &str,
@@ -602,6 +611,11 @@ impl AudioBlock {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the progress line reads its row, seek, state and measured line, and handles drag and keys"
+)]
 fn progress_line(
     id: &str,
     theme: &ArtisanTheme,

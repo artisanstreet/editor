@@ -218,6 +218,10 @@ fn file_link_line(destination: &str) -> Option<u32> {
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass flattening inline spans into styled runs, links and colour ranges"
+)]
 pub fn prepare_inline(
     spans: &[Span],
     theme: &ArtisanTheme,
@@ -473,6 +477,10 @@ impl Sources<'_> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one interactive leaf: styled text, link and colour hit-testing, and its selection source"
+)]
 pub(crate) fn interactive_leaf(
     spans: &[Span],
     body: BodyContext<'_>,

@@ -41,6 +41,10 @@ pub(super) fn plain_block(text: &str, block: usize) -> Option<&str> {
 }
 
 impl RowFactory {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stored Markdown row from source, page and leaf preparation through reveal and render"
+    )]
     pub(super) fn stored_row(
         &self,
         cx: &RowContext<'_>,
@@ -282,6 +286,10 @@ impl RowFactory {
             .build()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one literal stored row from source preparation through the retained batch"
+    )]
     pub(super) fn literal_row(
         &self,
         cx: &RowContext<'_>,

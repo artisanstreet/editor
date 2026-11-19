@@ -415,6 +415,11 @@ fn reading(size: f64, unit: Option<&str>) -> String {
     with_unit(&format_number(size), unit)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the hierarchy view takes its tree, layout, unit, levels, state and services"
+)]
 pub(crate) fn view(
     id: String,
     theme: &ArtisanTheme,

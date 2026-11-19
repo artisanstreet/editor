@@ -195,6 +195,10 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario operating the comparison frame as slider and as switch"
+)]
 fn the_comparison_frame_is_a_named_slider_or_switch_that_assistive_tech_operates() {
     use aqua_core::Role;
     use aqua_text::{SharedFonts, SharedRuns};

@@ -462,6 +462,11 @@ fn terminal_row(
     .build()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the inspector view assembles every section of the open item from one snapshot"
+)]
 pub(crate) fn inspector_view(
     core: &Core,
     inspector: &Inspector,

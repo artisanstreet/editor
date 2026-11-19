@@ -72,6 +72,10 @@ impl CompareState {
 
 pub(crate) type NavigationFrame = Rc<dyn Fn(Element, aqua_core::GpuiHsla) -> Element>;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a compare cell reads its content, column, count, selection, state and block id"
+)]
 fn cell(
     content: Element,
     id: String,
@@ -122,6 +126,10 @@ fn criterion(theme: &ArtisanTheme, label: &str) -> Element {
 }
 
 impl Compare {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one comparison table view with headers, cells and selection"
+    )]
     pub(crate) fn view(
         &self,
         id: &str,

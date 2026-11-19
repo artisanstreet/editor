@@ -31,6 +31,10 @@ impl MarkdownPresenter {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preparing a stored leaf needs its owner, ordinal, leaf, theme and selection placement"
+    )]
     pub fn prepare_stored_leaf(
         &mut self,
         owner: &super::super::stored::StoredOwner,

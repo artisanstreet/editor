@@ -165,6 +165,11 @@ impl HeatmapState {
 }
 
 impl Heatmap {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the heatmap view takes its text, empty, readout and navigation factories with its state"
+    )]
     pub(crate) fn view(
         &self,
         id: &str,

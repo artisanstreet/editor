@@ -340,6 +340,10 @@ pub fn thread_frame(
     .build()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batched thread layout composes the row factory, viewport, overlays, composer and drawer"
+)]
 pub fn layout_batched_thread_element(
     conversation: &crate::conversation::controller::Conversation,
     estimated_height: f32,

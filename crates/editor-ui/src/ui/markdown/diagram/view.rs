@@ -134,6 +134,10 @@ fn changing(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one diagram view built from its layout, interaction state and invalidation"
+)]
 pub(crate) fn view(
     theme: &ArtisanTheme,
     id: &str,

@@ -559,6 +559,10 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario walking a stored leaf from retention through revoked proof"
+)]
 fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     use crate::ui::markdown::{Block, Span};
     use crate::ui::theme::{ArtisanTheme, ThemeMode};

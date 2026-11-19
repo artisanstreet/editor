@@ -57,6 +57,10 @@ fn decision_label(decision: Decision) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one approval request card with its options, details and decided state"
+)]
 pub(crate) fn approval<E>(
     item: &Item,
     sending: bool,

@@ -737,6 +737,10 @@ impl StoredOwner {
                     && matches!(entry.phase, LeafPhase::Ready(_))
             })
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one leaf lookup walking the source, page and preparation states of a stored leaf"
+    )]
     pub fn leaf(&mut self, key: &str, source: &StoredSource, ordinal: usize) -> LeafPreparation {
         if source.format() != SourceIndexFormat::Markdown {
             return LeafPreparation::Failed(
@@ -852,6 +856,10 @@ impl StoredOwner {
         self.advance_leaf(key);
         LeafPreparation::Pending
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one step of the stored leaf state machine, issuing the next page or parse request"
+    )]
     fn advance_leaf(&mut self, key: &str) -> bool {
         let Some(index) = self.leaves.iter().position(|entry| entry.key == key) else {
             return false;
@@ -1042,6 +1050,10 @@ impl StoredOwner {
         );
         false
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match applying every kind of completed index, page and leaf delivery"
+    )]
     pub fn drain(&mut self) -> Vec<StoredUpdate> {
         self.indices.retain(|entry| entry.provider.is_available());
         self.leaves

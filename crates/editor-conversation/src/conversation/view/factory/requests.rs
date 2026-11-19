@@ -120,6 +120,10 @@ impl RowFactory {
         Ok(result)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one question collection: options, free text, submission and the answered state"
+    )]
     fn question_collection(
         &self,
         owner: &Rc<super::super::row_cache::RowOwner>,

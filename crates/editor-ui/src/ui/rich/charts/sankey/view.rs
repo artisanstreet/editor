@@ -283,6 +283,11 @@ fn paint(
     items
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the sankey view takes its label, readout, empty and navigation factories with its state"
+)]
 pub(crate) fn view(
     id: &str,
     theme: &ArtisanTheme,

@@ -252,6 +252,11 @@ impl TranscriptObservations {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one viewport observation feeding paging, follow, preparation and reveal from the same clip"
+    )]
     pub fn observe_viewport(
         &self,
         conversation: &mut Conversation,
@@ -756,6 +761,10 @@ fn reader_scrolled(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the observer reads the viewport with follow, readiness and prefix flags and two row probes"
+)]
 pub fn observer(
     conversation: &mut Conversation,
     core: &editor_core::Core,
