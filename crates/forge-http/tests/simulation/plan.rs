@@ -1,5 +1,3 @@
-use forge_store::faults::DiskFault;
-
 #[derive(Debug, Clone)]
 pub(crate) struct Rng(u64);
 
@@ -43,7 +41,7 @@ pub(crate) enum Delivery {
     Clean,
     ResponseLost,
     Aborted { after_ms: u64 },
-    Disk(DiskFault),
+    DiskFails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +53,7 @@ pub(crate) enum Action {
     },
     Draft {
         number: usize,
-        disk: Option<DiskFault>,
+        disk_fails: bool,
     },
     Restart(Stop),
     StepClock {
@@ -88,7 +86,7 @@ pub(crate) fn plan(seed: u64) -> Vec<Action> {
                 drafts += 1;
                 Action::Draft {
                     number: drafts,
-                    disk: rng.chance(30).then(|| disk(&mut rng)),
+                    disk_fails: rng.chance(30),
                 }
             }
             7 => Action::Restart(stop(&mut rng)),
@@ -116,7 +114,7 @@ fn delivery(rng: &mut Rng) -> Delivery {
         1 => Delivery::Aborted {
             after_ms: rng.below(40),
         },
-        2 => Delivery::Disk(disk(rng)),
+        2 => Delivery::DiskFails,
         _ => Delivery::Clean,
     }
 }
@@ -134,13 +132,5 @@ fn stop(rng: &mut Rng) -> Stop {
         Stop::Killed
     } else {
         Stop::Graceful
-    }
-}
-
-fn disk(rng: &mut Rng) -> DiskFault {
-    if rng.chance(50) {
-        DiskFault::Full
-    } else {
-        DiskFault::WriteError
     }
 }

@@ -2,6 +2,8 @@ use crate::plan::Stop;
 use forge_http::PairInvite;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -15,7 +17,39 @@ const STOPPED_WITHIN: Duration = Duration::from_secs(60);
 
 pub(crate) struct Forge {
     data: PathBuf,
+    disk: Disk,
     running: Option<Running>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Disk(Arc<AtomicU32>);
+
+impl Disk {
+    pub(crate) fn fail_next_commit(&self) {
+        self.0.store(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn heal(&self) {
+        self.0.store(0, Ordering::SeqCst);
+    }
+
+    fn environment(&self) -> forge_store::Environment {
+        let failing = Arc::clone(&self.0);
+        forge_store::Environment {
+            connections: forge_store::Connections::new(move |path| {
+                let mut conn = rusqlite::Connection::open(path)?;
+                let failing = Arc::clone(&failing);
+                conn.commit_hook(Some(move || {
+                    failing
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_ok()
+                }))?;
+                Ok(conn)
+            }),
+        }
+    }
 }
 
 struct Running {
@@ -29,6 +63,7 @@ impl Forge {
     pub(crate) fn start(data: &Path) -> (Self, PairInvite) {
         let mut forge = Self {
             data: data.to_path_buf(),
+            disk: Disk::default(),
             running: None,
         };
         let store = forge.launch();
@@ -40,6 +75,10 @@ impl Forge {
             .block_on(forge_http::invite(&store))
             .unwrap_or_else(|error| panic!("invite the Editor: {}", diagnostics::chain(&error)));
         (forge, invite)
+    }
+
+    pub(crate) const fn disk(&self) -> &Disk {
+        &self.disk
     }
 
     pub(crate) fn address(&self) -> SocketAddr {
@@ -100,10 +139,13 @@ impl Forge {
             .build()
             .expect("Forge's runtime starts");
         let server = runtime
-            .block_on(forge_http::start(forge_http::ServeConfig {
-                data_dir: self.data.clone(),
-                listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
-            }))
+            .block_on(forge_http::start_in(
+                forge_http::ServeConfig {
+                    data_dir: self.data.clone(),
+                    listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+                },
+                self.disk.environment(),
+            ))
             .unwrap_or_else(|error| panic!("Forge starts: {}", diagnostics::chain(&error)));
         let address = server.local_addr().expect("Forge listens");
         let store = server.store().clone();

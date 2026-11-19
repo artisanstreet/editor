@@ -20,14 +20,11 @@ use forge::Forge;
 use observer::{Observer, Screen};
 use plan::{Action, Delivery, Ending};
 use std::io::Write as _;
-use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::time::Duration;
 use test_support::replay::ReplayingEngine;
 use test_support::transcript::Transcript;
 
 const FIXED_SEEDS: [u64; 4] = [1, 7, 42, 0x5EED];
-const ONE_COMMIT: NonZeroU32 = NonZeroU32::MIN;
 
 #[test]
 fn forge_keeps_its_promises_under_seeded_faults() {
@@ -87,7 +84,6 @@ impl Drop for Reproduce {
 struct Session {
     runtime: tokio::runtime::Runtime,
     forge: Forge,
-    data: PathBuf,
     editor: Editor,
     observer: Observer,
     thread: ThreadId,
@@ -176,7 +172,6 @@ impl Session {
         Self {
             runtime,
             forge,
-            data: data.to_path_buf(),
             editor,
             observer: Observer::new(head),
             thread,
@@ -193,7 +188,7 @@ impl Session {
                 delivery,
                 ending,
             } => self.turn(number, delivery, ending),
-            Action::Draft { number, disk } => self.save_draft(number, disk),
+            Action::Draft { number, disk_fails } => self.save_draft(number, disk_fails),
             Action::Restart(stop) => self.forge.restart(stop),
             Action::StepClock { by_ms } => artisan_api::clock::step(by_ms),
             Action::DropEvents { after } => self.observer.cut_next_stream(after),
@@ -213,7 +208,6 @@ impl Session {
         let path = format!("/threads/{thread}/messages");
         let before = self.observer.screen().settled(&thread);
         let address = self.forge.address();
-        let data = self.data.clone();
         self.runtime.block_on(async {
             match delivery {
                 Delivery::Clean => {}
@@ -235,13 +229,13 @@ impl Session {
                         "a send on a healthy Forge was refused: {outcome:?}"
                     );
                 }
-                Delivery::Disk(fault) => {
-                    forge_store::faults::fail_commits(&data, fault, ONE_COMMIT);
+                Delivery::DiskFails => {
+                    self.forge.disk().fail_next_commit();
                     let outcome = self
                         .editor
                         .post::<Item>(address, &path, &message, None)
                         .await;
-                    forge_store::faults::heal(&data);
+                    self.forge.disk().heal();
                     assert!(
                         !matches!(outcome, Outcome::Lost),
                         "invariant: an uncut send is answered"
@@ -296,20 +290,20 @@ impl Session {
             .block_on(self.observer.until(&self.editor, address, what, done));
     }
 
-    fn save_draft(&mut self, number: usize, disk: Option<forge_store::faults::DiskFault>) {
+    fn save_draft(&mut self, number: usize, disk_fails: bool) {
         let address = self.forge.address();
         let path = format!("/drafts/{}", self.thread);
         let write = WriteDraft {
             expected_revision: self.draft.revision,
             body: serde_json::json!({ "text": format!("Draft {number}") }),
         };
-        if let Some(fault) = disk {
-            forge_store::faults::fail_commits(&self.data, fault, ONE_COMMIT);
+        if disk_fails {
+            self.forge.disk().fail_next_commit();
         }
         let outcome = self
             .runtime
             .block_on(self.editor.put::<DraftWriteResult>(address, &path, &write));
-        forge_store::faults::heal(&self.data);
+        self.forge.disk().heal();
         match outcome {
             Outcome::Accepted(result) => {
                 assert!(
@@ -319,7 +313,7 @@ impl Session {
                 self.draft = result.current;
             }
             Outcome::Refused { status, error } => assert!(
-                disk.is_some(),
+                disk_fails,
                 "a draft write refused with {status} ({error:?}) while the disk was healthy"
             ),
             Outcome::Lost => unreachable!("invariant: an uncut draft write is answered"),

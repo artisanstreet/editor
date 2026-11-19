@@ -55,8 +55,8 @@ rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 artisan-api = { workspace = true, features = ["tls", "test-support"] }
-forge-store = { workspace = true, features = ["test-support"] }
-rusqlite.workspace = true
+forge-store.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
 sse-core.workspace = true
 test-support = { workspace = true, features = ["http", "sse", "replay"] }
 reqwest = { workspace = true, features = ["json", "zstd"] }

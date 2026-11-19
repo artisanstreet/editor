@@ -1005,6 +1005,7 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
             listen: occupied.local_addr().unwrap(),
         },
         harness_for,
+        forge_store::Environment::system(),
     )
     .await;
     assert!(
@@ -1262,6 +1263,7 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
             listen: "127.0.0.1:0".parse().unwrap(),
         },
         Arc::new(move |_| Arc::clone(&harness)),
+        forge_store::Environment::system(),
     )
     .await
     .unwrap();

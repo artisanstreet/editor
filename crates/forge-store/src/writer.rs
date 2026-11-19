@@ -208,8 +208,6 @@ impl Writer {
         let result = job(&mut tx)?;
         let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
         events.sort_by_key(|envelope| envelope.seq);
-        #[cfg(feature = "test-support")]
-        crate::faults::before_commit(sql.path()).map_err(StorageError::from)?;
         sql.commit().map_err(StorageError::from)?;
         self.commits.note();
         self.hot.committed(&events);

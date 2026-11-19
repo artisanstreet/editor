@@ -182,21 +182,35 @@ pub struct Server {
 }
 
 pub async fn start(config: ServeConfig) -> Result<Server, StartError> {
-    start_with_harness(config, Arc::new(forge_engines::harness)).await
+    start_in(config, forge_store::Environment::system()).await
+}
+
+pub async fn start_in(
+    config: ServeConfig,
+    environment: forge_store::Environment,
+) -> Result<Server, StartError> {
+    start_with_harness(config, Arc::new(forge_engines::harness), environment).await
 }
 
 async fn start_with_harness(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
+    environment: forge_store::Environment,
 ) -> Result<Server, StartError> {
-    start_mode(config, harness_for, None).await
+    start_mode(config, harness_for, None, environment).await
 }
 
 pub async fn start_generation(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
 ) -> Result<Server, StartError> {
-    start_mode(config, Arc::new(forge_engines::harness), Some(registry)).await
+    start_mode(
+        config,
+        Arc::new(forge_engines::harness),
+        Some(registry),
+        forge_store::Environment::system(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -205,7 +219,13 @@ pub(crate) async fn start_generation_with_harness(
     registry: forge_runs::runtime::Registry,
     harness_for: forge_runs::HarnessFor,
 ) -> Result<Server, StartError> {
-    start_mode(config, harness_for, Some(registry)).await
+    start_mode(
+        config,
+        harness_for,
+        Some(registry),
+        forge_store::Environment::system(),
+    )
+    .await
 }
 
 #[expect(
@@ -216,6 +236,7 @@ async fn start_mode(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
     registry: Option<forge_runs::runtime::Registry>,
+    environment: forge_store::Environment,
 ) -> Result<Server, StartError> {
     std::fs::create_dir_all(&config.data_dir).map_err(|source| StartError::CreateDataFolder {
         path: config.data_dir.clone(),
@@ -227,9 +248,9 @@ async fn start_mode(
         lock_data_dir(&config.data_dir)?
     };
     let store = if registry.is_some() {
-        Store::join(&config.data_dir)
+        Store::join_in(&config.data_dir, environment)
     } else {
-        Store::open_restoring(&config.data_dir, &lock)
+        Store::open_restoring_in(&config.data_dir, &lock, environment)
     }
     .map_err(|source| StartError::Store {
         dir: config.data_dir.clone(),

@@ -5,9 +5,8 @@ mod content;
 pub mod coordination;
 pub mod discovery;
 mod encoded;
+mod environment;
 mod error;
-#[cfg(feature = "test-support")]
-pub mod faults;
 mod feed;
 pub mod hot;
 mod items;
@@ -50,6 +49,7 @@ pub use collection::{AnswerRefused, MAX_COLLECTION_BYTES};
 pub use content::{
     ContentError, Damage, MAX_FIELD_BYTES, MAX_FIELD_ENTRIES, MAX_ITEM_BYTES, MAX_SOURCE_BYTES,
 };
+pub use environment::{Connections, Environment};
 pub use error::StorageError;
 pub use feed::Subscription;
 pub use items::{
@@ -285,6 +285,7 @@ struct Inner {
     authorizer: Authorizer,
     device_watch: pairing::DeviceWatch,
     database: PathBuf,
+    connections: Connections,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
     blob_lock: Arc<tokio::sync::Mutex<()>>,
@@ -324,8 +325,8 @@ impl Drop for Threads {
     }
 }
 
-fn open_database(path: &Path) -> Result<Connection> {
-    let opened = Connection::open(path).and_then(|conn| {
+fn open_database(connections: &Connections, path: &Path) -> Result<Connection> {
+    let opened = connections.open(path).and_then(|conn| {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(conn)
     });
@@ -336,6 +337,7 @@ fn open_database(path: &Path) -> Result<Connection> {
 }
 
 fn start_devices(
+    connections: &Connections,
     database: &Path,
     revocations: broadcast::Sender<DeviceId>,
 ) -> Result<(Authorizer, pairing::DeviceWatch), OpenStoreError> {
@@ -343,7 +345,8 @@ fn start_devices(
         database: database.to_path_buf(),
         source,
     };
-    let devices = Devices::open(open_database(database).map_err(prepare)?).map_err(prepare)?;
+    let devices =
+        Devices::open(open_database(connections, database).map_err(prepare)?).map_err(prepare)?;
     let watch = pairing::DeviceWatch::start(database).map_err(OpenStoreError::WatchDevices)?;
     Ok((Authorizer::new(devices, revocations), watch))
 }
@@ -530,12 +533,12 @@ fn recover_after_opening(
     }
 }
 
-fn stored_version(database: &Path) -> Result<usize, OpenStoreError> {
+fn stored_version(connections: &Connections, database: &Path) -> Result<usize, OpenStoreError> {
     let prepare = |source| OpenStoreError::Database {
         database: database.to_owned(),
         source,
     };
-    open_database(database)
+    open_database(connections, database)
         .map_err(prepare)?
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|source| prepare(source.into()))
@@ -584,10 +587,19 @@ impl Store {
             blob_dir,
             dir.join("resources"),
             Opening::Upgrade(None),
+            Environment::system(),
         )
     }
 
-    pub fn open_restoring(dir: &Path, _data_lock: &std::fs::File) -> Result<Self, OpenStoreError> {
+    pub fn open_restoring(dir: &Path, data_lock: &std::fs::File) -> Result<Self, OpenStoreError> {
+        Self::open_restoring_in(dir, data_lock, Environment::system())
+    }
+
+    pub fn open_restoring_in(
+        dir: &Path,
+        _data_lock: &std::fs::File,
+        environment: Environment,
+    ) -> Result<Self, OpenStoreError> {
         let (database, blob_dir) = Self::prepare(dir)?;
         let rolled_back = match schema::roll_back(&database).map_err(|source| {
             OpenStoreError::RollBack {
@@ -622,13 +634,14 @@ impl Store {
             blob_dir,
             dir.join("resources"),
             Opening::Upgrade(rolled_back),
+            environment,
         )
     }
 
     pub fn open_current(dir: &Path) -> Result<Self, OpenStoreError> {
         let database = dir.join("forge.sqlite3");
         if database.is_file() {
-            match stored_version(&database)? {
+            match stored_version(&Connections::system(), &database)? {
                 0 => {}
                 found if found == schema::version() => {}
                 found => {
@@ -644,11 +657,15 @@ impl Store {
     }
 
     pub fn join(dir: &Path) -> Result<Self, OpenStoreError> {
+        Self::join_in(dir, Environment::system())
+    }
+
+    pub fn join_in(dir: &Path, environment: Environment) -> Result<Self, OpenStoreError> {
         let database = dir.join("forge.sqlite3");
         if !database.is_file() {
             return Err(OpenStoreError::NotRunning { database });
         }
-        let found = stored_version(&database)?;
+        let found = stored_version(&environment.connections, &database)?;
         if found != schema::version() {
             return Err(OpenStoreError::Schema {
                 expected: schema::version(),
@@ -660,6 +677,7 @@ impl Store {
             dir.join("blobs"),
             dir.join("resources"),
             Opening::Join,
+            environment,
         )
     }
 
@@ -672,14 +690,16 @@ impl Store {
         blob_dir: PathBuf,
         resource_dir: PathBuf,
         opening: Opening,
+        environment: Environment,
     ) -> Result<Self, OpenStoreError> {
+        let connections = environment.connections;
         let recover = matches!(opening, Opening::Upgrade(_));
         let prepare = |source| OpenStoreError::Database {
             database: database.clone(),
             source,
         };
         let sql = |source: rusqlite::Error| prepare(source.into());
-        let mut conn = open_database(&database).map_err(prepare)?;
+        let mut conn = open_database(&connections, &database).map_err(prepare)?;
         let mode: String = conn
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
             .map_err(sql)?;
@@ -724,7 +744,7 @@ impl Store {
                 })?,
         );
 
-        let checkpoint_conn = open_database(&database).map_err(prepare)?;
+        let checkpoint_conn = open_database(&connections, &database).map_err(prepare)?;
         threads.checkpointer = Some(
             std::thread::Builder::new()
                 .name("forge-store-checkpoint".into())
@@ -738,9 +758,10 @@ impl Store {
                 })?,
         );
 
-        let first_reader = open_database(&database).map_err(prepare)?;
+        let first_reader = open_database(&connections, &database).map_err(prepare)?;
         let revocations = broadcast::channel(64).0;
-        let (authorizer, device_watch) = start_devices(&database, revocations.clone())?;
+        let (authorizer, device_watch) =
+            start_devices(&connections, &database, revocations.clone())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 jobs,
@@ -761,6 +782,7 @@ impl Store {
                 authorizer,
                 device_watch,
                 database,
+                connections,
                 blob_dir,
                 resource_dir,
                 blob_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1073,7 +1095,7 @@ impl Inner {
             .pop();
         let conn = match pooled {
             Some(conn) => conn,
-            None => open_database(&self.database)?,
+            None => open_database(&self.connections, &self.database)?,
         };
         let result = query(&conn);
         let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
