@@ -129,24 +129,6 @@ reason = "used by Linux-only code or tests (target_os = linux), so the Windows r
 
 [[override]]
 lint = "hawk::dead_public"
-crate = "artisan_api"
-item = "clock::step"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "artisan_api"
-item = "clock::reset"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
 crate = "editor_aqua"
 item = "shell::entry::Entry::qualification_account"
 kind = "inherent_method"
@@ -177,24 +159,6 @@ lint = "hawk::dead_public"
 crate = "editor_core"
 item = "core::host::project_icons::<impl core::host::HostData>::project_icon_checked"
 kind = "inherent_method"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "forge_store"
-item = "faults::heal"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "forge_store"
-item = "faults::fail_commits"
-kind = "function"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
@@ -276,15 +240,6 @@ lint = "hawk::unnecessary_public"
 crate = "forge_runs"
 item = "runtime::registry::Registry::retire_unused"
 kind = "inherent_method"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "artisan_api"
-item = "clock"
-kind = "module"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
@@ -576,3 +531,30 @@ kind = "inherent_method"
 level = "expect"
 target = "cfg(windows)"
 reason = "only the Unix agent-call tests start a stubbed host in their own folder"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "start_in"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Linux-only Forge simulation test starts Forge in a simulated environment"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "executable"
+kind = "module"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix ae and engine-manager tests install executables from other crates"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "executable::install"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix ae and engine-manager tests install executables from other crates"
