@@ -77,7 +77,7 @@ fn a_version_pin_installs_from_its_immutable_tag_and_updates_from_its_channel() 
         assert_eq!(source.argument(), manifest);
         assert_eq!(source.update_feed(), Some(channel));
     }
-    assert!(Source::new(None, Some("../latest"), false).is_err());
+    Source::new(None, Some("../latest"), false).unwrap_err();
 }
 
 #[test]
@@ -119,11 +119,9 @@ fn channel_feeds_read_the_signature_and_files_from_the_release_they_point_at() {
             .expect("asset source");
         assert_eq!(assets.file("ae-linux-x86_64"), expected);
     }
-    assert!(
-        Source::Url(NIGHTLY_FEED.to_owned())
-            .immutable("../../evil")
-            .is_err()
-    );
+    Source::Url(NIGHTLY_FEED.to_owned())
+        .immutable("../../evil")
+        .unwrap_err();
 }
 
 struct SignedRelease {
@@ -211,7 +209,7 @@ fn altered_or_foreign_signatures_are_rejected() {
         base64::engine::general_purpose::STANDARD.encode(&signature),
     )
     .expect("alter signature");
-    assert!(release.resolve().is_err());
+    release.resolve().unwrap_err();
     release.write(
         br#"{"version":"1.2.3","commit":"a","artifacts":[]}"#,
         &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
@@ -333,7 +331,7 @@ fn an_unreadable_local_version_is_reported_instead_of_invented() {
         dir: dir.path().to_owned(),
     };
 
-    assert!(release.version("linux").is_err());
+    release.version("linux").unwrap_err();
     assert_eq!(
         Release::Local {
             dir: dir.path().join("elsewhere"),

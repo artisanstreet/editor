@@ -1,20 +1,3 @@
-#![expect(
-    clippy::allow_attributes,
-    clippy::exit,
-    clippy::print_stderr,
-    clippy::print_stdout,
-    clippy::unused_result_ok,
-    missing_debug_implementations,
-    unreachable_pub,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-#![allow(
-    clippy::assertions_on_result_states,
-    clippy::let_underscore_untyped,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
-
 mod account;
 mod bundle;
 mod editor;
@@ -150,7 +133,7 @@ enum DevicesCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum EngineCommand {
     #[command(about = "Every engine, its version and account")]
     List {
@@ -193,7 +176,7 @@ fn main() -> std::process::ExitCode {
     let recent = match diagnostics::subscribe("warn", std::io::stderr) {
         Ok(recent) => recent,
         Err(error) => {
-            eprintln!("error: {}", diagnostics::chain(&error));
+            ui::status(format_args!("error: {}", diagnostics::chain(&error)));
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -211,9 +194,9 @@ fn main() -> std::process::ExitCode {
         ),
     }
     match run(cli) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
-            eprintln!("error: {}", diagnostics::chain(&error));
+            ui::status(format_args!("error: {}", diagnostics::chain(&error)));
             std::process::ExitCode::FAILURE
         }
     }
@@ -265,7 +248,7 @@ enum ForgeServiceError {
     Restart(#[from] service::RestartError),
 }
 
-fn run(cli: Cli) -> Result<(), AeError> {
+fn run(cli: Cli) -> Result<std::process::ExitCode, AeError> {
     let apps = |apps: Vec<AppArg>| -> Vec<App> { apps.into_iter().map(App::from).collect() };
     let forge_command = matches!(
         cli.command,
@@ -297,7 +280,7 @@ fn run(cli: Cli) -> Result<(), AeError> {
         }
         return Ok(wsl::forward(&distro)?);
     }
-    match cli.command {
+    let ran: Result<(), AeError> = match cli.command {
         Command::Install(args) => Ok(install::install(&args)?),
         Command::Update { yes } => Ok(install::update(yes)?),
         Command::Uninstall {
@@ -318,7 +301,8 @@ fn run(cli: Cli) -> Result<(), AeError> {
         },
         Command::Account(args) => Ok(account::run(&args)?),
         Command::Engine { command } => Ok(engine::run(command)?),
-    }
+    };
+    ran.map(|()| std::process::ExitCode::SUCCESS)
 }
 
 fn forge_service(command: &ForgeCommand) -> Result<(), ForgeServiceError> {

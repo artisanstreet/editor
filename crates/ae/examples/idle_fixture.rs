@@ -1,8 +1,3 @@
-#![expect(
-    clippy::print_stdout,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
-
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, ProjectId, Run,
     RunId, RunOutcome, RunState, Status, ThreadId, Usage,
@@ -10,10 +5,13 @@ use artisan_api::{
 };
 use forge_store::NewItem;
 use serde_json::json;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 enum FixtureError {
+    #[error("print the fixture metadata")]
+    Announce(#[source] std::io::Error),
     #[error("provide a new fixture directory")]
     NoDirectory,
     #[error("fixture directory {} must be absolute", path.display())]
@@ -206,7 +204,7 @@ async fn main() -> Result<(), FixtureError> {
         "fixture_pid": std::process::id()
     });
     write(&root.join("fixture.json"), &to_json(&metadata))?;
-    println!("{metadata}");
+    writeln!(std::io::stdout(), "{metadata}").map_err(FixtureError::Announce)?;
     server.run().await;
     Ok(())
 }

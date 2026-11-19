@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
-pub struct AccountArgs {
+pub(crate) struct AccountArgs {
     #[arg(
         long,
         help = "Core base URL (else `AST_CORE_BASE_URL`, else production default)"
@@ -20,7 +20,7 @@ pub struct AccountArgs {
 }
 
 #[derive(Subcommand)]
-pub enum AccountCommand {
+pub(crate) enum AccountCommand {
     #[command(about = "Start an enrollment: prints a code to claim in a signed-in session")]
     Enroll {
         #[arg(long, help = "Human label for this machine (default: hostname)")]
@@ -107,7 +107,7 @@ enum Account {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AccountFileError {
+pub(crate) enum AccountFileError {
     #[error("read {}", path.display())]
     Read {
         path: PathBuf,
@@ -208,7 +208,7 @@ impl Account {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AccountError {
+pub(crate) enum AccountError {
     #[error(transparent)]
     Enroll(#[from] EnrollError),
     #[error(transparent)]
@@ -220,7 +220,7 @@ pub enum AccountError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum EnrollError {
+pub(crate) enum EnrollError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error(transparent)]
@@ -246,7 +246,7 @@ pub enum EnrollError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StatusError {
+pub(crate) enum StatusError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error(transparent)]
@@ -266,7 +266,7 @@ pub enum StatusError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConfirmError {
+pub(crate) enum ConfirmError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error(transparent)]
@@ -305,7 +305,7 @@ pub enum ConfirmError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AccountMismatch {
+pub(crate) enum AccountMismatch {
     #[error("--account-id must not be blank")]
     Blank,
     #[error("account mismatch: expected {expected}, found {actual}; refusing to confirm")]
@@ -315,7 +315,7 @@ pub enum AccountMismatch {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SyncError {
+pub(crate) enum SyncError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("read this machine's identity")]
@@ -428,7 +428,7 @@ fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient, BuildCoreC
     forge_http::core::CoreClient::new(&forge_http::core::core_base_url(core))
 }
 
-pub fn run(args: &AccountArgs) -> Result<(), AccountError> {
+pub(crate) fn run(args: &AccountArgs) -> Result<(), AccountError> {
     match &args.command {
         AccountCommand::Enroll {
             label,
@@ -518,14 +518,16 @@ fn enroll(
         crate::service::restart().map_err(EnrollError::Restart)?;
     }
     if json {
-        println!("{}", enroll_report(&created));
+        crate::ui::print(format_args!("{}", enroll_report(&created)));
         return Ok(());
     }
-    println!(
+    crate::ui::print(format_args!(
         "Claim this code in a signed-in session: {} (expires {})",
         created.code, created.expires_at
-    );
-    println!("Then run `ae account status`, and `ae account confirm`.");
+    ));
+    crate::ui::print(format_args!(
+        "Then run `ae account status`, and `ae account confirm`."
+    ));
     Ok(())
 }
 
@@ -546,15 +548,20 @@ fn status(core: Option<&str>, json: bool) -> Result<(), StatusError> {
             ..
         } => {
             if json {
-                println!("{}", enrolled_report(&machine_id, Some(&account_id)));
+                crate::ui::print(format_args!(
+                    "{}",
+                    enrolled_report(&machine_id, Some(&account_id))
+                ));
             } else {
-                println!("Enrolled: machine {machine_id} in account {account_id}.");
+                crate::ui::print(format_args!(
+                    "Enrolled: machine {machine_id} in account {account_id}."
+                ));
             }
             return Ok(());
         }
         Account::Unkeyed | Account::Keyed { .. } => {
             if json {
-                println!("{}", no_enrollment_report());
+                crate::ui::print(format_args!("{}", no_enrollment_report()));
                 return Ok(());
             }
             return Err(StatusError::NotStarted);
@@ -570,22 +577,24 @@ fn status(core: Option<&str>, json: bool) -> Result<(), StatusError> {
             source,
         })?;
     if json {
-        println!("{}", pending_report(&enrollment_id, &status));
+        crate::ui::print(format_args!("{}", pending_report(&enrollment_id, &status)));
         return Ok(());
     }
-    println!("Enrollment status: {}", status.status);
+    crate::ui::print(format_args!("Enrollment status: {}", status.status));
     match (status.account_id, status.email) {
         (Some(account_id), email) => {
-            println!("Claimed by account: {account_id}");
+            crate::ui::print(format_args!("Claimed by account: {account_id}"));
             if let Some(email) = email {
-                println!("Verified email: {email}");
+                crate::ui::print(format_args!("Verified email: {email}"));
             }
             if let Some(display_name) = status.display_name {
-                println!("Display name: {display_name}");
+                crate::ui::print(format_args!("Display name: {display_name}"));
             }
-            println!("If that identity is correct, run `ae account confirm`.");
+            crate::ui::print(format_args!(
+                "If that identity is correct, run `ae account confirm`."
+            ));
         }
-        (None, _) => println!("Not claimed yet; claim the code first."),
+        (None, _) => crate::ui::print(format_args!("Not claimed yet; claim the code first.")),
     }
     Ok(())
 }
@@ -603,7 +612,7 @@ fn confirm(
             ..
         } => {
             check_expected_account(expected_account, Some(&account_id))?;
-            println!("Already enrolled as {machine_id}.");
+            crate::ui::print(format_args!("Already enrolled as {machine_id}."));
             return Ok(());
         }
         Account::Unkeyed | Account::Keyed { .. } => return Err(ConfirmError::NotStarted),
@@ -619,12 +628,12 @@ fn confirm(
         })?;
     let account_id = status.account_id.clone().ok_or(ConfirmError::Unclaimed)?;
     check_expected_account(expected_account, Some(&account_id))?;
-    println!("Enrollment claimed by account: {account_id}");
+    crate::ui::print(format_args!("Enrollment claimed by account: {account_id}"));
     if let Some(email) = status.email.as_deref() {
-        println!("Verified email: {email}");
+        crate::ui::print(format_args!("Verified email: {email}"));
     }
     if let Some(display_name) = status.display_name.as_deref() {
-        println!("Display name: {display_name}");
+        crate::ui::print(format_args!("Display name: {display_name}"));
     }
     let approved = if yes {
         true
@@ -634,7 +643,7 @@ fn confirm(
         ask(&account_id)?
     };
     if !approved {
-        println!("Not confirmed.");
+        crate::ui::print(format_args!("Not confirmed."));
         return Ok(());
     }
     let confirmed = runtime
@@ -783,7 +792,10 @@ fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
             }
         }
         forge_http::sync::ConfigOutcome::Current(state) => {
-            println!("Config is current (version {}).", state.version);
+            crate::ui::print(format_args!(
+                "Config is current (version {}).",
+                state.version
+            ));
         }
     }
     Ok(())

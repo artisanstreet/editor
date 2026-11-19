@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub const UNIT: &str = "artisan-forge.service";
+pub(crate) const UNIT: &str = "artisan-forge.service";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Artisan Forge";
 const STOP_FILE: &str = "forge.stop";
@@ -16,7 +16,7 @@ const FORCE_DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
-pub enum AddressError {
+pub(crate) enum AddressError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("read where Forge listens from {}", data.display())]
@@ -28,7 +28,7 @@ pub enum AddressError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UnitError {
+pub(crate) enum UnitError {
     #[error("find the systemd user folder")]
     Config(#[source] EnvPathError),
     #[error(transparent)]
@@ -42,7 +42,7 @@ pub enum UnitError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AutostartError {
+pub(crate) enum AutostartError {
     #[error(transparent)]
     Unit(#[from] UnitError),
     #[error(transparent)]
@@ -56,7 +56,7 @@ pub enum AutostartError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum OperationLockError {
+pub(crate) enum OperationLockError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("lock Forge service operations with {}", path.display())]
@@ -68,7 +68,7 @@ pub enum OperationLockError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum NotReadyError {
+pub(crate) enum NotReadyError {
     #[error("Forge (pid {pid}) exited while starting{log}")]
     Exited { pid: u32, log: String },
     #[error("Forge (pid {pid}) made no progress starting for {}{log}", crate::ui::count(STALL_DEADLINE.as_secs(), "second", "seconds"))]
@@ -76,7 +76,7 @@ pub enum NotReadyError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StartError {
+pub(crate) enum StartError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
     #[error(transparent)]
@@ -114,7 +114,7 @@ pub enum StartError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StopError {
+pub(crate) enum StopError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
     #[error(transparent)]
@@ -148,7 +148,7 @@ pub enum StopError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RestartError {
+pub(crate) enum RestartError {
     #[error(transparent)]
     Lock(#[from] OperationLockError),
     #[error("restart Forge's service")]
@@ -165,16 +165,16 @@ fn data() -> Result<PathBuf, LocateError> {
     paths::data(App::Forge)
 }
 
-pub fn address() -> Result<SocketAddr, AddressError> {
+pub(crate) fn address() -> Result<SocketAddr, AddressError> {
     let data = data()?;
     forge_http::configured_listen(&data).map_err(|source| AddressError::Read { data, source })
 }
 
-pub fn log_file() -> Result<PathBuf, LocateError> {
+pub(crate) fn log_file() -> Result<PathBuf, LocateError> {
     Ok(data()?.join("forge.log"))
 }
 
-pub fn log_hint() -> Result<String, LocateError> {
+pub(crate) fn log_hint() -> Result<String, LocateError> {
     if uses_systemd() {
         Ok(format!("journalctl --user -u {UNIT}"))
     } else {
@@ -182,7 +182,7 @@ pub fn log_hint() -> Result<String, LocateError> {
     }
 }
 
-pub fn unit_path() -> Result<PathBuf, EnvPathError> {
+pub(crate) fn unit_path() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::xdg_config()?.join("systemd/user").join(UNIT))
 }
 
@@ -271,7 +271,7 @@ fn write_unit(mode: StopMode) -> Result<(), AutostartError> {
     sys::write(&unit, &this_unit(mode)?).map_err(AutostartError::Write)
 }
 
-pub fn prepare_bootstrap_stop() -> Result<(), AutostartError> {
+pub(crate) fn prepare_bootstrap_stop() -> Result<(), AutostartError> {
     if uses_systemd() {
         write_unit(StopMode::ProcessGroup)?;
         sys::run("systemctl", &["--user", "daemon-reload"])?;
@@ -283,7 +283,7 @@ fn run_command(forge: &Path) -> String {
     format!("\"{}\"", forge.display())
 }
 
-pub fn enable_autostart() -> Result<&'static str, AutostartError> {
+pub(crate) fn enable_autostart() -> Result<&'static str, AutostartError> {
     let forge = paths::binary(App::Forge)?;
     if systemd_available() {
         write_unit(StopMode::Gateway)?;
@@ -311,7 +311,7 @@ pub fn enable_autostart() -> Result<&'static str, AutostartError> {
     }
 }
 
-pub fn disable_autostart() -> Result<(), AutostartError> {
+pub(crate) fn disable_autostart() -> Result<(), AutostartError> {
     if unit_is_ours()? {
         let manager = systemd_available();
         if manager {
@@ -364,7 +364,7 @@ fn operation_lock() -> Result<std::fs::File, OperationLockError> {
     Ok(file)
 }
 
-pub fn start() -> Result<Option<u32>, StartError> {
+pub(crate) fn start() -> Result<Option<u32>, StartError> {
     let _operation = operation_lock()?;
     start_unlocked()
 }
@@ -526,7 +526,7 @@ fn recent_log() -> String {
     }
 }
 
-pub fn stop() -> Result<bool, StopError> {
+pub(crate) fn stop() -> Result<bool, StopError> {
     let _operation = operation_lock()?;
     stop_unlocked()
 }
@@ -579,7 +579,7 @@ fn wait_stopped(pid: u32, data: &Path, deadline: Duration) -> bool {
     }
 }
 
-pub fn restart() -> Result<Option<u32>, RestartError> {
+pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
     let _operation = operation_lock()?;
     if uses_systemd() {
         sys::run("systemctl", &["--user", "restart", UNIT]).map_err(RestartError::Systemctl)?;
@@ -592,7 +592,7 @@ pub fn restart() -> Result<Option<u32>, RestartError> {
     Ok(start_unlocked()?)
 }
 
-pub fn is_running() -> bool {
+pub(crate) fn is_running() -> bool {
     if uses_systemd() {
         systemd_active()
     } else {
@@ -608,7 +608,7 @@ fn recorded_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-pub fn running_pid() -> Option<u32> {
+pub(crate) fn running_pid() -> Option<u32> {
     let pid = recorded_pid(&pid_file().ok()?)?;
     let process = crate::platform::running(pid)?;
     #[cfg(unix)]
@@ -632,7 +632,7 @@ fn process_exists(pid: u32) -> bool {
     crate::platform::running(pid).is_some()
 }
 
-pub fn listening(address: SocketAddr) -> bool {
+pub(crate) fn listening(address: SocketAddr) -> bool {
     let address = if address.ip().is_unspecified() {
         SocketAddr::from(([127, 0, 0, 1], address.port()))
     } else {

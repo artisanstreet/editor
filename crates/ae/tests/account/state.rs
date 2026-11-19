@@ -94,10 +94,10 @@ fn labels_fall_back_to_a_bounded_hostname() {
 
 #[test]
 fn expected_account_gate_rejects_mismatch_before_rpc() {
-    assert!(check_expected_account(None, None).is_ok());
-    assert!(check_expected_account(None, Some("acct_a")).is_ok());
-    assert!(check_expected_account(Some("acct_a"), Some("acct_a")).is_ok());
-    assert!(check_expected_account(Some(" acct_a "), Some("acct_a")).is_ok());
+    check_expected_account(None, None).unwrap();
+    check_expected_account(None, Some("acct_a")).unwrap();
+    check_expected_account(Some("acct_a"), Some("acct_a")).unwrap();
+    check_expected_account(Some(" acct_a "), Some("acct_a")).unwrap();
     assert!(check_expected_account(Some("acct_a"), Some("acct_b")).is_err());
     assert!(check_expected_account(Some("acct_a"), None).is_err());
     assert!(check_expected_account(Some(""), Some("acct_a")).is_err());

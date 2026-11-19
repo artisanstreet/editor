@@ -12,7 +12,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast::error::RecvError;
 
 #[derive(Debug, thiserror::Error)]
-pub enum EngineError {
+pub(crate) enum EngineError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("Forge isn't installed here; run `ae install`")]
@@ -46,7 +46,7 @@ pub enum EngineError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CaptureError {
+pub(crate) enum CaptureError {
     #[error("sign in to claude.ai in a browser")]
     Browser(#[source] SignInError),
     #[error("ask Windows where its apps live")]
@@ -70,7 +70,7 @@ pub enum CaptureError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LoginError {
+pub(crate) enum LoginError {
     #[error(transparent)]
     NotInstalled(#[from] NotInstalled),
     #[error("the sign-in to {} stopped reporting", engine.display_name())]
@@ -92,7 +92,7 @@ pub enum LoginError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum IntoWslError {
+pub(crate) enum IntoWslError {
     #[error("start the async runtime")]
     Runtime(#[source] std::io::Error),
     #[error("sign in to claude.ai in a browser")]
@@ -111,7 +111,7 @@ pub enum IntoWslError {
     },
 }
 
-pub fn run(command: EngineCommand) -> Result<(), EngineError> {
+pub(crate) fn run(command: EngineCommand) -> Result<(), EngineError> {
     let data = paths::data(App::Forge)?;
     if !paths::binary(App::Forge)?.is_file() && !data.exists() {
         return Err(EngineError::ForgeNotInstalled);
@@ -140,7 +140,7 @@ pub fn run(command: EngineCommand) -> Result<(), EngineError> {
                 ..
             } => {
                 let session = capture_in_browser().await?;
-                println!("{}", session_json(&session));
+                ui::print(format_args!("{}", session_json(&session)));
                 Ok(())
             }
             EngineCommand::Login {
@@ -279,7 +279,7 @@ async fn capture_through_windows() -> Result<artisan_api::ClaudeAiSession, Captu
         .output()
         .await
         .map_err(CaptureError::Wslpath)?;
-    let ae = std::path::PathBuf::from(String::from_utf8_lossy(&converted.stdout).trim())
+    let ae = PathBuf::from(String::from_utf8_lossy(&converted.stdout).trim())
         .join("Artisan Street")
         .join("ae")
         .join("ae.exe");
@@ -304,7 +304,7 @@ async fn capture_through_windows() -> Result<artisan_api::ClaudeAiSession, Captu
     serde_json::from_slice(&output.stdout).map_err(CaptureError::NoSession)
 }
 
-pub fn claude_ai_into_wsl(distro: &str) -> Result<(), IntoWslError> {
+pub(crate) fn claude_ai_into_wsl(distro: &str) -> Result<std::process::ExitCode, IntoWslError> {
     let runtime = tokio::runtime::Runtime::new().map_err(IntoWslError::Runtime)?;
     ui::intro("Sign in to claude.ai");
     let session = runtime
@@ -340,7 +340,7 @@ pub fn claude_ai_into_wsl(distro: &str) -> Result<(), IntoWslError> {
         distro: distro.to_owned(),
         source,
     })?;
-    std::process::exit(status.code().unwrap_or(1));
+    Ok(crate::wsl::exit_code(status))
 }
 
 fn claude_ai_line(state: &ClaudeAiState) -> String {
@@ -383,7 +383,7 @@ async fn list(engines: &Engines, json: bool) -> Result<(), EngineError> {
                 })
             })
             .collect();
-        println!("{}", serde_json::Value::Array(list));
+        ui::print(format_args!("{}", serde_json::Value::Array(list)));
         return Ok(());
     }
     let rows: Vec<Vec<String>> = statuses
@@ -396,7 +396,10 @@ async fn list(engines: &Engines, json: bool) -> Result<(), EngineError> {
             ]
         })
         .collect();
-    println!("{}", ui::table(&["ENGINE", "VERSION", "ACCOUNT"], &rows));
+    ui::print(format_args!(
+        "{}",
+        ui::table(&["ENGINE", "VERSION", "ACCOUNT"], &rows)
+    ));
     if let Some(state) = statuses.iter().find_map(|status| status.claude_ai.as_ref()) {
         ui::note("claude.ai mode", claude_ai_line(state));
     }
@@ -591,10 +594,11 @@ fn open_browser(link: &str) {
         command.arg(link);
         command
     };
-    crate::sys::spawn_detached(
+    if let Err(error) = crate::sys::spawn_detached(
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
-    )
-    .ok();
+    ) {
+        tracing::warn!("open {link} in the browser: {}", diagnostics::chain(&error));
+    }
 }

@@ -1,7 +1,3 @@
-#![allow(
-    clippy::unused_result_ok,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
 #![cfg(unix)]
 
 use artisan_api::PairRequest;
@@ -110,7 +106,7 @@ fn publish(dir: &Path, key: &SigningKey, version: &str) -> Vec<u8> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut hex, byte| {
-        write!(hex, "{byte:02x}").ok();
+        write!(hex, "{byte:02x}").expect("invariant: writing to a String cannot fail");
         hex
     })
 }

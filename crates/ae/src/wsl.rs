@@ -9,7 +9,7 @@ const LIST_DEADLINE: Duration = Duration::from_secs(20);
 const PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
-pub enum DistrosError {
+pub(crate) enum DistrosError {
     #[error("list WSL distributions")]
     Run(#[source] BoundedRunError),
     #[error("wsl.exe --list failed ({status})")]
@@ -17,7 +17,7 @@ pub enum DistrosError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StatusInError {
+pub(crate) enum StatusInError {
     #[error("run `ae status --json` in {distro}")]
     Run {
         distro: String,
@@ -39,7 +39,7 @@ pub enum StatusInError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ForgeTargetError {
+pub(crate) enum ForgeTargetError {
     #[error("--distro only applies on Windows")]
     DistroOffWindows,
     #[error(transparent)]
@@ -54,13 +54,13 @@ pub enum ForgeTargetError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("run ae in {distro} (WSL)")]
-pub struct ForwardError {
+pub(crate) struct ForwardError {
     distro: String,
     #[source]
     source: std::io::Error,
 }
 
-pub fn distros() -> Result<Vec<String>, DistrosError> {
+pub(crate) fn distros() -> Result<Vec<String>, DistrosError> {
     let output = sys::output_within(
         Command::new("wsl.exe").args(["--list", "--quiet"]),
         LIST_DEADLINE,
@@ -88,7 +88,7 @@ pub fn distros() -> Result<Vec<String>, DistrosError> {
         .collect())
 }
 
-pub fn ae(distro: &str) -> Command {
+pub(crate) fn ae(distro: &str) -> Command {
     let mut command = Command::new("wsl.exe");
     command.args([
         "-d",
@@ -102,22 +102,20 @@ pub fn ae(distro: &str) -> Command {
     command
 }
 
-pub struct Probe {
+pub(crate) struct Probe {
     pub distro: String,
-    pub report: Result<serde_json::Value, StatusInError>,
+    pub report: Result<crate::status::Report, StatusInError>,
 }
 
 impl Probe {
-    pub fn has_forge(&self) -> bool {
-        self.report.as_ref().is_ok_and(|report| {
-            report["apps"]
-                .as_array()
-                .is_some_and(|apps| apps.iter().any(|app| app["app"] == App::Forge.id()))
-        })
+    pub(crate) fn has_forge(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_ok_and(|report| report.has(App::Forge))
     }
 }
 
-fn status_in(distro: &str) -> Result<serde_json::Value, StatusInError> {
+fn status_in(distro: &str) -> Result<crate::status::Report, StatusInError> {
     let output = sys::output_within(ae(distro).args(["status", "--json"]), PROBE_DEADLINE)
         .map_err(|source| StatusInError::Run {
             distro: distro.to_owned(),
@@ -136,7 +134,7 @@ fn status_in(distro: &str) -> Result<serde_json::Value, StatusInError> {
     })
 }
 
-pub fn probe_all() -> Result<Vec<Probe>, DistrosError> {
+pub(crate) fn probe_all() -> Result<Vec<Probe>, DistrosError> {
     Ok(distros()?
         .into_iter()
         .map(|distro| {
@@ -146,7 +144,7 @@ pub fn probe_all() -> Result<Vec<Probe>, DistrosError> {
         .collect())
 }
 
-pub fn distros_with_forge() -> Result<Vec<String>, DistrosError> {
+pub(crate) fn distros_with_forge() -> Result<Vec<String>, DistrosError> {
     let mut found = Vec::new();
     for probe in probe_all()? {
         match &probe.report {
@@ -162,7 +160,7 @@ pub fn distros_with_forge() -> Result<Vec<String>, DistrosError> {
     Ok(found)
 }
 
-pub fn forge_target(distro: Option<&str>) -> Result<Option<String>, ForgeTargetError> {
+pub(crate) fn forge_target(distro: Option<&str>) -> Result<Option<String>, ForgeTargetError> {
     if let Some(distro) = distro {
         if !cfg!(windows) {
             return Err(ForgeTargetError::DistroOffWindows);
@@ -194,7 +192,17 @@ pub fn forge_target(distro: Option<&str>) -> Result<Option<String>, ForgeTargetE
     }
 }
 
-pub fn forward(distro: &str) -> Result<(), ForwardError> {
+pub(crate) fn exit_code(status: ExitStatus) -> std::process::ExitCode {
+    status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .map_or(
+            std::process::ExitCode::FAILURE,
+            std::process::ExitCode::from,
+        )
+}
+
+pub(crate) fn forward(distro: &str) -> Result<std::process::ExitCode, ForwardError> {
     let mut args = Vec::new();
     let mut skip = false;
     for arg in std::env::args_os().skip(1) {
@@ -214,5 +222,5 @@ pub fn forward(distro: &str) -> Result<(), ForwardError> {
             distro: distro.to_owned(),
             source,
         })?;
-    std::process::exit(status.code().unwrap_or(1));
+    Ok(exit_code(status))
 }

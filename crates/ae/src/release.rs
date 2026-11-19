@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const DEFAULT_FEED: &str =
+pub(crate) const DEFAULT_FEED: &str =
     "https://github.com/artisanstreet/editor/releases/latest/download/release.json";
-pub const NIGHTLY_FEED: &str =
+pub(crate) const NIGHTLY_FEED: &str =
     "https://github.com/artisanstreet/editor/releases/download/nightly/release.json";
 const MANIFEST: &str = "release.json";
 const RELEASES: &str = "https://github.com/artisanstreet/editor/releases/";
@@ -20,13 +20,13 @@ const PUBLIC_KEY_HEX: &str = match option_env!("ARTISAN_RELEASE_PUBLIC_KEY_HEX")
 };
 
 #[derive(Debug, Deserialize)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     version: String,
     artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Artifact {
+pub(crate) struct Artifact {
     app: String,
     os: String,
     arch: String,
@@ -34,14 +34,14 @@ pub struct Artifact {
     sha256: String,
 }
 
-pub fn feed_for(version: &str) -> &'static str {
+pub(crate) fn feed_for(version: &str) -> &'static str {
     match semver::Version::parse(version) {
         Ok(version) if version.pre.as_str().starts_with("nightly") => NIGHTLY_FEED,
         _ => DEFAULT_FEED,
     }
 }
 
-pub fn carrier(os: &str) -> App {
+pub(crate) fn carrier(os: &str) -> App {
     if os == "windows" {
         App::Editor
     } else {
@@ -50,7 +50,7 @@ pub fn carrier(os: &str) -> App {
 }
 
 #[derive(Clone, Debug)]
-pub enum Source {
+pub(crate) enum Source {
     Bundled,
     Url(String),
     Pinned(semver::Version),
@@ -86,7 +86,7 @@ fn pins(pin: &semver::Version, version: &str) -> bool {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SourceError {
+pub(crate) enum SourceError {
     #[error("pass either --from or --version")]
     Both,
     #[error("resolve {value}")]
@@ -104,7 +104,7 @@ pub enum SourceError {
 }
 
 impl Source {
-    pub fn new(
+    pub(crate) fn new(
         from: Option<&str>,
         version: Option<&str>,
         bundled: bool,
@@ -137,7 +137,7 @@ impl Source {
         })
     }
 
-    pub fn argument(&self) -> String {
+    pub(crate) fn argument(&self) -> String {
         match self {
             Self::Bundled => "this installer".to_owned(),
             Self::Url(url) => url.clone(),
@@ -146,7 +146,7 @@ impl Source {
         }
     }
 
-    pub fn update_feed(&self) -> Option<&str> {
+    pub(crate) fn update_feed(&self) -> Option<&str> {
         match self {
             Self::Url(url)
                 if url
@@ -187,13 +187,13 @@ impl Source {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Carried {
+pub(crate) struct Carried {
     pub editor: Option<PathBuf>,
     pub linux_ae: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Limits {
+pub(crate) struct Limits {
     pub connect: Duration,
     pub idle: Duration,
     pub metadata: Duration,
@@ -202,7 +202,7 @@ pub struct Limits {
     pub artifact_bytes: u64,
 }
 
-pub const LIMITS: Limits = Limits {
+pub(crate) const LIMITS: Limits = Limits {
     connect: Duration::from_secs(15),
     idle: Duration::from_secs(30),
     metadata: Duration::from_secs(60),
@@ -212,7 +212,7 @@ pub const LIMITS: Limits = Limits {
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum DownloadError {
+pub(crate) enum DownloadError {
     #[error("start the HTTP client")]
     Client(#[source] reqwest::Error),
     #[error("download {location}")]
@@ -234,7 +234,7 @@ pub enum DownloadError {
     },
 }
 
-pub fn http_client(limits: &Limits) -> Result<reqwest::Client, DownloadError> {
+pub(crate) fn http_client(limits: &Limits) -> Result<reqwest::Client, DownloadError> {
     reqwest::Client::builder()
         .user_agent(concat!("ae/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(limits.connect)
@@ -290,7 +290,7 @@ async fn download(
     }
 }
 
-pub async fn fetch_metadata(
+pub(crate) async fn fetch_metadata(
     http: &reqwest::Client,
     location: &str,
     limits: &Limits,
@@ -310,7 +310,7 @@ pub async fn fetch_metadata(
     Ok(bytes)
 }
 
-pub async fn fetch_artifact(
+pub(crate) async fn fetch_artifact(
     http: &reqwest::Client,
     location: &str,
     limits: &Limits,
@@ -346,7 +346,7 @@ pub async fn fetch_artifact(
     Ok((file, hex::encode(hasher.finalize())))
 }
 
-pub struct Feed {
+pub(crate) struct Feed {
     manifest: Manifest,
     source: Source,
     assets: Source,
@@ -354,14 +354,14 @@ pub struct Feed {
     limits: Limits,
 }
 
-pub enum Release {
+pub(crate) enum Release {
     Feed(Feed),
     Local { dir: PathBuf },
     Bundled(Carried),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ResolveError {
+pub(crate) enum ResolveError {
     #[error("read Artisan's release key")]
     Key(#[source] ReleaseKeyError),
     #[error("{} is neither a release nor a local build", dir.display())]
@@ -399,7 +399,7 @@ pub enum ResolveError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FetchError {
+pub(crate) enum FetchError {
     #[error("this installer carries no {name}")]
     Bundled { name: String },
     #[error("read {location}")]
@@ -413,7 +413,7 @@ pub enum FetchError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReleaseKeyError {
+pub(crate) enum ReleaseKeyError {
     #[error("the release public key isn't hex")]
     Hex(#[source] hex::FromHexError),
     #[error("the release key is not 32 bytes but {length}")]
@@ -423,7 +423,7 @@ pub enum ReleaseKeyError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SignatureError {
+pub(crate) enum SignatureError {
     #[error("decode release.json.sig")]
     Decode(#[source] base64::DecodeError),
     #[error("read release.json.sig")]
@@ -433,7 +433,7 @@ pub enum SignatureError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FetchCarrierError {
+pub(crate) enum FetchCarrierError {
     #[error("release {version} has no installer for {os} {arch}")]
     NoInstaller {
         version: String,
@@ -468,14 +468,14 @@ pub enum FetchCarrierError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("make {} runnable", path.display())]
-pub struct MakeRunnableError {
+pub(crate) struct MakeRunnableError {
     path: PathBuf,
     #[source]
     source: std::io::Error,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReleaseVersionError {
+pub(crate) enum ReleaseVersionError {
     #[error("read {}", path.display())]
     Read {
         path: PathBuf,
@@ -487,7 +487,7 @@ pub enum ReleaseVersionError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UnpackError {
+pub(crate) enum UnpackError {
     #[error("create {}", path.display())]
     CreateDir {
         path: PathBuf,
@@ -519,7 +519,7 @@ pub enum UnpackError {
     NotCarried { app: App, os: String },
 }
 
-pub async fn resolve(
+pub(crate) async fn resolve(
     source: &Source,
     carried: Carried,
     limits: Limits,
@@ -633,15 +633,15 @@ fn verify_signature(
 }
 
 impl Feed {
-    pub fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         &self.manifest.version
     }
 
-    pub fn update_feed(&self) -> Option<&str> {
+    pub(crate) fn update_feed(&self) -> Option<&str> {
         self.source.update_feed()
     }
 
-    pub fn carries(&self, os: &str) -> bool {
+    pub(crate) fn carries(&self, os: &str) -> bool {
         self.artifact(os).is_some()
     }
 
@@ -652,7 +652,7 @@ impl Feed {
         })
     }
 
-    pub async fn fetch_carrier(
+    pub(crate) async fn fetch_carrier(
         &self,
         os: &str,
         folder: &Path,
@@ -771,7 +771,13 @@ fn copy_artifact(
         reason = "only Unix marks a file runnable"
     )
 )]
-fn make_runnable(path: &Path) -> Result<(), MakeRunnableError> {
+fn make_runnable(
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "only Unix marks a file runnable")
+    )]
+    path: &Path,
+) -> Result<(), MakeRunnableError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -782,13 +788,11 @@ fn make_runnable(path: &Path) -> Result<(), MakeRunnableError> {
             },
         )?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
 impl Release {
-    pub fn version(&self, os: &str) -> Result<String, ReleaseVersionError> {
+    pub(crate) fn version(&self, os: &str) -> Result<String, ReleaseVersionError> {
         match self {
             Self::Feed(feed) => Ok(feed.manifest.version.clone()),
             Self::Bundled(_) => Ok(env!("CARGO_PKG_VERSION").to_owned()),
@@ -809,11 +813,11 @@ impl Release {
         }
     }
 
-    pub const fn is_local(&self) -> bool {
+    pub(crate) const fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })
     }
 
-    pub fn has(&self, app: App, os: &str) -> bool {
+    pub(crate) fn has(&self, app: App, os: &str) -> bool {
         let here = os == std::env::consts::OS;
         let into_wsl = cfg!(windows) && os == "linux";
         match self {
@@ -834,7 +838,7 @@ impl Release {
         }
     }
 
-    pub fn unpack(&self, app: App, os: &str, dest: &Path) -> Result<(), UnpackError> {
+    pub(crate) fn unpack(&self, app: App, os: &str, dest: &Path) -> Result<(), UnpackError> {
         let binary = app.binary_name_on(os);
         let here = os == std::env::consts::OS;
         std::fs::create_dir_all(dest).map_err(|source| UnpackError::CreateDir {
@@ -880,7 +884,7 @@ impl Release {
     }
 }
 
-pub fn usable_name(name: &str) -> bool {
+pub(crate) fn usable_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && !name.starts_with('.')
@@ -889,7 +893,7 @@ pub fn usable_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b".-_+".contains(&byte))
 }
 
-pub fn newer(candidate: &str, installed: &str) -> bool {
+pub(crate) fn newer(candidate: &str, installed: &str) -> bool {
     match (
         semver::Version::parse(candidate),
         semver::Version::parse(installed),

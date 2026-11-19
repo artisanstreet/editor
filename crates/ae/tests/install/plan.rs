@@ -23,8 +23,8 @@ fn every_place_survives_being_handed_to_another_installer() {
 
 #[test]
 fn a_place_an_app_cannot_go_is_refused_instead_of_skipped() {
-    assert!(EditorPlace::parse("wsl:Ubuntu").is_err());
-    assert!(ForgePlace::parse("windows").is_err());
+    EditorPlace::parse("wsl:Ubuntu").unwrap_err();
+    ForgePlace::parse("windows").unwrap_err();
 }
 
 #[test]

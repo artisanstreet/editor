@@ -12,7 +12,7 @@ const EDITOR: &[App] = &[App::Editor];
 const EVERY_APP: &[App] = &[App::Ae, App::Forge, App::Editor];
 
 #[derive(Debug, thiserror::Error)]
-pub enum MigrateError {
+pub(crate) enum MigrateError {
     #[error("find where the earlier install kept its files")]
     Locate(#[source] io::Error),
     #[error("check what the earlier install left in {}", path.display())]
@@ -91,7 +91,7 @@ pub enum MigrateError {
     },
 }
 
-pub fn migrate(selected: &[App]) -> Result<(), MigrateError> {
+pub(crate) fn migrate(selected: &[App]) -> Result<(), MigrateError> {
     let done: Vec<App> = App::ALL
         .into_iter()
         .filter(|app| selected.contains(app) || install::installed(*app).is_some())

@@ -11,7 +11,7 @@ const PROTOCOL_KEY: &str = r"HKCU:\Software\Classes\artisan";
 const KEEP_OTHER_ENTRIES: &str = r"$_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\')";
 
 #[derive(Debug, thiserror::Error)]
-pub enum AddToPathError {
+pub(crate) enum AddToPathError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("add ae's folder to the user Path")]
@@ -20,6 +20,12 @@ pub enum AddToPathError {
     Home(#[source] EnvPathError),
     #[error("create {}", path.display())]
     CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the old {}", path.display())]
+    Replace {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -34,7 +40,7 @@ pub enum AddToPathError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveFromPathError {
+pub(crate) enum RemoveFromPathError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("drop ae's folder from the user Path")]
@@ -46,7 +52,7 @@ pub enum RemoveFromPathError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum IntegrateEditorError {
+pub(crate) enum IntegrateEditorError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("APPDATA is not set")]
@@ -60,7 +66,7 @@ pub enum IntegrateEditorError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveEditorIntegrationError {
+pub(crate) enum RemoveEditorIntegrationError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("APPDATA is not set")]
@@ -74,7 +80,7 @@ pub enum RemoveEditorIntegrationError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RegisterUninstallError {
+pub(crate) enum RegisterUninstallError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("add {} to Settings → Apps", app.display_name())]
@@ -86,14 +92,14 @@ pub enum RegisterUninstallError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LaunchEditorError {
+pub(crate) enum LaunchEditorError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error(transparent)]
     Spawn(#[from] SpawnError),
 }
 
-pub fn add_to_path() -> Result<Option<String>, AddToPathError> {
+pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
     if cfg!(windows) {
         let dir = ps_quote(&paths::dir(App::Ae)?);
         sys::powershell(&format!(
@@ -114,7 +120,11 @@ pub fn add_to_path() -> Result<Option<String>, AddToPathError> {
                 source,
             })?;
         }
-        std::fs::remove_file(&link).ok();
+        if let Err(source) = std::fs::remove_file(&link)
+            && source.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(AddToPathError::Replace { path: link, source });
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(paths::binary(App::Ae)?, &link).map_err(|source| {
             AddToPathError::Link {
@@ -132,7 +142,7 @@ pub fn add_to_path() -> Result<Option<String>, AddToPathError> {
     }
 }
 
-pub fn foreign_ae() -> Option<PathBuf> {
+pub(crate) fn foreign_ae() -> Option<PathBuf> {
     if cfg!(windows) {
         return None;
     }
@@ -142,7 +152,7 @@ pub fn foreign_ae() -> Option<PathBuf> {
         .then_some(link)
 }
 
-pub fn remove_from_path() -> Result<(), RemoveFromPathError> {
+pub(crate) fn remove_from_path() -> Result<(), RemoveFromPathError> {
     if cfg!(windows) {
         remove_path_entry(&paths::dir(App::Ae)?).map_err(RemoveFromPathError::PowerShell)
     } else {
@@ -156,7 +166,7 @@ pub fn remove_from_path() -> Result<(), RemoveFromPathError> {
     }
 }
 
-pub fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
+pub(crate) fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
     let dir = ps_quote(dir);
     sys::powershell(&format!(
         "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
@@ -167,7 +177,7 @@ pub fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
     .map(drop)
 }
 
-pub fn path_ok() -> bool {
+pub(crate) fn path_ok() -> bool {
     if cfg!(windows) {
         let Ok(dir) = App::Ae.dir() else {
             return false;
@@ -190,7 +200,7 @@ pub fn path_ok() -> bool {
     }
 }
 
-pub fn unix_link() -> Result<PathBuf, EnvPathError> {
+pub(crate) fn unix_link() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::home()?.join(".local/bin/ae"))
 }
 
@@ -199,7 +209,7 @@ fn on_path(dir: &Path) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == dir))
 }
 
-pub fn integrate_editor() -> Result<(), IntegrateEditorError> {
+pub(crate) fn integrate_editor() -> Result<(), IntegrateEditorError> {
     let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
         let link = start_menu()
@@ -248,7 +258,7 @@ pub fn integrate_editor() -> Result<(), IntegrateEditorError> {
     }
 }
 
-pub fn remove_editor_integration() -> Result<(), RemoveEditorIntegrationError> {
+pub(crate) fn remove_editor_integration() -> Result<(), RemoveEditorIntegrationError> {
     if cfg!(windows) {
         sys::remove(
             &start_menu()
@@ -306,7 +316,7 @@ fn uninstall_key(app: App) -> String {
     )
 }
 
-pub fn register_uninstall(app: App, version: &str) -> Result<(), RegisterUninstallError> {
+pub(crate) fn register_uninstall(app: App, version: &str) -> Result<(), RegisterUninstallError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -339,7 +349,7 @@ pub fn register_uninstall(app: App, version: &str) -> Result<(), RegisterUninsta
     .map_err(|source| RegisterUninstallError::PowerShell { app, source })
 }
 
-pub fn unregister_uninstall(app: App) -> Result<(), RunError> {
+pub(crate) fn unregister_uninstall(app: App) -> Result<(), RunError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -350,7 +360,7 @@ pub fn unregister_uninstall(app: App) -> Result<(), RunError> {
     .map(drop)
 }
 
-pub fn launch_editor() -> Result<(), LaunchEditorError> {
+pub(crate) fn launch_editor() -> Result<(), LaunchEditorError> {
     let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
         sys::spawn_detached(std::process::Command::new("explorer.exe").arg(&editor))?;
@@ -368,19 +378,19 @@ const CLOSE_DEADLINE: Duration = Duration::from_secs(10);
 const FORCE_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Running {
+pub(crate) struct Running {
     pub pid: u32,
     pub executable: PathBuf,
     pub started: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StopError {
+pub(crate) enum StopError {
     #[error("process {pid} ({}) still runs after it was force-stopped", executable.display())]
     Survived { pid: u32, executable: PathBuf },
 }
 
-pub fn close_processes(executables: &[PathBuf]) -> Result<usize, StopError> {
+pub(crate) fn close_processes(executables: &[PathBuf]) -> Result<usize, StopError> {
     let running: Vec<Running> = processes(sysinfo::ProcessesToUpdate::All)
         .into_iter()
         .filter(|process| {
@@ -393,7 +403,7 @@ pub fn close_processes(executables: &[PathBuf]) -> Result<usize, StopError> {
     Ok(running.len())
 }
 
-pub fn running(pid: u32) -> Option<Running> {
+pub(crate) fn running(pid: u32) -> Option<Running> {
     processes(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(
         pid,
     )]))
@@ -401,7 +411,7 @@ pub fn running(pid: u32) -> Option<Running> {
     .next()
 }
 
-pub fn stop(processes: &[Running]) -> Result<(), StopError> {
+pub(crate) fn stop(processes: &[Running]) -> Result<(), StopError> {
     for process in processes {
         request_close(process);
     }
@@ -459,7 +469,7 @@ fn alive(process: &Running) -> bool {
     running(process.pid).is_some_and(|now| now.started == process.started)
 }
 
-pub fn same_executable(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_executable(left: &Path, right: &Path) -> bool {
     if cfg!(windows) {
         left.to_string_lossy()
             .eq_ignore_ascii_case(&right.to_string_lossy())
@@ -500,12 +510,12 @@ fn force_close(process: &Running) {
     }
 }
 
-pub fn has_desktop() -> bool {
+pub(crate) fn has_desktop() -> bool {
     cfg!(any(windows, target_os = "macos"))
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-pub fn in_wsl() -> bool {
+pub(crate) fn in_wsl() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some()
 }

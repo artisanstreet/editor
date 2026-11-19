@@ -2,44 +2,119 @@ use crate::{install, platform, service, wsl};
 use artisan_api::{EngineId, InstallState};
 use artisan_paths::App;
 use forge_store::admin::{Admin, AdminError};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-pub fn status(json_output: bool) {
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Report {
+    #[serde(default)]
+    machine: String,
+    #[serde(default)]
+    apps: Vec<AppReport>,
+    #[serde(default)]
+    forge: Option<ForgeReport>,
+    #[serde(default)]
+    problems: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AppReport {
+    app: String,
+    version: String,
+    path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ForgeReport {
+    running: bool,
+    pid: Option<u32>,
+    address: Option<String>,
+    listening: bool,
+    healthy: Option<bool>,
+    log: Option<String>,
+    devices: Option<usize>,
+    #[serde(default)]
+    engines: Vec<EngineReport>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EngineReport {
+    engine: String,
+    version: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Remote {
+    Read(Report),
+    Unreadable { error: String },
+}
+
+#[derive(Serialize)]
+struct Everything<'a> {
+    #[serde(flatten)]
+    local: &'a Report,
+    wsl: &'a BTreeMap<String, Remote>,
+}
+
+impl Report {
+    pub(crate) fn has(&self, app: App) -> bool {
+        self.apps.iter().any(|installed| installed.app == app.id())
+    }
+}
+
+pub(crate) fn status(json_output: bool) {
     let report = local();
-    let wsl: Vec<(String, Value)> = if cfg!(windows) {
+    let wsl: BTreeMap<String, Remote> = if cfg!(windows) {
         match wsl::probe_all() {
             Ok(probes) => probes
                 .into_iter()
                 .filter(|probe| probe.report.is_err() || probe.has_forge())
                 .map(|probe| {
-                    let report = probe
-                        .report
-                        .unwrap_or_else(|error| json!({ "error": diagnostics::chain(&error) }));
-                    (probe.distro, report)
+                    let remote = probe.report.map_or_else(
+                        |error| Remote::Unreadable {
+                            error: diagnostics::chain(&error),
+                        },
+                        Remote::Read,
+                    );
+                    (probe.distro, remote)
                 })
                 .collect(),
-            Err(error) => vec![(
+            Err(error) => BTreeMap::from([(
                 "WSL".to_owned(),
-                json!({ "error": diagnostics::chain(&error) }),
-            )],
+                Remote::Unreadable {
+                    error: diagnostics::chain(&error),
+                },
+            )]),
         }
     } else {
-        Vec::new()
+        BTreeMap::new()
     };
     if json_output {
-        let mut value = report;
-        value["wsl"] = Value::Object(wsl.into_iter().collect());
-        println!("{value}");
+        let everything = Everything {
+            local: &report,
+            wsl: &wsl,
+        };
+        crate::ui::print(
+            serde_json::to_string(&everything)
+                .expect("invariant: the status report serializes to JSON"),
+        );
         return;
     }
     print(&report, None);
-    for (distro, report) in &wsl {
-        println!();
-        print(report, Some(distro));
+    for (distro, remote) in &wsl {
+        crate::ui::print("");
+        match remote {
+            Remote::Read(report) => print(report, Some(distro)),
+            Remote::Unreadable { error } => {
+                crate::ui::print(format_args!("{distro} (WSL)"));
+                crate::ui::print(format_args!("  ! couldn't read its status: {error}"));
+            }
+        }
     }
 }
 
-fn paired_devices(problems: &mut Vec<String>) -> Value {
+fn paired_devices(problems: &mut Vec<String>) -> Option<usize> {
     let counted = App::Forge
         .data()
         .map_err(|error| diagnostics::chain(&error))
@@ -52,16 +127,16 @@ fn paired_devices(problems: &mut Vec<String>) -> Value {
             Err(error) => Err(diagnostics::chain(&error)),
         });
     match counted {
-        Ok(count) => json!(count),
+        Ok(count) => Some(count),
         Err(error) => {
             problems.push(format!("Couldn't count paired devices: {error}"));
-            Value::Null
+            None
         }
     }
 }
 
 #[cfg(unix)]
-fn health(problems: &mut Vec<String>, log: Option<&str>) -> Value {
+fn health(problems: &mut Vec<String>, log: Option<&str>) -> bool {
     let checked = App::Forge
         .data()
         .map_err(|error| diagnostics::chain(&error))
@@ -79,113 +154,128 @@ fn health(problems: &mut Vec<String>, log: Option<&str>) -> Value {
                 .map_err(|error| diagnostics::chain(&error))
         });
     match checked {
-        Ok(_) => json!(true),
+        Ok(_) => true,
         Err(error) => {
             problems.push(format!(
                 "Forge isn't healthy: {error}; see {}",
                 log.unwrap_or("its log")
             ));
-            json!(false)
+            false
         }
     }
 }
 
-fn local() -> Value {
-    let apps: Vec<Value> = App::ALL
+fn local() -> Report {
+    let mut problems = Vec::new();
+    let apps: Vec<AppReport> = App::ALL
         .iter()
         .filter_map(|app| {
             let version = install::installed(*app)?;
-            Some(json!({
-                "app": app.id(),
-                "version": version,
-                "path": app.dir().ok()?.display().to_string(),
-            }))
+            match app.dir() {
+                Ok(dir) => Some(AppReport {
+                    app: app.id().to_owned(),
+                    version,
+                    path: dir.display().to_string(),
+                }),
+                Err(error) => {
+                    problems.push(format!(
+                        "Couldn't find {}'s folder: {}",
+                        app.id(),
+                        diagnostics::chain(&error)
+                    ));
+                    None
+                }
+            }
         })
         .collect();
-    let mut problems = Vec::new();
     let has = |app: App| install::installed(app).is_some();
     if has(App::Ae) && !platform::path_ok() {
         problems.push("`ae` isn't on PATH for new terminals; run `ae install`".to_owned());
     }
-    let forge = if has(App::Forge) {
-        let running = service::is_running();
-        let address = match service::address() {
-            Ok(address) => Some(address),
-            Err(error) => {
-                problems.push(diagnostics::chain(&error));
-                None
-            }
-        };
-        let listening = address.is_some_and(service::listening);
-        let log = match service::log_hint() {
-            Ok(log) => Some(log),
-            Err(error) => {
-                problems.push(format!(
-                    "Couldn't find Forge's log: {}",
-                    diagnostics::chain(&error)
-                ));
-                None
-            }
-        };
-        #[cfg(unix)]
-        let healthy = if running {
-            health(&mut problems, log.as_deref())
-        } else {
-            Value::Null
-        };
-        #[cfg(not(unix))]
-        let healthy = Value::Null;
-        if !running {
-            problems.push("Forge isn't running; run `ae forge start`".to_owned());
-        } else if let Some(address) = address.filter(|_| !listening) {
-            problems.push(format!(
-                "Forge runs but doesn't answer on {address}; see {}",
-                log.as_deref().unwrap_or("its log")
-            ));
-        }
-        let devices = paired_devices(&mut problems);
-        let engines: Vec<Value> = App::Forge
-            .data()
-            .map(|data| {
-                let engines = forge_engines::Engines::new(&data);
-                EngineId::ALL
-                    .iter()
-                    .map(|engine| {
-                        let version = match engines.status(*engine).install {
-                            InstallState::Installed { version, .. } => Some(version),
-                            InstallState::Absent
-                            | InstallState::Downloading { .. }
-                            | InstallState::Verifying { .. }
-                            | InstallState::Failed { .. } => None,
-                        };
-                        json!({"engine": engine.as_str(), "version": version})
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        json!({
-            "running": running,
-            "pid": service::running_pid(),
-            "address": address.map(|address| address.to_string()),
-            "listening": listening,
-            "healthy": healthy,
-            "log": log,
-            "devices": devices,
-            "engines": engines,
-        })
-    } else {
-        Value::Null
-    };
+    let forge = has(App::Forge).then(|| forge(&mut problems));
 
     if apps.is_empty() {
         problems.push("Nothing is installed here; run `ae install`".to_owned());
     }
-    json!({
-        "machine": machine_name(),
-        "apps": apps,
-        "forge": forge,
-        "problems": problems,
-    })
+    Report {
+        machine: machine_name(),
+        apps,
+        forge,
+        problems,
+    }
+}
+
+fn forge(problems: &mut Vec<String>) -> ForgeReport {
+    let running = service::is_running();
+    let address = match service::address() {
+        Ok(address) => Some(address),
+        Err(error) => {
+            problems.push(diagnostics::chain(&error));
+            None
+        }
+    };
+    let listening = address.is_some_and(service::listening);
+    let log = match service::log_hint() {
+        Ok(log) => Some(log),
+        Err(error) => {
+            problems.push(format!(
+                "Couldn't find Forge's log: {}",
+                diagnostics::chain(&error)
+            ));
+            None
+        }
+    };
+    #[cfg(unix)]
+    let healthy = running.then(|| health(problems, log.as_deref()));
+    #[cfg(not(unix))]
+    let healthy = None;
+    if !running {
+        problems.push("Forge isn't running; run `ae forge start`".to_owned());
+    } else if let Some(address) = address.filter(|_| !listening) {
+        problems.push(format!(
+            "Forge runs but doesn't answer on {address}; see {}",
+            log.as_deref().unwrap_or("its log")
+        ));
+    }
+    let devices = paired_devices(problems);
+    let engines: Vec<EngineReport> = match App::Forge.data() {
+        Ok(data) => {
+            let engines = forge_engines::Engines::new(&data);
+            EngineId::ALL
+                .iter()
+                .map(|engine| {
+                    let version = match engines.status(*engine).install {
+                        InstallState::Installed { version, .. } => Some(version),
+                        InstallState::Absent
+                        | InstallState::Downloading { .. }
+                        | InstallState::Verifying { .. }
+                        | InstallState::Failed { .. } => None,
+                    };
+                    EngineReport {
+                        engine: engine.as_str().to_owned(),
+                        version,
+                    }
+                })
+                .collect()
+        }
+        Err(error) => {
+            problems.push(format!(
+                "Couldn't list Forge's engines: {}",
+                diagnostics::chain(&error)
+            ));
+            Vec::new()
+        }
+    };
+    ForgeReport {
+        running,
+        pid: service::running_pid(),
+        address: address.map(|address| address.to_string()),
+        listening,
+        healthy,
+        log,
+        devices,
+        engines,
+    }
 }
 
 fn machine_name() -> String {
@@ -201,74 +291,64 @@ fn machine_name() -> String {
     }
 }
 
-fn print(report: &Value, distro: Option<&str>) {
+fn print(report: &Report, distro: Option<&str>) {
     let machine = distro.map_or_else(
-        || report["machine"].as_str().unwrap_or_default().to_owned(),
+        || report.machine.clone(),
         |distro| format!("{distro} (WSL)"),
     );
-    println!("{machine}");
-    if let Some(error) = report["error"].as_str() {
-        println!("  ! couldn't read its status: {error}");
-        return;
-    }
-    for app in report["apps"].as_array().into_iter().flatten() {
-        let name = match app["app"].as_str() {
-            Some("forge") => "Forge",
-            Some("editor") => "Editor",
+    crate::ui::print(&machine);
+    for app in &report.apps {
+        let name = match app.app.as_str() {
+            "forge" => "Forge",
+            "editor" => "Editor",
             _ => "ae",
         };
-        println!(
-            "  {name:<8} {:<16} {}",
-            app["version"].as_str().unwrap_or_default(),
-            app["path"].as_str().unwrap_or_default()
-        );
+        crate::ui::print(format_args!("  {name:<8} {:<16} {}", app.version, app.path));
     }
-    let forge = &report["forge"];
-    if !forge.is_null() {
-        let state = if forge["running"].as_bool() == Some(true) {
-            let pid = forge["pid"]
-                .as_u64()
+    if let Some(forge) = &report.forge {
+        let state = if forge.running {
+            let pid = forge
+                .pid
                 .map(|pid| format!(", pid {pid}"))
                 .unwrap_or_default();
-            let health = if forge["healthy"].as_bool() == Some(false) {
+            let health = if forge.healthy == Some(false) {
                 ", unhealthy"
             } else {
                 ""
             };
-            format!(
-                "● running on {}{pid}{health}",
-                forge["address"].as_str().unwrap_or_default()
-            )
+            match &forge.address {
+                Some(address) => format!("● running on {address}{pid}{health}"),
+                None => format!("● running{pid}{health}"),
+            }
         } else {
             "○ stopped".to_owned()
         };
-        println!("  Forge    {state}");
-        println!(
+        crate::ui::print(format_args!("  Forge    {state}"));
+        crate::ui::print(format_args!(
             "           log: {}",
-            forge["log"].as_str().unwrap_or("unknown")
-        );
-        match forge["devices"].as_u64() {
-            Some(devices) => println!(
+            forge.log.as_deref().unwrap_or("unknown")
+        ));
+        match forge.devices {
+            Some(devices) => crate::ui::print(format_args!(
                 "           {}",
-                crate::ui::count(devices, "paired device", "paired devices")
-            ),
-            None => println!("           paired devices unknown"),
+                crate::ui::count(devices as u64, "paired device", "paired devices")
+            )),
+            None => crate::ui::print("           paired devices unknown"),
         }
-        let engines: Vec<String> = forge["engines"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let engines: Vec<String> = forge
+            .engines
+            .iter()
             .map(|engine| {
                 format!(
                     "{} {}",
-                    engine["engine"].as_str().unwrap_or_default(),
-                    engine["version"].as_str().unwrap_or("not installed")
+                    engine.engine,
+                    engine.version.as_deref().unwrap_or("not installed")
                 )
             })
             .collect();
-        println!("           engines: {}", engines.join(", "));
+        crate::ui::print(format_args!("           engines: {}", engines.join(", ")));
     }
-    for problem in report["problems"].as_array().into_iter().flatten() {
-        println!("  ! {}", problem.as_str().unwrap_or_default());
+    for problem in &report.problems {
+        crate::ui::print(format_args!("  ! {problem}"));
     }
 }

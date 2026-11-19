@@ -27,7 +27,7 @@ const INSTALL_LOCK: &str = ".install.lock";
 const ORIGIN_FILE: &str = "release-feed";
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallError {
+pub(crate) enum InstallError {
     #[error("--editor windows is for installing from inside WSL")]
     EditorWindowsOutsideWsl,
     #[error("--forge wsl:<distro> is for installing from Windows")]
@@ -77,7 +77,7 @@ pub enum InstallError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallLockError {
+pub(crate) enum InstallLockError {
     #[error("find the install folder")]
     Root(#[source] RootError),
     #[error("create {}", path.display())]
@@ -95,7 +95,7 @@ pub enum InstallLockError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StagingError {
+pub(crate) enum StagingError {
     #[error("create {}", path.display())]
     Create {
         path: PathBuf,
@@ -111,7 +111,7 @@ pub enum StagingError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum WindowsTempError {
+pub(crate) enum WindowsTempError {
     #[error("find Windows' temp folder")]
     Cmd(#[source] io::Error),
     #[error("convert Windows' temp folder for WSL")]
@@ -125,7 +125,7 @@ pub enum WindowsTempError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum HandOverError {
+pub(crate) enum HandOverError {
     #[error(transparent)]
     WindowsTemp(#[from] WindowsTempError),
     #[error(transparent)]
@@ -147,7 +147,7 @@ pub enum HandOverError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RememberedFeedError {
+pub(crate) enum RememberedFeedError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("{} should name a release feed URL or `local` but holds {text:?}", path.display())]
@@ -163,7 +163,7 @@ pub enum RememberedFeedError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallEditorError {
+pub(crate) enum InstallEditorError {
     #[error(transparent)]
     Feed(#[from] RememberedFeedError),
     #[error(transparent)]
@@ -171,7 +171,7 @@ pub enum InstallEditorError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApplyError {
+pub(crate) enum ApplyError {
     #[error(transparent)]
     Lock(#[from] InstallLockError),
     #[error(transparent)]
@@ -185,7 +185,7 @@ pub enum ApplyError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallHereError {
+pub(crate) enum InstallHereError {
     #[error(transparent)]
     Version(#[from] ReleaseVersionError),
     #[error("install {} {version}", app.display_name())]
@@ -198,7 +198,7 @@ pub enum InstallHereError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallAppError {
+pub(crate) enum InstallAppError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("create {}", path.display())]
@@ -261,7 +261,7 @@ pub enum InstallAppError {
 }
 
 #[derive(Debug)]
-pub enum PutBack {
+pub(crate) enum PutBack {
     Restored,
     Restarted,
     NotRestored(String),
@@ -290,7 +290,7 @@ impl std::fmt::Display for PutBack {
 
 #[cfg(unix)]
 #[derive(Debug, thiserror::Error)]
-pub enum UpgradeOnlineError {
+pub(crate) enum UpgradeOnlineError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("check whether Forge hands over to a new version")]
@@ -326,7 +326,7 @@ pub enum UpgradeOnlineError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallInWslError {
+pub(crate) enum InstallInWslError {
     #[error("make a staging folder")]
     Staging(#[source] io::Error),
     #[error(transparent)]
@@ -375,7 +375,7 @@ pub enum InstallInWslError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InstallInWindowsError {
+pub(crate) enum InstallInWindowsError {
     #[error("this installer carries no Editor for Windows")]
     NotCarried,
     #[error(transparent)]
@@ -395,7 +395,7 @@ pub enum InstallInWindowsError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UpdateError {
+pub(crate) enum UpdateError {
     #[error("nothing is installed here; run `ae install`")]
     NothingInstalled,
     #[error(transparent)]
@@ -413,7 +413,7 @@ pub enum UpdateError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UninstallError {
+pub(crate) enum UninstallError {
     #[error(transparent)]
     Ask(#[from] AskError),
     #[error(
@@ -425,7 +425,7 @@ pub enum UninstallError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveChosenError {
+pub(crate) enum RemoveChosenError {
     #[error(transparent)]
     Lock(#[from] InstallLockError),
     #[error("remove {}", app.display_name())]
@@ -441,7 +441,7 @@ pub enum RemoveChosenError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveBrowserProfileError {
+pub(crate) enum RemoveBrowserProfileError {
     #[error("find the claude.ai browser profile")]
     Locate(#[source] RootError),
     #[error(transparent)]
@@ -449,7 +449,7 @@ pub enum RemoveBrowserProfileError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ForgetRootError {
+pub(crate) enum ForgetRootError {
     #[error("find the install folder")]
     Root(#[source] RootError),
     #[error("remove the install lock")]
@@ -462,14 +462,14 @@ pub enum ForgetRootError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("remove {}", path.display())]
-pub struct RemoveDirError {
+pub(crate) struct RemoveDirError {
     path: PathBuf,
     #[source]
     source: io::Error,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveAppError {
+pub(crate) enum RemoveAppError {
     #[error(transparent)]
     Stop(#[from] StopError),
     #[error("stop Forge starting at login")]
@@ -499,7 +499,7 @@ pub enum RemoveAppError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveSelfLaterError {
+pub(crate) enum RemoveSelfLaterError {
     #[error("find the install folder")]
     Root(#[source] RootError),
     #[error("find the default install folder")]
@@ -509,7 +509,7 @@ pub enum RemoveSelfLaterError {
 }
 
 #[derive(Args, Default)]
-pub struct InstallArgs {
+pub(crate) struct InstallArgs {
     #[arg(long, value_name = "WHERE", value_parser = EditorPlace::parse, help = "Where the Editor goes: here, windows (from WSL), keep or none")]
     editor: Option<EditorPlace>,
     #[arg(long, value_name = "WHERE", value_parser = ForgePlace::parse, help = "Where Forge goes: here, wsl:<distro> (from Windows), keep or none")]
@@ -549,7 +549,7 @@ pub struct InstallArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EditorPlace {
+pub(crate) enum EditorPlace {
     Here,
     Windows,
     Keep,
@@ -578,7 +578,7 @@ impl EditorPlace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ForgePlace {
+pub(crate) enum ForgePlace {
     Here,
     Wsl(String),
     Keep,
@@ -609,7 +609,7 @@ impl ForgePlace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Origin {
+pub(crate) enum Origin {
     Feed(String),
     Local,
 }
@@ -768,7 +768,7 @@ const fn this_machine() -> &'static str {
     }
 }
 
-pub fn installed(app: App) -> Option<String> {
+pub(crate) fn installed(app: App) -> Option<String> {
     let dir = app.dir().ok()?;
     if !app.binary().ok()?.is_file() {
         return None;
@@ -855,7 +855,7 @@ fn staging_in(dir: &Path, prefix: &str) -> Result<tempfile::TempDir, StagingErro
         })
 }
 
-pub fn install(args: &InstallArgs) -> Result<(), InstallError> {
+pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
     if !args.apply {
         ui::intro("Artisan installer");
     }
@@ -1116,7 +1116,7 @@ fn remembered_feed() -> Result<String, RememberedFeedError> {
     }
 }
 
-pub fn install_editor() -> Result<(), InstallEditorError> {
+pub(crate) fn install_editor() -> Result<(), InstallEditorError> {
     Ok(install(&InstallArgs {
         editor: Some(EditorPlace::Here),
         forge: Some(ForgePlace::Skip),
@@ -1461,7 +1461,7 @@ fn write_beside(dir: &Path, name: &str, contents: &str) -> Result<(), InstallApp
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReplaceError {
+pub(crate) enum ReplaceError {
     #[error("read {}", path.display())]
     Read {
         path: PathBuf,
@@ -1803,7 +1803,7 @@ fn install_in_windows(release: &Release, source: &Source) -> Result<(), InstallI
     Ok(())
 }
 
-pub fn update(yes: bool) -> Result<(), UpdateError> {
+pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
     ui::intro("Artisan update");
     if installed(App::Ae).is_none() {
         return Err(UpdateError::NothingInstalled);
@@ -1865,7 +1865,7 @@ fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
             .any(|app| *app != App::Ae && !chosen.contains(app))
 }
 
-pub fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
+pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
     ui::intro("Artisan uninstall");
     let present: Vec<App> = App::ALL
         .into_iter()

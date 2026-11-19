@@ -6,7 +6,7 @@ use artisan_paths::App;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
-pub enum OpenError {
+pub(crate) enum OpenError {
     #[error("the Editor isn't installed here; run `ae install --editor here`")]
     NotInstalled,
     #[error(transparent)]
@@ -25,7 +25,7 @@ pub enum OpenError {
     Spawn(#[from] SpawnError),
 }
 
-pub fn open(path: Option<&Path>) -> Result<(), OpenError> {
+pub(crate) fn open(path: Option<&Path>) -> Result<(), OpenError> {
     if install::installed(App::Editor).is_none() {
         if !ui::interactive() {
             return Err(OpenError::NotInstalled);

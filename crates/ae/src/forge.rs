@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ForgeDataError {
+pub(crate) enum ForgeDataError {
     #[error(transparent)]
     Locate(#[from] LocateError),
     #[error("Forge isn't installed here; run `ae install`")]
@@ -18,7 +18,7 @@ pub enum ForgeDataError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AdministerError {
+pub(crate) enum AdministerError {
     #[error("create {}", path.display())]
     Create {
         path: PathBuf,
@@ -46,7 +46,7 @@ pub enum AdministerError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PairError {
+pub(crate) enum PairError {
     #[error(transparent)]
     Data(#[from] ForgeDataError),
     #[error(transparent)]
@@ -78,7 +78,7 @@ pub enum PairError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ListDevicesError {
+pub(crate) enum ListDevicesError {
     #[error(transparent)]
     Data(#[from] ForgeDataError),
     #[error("open the Forge database in {}", data.display())]
@@ -96,7 +96,7 @@ pub enum ListDevicesError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UnpairError {
+pub(crate) enum UnpairError {
     #[error(transparent)]
     List(#[from] ListDevicesError),
     #[error(transparent)]
@@ -189,7 +189,7 @@ fn reachable_address() -> Result<SocketAddr, AddressError> {
     })
 }
 
-pub fn pair(json: bool) -> Result<(), PairError> {
+pub(crate) fn pair(json: bool) -> Result<(), PairError> {
     let data = data()?;
     let invite = forge_http::invite_offline(&administer(&data)?.admin).map_err(|source| {
         PairError::Invite {
@@ -208,15 +208,15 @@ pub fn pair(json: bool) -> Result<(), PairError> {
             "expires_at": invite.expires_at,
             "address": address.to_string(),
         });
-        println!("{value}");
+        ui::print(format_args!("{value}"));
         return Ok(());
     }
     let paste = format!("{address} {} {fingerprint}", invite.code);
     if !ui::interactive() {
-        println!("{paste}");
-        eprintln!(
+        ui::print(format_args!("{paste}"));
+        ui::status(format_args!(
             "Paste this into the Editor (Settings → Hosts → Add). Valid for 10 minutes, once."
-        );
+        ));
         return Ok(());
     }
     ui::intro("Pair an Editor");
@@ -276,7 +276,7 @@ pub fn pair(json: bool) -> Result<(), PairError> {
     }
 }
 
-pub fn devices(json: bool) -> Result<(), ListDevicesError> {
+pub(crate) fn devices(json: bool) -> Result<(), ListDevicesError> {
     let devices = paired_devices(&data()?)?;
     if json {
         let list: Vec<_> = devices
@@ -290,11 +290,11 @@ pub fn devices(json: bool) -> Result<(), ListDevicesError> {
                 })
             })
             .collect();
-        println!("{}", serde_json::Value::Array(list));
+        ui::print(format_args!("{}", serde_json::Value::Array(list)));
         return Ok(());
     }
     if devices.is_empty() {
-        println!("No paired devices. Pair one with `ae pair`.");
+        ui::print(format_args!("No paired devices. Pair one with `ae pair`."));
         return Ok(());
     }
     let now = artisan_api::now();
@@ -311,14 +311,14 @@ pub fn devices(json: bool) -> Result<(), ListDevicesError> {
             ]
         })
         .collect();
-    println!(
+    ui::print(format_args!(
         "{}",
         ui::table(&["ID", "NAME", "PAIRED", "LAST SEEN"], &rows)
-    );
+    ));
     Ok(())
 }
 
-pub fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
+pub(crate) fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
     let data = data().map_err(ListDevicesError::Data)?;
     let devices = paired_devices(&data)?;
     let (id, name) = match id {
@@ -386,7 +386,7 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
     }
 }
 
-pub fn ago(now: Timestamp, at: Timestamp) -> String {
+pub(crate) fn ago(now: Timestamp, at: Timestamp) -> String {
     let seconds = ((now - at).max(0) / 1000).unsigned_abs();
     match seconds {
         0..60 => "just now".to_owned(),

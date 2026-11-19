@@ -1,8 +1,3 @@
-#![allow(
-    clippy::unused_result_ok,
-    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
-)]
-
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
@@ -92,7 +87,7 @@ mod tests {
     impl Drop for Instance {
         fn drop(&mut self) {
             if self.data.join("forge.pid").exists() {
-                self.command("stop").output().ok();
+                let _stopped = self.command("stop").output();
             }
         }
     }

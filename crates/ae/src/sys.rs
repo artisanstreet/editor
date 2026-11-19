@@ -3,7 +3,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
-pub enum BoundedRunError {
+pub(crate) enum BoundedRunError {
     #[error("start {program}")]
     Start {
         program: String,
@@ -20,7 +20,10 @@ pub enum BoundedRunError {
     TimedOut { program: String, after: Duration },
 }
 
-pub fn output_within(command: &mut Command, limit: Duration) -> Result<Output, BoundedRunError> {
+pub(crate) fn output_within(
+    command: &mut Command,
+    limit: Duration,
+) -> Result<Output, BoundedRunError> {
     let program = command.get_program().to_string_lossy().into_owned();
     let wait = |source| BoundedRunError::Wait {
         program: program.clone(),
@@ -82,7 +85,7 @@ fn joined(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RunError {
+pub(crate) enum RunError {
     #[error("run {program}")]
     Start {
         program: String,
@@ -103,11 +106,11 @@ pub enum RunError {
     },
 }
 
-pub fn run(program: &str, args: &[&str]) -> Result<(), RunError> {
+pub(crate) fn run(program: &str, args: &[&str]) -> Result<(), RunError> {
     output(program, args).map(drop)
 }
 
-pub fn output(program: &str, args: &[&str]) -> Result<String, RunError> {
+pub(crate) fn output(program: &str, args: &[&str]) -> Result<String, RunError> {
     let output = quiet(Command::new(program).args(args))
         .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
@@ -127,7 +130,7 @@ pub fn output(program: &str, args: &[&str]) -> Result<String, RunError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub fn powershell(script: &str) -> Result<String, RunError> {
+pub(crate) fn powershell(script: &str) -> Result<String, RunError> {
     let output = powershell_command(script)
         .output()
         .map_err(|source| RunError::Start {
@@ -143,7 +146,7 @@ pub fn powershell(script: &str) -> Result<String, RunError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub fn powershell_command(script: &str) -> Command {
+pub(crate) fn powershell_command(script: &str) -> Command {
     let mut command = Command::new("powershell.exe");
     command
         .args([
@@ -159,19 +162,22 @@ pub fn powershell_command(script: &str) -> Command {
     command
 }
 
-pub fn ps_quote(value: &Path) -> String {
+pub(crate) fn ps_quote(value: &Path) -> String {
     ps_string(&value.display().to_string())
 }
 
-pub fn ps_string(value: &str) -> String {
+pub(crate) fn ps_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-#[allow(
-    clippy::missing_const_for_fn,
-    reason = "const only off Windows, where the body sets no flags"
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "const only off Windows, where the body sets no flags"
+    )
 )]
-pub fn quiet(command: &mut Command) -> &mut Command {
+pub(crate) fn quiet(command: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -183,13 +189,13 @@ pub fn quiet(command: &mut Command) -> &mut Command {
 
 #[derive(Debug, thiserror::Error)]
 #[error("start {}", program.display())]
-pub struct SpawnError {
+pub(crate) struct SpawnError {
     pub program: PathBuf,
     #[source]
     pub source: std::io::Error,
 }
 
-pub fn spawn_detached(command: &mut Command) -> Result<u32, SpawnError> {
+pub(crate) fn spawn_detached(command: &mut Command) -> Result<u32, SpawnError> {
     command.stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -211,7 +217,7 @@ pub fn spawn_detached(command: &mut Command) -> Result<u32, SpawnError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RemoveError {
+pub(crate) enum RemoveError {
     #[error("inspect {}", path.display())]
     Inspect {
         path: PathBuf,
@@ -226,7 +232,7 @@ pub enum RemoveError {
     },
 }
 
-pub fn remove(path: &Path) -> Result<(), RemoveError> {
+pub(crate) fn remove(path: &Path) -> Result<(), RemoveError> {
     let metadata = match path.symlink_metadata() {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -249,7 +255,7 @@ pub fn remove(path: &Path) -> Result<(), RemoveError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum WriteError {
+pub(crate) enum WriteError {
     #[error("create {}", path.display())]
     CreateDir {
         path: PathBuf,
@@ -264,7 +270,7 @@ pub enum WriteError {
     },
 }
 
-pub fn write(path: &Path, contents: &str) -> Result<(), WriteError> {
+pub(crate) fn write(path: &Path, contents: &str) -> Result<(), WriteError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| WriteError::CreateDir {
             path: parent.to_owned(),
