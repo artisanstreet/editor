@@ -132,7 +132,6 @@ fn stored_edit_counts_are_not_zeroed_when_status_changes() {
         }]
         .into(),
     };
-    assert_eq!(inline_edit_totals(&tool), None);
     assert_eq!(edit_totals(&conn, &tool).unwrap(), Some(expected));
 }
 #[test]

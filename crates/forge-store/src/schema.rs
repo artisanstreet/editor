@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 mod backup;
+mod frozen;
 
 pub(crate) use backup::Rollback;
 pub use backup::{BackupError, RollbackError};
@@ -27,6 +28,18 @@ type Result<T, E = MigrationFailure> = std::result::Result<T, E>;
 pub enum MigrationFailure {
     #[error("question item {item} has no {part}")]
     Question { item: String, part: QuestionPart },
+    #[error("item {item} is not JSON")]
+    Body {
+        item: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("outline user message {item}")]
+    Outline {
+        item: String,
+        #[source]
+        source: frozen::OutlineError,
+    },
     #[error(transparent)]
     Content(#[from] ContentError),
     #[error(transparent)]
@@ -124,7 +137,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(include_str!("sql/migrations/v23.sql"))],
     &[Step::Rust(migrate_model_permissions)],
     &[Step::Sql(include_str!("sql/migrations/v25.sql"))],
-    &[Step::Sql(include_str!("sql/coordination/schema.sql"))],
+    &[Step::Sql(include_str!("sql/migrations/v26.sql"))],
     &[Step::Sql(include_str!("sql/migrations/v27.sql"))],
     &[
         Step::Sql(include_str!("sql/migrations/v28_a.sql")),
@@ -187,15 +200,21 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn body(item: &str, text: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(text).map_err(|source| MigrationFailure::Body {
+        item: item.to_owned(),
+        source,
+    })
+}
+
 fn backfill_work(conn: &Connection) -> Result<()> {
     let mut select = conn.prepare(include_str!("sql/migrations/work_candidates.sql"))?;
     let mut rows = select.query([])?;
     let mut update = conn.prepare(include_str!("sql/migrations/mark_work.sql"))?;
     while let Some(row) = rows.next()? {
-        let body: String = row.get(1)?;
-        if serde_json::from_str::<artisan_api::Item>(&body).is_ok_and(|item| item.folds_into_work())
-        {
-            update.execute([row.get::<_, String>(0)?])?;
+        let id: String = row.get(0)?;
+        if frozen::folds_into_work(&body(&id, &row.get::<_, String>(1)?)?) {
+            update.execute([id])?;
         }
     }
     Ok(())
@@ -248,19 +267,16 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
         };
         if let Some((target, mut gated)) = gated {
             gated["kind"]["approval"] = value["kind"]["approval"].take();
-            let item: artisan_api::Item = crate::read::from_value(gated)?;
             conn.execute(
                 include_str!("sql/migrations/set_item_body.sql"),
-                rusqlite::params![target, crate::read::to_body(&item)?],
+                rusqlite::params![target, gated.to_string()],
             )?;
-            crate::content::own(conn, &item)?;
             conn.execute(include_str!("sql/migrations/delete_item.sql"), [&id])?;
         } else {
             legacy_approval(&mut value);
-            let item: artisan_api::Item = crate::read::from_value(value)?;
             conn.execute(
                 include_str!("sql/migrations/approval_as_tool.sql"),
-                rusqlite::params![id, crate::read::to_body(&item)?],
+                rusqlite::params![id, value.to_string()],
             )?;
         }
     }
@@ -329,12 +345,9 @@ fn backfill_edit_totals(conn: &Connection) -> Result<()> {
     let mut update = conn.prepare(include_str!("sql/migrations/set_edit_totals.sql"))?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        let body: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
-        if let Some(tool) = body.pointer("/kind/tool") {
-            let tool: artisan_api::ToolKind = crate::read::from_value(tool.clone())?;
-            if let Some(stats) = crate::content::inline_edit_totals(&tool) {
-                update.execute(rusqlite::params![id, stats.added, stats.removed])?;
-            }
+        let item = body(&id, &row.get::<_, String>(1)?)?;
+        if let Some(stats) = item.pointer("/kind/tool").and_then(frozen::edit_totals) {
+            update.execute(rusqlite::params![id, stats.added, stats.removed])?;
         }
     }
     Ok(())
@@ -345,12 +358,15 @@ fn backfill_outline(conn: &Connection) -> Result<()> {
     let mut rows = select.query([])?;
     let mut update = conn.prepare(include_str!("sql/migrations/set_outline.sql"))?;
     while let Some(row) = rows.next()? {
-        let body: String = row.get(1)?;
-        let Ok(item) = serde_json::from_str::<artisan_api::Item>(&body) else {
-            continue;
-        };
-        if let Some(label) = crate::read::outline_entry(conn, &item)? {
-            update.execute(rusqlite::params![row.get::<_, String>(0)?, label])?;
+        let id: String = row.get(0)?;
+        let item = body(&id, &row.get::<_, String>(1)?)?;
+        let label =
+            frozen::outline_entry(conn, &item).map_err(|source| MigrationFailure::Outline {
+                item: id.clone(),
+                source,
+            })?;
+        if let Some(label) = label {
+            update.execute(rusqlite::params![id, label])?;
         }
     }
     Ok(())
@@ -540,3 +556,7 @@ mod item_column_migration_tests;
 #[cfg(test)]
 #[path = "../tests/schema/folded_text_migration.rs"]
 mod folded_text_migration_tests;
+
+#[cfg(test)]
+#[path = "../tests/schema/frozen_migration.rs"]
+mod frozen_migration_tests;

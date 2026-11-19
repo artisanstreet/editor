@@ -475,22 +475,6 @@ fn diff_totals(diff: &str) -> EditTotals {
     totals
 }
 
-pub(crate) fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
-    let ToolKind::Edit { changes } = tool else {
-        return None;
-    };
-    let mut totals = EditTotals::default();
-    for change in changes.inline()? {
-        let Some(diff) = &change.diff else {
-            continue;
-        };
-        let count = diff_totals(diff.inline()?);
-        totals.added = totals.added.saturating_add(count.added);
-        totals.removed = totals.removed.saturating_add(count.removed);
-    }
-    Some(totals)
-}
-
 pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
     let ToolKind::Edit { changes } = tool else {
         return Ok(None);

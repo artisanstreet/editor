@@ -382,7 +382,7 @@ pub enum OpenStoreError {
     Migrate {
         database: PathBuf,
         #[source]
-        source: SchemaError,
+        source: Box<SchemaError>,
     },
     #[error("there is no running Forge store to join at {}", database.display())]
     NotRunning { database: PathBuf },
@@ -552,7 +552,7 @@ fn upgrade(
 ) -> Result<(), OpenStoreError> {
     schema::migrate(conn, upgrade).map_err(|source| OpenStoreError::Migrate {
         database: database.to_owned(),
-        source,
+        source: Box::new(source),
     })?;
     recall::refresh_index(conn).map_err(|source| OpenStoreError::RecallIndex {
         database: database.to_owned(),
