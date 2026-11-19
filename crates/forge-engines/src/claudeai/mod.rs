@@ -322,7 +322,7 @@ async fn drive_turn(
 
     for round in 0..MAX_TOOL_ROUNDS {
         let started = tokio::select! {
-            started = backend.complete(&conversation, &request) => started,
+            biased;
             () = io.cancel.cancelled() => {
                 if let Err(error) = stop(backend, &conversation).await {
                     return Outcome::failed(format!(
@@ -332,6 +332,7 @@ async fn drive_turn(
                 }
                 return Outcome::cancelled();
             },
+            started = backend.complete(&conversation, &request) => started,
         };
         let mut events = match started {
             Ok(events) => events,
@@ -454,8 +455,9 @@ async fn drive_turn(
                 run_call(call, &ctx, &mut inbox, &mut io).await
             } else {
                 tokio::select! {
-                    answer = run_call(call, &ctx, &mut inbox, &mut io) => answer,
+                    biased;
                     () = cancel.cancelled() => None,
+                    answer = run_call(call, &ctx, &mut inbox, &mut io) => answer,
                 }
             };
             let Some(mut answer) = answer else {

@@ -909,9 +909,14 @@ async fn a_browser_check_is_a_short_retryable_error() {
 #[tokio::test]
 async fn stopping_the_turn_stops_a_running_command() {
     let work = tempfile::tempdir().expect("a dir");
+    let started = work.path().join("started");
     let backend = script(vec![calls(
         "m1",
-        &[("toolu_1", "Bash", json!({ "command": "sleep 30" }))],
+        &[(
+            "toolu_1",
+            "Bash",
+            json!({ "command": format!("touch {}; sleep 600", started.display()) }),
+        )],
     )]);
     let cancel = CancellationToken::new();
     let stopper = cancel.clone();
@@ -919,23 +924,31 @@ async fn stopping_the_turn_stops_a_running_command() {
         if matches!(event, EngineEvent::Item { key, status: Status::Running, kind: ItemKind::Tool { .. }, .. } if key == "toolu_1")
         {
             let stopper = stopper.clone();
+            let started = started.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                test_support::wait::eventually(
+                    "the command to start",
+                    test_support::wait::LIVENESS,
+                    || std::future::ready(started.exists()),
+                )
+                .await;
                 stopper.cancel();
             });
         }
         Vec::new()
     });
-    let started = std::time::Instant::now();
-    let (outcome, _, _) = run_with(
-        backend,
-        turn(work.path(), None, Permissions::Full),
-        &mut user,
-        cancel,
+    let (outcome, _, _) = test_support::wait::within(
+        "the stopped turn to end",
+        test_support::wait::LIVENESS,
+        run_with(
+            backend,
+            turn(work.path(), None, Permissions::Full),
+            &mut user,
+            cancel,
+        ),
     )
     .await;
     assert_eq!(outcome.status(), RunStatus::Cancelled);
-    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 #[tokio::test]
@@ -1622,7 +1635,7 @@ fn starts_an_agent(prompt: &str) -> Reply {
     )
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stopping_the_turn_during_a_task_stops_the_agent_s_completion() {
     let work = tempfile::tempdir().expect("a dir");
     let mut working = vec![start("c1")];
