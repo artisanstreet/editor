@@ -19,8 +19,8 @@ pub enum GrepFailure {
     Content(#[from] ContentError),
 }
 
-crate::error::operation_error!(RecallSearchError(ContentError), "search recall for {query:?}", query: String);
-crate::error::operation_error!(RecallGrepError(GrepFailure), "grep recall for {pattern:?}", pattern: String);
+crate::error::operation_error!(RecallSearchError(ContentError), "search recall for a {query_chars}-character query", query_chars: usize);
+crate::error::operation_error!(RecallGrepError(GrepFailure), "grep recall for a {pattern_chars}-character pattern", pattern_chars: usize);
 crate::error::operation_error!(RecallTouchingError(ContentError), "find the items touching {path:?}", path: String);
 
 impl From<crate::StorageError> for GrepFailure {
@@ -1054,11 +1054,11 @@ impl Store {
         limit: u32,
         cursor: Option<SearchCursor>,
     ) -> Result<SearchPage, RecallSearchError> {
-        let searched = query.clone();
+        let query_chars = query.chars().count();
         self.scan(move |conn| search_rows(conn, &scope, &query, output, limit, cursor))
             .await
             .map_err(|cause| RecallSearchError {
-                query: searched,
+                query_chars,
                 cause: Box::new(cause),
             })
     }
@@ -1068,11 +1068,11 @@ impl Store {
         scope: RecallScope,
         query: GrepQuery,
     ) -> Result<GrepPage, RecallGrepError> {
-        let pattern = query.pattern.clone();
+        let pattern_chars = query.pattern.chars().count();
         self.scan(move |conn| grep_rows(conn, &scope, &query))
             .await
             .map_err(|cause| RecallGrepError {
-                pattern,
+                pattern_chars,
                 cause: Box::new(cause),
             })
     }

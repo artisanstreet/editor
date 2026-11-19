@@ -304,3 +304,32 @@ async fn composed_and_decomposed_accents_match_each_other() {
         hits([(0, "\u{e9}"), (1, "e\u{301}")])
     );
 }
+
+#[tokio::test]
+async fn a_failed_search_keeps_the_query_out_of_its_error() {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).expect("open the store");
+    rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
+        .expect("open the database beside the store")
+        .execute_batch(include_str!("text_search/drop_message_search.sql"))
+        .expect("drop the message index");
+
+    let error = store
+        .text_search(TextSearchQuery {
+            query: "my private plans".into(),
+            limit: None,
+        })
+        .await
+        .expect_err("searching without the message index fails");
+
+    let error: &(dyn std::error::Error + 'static) = &error;
+    let logged = std::iter::successors(Some(error), |error| error.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    assert!(
+        !logged.contains("private plans"),
+        "the logged error carries the user's words: {logged}"
+    );
+    assert!(logged.contains("16-character"), "{logged}");
+}

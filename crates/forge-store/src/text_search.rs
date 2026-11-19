@@ -9,7 +9,7 @@ pub(crate) mod folded;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
-operation_error!(TextSearchError(StorageError), "search message text for {query:?}", query: String);
+operation_error!(TextSearchError(StorageError), "search message text for a {query_chars}-character query", query_chars: usize);
 
 const SCAN_ROWS: usize = 60_000;
 const SCAN_BYTES: usize = 32 * 1024 * 1024;
@@ -121,11 +121,11 @@ impl Store {
         &self,
         query: TextSearchQuery,
     ) -> Result<Vec<TextHit>, TextSearchError> {
-        let searched = query.query.clone();
+        let query_chars = query.query.chars().count();
         self.scan(move |conn| text_hits(conn, &query))
             .await
             .map_err(|cause| TextSearchError {
-                query: searched,
+                query_chars,
                 cause: Box::new(cause),
             })
     }
