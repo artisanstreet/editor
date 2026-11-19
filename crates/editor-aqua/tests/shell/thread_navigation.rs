@@ -9,16 +9,6 @@ const PANEL_PITCH: f32 = match Row::MenuItem.height() {
 };
 
 #[test]
-fn latest_is_offered_only_for_a_current_reading_thread_with_composer() {
-    assert!(show_latest(true, true, false, false, true));
-    assert!(!show_latest(false, true, false, false, true));
-    assert!(!show_latest(true, false, false, false, true));
-    assert!(!show_latest(true, true, true, false, true));
-    assert!(!show_latest(true, true, false, true, true));
-    assert!(!show_latest(true, true, false, false, false));
-}
-
-#[test]
 fn active_turn_tracks_latest_outline_marker_at_or_before_reader() {
     let markers: Vec<_> = [10, 40, 100]
         .into_iter()

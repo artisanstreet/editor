@@ -257,12 +257,14 @@ impl SectionViews for RootViews {
             &shell.core,
             ui,
             &theme,
-            width,
-            reduced,
-            swift,
             app_media,
-            shell.core.clock().now(),
-            true,
+            thread_content::ContentPass {
+                width,
+                reduced_motion: reduced,
+                swift,
+                now: shell.core.clock().now(),
+                transcript_only: true,
+            },
         ) {
             Ok(element) => element,
             Err(error) => {

@@ -155,6 +155,21 @@ pub(crate) struct ComposerParts {
     pub mention_overlay: Option<Element>,
     pub thread_error: Option<Element>,
     pub shift: f32,
+    pub measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    pub above: Option<Element>,
+}
+
+pub(crate) type InitialHeight =
+    std::rc::Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>;
+
+pub(crate) struct Transcript {
+    pub estimated_height: f32,
+    pub row: crate::conversation::view::transcript::LayoutBatchedRowFactory,
+    pub revision: crate::conversation::view::transcript::RowRevision,
+    pub viewport: std::rc::Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
+    pub initial_height: InitialHeight,
+    pub overlays: Vec<Element>,
+    pub drawer: Option<Element>,
 }
 
 pub(crate) fn conversation_virtual(
@@ -162,28 +177,22 @@ pub(crate) fn conversation_virtual(
     core: &crate::core::Core,
     theme: &ArtisanTheme,
     viewport_width: f32,
-    estimated_height: f32,
-    row: crate::conversation::view::transcript::LayoutBatchedRowFactory,
-    revision: crate::conversation::view::transcript::RowRevision,
-    viewport: std::rc::Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: std::rc::Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    drawer: Option<Element>,
+    transcript: Transcript,
     parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
 ) -> Result<Element, BuildError> {
+    let Transcript {
+        estimated_height,
+        row,
+        revision,
+        viewport,
+        initial_height,
+        overlays,
+        drawer,
+    } = transcript;
     let card = if workspace.conversation.agent.is_some() {
         None
     } else {
-        Some(measured_composer(
-            workspace,
-            core,
-            theme,
-            parts,
-            composer_measurement,
-            above_composer,
-        )?)
+        Some(measured_composer(workspace, core, theme, parts)?)
     };
     Ok(crate::conversation::view::layout_batched_thread_element(
         &workspace.conversation,
@@ -203,10 +212,10 @@ fn measured_composer(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
-    parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
+    mut parts: ComposerParts,
 ) -> Result<Element, BuildError> {
+    let composer_measurement = std::rc::Rc::clone(&parts.measurement);
+    let above_composer = parts.above.take();
     let shift = parts.shift;
     let owner = workspace.composer.as_ref().ok_or(BuildError::NoComposer)?;
     let (host_id, instance, placeholder) = {
@@ -277,20 +286,11 @@ pub(crate) fn conversation_body(
     body: Element,
     overlays: Vec<Element>,
     parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
 ) -> Result<Element, BuildError> {
     let card = if workspace.conversation.agent.is_some() {
         None
     } else {
-        Some(measured_composer(
-            workspace,
-            core,
-            theme,
-            parts,
-            composer_measurement,
-            above_composer,
-        )?)
+        Some(measured_composer(workspace, core, theme, parts)?)
     };
     Ok(crate::conversation::view::thread_frame(
         body,
@@ -379,11 +379,11 @@ pub(crate) fn new_conversation(
     core: &crate::core::Core,
     theme: &ArtisanTheme,
     parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     reduced_motion: bool,
     docked: Option<f32>,
     look: Option<&Sky>,
 ) -> Result<Element, BuildError> {
+    let composer_measurement = std::rc::Rc::clone(&parts.measurement);
     let artwork = look.map(|look| {
         sky(
             theme,
@@ -392,7 +392,7 @@ pub(crate) fn new_conversation(
             look,
         )
     });
-    let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
+    let card = measured_composer(workspace, core, theme, parts)?;
     let body = match docked {
         Some(width) => crate::conversation::view::thread_frame(
             UiBox::new().build(),

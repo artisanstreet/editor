@@ -5,6 +5,20 @@ use aqua::prelude::ObservedWindowState;
 use aqua_ui::element::Element;
 use std::{cell::Cell, collections::HashMap, rc::Rc};
 
+type ConversationCallbacks = (
+    Rc<dyn Fn(crate::ui::markdown::visual::LinkAction)>,
+    Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>,
+);
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ContentPass {
+    pub(super) width: f32,
+    pub(super) reduced_motion: bool,
+    pub(super) swift: bool,
+    pub(super) now: std::time::Instant,
+    pub(super) transcript_only: bool,
+}
+
 impl RootViews {
     pub(super) fn thread_content(
         &mut self,
@@ -12,15 +26,18 @@ impl RootViews {
         core: &crate::core::Core,
         ui: &mut UiApp,
         theme: &crate::ui::theme::ArtisanTheme,
-        width: f32,
-        reduced_motion: bool,
-        swift: bool,
         media_resources: AppMedia,
-        now: std::time::Instant,
-        transcript_only: bool,
+        pass: ContentPass,
     ) -> Result<Element, BuildError> {
         use crate::conversation::presentation::PresentationScope;
         use crate::conversation::view::factory::RowFactory;
+        let ContentPass {
+            width,
+            reduced_motion,
+            swift,
+            now,
+            transcript_only,
+        } = pass;
         let scope = PresentationScope::capture(&workspace.conversation, core)
             .ok_or(BuildError::ConversationGone)?;
         if self.rows.as_ref().is_none_or(|rows| rows.scope != scope) {
@@ -420,6 +437,8 @@ impl RootViews {
             mention_overlay: None,
             thread_error: None,
             shift: self.composer_glide.shift(now),
+            measurement: Rc::clone(&self.composer_measurement),
+            above: above_composer,
         };
         let center = if workspace.conversation.rows.is_empty() {
             self.thread_landing.reset();
@@ -447,17 +466,7 @@ impl RootViews {
                     view::conversation_notice(theme, "No messages yet.".to_owned(), false)
                 }
             };
-            view::conversation_body(
-                workspace,
-                core,
-                theme,
-                width,
-                body,
-                Vec::new(),
-                parts,
-                Rc::clone(&self.composer_measurement),
-                above_composer,
-            )?
+            view::conversation_body(workspace, core, theme, width, body, Vec::new(), parts)?
         } else {
             self.thread_loading.reset();
             let mut overlays = vec![
@@ -520,19 +529,21 @@ impl RootViews {
                 core,
                 theme,
                 width,
-                24.0,
-                factory.layout_callback(),
-                {
-                    let revisions = Rc::clone(&factory);
-                    Rc::new(move |index, key| revisions.revision(index, key))
+                view::Transcript {
+                    estimated_height: 24.0,
+                    row: factory.layout_callback(),
+                    revision: {
+                        let revisions = Rc::clone(&factory);
+                        Rc::new(move |index, key| revisions.revision(index, key))
+                    },
+                    viewport,
+                    initial_height: Rc::new(move |_, key| {
+                        heights.get(key).copied().unwrap_or(24.0)
+                    }),
+                    overlays,
+                    drawer,
                 },
-                viewport,
-                Rc::new(move |_, key| heights.get(key).copied().unwrap_or(24.0)),
-                overlays,
-                drawer,
                 parts,
-                Rc::clone(&self.composer_measurement),
-                above_composer,
             )?
         };
         self.replace_rows(Some(factory));
@@ -542,10 +553,7 @@ impl RootViews {
     fn conversation_callbacks(
         &self,
         scope: crate::conversation::presentation::PresentationScope,
-    ) -> (
-        Rc<dyn Fn(crate::ui::markdown::visual::LinkAction)>,
-        Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>,
-    ) {
+    ) -> ConversationCallbacks {
         let links = Rc::clone(&self.conversation_actions);
         let colors = Rc::clone(&self.conversation_actions);
         let link_scope = scope.clone();

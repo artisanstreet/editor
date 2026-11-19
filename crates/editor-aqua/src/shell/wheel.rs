@@ -23,6 +23,10 @@ struct Metrics {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-frame outcomes that merge by OR across surfaces, not states of one machine"
+)]
 pub struct Advance {
     pub moved: bool,
     pub active: bool,

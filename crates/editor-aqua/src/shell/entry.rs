@@ -230,7 +230,7 @@ impl Entry {
             "you@artisan.email",
             Event::SubmitEmail,
         );
-        let code = editor(
+        let code_field = editor(
             Rc::clone(&self.controller.sign_in.second_factor),
             "artisan-sign-in-code",
             "123456",
@@ -242,7 +242,7 @@ impl Entry {
                 view: &view,
                 sign_in: &self.sign_in,
                 email,
-                code,
+                code: code_field,
                 busy: model::locked(&view),
                 width: card::WIDTH,
                 now: std::time::Instant::now(),

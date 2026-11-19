@@ -601,14 +601,14 @@ impl SeedSnapshot {
             .ok_or_else(|| ProduceSnapshotError::NoDataDirectory {
                 path: blobs.to_owned(),
             })?;
-        let served =
+        let data_directory =
             canonical_path(data).map_err(|source| ProduceSnapshotError::ResolveDataDirectory {
                 path: data.to_owned(),
                 source,
             })?;
-        if served != logical_path {
+        if data_directory != logical_path {
             return Err(ProduceSnapshotError::NotPinned {
-                actual: served,
+                actual: data_directory,
                 pinned: logical_path,
             });
         }
@@ -708,11 +708,11 @@ fn clear_leftover(path: &Path) -> Result<(), RestoreSnapshotError> {
         source,
     })?;
     let removal = |path: PathBuf| move |source| RestoreSnapshotError::Remove { path, source };
-    let marker = marked.join(".artisan-qualification");
+    let qualification_marker = marked.join(".artisan-qualification");
     for entry in std::fs::read_dir(&marked).map_err(removal(marked.clone()))? {
         let entry = entry.map_err(removal(marked.clone()))?;
         let path = entry.path();
-        if path == marker {
+        if path == qualification_marker {
             continue;
         }
         let kind = entry.file_type().map_err(removal(path.clone()))?;
@@ -723,7 +723,7 @@ fn clear_leftover(path: &Path) -> Result<(), RestoreSnapshotError> {
         }
         .map_err(removal(path))?;
     }
-    std::fs::remove_file(&marker).map_err(removal(marker))?;
+    std::fs::remove_file(&qualification_marker).map_err(removal(qualification_marker))?;
     std::fs::remove_dir(&marked).map_err(removal(marked))
 }
 

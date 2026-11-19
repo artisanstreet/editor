@@ -29,5 +29,9 @@ fn qualification_frames_never_initialize_native_notifications() {
         runtime.dispatch_frame_completed(&mut app, id, sequence);
     }
     assert!(app.notifications.is_none());
-    assert!(!app.notifications_started);
+    assert_eq!(
+        app.notifications_start,
+        NotificationStart::Disabled,
+        "a qualification run never starts native notifications"
+    );
 }

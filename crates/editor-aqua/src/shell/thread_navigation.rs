@@ -64,14 +64,19 @@ pub(super) fn latest_visible(
     core: &Core,
     composer_present: bool,
 ) -> bool {
+    let on_open_thread = matches!(
+        core.workspace_screen(),
+        crate::core::Screen::Thread { host, thread }
+            if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| {
+                open_host == host && open_thread == thread
+            })
+    );
     conversation.view.as_ref().is_some_and(|view| {
-        show_latest(
-            matches!(core.workspace_screen(), crate::core::Screen::Thread { host, thread } if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| open_host == host && open_thread == thread)),
-            composer_present,
-            conversation.agent.is_some(),
-            view.viewport.state().is_following(),
-            conversation.host_is_current(core),
-        )
+        on_open_thread
+            && composer_present
+            && conversation.agent.is_none()
+            && !view.viewport.state().is_following()
+            && conversation.host_is_current(core)
     })
 }
 
@@ -169,10 +174,6 @@ pub(crate) fn jump_to_latest(theme: &ArtisanTheme, presence: f32, dispatch: Disp
         .style(Style::new().justify(JustifyContent::CENTER))
         .child(presence)
         .build()
-}
-
-fn show_latest(thread: bool, composer: bool, agent: bool, following: bool, current: bool) -> bool {
-    thread && composer && !agent && !following && current
 }
 
 const EASE: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);

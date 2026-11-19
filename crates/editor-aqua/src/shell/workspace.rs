@@ -92,6 +92,8 @@ impl SettingsPlatformEffect {
     }
 }
 
+type OptionDetailAction = ((u64, u64), crate::sources::ContentAction);
+
 #[derive(PartialEq, Eq)]
 struct QuestionSourceIdentity {
     host: crate::core::HostId,
@@ -127,6 +129,10 @@ impl SidePanel {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent dirty and pending flags for separate subsystems, each cleared on its own"
+)]
 pub struct Workspace {
     pub(crate) selections: crate::shell::selection::SelectionScope,
     pub(crate) inspector: crate::inspector::InspectorOwner,
@@ -170,8 +176,7 @@ pub struct Workspace {
     question_source: Option<(QuestionSourceIdentity, crate::shell::source::SourceView)>,
     question_source_revision: u64,
     question_option_detail: Option<((u64, u64), crate::shell::source::SourceView)>,
-    question_option_detail_actions:
-        Rc<RefCell<VecDeque<((u64, u64), crate::sources::ContentAction)>>>,
+    question_option_detail_actions: Rc<RefCell<VecDeque<OptionDetailAction>>>,
     pub(crate) marketplace: crate::marketplace::controller::MarketplaceController,
     marketplace_focus_pending: bool,
     marketplace_reveal_pending: bool,
@@ -1455,31 +1460,25 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub(crate) fn sidebar_view(
+    pub(crate) fn settings_sidebar_view(
         &self,
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
         viewport: aqua_core::Size,
-        visible: bool,
         reduced_motion: bool,
         now: std::time::Instant,
-        settings: bool,
     ) -> aqua_ui::element::Element {
-        let sidebar = if settings {
-            &self.settings_sidebar
-        } else {
-            &self.sidebar
-        };
         crate::sidebar::view::build(
-            sidebar,
+            &self.settings_sidebar,
             core,
             theme,
             viewport,
-            visible,
+            true,
             reduced_motion,
             now,
-            sidebar.thread_visual_factory(theme, reduced_motion),
-            &self.sidebar_emit(settings),
+            self.settings_sidebar
+                .thread_visual_factory(theme, reduced_motion),
+            &self.sidebar_emit(true),
         )
     }
 

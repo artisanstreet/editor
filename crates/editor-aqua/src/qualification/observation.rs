@@ -67,6 +67,10 @@ pub(crate) fn record_native_state(
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a serialized record of independent view flags the qualification report compares field by field"
+)]
 pub struct Observation {
     pub account: String,
     pub host: String,

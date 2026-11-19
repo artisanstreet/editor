@@ -142,13 +142,19 @@ pub trait SectionViews {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationStart {
+    Disabled,
+    Pending,
+    Started,
+}
+
 pub struct ShellApplication<V> {
     pub shell: Shell,
     pub views: V,
     pub ui: ManagedUiApp,
     pub notifications: Option<NativeNotifications>,
-    pub notifications_started: bool,
-    pub notifications_enabled: bool,
+    pub notifications_start: NotificationStart,
     pub initial: Option<ShellUpdates>,
     pub mounted: bool,
     pub font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
@@ -292,7 +298,7 @@ impl<V: SectionViews> ShellApplication<V> {
     pub fn for_qualification(core: crate::core::Core, resources: ShellResources, views: V) -> Self {
         let (shell, initial) = Shell::for_qualification(core, resources.images.clone());
         let mut app = Self::from_shell(shell, initial, resources, views);
-        app.notifications_enabled = false;
+        app.notifications_start = NotificationStart::Disabled;
         app
     }
 
@@ -307,8 +313,7 @@ impl<V: SectionViews> ShellApplication<V> {
             views,
             ui: resources.into_managed(),
             notifications: None,
-            notifications_started: false,
-            notifications_enabled: true,
+            notifications_start: NotificationStart::Pending,
             initial: Some(initial),
             mounted: false,
             font_popup: None,
@@ -334,9 +339,10 @@ impl<V: SectionViews> ShellApplication<V> {
     }
 
     fn start_notifications(&mut self, ctx: &AppCtx<'_>, id: AquaWindowId) -> bool {
-        if !self.notifications_enabled || std::mem::replace(&mut self.notifications_started, true) {
+        if self.notifications_start != NotificationStart::Pending {
             return false;
         }
+        self.notifications_start = NotificationStart::Started;
         match NativeNotifications::new() {
             Ok(notifications) => {
                 notifications.bind(ctx, id);
@@ -893,7 +899,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
         #[cfg(feature = "qualification")]
-        if !self.notifications_enabled
+        if self.notifications_start == NotificationStart::Disabled
             && let Err(error) =
                 crate::qualification::observation::record_native_state(&self.shell, sequence)
         {

@@ -95,12 +95,15 @@ impl RootViews {
                         &shell.core,
                         ui,
                         &theme,
-                        card_width,
-                        reduced,
-                        shell.preferences.streaming == crate::ui::preferences::StreamingMode::Swift,
                         app_media,
-                        now,
-                        false,
+                        super::thread_content::ContentPass {
+                            width: card_width,
+                            reduced_motion: reduced,
+                            swift: shell.preferences.streaming
+                                == crate::ui::preferences::StreamingMode::Swift,
+                            now,
+                            transcript_only: false,
+                        },
                     )?
                 } else {
                     self.replace_rows(None);
@@ -140,8 +143,9 @@ impl RootViews {
                             mention_overlay: None,
                             thread_error: None,
                             shift: self.composer_glide.shift(now),
+                            measurement: Rc::clone(&self.composer_measurement),
+                            above: None,
                         },
-                        Rc::clone(&self.composer_measurement),
                         reduced,
                         self.composer_glide.launched().then_some(card_width),
                         self.composer_glide.sky_shown(now).then_some(&sky),
@@ -240,14 +244,12 @@ impl RootViews {
         let settings_open = matches!(shell.core.screen(), Screen::Settings(_));
         self.settings_panel = settings_open.then(|| {
             let settings_layout = layout::settings_layout(viewport);
-            let nav = workspace.sidebar_view(
+            let nav = workspace.settings_sidebar_view(
                 &shell.core,
                 &theme,
                 aqua_core::Size::new(settings_layout.size.width, settings_layout.size.height),
-                true,
                 reduced,
                 now,
-                true,
             );
             let page = workspace.settings_view(&shell.core, &theme, &shell.build, size, true);
             let dismissed = Rc::clone(&self.settings_dismissed);
