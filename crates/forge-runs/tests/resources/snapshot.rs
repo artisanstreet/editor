@@ -9,22 +9,16 @@ async fn kept(fixture: &Fixture, item: &ItemId, written: &Written) -> Vec<u8> {
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(test_support::wait::LIVENESS, async {
-        loop {
-            let snapshot = fixture.hub.store().resource_snapshot_target(
-                &fixture.thread_id,
-                item,
-                &written.path,
-                written.from_home,
-            );
-            if snapshot.is_some_and(|path| path.is_file()) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the reply's image is kept");
+    let snapshot = fixture.hub.store().resource_snapshot_target(
+        &fixture.thread_id,
+        item,
+        &written.path,
+        written.from_home,
+    );
+    assert!(
+        snapshot.is_some_and(|path| path.is_file()),
+        "the reply's image was kept before the reply was saved"
+    );
     fixture
         .hub
         .read_resource(&thread, Some(item), written)
