@@ -277,6 +277,10 @@ fn paging_retries_only_after_scroll_and_closed_history_stops_older_loading() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one host-recreation scenario walked step by step"
+)]
 fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};

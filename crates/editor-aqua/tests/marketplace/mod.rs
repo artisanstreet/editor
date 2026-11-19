@@ -202,6 +202,10 @@ fn same_id_host_replacement_resets_marketplace_requests() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one keyboard search scenario walked step by step"
+)]
 fn mounted_search_routes_keyboard_selection_and_escape() {
     use aqua_core::{InputEvent, Key as InputKey, KeyEvent, Modifiers, NamedKey};
     use aqua_text::{SharedFonts, SharedRuns};

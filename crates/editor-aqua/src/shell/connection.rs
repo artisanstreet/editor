@@ -224,6 +224,10 @@ impl ConnectionPresenter {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one presenter covering every connection phase the new-thread screen shows"
+    )]
     pub fn build(
         &mut self,
         host: &HostData,

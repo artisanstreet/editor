@@ -13,6 +13,10 @@ const REPLY_SEQ: u64 = 4;
 const RUN_SEQ: u64 = 5;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one focus-and-read scenario walked step by step"
+)]
 fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
     let thread = ThreadId("read-thread".into());
     let run = RunId("read-run".into());

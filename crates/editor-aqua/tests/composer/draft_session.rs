@@ -127,6 +127,10 @@ fn edits_during_a_write_are_not_discarded() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one host-replacement scenario walked step by step"
+)]
 fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::composer::view::ComposerAction;

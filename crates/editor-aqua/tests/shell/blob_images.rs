@@ -8,6 +8,10 @@ use artisan_api::{BlobHash, Item, ItemId, ItemKind, Status, ThreadId};
 use std::sync::Arc;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one blob-preview scenario walked through each fence in turn"
+)]
 fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     let directory = tempfile::tempdir().unwrap();
     let files = EditorFiles {

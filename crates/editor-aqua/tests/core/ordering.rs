@@ -258,6 +258,10 @@ fn image_facade_observes_current_results_without_retaining_host_or_evicted_image
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one gate and instance scenario walked step by step"
+)]
 fn source_provider_tracks_gate_and_host_instance_without_reviving() {
     let (_directory, mut core) = core();
     let id = host(&mut core, "sources");

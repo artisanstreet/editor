@@ -6,6 +6,10 @@ use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::rc::Rc;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one image completion scenario walked step by step"
+)]
 fn completed_image_invalidates_retained_loading_row() {
     use aqua::images::{ImageAssets, ImageStatus};
     use aqua_ui::{

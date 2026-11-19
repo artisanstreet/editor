@@ -11,6 +11,10 @@ use aqua::{Aqua, pct, px};
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one inbox view: header, live rows, then the collapsed history"
+)]
 pub(crate) fn view(
     sidebar: &Sidebar,
     core: &Core,

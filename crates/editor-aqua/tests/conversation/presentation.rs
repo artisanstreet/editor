@@ -56,6 +56,10 @@ fn measured_heights_ignore_stale_rows_and_invalid_values() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one admission-order scenario walked across rebuilds"
+)]
 fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     use artisan_api::{Item, RunId, Status};
     use editor_aqua::conversation::adapter::RowModel;
@@ -195,6 +199,10 @@ fn mounted_live_reveal_uses_live_rope_when_saved_source_is_stored() {
     exercise_mounted_live_reveal(true);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one mounted reveal scenario walked step by step"
+)]
 fn exercise_mounted_live_reveal(stored_saved: bool) {
     use artisan_api::{Event, Item, LiveCoverage, LiveTarget, Status, TextContent};
     use editor_aqua::conversation::adapter::row_model;
@@ -449,6 +457,10 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one factory lifetime scenario walked step by step"
+)]
 fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected() {
     use artisan_api::{Item, ItemKind, TextContent};
     use editor_aqua::conversation::adapter::RowModel;

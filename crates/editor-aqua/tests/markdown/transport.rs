@@ -43,6 +43,10 @@ fn wait_source(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real-Forge paging scenario walked step by step"
+)]
 fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     let directory = tempfile::tempdir().unwrap();
     let server = runtime()
@@ -262,6 +266,10 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
     runtime().block_on(server.shutdown()).unwrap();
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stored-conversation transaction driven against a real Forge"
+)]
 fn stored_conversation_transaction(
     core: &mut Core,
     config: &editor_aqua::core::HostConfig,

@@ -82,6 +82,10 @@ fn scale_change_reaches_layout_before_the_rebuild() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one DPI scenario walked through resize and scale change"
+)]
 fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_change() {
     for initial_scale in [1.25_f64, 2.0] {
         let directory = tempfile::tempdir().unwrap();

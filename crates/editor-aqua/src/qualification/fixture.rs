@@ -842,6 +842,10 @@ fn verify_editor_settings(
 }
 
 impl VerifiedBootstrap {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bootstrap load that verifies each input before starting the Forge"
+    )]
     pub async fn load(path: &Path) -> Result<Self, LoadBootstrapError> {
         let bytes = std::fs::read(path).map_err(|source| LoadBootstrapError::Read {
             path: path.to_owned(),
@@ -1430,6 +1434,10 @@ impl Fixture {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one seed transaction writing every fixture table in dependency order"
+    )]
     pub async fn seed(&self, store: &forge_store::Store) -> Result<StoreSnapshot, SeedError> {
         self.validate().map_err(SeedError::Invalid)?;
         let initial = store.state().await.map_err(SeedError::State)?;

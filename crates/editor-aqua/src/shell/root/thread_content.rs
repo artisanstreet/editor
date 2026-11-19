@@ -20,6 +20,10 @@ pub(super) struct ContentPass {
 }
 
 impl RootViews {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one thread content pass that shares scope, caches and row factory across its regions"
+    )]
     pub(super) fn thread_content(
         &mut self,
         workspace: &mut crate::shell::workspace::Workspace,

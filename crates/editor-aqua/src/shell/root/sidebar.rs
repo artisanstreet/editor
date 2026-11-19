@@ -35,6 +35,10 @@ impl RootViews {
         self.close_resource(ui);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sidebar sync over model, overlays and the refreshed subtree"
+    )]
     pub(super) fn sync_sidebar(
         &mut self,
         shell: &mut Shell,

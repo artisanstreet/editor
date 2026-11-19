@@ -22,6 +22,10 @@ use test_support::editor::ui::{click, mounted};
 use test_support::items;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one approval scenario walked through each fence in turn"
+)]
 fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifetime() {
     let opened = OpenThread::new("approval-host", "thread");
     let scope = opened.scope();

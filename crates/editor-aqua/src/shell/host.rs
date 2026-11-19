@@ -223,6 +223,10 @@ impl Shell {
         self.preferences.apply_window(ctx, window)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded drain over core, entry and live events sharing the frame budget"
+    )]
     pub(crate) fn drain(&mut self, window_active: bool, ui: &mut aqua::UiApp) -> ShellUpdates {
         const MESSAGES_PER_DRAIN: usize = 256;
         const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);

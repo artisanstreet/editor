@@ -40,6 +40,10 @@ fn question(id: &str, digit: char) -> Arc<Item> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one eviction scenario walked step by step"
+)]
 fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_eviction() {
     let opened = OpenThread::new("question-host", "thread");
     let scope = opened.scope();

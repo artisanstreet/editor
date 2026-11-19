@@ -7,6 +7,10 @@ use aqua_ui::element::Element;
 use std::rc::Rc;
 
 impl RootViews {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one root build that assembles every screen region from the same frame state"
+    )]
     pub(super) fn build_root(
         &mut self,
         shell: &mut Shell,

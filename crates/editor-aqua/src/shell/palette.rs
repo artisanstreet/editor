@@ -232,6 +232,10 @@ impl Palette {
         self.pending > 0
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one refresh building every palette section in display order"
+    )]
     pub fn refresh(&mut self, active: Option<&HostId>, hosts: &[HostSnapshot<'_>]) {
         let selected = self
             .entries

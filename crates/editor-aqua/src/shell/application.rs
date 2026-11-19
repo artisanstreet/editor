@@ -412,6 +412,10 @@ impl<V: SectionViews> ShellApplication<V> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one rebuild pass: popups, views, mount and the frame request in order"
+    )]
     fn rebuild(
         &mut self,
         ctx: &mut AppCtx<'_>,
@@ -691,6 +695,10 @@ impl<V: SectionViews> ShellApplication<V> {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one drain pass over shell, views and native effects with shared timing"
+    )]
     fn drain(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sections_changed: bool) {
         let tm_pre = Tm::new("drain.pre");
         for control in self.shell.titlebar.take_actions() {
@@ -897,6 +905,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             self.drain(ctx, id, false);
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame-completion pass: notifications, qualification, refresh and pacing"
+    )]
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
         #[cfg(feature = "qualification")]
         if self.notifications_start == NotificationStart::Disabled

@@ -27,6 +27,10 @@ fn username_replaces_email_without_replacing_the_display_name() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one menu hover scenario walked frame by frame"
+)]
 fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
     use aqua::UiApp;
     use aqua_core::{InputEvent, Point, PointerEvent, PointerKind};

@@ -6,6 +6,10 @@ use aqua::prelude::AquaWindowId;
 use aqua::{AppCtx, UiApp};
 
 impl RootViews {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame-completion pass whose steps share the painted rows and timing"
+    )]
     pub(super) fn complete_frame(
         &mut self,
         shell: &mut Shell,

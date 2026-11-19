@@ -74,6 +74,10 @@ impl RootViews {
         self.wheel.offer(ui, input).map(|_| true)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one input router trying each overlay and surface in priority order"
+    )]
     pub(super) fn route_input(
         &mut self,
         shell: &mut Shell,

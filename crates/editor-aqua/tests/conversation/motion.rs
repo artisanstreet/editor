@@ -64,6 +64,10 @@ fn compaction_completes_entrance_and_plays_checkpoint_after_settling() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one entrance scenario walked step by step through eviction"
+)]
 fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::{Box as UiBox, Key};

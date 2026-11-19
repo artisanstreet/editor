@@ -160,6 +160,10 @@ pub fn launch() -> Result<(), LaunchError> {
     launched
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one launch sequence: setup, qualification, capture, links, then the window loop"
+)]
 fn run(qualifying: bool) -> Result<(), LaunchError> {
     if matches!(
         crate::setup::begin().map_err(LaunchError::Setup)?,

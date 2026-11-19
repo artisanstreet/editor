@@ -79,6 +79,10 @@ fn the_row_window_opens_at_the_tail_and_shifts_once_per_edge_reached() {
 
 #[cfg(feature = "qualification")]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one failing-page scenario from the error to the retried load"
+)]
 fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
     use aqua_text::document::SelectionDocumentId;
     use artisan_api::{

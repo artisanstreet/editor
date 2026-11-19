@@ -6,6 +6,10 @@ use aqua::{AppCtx, UiApp};
 use std::rc::Rc;
 
 impl RootViews {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dispatch loop with an arm per conversation action"
+    )]
     pub(super) fn dispatch_conversation(
         &mut self,
         shell: &mut Shell,

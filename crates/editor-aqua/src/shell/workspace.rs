@@ -1238,6 +1238,10 @@ impl Workspace {
             .unwrap_or(crate::composer::draft_session::Posting::Idle)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one composer content pass building questionnaires and attachments together"
+    )]
     pub(crate) fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,

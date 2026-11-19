@@ -220,6 +220,10 @@ fn encode(what: &'static str, value: &impl Serialize) -> Result<Vec<u8>, Prepare
     clippy::print_stdout,
     reason = "the qualification CLI reports the prepared seed to its caller on stdout"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one preparation run from seeding the store to writing the digest"
+)]
 pub fn prepare(path: &Path) -> Result<(), PrepareError> {
     let bytes = std::fs::read(path).map_err(|source| PrepareError::Read {
         path: path.to_owned(),

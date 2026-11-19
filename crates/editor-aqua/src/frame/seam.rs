@@ -17,6 +17,10 @@ use std::sync::Arc;
 pub(crate) const ACTIVE: &str = "artisan-active-thread-tab";
 pub(crate) const SHEET: &str = "artisan-thread-sheet";
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one canvas whose prepaint measures, targets and paints the seam in a single pass"
+)]
 pub(crate) fn surface(
     theme: &ArtisanTheme,
     motion: Rc<RefCell<motion::Motion>>,
@@ -132,6 +136,10 @@ const DARK: usize = 24;
 #[expect(
     clippy::disallowed_types,
     reason = "the seam sheet is a path-traced silhouette painted layer by layer; no kit surface can draw it"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one shader parameter block laid out field by field in shader order"
 )]
 fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayItem> {
     let local = Rect {

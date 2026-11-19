@@ -39,6 +39,10 @@ fn replies(opened: &mut ThreadShell, count: u64) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one landing scenario walked step by step"
+)]
 fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
     for expire in [false, true] {
         let clock = ManualClock::starting_at(1_700_000_000_000);
