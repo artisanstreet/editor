@@ -205,6 +205,9 @@ debug = "line-tables-only"
 opt-level = 3
 debug = false
 
+[profile.test.package.diagnostics]
+debug = "line-tables-only"
+
 [profile.bench]
 lto = false
 codegen-units = 16
