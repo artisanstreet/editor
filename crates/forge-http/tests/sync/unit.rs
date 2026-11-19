@@ -461,15 +461,69 @@ async fn synced_servers_keep_credentials_only_while_their_destination_is_unchang
         moved.headers
     );
 
-    let command = |command: &str| {
-        mcp_manifest(&serde_json::json!({"name": "s", "command": command, "args": ["--stdio"]}))
+    let launched = |command: &str, args: &[&str], others: &[&str]| {
+        let servers: Vec<_> =
+            std::iter::once(serde_json::json!({"name": "s", "command": command, "args": args}))
+                .chain(
+                    others
+                        .iter()
+                        .map(|name| serde_json::json!({"name": name, "command": "other"})),
+                )
+                .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "format": "ast-editor-config/1",
+            "mcp_servers": servers,
+        }))
+        .unwrap()
     };
-    sync_with(command("search-server"), &hub, dir.path()).await;
-    let mut stdio = mcp_servers(store).await.pop().unwrap();
-    stdio.env.insert("API_KEY".into(), "secret".into());
-    add_local(store, stdio).await;
-    sync_with(command("other-server"), &hub, dir.path()).await;
-    let replaced = mcp_servers(store).await.pop().unwrap();
+    let stdio = async || {
+        mcp_servers(store)
+            .await
+            .into_iter()
+            .find(|server| server.name == "s")
+            .unwrap()
+    };
+    let with_key = async || {
+        let mut placed = stdio().await;
+        placed.env.insert("API_KEY".into(), "secret".into());
+        add_local(store, placed).await;
+    };
+    sync_with(launched("npx", &["search-server"], &[]), &hub, dir.path()).await;
+    with_key().await;
+    sync_with(
+        launched("npx", &["search-server"], &["t"]),
+        &hub,
+        dir.path(),
+    )
+    .await;
+    assert_eq!(
+        stdio().await.env.get("API_KEY").map(String::as_str),
+        Some("secret"),
+        "an unchanged server lost its secrets when another server changed"
+    );
+
+    sync_with(
+        launched("npx", &["other-package"], &["t"]),
+        &hub,
+        dir.path(),
+    )
+    .await;
+    let repackaged = stdio().await;
+    assert_eq!(repackaged.args, ["other-package"]);
+    assert!(
+        repackaged.env.is_empty(),
+        "a different package run by the same command received the old secrets: {:?}",
+        repackaged.env
+    );
+
+    with_key().await;
+    sync_with(
+        launched("other-server", &["other-package"], &[]),
+        &hub,
+        dir.path(),
+    )
+    .await;
+    let replaced = stdio().await;
     assert_eq!(replaced.command, "other-server");
     assert!(
         replaced.env.is_empty(),

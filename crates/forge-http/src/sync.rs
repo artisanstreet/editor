@@ -1083,7 +1083,7 @@ fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpSe
             (Ok(previous), Ok(next)) => previous.origin() == next.origin(),
             (Err(_), _) | (_, Err(_)) => false,
         },
-        (None, None) => previous.command == next.command,
+        (None, None) => previous.command == next.command && previous.args == next.args,
         (Some(_), None) | (None, Some(_)) => false,
     }
 }
