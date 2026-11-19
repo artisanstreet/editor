@@ -182,7 +182,7 @@ fn is_switch(value: &str) -> bool {
 }
 
 #[must_use]
-pub fn effective_environment(command: &std::process::Command) -> Vec<(String, String)> {
+pub(crate) fn effective_environment(command: &std::process::Command) -> Vec<(String, String)> {
     let mut environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
         std::env::vars_os().collect();
     for (key, value) in command.get_envs() {
@@ -497,7 +497,7 @@ impl Trace {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<Arc<str>> {
+    pub(crate) fn name(&self) -> Option<Arc<str>> {
         self.sink.as_ref().map(|sink| Arc::clone(&sink.name))
     }
 
@@ -520,7 +520,7 @@ impl Trace {
             .saturating_add(RECORD_OVERHEAD_BYTES);
         if sink
             .remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                 remaining.checked_sub(bytes)
             })
             .is_err()

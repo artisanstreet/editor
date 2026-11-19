@@ -63,7 +63,7 @@ pub struct StderrWritten {
 
 impl StderrWritten {
     #[must_use]
-    pub const fn bytes(&self) -> u64 {
+    pub(crate) const fn bytes(&self) -> u64 {
         self.bytes
     }
 }
