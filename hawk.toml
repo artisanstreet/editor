@@ -175,24 +175,6 @@ reason = "used by Linux-only code or tests (target_os = linux), so the Windows r
 [[override]]
 lint = "hawk::dead_public"
 crate = "editor_core"
-item = "core::diagnostics::rebuild_stats::take_tally"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "editor_core"
-item = "core::diagnostics::rebuild_stats::Tally::event"
-kind = "inherent_method"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "editor_core"
 item = "core::host::project_icons::<impl core::host::HostData>::project_icon_checked"
 kind = "inherent_method"
 level = "expect"
@@ -425,15 +407,6 @@ target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
 
 [[override]]
-lint = "hawk::unnecessary_public"
-crate = "editor_ui"
-item = "ui::locale::system::posix_locale"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
 lint = "hawk::unnecessary_restricted_visibility"
 crate = "editor_aqua"
 item = "shell::open_url"
@@ -585,3 +558,30 @@ kind = "function"
 level = "expect"
 target = "cfg(not(windows))"
 reason = "the Windows capture recorder and surface size frames with it; they are not compiled elsewhere"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "editor_core"
+item = "core::diagnostics::rebuild_stats::take_tally"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "the budgets test that reads each frame's tally only runs on Linux"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "test_support"
+item = "skipped"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix sandbox and gateway tests can be skipped for a missing tool"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "editor::core::StubbedHost::start_in"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix agent-call tests start a stubbed host in their own folder"
