@@ -1,18 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::items_after_statements,
-    clippy::let_underscore_untyped,
-    clippy::redundant_clone,
-    clippy::redundant_closure_for_method_calls,
-    clippy::too_many_lines,
-    clippy::unchecked_time_subtraction,
-    clippy::wildcard_enum_match_arm,
-    let_underscore_drop,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 #[path = "composer/draft_session.rs"]

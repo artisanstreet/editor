@@ -1,18 +1,3 @@
-#![expect(
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::float_cmp,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_value,
-    clippy::redundant_clone,
-    clippy::redundant_closure_for_method_calls,
-    clippy::renamed_function_params,
-    clippy::too_many_lines,
-    clippy::unchecked_time_subtraction,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 #[path = "shell/application.rs"]

@@ -1,17 +1,3 @@
-#![expect(
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::imprecise_flops,
-    clippy::match_bool,
-    clippy::needless_for_each,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::unreadable_literal,
-    clippy::wildcard_enum_match_arm,
-    unreachable_pub,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 #[path = "ui/code_copy.rs"]

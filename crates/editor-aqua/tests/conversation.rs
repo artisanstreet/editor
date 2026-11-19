@@ -1,21 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::iter_on_single_items,
-    clippy::let_underscore_untyped,
-    clippy::needless_borrow,
-    clippy::redundant_clone,
-    clippy::renamed_function_params,
-    clippy::semicolon_if_nothing_returned,
-    clippy::suboptimal_flops,
-    clippy::too_many_lines,
-    clippy::wildcard_enum_match_arm,
-    let_underscore_drop,
-    unused_qualifications,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 #[path = "conversation/compaction_view.rs"]

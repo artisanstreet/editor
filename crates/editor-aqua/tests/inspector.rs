@@ -1,7 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 #![cfg(test)]
 
 #[expect(
