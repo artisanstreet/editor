@@ -612,7 +612,7 @@ impl Core {
     }
     pub fn reload_settings(&mut self) {
         self.settings = Settings::read(self.files.settings());
-        self.saves.confirm(&self.settings);
+        self.saves.reload(&self.settings);
         if let Some(error) = self.settings.unreadable() {
             tracing::warn!(
                 error = %::diagnostics::chain(error),

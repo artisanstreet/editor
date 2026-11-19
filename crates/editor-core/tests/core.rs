@@ -26,6 +26,8 @@ mod released_forge;
 mod screen;
 #[path = "core/host/settings.rs"]
 mod settings;
+#[path = "core/settings_writer.rs"]
+mod settings_writer;
 #[path = "core/store.rs"]
 mod store;
 #[path = "core/hosts/wsl.rs"]
