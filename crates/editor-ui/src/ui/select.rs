@@ -344,14 +344,17 @@ impl<V: Clone + Eq + 'static> Select<V> {
             open_change: None,
         }
     }
+    #[must_use]
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
     }
+    #[must_use]
     pub fn on_change(mut self, change: impl Fn(V) + 'static) -> Self {
         self.change = Some(Rc::new(change));
         self
     }
+    #[must_use]
     pub fn on_open_change(mut self, change: impl Fn(bool) + 'static) -> Self {
         self.open_change = Some(Rc::new(change));
         self
@@ -524,10 +527,12 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             open_change: None,
         }
     }
+    #[must_use]
     pub fn on_change(mut self, change: impl Fn(V) + 'static) -> Self {
         self.change = Some(Rc::new(change));
         self
     }
+    #[must_use]
     pub fn on_open_change(mut self, change: impl Fn(bool) + 'static) -> Self {
         self.open_change = Some(Rc::new(change));
         self

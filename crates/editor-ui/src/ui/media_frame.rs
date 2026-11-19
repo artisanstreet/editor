@@ -23,13 +23,14 @@ enum FrameSize {
     Transcript { aspect: f32, width: f32 },
 }
 
+type Activate = dyn Fn(ActionEvent);
 pub struct MediaFrame {
     theme: ArtisanTheme,
     size: FrameSize,
     content: Element,
     id: Option<Key>,
     selector: Option<String>,
-    activation: Option<(String, Box<dyn Fn(ActionEvent)>)>,
+    activation: Option<(String, Box<Activate>)>,
     error: bool,
     visible: Option<Rc<dyn Fn()>>,
 }
@@ -121,11 +122,13 @@ impl MediaFrame {
             .build()
     }
 
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.selector = Some(selector.into());
         self
     }
 
+    #[must_use]
     pub fn on_activate(
         mut self,
         id: impl Into<Key>,
@@ -142,6 +145,7 @@ impl MediaFrame {
         self
     }
 
+    #[must_use]
     pub fn on_visible(mut self, action: impl Fn() + 'static) -> Self {
         self.visible = Some(Rc::new(action));
         self

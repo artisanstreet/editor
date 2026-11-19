@@ -118,9 +118,11 @@ impl LocalPath {
     }
 }
 
+type CachedPaths = ((u32, u32), Vec<Option<LocalPath>>);
+
 #[derive(Default)]
 pub struct SceneCache {
-    paths: std::cell::RefCell<Option<((u32, u32), Vec<Option<LocalPath>>)>>,
+    paths: std::cell::RefCell<Option<CachedPaths>>,
 }
 
 impl std::fmt::Debug for SceneCache {

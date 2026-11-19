@@ -125,12 +125,14 @@ impl MediaFetcher {
         (self.fetch)(request)
     }
 
+    #[must_use]
     pub fn owned_by(mut self, owner: &[u64], revision: u64) -> Self {
         self.owner = Arc::from(owner);
         self.revision = revision;
         self
     }
 
+    #[must_use]
     pub fn showing(mut self, item: &str) -> Self {
         self.item = Some(Arc::from(item));
         self

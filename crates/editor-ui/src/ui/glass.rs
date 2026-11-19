@@ -147,6 +147,7 @@ impl ComposerFrame {
         }
     }
 
+    #[must_use]
     pub const fn nested(mut self, nested: bool) -> Self {
         self.nested = nested;
         self

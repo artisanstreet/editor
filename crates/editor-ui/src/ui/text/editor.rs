@@ -62,6 +62,7 @@ pub struct StyledToken {
     pub glyph: Option<editor_assets::AssetId>,
 }
 
+pub type Tokenizer = Rc<dyn Fn(&str) -> Vec<TokenRange>>;
 pub type StyledTokenizer = Rc<dyn Fn(&str) -> Vec<StyledToken>>;
 
 #[derive(Clone, Debug)]
@@ -197,7 +198,7 @@ impl Editor {
             self.vertical_goal_column = None;
         }
     }
-    pub fn set_tokenizer(&mut self, tokenizer: Option<Rc<dyn Fn(&str) -> Vec<TokenRange>>>) {
+    pub fn set_tokenizer(&mut self, tokenizer: Option<Tokenizer>) {
         *self.token_cache.get_mut() = None;
         self.tokenizer = tokenizer.map(|tokenize| -> StyledTokenizer {
             Rc::new(move |text: &str| {

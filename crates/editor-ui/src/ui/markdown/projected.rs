@@ -20,6 +20,21 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+type RichFenceView<'a> = dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError> + 'a;
+type OrdinaryFence<'a> = dyn Fn(
+        usize,
+        &super::fence::Fence,
+        &[SelectionSource],
+        Option<&str>,
+    ) -> Result<Element, PresenterError>
+    + 'a;
+type ProjectedRender = (
+    Element,
+    Arc<[SelectionSource]>,
+    Arc<SelectionSourceBatch>,
+    ProjectedGeometry,
+);
+
 struct Leaf {
     range: Range<usize>,
     signature: u64,
@@ -429,24 +444,9 @@ impl ProjectedDocument {
         on_link: Option<Rc<dyn Fn(LinkAction)>>,
         on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
         scope: Option<ResourceScope>,
-        rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-        ordinary: Option<
-            &dyn Fn(
-                usize,
-                &super::fence::Fence,
-                &[SelectionSource],
-                Option<&str>,
-            ) -> Result<Element, PresenterError>,
-        >,
-    ) -> Result<
-        (
-            Element,
-            Arc<[SelectionSource]>,
-            Arc<SelectionSourceBatch>,
-            ProjectedGeometry,
-        ),
-        PresenterError,
-    > {
+        rich: Option<&RichFenceView<'_>>,
+        ordinary: Option<&OrdinaryFence<'_>>,
+    ) -> Result<ProjectedRender, PresenterError> {
         let target = self
             .leaves
             .get(row)
@@ -512,15 +512,8 @@ fn render_leaf(
     on_link: Option<Rc<dyn Fn(LinkAction)>>,
     on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
     scope: Option<ResourceScope>,
-    rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-    ordinary: Option<
-        &dyn Fn(
-            usize,
-            &super::fence::Fence,
-            &[SelectionSource],
-            Option<&str>,
-        ) -> Result<Element, PresenterError>,
-    >,
+    rich: Option<&RichFenceView<'_>>,
+    ordinary: Option<&OrdinaryFence<'_>>,
 ) -> Result<(Element, ProjectedGeometry), PresenterError> {
     let target_ids: Vec<_> = target_sources.iter().map(|source| source.id).collect();
     let text_key = |id: SelectionSourceId| format!("markdown-reveal-{batch_owner:?}-{}", id.0);
@@ -846,15 +839,8 @@ pub(super) fn render_stored_leaf(
     scope: Option<ResourceScope>,
     fence: Option<&super::fence::Fence>,
     fallback_note: Option<&str>,
-    rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-    ordinary: Option<
-        &dyn Fn(
-            usize,
-            &super::fence::Fence,
-            &[SelectionSource],
-            Option<&str>,
-        ) -> Result<Element, PresenterError>,
-    >,
+    rich: Option<&RichFenceView<'_>>,
+    ordinary: Option<&OrdinaryFence<'_>>,
 ) -> Result<(Element, ProjectedGeometry), PresenterError> {
     let target = LeafView {
         context: &leaf.context,

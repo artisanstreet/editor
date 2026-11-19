@@ -44,11 +44,13 @@ impl Switch {
         }
     }
 
+    #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
+    #[must_use]
     pub fn on_change(mut self, handler: impl Fn(bool) + 'static) -> Self {
         self.on_change = Some(Box::new(handler));
         self

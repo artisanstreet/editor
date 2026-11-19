@@ -64,43 +64,53 @@ impl AttachmentTile {
             activate: None,
         }
     }
+    #[must_use]
     pub fn preview(mut self, image: Option<aqua::ImageHandle>, elapsed: Option<Duration>) -> Self {
         self.image = image;
         self.reveal_elapsed = elapsed;
         self
     }
+    #[must_use]
     pub const fn file(mut self, glyph: AssetId) -> Self {
         self.glyph = Some(glyph);
         self
     }
+    #[must_use]
     pub const fn preparing(mut self, preparing: bool) -> Self {
         self.preparing = preparing;
         self
     }
+    #[must_use]
     pub fn error(mut self, error: Option<String>) -> Self {
         self.error = error;
         self
     }
+    #[must_use]
     pub const fn shaking(mut self, elapsed: Option<Duration>) -> Self {
         self.shake_elapsed = elapsed;
         self
     }
+    #[must_use]
     pub const fn reduced_motion(mut self, reduced: bool) -> Self {
         self.reduced_motion = reduced;
         self
     }
+    #[must_use]
     pub const fn removable(mut self, removable: bool) -> Self {
         self.removable = removable;
         self
     }
+    #[must_use]
     pub fn on_remove(mut self, action: impl Fn() + 'static) -> Self {
         self.remove = Some(Rc::new(action));
         self
     }
+    #[must_use]
     pub fn on_retry(mut self, action: impl Fn() + 'static) -> Self {
         self.retry = Some(Rc::new(action));
         self
     }
+    #[must_use]
     pub fn on_activate(mut self, action: impl Fn() + 'static) -> Self {
         self.activate = Some(Rc::new(action));
         self

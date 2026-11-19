@@ -73,29 +73,35 @@ impl ShimmerText {
         }
     }
 
+    #[must_use]
     pub fn timing(mut self, timing: ShimmerTiming) -> Self {
         self.timing = timing;
         self
     }
 
+    #[must_use]
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
         self
     }
 
+    #[must_use]
     pub fn reduced_motion(mut self, reduced_motion: bool) -> Self {
         self.reduced_motion = reduced_motion;
         self
     }
 
+    #[must_use]
     pub fn tone(mut self, tone: ShimmerTone) -> Self {
         self.tone = tone;
         self
     }
+    #[must_use]
     pub fn truncate(mut self) -> Self {
         self.truncate = true;
         self
     }
+    #[must_use]
     pub fn spans(mut self, spans: Vec<StyledSpan>) -> Self {
         self.spans = spans;
         self

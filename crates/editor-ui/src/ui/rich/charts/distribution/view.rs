@@ -56,14 +56,12 @@ struct Entry {
     reveal: Option<usize>,
     reset: u64,
 }
+type SyncedDistribution = (Option<(f32, f32)>, Probe, Rc<RefCell<SliderState>>, u64);
+
 #[derive(Clone, Default)]
 pub(crate) struct DistributionState(Rc<RefCell<HashMap<String, Entry>>>);
 impl DistributionState {
-    fn sync(
-        &self,
-        id: &str,
-        model: &Arc<Distribution>,
-    ) -> (Option<(f32, f32)>, Probe, Rc<RefCell<SliderState>>, u64) {
+    fn sync(&self, id: &str, model: &Arc<Distribution>) -> SyncedDistribution {
         let mut entries = self.0.borrow_mut();
         let (domain, step, start) = model.slider();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {

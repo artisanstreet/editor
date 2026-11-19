@@ -67,27 +67,33 @@ impl Dialog {
             soft_backdrop: false,
         }
     }
+    #[must_use]
     pub const fn dismissible(mut self, value: bool) -> Self {
         self.dismissible = value;
         self
     }
+    #[must_use]
     pub const fn bare(mut self) -> Self {
         self.bare = true;
         self
     }
+    #[must_use]
     pub const fn soft_backdrop(mut self) -> Self {
         self.soft_backdrop = true;
         self
     }
+    #[must_use]
     pub const fn max_width(mut self, width: f32) -> Self {
         self.max_width = width;
         self.viewport_width = None;
         self
     }
+    #[must_use]
     pub const fn viewport_max_width(mut self, inset: f32, maximum: f32) -> Self {
         self.viewport_width = Some((inset, maximum));
         self
     }
+    #[must_use]
     pub fn on_dismiss(mut self, handler: impl Fn(DialogDismissReason) + 'static) -> Self {
         self.dismiss = Some(Rc::new(handler));
         self

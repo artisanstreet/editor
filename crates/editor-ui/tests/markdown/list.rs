@@ -22,7 +22,9 @@ fn prepared(source: &str) -> MarkdownPresenter {
 
 const TASKS: &str = "- [x] Ship it\n- [ ] Tell everyone\n  1. Nested step\n";
 
-fn items(nodes: &[SemanticNode]) -> Vec<(Option<usize>, Option<bool>, Option<(usize, usize)>)> {
+type Item = (Option<usize>, Option<bool>, Option<(usize, usize)>);
+
+fn items(nodes: &[SemanticNode]) -> Vec<Item> {
     nodes
         .iter()
         .filter(|node| node.role == Role::ListItem)

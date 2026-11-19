@@ -41,6 +41,7 @@ pub struct Notice {
 }
 impl Notice {
     const SURFACE: Surface = Surface::Callout(Tone::Danger);
+    #[must_use]
     pub fn action(mut self, action: Element) -> Self {
         self.children.push(action);
         self

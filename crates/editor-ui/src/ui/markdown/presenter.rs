@@ -174,8 +174,24 @@ struct StoredProjectedLeaf {
     fallback_note: Option<String>,
 }
 
+type CopyButton = dyn Fn(&str, &str) -> Element;
+type HeatmapReadout = dyn Fn(f32, &str, &str) -> Element;
+type ConcentrationFrame = dyn Fn(Element, &str, &str) -> Element;
+type PlotLabel = dyn Fn(f32, f32, &str, GpuiHsla) -> Element;
+type ConcentrationReadout = dyn Fn(f32, &str, &str, &str, GpuiHsla) -> Element;
+type FileTreeFocus = (String, String, usize);
+type ImageEntry = (
+    Arc<rich::media::image::ImageBlock>,
+    String,
+    Rc<RefCell<rich::media::image::ImageState>>,
+);
+type ImageComparisonEntry = (
+    String,
+    Rc<RefCell<rich::media::image_compare::view::CompareState>>,
+);
+
 pub struct CodeServices {
-    pub copy: Rc<dyn Fn(&str, &str) -> Element>,
+    pub copy: Rc<CopyButton>,
     pub copy_enabled: bool,
     pub reference: Option<ReferenceServices>,
 }
@@ -220,7 +236,7 @@ impl std::fmt::Debug for MediaServices {
 
 pub struct HeatmapServices {
     empty: Rc<dyn Fn(&str) -> Element>,
-    readout: Rc<dyn Fn(f32, &str, &str) -> Element>,
+    readout: Rc<HeatmapReadout>,
     navigation_frame: Rc<dyn Fn(Element, GpuiHsla) -> Element>,
     concentration: ConcentrationServices,
 }
@@ -232,9 +248,9 @@ impl std::fmt::Debug for HeatmapServices {
 }
 
 pub struct ConcentrationServices {
-    frame: Rc<dyn Fn(Element, &str, &str) -> Element>,
-    plot_label: Rc<dyn Fn(f32, f32, &str, GpuiHsla) -> Element>,
-    readout: Rc<dyn Fn(f32, &str, &str, &str, GpuiHsla) -> Element>,
+    frame: Rc<ConcentrationFrame>,
+    plot_label: Rc<PlotLabel>,
+    readout: Rc<ConcentrationReadout>,
 }
 
 impl std::fmt::Debug for ConcentrationServices {
@@ -307,32 +323,15 @@ pub struct MarkdownPresenter {
     audio_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
     media_services: RefCell<HashMap<String, MediaServices>>,
     media_invalidations: RefCell<HashMap<String, Rc<dyn Fn()>>>,
-    images: RefCell<
-        BTreeMap<
-            String,
-            (
-                Arc<rich::media::image::ImageBlock>,
-                String,
-                Rc<RefCell<rich::media::image::ImageState>>,
-            ),
-        >,
-    >,
+    images: RefCell<BTreeMap<String, ImageEntry>>,
     image_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
-    image_comparisons: RefCell<
-        BTreeMap<
-            String,
-            (
-                String,
-                Rc<RefCell<rich::media::image_compare::view::CompareState>>,
-            ),
-        >,
-    >,
+    image_comparisons: RefCell<BTreeMap<String, ImageComparisonEntry>>,
     image_comparison_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
     annotated: RefCell<HashMap<String, Rc<RefCell<rich::code::annotated::view::AnnotatedState>>>>,
     annotated_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
     file_trees: RefCell<HashMap<String, Rc<RefCell<rich::code::file_tree::FileTreeState>>>>,
     file_tree_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
-    file_tree_focus: Rc<RefCell<HashMap<String, (String, String, usize)>>>,
+    file_tree_focus: Rc<RefCell<HashMap<String, FileTreeFocus>>>,
     comparisons: CompareState,
     comparison_ids: RefCell<BTreeMap<String, BTreeSet<String>>>,
     stats: StatsState,

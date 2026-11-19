@@ -59,10 +59,10 @@ impl Compare {
     }
 }
 
+type CompareEntry = (std::sync::Weak<CompareData>, Option<usize>);
+
 #[derive(Clone, Default)]
-pub(crate) struct CompareState(
-    Rc<RefCell<HashMap<String, (std::sync::Weak<CompareData>, Option<usize>)>>>,
-);
+pub(crate) struct CompareState(Rc<RefCell<HashMap<String, CompareEntry>>>);
 
 impl CompareState {
     pub(crate) fn remove(&self, id: &str) {

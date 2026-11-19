@@ -66,11 +66,13 @@ impl ChatBubbleSegment {
         }
     }
 
+    #[must_use]
     pub const fn answer(mut self) -> Self {
         self.answer = true;
         self
     }
 
+    #[must_use]
     pub const fn tinted(mut self, tint: Oklch) -> Self {
         self.tint = Some(tint);
         self
