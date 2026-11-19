@@ -113,6 +113,16 @@ impl Ending {
         }))
     }
 
+    fn stopped_by_user(self) -> Self {
+        match self {
+            Self::Finished(Outcome::Failed(failure)) => {
+                Self::Stopped(Cleanup::Failed(failure.message))
+            }
+            kept @ (Self::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
+            | Self::Stopped(_)) => kept,
+        }
+    }
+
     fn unconfirmed(self) -> Self {
         match self {
             Self::Stopped(Cleanup::Confirmed | Cleanup::Unconfirmed) => {
@@ -323,6 +333,9 @@ pub(crate) async fn drive(
         (None, true) => Some(StoppedBy::Shutdown),
         (None, false) => None,
     };
+    if stopped_by == Some(StoppedBy::User) {
+        ending = ending.stopped_by_user();
+    }
     let ended = ending.run_outcome(stopped_by, &run.id);
     let status = ended.status();
     hub.attention_lock()

@@ -661,3 +661,91 @@ async fn a_stop_that_lands_as_the_engine_returns_is_still_a_stop() {
         "a stop is not retried"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continue_pressed_while_a_failed_save_winds_down_still_carries_the_turn_on() {
+    let go = Arc::new(Notify::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = fixture(Arc::new({
+        let (go, entered, release, turns) = (
+            Arc::clone(&go),
+            Arc::clone(&entered),
+            Arc::clone(&release),
+            Arc::clone(&turns),
+        );
+        move |_, io| {
+            let (go, entered, release, turns) = (
+                Arc::clone(&go),
+                Arc::clone(&entered),
+                Arc::clone(&release),
+                Arc::clone(&turns),
+            );
+            Box::pin(async move {
+                if turns.fetch_add(1, Ordering::SeqCst) > 0 {
+                    io.emit(reply("done", "picked it back up")).await;
+                    return Outcome::done();
+                }
+                go.notified().await;
+                io.emit(EngineEvent::Session {
+                    id: "resumed".to_owned(),
+                })
+                .await;
+                io.cancel.cancelled().await;
+                entered.notify_one();
+                release.notified().await;
+                Outcome::cancelled()
+            })
+        }
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("refactor the parser"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| {
+            items.iter().any(|item| {
+                matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+            })
+        })
+        .await;
+    let disk = durability::DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    go.notify_one();
+    tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
+        .await
+        .unwrap();
+
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture
+        .hub
+        .continue_turn(&fixture.thread_id)
+        .await
+        .expect("Continue is accepted while the stop winds down");
+    disk.clear();
+    release.notify_one();
+
+    fixture.settled().await;
+    let history = fixture.runs().await;
+    let runs: Vec<_> = history
+        .iter()
+        .map(|run| (run.status(), run.continuation))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (RunStatus::Cancelled, None),
+            (RunStatus::Done, Some(artisan_api::Continuation::Requested)),
+        ],
+        "{history:#?}"
+    );
+    assert!(
+        history[0]
+            .error()
+            .is_some_and(|error| error.contains("database or disk is full")),
+        "the stop keeps why the run could not be saved: {history:#?}"
+    );
+}
