@@ -183,17 +183,15 @@ pub fn model_config_key(engine: EngineId, model: &str) -> String {
 }
 
 #[must_use]
-pub fn saved_model_config(
-    configs: &serde_json::Value,
+pub fn saved_model_config<'a>(
+    configs: &'a std::collections::BTreeMap<String, EngineConfig>,
     engine: EngineId,
     model: &str,
-) -> Option<EngineConfig> {
-    let configs = configs.as_object()?;
+) -> Option<&'a EngineConfig> {
     configs
         .get(&model_config_key(engine, model))
         .into_iter()
         .chain(configs.values())
-        .filter_map(|value| serde_json::from_value::<EngineConfig>(value.clone()).ok())
         .find(|config| config.engine == engine && config.model.as_deref() == Some(model))
 }
 

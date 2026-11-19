@@ -66,6 +66,9 @@ async fn saving_default_does_not_pin_a_reported_effort_or_variant() {
         .await
         .unwrap()
         .unwrap();
-    let restored = artisan_api::saved_model_config(&setting, EngineId::Codex, &model.id).unwrap();
+    let remembered: std::collections::BTreeMap<String, EngineConfig> =
+        serde_json::from_value(setting).unwrap();
+    let restored =
+        artisan_api::saved_model_config(&remembered, EngineId::Codex, &model.id).unwrap();
     assert_eq!(restored.effort, None);
 }

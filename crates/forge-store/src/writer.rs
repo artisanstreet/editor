@@ -670,6 +670,25 @@ impl Tx<'_> {
         }
     }
 
+    pub(crate) fn remembered_model_configs(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, artisan_api::EngineConfig>, StorageError> {
+        let mut configs = std::collections::BTreeMap::new();
+        for (key, value) in self.object_setting(artisan_api::MODEL_CONFIGS_KEY)? {
+            match serde_json::from_value(value) {
+                Ok(config) => {
+                    configs.insert(key, config);
+                }
+                Err(error) => tracing::warn!(
+                    key,
+                    %error,
+                    "a remembered model config doesn't read here, so it is kept but not used"
+                ),
+            }
+        }
+        Ok(configs)
+    }
+
     pub(crate) fn remember_model_config(
         &mut self,
         config: &artisan_api::EngineConfig,
@@ -685,10 +704,10 @@ impl Tx<'_> {
         };
         let mut configs = self.object_setting(artisan_api::MODEL_CONFIGS_KEY)?;
         configs.retain(|_, value| {
-            serde_json::from_value::<artisan_api::EngineConfig>(value.clone())
-                .map_or(true, |saved| {
-                    saved.engine != config.engine || saved.model.as_ref() != Some(model)
-                })
+            match serde_json::from_value::<artisan_api::EngineConfig>(value.clone()) {
+                Ok(saved) => saved.engine != config.engine || saved.model.as_ref() != Some(model),
+                Err(_kept_unread) => true,
+            }
         });
         configs.insert(
             artisan_api::model_config_key(config.engine, model),

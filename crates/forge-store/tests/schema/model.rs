@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[test]
 fn remembered_model_configs_keep_full_access() {
@@ -23,9 +23,10 @@ fn remembered_model_configs_keep_full_access() {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap();
-    let value: Value = serde_json::from_str(&value).unwrap();
+    let remembered: std::collections::BTreeMap<String, artisan_api::EngineConfig> =
+        serde_json::from_str(&value).unwrap();
     let config = |model: &str| {
-        artisan_api::saved_model_config(&value, artisan_api::EngineId::Claude, model).unwrap()
+        artisan_api::saved_model_config(&remembered, artisan_api::EngineId::Claude, model).unwrap()
     };
     assert_eq!(
         config("claude-opus-5-5").permissions,

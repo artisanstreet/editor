@@ -155,8 +155,8 @@ impl Store {
     ) -> Result<artisan_api::EngineConfig, SetDefaultModelError> {
         let chosen = model.id.clone();
         self.write_acknowledged(move |tx| {
-            let saved = read::setting(tx, artisan_api::MODEL_CONFIGS_KEY)?
-                .and_then(|configs| artisan_api::saved_model_config(&configs, engine, &model.id));
+            let remembered = tx.remembered_model_configs()?;
+            let saved = artisan_api::saved_model_config(&remembered, engine, &model.id).cloned();
             let mut config = match saved {
                 Some(config) => config,
                 None => read::setting(tx, artisan_api::HARNESS_CONFIGS_KEY)?

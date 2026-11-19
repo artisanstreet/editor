@@ -89,9 +89,49 @@ async fn choosing_a_model_repairs_remembered_configs_that_are_not_an_object() {
         .await
         .unwrap()
         .expect("the configs are saved");
+    let configs: std::collections::BTreeMap<String, artisan_api::EngineConfig> =
+        serde_json::from_value(remembered.clone()).unwrap();
     assert!(
-        artisan_api::saved_model_config(&remembered, artisan_api::EngineId::Claude, "opus")
-            .is_some(),
+        artisan_api::saved_model_config(&configs, artisan_api::EngineId::Claude, "opus").is_some(),
         "{remembered}"
     );
+}
+
+#[tokio::test]
+async fn choosing_a_model_uses_its_remembered_config_and_keeps_one_this_forge_cannot_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut opus = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
+    opus.model = Some("opus".into());
+    opus.permissions = artisan_api::Permissions::Full;
+    let unreadable = serde_json::json!({"engine": "a-newer-engine", "model": "x"});
+    store
+        .set_setting(
+            artisan_api::MODEL_CONFIGS_KEY.into(),
+            serde_json::json!({
+                "claude/opus": serde_json::to_value(&opus).unwrap(),
+                "a-newer-engine/x": unreadable.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let chosen = store
+        .set_default_model(
+            artisan_api::EngineId::Claude,
+            artisan_api::Model {
+                id: "opus".into(),
+                ..artisan_api::Model::default()
+            },
+        )
+        .await
+        .expect("choose the default model");
+
+    assert_eq!(chosen.permissions, artisan_api::Permissions::Full);
+    let remembered = store
+        .setting(artisan_api::MODEL_CONFIGS_KEY)
+        .await
+        .unwrap()
+        .expect("the configs are saved");
+    assert_eq!(remembered["a-newer-engine/x"], unreadable);
 }
