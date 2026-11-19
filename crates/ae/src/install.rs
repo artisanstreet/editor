@@ -60,8 +60,6 @@ pub(crate) enum InstallError {
     },
     #[error("look for an `ae` that isn't Artisan's")]
     ExistingAe(#[from] platform::ExistingAeError),
-    #[error("replace the `ae` that isn't Artisan's")]
-    RemoveForeign(#[source] RemoveError),
     #[error("remember {} as the install folder", root.display())]
     ChooseRoot {
         root: PathBuf,
@@ -906,10 +904,10 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
             return Ok(());
         }
     }
-    if !replace_foreign_ae(args)? {
+    let Some(replaceable) = replace_foreign_ae(args)? else {
         ui::outro("Nothing was installed.");
         return Ok(());
-    }
+    };
     if let Some(root) = &relocated {
         artisan_paths::choose_root(root).map_err(|source| InstallError::ChooseRoot {
             root: root.clone(),
@@ -931,7 +929,7 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
                 .update_feed()
                 .map_or(Origin::Local, |feed| Origin::Feed(feed.to_owned())),
         };
-        apply(&release, &source, &origin, &plan, args.yes)?;
+        apply(&release, &source, &origin, &plan, args.yes, &replaceable)?;
     }
 
     let editor_somewhere = plan.editor != EditorTarget::Nowhere;
@@ -953,10 +951,10 @@ fn confirmed(question: &str) -> Result<bool, AskError> {
         .map_err(ui::prompt_error)
 }
 
-fn replace_foreign_ae(args: &InstallArgs) -> Result<bool, InstallError> {
-    let file = match platform::existing_ae()? {
-        platform::ExistingAe::Artisans => return Ok(true),
-        platform::ExistingAe::Foreign { path } => path,
+fn replace_foreign_ae(args: &InstallArgs) -> Result<Option<platform::Replaceable>, InstallError> {
+    let (file, replaceable) = match platform::existing_ae()? {
+        platform::ExistingAe::Artisans(replaceable) => return Ok(Some(replaceable)),
+        platform::ExistingAe::Foreign { path, replaceable } => (path, replaceable),
     };
     let replace = if ui::interactive() && !args.apply {
         confirmed(&format!(
@@ -970,10 +968,7 @@ fn replace_foreign_ae(args: &InstallArgs) -> Result<bool, InstallError> {
             ui::needs_flag(&format!("whether to replace {}", file.display()), "--yes").into(),
         );
     };
-    if replace {
-        sys::remove(&file).map_err(InstallError::RemoveForeign)?;
-    }
-    Ok(replace)
+    Ok(replace.then_some(replaceable))
 }
 
 fn apply(
@@ -982,11 +977,12 @@ fn apply(
     origin: &Origin,
     plan: &Plan,
     yes: bool,
+    replaceable: &platform::Replaceable,
 ) -> Result<(), ApplyError> {
     let _installing = install_lock()?;
     let here = plan.here();
     legacy::migrate(&here)?;
-    install_here(release, origin, &here)?;
+    install_here(release, origin, &here, replaceable)?;
     for distro in &plan.distros {
         install_in_wsl(release, source, origin, distro, yes)?;
     }
@@ -1278,13 +1274,20 @@ fn upgrade_forge_online(
     }
 }
 
-fn install_here(release: &Release, origin: &Origin, apps: &[App]) -> Result<(), InstallHereError> {
+fn install_here(
+    release: &Release,
+    origin: &Origin,
+    apps: &[App],
+    replaceable: &platform::Replaceable,
+) -> Result<(), InstallHereError> {
     let version = release.version(os())?;
     for app in apps {
-        install_app(release, origin, *app, &version).map_err(|source| InstallHereError::App {
-            app: *app,
-            version: version.clone(),
-            source: Box::new(source),
+        install_app(release, origin, *app, &version, replaceable).map_err(|source| {
+            InstallHereError::App {
+                app: *app,
+                version: version.clone(),
+                source: Box::new(source),
+            }
         })?;
     }
     Ok(())
@@ -1295,6 +1298,7 @@ fn install_app(
     origin: &Origin,
     app: App,
     version: &str,
+    replaceable: &platform::Replaceable,
 ) -> Result<(), InstallAppError> {
     let dir = paths::dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|source| InstallAppError::CreateDir {
@@ -1306,7 +1310,15 @@ fn install_app(
     release.unpack(app, os(), incoming.path())?;
 
     let progress = ui::Progress::spinner(format!("Installing {} {version}", app.display_name()));
-    match put_in_place(origin, app, version, &dir, incoming.path(), &progress) {
+    match put_in_place(
+        origin,
+        app,
+        version,
+        &dir,
+        incoming.path(),
+        replaceable,
+        &progress,
+    ) {
         Ok(message) => {
             progress.done(message);
             Ok(())
@@ -1324,6 +1336,7 @@ fn put_in_place(
     version: &str,
     dir: &Path,
     incoming: &Path,
+    replaceable: &platform::Replaceable,
     progress: &ui::Progress,
 ) -> Result<String, InstallAppError> {
     let binary = paths::binary(app)?;
@@ -1371,7 +1384,7 @@ fn put_in_place(
             return Err(put_back(stopped, failed.into(), previous, progress));
         }
     };
-    match finish(app, version, upgraded, progress) {
+    match finish(app, version, upgraded, replaceable, progress) {
         Ok(message) => {
             replaced.keep();
             Ok(message)
@@ -1432,11 +1445,12 @@ fn finish(
     app: App,
     version: &str,
     upgraded: bool,
+    replaceable: &platform::Replaceable,
     progress: &ui::Progress,
 ) -> Result<String, InstallAppError> {
     platform::register_uninstall(app, version)?;
     Ok(match app {
-        App::Ae => platform::add_to_path()?.map_or_else(
+        App::Ae => platform::add_to_path(replaceable)?.map_or_else(
             || format!("ae {version} installed, on PATH"),
             |hint| format!("ae {version} installed. {hint}"),
         ),

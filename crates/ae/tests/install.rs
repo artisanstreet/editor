@@ -241,4 +241,36 @@ mod tests {
             "#!/bin/sh\necho my own ae\n"
         );
     }
+
+    #[test]
+    fn a_failed_install_keeps_the_ae_that_isnt_artisans_and_a_successful_one_replaces_it() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let theirs = sandbox.root.path().join("home/.local/bin/ae");
+        script(&theirs, "#!/bin/sh\necho my own ae\n");
+        let blocker = App::Ae.dir_under(&artisan_street(sandbox.root.path()));
+        std::fs::write(&blocker, "in the way of ae's folder").expect("block ae's folder");
+        let stage = ae_only_stage(&sandbox);
+
+        let failed = install_ae_only(&sandbox, &stage, true);
+
+        assert!(!failed.status.success(), "the install fails");
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("their ae is still there"),
+            "#!/bin/sh\necho my own ae\n"
+        );
+
+        std::fs::remove_file(&blocker).expect("clear the way");
+        let installed = install_ae_only(&sandbox, &stage, true);
+
+        assert!(
+            installed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        assert_eq!(
+            std::fs::read_link(&theirs).expect("ae is linked"),
+            artisans_ae(&sandbox)
+        );
+    }
 }

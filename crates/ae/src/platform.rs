@@ -24,13 +24,14 @@ pub(crate) enum AddToPathError {
         #[source]
         source: std::io::Error,
     },
-    #[error("remove the old {}", path.display())]
-    Replace {
+    #[error("look at {}", path.display())]
+    Inspect {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[cfg(unix)]
+    #[error("{} changed during the install and isn't Artisan's `ae`, so it was left alone", path.display())]
+    Changed { path: PathBuf },
     #[error("link {}", path.display())]
     Link {
         path: PathBuf,
@@ -127,9 +128,15 @@ enum Held {
 }
 
 #[derive(Debug)]
+pub(crate) struct Replaceable(Held);
+
+#[derive(Debug)]
 pub(crate) enum ExistingAe {
-    Artisans,
-    Foreign { path: PathBuf },
+    Artisans(Replaceable),
+    Foreign {
+        path: PathBuf,
+        replaceable: Replaceable,
+    },
 }
 
 fn held(link: &Path) -> std::io::Result<Held> {
@@ -151,7 +158,7 @@ fn artisans(held: &Held, binary: &Path) -> bool {
 
 pub(crate) fn existing_ae() -> Result<ExistingAe, ExistingAeError> {
     if cfg!(windows) {
-        return Ok(ExistingAe::Artisans);
+        return Ok(ExistingAe::Artisans(Replaceable(Held::Nothing)));
     }
     let link = unix_link().map_err(ExistingAeError::Home)?;
     let binary = paths::binary(App::Ae)?;
@@ -160,13 +167,16 @@ pub(crate) fn existing_ae() -> Result<ExistingAe, ExistingAeError> {
         source,
     })?;
     Ok(if artisans(&found, &binary) {
-        ExistingAe::Artisans
+        ExistingAe::Artisans(Replaceable(found))
     } else {
-        ExistingAe::Foreign { path: link }
+        ExistingAe::Foreign {
+            path: link,
+            replaceable: Replaceable(found),
+        }
     })
 }
 
-pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
+pub(crate) fn add_to_path(replaceable: &Replaceable) -> Result<Option<String>, AddToPathError> {
     if cfg!(windows) {
         let dir = ps_quote(&paths::dir(App::Ae)?);
         sys::powershell(&format!(
@@ -181,25 +191,22 @@ pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
         Ok(None)
     } else {
         let link = unix_link().map_err(AddToPathError::Home)?;
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| AddToPathError::CreateDir {
-                path: parent.to_owned(),
-                source,
-            })?;
-        }
-        if let Err(source) = std::fs::remove_file(&link)
-            && source.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(AddToPathError::Replace { path: link, source });
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(paths::binary(App::Ae)?, &link).map_err(|source| {
-            AddToPathError::Link {
-                path: link.clone(),
-                source,
-            }
+        let binary = paths::binary(App::Ae)?;
+        let dir = link
+            .parent()
+            .expect("invariant: ~/.local/bin/ae has a folder");
+        std::fs::create_dir_all(dir).map_err(|source| AddToPathError::CreateDir {
+            path: dir.to_owned(),
+            source,
         })?;
-        let dir = link.parent().unwrap_or(&link);
+        let now = held(&link).map_err(|source| AddToPathError::Inspect {
+            path: link.clone(),
+            source,
+        })?;
+        if now != replaceable.0 && !artisans(&now, &binary) {
+            return Err(AddToPathError::Changed { path: link });
+        }
+        link_over(&binary, &link)?;
         Ok((!on_path(dir)).then(|| {
             format!(
                 "Add {} to your PATH to run `ae` from a terminal.",
@@ -207,6 +214,26 @@ pub(crate) fn add_to_path() -> Result<Option<String>, AddToPathError> {
             )
         }))
     }
+}
+
+fn link_over(binary: &Path, link: &Path) -> Result<(), AddToPathError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as symlink;
+    let linking = |source| AddToPathError::Link {
+        path: link.to_owned(),
+        source,
+    };
+    let dir = link
+        .parent()
+        .expect("invariant: ~/.local/bin/ae has a folder");
+    tempfile::Builder::new()
+        .prefix(".ae-")
+        .make_in(dir, |incoming| symlink(binary, incoming))
+        .map_err(linking)?
+        .persist(link)
+        .map_err(|failed| linking(failed.error))
 }
 
 pub(crate) fn remove_from_path() -> Result<(), RemoveFromPathError> {
