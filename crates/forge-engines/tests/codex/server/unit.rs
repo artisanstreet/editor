@@ -15,6 +15,7 @@ struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
     env: Vec<(String, String)>,
+    slow_gate: std::fs::File,
 }
 
 impl Fixture {
@@ -26,9 +27,12 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
         let path = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let slow_gate = std::fs::File::create(root.join("slow-gate")).unwrap();
+        slow_gate.lock().unwrap();
         let env = [
             ("ARTISAN_TEST_SPAWNS".to_owned(), path("spawns")),
             ("ARTISAN_TEST_INPUT".to_owned(), path("input")),
+            ("ARTISAN_TEST_SLOW_GATE".to_owned(), path("slow-gate")),
         ]
         .into_iter()
         .chain(
@@ -40,7 +44,22 @@ impl Fixture {
             _dir: dir,
             root,
             env,
+            slow_gate,
         }
+    }
+
+    fn release_slow(&self) {
+        self.slow_gate.unlock().unwrap();
+    }
+
+    async fn release_slow_once_read(&self, needle: &str) {
+        test_support::wait::eventually(
+            &format!("Codex to read {needle}"),
+            test_support::wait::LIVENESS,
+            || std::future::ready(self.input().contains(needle)),
+        )
+        .await;
+        self.release_slow();
     }
 
     fn turn(&self, text: &str, session: Option<&str>) -> Turn {
@@ -229,9 +248,10 @@ async fn a_changed_codex_config_starts_a_fresh_app_server() {
 #[tokio::test]
 async fn an_approval_reaches_only_the_thread_that_asked() {
     let fixture = Fixture::new();
-    let ((asked, a), (other, b)) = tokio::join!(
+    let ((asked, a), (other, b), ()) = tokio::join!(
         run_approving(fixture.turn("ask", None), Some("cmd-1")),
         run(fixture.turn("slow", None)),
+        fixture.release_slow_once_read("\"decision\""),
     );
     assert_eq!(
         (asked.status(), other.status()),
@@ -264,7 +284,7 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
     let other = tokio::spawn(run(fixture.turn("slow", None)));
     test_support::wait::eventually(
         "the other turn to start before its server retires",
-        std::time::Duration::from_secs(5),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .input()
@@ -287,6 +307,7 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
         !other.is_finished(),
         "the other turn is still running after handoff"
     );
+    fixture.release_slow();
     let (outcome, _) = other.await.unwrap();
     assert_eq!(
         outcome.status(),

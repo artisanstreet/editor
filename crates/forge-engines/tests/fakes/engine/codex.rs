@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ struct Config {
     stall_release: bool,
     start_delay: Option<Duration>,
     interrupt_delay: Option<Duration>,
-    slow: Duration,
+    slow_gate: Option<PathBuf>,
 }
 
 impl Config {
@@ -40,7 +40,7 @@ impl Config {
             stall_release: std::env::var_os("ARTISAN_TEST_STALL_RELEASE").is_some(),
             start_delay: millis("ARTISAN_TEST_START_DELAY_MS"),
             interrupt_delay: millis("ARTISAN_TEST_INTERRUPT_DELAY_MS"),
-            slow: millis("ARTISAN_TEST_SLOW_MS").unwrap_or(Duration::from_millis(1500)),
+            slow_gate: std::env::var_os("ARTISAN_TEST_SLOW_GATE").map(PathBuf::from),
         }
     }
 
@@ -237,17 +237,20 @@ impl AppServer {
                 });
             }
             _ => {
-                let slow = self.config.slow;
-                std::thread::spawn(move || reply(&thread, &turn, &text, slow));
+                let slow_gate = self.config.slow_gate.clone();
+                std::thread::spawn(move || reply(&thread, &turn, &text, slow_gate.as_deref()));
             }
         }
     }
 }
 
-fn reply(thread: &str, turn: &str, text: &str, slow: Duration) {
+fn reply(thread: &str, turn: &str, text: &str, slow_gate: Option<&Path>) {
     std::thread::sleep(Duration::from_millis(300));
     if text == "slow" {
-        std::thread::sleep(slow);
+        let slow_gate = slow_gate.expect("a slow turn waits at ARTISAN_TEST_SLOW_GATE");
+        File::open(slow_gate)
+            .and_then(|gate| gate.lock_shared())
+            .expect("the test opens the slow turn's gate");
     }
     let child = format!("child-{thread}");
     let child_message = || {

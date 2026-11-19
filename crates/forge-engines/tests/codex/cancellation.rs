@@ -16,13 +16,13 @@ async fn cancellation_during_turn_start_waits_for_its_id_and_interrupts_it() {
     };
     let harness = super::super::CodexHarness.run(fixture.turn("slow", None), io);
     let running = tokio::spawn(harness);
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !fixture.root.join("input.starting").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let starting = fixture.root.join("input.starting");
+    test_support::wait::eventually(
+        "Codex to start the turn",
+        test_support::wait::LIVENESS,
+        || std::future::ready(starting.exists()),
+    )
+    .await;
     cancel.cancel();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), running)
         .await
@@ -46,7 +46,7 @@ async fn cancellation_during_turn_start_waits_for_its_id_and_interrupts_it() {
 
 #[tokio::test]
 async fn an_unconfirmed_interrupt_fails_and_unsubscribes_instead_of_claiming_cancellation() {
-    let fixture = Fixture::with(&[("ARTISAN_TEST_SLOW_MS", "30000")]);
+    let fixture = Fixture::new();
     let (_peer_inputs, peer_inbox) = mpsc::channel(8);
     let (peer_events, _peer_received) = mpsc::channel(1024);
     let peer = tokio::spawn(super::super::CodexHarness.run(
@@ -84,13 +84,12 @@ async fn an_unconfirmed_interrupt_fails_and_unsubscribes_instead_of_claiming_can
         .unwrap();
     assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
     assert!(outcome.error().unwrap().contains("did not confirm"));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !read(&fixture.root.join("input")).contains("thread/unsubscribe") {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    test_support::wait::eventually(
+        "Codex to read the unsubscribe",
+        test_support::wait::LIVENESS,
+        || std::future::ready(read(&fixture.root.join("input")).contains("thread/unsubscribe")),
+    )
+    .await;
     assert!(!peer.is_finished());
     peer.abort();
     assert!(peer.await.is_err_and(|error| error.is_cancelled()));
@@ -101,7 +100,6 @@ async fn a_deferred_interrupt_receives_its_full_confirmation_grace() {
     let fixture = Fixture::with(&[
         ("ARTISAN_TEST_START_DELAY_MS", "4000"),
         ("ARTISAN_TEST_INTERRUPT_DELAY_MS", "2000"),
-        ("ARTISAN_TEST_SLOW_MS", "30000"),
     ]);
     let (_, inbox) = mpsc::channel(8);
     let (events, _received) = mpsc::channel(1024);
@@ -113,13 +111,13 @@ async fn a_deferred_interrupt_receives_its_full_confirmation_grace() {
     };
     let harness = super::super::CodexHarness.run(fixture.turn("slow", None), io);
     let running = tokio::spawn(harness);
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !fixture.root.join("input.starting").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let starting = fixture.root.join("input.starting");
+    test_support::wait::eventually(
+        "Codex to start the turn",
+        test_support::wait::LIVENESS,
+        || std::future::ready(starting.exists()),
+    )
+    .await;
     cancel.cancel();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), running)
         .await

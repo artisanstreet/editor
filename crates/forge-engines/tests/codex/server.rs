@@ -38,7 +38,7 @@ async fn run_steering(turn: Turn, steers: &[&str]) -> (crate::Outcome, Vec<Engin
 async fn until_codex_read(fixture: &Fixture, needle: &str) {
     test_support::wait::eventually(
         &format!("Codex to read {needle}"),
-        Duration::from_secs(5),
+        test_support::wait::LIVENESS,
         || async { fixture.input().contains(needle) },
     )
     .await;
@@ -54,6 +54,8 @@ async fn a_codex_server_that_stops_reading_still_delivers_other_threads_replies(
         let turn = fixture.turn("jam", None);
         async move { run_steering(turn, &[flood.as_str()]).await }
     });
+    until_codex_read(&fixture, "\"text\":\"jam\"").await;
+    fixture.release_slow();
     let (outcome, events) = tokio::time::timeout(Duration::from_secs(10), other)
         .await
         .expect("a stalled write for one thread must not stop replies to another")
@@ -110,8 +112,10 @@ async fn a_stalled_handoff_does_not_hold_up_codex_threads_of_another_home() {
 #[tokio::test]
 async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
     let fixture = Fixture::new();
-    let (outcome, _) =
-        run_steering(fixture.turn("slow", None), &["first steer", "second steer"]).await;
+    let ((outcome, _), ()) = tokio::join!(
+        run_steering(fixture.turn("slow", None), &["first steer", "second steer"]),
+        fixture.release_slow_once_read("second steer"),
+    );
     assert_eq!(
         outcome.status(),
         artisan_api::RunStatus::Done,
