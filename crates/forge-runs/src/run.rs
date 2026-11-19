@@ -1,4 +1,5 @@
 use crate::Hub;
+use crate::turns::{AfterStop, Phase};
 use artisan_api::{
     Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
     NamedModel, Permissions, Run, RunId, RunOutcome, RunState, RunStatus, Status, ThreadId,
@@ -82,7 +83,7 @@ pub(crate) enum DriveError {
     #[error(transparent)]
     Begin(#[from] forge_store::BeginRunError),
     #[error(transparent)]
-    Settle(#[from] forge_store::SettleRunError),
+    Restore(#[from] forge_store::RestoreInputsError),
     #[error("read the Claude transport for thread {thread}")]
     Transport {
         thread: ThreadId,
@@ -97,11 +98,11 @@ impl DriveError {
             Self::Continuation(_)
             | Self::PendingInputs(_)
             | Self::ReadThread(_)
+            | Self::Restore(_)
             | Self::Begin(_) => true,
             Self::ThreadGone { .. }
             | Self::LatestRun(_)
             | Self::CancelledItems(_)
-            | Self::Settle(_)
             | Self::Transport { .. } => false,
         }
     }
@@ -256,6 +257,11 @@ fn carried_usage(carried: Option<&Run>, config: &EngineConfig) -> Usage {
     }
 }
 
+pub(crate) enum Drove {
+    Nothing,
+    Concluded(RunStatus),
+}
+
 pub(crate) async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
@@ -263,14 +269,17 @@ pub(crate) async fn drive(
     inbox: mpsc::Receiver<Input>,
     cancel: CancellationToken,
     stop: crate::turns::StopSignal,
-) -> Result<RunStatus, DriveError> {
+) -> Result<Drove, DriveError> {
     let store = hub.store();
     let continuation = store.continue_request(thread_id).await?;
+    if continuation == Some(artisan_api::Continuation::Requested) {
+        store.restore_undelivered_inputs(thread_id.clone()).await?;
+    }
     let observed = store.pending_inputs(thread_id).await?;
     let pending = observed.items;
     let continuation = continuation.filter(|_| pending.is_empty());
     if pending.is_empty() && continuation.is_none() {
-        return Ok(RunStatus::Done);
+        return Ok(Drove::Nothing);
     }
     let thread = store
         .thread(thread_id)
@@ -337,13 +346,13 @@ pub(crate) async fn drive(
         .or_default()
         .add(&items.weighed);
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
-    let status = conclude(hub, &mut run, &items, ending, attempted).await?;
+    let status = conclude(hub, &mut run, &items, ending, attempted).await;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
         hub.engines().changed(engine);
     }
-    Ok(status)
+    Ok(Drove::Concluded(status))
 }
 
 fn unstarted(
@@ -409,18 +418,20 @@ async fn fail_unstarted(
     run: Run,
     pending: &[artisan_api::Item],
     error: &DriveError,
-) -> Result<RunStatus, DriveError> {
+) -> Result<Drove, DriveError> {
     tracing::error!(thread = %run.thread_id, run = %run.id, "the run could not start: {}", diagnostics::chain(error));
     let mut run = hub.store().begin_run(run).await?;
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
-    Ok(conclude(
-        hub,
-        &mut run,
-        &Work::default(),
-        Ending::Finished(Outcome::failed(diagnostics::chain(error))),
-        attempted,
-    )
-    .await?)
+    Ok(Drove::Concluded(
+        conclude(
+            hub,
+            &mut run,
+            &Work::default(),
+            Ending::Finished(Outcome::failed(diagnostics::chain(error))),
+            attempted,
+        )
+        .await,
+    ))
 }
 
 async fn conclude(
@@ -429,7 +440,7 @@ async fn conclude(
     items: &Work,
     mut ending: Ending,
     attempted: Vec<ItemId>,
-) -> Result<RunStatus, forge_store::SettleRunError> {
+) -> RunStatus {
     let park = match &ending {
         Ending::Finished(outcome @ Outcome::Failed(_)) => {
             crate::park::plan(hub, run, outcome).await
@@ -438,8 +449,11 @@ async fn conclude(
         | Ending::Stopped(_) => None,
     };
     let _admission = hub.inner.admission.lock().await;
-    let stopped_through = hub.stopped_through(&run.thread_id);
-    if let Some(cancel_cutoff) = stopped_through
+    let phase = hub.lock().phase(&run.thread_id, &run.id);
+    if let Phase::Stopping {
+        through: cancel_cutoff,
+        then: AfterStop::Settle,
+    } = phase
         && let Err(error) = hub
             .store()
             .cancel_pending_inputs(run.thread_id.clone(), cancel_cutoff)
@@ -451,18 +465,24 @@ async fn conclude(
             diagnostics::chain(&error)
         ));
     }
-    let stopped_by = match (stopped_through, hub.inner.shutdown.is_cancelled()) {
-        (Some(_), _) => Some(StoppedBy::User),
-        (None, true) => Some(StoppedBy::Shutdown),
-        (None, false) => None,
+    let stopped_by = match (phase, hub.inner.shutdown.is_cancelled()) {
+        (Phase::Stopping { .. }, _) => Some(StoppedBy::User),
+        (Phase::Working, true) => Some(StoppedBy::Shutdown),
+        (Phase::Working, false) => None,
     };
     if stopped_by == Some(StoppedBy::User) {
         ending = ending.stopped_by_user();
     }
     let ended = ending.run_outcome(stopped_by, &run.id);
     let park = park.filter(|_| matches!(ending, Ending::Finished(Outcome::Failed(_))));
-    finish(hub, run, items, ending, ended, attempted, park).await?;
-    Ok(ended.status())
+    let settled = finish(hub, run, items, ending, ended, attempted, park).await;
+    hub.lock().end(
+        &run.thread_id,
+        &run.id,
+        settled,
+        tokio::time::Instant::now(),
+    );
+    ended.status()
 }
 
 struct Control {
@@ -788,7 +808,7 @@ async fn execute(
     inbox.close();
     cancel.cancel();
     let mut ending = outcome;
-    let mut announced = !adapter_finished && stop.requested.is_cancelled();
+    let mut announced = !adapter_finished && stop.is_requested();
     if announced {
         announce_stop(hub, run, items, pending, &stop).await;
     }
@@ -797,7 +817,7 @@ async fn execute(
         tokio::pin!(deadline);
         loop {
             tokio::select! {
-                () = stop.requested.cancelled(), if !announced => {
+                () = stop.requested(), if !announced => {
                     announce_stop(hub, run, items, pending, &stop).await;
                     announced = true;
                 }
@@ -1886,12 +1906,15 @@ async fn announce_stop(
     }))
     .await;
     match saved {
-        Ok((stopped, _)) => *run = stopped,
+        Ok((stopped, _)) => {
+            *run = stopped;
+            stop.resolve(Ok(()));
+        }
         Err(error) => {
             tracing::warn!(thread = %run.thread_id, run = %run.id, "save the stop before the engine confirms it; it is saved when the run ends: {}", diagnostics::chain(&error));
+            stop.resolve(Err(Arc::new(error)));
         }
     }
-    stop.saved.cancel();
 }
 
 async fn finish(
@@ -1902,7 +1925,7 @@ async fn finish(
     ended: RunOutcome,
     attempted: Vec<ItemId>,
     park: Option<forge_store::Park>,
-) -> Result<(), forge_store::SettleRunError> {
+) -> crate::turns::Ended {
     let open = open_items(items);
     if let Some(error) = ending.error() {
         tracing::warn!(thread = %run.thread_id, run = %run.id, outcome = ?ended, failure_bytes = error.len(), "the run ended with a failure, shown in the thread");
@@ -1949,11 +1972,14 @@ async fn finish(
                 tracing::info!(thread = %run.thread_id, run = %run.id, continuation = ?park.continuation,
                     due_at = park.due_at, "parked a failed turn");
             }
-            Ok(())
+            crate::turns::Ended::Settled
         }
         Err(error) => {
-            hub.keep_unsettled(settlement);
-            Err(error)
+            tracing::error!(thread = %run.thread_id, run = %run.id, "the run's end could not be saved; retrying until it is: {}", diagnostics::chain(&error));
+            crate::turns::Ended::Unsaved {
+                settlement: Box::new(settlement),
+                error: Arc::new(error),
+            }
         }
     }
 }

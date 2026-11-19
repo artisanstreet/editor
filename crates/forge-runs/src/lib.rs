@@ -43,7 +43,7 @@ pub use mcp_auth::{
 pub(crate) use operation::InputError;
 pub use operation::{
     AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
-    ContinueRefusal, SendError, UpdateError,
+    ContinueRefusal, SendError, StopFailure, UpdateError,
 };
 pub use retention::RemoveInactiveThreadsError;
 pub use run::PrepareError;
@@ -136,9 +136,9 @@ fn retry_delay(failures: u32) -> std::time::Duration {
         .min(LONGEST_RETRY)
 }
 
-enum Continuing {
-    Continued,
-    Owed,
+enum Stopping {
+    Live(turns::StopWait),
+    Idle,
 }
 
 #[derive(Debug)]
@@ -612,91 +612,38 @@ impl Hub {
     }
 
     async fn continue_here(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let _admission = self.inner.admission.lock().await;
+        self.continue_admitted(thread_id).await
+    }
+
+    async fn continue_admitted(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
         let refused = |reason| ContinueError::Refused {
             thread: thread_id.clone(),
             reason,
         };
-        let _admission = self.inner.admission.lock().await;
         let continued = self.lock().carry_on(thread_id);
         match continued {
-            turns::Continued::Queued => return Ok(()),
-            turns::Continued::Busy => return Err(refused(ContinueRefusal::Working)),
-            turns::Continued::NothingStopped => {
-                return Err(refused(ContinueRefusal::NothingStopped));
+            turns::Continued::Recorded => Ok(()),
+            turns::Continued::Record => {
+                self.store().request_continue(thread_id.clone()).await?;
+                self.lock().continued(thread_id);
+                Ok(())
             }
-            turns::Continued::Idle => {}
-        }
-        self.carry_on(thread_id).await?;
-        self.resume_pending();
-        Ok(())
-    }
-
-    async fn fulfil_continue(&self, thread_id: &ThreadId) -> Continuing {
-        match self.carry_on(thread_id).await {
-            Ok(()) => {
-                self.lock().fulfilled(thread_id);
+            turns::Continued::Busy => Err(refused(ContinueRefusal::Working)),
+            turns::Continued::NothingStopped => Err(refused(ContinueRefusal::NothingStopped)),
+            turns::Continued::Idle => {
+                let stopped = self
+                    .store()
+                    .latest_run(thread_id)
+                    .await?
+                    .is_some_and(|run| run.status().is_stopped());
+                if !stopped {
+                    return Err(refused(ContinueRefusal::NothingStopped));
+                }
+                self.store().request_continue(thread_id.clone()).await?;
                 self.resume_pending();
-                Continuing::Continued
+                Ok(())
             }
-            Err(ContinueError::Refused { reason, .. }) => {
-                tracing::info!(thread = %thread_id, %reason, "the turn ended without a stop, so the Continue pressed while it ended has nothing to carry on");
-                self.lock().fulfilled(thread_id);
-                Continuing::Continued
-            }
-            Err(error) => {
-                tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down; retrying: {}", diagnostics::chain(&error));
-                Continuing::Owed
-            }
-        }
-    }
-
-    async fn continue_owed(&self) -> bool {
-        if self.lock().owed().is_empty() {
-            return true;
-        }
-        let _admission = self.inner.admission.lock().await;
-        let owed = self.lock().owed();
-        let mut done = true;
-        for thread in owed {
-            if !self.lock().is_owed(&thread) {
-                continue;
-            }
-            match self.fulfil_continue(&thread).await {
-                Continuing::Continued => {}
-                Continuing::Owed => done = false,
-            }
-        }
-        done
-    }
-
-    async fn carry_on(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
-        let stopped = self
-            .store()
-            .latest_run(thread_id)
-            .await?
-            .is_some_and(|run| run.status().is_stopped());
-        if !stopped {
-            return Err(ContinueError::Refused {
-                thread: thread_id.clone(),
-                reason: ContinueRefusal::NothingStopped,
-            });
-        }
-        if self
-            .store()
-            .restore_undelivered_inputs(thread_id.clone())
-            .await?
-            == 0
-        {
-            self.store().request_continue(thread_id.clone()).await?;
-        }
-        Ok(())
-    }
-
-    fn stopped_through(&self, thread_id: &ThreadId) -> Option<u64> {
-        let phase = self.lock().get(thread_id)?.phase;
-        match phase {
-            turns::Phase::Working => None,
-            turns::Phase::Stopping { through, .. } => Some(through),
         }
     }
 
@@ -896,69 +843,107 @@ impl Hub {
     }
 
     pub async fn cancel(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
-        let (elsewhere, idle, stopping) = {
+        let mut failures = Vec::new();
+        let mut elsewhere = Vec::new();
+        let mut idle = Vec::new();
+        let mut stopping = Vec::new();
+        let total = {
             let _admission = self.inner.admission.lock().await;
-            let mut elsewhere = Vec::new();
-            let mut idle = Vec::new();
-            let mut stopping = Vec::new();
-            for thread in self.agent_tree(thread_id).await? {
-                let route = self.route(&thread).map_err(|source| CancelError::Route {
-                    thread: thread.clone(),
-                    source,
-                })?;
-                match route {
-                    Some(member) => elsewhere.push((thread, member)),
-                    None => match self.cancel_owned(&thread).await? {
-                        turns::Stopped::Live(saved) => stopping.push(saved),
-                        turns::Stopped::Idle => idle.push(thread),
+            let tree = self.agent_tree(thread_id).await?;
+            for thread in &tree {
+                match self.route(thread) {
+                    Ok(Some(member)) => elsewhere.push((thread.clone(), member)),
+                    Ok(None) => match self.cancel_owned(thread, &mut failures).await {
+                        Stopping::Live(saved) => stopping.push((thread.clone(), saved)),
+                        Stopping::Idle => idle.push(thread.clone()),
                     },
+                    Err(source) => failures.push(StopFailure::Route {
+                        thread: thread.clone(),
+                        source,
+                    }),
                 }
             }
-            (elsewhere, idle, stopping)
+            tree.len()
         };
-        for saved in stopping {
-            saved.cancelled().await;
+        for (thread, saved) in stopping {
+            if let Err(source) = saved.saved().await {
+                failures.push(StopFailure::Unsaved { thread, source });
+            }
         }
         for thread in idle {
             self.agent_run_ended(&thread).await;
         }
         for (thread, member) in elsewhere {
-            runtime::request(
+            if let Err(source) = runtime::request(
                 &member,
                 &runtime::Command::Cancel {
                     thread: thread.clone(),
                 },
             )
             .await
-            .map_err(|source| CancelError::Peer {
-                thread,
-                source: Box::new(source),
-            })?;
+            {
+                failures.push(StopFailure::Peer {
+                    thread,
+                    source: Box::new(source),
+                });
+            }
         }
-        Ok(())
+        CancelError::check(thread_id, total, failures)
     }
 
     async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
+        let mut failures = Vec::new();
         let stopped = {
             let _admission = self.inner.admission.lock().await;
-            self.cancel_owned(thread_id).await?
+            self.cancel_owned(thread_id, &mut failures).await
         };
         match stopped {
-            turns::Stopped::Live(saved) => saved.cancelled().await,
-            turns::Stopped::Idle => self.agent_run_ended(thread_id).await,
+            Stopping::Live(saved) => {
+                if let Err(source) = saved.saved().await {
+                    failures.push(StopFailure::Unsaved {
+                        thread: thread_id.clone(),
+                        source,
+                    });
+                }
+            }
+            Stopping::Idle => self.agent_run_ended(thread_id).await,
         }
-        Ok(())
+        CancelError::check(thread_id, 1, failures)
     }
 
-    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<turns::Stopped, CancelError> {
+    async fn cancel_owned(
+        &self,
+        thread_id: &ThreadId,
+        failures: &mut Vec<StopFailure>,
+    ) -> Stopping {
         let cutoff = self.store().head();
         let stopped = self.lock().stop(thread_id, cutoff);
-        self.store()
+        if let Err(error) = self
+            .store()
             .cancel_pending_inputs(thread_id.clone(), cutoff)
-            .await?;
-        self.store().unpark(thread_id.clone()).await?;
+            .await
+        {
+            failures.push(error.into());
+        }
+        if let Err(error) = self.store().unpark(thread_id.clone()).await {
+            failures.push(error.into());
+        }
+        let stopping = match stopped {
+            turns::Stopped::Live(saved) => Stopping::Live(saved),
+            turns::Stopped::Idle => Stopping::Idle,
+            turns::Stopped::Unsettled(settlement) => {
+                match self.store().settle_run(*settlement).await {
+                    Ok(_) => self.lock().settled(thread_id),
+                    Err(error) => failures.push(StopFailure::Unsaved {
+                        thread: thread_id.clone(),
+                        source: Arc::new(error),
+                    }),
+                }
+                Stopping::Idle
+            }
+        };
         self.resume_pending();
-        Ok(stopped)
+        stopping
     }
 
     pub fn shutdown_on_drop(&self) -> tokio_util::sync::DropGuard {
@@ -1131,16 +1116,6 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn keep_unsettled(&self, settlement: forge_store::Settlement) {
-        tracing::error!(
-            thread = %settlement.run.thread_id,
-            run = %settlement.run.id,
-            "the run's end could not be saved; retrying until it is"
-        );
-        self.lock().unsettle(settlement);
-        self.resume_pending();
-    }
-
     async fn settle_unsettled(&self) -> bool {
         if self.lock().unsettled().is_empty() {
             return true;
@@ -1160,12 +1135,6 @@ impl Hub {
                 }
                 tracing::info!(%thread, %run, "saved the run's end after an earlier failure");
                 self.lock().settled(&thread);
-                if self.lock().is_owed(&thread) {
-                    match self.fulfil_continue(&thread).await {
-                        Continuing::Continued => {}
-                        Continuing::Owed => settled = false,
-                    }
-                }
                 ended.push(thread);
             }
         }
@@ -1197,7 +1166,7 @@ impl Hub {
                         tokio::time::sleep(retry_delay(failures)).await;
                     }
                 };
-                let next_due = hub.lock().next_due();
+                let next_due = hub.lock().next_due(tokio::time::Instant::now());
                 let undeferred = async {
                     match next_due {
                         Some(until) => tokio::time::sleep_until(until).await,
@@ -1212,10 +1181,8 @@ impl Hub {
                     () = retry => {},
                     () = undeferred => {},
                 }
-                hub.lock().release_due(tokio::time::Instant::now());
                 let mut failed = !readable;
                 failed |= !hub.settle_unsettled().await;
-                failed |= !hub.continue_owed().await;
                 unclaimed_at = Some(hub.store().now());
                 loop {
                     let _admission = hub.inner.admission.lock().await;
@@ -1287,24 +1254,33 @@ impl Hub {
         let hub = self.clone();
         let span = tracing::info_span!("run", thread = %thread_id, run = %run_id);
         let run = async move {
-            let outcome = Box::pin(run::drive(
+            let drove = Box::pin(run::drive(
                 &hub,
                 &thread_id,
                 run_id.clone(),
                 receiver,
                 cancel.clone(),
-                stop.clone(),
+                stop,
             ))
             .await;
-            stop.saved.cancel();
-            let retry_later = match &outcome {
-                Ok(_) => false,
+            let status = match drove {
+                Ok(run::Drove::Concluded(status)) => Some(status),
+                Ok(run::Drove::Nothing) => {
+                    hub.end_live(&thread_id, &run_id, turns::Ended::Settled)
+                        .await;
+                    None
+                }
                 Err(error) => {
                     tracing::error!(thread = %thread_id, run = %run_id, "run failed: {}", diagnostics::chain(&error));
-                    error.retry_later()
+                    let ended = if error.retry_later() {
+                        turns::Ended::Deferred
+                    } else {
+                        turns::Ended::Settled
+                    };
+                    hub.end_live(&thread_id, &run_id, ended).await;
+                    None
                 }
             };
-            hub.end_live(&thread_id, retry_later).await;
             drop(permit);
             if !hub.inner.shutdown.is_cancelled() {
                 hub.resume_pending();
@@ -1312,7 +1288,7 @@ impl Hub {
             if !hub.inner.shutdown.is_cancelled() {
                 hub.agent_run_ended(&thread_id).await;
             }
-            if matches!(outcome, Ok(artisan_api::RunStatus::Done))
+            if status == Some(artisan_api::RunStatus::Done)
                 && !hub.inner.shutdown.is_cancelled()
                 && !hub.is_agent_thread(&thread_id).await
             {
@@ -1324,19 +1300,10 @@ impl Hub {
             .spawn(tracing::Instrument::instrument(run, span));
     }
 
-    async fn end_live(&self, thread_id: &ThreadId, retry_later: bool) {
+    async fn end_live(&self, thread_id: &ThreadId, run_id: &RunId, ended: turns::Ended) {
         let _admission = self.inner.admission.lock().await;
-        let continues = self.lock().continues_after_stop(thread_id);
-        let owed = continues
-            && match self.fulfil_continue(thread_id).await {
-                Continuing::Continued => false,
-                Continuing::Owed => true,
-            };
         self.lock()
-            .end(thread_id, retry_later, owed, tokio::time::Instant::now());
-        if owed {
-            self.resume_pending();
-        }
+            .end(thread_id, run_id, ended, tokio::time::Instant::now());
     }
 
     #[must_use]

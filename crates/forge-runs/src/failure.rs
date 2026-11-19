@@ -7,7 +7,7 @@ use crate::extensions::{
 use crate::mcp_auth::{McpSignInFinishError, McpSignInStartError, McpStoreError};
 use crate::operation::{
     AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
-    ContinueRefusal, SendError, UpdateError,
+    ContinueRefusal, SendError, StopFailure, UpdateError,
 };
 use crate::resources::{ResourceError, RootError};
 use crate::runtime::{ControlError, EditorReplyError, PeerError};
@@ -500,9 +500,7 @@ impl ContinueError {
                 },
             }),
             Self::Peer { source, .. } => source.wire(),
-            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) | Self::Route { .. } => {
-                Failure::Internal
-            }
+            Self::LatestRun(_) | Self::Request(_) | Self::Route { .. } => Failure::Internal,
         }
     }
 }
@@ -552,10 +550,11 @@ impl CancelError {
     #[must_use]
     pub fn wire(&self) -> Failure {
         match self {
-            Self::Peer { source, .. } => source.wire(),
-            Self::Tree(_) | Self::Inputs(_) | Self::Unpark(_) | Self::Route { .. } => {
-                Failure::Internal
-            }
+            Self::Stops { failures, .. } => match failures.as_slice() {
+                [StopFailure::Peer { source, .. }] => source.wire(),
+                _ => Failure::Internal,
+            },
+            Self::Tree(_) => Failure::Internal,
         }
     }
 }

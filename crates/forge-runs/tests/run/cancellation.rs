@@ -452,13 +452,61 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
     );
 }
 
+fn unsaved_stop(error: &CancelError) -> bool {
+    match error {
+        CancelError::Stops { failures, .. } => {
+            matches!(failures.as_slice(), [StopFailure::Unsaved { .. }])
+        }
+        CancelError::Tree(_) => false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_that_cannot_be_saved_says_so_instead_of_succeeding() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    let disk = durability::DiskFull::arming(&fixture, "runs");
+    disk.strike();
+
+    let error = fixture
+        .hub
+        .cancel(&fixture.thread_id)
+        .await
+        .expect_err("a Stop whose save failed is not acknowledged");
+
+    assert!(unsaved_stop(&error), "{error:?}");
+    assert!(
+        diagnostics::chain(&error).contains("database or disk is full"),
+        "{}",
+        diagnostics::chain(&error)
+    );
+    assert_eq!(
+        fixture
+            .hub
+            .store()
+            .latest_run(&fixture.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status(),
+        RunStatus::Running,
+        "the error matches what is on disk"
+    );
+    disk.clear();
+    winding.release.notify_one();
+    let runs = fixture.settled().await;
+    assert_eq!(runs[0].status(), RunStatus::Cancelled, "{runs:#?}");
+    assert_eq!(winding.turns(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn continue_is_accepted_while_a_stop_winds_down_before_the_stop_is_saved() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     let disk = durability::DiskFull::arming(&fixture, "runs");
     disk.strike();
-    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let error = fixture.hub.cancel(&fixture.thread_id).await.unwrap_err();
+    assert!(unsaved_stop(&error), "{error:?}");
     tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
@@ -574,7 +622,7 @@ async fn a_stop_pressed_while_forge_shuts_down_is_not_resumed_on_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_continue_acknowledged_during_a_stop_survives_a_storage_failure() {
+async fn a_continue_acknowledged_during_a_stop_survives_a_crash_before_the_engine_stops() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
@@ -582,36 +630,47 @@ async fn a_continue_acknowledged_during_a_stop_survives_a_storage_failure() {
         .await
         .unwrap();
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
-    let disk = durability::DiskFull::arming(&fixture, "continues");
-    disk.strike();
-    winding.release.notify_one();
-    test_support::wait::within(
-        "the stopped run to end",
-        test_support::wait::LIVENESS,
-        async {
-            while fixture.hub.is_live(&fixture.thread_id) {
-                tokio::task::yield_now().await;
-            }
-        },
-    )
-    .await;
-    assert_eq!(winding.turns(), 1);
 
-    disk.clear();
+    fixture
+        .hub
+        .store()
+        .recover_thread(fixture.thread_id.clone())
+        .await
+        .unwrap();
+    let asked = Asked::default();
+    let record = Arc::clone(&asked);
+    let harness: Arc<dyn Harness> = Arc::new(Scripted(Arc::new(move |turn, io| {
+        let record = Arc::clone(&record);
+        Box::pin(async move {
+            record
+                .lock()
+                .unwrap()
+                .push((turn.input.text.clone(), turn.session_id.clone()));
+            io.emit(reply("done", "picked it back up")).await;
+            Outcome::done()
+        })
+    })));
+    let restarted = Hub::with_harness(
+        fixture.hub.store().clone(),
+        fixture.hub.engines().clone(),
+        fixture.dir.path().to_path_buf(),
+        Arc::new(move |_| Arc::clone(&harness)),
+    );
+    restarted.resume_pending();
     test_support::wait::eventually(
-        "the acknowledged continue to run once storage recovers",
+        "the acknowledged Continue to run in the restarted Forge",
         test_support::wait::LIVENESS,
-        || async { winding.turns() == 2 },
+        || async { !asked.lock().unwrap().is_empty() },
     )
     .await;
-    let continued = fixture.settled().await;
-    assert_eq!(
-        continued
-            .iter()
-            .find(|run| run.continuation.is_some())
-            .map(|run| (run.status(), run.continuation)),
-        Some((RunStatus::Done, Some(artisan_api::Continuation::Requested)))
+
+    let asked = asked.lock().unwrap().clone();
+    assert!(
+        asked[0].0.starts_with("Continue from where you left off."),
+        "{asked:?}"
     );
+    assert_eq!(winding.turns(), 1);
+    restarted.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -719,7 +778,8 @@ async fn a_continue_pressed_while_a_failed_save_winds_down_still_carries_the_tur
         .await
         .unwrap();
 
-    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let stop = fixture.hub.cancel(&fixture.thread_id).await.unwrap_err();
+    assert!(unsaved_stop(&stop), "{stop:?}");
     fixture
         .hub
         .continue_turn(&fixture.thread_id)
@@ -765,7 +825,8 @@ async fn a_second_stop_cancels_a_continue_still_waiting_on_an_unsaved_stop() {
     let fixture = stopping_fixture(&winding).await;
     let disk = durability::DiskFull::arming(&fixture, "runs");
     disk.strike();
-    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let first = fixture.hub.cancel(&fixture.thread_id).await.unwrap_err();
+    assert!(unsaved_stop(&first), "{first:?}");
     tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
@@ -773,10 +834,19 @@ async fn a_second_stop_cancels_a_continue_still_waiting_on_an_unsaved_stop() {
     winding.release.notify_one();
     ended(&fixture).await;
 
-    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let second = fixture.hub.cancel(&fixture.thread_id).await.unwrap_err();
+    assert!(unsaved_stop(&second), "{second:?}");
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .continue_pending(&fixture.thread_id)
+            .await
+            .unwrap(),
+        "the second Stop takes back the saved Continue"
+    );
     disk.clear();
     fixture.hub.settle_unsettled().await;
-    fixture.hub.continue_owed().await;
 
     let runs = fixture.settled().await;
     assert_eq!(winding.turns(), 1, "the second Stop wins over the Continue");
@@ -841,7 +911,8 @@ async fn a_continue_pressed_while_the_stop_is_unsaved_brings_back_the_unread_mes
     .await;
     let disk = durability::DiskFull::arming(&fixture, "runs");
     disk.strike();
-    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let stop = fixture.hub.cancel(&fixture.thread_id).await.unwrap_err();
+    assert!(unsaved_stop(&stop), "{stop:?}");
     tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
         .await
         .unwrap();
@@ -903,11 +974,29 @@ async fn a_stop_pressed_while_forge_shuts_down_is_saved_before_the_engine_confir
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
-    let fixture = fixture(Arc::new(|_, io| {
-        Box::pin(async move {
-            io.emit(reply("done", "all done")).await;
-            Outcome::done()
-        })
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = fixture(Arc::new({
+        let (started, release, turns) = (
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Arc::clone(&turns),
+        );
+        move |_, io| {
+            let (started, release, turns) = (
+                Arc::clone(&started),
+                Arc::clone(&release),
+                Arc::clone(&turns),
+            );
+            Box::pin(async move {
+                turns.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                release.notified().await;
+                io.emit(reply("done", "all done")).await;
+                Outcome::done()
+            })
+        }
     }))
     .await;
     fixture
@@ -915,31 +1004,46 @@ async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
         .send_message(&fixture.thread_id, message("finish it"))
         .await
         .unwrap();
-    assert_eq!(fixture.settled().await[0].status(), RunStatus::Done);
-    let (inbox, _receiver) = mpsc::channel(1);
-    let through = fixture.hub.store().head();
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
+        .await
+        .unwrap();
+    let admission = fixture.hub.inner.admission.lock().await;
+    release.notify_one();
+    test_support::wait::within(
+        "the engine to return before the turn concludes",
+        test_support::wait::LIVENESS,
+        async {
+            while !fixture
+                .hub
+                .lock()
+                .get(&fixture.thread_id)
+                .is_some_and(|run| run.inbox.is_closed())
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+    )
+    .await;
+    let mut failures = Vec::new();
+    let Stopping::Live(saved) = fixture
+        .hub
+        .cancel_owned(&fixture.thread_id, &mut failures)
+        .await
+    else {
+        panic!("the turn is still live while it waits to conclude");
+    };
+    assert!(failures.is_empty(), "{failures:?}");
     fixture
         .hub
-        .lock()
-        .claim(fixture.thread_id.clone(), |retries| LiveRun {
-            id: RunId::new(),
-            inbox,
-            cancel: CancellationToken::new(),
-            engine: None,
-            launched: None,
-            live: std::collections::BTreeMap::new(),
-            foreground_bytes: 0,
-            terminal_bytes: 0,
-            phase: turns::Phase::Stopping {
-                through,
-                then: turns::AfterStop::Continue,
-            },
-            stop: turns::StopSignal::default(),
-            retries,
-        });
+        .continue_admitted(&fixture.thread_id)
+        .await
+        .expect("Continue on a stopping turn is accepted");
+    drop(admission);
+    saved.saved().await.expect("the stop is saved");
 
-    fixture.hub.end_live(&fixture.thread_id, false).await;
-
+    let runs = fixture.settled().await;
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(runs[0].status(), RunStatus::Done);
     assert!(
         fixture
             .items()
@@ -956,5 +1060,5 @@ async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
             .await
             .unwrap()
     );
-    assert!(fixture.hub.active_thread_ids().is_empty());
+    assert_eq!(turns.load(Ordering::SeqCst), 1);
 }

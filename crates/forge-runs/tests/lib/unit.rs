@@ -1882,17 +1882,35 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         ))
         .await
         .unwrap();
-    let status = Box::pin(run::drive(
+    let run_id = RunId::new();
+    let stop = turns::StopSignal::default();
+    fixture
+        .hub
+        .lock()
+        .claim(fixture.thread_id.clone(), |retries| LiveRun {
+            id: run_id.clone(),
+            inbox: sender,
+            cancel: CancellationToken::new(),
+            engine: None,
+            launched: None,
+            live: std::collections::BTreeMap::new(),
+            foreground_bytes: 0,
+            terminal_bytes: 0,
+            phase: turns::Phase::Working,
+            stop: stop.clone(),
+            retries,
+        });
+    let drove = Box::pin(run::drive(
         &fixture.hub,
         &fixture.thread_id,
-        RunId::new(),
+        run_id,
         receiver,
         CancellationToken::new(),
-        turns::StopSignal::default(),
+        stop,
     ))
     .await
     .unwrap();
-    assert_eq!(status, RunStatus::Done);
+    assert!(matches!(drove, run::Drove::Concluded(RunStatus::Done)));
     assert_eq!(
         fixture
             .hub

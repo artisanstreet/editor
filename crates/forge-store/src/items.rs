@@ -558,7 +558,7 @@ impl Store {
             note,
         } = settlement;
         let (id, thread) = (run.id.clone(), run.thread_id.clone());
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             if let Some(note) = note {
                 tx.upsert_item(note)?;
             }
@@ -605,6 +605,9 @@ impl Store {
                 Some(park) => tx.park(&run, park)?,
                 None => false,
             };
+            if !parked && !run.status().is_stopped() {
+                tx.take_continue(&run.thread_id)?;
+            }
             let undelivered = match run.status() {
                 RunStatus::Failed | RunStatus::Refused if !parked => Some(Status::Failed),
                 RunStatus::Cancelled => Some(Status::Cancelled),

@@ -148,8 +148,6 @@ pub enum ContinueError {
     #[error(transparent)]
     LatestRun(#[from] forge_store::LatestRunError),
     #[error(transparent)]
-    Restore(#[from] forge_store::RestoreInputsError),
-    #[error(transparent)]
     Request(#[from] forge_store::RequestContinueError),
     #[error("check where thread {thread} runs")]
     Route {
@@ -171,9 +169,7 @@ impl ContinueError {
         match self {
             Self::Refused { .. } => ErrorClass::Conflict,
             Self::Peer { source, .. } => source.class(),
-            Self::LatestRun(_) | Self::Restore(_) | Self::Request(_) | Self::Route { .. } => {
-                ErrorClass::Internal
-            }
+            Self::LatestRun(_) | Self::Request(_) | Self::Route { .. } => ErrorClass::Internal,
         }
     }
 }
@@ -308,10 +304,30 @@ pub enum ClearGoalRefusal {
 pub enum CancelError {
     #[error(transparent)]
     Tree(#[from] forge_store::AgentThreadsError),
+    #[error(
+        "stop thread {thread}: {} of the {total} threads it runs did not stop cleanly: {}",
+        failures.len(),
+        listed(failures)
+    )]
+    Stops {
+        thread: ThreadId,
+        total: usize,
+        failures: Vec<StopFailure>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StopFailure {
     #[error(transparent)]
     Inputs(#[from] forge_store::CancelInputsError),
     #[error(transparent)]
     Unpark(#[from] forge_store::UnparkError),
+    #[error("save the stop of thread {thread}")]
+    Unsaved {
+        thread: ThreadId,
+        #[source]
+        source: std::sync::Arc<forge_store::SettleRunError>,
+    },
     #[error("hand cancelling thread {thread} to the generation running it")]
     Peer {
         thread: ThreadId,
@@ -326,14 +342,38 @@ pub enum CancelError {
     },
 }
 
+fn listed(failures: &[StopFailure]) -> String {
+    failures
+        .iter()
+        .map(|failure| diagnostics::chain(failure))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 impl CancelError {
+    pub(crate) fn check(
+        thread: &ThreadId,
+        total: usize,
+        failures: Vec<StopFailure>,
+    ) -> Result<(), Self> {
+        if failures.is_empty() {
+            return Ok(());
+        }
+        Err(Self::Stops {
+            thread: thread.clone(),
+            total,
+            failures,
+        })
+    }
+
     #[must_use]
     pub const fn class(&self) -> ErrorClass {
         match self {
-            Self::Peer { source, .. } => source.class(),
-            Self::Tree(_) | Self::Inputs(_) | Self::Unpark(_) | Self::Route { .. } => {
-                ErrorClass::Internal
-            }
+            Self::Stops { failures, .. } => match failures.as_slice() {
+                [StopFailure::Peer { source, .. }] => source.class(),
+                _ => ErrorClass::Internal,
+            },
+            Self::Tree(_) => ErrorClass::Internal,
         }
     }
 }
