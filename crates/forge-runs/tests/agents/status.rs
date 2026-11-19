@@ -1,6 +1,13 @@
 use super::*;
 
 async fn spawned_agent(fixture: &Fixture) -> (ThreadId, ItemId, ThreadId, Item) {
+    described_agent(fixture, "Review the diff").await
+}
+
+async fn described_agent(
+    fixture: &Fixture,
+    description: &str,
+) -> (ThreadId, ItemId, ThreadId, Item) {
     let store = fixture.hub.store();
     let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
     let agent = ItemId::new();
@@ -16,7 +23,7 @@ async fn spawned_agent(fixture: &Fixture) -> (ThreadId, ItemId, ThreadId, Item) 
                 status: Status::Running,
                 kind: ItemKind::Agent {
                     name: None,
-                    description: "Review the diff".into(),
+                    description: description.to_owned().into(),
                     prompt: None,
                     agent_id: None,
                     context_used: None,
@@ -123,5 +130,26 @@ async fn an_agent_stopped_before_its_first_run_reports_cancelled_to_its_waiter()
         .await
         .unwrap();
     assert_eq!(status.state, AgentState::Cancelled);
+    fixture.hub.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlabelled_agent_with_a_long_task_is_listed_by_its_whole_task() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let task = "Review every file in the diff. ".repeat(artisan_api::INLINE_TEXT_BYTES / 16);
+    let (parent, agent, _, _) = described_agent(&fixture, &task).await;
+    let disk =
+        rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3")).unwrap();
+    disk.busy_timeout(test_support::wait::LIVENESS).unwrap();
+    disk.execute(include_str!("forget_label.sql"), [agent.as_str()])
+        .unwrap();
+
+    let status = fixture
+        .hub
+        .agent_status(&parent, agent.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(status.task, task);
     fixture.hub.shutdown();
 }

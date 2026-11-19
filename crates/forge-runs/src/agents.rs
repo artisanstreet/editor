@@ -380,6 +380,12 @@ pub enum AgentViewError {
     Reopen(#[from] forge_store::ReopenAgentError),
     #[error(transparent)]
     Save(#[from] forge_store::UpsertItemError),
+    #[error("read the stored task description of agent {agent}")]
+    Description {
+        agent: ItemId,
+        #[source]
+        source: forge_store::ResolveTextError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -895,10 +901,19 @@ impl Hub {
                 thread: child_thread,
             },
         });
+        let task = match label {
+            Some(label) => label,
+            None => store.resolve_text(&description).await.map_err(|source| {
+                AgentViewError::Description {
+                    agent: item.id.clone(),
+                    source,
+                }
+            })?,
+        };
         let info = AgentInfo {
             agent: item.id.clone(),
             thread: child.clone(),
-            task: label.unwrap_or_else(|| store_text(&description)),
+            task,
             harness: engine.unwrap_or(EngineId::Claude),
             model: config
                 .as_ref()
@@ -1198,10 +1213,6 @@ fn report_text(info: &AgentInfo) -> String {
         text.push_str(result);
     }
     text
-}
-
-fn store_text(text: &artisan_api::TextContent) -> String {
-    text.inline().unwrap_or_default().to_owned()
 }
 
 struct Waiting<'h> {
