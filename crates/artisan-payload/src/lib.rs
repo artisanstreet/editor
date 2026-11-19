@@ -1,8 +1,3 @@
-#![expect(
-    clippy::print_stdout,
-    missing_debug_implementations,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -66,6 +61,14 @@ pub enum EmbedError {
 #[derive(Clone, Copy)]
 pub struct Payload<'a>(&'a [u8]);
 
+impl std::fmt::Debug for Payload<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Payload")
+            .field("packed_bytes", &self.0.len())
+            .finish()
+    }
+}
+
 impl<'a> Payload<'a> {
     #[must_use]
     pub const fn new(packed: &'a [u8]) -> Self {
@@ -124,12 +127,20 @@ fn pack(program: &[u8]) -> Result<Vec<u8>, PackError> {
     encoder.finish().map_err(PackError)
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "Cargo reads build-script directives from stdout"
+)]
+fn cargo_directive(directive: std::fmt::Arguments<'_>) {
+    println!("cargo:{directive}");
+}
+
 pub fn embed(variable: &str, name: &str) -> Result<(), EmbedError> {
-    println!("cargo:rerun-if-env-changed={variable}");
+    cargo_directive(format_args!("rerun-if-env-changed={variable}"));
     let packed = match std::env::var_os(variable).filter(|path| !path.is_empty()) {
         Some(path) => {
             let path = PathBuf::from(path);
-            println!("cargo:rerun-if-changed={}", path.display());
+            cargo_directive(format_args!("rerun-if-changed={}", path.display()));
             let program = std::fs::read(&path).map_err(|source| EmbedError::ReadProgram {
                 variable: variable.to_owned(),
                 path: path.clone(),
@@ -173,7 +184,7 @@ pub enum EmbedNoticesError {
 pub fn embed_notices(name: &str, root: &Path, files: &[PathBuf]) -> Result<(), EmbedNoticesError> {
     let mut notices = Vec::new();
     for file in files {
-        println!("cargo:rerun-if-changed={}", file.display());
+        cargo_directive(format_args!("rerun-if-changed={}", file.display()));
         let label = file
             .strip_prefix(root)
             .map_err(|_outside| EmbedNoticesError::Outside {
