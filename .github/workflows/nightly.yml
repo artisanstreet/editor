@@ -73,16 +73,20 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
       - name: Say which engines can run a prompt
+        id: secrets
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
+          missing=''
           for name in ANTHROPIC_API_KEY OPENAI_API_KEY OPENCODE_API_KEY; do
             if [ -z "${!name}" ]; then
-              echo "::notice title=Engine contracts::the $name secret is not defined; its engine is only installed and probed, no prompt runs"
+              echo "::warning title=Engine contracts::the $name secret is not defined; its engine is only installed and probed, no prompt runs"
+              missing="$missing $name"
             fi
           done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
       - name: Install each engine the way Forge does and check what it sends
         id: contracts
         env:
@@ -146,3 +150,11 @@ jobs:
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           fi
+      - name: Fail when an engine could not run a prompt
+        if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
+        env:
+          MISSING: ${{ steps.secrets.outputs.missing }}
+        run: |
+          echo "::error title=Engine contracts::no prompt ran for $MISSING; define these repository secrets so the nightly checks what each engine sends"
+          echo "### Not checked: no prompt ran for $MISSING" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
