@@ -375,6 +375,36 @@ fn a_sandboxed_child_reaches_only_its_own_and_the_agent_sockets_when_the_kernel_
 }
 
 #[test]
+fn a_confined_thread_writes_only_inside_and_leaves_the_rest_of_forge_free() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    let own = tempfile::tempdir().unwrap();
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let ruleset = landlock
+        .writes_only_to(&[allowed.path().to_path_buf()], own.path(), &[])
+        .unwrap();
+
+    let (inside, escaped) = ruleset
+        .run_confined(|| {
+            (
+                std::fs::write(allowed.path().join("written"), "inside"),
+                std::fs::write(outside.path().join("escaped"), "outside"),
+            )
+        })
+        .unwrap();
+
+    inside.unwrap();
+    assert_eq!(
+        escaped.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::PermissionDenied)
+    );
+    assert!(!outside.path().join("escaped").exists());
+    std::fs::write(outside.path().join("afterwards"), "free").unwrap();
+}
+
+#[test]
 fn an_ssh_agent_path_that_is_not_a_socket_does_not_refuse_the_run() {
     let Some(landlock) = landlock() else {
         return;

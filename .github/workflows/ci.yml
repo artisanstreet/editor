@@ -129,7 +129,7 @@ jobs:
           test "$(cut -f1 "$RUNNER_TEMP/sandbox-tests.tsv" | grep -cxE 'forge_engines|sandbox|unix|linux')" -eq 4
           while IFS=$'\t' read -r target executable crate; do
             case "$target" in
-              forge_engines) filters=(sandbox:: process::) ;;
+              forge_engines) filters=(sandbox:: process:: an_auto_write_runs_inside_the_runs_sandbox) ;;
               sandbox | unix | linux) filters=() ;;
               *) continue ;;
             esac

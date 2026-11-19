@@ -363,6 +363,20 @@ fn confirm(opened: &OwnedFd, expected: &Resolved) -> Result<(), RulesetError> {
 }
 
 impl Ruleset {
+    pub fn run_confined<T: Send>(&self, job: impl FnOnce() -> T + Send) -> std::io::Result<T> {
+        std::thread::scope(|scope| {
+            let confined = std::thread::Builder::new()
+                .name("forge-confined".to_owned())
+                .spawn_scoped(scope, || {
+                    self.restrict_self()?;
+                    Ok(job())
+                })?;
+            confined
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    }
+
     pub(crate) fn restrict_self(&self) -> std::io::Result<()> {
         unsafe {
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {

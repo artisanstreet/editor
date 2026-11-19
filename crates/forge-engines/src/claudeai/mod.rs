@@ -634,6 +634,7 @@ async fn run_call(
         tools::plan(
             call,
             inbox.permissions,
+            tools::Confinement::of(&ctx.runtime.sandbox),
             &allowed,
             &ctx.runtime.rules,
             &ctx.runtime.mcp,

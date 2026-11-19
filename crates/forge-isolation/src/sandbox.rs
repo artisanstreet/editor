@@ -91,6 +91,13 @@ impl Landlock {
 #[derive(Debug, Clone)]
 pub struct Ruleset(Never);
 
+#[cfg(not(target_os = "linux"))]
+impl Ruleset {
+    pub fn run_confined<T>(&self, _job: impl FnOnce() -> T) -> std::io::Result<T> {
+        match self.0 {}
+    }
+}
+
 #[cfg(all(unix, not(target_os = "linux")))]
 impl Ruleset {
     pub(crate) const fn restrict_self(&self) -> std::io::Result<()> {

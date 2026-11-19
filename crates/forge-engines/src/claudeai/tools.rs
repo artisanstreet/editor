@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
 use super::files::{self, ReadFileError};
-use super::rules::{Rules, Verdict, changes_files, url_host};
+use super::rules::{Grants, Rules, Verdict, changes_files, url_host};
 use super::{mcp, shells, skills};
 use crate::sandbox::Sandbox;
 
@@ -100,6 +100,22 @@ impl Runtime {
         tokio::task::spawn_blocking(move || drop(self))
             .await
             .expect("invariant: releasing a claude.ai run's tools does not panic");
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Confinement {
+    Sandboxed,
+    Unconfined,
+}
+
+impl Confinement {
+    pub(crate) const fn of(sandbox: &Sandbox) -> Self {
+        if sandbox.confined() {
+            Self::Sandboxed
+        } else {
+            Self::Unconfined
+        }
     }
 }
 
@@ -393,6 +409,7 @@ pub(super) fn questions(call: &Call) -> Vec<artisan_api::Question> {
 pub(super) fn plan(
     call: &Call,
     permissions: Permissions,
+    confinement: Confinement,
     allowed: &Allowed,
     rules: &Rules,
     mcp: &mcp::Servers,
@@ -418,7 +435,11 @@ pub(super) fn plan(
         reason.push_str(". Tell the user; do not retry.");
         return Plan::Refuse(reason);
     }
-    let verdict = rules.verdict(call);
+    let grants = match (permissions, confinement) {
+        (Permissions::Auto, Confinement::Unconfined) => Grants::EngineOnly,
+        (Permissions::Auto, Confinement::Sandboxed) | (Permissions::Full, _) => Grants::All,
+    };
+    let verdict = rules.verdict_granting(call, grants);
     if let Some(Verdict::Deny(reason)) = verdict {
         return Plan::Refuse(reason);
     }
@@ -439,7 +460,9 @@ pub(super) fn plan(
     match name {
         "Read" | "Glob" | "Grep" | "AskUserQuestion" | "TodoWrite" | "Task" | "Skill"
         | "BashOutput" | "KillShell" => Plan::Run,
-        _ if changes_files(name) && rules.accept_edits() && rules.inside_root(call) => Plan::Run,
+        _ if changes_files(name) && rules.accept_edits(grants) && rules.inside_root(call) => {
+            Plan::Run
+        }
         _ => Plan::Ask(request_for(call, mcp)),
     }
 }
@@ -613,8 +636,8 @@ pub(super) async fn execute(
 ) -> (Answer, ItemKind) {
     let answer = match call.name.as_str() {
         "Read" => read(call, cwd).await,
-        "Write" => write(call, cwd).await,
-        "Edit" => edit(call, cwd).await,
+        "Write" => write(call, cwd, &runtime.sandbox).await,
+        "Edit" => edit(call, cwd, &runtime.sandbox).await,
         "Glob" => glob(call, cwd, &runtime.rules).await,
         "Grep" => grep(call, cwd, &runtime.rules, cancel).await,
         "Bash" if call.input["run_in_background"].as_bool() == Some(true) => {
@@ -799,7 +822,79 @@ async fn read(call: &Call, cwd: &Path) -> Answer {
     Answer::ok(truncate(&out))
 }
 
-async fn write(call: &Call, cwd: &Path) -> Answer {
+#[derive(Debug, thiserror::Error)]
+enum StoreError {
+    #[error("Could not create {}: {source}", path.display())]
+    Folder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Could not write {}: {source}", path.display())]
+    File {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Could not write {}: {source}. In Auto, only the project, the engine's folders and the run's temporary folder can be changed; ask the user for Full access if this file must change", path.display())]
+    Denied {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Could not start the sandboxed writer for {}: {source}", path.display())]
+    Confine {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn store_now(path: &Path, bytes: &[u8], make_folder: bool) -> Result<(), StoreError> {
+    if make_folder && let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| StoreError::Folder {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(path, bytes).map_err(|source| StoreError::File {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+async fn store(
+    path: PathBuf,
+    bytes: Vec<u8>,
+    make_folder: bool,
+    sandbox: &Sandbox,
+) -> Result<(), StoreError> {
+    let ruleset = sandbox.ruleset().cloned();
+    tokio::task::spawn_blocking(move || match ruleset {
+        None => store_now(&path, &bytes, make_folder),
+        Some(ruleset) => ruleset
+            .run_confined(|| store_now(&path, &bytes, make_folder))
+            .map_err(|source| StoreError::Confine {
+                path: path.clone(),
+                source,
+            })?
+            .map_err(|failure| match failure {
+                StoreError::Folder { path, source } | StoreError::File { path, source }
+                    if source.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    StoreError::Denied { path, source }
+                }
+                other @ (StoreError::Folder { .. }
+                | StoreError::File { .. }
+                | StoreError::Denied { .. }
+                | StoreError::Confine { .. }) => other,
+            }),
+    })
+    .await
+    .expect("invariant: writing a file does not panic")
+}
+
+async fn write(call: &Call, cwd: &Path, sandbox: &Sandbox) -> Answer {
     let path = match path_input(call, "Write") {
         Ok(path) => resolve(cwd, path),
         Err(answer) => return answer,
@@ -810,13 +905,8 @@ async fn write(call: &Call, cwd: &Path) -> Answer {
     if content.len() as u64 > MAX_FILE_BYTES {
         return Answer::error("That is more than Write takes in one file.");
     }
-    if let Some(parent) = path.parent()
-        && let Err(error) = tokio::fs::create_dir_all(parent).await
-    {
-        return Answer::error(format!("Could not create {}: {error}", parent.display()));
-    }
-    if let Err(error) = tokio::fs::write(&path, content).await {
-        return Answer::error(format!("Could not write {}: {error}", path.display()));
+    if let Err(error) = store(path.clone(), content.as_bytes().to_vec(), true, sandbox).await {
+        return Answer::error(error.to_string());
     }
     Answer::ok(format!(
         "Wrote {} ({} bytes).",
@@ -825,7 +915,7 @@ async fn write(call: &Call, cwd: &Path) -> Answer {
     ))
 }
 
-async fn edit(call: &Call, cwd: &Path) -> Answer {
+async fn edit(call: &Call, cwd: &Path, sandbox: &Sandbox) -> Answer {
     let path = match path_input(call, "Edit") {
         Ok(path) => resolve(cwd, path),
         Err(answer) => return answer,
@@ -865,8 +955,8 @@ async fn edit(call: &Call, cwd: &Path) -> Answer {
     } else {
         text.replacen(old, new, 1)
     };
-    if let Err(error) = tokio::fs::write(&path, &updated).await {
-        return Answer::error(format!("Could not write {}: {error}", path.display()));
+    if let Err(error) = store(path.clone(), updated.into_bytes(), false, sandbox).await {
+        return Answer::error(error.to_string());
     }
     Answer::ok(format!(
         "Edited {} ({count} replacement{}).",
