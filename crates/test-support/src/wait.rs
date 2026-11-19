@@ -49,3 +49,35 @@ where
     })
     .await;
 }
+
+#[cfg(feature = "tokio")]
+pub async fn while_progressing<T, F, C>(
+    what: &str,
+    stall: Duration,
+    mut progress: impl FnMut() -> u64,
+    mut ready: C,
+) -> T
+where
+    C: FnMut() -> F,
+    F: Future<Output = Option<T>>,
+{
+    let mut seen = progress();
+    let mut moved_at = tokio::time::Instant::now();
+    let mut pause = FIRST_PAUSE;
+    loop {
+        if let Some(value) = ready().await {
+            return value;
+        }
+        let now = progress();
+        if now != seen {
+            seen = now;
+            moved_at = tokio::time::Instant::now();
+        }
+        assert!(
+            moved_at.elapsed() < stall,
+            "nothing moved for {stall:?} while waiting for {what}"
+        );
+        tokio::time::sleep(pause).await;
+        pause = (pause * 2).min(LONGEST_PAUSE);
+    }
+}

@@ -310,24 +310,23 @@ impl Fixture {
     }
 
     async fn settled(&self) -> Vec<artisan_api::Run> {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if !self.hub.is_live(&self.thread_id)
+        test_support::wait::while_progressing(
+            "the run to settle",
+            STALL,
+            || self.hub.store().head(),
+            || async {
+                (!self.hub.is_live(&self.thread_id)
                     && !self
                         .hub
                         .store()
                         .pending_threads(8, Vec::new())
                         .await
                         .unwrap()
-                        .contains(&self.thread_id)
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("run settles");
+                        .contains(&self.thread_id))
+                .then_some(())
+            },
+        )
+        .await;
         let state = self.hub.store().state().await.unwrap();
         state
             .runs
@@ -346,18 +345,17 @@ impl Fixture {
     }
 
     async fn wait_for(&self, check: impl Fn(&[Item]) -> bool + Send + Sync) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if check(&self.items().await) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("condition reached");
+        test_support::wait::while_progressing(
+            "the thread's items to reach the condition",
+            STALL,
+            || self.hub.store().head(),
+            || async { check(&self.items().await).then_some(()) },
+        )
+        .await;
     }
 }
+
+const STALL: Duration = Duration::from_secs(10);
 
 async fn undelivered(store: &Store, thread: &ThreadId) -> Vec<Item> {
     let query = ItemsQuery {
@@ -5253,18 +5251,35 @@ fn failing_then_done(asked: &Asked, outcomes: Vec<Outcome>) -> Script {
 }
 
 impl Fixture {
+    async fn notified(&self, notify: &Notify) {
+        test_support::wait::while_progressing(
+            "the harness to be notified",
+            STALL,
+            || self.hub.store().head(),
+            || async {
+                test_support::poll::poll_once(std::pin::pin!(notify.notified()))
+                    .is_ready()
+                    .then_some(())
+            },
+        )
+        .await;
+    }
+
     async fn latest_run_once(&self, status: RunStatus) -> artisan_api::Run {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let latest = self.hub.store().latest_run(&self.thread_id).await.unwrap();
-                if let Some(latest) = latest.filter(|run| run.status() == status) {
-                    return latest;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
+        test_support::wait::while_progressing(
+            "the thread's latest run to reach the status",
+            STALL,
+            || self.hub.store().head(),
+            || async {
+                self.hub
+                    .store()
+                    .latest_run(&self.thread_id)
+                    .await
+                    .unwrap()
+                    .filter(|run| run.status() == status)
+            },
+        )
         .await
-        .expect("the thread's latest run reaches the status")
     }
 
     async fn thread(&self) -> artisan_api::Thread {
@@ -5783,9 +5798,7 @@ async fn background_titles_replace_the_prompt_and_reach_the_adapter_before_the_t
                 .send_message(&fixture.thread_id, message("repair the sidebar"))
                 .await
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(5), harness.title_started.notified())
-                .await
-                .unwrap();
+            fixture.notified(&harness.title_started).await;
             assert_eq!(
                 fixture
                     .hub
@@ -5812,9 +5825,7 @@ async fn background_titles_replace_the_prompt_and_reach_the_adapter_before_the_t
                 })).await;
             }
             harness.release_title.notify_one();
-            tokio::time::timeout(Duration::from_secs(5), harness.named.notified())
-                .await
-                .unwrap();
+            fixture.notified(&harness.named).await;
             assert_eq!(
                 fixture
                     .hub
