@@ -158,6 +158,9 @@ impl Shell {
         }
         if let Some(workspace) = self.entry.workspace() {
             workspace.inspector.bind(ctx, window);
+            if let Some(mailbox) = workspace.conversation.wake_mailbox() {
+                ctx.bind_mailbox(window, mailbox);
+            }
             workspace.markdown.borrow().bind_media(ctx, window);
             ctx.bind_mailbox(window, workspace.images.wake_mailbox());
             for (_, _, content) in workspace.conversation.sources.iter() {

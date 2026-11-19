@@ -3,6 +3,7 @@ use editor_aqua::conversation::adapter::{Action, ScopedAction};
 use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::stored::StoredConversation;
 use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 fn config() -> HostConfig {
@@ -19,12 +20,21 @@ fn client(core: &Core) -> ForgeClient {
     ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
 }
 
-fn wait_for_page(conversation: &Conversation) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !conversation.page_task_finished() {
-        assert!(Instant::now() < deadline, "page request did not finish");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn page_wakes(conversation: &Conversation) -> mpsc::Receiver<()> {
+    let (wake, woken) = mpsc::channel();
+    conversation
+        .wake_mailbox()
+        .expect("the conversation owns its wake mailbox")
+        .set_waker(Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
+    woken
+}
+
+fn wait_for_page(woken: &mpsc::Receiver<()>) {
+    woken
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the page request delivers its completion");
 }
 
 #[test]
@@ -38,8 +48,9 @@ fn pending_page_rejects_removed_and_recreated_host() {
     core.add_test_host(&config, client(&core));
     let thread = ThreadId("thread".into());
     let mut conversation = Conversation::new(&core);
+    let woken = page_wakes(&conversation);
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
-    wait_for_page(&conversation);
+    wait_for_page(&woken);
     conversation.drain(&mut core);
     assert!(
         conversation
@@ -50,7 +61,7 @@ fn pending_page_rejects_removed_and_recreated_host() {
 
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
     let original = core.host(&config.id).unwrap().instance();
-    wait_for_page(&conversation);
+    wait_for_page(&woken);
     core.remove_host(&config.id).unwrap();
     conversation.drain(&mut core);
     assert!(conversation.load_error.is_none());
@@ -60,7 +71,7 @@ fn pending_page_rejects_removed_and_recreated_host() {
     let replacement = core.host(&config.id).unwrap().instance();
     assert_ne!(original, replacement);
     conversation.open_thread(&mut core, config.id.clone(), thread);
-    wait_for_page(&conversation);
+    wait_for_page(&woken);
     core.add_test_host(&config, client(&core));
     assert_ne!(replacement, core.host(&config.id).unwrap().instance());
     conversation.drain(&mut core);

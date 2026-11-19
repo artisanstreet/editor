@@ -226,10 +226,7 @@ impl Conversation {
             agent_task: None,
             answer_tasks: HashMap::new(),
             next_answer: 0,
-            delivery: Delivery::with_wake(
-                const { NonZeroUsize::new(64).expect("64 is not zero") },
-                core.wake_mailbox().sender(),
-            ),
+            delivery: Delivery::new(const { NonZeroUsize::new(64).expect("64 is not zero") }),
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
@@ -1388,11 +1385,8 @@ impl Conversation {
             .is_some_and(|((host, _), instance)| core.host_if_instance(host, instance).is_some())
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn page_task_finished(&self) -> bool {
-        self.page_task
-            .as_ref()
-            .is_some_and(AbortOnDropHandle::is_finished)
+    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+        self.delivery.wake_mailbox()
     }
 
     #[expect(
