@@ -408,8 +408,11 @@ async fn an_answer_the_owning_generation_refuses_reaches_the_editor_as_a_conflic
     assert_eq!(response.status(), 409);
     let body: artisan_api::ApiError = response.json().await.unwrap();
     assert_eq!(
-        body.message,
-        format!("Item {} is not an approval request.", question.id)
+        body.failure,
+        artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+            item: Some(question.id.clone()),
+            reason: artisan_api::AnswerRefusal::NotAnApproval,
+        })
     );
     runtime::request(&overlap.new_member, &Command::Stop)
         .await

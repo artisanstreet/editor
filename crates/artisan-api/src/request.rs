@@ -393,12 +393,6 @@ pub struct PairResponse {
     pub device_id: crate::DeviceId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiError {
-    pub code: ErrorCode,
-    pub message: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -410,11 +404,3 @@ pub enum ErrorCode {
     EngineUnavailable,
     Internal,
 }
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}

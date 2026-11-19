@@ -885,6 +885,9 @@ fn check_tunnel(response: &TunnelResponse) -> Result<(), ApiError> {
     if (200..300).contains(&response.status) {
         return Ok(());
     }
+    if let Ok(refusal) = ApiError::deserialize(&response.body) {
+        return Err(refusal);
+    }
     let detail = |key: &str| {
         response
             .body
@@ -902,7 +905,7 @@ fn check_tunnel(response: &TunnelResponse) -> Result<(), ApiError> {
         || format!("Forge answered {}", response.status),
         str::to_owned,
     );
-    Err(ApiError { code, message })
+    Err(ApiError::legacy(code, message))
 }
 
 fn decode_tunnel_bytes(response: &TunnelResponse) -> Result<Vec<u8>, TunnelBytesError> {

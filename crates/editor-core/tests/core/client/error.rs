@@ -14,10 +14,7 @@ fn call(failure: CallFailure) -> CallError {
 fn refused(status: reqwest::StatusCode, code: ErrorCode) -> CallError {
     call(CallFailure::Answer(ResponseError::Refused {
         status,
-        error: ApiError {
-            code,
-            message: "thread missing not found".to_owned(),
-        },
+        error: ApiError::legacy(code, "thread missing not found".to_owned()),
     }))
 }
 

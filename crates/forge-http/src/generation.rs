@@ -124,7 +124,7 @@ async fn control(
     };
     Json(match result {
         Ok(value) => Reply::Ok(value),
-        Err(error) => Reply::Error(ReplyFailure::Typed(error.failure())),
+        Err(error) => Reply::Error(ReplyFailure::Typed(error.remote())),
     })
     .into_response()
 }

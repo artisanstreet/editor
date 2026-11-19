@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub(crate) const DISABLED_SKILLS_KEY: &str = "disabled_skills";
 const GLOBAL_PROMPT_KEY: &str = "global_prompt";
-const PROMPT_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HomesLockError {

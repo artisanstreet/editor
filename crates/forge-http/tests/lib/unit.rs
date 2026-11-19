@@ -140,8 +140,14 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .unwrap();
     assert_eq!(missing.status(), 404);
     assert_eq!(
-        missing.json::<artisan_api::ApiError>().await.unwrap().code,
-        artisan_api::ErrorCode::NotFound,
+        missing
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Project(artisan_api::ProjectFailure::NotFound {
+            project: missing_project.project_id.clone(),
+        }),
     );
     assert_eq!(store.head(), since, "canonical rejection performs no write");
 
@@ -157,8 +163,10 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
             .json::<artisan_api::ApiError>()
             .await
             .unwrap()
-            .code,
-        artisan_api::ErrorCode::Conflict,
+            .failure,
+        artisan_api::Failure::Extension(artisan_api::ExtensionFailure::Unmanaged {
+            skill: "no-such-artisan-skill".into(),
+        }),
     );
     assert_eq!(store.head(), since, "extension refusal performs no write");
 
@@ -465,7 +473,12 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .unwrap();
     assert_eq!(missing.status(), 404);
     let error: artisan_api::ApiError = missing.json().await.unwrap();
-    assert_eq!(error.message, "thread no-such-thread not found");
+    assert_eq!(
+        error.failure,
+        artisan_api::Failure::Thread(artisan_api::ThreadFailure::NotFound {
+            thread: ThreadId("no-such-thread".into()),
+        })
+    );
 
     let answer = artisan_api::Answer::Approval {
         decision: artisan_api::Decision::AllowOnce,
@@ -478,6 +491,16 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), 404);
+    assert_eq!(
+        unknown
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Thread(artisan_api::ThreadFailure::ItemNotFound {
+            item: ItemId("no-such-item".into()),
+        })
+    );
 
     let project = store
         .create_project(CreateProject {
@@ -521,6 +544,13 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(stale.status(), 409);
+    assert_eq!(
+        stale.json::<artisan_api::ApiError>().await.unwrap().failure,
+        artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+            item: Some(said.id.clone()),
+            reason: artisan_api::AnswerRefusal::NotAnApproval,
+        })
+    );
     let not_a_question = editor
         .http
         .post(editor.url(&format!("/items/{}/answer", said.id)))
@@ -535,6 +565,17 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         409,
         "the store's refusal reaches the Editor as a conflict"
     );
+    assert_eq!(
+        not_a_question
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+            item: Some(said.id.clone()),
+            reason: artisan_api::AnswerRefusal::NotAQuestion,
+        })
+    );
 
     let raw = editor
         .http
@@ -544,6 +585,14 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(raw.status(), 400);
+    assert!(
+        matches!(
+            raw.json::<artisan_api::ApiError>().await.unwrap().failure,
+            artisan_api::Failure::Setting(artisan_api::SettingFailure::OwnRoute { key, .. })
+                if key == "global_prompt"
+        ),
+        "a setting with its own route names that route"
+    );
     assert_ne!(
         store.setting("global_prompt").await.unwrap(),
         Some(serde_json::json!("unversioned"))
@@ -569,6 +618,14 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .await
         .unwrap();
     assert_eq!(garbled.status(), 400);
+    assert!(
+        matches!(
+            garbled.json::<artisan_api::ApiError>().await.unwrap().failure,
+            artisan_api::Failure::Setting(artisan_api::SettingFailure::InvalidValue { key, .. })
+                if key == "suggestions"
+        ),
+        "a garbled value names its setting"
+    );
 
     for key in [
         "summary_titles",

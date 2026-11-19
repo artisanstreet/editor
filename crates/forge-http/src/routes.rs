@@ -13,7 +13,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use forge_runs::{ErrorClass, Hub};
+use forge_runs::Hub;
+use forge_runs::failure as wire;
 use serde::Deserialize;
 use sha2::Digest as _;
 use std::path::PathBuf;
@@ -164,11 +165,7 @@ async fn authorize(
                 )));
             return next.run(request).await;
         }
-        return error(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-            "this tunneled call is not authorized",
-        );
+        return Failure::from(Unauthorized::Tunnel).into_response();
     }
     let Some(Extension(client)) = client else {
         return Failure::from(Unauthorized::NoCertificate).into_response();
@@ -178,33 +175,19 @@ async fn authorize(
             request.extensions_mut().insert(device);
             next.run(request).await
         }
-        Ok(None) => error(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-            "this device is not paired with Forge",
-        ),
+        Ok(None) => Failure::from(Unauthorized::NotPaired).into_response(),
         Err(failure) => Failure::from(failure).into_response(),
     }
 }
 
-type Status = (StatusCode, ErrorCode);
-
-const fn classified(class: ErrorClass) -> Status {
-    match class {
-        ErrorClass::NotFound => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
-        ErrorClass::Conflict => (StatusCode::CONFLICT, ErrorCode::Conflict),
-        ErrorClass::BadRequest => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
-        ErrorClass::Internal => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
-    }
-}
-
-const INTERNAL: Status = classified(ErrorClass::Internal);
-const BAD_REQUEST: Status = classified(ErrorClass::BadRequest);
-
-const fn rejected_unless_internal(class: ErrorClass) -> Status {
-    match class {
-        ErrorClass::Internal => INTERNAL,
-        ErrorClass::NotFound | ErrorClass::Conflict | ErrorClass::BadRequest => BAD_REQUEST,
+const fn status(code: ErrorCode) -> StatusCode {
+    match code {
+        ErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+        ErrorCode::Conflict | ErrorCode::VersionMismatch => StatusCode::CONFLICT,
+        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::EngineUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -226,8 +209,36 @@ pub enum Missing {
     Collection(ContentId),
     #[error("blob {0} not found")]
     Blob(BlobHash),
-    #[error("{path} not found")]
-    Resource { path: String },
+}
+
+impl Missing {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{AgentFailure, Failure, ProjectFailure, ResourceFailure, ThreadFailure};
+        match self {
+            Self::Thread(thread) => Failure::Thread(ThreadFailure::NotFound {
+                thread: thread.clone(),
+            }),
+            Self::Project(project) => Failure::Project(ProjectFailure::NotFound {
+                project: project.clone(),
+            }),
+            Self::Item(item) => Failure::Thread(ThreadFailure::ItemNotFound { item: item.clone() }),
+            Self::Agent(agent) => Failure::Agent(AgentFailure::NotFound {
+                agent: agent.clone(),
+            }),
+            Self::AgentInThread { thread, agent } => Failure::Agent(AgentFailure::NotInThread {
+                thread: thread.clone(),
+                agent: agent.clone(),
+            }),
+            Self::TextSource(content) | Self::Collection(content) => {
+                Failure::Resource(ResourceFailure::ContentNotFound {
+                    content: content.clone(),
+                })
+            }
+            Self::Blob(blob) => {
+                Failure::Resource(ResourceFailure::BlobNotFound { blob: blob.clone() })
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -262,13 +273,89 @@ pub enum Rejected {
     NoHome,
 }
 
+impl Rejected {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{
+            EngineFailure, Failure, ProjectFailure, ResourceFailure, SettingFailure,
+            SettingValueError as Value,
+        };
+        match self {
+            Self::NotADirectory { path } => {
+                Failure::Project(ProjectFailure::NotADirectory { path: path.clone() })
+            }
+            Self::ContentQuery { content } | Self::CollectionQuery { content } => {
+                Failure::Resource(ResourceFailure::InvalidContent {
+                    content: content.clone(),
+                })
+            }
+            Self::Transport { key } => Failure::Setting(SettingFailure::InvalidValue {
+                key: key.clone(),
+                detail: self.to_string(),
+            }),
+            Self::SettingValue(
+                error @ (Value::NotBool { key }
+                | Value::NotText { key, .. }
+                | Value::NotAChoice { key, .. }
+                | Value::NotAnOption { key, .. }
+                | Value::ModelCustomizations { key, .. }),
+            ) => Failure::Setting(SettingFailure::InvalidValue {
+                key: (*key).to_owned(),
+                detail: diagnostics::chain(error),
+            }),
+            Self::UnknownSetting { key } => {
+                Failure::Setting(SettingFailure::Unknown { key: key.clone() })
+            }
+            Self::OwnRoute { key, route } => Failure::Setting(SettingFailure::OwnRoute {
+                key: key.clone(),
+                route: (*route).to_owned(),
+            }),
+            Self::ModelUnavailable { engine, model } => {
+                Failure::Setting(SettingFailure::ModelUnavailable {
+                    engine: *engine,
+                    model: model.clone(),
+                })
+            }
+            Self::ConfigEngine { engine, sent } => Failure::Setting(SettingFailure::ConfigEngine {
+                engine: *engine,
+                sent: *sent,
+            }),
+            Self::ConfigWithoutModel { engine } => {
+                Failure::Setting(SettingFailure::ConfigWithoutModel { engine: *engine })
+            }
+            Self::ClaudeAiEngine { engine } => {
+                Failure::Engine(EngineFailure::ClaudeAiEngine { engine: *engine })
+            }
+            Self::NoHome => Failure::Resource(ResourceFailure::NoHome),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Unauthorized {
     #[error("the connection carries no client certificate")]
     NoCertificate,
+    #[error("this device is not paired with Forge")]
+    NotPaired,
     #[error("that pairing code is wrong or expired")]
     PairCode,
+    #[error("this tunneled call is not authorized")]
+    Tunnel,
 }
+
+impl Unauthorized {
+    const fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{AuthFailure, Failure};
+        Failure::Auth(match self {
+            Self::NoCertificate => AuthFailure::NoCertificate,
+            Self::NotPaired => AuthFailure::NotPaired,
+            Self::PairCode => AuthFailure::PairCode,
+            Self::Tunnel => AuthFailure::Tunnel,
+        })
+    }
+}
+
+const LISTING_ENTRIES: usize = 32_768;
+const LISTING_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ListDirectoryError {
@@ -298,18 +385,29 @@ pub enum ListDirectoryError {
         #[source]
         source: std::io::Error,
     },
-    #[error("the listing of {} exceeds 32768 entries or 4 MiB", path.display())]
+    #[error("the listing of {} exceeds {LISTING_ENTRIES} entries or {LISTING_BYTES} bytes", path.display())]
     TooLarge { path: PathBuf },
 }
 
 impl ListDirectoryError {
-    const fn status(&self) -> Status {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{Failure, Limited, ResourceFailure};
         match self {
-            Self::Slot(_) | Self::Task { .. } => INTERNAL,
-            Self::Read { .. }
-            | Self::Entry { .. }
-            | Self::Inspect { .. }
-            | Self::TooLarge { .. } => BAD_REQUEST,
+            Self::Slot(_) | Self::Task { .. } => Failure::Internal,
+            Self::Read { path, .. } | Self::Entry { path, .. } => {
+                Failure::Resource(ResourceFailure::Unlistable {
+                    path: path.display().to_string(),
+                })
+            }
+            Self::Inspect { entry, .. } => Failure::Resource(ResourceFailure::Unlistable {
+                path: entry.clone(),
+            }),
+            Self::TooLarge { .. } => Failure::Resource(ResourceFailure::TooLarge {
+                subject: Limited::Listing,
+                actual: None,
+                limit: u64::try_from(LISTING_ENTRIES)
+                    .expect("invariant: the listing entry limit fits in u64"),
+            }),
         }
     }
 }
@@ -327,72 +425,99 @@ pub struct ReadBlobError {
     source: std::io::Error,
 }
 
-const fn source_index_class(error: &forge_store::SourceIndexError) -> ErrorClass {
-    use forge_store::SourceIndexError as Index;
+#[derive(Debug, thiserror::Error)]
+#[error("read resource {path}")]
+pub struct ReadResourceError {
+    path: String,
+    #[source]
+    source: forge_runs::resources::ResourceError,
+}
+
+fn engines_failure(engine: EngineId, kind: EngineKind<'_>) -> artisan_api::Failure {
+    use artisan_api::{EngineFailure, Failure};
+    Failure::Engine(match kind {
+        EngineKind::NotInstalled => EngineFailure::NotInstalled { engine },
+        EngineKind::NoBuild => EngineFailure::NoBuild { engine },
+        EngineKind::Versions(detail) => EngineFailure::Versions { engine, detail },
+        EngineKind::NoSignIn => EngineFailure::NoSignIn { engine },
+        EngineKind::SignInClosed => EngineFailure::SignInClosed { engine },
+        EngineKind::Unusable(version) => EngineFailure::UnusableVersion {
+            engine,
+            version: version.to_owned(),
+        },
+    })
+}
+
+enum EngineKind<'a> {
+    NotInstalled,
+    NoBuild,
+    Versions(String),
+    NoSignIn,
+    SignInClosed,
+    Unusable(&'a str),
+}
+
+fn validate_version(
+    error: &forge_engines::ValidateVersionError,
+    engine: EngineId,
+) -> artisan_api::Failure {
+    use forge_engines::ValidateVersionError as Validate;
     match error {
-        Index::InvalidIdentity { .. }
-        | Index::PageLimit { .. }
-        | Index::OffsetPastEnd { .. }
-        | Index::Markdown { .. }
-        | Index::MetadataTooLarge { .. } => ErrorClass::BadRequest,
-        Index::Content(content) => forge_runs::error::content(content),
-        Index::IdentityMismatch { .. }
-        | Index::MissingRecord { .. }
-        | Index::SelfOwned { .. }
-        | Index::TopologyGap { .. }
-        | Index::TopologyOrdinals { .. }
-        | Index::Storage(_) => ErrorClass::Internal,
+        Validate::Unusable(unusable) => {
+            engines_failure(engine, EngineKind::Unusable(&unusable.version))
+        }
+        Validate::TooOld {
+            engine,
+            version,
+            minimum,
+        } => artisan_api::Failure::Engine(artisan_api::EngineFailure::VersionTooOld {
+            engine: *engine,
+            version: version.clone(),
+            minimum: (*minimum).to_owned(),
+        }),
     }
 }
 
-const fn threads_page_status(failure: &forge_store::ThreadsPageFailure) -> Status {
-    match failure {
-        forge_store::ThreadsPageFailure::SearchTooLong { .. } => BAD_REQUEST,
-        forge_store::ThreadsPageFailure::Storage(_) => INTERNAL,
-    }
-}
-
-const fn sign_in_start(error: &forge_runs::McpSignInStartError) -> Status {
-    use forge_runs::McpSignInStartError as Start;
+fn submit_code(error: &forge_engines::SubmitCodeError) -> artisan_api::Failure {
+    use forge_engines::SubmitCodeError as Submit;
     match error {
-        Start::Store(store) => classified(store.class()),
-        Start::UnknownServer { .. } => classified(ErrorClass::NotFound),
-        Start::NotHttp { .. }
-        | Start::Probe { .. }
-        | Start::Open { .. }
-        | Start::NeedsToken { .. }
-        | Start::Registration { .. }
-        | Start::Removed { .. }
-        | Start::Random { .. } => classified(ErrorClass::Conflict),
+        Submit::NoSignIn { engine } => engines_failure(*engine, EngineKind::NoSignIn),
+        Submit::Closed { engine } => engines_failure(*engine, EngineKind::SignInClosed),
+        Submit::Write { .. } => artisan_api::Failure::Internal,
     }
 }
 
-const fn sign_in_finish(error: &forge_runs::McpSignInFinishError) -> Status {
-    use forge_runs::McpSignInFinishError as Finish;
+fn claude_ai_sign_in(error: &forge_engines::ClaudeAiSignInError) -> artisan_api::Failure {
+    use artisan_api::{EngineFailure, Failure};
+    use forge_engines::ClaudeAiSignInError as SignIn;
     match error {
-        Finish::Store(store) => classified(store.class()),
-        Finish::Expired
-        | Finish::SignedOut { .. }
-        | Finish::Exchange { .. }
-        | Finish::Removed { .. } => classified(ErrorClass::Conflict),
+        SignIn::NotSignedIn => Failure::Engine(EngineFailure::ClaudeAiSignedOut),
+        SignIn::NoUserAgent => Failure::Engine(EngineFailure::ClaudeAiNoUserAgent),
+        SignIn::Bootstrap(source) => Failure::Engine(EngineFailure::ClaudeAiRefused {
+            detail: diagnostics::chain(source),
+        }),
+        SignIn::NoOrganization => Failure::Engine(EngineFailure::ClaudeAiNoOrganization),
+        SignIn::Client(_) | SignIn::Save(_) => Failure::Internal,
     }
 }
 
-const fn put_blob_status(failure: &forge_store::BlobFailure) -> Status {
-    use forge_store::BlobFailure as Blob;
-    match failure {
-        Blob::Rejected(_) => BAD_REQUEST,
-        Blob::TooManyPixels { .. }
-        | Blob::Image(_)
-        | Blob::WebPEncoder
-        | Blob::WebPEncode { .. }
-        | Blob::Io { .. }
-        | Blob::Storage(_) => INTERNAL,
+fn list_versions(error: &forge_engines::ListVersionsError) -> artisan_api::Failure {
+    use forge_engines::ListVersionsError as List;
+    match error {
+        List::NoBuild(no_build) => engines_failure(no_build.engine, EngineKind::NoBuild),
+        List::Get { engine, source } => {
+            engines_failure(*engine, EngineKind::Versions(diagnostics::chain(source)))
+        }
+        List::Task { .. } => artisan_api::Failure::Internal,
     }
+}
+
+const fn internal<E>(_: &E) -> artisan_api::Failure {
+    artisan_api::Failure::Internal
 }
 
 macro_rules! route_errors {
-    ($($variant:ident($error:ty) => $status:expr,)*) => {
+    ($($variant:ident($error:ty) => $wire:expr,)*) => {
         #[derive(Debug, thiserror::Error)]
         pub enum RouteError {
             $(
@@ -402,18 +527,12 @@ macro_rules! route_errors {
         }
 
         impl RouteError {
-            fn status(&self) -> Status {
+            fn wire(&self) -> artisan_api::Failure {
                 match self {
                     $(Self::$variant(error) => {
-                        let status: fn(&$error) -> Status = $status;
-                        status(error)
+                        let wire: fn(&$error) -> artisan_api::Failure = $wire;
+                        wire(error)
                     })*
-                }
-            }
-
-            fn inner(&self) -> &(dyn std::error::Error + 'static) {
-                match self {
-                    $(Self::$variant(error) => error,)*
                 }
             }
         }
@@ -429,131 +548,109 @@ macro_rules! route_errors {
 }
 
 route_errors! {
-    Missing(Missing) => |_| classified(ErrorClass::NotFound),
-    Rejected(Rejected) => |_| BAD_REQUEST,
-    Unauthorized(Unauthorized) => |error| match error {
-        Unauthorized::NoCertificate => INTERNAL,
-        Unauthorized::PairCode => (StatusCode::UNAUTHORIZED, ErrorCode::Unauthorized),
-    },
-    ListDirectory(ListDirectoryError) => ListDirectoryError::status,
-    ReadBlob(ReadBlobError) => |_| INTERNAL,
-    ReceiveBlob(ReceiveBlobError) => |_| BAD_REQUEST,
-    Authorize(forge_store::AuthorizeError) => |_| INTERNAL,
-    AwaitingItems(forge_store::AwaitingItemsError) => |_| INTERNAL,
-    CreateProject(forge_store::CreateProjectError) => |error| classified(forge_runs::error::create_project(&error.cause)),
-    CreateThread(forge_store::CreateThreadError) => |error| classified(forge_runs::error::create_thread(error)),
-    Inspector(forge_store::InspectorError) => |error| classified(forge_runs::error::content(&error.cause)),
-    MarkUnread(forge_store::MarkUnreadError) => |error| classified(forge_runs::error::write(&error.cause)),
-    PairDevice(forge_store::PairDeviceError) => |_| INTERNAL,
-    PutBlob(forge_store::PutBlobError) => |error| put_blob_status(&error.cause),
-    ReadDraft(forge_store::ReadDraftError) => |_| INTERNAL,
-    ReadItem(forge_store::ReadItemError) => |_| INTERNAL,
-    ReadProject(forge_store::ReadProjectError) => |_| INTERNAL,
-    ReadThread(forge_store::ReadThreadError) => |_| INTERNAL,
-    RemoveProject(forge_store::RemoveProjectError) => |_| INTERNAL,
-    SetDefaultModel(forge_store::SetDefaultModelError) => |error| classified(forge_runs::error::setting(&error.cause)),
-    SetDraft(forge_store::SetDraftError) => |error| classified(forge_runs::error::setting(&error.cause)),
-    SetModelConfig(forge_store::SetModelConfigError) => |error| classified(forge_runs::error::setting(&error.cause)),
-    SetModelGroup(forge_store::SetModelGroupError) => |error| classified(forge_runs::error::write(&error.cause)),
-    SetSetting(forge_store::SetSettingError) => |error| classified(forge_runs::error::setting(&error.cause)),
-    SettleThread(forge_store::SettleThreadError) => |error| classified(forge_runs::error::write(&error.cause)),
-    State(forge_store::StateError) => |_| INTERNAL,
-    TextSearch(forge_store::TextSearchError) => |_| INTERNAL,
-    TranscriptPage(forge_store::TranscriptPageError) => |_| INTERNAL,
-    TranscriptRows(forge_store::TranscriptRowsError) => |_| INTERNAL,
-    WorkPage(forge_store::WorkPageError) => |_| INTERNAL,
-    ThreadsPage(forge_store::ThreadsPageError) => |error| threads_page_status(&error.cause),
-    ContentRange(forge_store::ContentRangeError) => |error| classified(forge_runs::error::content(&error.cause)),
-    CollectionRange(forge_store::CollectionRangeError) => |error| classified(forge_runs::error::content(&error.cause)),
-    SourceIndex(forge_store::SourceIndexPageError) => |error| classified(source_index_class(&error.cause)),
-    MutateMcp(forge_store::MutateMcpError) => |error| rejected_unless_internal(forge_runs::error::setting(&error.cause)),
-    AdoptSkill(forge_runs::AdoptSkillError) => |error| classified(error.class()),
-    DiscardSkill(forge_runs::DiscardSkillError) => |error| classified(error.class()),
-    EnabledSkills(forge_runs::EnabledSkillsError) => |error| classified(error.class()),
-    GlobalPrompt(forge_runs::GlobalPromptError) => |error| classified(error.class()),
-    MarketplaceInstall(forge_runs::MarketplaceInstallError) => |error| classified(error.class()),
-    MarketplaceSearch(forge_runs::MarketplaceSearchError) => |error| classified(error.class()),
-    ResolveGlobalPrompt(forge_runs::ResolveGlobalPromptError) => |error| classified(error.class()),
-    SaveGlobalPrompt(forge_runs::SaveGlobalPromptError) => |error| classified(error.class()),
-    SetSkillEnabled(forge_runs::SetSkillEnabledError) => |error| classified(error.class()),
-    SkillCatalog(forge_runs::SkillCatalogError) => |error| classified(error.class()),
-    Resource(forge_runs::resources::ResourceError) => |error| classified(error.class()),
-    McpStore(forge_runs::McpStoreError) => |error| classified(error.class()),
-    McpSignInStart(forge_runs::McpSignInStartError) => sign_in_start,
-    McpSignInFinish(forge_runs::McpSignInFinishError) => sign_in_finish,
-    Send(forge_runs::SendError) => |error| classified(error.class()),
-    Answer(forge_runs::AnswerError) => |error| classified(error.class()),
-    Continue(forge_runs::ContinueError) => |error| classified(error.class()),
-    Update(forge_runs::UpdateError) => |error| classified(error.class()),
-    ClearGoal(forge_runs::ClearGoalError) => |error| classified(error.class()),
-    Cancel(forge_runs::CancelError) => |error| classified(error.class()),
-    EditorReply(forge_runs::runtime::EditorReplyError) => |_| INTERNAL,
-    ValidateVersion(forge_engines::ValidateVersionError) => |_| BAD_REQUEST,
-    NotInstalled(forge_engines::NotInstalled) => |_| BAD_REQUEST,
-    SubmitCode(forge_engines::SubmitCodeError) => |_| BAD_REQUEST,
-    ClaudeAiSignIn(forge_engines::ClaudeAiSignInError) => |_| BAD_REQUEST,
-    ClaudeAiSignOut(forge_engines::claudeai::RemoveSessionError) => |_| BAD_REQUEST,
-    ListVersions(forge_engines::ListVersionsError) => |_| BAD_REQUEST,
+    Missing(Missing) => Missing::wire,
+    Rejected(Rejected) => Rejected::wire,
+    Unauthorized(Unauthorized) => Unauthorized::wire,
+    ListDirectory(ListDirectoryError) => ListDirectoryError::wire,
+    ReadBlob(ReadBlobError) => internal,
+    ReceiveBlob(ReceiveBlobError) => |_| artisan_api::Failure::Resource(artisan_api::ResourceFailure::UploadInterrupted),
+    ReadResource(ReadResourceError) => |error| error.source.wire(&error.path),
+    Authorize(forge_store::AuthorizeError) => internal,
+    AwaitingItems(forge_store::AwaitingItemsError) => internal,
+    CreateProject(forge_store::CreateProjectError) => |error| wire::create_project(&error.cause),
+    CreateThread(forge_store::CreateThreadError) => wire::create_thread,
+    Inspector(forge_store::InspectorError) => |error| wire::content(&error.cause),
+    MarkUnread(forge_store::MarkUnreadError) => |error| wire::write(&error.cause),
+    PairDevice(forge_store::PairDeviceError) => internal,
+    PutBlob(forge_store::PutBlobError) => |error| wire::blob(&error.cause),
+    ReadDraft(forge_store::ReadDraftError) => internal,
+    ReadItem(forge_store::ReadItemError) => internal,
+    ReadProject(forge_store::ReadProjectError) => internal,
+    ReadThread(forge_store::ReadThreadError) => internal,
+    RemoveProject(forge_store::RemoveProjectError) => internal,
+    SetDefaultModel(forge_store::SetDefaultModelError) => |error| wire::setting(&error.cause),
+    SetDraft(forge_store::SetDraftError) => |error| wire::draft(&error.scope, &error.cause),
+    SetModelConfig(forge_store::SetModelConfigError) => |error| wire::setting(&error.cause),
+    SetModelGroup(forge_store::SetModelGroupError) => |error| wire::write(&error.cause),
+    SetSetting(forge_store::SetSettingError) => |error| wire::setting(&error.cause),
+    SettleThread(forge_store::SettleThreadError) => |error| wire::write(&error.cause),
+    State(forge_store::StateError) => internal,
+    TextSearch(forge_store::TextSearchError) => internal,
+    TranscriptPage(forge_store::TranscriptPageError) => internal,
+    TranscriptRows(forge_store::TranscriptRowsError) => internal,
+    WorkPage(forge_store::WorkPageError) => internal,
+    ThreadsPage(forge_store::ThreadsPageError) => |error| wire::threads_page(&error.cause),
+    ContentRange(forge_store::ContentRangeError) => |error| wire::content(&error.cause),
+    CollectionRange(forge_store::CollectionRangeError) => |error| wire::content(&error.cause),
+    SourceIndex(forge_store::SourceIndexPageError) => |error| wire::source_index(&error.cause),
+    MutateMcp(forge_store::MutateMcpError) => |error| wire::setting(&error.cause),
+    AdoptSkill(forge_runs::AdoptSkillError) => forge_runs::AdoptSkillError::wire,
+    DiscardSkill(forge_runs::DiscardSkillError) => forge_runs::DiscardSkillError::wire,
+    EnabledSkills(forge_runs::EnabledSkillsError) => forge_runs::EnabledSkillsError::wire,
+    GlobalPrompt(forge_runs::GlobalPromptError) => forge_runs::GlobalPromptError::wire,
+    MarketplaceInstall(forge_runs::MarketplaceInstallError) => forge_runs::MarketplaceInstallError::wire,
+    MarketplaceSearch(forge_runs::MarketplaceSearchError) => forge_runs::MarketplaceSearchError::wire,
+    ResolveGlobalPrompt(forge_runs::ResolveGlobalPromptError) => forge_runs::ResolveGlobalPromptError::wire,
+    SaveGlobalPrompt(forge_runs::SaveGlobalPromptError) => forge_runs::SaveGlobalPromptError::wire,
+    SetSkillEnabled(forge_runs::SetSkillEnabledError) => forge_runs::SetSkillEnabledError::wire,
+    SkillCatalog(forge_runs::SkillCatalogError) => forge_runs::SkillCatalogError::wire,
+    McpStore(forge_runs::McpStoreError) => forge_runs::McpStoreError::wire,
+    McpSignInStart(forge_runs::McpSignInStartError) => forge_runs::McpSignInStartError::wire,
+    McpSignInFinish(forge_runs::McpSignInFinishError) => forge_runs::McpSignInFinishError::wire,
+    Send(forge_runs::SendError) => forge_runs::SendError::wire,
+    Answer(forge_runs::AnswerError) => forge_runs::AnswerError::wire,
+    Continue(forge_runs::ContinueError) => forge_runs::ContinueError::wire,
+    Update(forge_runs::UpdateError) => forge_runs::UpdateError::wire,
+    ClearGoal(forge_runs::ClearGoalError) => forge_runs::ClearGoalError::wire,
+    Cancel(forge_runs::CancelError) => forge_runs::CancelError::wire,
+    EditorReply(forge_runs::runtime::EditorReplyError) => forge_runs::runtime::EditorReplyError::wire,
+    ValidateVersion(VersionError) => |error| validate_version(&error.source, error.engine),
+    NotInstalled(forge_engines::NotInstalled) => |error| engines_failure(error.engine, EngineKind::NotInstalled),
+    SubmitCode(forge_engines::SubmitCodeError) => submit_code,
+    ClaudeAiSignIn(forge_engines::ClaudeAiSignInError) => claude_ai_sign_in,
+    ClaudeAiSignOut(forge_engines::claudeai::RemoveSessionError) => internal,
+    ListVersions(forge_engines::ListVersionsError) => list_versions,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("use {engine} version")]
+pub struct VersionError {
+    engine: EngineId,
+    #[source]
+    source: forge_engines::ValidateVersionError,
 }
 
 pub struct Failure {
-    status: Status,
+    failure: artisan_api::Failure,
     error: Box<RouteError>,
 }
 
 impl Failure {
     fn new(error: RouteError) -> Self {
         Self {
-            status: error.status(),
+            failure: error.wire(),
             error: Box::new(error),
         }
-    }
-
-    fn message(&self) -> String {
-        std::iter::successors(Some(self.error.inner()), |cause| cause.source())
-            .find_map(|cause| {
-                cause
-                    .downcast_ref::<forge_runs::Refused>()
-                    .map(|refused| refused.0.clone())
-                    .or_else(|| {
-                        cause
-                            .downcast_ref::<forge_runs::runtime::RemoteFailure>()
-                            .filter(|failure| failure.class != forge_runs::ErrorClass::Internal)
-                            .map(|failure| failure.message.clone())
-                    })
-            })
-            .unwrap_or_else(|| diagnostics::chain(&*self.error))
     }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        let (status, code) = self.status;
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            let mut response = error(status, code, &diagnostics::chain(&*self.error));
-            response
-                .extensions_mut()
-                .insert(InternalError(Arc::from(self.error)));
-            response
-        } else {
-            error(status, code, &self.message())
-        }
+        let message = forge_runs::failure::message(&*self.error, &self.failure);
+        let mut response = refusal(artisan_api::ApiError::new(self.failure, message));
+        response
+            .extensions_mut()
+            .insert(Refusal(Arc::from(self.error)));
+        response
     }
 }
 
-fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
-    (
-        status,
-        Json(ApiError {
-            code,
-            message: message.to_owned(),
-        }),
-    )
-        .into_response()
+fn refusal(error: ApiError) -> Response {
+    (status(error.code), Json(error)).into_response()
 }
 
 #[derive(Clone)]
-struct InternalError(Arc<RouteError>);
+struct Refusal(Arc<RouteError>);
 
 async fn log_internal(request: Request, next: Next) -> Response {
     let span = tracing::info_span!(
@@ -563,8 +660,12 @@ async fn log_internal(request: Request, next: Next) -> Response {
     );
     async move {
         let response = next.run(request).await;
-        if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
-            tracing::error!(error = diagnostics::chain(&**failure), "request failed");
+        if let Some(Refusal(failure)) = response.extensions().get::<Refusal>() {
+            if response.status().is_server_error() {
+                tracing::error!(error = diagnostics::chain(&**failure), "request failed");
+            } else {
+                tracing::info!(error = diagnostics::chain(&**failure), "request refused");
+            }
         }
         response
     }
@@ -961,7 +1062,7 @@ async fn resource(
     Path(id): Path<String>,
     Query(query): Query<ResourceQuery>,
 ) -> Result<Bytes> {
-    use forge_runs::resources::{ResourceError, Written};
+    use forge_runs::resources::Written;
     let thread = app
         .hub
         .store()
@@ -976,17 +1077,12 @@ async fn resource(
         .read_resource(&thread, query.item.as_ref(), &written)
         .await
         .map(Bytes::from)
-        .map_err(|error| match error {
-            ResourceError::Missing => Missing::Resource { path: written.path }.into(),
-            error @ (ResourceError::InvalidUrl { .. }
-            | ResourceError::OtherDistribution { .. }
-            | ResourceError::NoHome
-            | ResourceError::NotRegular { .. }
-            | ResourceError::Outside { .. }
-            | ResourceError::Refused { .. }
-            | ResourceError::Read { .. }
-            | ResourceError::Folder(_)
-            | ResourceError::Task { .. }) => Failure::from(error),
+        .map_err(|source| {
+            ReadResourceError {
+                path: written.path,
+                source,
+            }
+            .into()
         })
 }
 
@@ -1220,7 +1316,8 @@ async fn engine_action(
     use artisan_api::EngineCommand as Command;
     let engines = app.hub.engines().clone();
     if let Command::Use { version } = &command {
-        forge_engines::Engines::validate_version(engine, version)?;
+        forge_engines::Engines::validate_version(engine, version)
+            .map_err(|source| VersionError { engine, source })?;
     }
     match command {
         Command::Install {} | Command::Update {} | Command::Rollback {} | Command::Use { .. } => {
@@ -1326,7 +1423,7 @@ fn read_directory(path: &std::path::Path) -> std::result::Result<DirListing, Lis
         bytes = bytes
             .saturating_add(name.len())
             .saturating_add(entry_path.len());
-        if entries.len() >= 32_768 || bytes > 4 * 1024 * 1024 {
+        if entries.len() >= LISTING_ENTRIES || bytes > LISTING_BYTES {
             return Err(ListDirectoryError::TooLarge {
                 path: path.to_owned(),
             });

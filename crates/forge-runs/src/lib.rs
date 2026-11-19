@@ -18,6 +18,7 @@ mod coordination;
 mod disk;
 pub mod error;
 mod extensions;
+pub mod failure;
 mod gateway;
 mod handoff;
 mod mcp_auth;
@@ -52,7 +53,8 @@ pub use mcp_auth::{
     ReadMcpServersError,
 };
 pub use operation::{
-    AnswerError, CancelError, ClearGoalError, ContinueError, InputError, SendError, UpdateError,
+    AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
+    ContinueRefusal, InputError, SendError, UpdateError,
 };
 pub use retention::RemoveInactiveThreadsError;
 pub use run::PrepareError;
@@ -529,16 +531,11 @@ impl Hub {
                 | ItemKind::Notice { .. }
                 | ItemKind::Error { .. } => None,
             }
-            .ok_or_else(|| {
-                AnswerError::refused(
-                    item_id,
-                    format!("Item {item_id} is not an approval request."),
-                )
-            })?;
+            .ok_or_else(|| AnswerError::refused(item_id, AnswerRefusal::NotAnApproval))?;
             if !approval.options.contains(decision) {
                 return Err(AnswerError::refused(
                     item_id,
-                    "This request does not offer that decision.",
+                    AnswerRefusal::DecisionNotOffered,
                 ));
             }
             if self.answer_own_approval(item_id, *decision) {
@@ -567,10 +564,7 @@ impl Hub {
             return Ok(());
         }
         if item.status != Status::AwaitingUser {
-            return Err(AnswerError::refused(
-                item_id,
-                format!("Item {item_id} is not waiting for an answer."),
-            ));
+            return Err(AnswerError::refused(item_id, AnswerRefusal::NotWaiting));
         }
         let key =
             self.store()
@@ -579,8 +573,7 @@ impl Hub {
                 .ok_or_else(|| AnswerError::NoEngineId {
                     item: item_id.clone(),
                 })?;
-        let ended =
-            || AnswerError::refused(item_id, format!("The run of item {item_id} has ended."));
+        let ended = || AnswerError::refused(item_id, AnswerRefusal::RunEnded);
         let inbox = inbox.ok_or_else(ended)?;
         if inbox.send(Input::Answer { key, answer }).await.is_err() {
             return Err(ended());
@@ -592,7 +585,7 @@ impl Hub {
     pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
         let busy = || ContinueError::Refused {
             thread: thread_id.clone(),
-            refused: Refused("The thread is already working.".to_owned()),
+            reason: ContinueRefusal::Working,
         };
         let _admission = self.inner.admission.lock().await;
         let phase = self.lock().get_mut(thread_id).map(|run| {
@@ -623,7 +616,7 @@ impl Hub {
                 self.owed_continues_lock().remove(thread_id);
                 return Continuing::Continued;
             }
-            Err(ContinueError::Refused { refused, .. }) => refused,
+            Err(ContinueError::Refused { reason, .. }) => reason,
             Err(error) => {
                 tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down; retrying: {}", diagnostics::chain(&error));
                 self.owed_continues_lock().insert(thread_id.clone());
@@ -639,7 +632,7 @@ impl Hub {
             status: Status::Done,
             kind: ItemKind::Error {
                 kind: artisan_api::ErrorKind::Execution,
-                message: format!("Continue could not start: {}", refused.0).into(),
+                message: format!("Continue could not start: {refused}").into(),
                 retryable: false,
             },
         };
@@ -693,7 +686,7 @@ impl Hub {
         if !stopped {
             return Err(ContinueError::Refused {
                 thread: thread_id.clone(),
-                refused: Refused("The thread has no stopped turn to continue.".to_owned()),
+                reason: ContinueRefusal::NothingStopped,
             });
         }
         if self
@@ -811,7 +804,7 @@ impl Hub {
             .inspector(thread_id)
             .await?
             .goal
-            .ok_or_else(|| ClearGoalError::refused(thread_id, "The thread has no goal."))?;
+            .ok_or_else(|| ClearGoalError::refused(thread_id, ClearGoalRefusal::NoGoal))?;
         let live = self.lock().get(thread_id).map(|run| {
             (
                 run.inbox.clone(),
@@ -842,10 +835,7 @@ impl Hub {
         }
         if let Some((inbox, _)) = live {
             if inbox.send(Input::ClearGoal).await.is_err() {
-                return Err(ClearGoalError::refused(
-                    thread_id,
-                    "The run is ending; try again in a moment.",
-                ));
+                return Err(ClearGoalError::refused(thread_id, ClearGoalRefusal::Ending));
             }
         } else {
             self.clear_goal_offline(&thread, engine).await?;
@@ -882,10 +872,7 @@ impl Hub {
             .filter(|run| run.engine == engine)
             .and_then(|run| run.session_id)
             .ok_or_else(|| {
-                ClearGoalError::refused(
-                    thread_id,
-                    "This engine never started this thread's session.",
-                )
+                ClearGoalError::refused(thread_id, ClearGoalRefusal::NoSession { engine })
             })?;
         let lease = self.engines().lease(engine);
         let turn = run::prepare(

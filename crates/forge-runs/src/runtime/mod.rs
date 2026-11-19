@@ -73,6 +73,34 @@ impl Command {
 pub struct RemoteFailure {
     pub class: ErrorClass,
     pub message: String,
+    #[serde(
+        default,
+        deserialize_with = "typed_failure",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub failure: Option<artisan_api::Failure>,
+}
+
+fn typed_failure<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<artisan_api::Failure>, D::Error> {
+    Ok(
+        match Option::<Value>::deserialize(deserializer)?.map(artisan_api::Failure::deserialize) {
+            Some(Ok(failure)) => Some(failure),
+            Some(Err(_)) | None => None,
+        },
+    )
+}
+
+impl RemoteFailure {
+    #[must_use]
+    pub fn wire(&self) -> artisan_api::Failure {
+        self.failure
+            .clone()
+            .unwrap_or_else(|| artisan_api::Failure::Legacy {
+                code: self.class.code(),
+            })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +117,7 @@ impl ReplyFailure {
             Self::Untyped(message) => RemoteFailure {
                 class: ErrorClass::Internal,
                 message,
+                failure: None,
             },
         }
     }
@@ -121,7 +150,7 @@ pub enum PeerError {
         generation: String,
         command: &'static str,
         #[source]
-        failure: RemoteFailure,
+        failure: Box<RemoteFailure>,
     },
     #[error("read generation {generation}'s reply to {command}")]
     Decode {
@@ -173,7 +202,7 @@ pub async fn request(member: &Member, command: &Command) -> Result<Value, PeerEr
         Reply::Error(failure) => Err(PeerError::Rejected {
             generation: member.id.clone(),
             command: name,
-            failure: failure.into_remote(),
+            failure: Box::new(failure.into_remote()),
         }),
     }
 }
@@ -255,17 +284,13 @@ impl ControlError {
     }
 
     #[must_use]
-    pub fn failure(&self) -> RemoteFailure {
-        let class = self.class();
-        let refused =
-            std::iter::successors(Some(self as &(dyn std::error::Error + 'static)), |cause| {
-                cause.source()
-            })
-            .find_map(|cause| cause.downcast_ref::<crate::Refused>())
-            .filter(|_| class != ErrorClass::Internal);
+    pub fn remote(&self) -> RemoteFailure {
+        let failure = self.wire();
+        let message = crate::failure::message(self, &failure);
         RemoteFailure {
-            class,
-            message: refused.map_or_else(|| diagnostics::chain(self), |refused| refused.0.clone()),
+            class: self.class(),
+            message,
+            failure: Some(failure),
         }
     }
 }
@@ -564,3 +589,7 @@ impl crate::Hub {
         self.resume_pending();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/reply.rs"]
+mod reply_tests;

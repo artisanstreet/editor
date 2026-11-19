@@ -13,6 +13,18 @@ pub enum ErrorClass {
     Internal,
 }
 
+impl ErrorClass {
+    #[must_use]
+    pub const fn code(self) -> artisan_api::ErrorCode {
+        match self {
+            Self::NotFound => artisan_api::ErrorCode::NotFound,
+            Self::Conflict => artisan_api::ErrorCode::Conflict,
+            Self::BadRequest => artisan_api::ErrorCode::BadRequest,
+            Self::Internal => artisan_api::ErrorCode::Internal,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Refused(pub String);

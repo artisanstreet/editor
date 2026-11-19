@@ -1,4 +1,4 @@
-use crate::error::{self, ErrorClass, Refused};
+use crate::error::{self, ErrorClass};
 use crate::runtime::{PeerError, RegistryFileError};
 use artisan_api::{EngineId, ItemId, ThreadId};
 
@@ -80,12 +80,8 @@ pub enum AnswerError {
     ItemNotFound { item: ItemId },
     #[error(transparent)]
     Validate(#[from] forge_store::ValidateAnswersError),
-    #[error("answer item {item}")]
-    Refused {
-        item: ItemId,
-        #[source]
-        refused: Refused,
-    },
+    #[error("answer item {item}: {reason}")]
+    Refused { item: ItemId, reason: AnswerRefusal },
     #[error(transparent)]
     Save(#[from] forge_store::AnswerQuestionError),
     #[error(transparent)]
@@ -122,21 +118,32 @@ impl AnswerError {
         }
     }
 
-    pub(crate) fn refused(item: &ItemId, message: impl Into<String>) -> Self {
+    pub(crate) fn refused(item: &ItemId, reason: AnswerRefusal) -> Self {
         Self::Refused {
             item: item.clone(),
-            refused: Refused(message.into()),
+            reason,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AnswerRefusal {
+    #[error("the item is not an approval request")]
+    NotAnApproval,
+    #[error("the request does not offer that decision")]
+    DecisionNotOffered,
+    #[error("the item is not waiting for an answer")]
+    NotWaiting,
+    #[error("the run that asked has ended")]
+    RunEnded,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ContinueError {
-    #[error("continue thread {thread}")]
+    #[error("continue thread {thread}: {reason}")]
     Refused {
         thread: ThreadId,
-        #[source]
-        refused: Refused,
+        reason: ContinueRefusal,
     },
     #[error(transparent)]
     LatestRun(#[from] forge_store::LatestRunError),
@@ -144,6 +151,14 @@ pub enum ContinueError {
     Restore(#[from] forge_store::RestoreInputsError),
     #[error(transparent)]
     Request(#[from] forge_store::RequestContinueError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ContinueRefusal {
+    #[error("The thread is already working.")]
+    Working,
+    #[error("The thread has no stopped turn to continue.")]
+    NothingStopped,
 }
 
 impl ContinueError {
@@ -195,11 +210,10 @@ pub enum ClearGoalError {
     ThreadNotFound { thread: ThreadId },
     #[error(transparent)]
     Inspector(#[from] forge_store::InspectorError),
-    #[error("clear the goal of thread {thread}")]
+    #[error("clear the goal of thread {thread}: {reason}")]
     Refused {
         thread: ThreadId,
-        #[source]
-        refused: Refused,
+        reason: ClearGoalRefusal,
     },
     #[error("send /goal clear to thread {thread}")]
     Send {
@@ -257,12 +271,22 @@ impl ClearGoalError {
         }
     }
 
-    pub(crate) fn refused(thread: &ThreadId, message: impl Into<String>) -> Self {
+    pub(crate) fn refused(thread: &ThreadId, reason: ClearGoalRefusal) -> Self {
         Self::Refused {
             thread: thread.clone(),
-            refused: Refused(message.into()),
+            reason,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ClearGoalRefusal {
+    #[error("the thread has no goal")]
+    NoGoal,
+    #[error("the run is ending")]
+    Ending,
+    #[error("{engine} never started the thread's session")]
+    NoSession { engine: EngineId },
 }
 
 #[derive(Debug, thiserror::Error)]
