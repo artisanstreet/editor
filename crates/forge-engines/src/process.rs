@@ -301,13 +301,14 @@ fn spawn_command(
         let stderr_trace = trace.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut buffer = vec![0_u8; 4096];
+            let mut traced = stderr_trace.stream(Kind::Stderr);
             while let Ok(read) = stderr.read(&mut buffer).await {
                 if read == 0 {
                     break;
                 }
                 let text = String::from_utf8_lossy(&buffer[..read]);
                 tracing::debug!(target: "engine_stderr", bytes = read, "the engine wrote to stderr");
-                stderr_trace.record(Kind::Stderr, &text);
+                traced.write(&buffer[..read]);
                 let mut tail = tail
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -141,6 +141,64 @@ fn launch_credentials_never_reach_the_trace() {
     );
 }
 
+fn password_launch() -> forge_engines::Launch {
+    let mut launch = forge_engines::Launch::default();
+    launch.env.push((
+        "OPENCODE_SERVER_PASSWORD".to_owned(),
+        "server-pässword-42".to_owned(),
+    ));
+    launch
+}
+
+#[expect(clippy::unwrap_used, reason = "a record without text fails the test")]
+fn traced_stderr(dir: &Path) -> String {
+    of_kind(&records(dir), "stderr")
+        .iter()
+        .map(|record| record["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_credential_split_across_stderr_reads_is_redacted_at_every_split() {
+    let line = "error: login with server-pässword-42 failed\n".as_bytes();
+    for split in 0..=line.len() {
+        let dir = tempfile::tempdir().unwrap();
+        let started =
+            Trace::start(dir.path(), "opencode-t-4", Secrets::of(&password_launch())).unwrap();
+        let mut stderr = started.trace.stream(Kind::Stderr);
+        stderr.write(&line[..split]);
+        stderr.write(&line[split..]);
+        drop(stderr);
+        finish(started);
+        assert_eq!(
+            traced_stderr(dir.path()),
+            "error: login with [redacted] failed\n",
+            "split after byte {split}"
+        );
+    }
+}
+
+#[test]
+fn credentials_in_long_unbroken_stderr_are_redacted_across_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let started =
+        Trace::start(dir.path(), "opencode-t-5", Secrets::of(&password_launch())).unwrap();
+    let filler = "é".repeat(487);
+    let written = format!("{filler}server-pässword-42").repeat(64);
+    let mut stderr = started.trace.stream(Kind::Stderr);
+    for read in written.as_bytes().chunks(4093) {
+        stderr.write(read);
+    }
+    drop(stderr);
+    finish(started);
+    let traced = traced_stderr(dir.path());
+    assert!(
+        !traced.contains("pässword"),
+        "a split credential was traced"
+    );
+    assert_eq!(traced, format!("{filler}[redacted]").repeat(64));
+}
+
 const MIB: u64 = 1024 * 1024;
 const HOUR: Duration = Duration::from_hours(1);
 const DAY: Duration = Duration::from_hours(24);

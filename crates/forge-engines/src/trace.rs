@@ -91,6 +91,7 @@ const SECRET_ENV_MARKERS: [&str; 7] = [
     "COOKIE",
 ];
 const REDACTED: &str = "[redacted]";
+const HELD_STREAM_BYTES: usize = 16 * 1024;
 
 impl Secrets {
     #[must_use]
@@ -136,6 +137,53 @@ impl Secrets {
             text.replace(secret.as_str(), REDACTED)
         })
     }
+
+    fn clear_of_secrets(&self, bytes: &[u8], mut cut: usize) -> usize {
+        loop {
+            let straddling = self
+                .0
+                .iter()
+                .filter_map(|secret| {
+                    let secret = secret.as_bytes();
+                    (cut.saturating_sub(secret.len() - 1)..cut).find(|&start| {
+                        let seen = &bytes[start..bytes.len().min(start + secret.len())];
+                        secret.starts_with(seen)
+                    })
+                })
+                .min();
+            match straddling {
+                Some(start) => cut = start,
+                None => return cut,
+            }
+        }
+    }
+}
+
+const fn utf8_width(lead: u8) -> usize {
+    match lead.leading_ones() {
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        _ => 1,
+    }
+}
+
+fn char_boundary(bytes: &[u8], cut: usize) -> usize {
+    (cut.saturating_sub(3)..cut)
+        .rev()
+        .find(|&at| bytes[at].leading_ones() != 1)
+        .filter(|&lead| lead + utf8_width(bytes[lead]) > cut)
+        .unwrap_or(cut)
+}
+
+fn frame_end(bytes: &[u8]) -> usize {
+    if bytes.len() >= HELD_STREAM_BYTES {
+        return bytes.len();
+    }
+    bytes
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |newline| newline + 1)
 }
 
 struct Sink {
@@ -328,6 +376,15 @@ impl Trace {
         })
     }
 
+    #[must_use]
+    pub fn stream(&self, kind: Kind) -> Stream {
+        Stream {
+            trace: self.clone(),
+            kind,
+            held: Vec::new(),
+        }
+    }
+
     pub fn record(&self, kind: Kind, text: &str) {
         let Some(sink) = &self.sink else { return };
         let text = Text::bounded(&sink.secrets.redact(text));
@@ -354,6 +411,36 @@ impl Trace {
         if sink.sender.try_send(record).is_err() {
             sink.remaining.fetch_add(bytes, Ordering::Relaxed);
             sink.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub struct Stream {
+    trace: Trace,
+    kind: Kind,
+    held: Vec<u8>,
+}
+
+impl Stream {
+    pub fn write(&mut self, bytes: &[u8]) {
+        let Some(sink) = &self.trace.sink else { return };
+        self.held.extend_from_slice(bytes);
+        let cut = char_boundary(&self.held, frame_end(&self.held));
+        let cut = sink.secrets.clear_of_secrets(&self.held, cut);
+        if cut > 0 {
+            let framed: Vec<u8> = self.held.drain(..cut).collect();
+            self.trace
+                .record(self.kind, &String::from_utf8_lossy(&framed));
+        }
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        if !self.held.is_empty() {
+            let rest = std::mem::take(&mut self.held);
+            self.trace
+                .record(self.kind, &String::from_utf8_lossy(&rest));
         }
     }
 }
