@@ -710,9 +710,10 @@ fn clear_leftover(path: &Path) -> Result<(), RestoreSnapshotError> {
             continue;
         }
         let kind = entry.file_type().map_err(removal(path.clone()))?;
-        match kind.is_dir() {
-            true => std::fs::remove_dir_all(&path),
-            false => std::fs::remove_file(&path),
+        if kind.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
         }
         .map_err(removal(path))?;
     }

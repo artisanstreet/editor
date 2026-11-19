@@ -106,9 +106,10 @@ impl Sidebar {
 
     pub fn fit(&mut self, window_width: f32, now: Instant, reduced: bool) {
         let visible_width = self.width(now);
-        let threshold = match self.forced {
-            true => RESTORE_AT,
-            false => COLLAPSE_BELOW,
+        let threshold = if self.forced {
+            RESTORE_AT
+        } else {
+            COLLAPSE_BELOW
         };
         self.forced = window_width < threshold;
         if self.open() {
@@ -116,9 +117,10 @@ impl Sidebar {
         }
         self.width_limit = (window_width - THREAD_MIN_WIDTH - crate::frame::view::SHEET_PADDING)
             .clamp(COLLAPSED_WIDTH, OPEN_WIDTH);
-        let target = match self.open() {
-            true => OPEN_WIDTH,
-            false => COLLAPSED_WIDTH,
+        let target = if self.open() {
+            OPEN_WIDTH
+        } else {
+            COLLAPSED_WIDTH
         };
         if self.width.target() != target || (reduced && self.width.running()) {
             if self.width.value(now, RESIZE) > visible_width {
@@ -147,9 +149,10 @@ impl Sidebar {
         if self.search.target() == target {
             return;
         }
-        self.search_motion = match target > 0.5 {
-            true => SEARCH_OPEN,
-            false => SEARCH_CLOSE,
+        self.search_motion = if target > 0.5 {
+            SEARCH_OPEN
+        } else {
+            SEARCH_CLOSE
         };
         self.focus_search = target > 0.5;
         self.search = self

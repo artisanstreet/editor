@@ -151,7 +151,7 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>, choices: &Choices) -> Vec<E
         .style(
             Style::new()
                 .max_height(Length::Px(
-                    row_height * visible + gap.px() * (visible - 1.0),
+                    gap.px().mul_add(visible - 1.0, row_height * visible),
                 ))
                 .flex_shrink(0.0),
         )
@@ -246,9 +246,10 @@ fn machine_row(
     emit: &Rc<dyn Fn(Choice)>,
 ) -> Element {
     let pick = Rc::clone(emit);
-    let row = match roomy {
-        true => Row::ListItem(Density::Tall),
-        false => Row::ListItem(Density::Regular),
+    let row = if roomy {
+        Row::ListItem(Density::Tall)
+    } else {
+        Row::ListItem(Density::Regular)
     };
     let radius = Radius::Field.px();
     let face = UiBox::new()
@@ -268,9 +269,10 @@ fn machine_row(
     .leading(radio(theme, selected))
     .selected(selected)
     .on_activate(move || pick(Choice::Selected(index)));
-    match roomy {
-        true => item.detail(machine.detail()),
-        false => item,
+    if roomy {
+        item.detail(machine.detail())
+    } else {
+        item
     }
     .build()
 }

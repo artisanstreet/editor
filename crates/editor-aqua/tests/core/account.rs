@@ -35,10 +35,10 @@ fn cancelled_requests_cannot_lock_out_retries_or_apply_late_responses() {
                 if line == "\r\n" {
                     break;
                 }
-                if let Some((name, value)) = line.split_once(':') {
-                    if name.eq_ignore_ascii_case("content-length") {
-                        length = value.trim().parse().unwrap();
-                    }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
                 }
             }
             let mut body = vec![0; length];

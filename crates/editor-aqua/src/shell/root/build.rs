@@ -83,18 +83,7 @@ impl RootViews {
                 if reduced {
                     workspace.conversation.skip_reveal();
                 }
-                if !workspace.conversation.host_is_current(&shell.core) {
-                    self.replace_rows(None);
-                    if let Screen::Thread { host, thread } = &screen {
-                        self.connection
-                            .hold(Some(crate::shell::connection::Owner::Thread(
-                                host.clone(),
-                                thread.clone(),
-                            )));
-                    }
-                    connection_held = true;
-                    view::centered_conversation(self.connection.waiting(theme, now, reduced))
-                } else {
+                if workspace.conversation.host_is_current(&shell.core) {
                     self.thread_content(
                         workspace,
                         &shell.core,
@@ -107,6 +96,17 @@ impl RootViews {
                         now,
                         false,
                     )?
+                } else {
+                    self.replace_rows(None);
+                    if let Screen::Thread { host, thread } = &screen {
+                        self.connection
+                            .hold(Some(crate::shell::connection::Owner::Thread(
+                                host.clone(),
+                                thread.clone(),
+                            )));
+                    }
+                    connection_held = true;
+                    view::centered_conversation(self.connection.waiting(theme, now, reduced))
                 }
             }
             Screen::NewThread { host, .. } => {
@@ -226,7 +226,7 @@ impl RootViews {
             self.close_resource(ui);
         }
         let settings_open = matches!(shell.core.screen(), Screen::Settings(_));
-        self.settings_panel = if settings_open {
+        self.settings_panel = settings_open.then(|| {
             let settings_layout = layout::settings_layout(viewport);
             let nav = workspace.sidebar_view(
                 &shell.core,
@@ -246,10 +246,8 @@ impl RootViews {
                 page,
                 Rc::new(move || dismissed.set(true)),
             );
-            Some((panel, settings_layout.size.width))
-        } else {
-            None
-        };
+            (panel, settings_layout.size.width)
+        });
         aqua_core::checkpoint::reach();
         let titlebar_scope = matches!(shell.core.screen(), Screen::Thread { .. })
             .then(|| {
@@ -308,8 +306,10 @@ impl RootViews {
                             location: (!project.id.is_scratch()).then(|| {
                                 host.repository(&project.id)
                                     .and_then(|repository| repository.web_url.as_deref())
-                                    .map(crate::sidebar::list::qualified_label)
-                                    .unwrap_or_else(|| project.name.clone())
+                                    .map_or_else(
+                                        || project.name.clone(),
+                                        crate::sidebar::list::qualified_label,
+                                    )
                             }),
                             url: host
                                 .repository(&project.id)
@@ -378,7 +378,7 @@ impl RootViews {
                 now,
                 reduced,
                 Rc::new(move |generation, action| {
-                    events.borrow_mut().push_back((generation, action))
+                    events.borrow_mut().push_back((generation, action));
                 }),
             )
         });

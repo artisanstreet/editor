@@ -56,9 +56,10 @@ pub fn strip(
 }
 
 fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
-    let color = match tab.active {
-        true => theme.colors.text,
-        false => theme.colors.text_muted,
+    let color = if tab.active {
+        theme.colors.text
+    } else {
+        theme.colors.text_muted
     };
     let id = tab.id.clone();
     let label = tab
@@ -106,9 +107,10 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .child(row)
         .on_activate(move || emit(Event::Navigate(Command::Open(id.clone()))))
         .build();
-    let area = match tab.active {
-        true => area.debug_selector(crate::frame::seam::ACTIVE),
-        false => area,
+    let area = if tab.active {
+        area.debug_selector(crate::frame::seam::ACTIVE)
+    } else {
+        area
     };
     UiBox::new()
         .layout("column")
@@ -137,31 +139,28 @@ fn location(
     location_label: &str,
     emit: Rc<dyn Fn(Event)>,
 ) -> Element {
-    let name = match &tab.url {
-        Some(url) => {
-            let url = url.clone();
-            Link::new(
-                "artisan-thread-repository-link",
-                *theme,
-                LinkTone::Link,
-                location_label,
-            )
-            .on_activate(move || emit(Event::Navigate(Command::OpenUrl(url.clone()))))
-            .build()
-            .aria_label(format!("Open {location_label}"))
-        }
-        None => {
-            let project = tab.project.clone();
-            Link::new(
-                "artisan-thread-project-link",
-                *theme,
-                LinkTone::Crumb,
-                location_label,
-            )
-            .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
-            .build()
-            .aria_label(format!("New thread in {location_label}"))
-        }
+    let name = if let Some(url) = &tab.url {
+        let url = url.clone();
+        Link::new(
+            "artisan-thread-repository-link",
+            *theme,
+            LinkTone::Link,
+            location_label,
+        )
+        .on_activate(move || emit(Event::Navigate(Command::OpenUrl(url.clone()))))
+        .build()
+        .aria_label(format!("Open {location_label}"))
+    } else {
+        let project = tab.project.clone();
+        Link::new(
+            "artisan-thread-project-link",
+            *theme,
+            LinkTone::Crumb,
+            location_label,
+        )
+        .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
+        .build()
+        .aria_label(format!("New thread in {location_label}"))
     };
     UiBox::new()
         .layout("row")
@@ -207,12 +206,13 @@ fn separator(theme: &ArtisanTheme) -> Element {
 
 fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
     let pulsing = tab.state == RowState::Working && !reduced;
-    match tab.trail.is_empty() {
-        true => title(
+    if tab.trail.is_empty() {
+        title(
             frame(Text::new(tab.title.clone()), tab.outline.is_none()),
             pulsing,
-        ),
-        false => title(
+        )
+    } else {
+        title(
             Link::new(
                 "artisan-thread-crumb",
                 *theme,
@@ -223,7 +223,7 @@ fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)
             .build()
             .aria_label(format!("Open {}", tab.title)),
             pulsing,
-        ),
+        )
     }
 }
 
@@ -251,8 +251,8 @@ fn agents(theme: &ArtisanTheme, tab: &Tab, emit: &Rc<dyn Fn(Event)>) -> Vec<Elem
 }
 
 fn title(label: Element, pulsing: bool) -> Element {
-    match pulsing {
-        true => UiBox::new()
+    if pulsing {
+        UiBox::new()
             .layout("row")
             .style(
                 Style::new()
@@ -266,8 +266,9 @@ fn title(label: Element, pulsing: bool) -> Element {
                     }),
             )
             .child(label)
-            .build(),
-        false => label,
+            .build()
+    } else {
+        label
     }
 }
 

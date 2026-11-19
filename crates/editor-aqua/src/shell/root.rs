@@ -324,7 +324,8 @@ impl SectionViews for RootViews {
             &theme,
             self.sidebar_model(&theme, search, tree, account.as_ref(), now),
         );
-        let refreshed = [
+
+        [
             (crate::frame::view::SIDEBAR, element),
             (crate::frame::search::OVERLAY, overlay),
         ]
@@ -336,8 +337,7 @@ impl SectionViews for RootViews {
                 false
             }
         })
-        .fold(true, |all, refreshed| all && refreshed);
-        refreshed
+        .fold(true, |all, refreshed| all && refreshed)
     }
 
     fn refresh_sidebar(&self, shell: &Shell, ui: &mut UiApp, window: &ObservedWindowState) -> bool {
@@ -457,7 +457,7 @@ impl SectionViews for RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
-        self.after_mount(shell, ui, ctx, window)
+        self.after_mount(shell, ui, ctx, window);
     }
 
     fn frame_completed(

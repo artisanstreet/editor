@@ -198,9 +198,10 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
         crate::frame::sign_in::model::Page::Code
     );
     let feedback = crate::frame::sign_in::model::feedback_of(props.view);
-    let (email_feedback, code_feedback) = match code_shown {
-        true => (Feedback::None, feedback),
-        false => (feedback, Feedback::None),
+    let (email_feedback, code_feedback) = if code_shown {
+        (Feedback::None, feedback)
+    } else {
+        (feedback, Feedback::None)
     };
     let busy_swap = Key {
         swap: props.sign_in.motion.busy.value(now, SWAP),
@@ -250,9 +251,10 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
 }
 
 fn page(key: &'static str, active: bool, opacity: f32, shift: f32, content: Element) -> Element {
-    let position = match active {
-        true => Style::new(),
-        false => Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), None),
+    let position = if active {
+        Style::new()
+    } else {
+        Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), None)
     };
     let blur = PAGE_BLUR * (1.0 - opacity);
     let mut style = position
@@ -267,9 +269,10 @@ fn page(key: &'static str, active: bool, opacity: f32, shift: f32, content: Elem
         .build()
         .with_key(key)
         .debug_selector(key);
-    match active {
-        true => element,
-        false => element.exclude_from_hit_testing(),
+    if active {
+        element
+    } else {
+        element.exclude_from_hit_testing()
     }
 }
 
@@ -304,9 +307,10 @@ fn email_page(
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
-    let note = match cancellable {
-        true => cancel_text(theme, emit),
-        false => legal(theme, emit),
+    let note = if cancellable {
+        cancel_text(theme, emit)
+    } else {
+        legal(theme, emit)
     };
     let entry = UiBox::new()
         .layout("column")
@@ -408,7 +412,7 @@ pub(crate) fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) 
         .layout("column")
         .style(
             Style::new()
-                .height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
+                .height(Length::Px(2.0f32.mul_add(-FIELD.padding_px(), KEY.edge())))
                 .justify(JustifyContent::CENTER),
         )
         .child(content)
@@ -489,9 +493,10 @@ fn continue_key(
         "artisan-sign-in-continue",
         "Continue",
         KEY,
-        match busy {
-            true => CursorIcon::Progress,
-            false => CursorIcon::Pointer,
+        if busy {
+            CursorIcon::Progress
+        } else {
+            CursorIcon::Pointer
         },
         glyphs,
         Rc::new(move || {
@@ -761,7 +766,8 @@ fn linked(
             EventPhase::Bubble,
             move |routed| {
                 if let RoutedInput::TextRangeActivated { id, .. } = &routed.input {
-                    let at = usize::try_from(*id).expect("invariant: caption link ids fit in usize");
+                    let at =
+                        usize::try_from(*id).expect("invariant: caption link ids fit in usize");
                     let event = events.get(at).unwrap_or_else(|| {
                         panic!(
                             "invariant: link {id} indexes one of the caption's {} events",

@@ -164,7 +164,7 @@ fn mounted_input_and_composition_edit_editor_once() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = events.clone();
     let controller = EditorController::new(Editor::new("", Mode::Prompt), move |event| {
-        recorded.borrow_mut().push(event)
+        recorded.borrow_mut().push(event);
     });
     let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     runtime
@@ -478,7 +478,7 @@ fn mounted(
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
     let recorded = events.clone();
     let controller = EditorController::new(Editor::new(text, mode), move |event| {
-        recorded.borrow_mut().push(event)
+        recorded.borrow_mut().push(event);
     });
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
@@ -634,7 +634,7 @@ fn shared_controller_reports_selection_and_controls_disabled_state() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = events.clone();
     let controller = EditorController::from_shared(shared.clone(), move |event| {
-        recorded.borrow_mut().push(event)
+        recorded.borrow_mut().push(event);
     });
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);

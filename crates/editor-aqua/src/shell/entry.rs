@@ -139,11 +139,10 @@ impl Entry {
             approval,
             rejected: None,
         } = core.account().phase()
+            && !approval.totp_required
         {
-            if !approval.totp_required {
-                core.account_mut().finish_sign_in(None);
-                changed = true;
-            }
+            core.account_mut().finish_sign_in(None);
+            changed = true;
         }
         let view = model::view_of(core.account().phase(), self.sign_in.problem);
         let feedback = model::feedback_of(&view);
@@ -330,22 +329,22 @@ impl Entry {
             EntryGate::Ready { account_id } => Some(account_id),
             _ => None,
         };
-        if self.workspace.as_ref().map(|(account, _)| account) != ready {
-            if let Some((_, workspace)) = &mut self.workspace {
-                workspace.dispose_composer_popups(ui);
-                workspace.conversation_selection.clear(ui);
-                workspace.markdown.borrow_mut().rebind(ui, None);
-                workspace.dispose_terminal_dialog(ui);
-                workspace.inspector.release(ui);
-            }
+        if self.workspace.as_ref().map(|(account, _)| account) != ready
+            && let Some((_, workspace)) = &mut self.workspace
+        {
+            workspace.dispose_composer_popups(ui);
+            workspace.conversation_selection.clear(ui);
+            workspace.markdown.borrow_mut().rebind(ui, None);
+            workspace.dispose_terminal_dialog(ui);
+            workspace.inspector.release(ui);
         }
-        if let CoreEvent::OpenUrl(url) = event {
-            if let Err(error) = crate::shell::open_url(url) {
-                tracing::warn!(
-                    error = %::diagnostics::chain(&error),
-                    "could not open URL"
-                );
-            }
+        if let CoreEvent::OpenUrl(url) = event
+            && let Err(error) = crate::shell::open_url(url)
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not open URL"
+            );
         }
         let mounted = self.sync(core);
         self.land(core);

@@ -9,7 +9,7 @@ fn the_outline_does_not_cross_the_tab_opening() {
         let tab = Rect::from_edges(left, 8.0, left + 140.0, 48.0);
         for inset in [0.0, 1.0, 2.0] {
             let mut from = Point::ZERO;
-            let center = (tab.x + tab.w * 0.5).min(body.right() - 4.0);
+            let center = tab.w.mul_add(0.5, tab.x).min(body.right() - 4.0);
             for command in trace(body, Some(tab), inset) {
                 from = match command {
                     PathCommand::Move(to) | PathCommand::Arc { to, .. } => to,

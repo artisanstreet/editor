@@ -27,7 +27,7 @@ fn scroll_easing_uses_elapsed_time_and_preserves_tail_following() {
         panic!("expected eased scrolling")
     };
     assert!(continue_animation);
-    assert!((offset - (-100.0 * (1.0 - (-1.0_f32).exp()))).abs() < 0.001);
+    assert!((-100.0f32).mul_add(-(1.0 - (-1.0_f32).exp()), offset).abs() < 0.001);
     assert_eq!(
         scroll.step(true, true, false, false, false, offset, 100.0, now),
         Step::FollowTail
@@ -144,7 +144,12 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
         })
         .unwrap();
     let height = next.tree().pre_transform_rect(node).unwrap().h;
-    assert!((height - 32.0 * MotionCurve::SmoothOut.sample_f32(0.5)).abs() < 0.01);
+    assert!(
+        32.0f32
+            .mul_add(-MotionCurve::SmoothOut.sample_f32(0.5), height)
+            .abs()
+            < 0.01
+    );
 
     let scale = 1.25_f32;
     let grow = MotionCurve::SmoothOut.sample_f32(0.5);
@@ -226,13 +231,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     );
     assert!(
         motion
-            .entrance(
-                key.clone(),
-                true,
-                true,
-                false,
-                now + Duration::from_millis(403)
-            )
+            .entrance(key, true, true, false, now + Duration::from_millis(403))
             .is_none()
     );
 
@@ -244,13 +243,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     );
     assert!(
         motion
-            .entrance(
-                history.clone(),
-                true,
-                true,
-                false,
-                now + Duration::from_millis(1)
-            )
+            .entrance(history, true, true, false, now + Duration::from_millis(1))
             .is_none()
     );
     let reduced = RowKey::Item(artisan_api::ItemId("reduced".into()));
@@ -529,7 +522,7 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let key = RowKey::Item(artisan_api::ItemId("prompt".into()));
     let start = Instant::now();
     let mut motion = RowMotion::default();
-    let sticker = motion.sticker(key.clone(), true, false, start).unwrap();
+    let sticker = motion.sticker(key, true, false, start).unwrap();
     assert!(
         !motion.animating(),
         "a sticker must not rebuild every frame"

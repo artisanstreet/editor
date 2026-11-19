@@ -91,7 +91,7 @@ fn fetcher_clones_share_thread_cache_and_preserve_semantic_identity() {
     let first = fetcher.clone().owned_by(&[42], 1);
     let repeated = fetcher.clone().owned_by(&[42], 1);
     let revised = fetcher.clone().owned_by(&[42], 2);
-    let other = fetcher.clone().owned_by(&[43], 1);
+    let other = fetcher.owned_by(&[43], 1);
     let new_thread = MediaFetcher::new("forge/thread", |_| {
         Box::pin(async { Err(MediaFailure::Missing) })
     })

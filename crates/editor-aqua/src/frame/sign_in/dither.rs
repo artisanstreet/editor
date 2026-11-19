@@ -107,14 +107,17 @@ pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Param
         ) else {
             return false;
         };
-        let luminance = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255.0;
+        let luminance = b.mul_add(0.0722, g.mul_add(0.7152, r * 0.2126)) / 255.0;
         let threshold = (f32::from(THRESHOLDS[((y % 4) * 4 + x % 4) as usize]) + 0.5) / 16.0;
-        let fade = match fade_right > 0.0 {
-            true => 1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0),
-            false => 1.0,
+        let fade = if fade_right > 0.0 {
+            1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0)
+        } else {
+            1.0
         };
-        let adjusted =
-            ((luminance * params.brightness - 0.5) * params.contrast + 0.5).clamp(0.0, 1.0) * fade;
+        let adjusted = (luminance * params.brightness - 0.5)
+            .mul_add(params.contrast, 0.5)
+            .clamp(0.0, 1.0)
+            * fade;
         adjusted > threshold + params.threshold_bias && a > 0.0
     })
 }
@@ -123,13 +126,15 @@ pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Param
 pub fn paint(mask: &Mask, paint: Paint) -> RgbaImage {
     let width = mask.width() as f32;
     RgbaImage::from_fn(mask.width(), mask.height(), |x, y| {
-        let reveal = match paint.fade_in_left > 0.0 {
-            true => ((x as f32 + 0.5) / width / paint.fade_in_left).min(1.0),
-            false => 1.0,
+        let reveal = if paint.fade_in_left > 0.0 {
+            ((x as f32 + 0.5) / width / paint.fade_in_left).min(1.0)
+        } else {
+            1.0
         };
-        let alpha = match mask.lit(x, y) {
-            true => (255.0 * paint.opacity * reveal).round() as u8,
-            false => 0,
+        let alpha = if mask.lit(x, y) {
+            (255.0 * paint.opacity * reveal).round() as u8
+        } else {
+            0
         };
         image::Rgba([paint.rgb[0], paint.rgb[1], paint.rgb[2], alpha])
     })
@@ -155,7 +160,7 @@ fn area(source: Source<'_>, left: f32, top: f32, span: f32) -> Option<[f32; 4]> 
             let cover = cover_y * (right.min(x as f32 + 1.0) - left.max(x as f32)).max(0.0);
             let pixel = source.image.get_pixel(x, y);
             for (sum, channel) in total.iter_mut().zip(pixel.0) {
-                *sum += f32::from(channel) * cover;
+                *sum = f32::from(channel).mul_add(cover, *sum);
             }
             weight += cover;
         }

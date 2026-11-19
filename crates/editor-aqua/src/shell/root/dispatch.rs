@@ -94,12 +94,12 @@ impl RootViews {
                     let Some(workspace) = shell.entry.workspace() else {
                         continue;
                     };
-                    if !workspace
+                    if workspace
                         .conversation
                         .view
                         .as_ref()
                         .and_then(|view| view.item(&key.item))
-                        .is_some_and(|item| item.seq == revision)
+                        .is_none_or(|item| item.seq != revision)
                     {
                         continue;
                     }
@@ -235,7 +235,7 @@ impl RootViews {
                     }
                 }
                 ColorCopyEffect::RequestFrame => {
-                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION)
+                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
                 }
                 ColorCopyEffect::Dismissed => {
                     self.color_menu = None;

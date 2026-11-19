@@ -85,16 +85,18 @@ fn ridge(x: f32) -> f32 {
 }
 
 fn fade_right(x: f32) -> f32 {
-    match x <= 0.3 {
-        true => 1.0,
-        false => (1.0 - (x - 0.3) / 0.7).max(0.0),
+    if x <= 0.3 {
+        1.0
+    } else {
+        (1.0 - (x - 0.3) / 0.7).max(0.0)
     }
 }
 
 fn fade_up(y: f32) -> f32 {
     let rise = 1.0 - y;
-    match rise <= 0.45 {
-        true => 1.0,
-        false => (1.0 - (rise - 0.45) / 0.55).max(0.0),
+    if rise <= 0.45 {
+        1.0
+    } else {
+        (1.0 - (rise - 0.45) / 0.55).max(0.0)
     }
 }

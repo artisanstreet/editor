@@ -563,7 +563,7 @@ mod spacer {
         let closed = history_spacer(&column(), 500.0, 0.0);
         let open = history_spacer(&column(), 500.0, 1.0);
         let half = history_spacer(&column(), 500.0, 0.5);
-        assert!((half - (closed + open) / 2.0).abs() < 1e-4);
+        assert!((half - f32::midpoint(closed, open)).abs() < 1e-4);
     }
 }
 
@@ -667,7 +667,7 @@ fn message_search_results_do_not_follow_a_switch_to_another_host() {
         );
     }
     core.navigate(Screen::NewThread {
-        host: first.clone(),
+        host: first,
         project: None,
     });
     let mut sidebar = Sidebar::new(false);

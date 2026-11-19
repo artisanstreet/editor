@@ -43,8 +43,14 @@ pub(crate) fn view(
         .skip(1)
         .cloned()
         .collect::<Vec<_>>();
-    let inbox_height: f32 = inbox_entries.iter().map(|entry| entry.height()).sum();
-    let history_content: f32 = history_entries.iter().map(|entry| entry.height()).sum();
+    let inbox_height: f32 = inbox_entries
+        .iter()
+        .map(editor_sidebar::geometry::Entry::height)
+        .sum();
+    let history_content: f32 = history_entries
+        .iter()
+        .map(editor_sidebar::geometry::Entry::height)
+        .sum();
     let history_height = history_height(
         height,
         inbox_height,

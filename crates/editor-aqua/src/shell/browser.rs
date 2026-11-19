@@ -26,13 +26,12 @@ const QUERY_LIMIT: usize = 2000;
 #[must_use]
 pub fn program_of(command: &str) -> Option<PathBuf> {
     let command = command.trim();
-    let program = match command.strip_prefix('"') {
-        Some(rest) => rest.split('"').next()?,
-        None => {
-            let lower = command.to_ascii_lowercase();
-            let end = lower.find(".exe").map_or(command.len(), |at| at + 4);
-            &command[..end]
-        }
+    let program = if let Some(rest) = command.strip_prefix('"') {
+        rest.split('"').next()?
+    } else {
+        let lower = command.to_ascii_lowercase();
+        let end = lower.find(".exe").map_or(command.len(), |at| at + 4);
+        &command[..end]
     };
     (!program.trim().is_empty()).then(|| PathBuf::from(program.trim()))
 }
@@ -65,9 +64,10 @@ impl Browser {
         let path = self.program.to_string_lossy().to_ascii_lowercase();
         let file = path.rsplit(['\\', '/']).next().unwrap_or_default();
         let stem = file.strip_suffix(".exe").unwrap_or(file);
-        match GECKO.contains(&stem) {
-            true => Family::Gecko,
-            false => Family::Chromium,
+        if GECKO.contains(&stem) {
+            Family::Gecko
+        } else {
+            Family::Chromium
         }
     }
 

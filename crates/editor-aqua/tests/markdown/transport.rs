@@ -206,7 +206,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             "row",
             0,
             leaf.clone(),
-            &theme,
+            theme,
             SelectionDocumentId(9),
             &[7],
             |part| SelectionSourceId(100 + part as u64),
@@ -219,7 +219,7 @@ fn real_forge_stored_markdown_loads_bounded_pages_and_revokes_leaf_proof() {
             0,
             0,
             true,
-            &theme,
+            theme,
             BodyTone::Foreground,
             Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
             Rc::new(|| {}),
@@ -377,7 +377,7 @@ fn stored_conversation_transaction(
     ));
     let observations = TranscriptObservations::default();
     let ids = Rc::new(Cell::new(1000));
-    let allocated = ids.clone();
+    let allocated = ids;
     let factory = Rc::new(
         RowFactory::new(
             vec![RealizedRow {
@@ -448,7 +448,6 @@ fn stored_conversation_transaction(
         .find(|paint| paint.snapshot.stored.is_some())
         .unwrap();
     let candidate = painted
-        .clone()
         .capture(&conversation, core, &markdown.borrow(), &scope, clip, true)
         .unwrap();
     let stale_host = painted

@@ -68,12 +68,11 @@ impl RootViews {
     }
 
     pub(super) fn close_image_preview(&mut self, ui: &mut UiApp, restore_focus: bool) {
-        if let Some(preview) = self.image_preview.take() {
-            if restore_focus {
-                if let Some(key) = preview.view.opener_key() {
-                    ui.focus_key(key.to_owned());
-                }
-            }
+        if let Some(preview) = self.image_preview.take()
+            && restore_focus
+            && let Some(key) = preview.view.opener_key()
+        {
+            ui.focus_key(key.to_owned());
         }
         self.preview_actions.borrow_mut().clear();
     }
@@ -90,10 +89,10 @@ impl RootViews {
         let mut subtree = std::collections::HashSet::new();
         let mut pending = vec![root];
         while let Some(node) = pending.pop() {
-            if subtree.insert(node) {
-                if let Some(record) = ui.tree().get(node) {
-                    pending.extend(record.children.iter().copied());
-                }
+            if subtree.insert(node)
+                && let Some(record) = ui.tree().get(node)
+            {
+                pending.extend(record.children.iter().copied());
             }
         }
         let order: Vec<_> = aqua_ui::events::focusable_nodes(ui.tree())

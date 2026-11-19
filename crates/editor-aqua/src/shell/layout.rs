@@ -68,8 +68,9 @@ pub(crate) fn meter_right(inspector: Option<f32>) -> f32 {
 }
 
 pub(crate) fn header_right_inset(meter_right: f32, has_meter: bool) -> f32 {
-    match has_meter {
-        true => (meter_right + crate::ui::kit::Space::S24.px() - CONTROLS_WIDTH).max(0.0),
-        false => 0.0,
+    if has_meter {
+        (meter_right + crate::ui::kit::Space::S24.px() - CONTROLS_WIDTH).max(0.0)
+    } else {
+        0.0
     }
 }

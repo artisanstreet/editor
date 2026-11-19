@@ -154,7 +154,7 @@ impl ViewState {
                 copy_path(Action::CopyPath {
                     generation,
                     text: path.clone(),
-                })
+                });
             })
             .build(),
         );
@@ -188,7 +188,7 @@ impl ViewState {
                             copy_file(Action::CopyFile {
                                 generation,
                                 text: Arc::clone(&full),
-                            })
+                            });
                         })
                         .build(),
                     )

@@ -73,12 +73,14 @@ impl NativeNotifications {
             Arc::new(move |response| {
                 pending
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push_back(response);
                 match sender.send(()) {
                     Ok(()) | Err(aqua::mailbox::SendError::Full(())) => {}
                     Err(aqua::mailbox::SendError::Closed(())) => {
-                        tracing::debug!("a notification answer arrived after the Editor closed its notifications");
+                        tracing::debug!(
+                            "a notification answer arrived after the Editor closed its notifications"
+                        );
                     }
                 }
             }),
@@ -94,7 +96,7 @@ impl NativeNotifications {
         !self
             .responses
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
     }
 
@@ -153,7 +155,7 @@ impl NativeNotifications {
             &mut *self
                 .responses
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         let changed = !responses.is_empty();
         for response in responses {

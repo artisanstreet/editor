@@ -78,7 +78,7 @@ impl Surface {
 
     fn node(self, ui: &UiApp) -> Option<NodeId> {
         match self {
-            Self::Transcript => crate::shell::wheel::keyed_node(ui, "conversation-transcript"),
+            Self::Transcript => keyed_node(ui, "conversation-transcript"),
             Self::Threads => keyed_node(ui, THREADS),
             Self::Model => keyed_node(ui, MODEL_MENU),
             Self::Tree => keyed_node(ui, PROJECT_TREE),

@@ -156,7 +156,7 @@ impl ResourcePreview {
         let target_line = line.unwrap_or(1).saturating_sub(1) as usize;
         let mut preview = Self {
             content: None,
-            delivery: crate::core::delivery::Delivery::new(std::num::NonZeroUsize::MIN),
+            delivery: crate::core::delivery::Delivery::new(NonZeroUsize::MIN),
             request: None,
             source: None,
             thread: None,

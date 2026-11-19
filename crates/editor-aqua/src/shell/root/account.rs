@@ -156,7 +156,7 @@ impl RootViews {
             Rc::new(move || {
                 dismissed(crate::frame::sidebar::Event::Account(
                     crate::ui::chrome::menu::Event::Dismissed,
-                ))
+                ));
             }),
         ) {
             tracing::warn!(%error, "could not open the account menu");

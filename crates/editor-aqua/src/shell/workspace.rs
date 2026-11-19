@@ -311,10 +311,10 @@ impl Workspace {
             CoreEvent::Host {
                 host,
                 event: HostEvent::ThreadChanged { thread_id },
-            } => {
-                if core.screen().host() == Some(host) && core.screen().thread() == Some(thread_id) {
-                    self.repository_pending = true;
-                }
+            } if core.screen().host() == Some(host)
+                && core.screen().thread() == Some(thread_id) =>
+            {
+                self.repository_pending = true;
             }
             _ => {}
         }
@@ -437,13 +437,13 @@ impl Workspace {
                 shown.as_ref() != Some(content) || node != Some(*anchor) || !host.is_open(ui)
             })
         {
-            if let Some((_, _, mut tooltip)) = self.composer_tooltip.take() {
-                if tooltip.is_open(ui) {
-                    if let Err(error) = tooltip.begin_close(ui) {
-                        tracing::warn!(%error, "could not close composer tooltip");
-                    }
-                    self.retiring_tooltips.push(tooltip);
+            if let Some((_, _, mut tooltip)) = self.composer_tooltip.take()
+                && tooltip.is_open(ui)
+            {
+                if let Err(error) = tooltip.begin_close(ui) {
+                    tracing::warn!(%error, "could not close composer tooltip");
                 }
+                self.retiring_tooltips.push(tooltip);
             }
             changed = true;
         }
@@ -589,10 +589,10 @@ impl Workspace {
                 PopupKind::Mentions => mentions,
             };
             if !desired {
-                if owner.popup_is_open(kind, ui) {
-                    if let Err(error) = owner.close_popup(ui, kind, now) {
-                        tracing::warn!(%error, "could not close composer popup");
-                    }
+                if owner.popup_is_open(kind, ui)
+                    && let Err(error) = owner.close_popup(ui, kind, now)
+                {
+                    tracing::warn!(%error, "could not close composer popup");
                 }
                 continue;
             }
@@ -800,7 +800,9 @@ impl Workspace {
             _ => return,
         };
         let identity = target.map(|target| {
-            let instance = core.host(target.host()).map(|host| host.instance());
+            let instance = core
+                .host(target.host())
+                .map(editor_core::HostData::instance);
             (target, instance)
         });
         let prompt_key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("composer-prompt"));
@@ -846,21 +848,20 @@ impl Workspace {
         core: &mut Core,
         theme: &crate::ui::theme::ArtisanTheme,
     ) {
-        if let (Some(_), Some((target, Some(instance)))) = (&self.composer, &self.composer_target) {
-            if let Some(host) = core.host_mut_if_instance(target.host(), *instance) {
-                host.load_skill_catalog(false);
-            }
+        if let (Some(_), Some((target, Some(instance)))) = (&self.composer, &self.composer_target)
+            && let Some(host) = core.host_mut_if_instance(target.host(), *instance)
+        {
+            host.load_skill_catalog(false);
         }
         if !self.composer_mentions_dirty {
             return;
         }
         if let (Some(owner), Some((target, Some(instance)))) =
             (&self.composer, &self.composer_target)
+            && let Some(host) = core.host_if_instance(target.host(), *instance)
         {
-            if let Some(host) = core.host_if_instance(target.host(), *instance) {
-                owner.refresh_mentions(host, theme);
-                self.composer_mentions_dirty = false;
-            }
+            owner.refresh_mentions(host, theme);
+            self.composer_mentions_dirty = false;
         }
     }
 
@@ -901,7 +902,7 @@ impl Workspace {
                 ComposerEffect::FocusEditor => self.composer_focus_pending = true,
                 ComposerEffect::NewProject => self.sidebar.add_project(core),
                 ComposerEffect::RetryQuestionPage => {
-                    self.conversation.question_pages.retry_question(core)
+                    self.conversation.question_pages.retry_question(core);
                 }
                 ComposerEffect::OpenQuestionSource(source) => {
                     if let (Some(owner), Some((target, Some(instance)))) =
@@ -1087,7 +1088,9 @@ impl Workspace {
                 new_thread
                     .then(|| composer.session.as_ref())
                     .flatten()
-                    .map(|session| session.read(|state| state.posting()))
+                    .map(|session| {
+                        session.read(editor_composer::draft_session::DraftSession::posting)
+                    })
             })
             .unwrap_or(crate::composer::draft_session::Posting::Idle)
     }
@@ -1227,13 +1230,12 @@ impl Workspace {
             self.conversation.question_pages.options_browser(),
         ) {
             let browser = browser.borrow();
-            if browser.identity() == identity.0 {
-                if let Some(content) = browser
+            if browser.identity() == identity.0
+                && let Some(content) = browser
                     .detail()
                     .filter(|content| content.identity() == identity.1)
-                {
-                    service.bind(content, ctx, window);
-                }
+            {
+                service.bind(content, ctx, window);
             }
         }
     }
@@ -1262,18 +1264,17 @@ impl Workspace {
             self.conversation.question_pages.options_browser(),
         ) {
             let mut browser = browser.borrow_mut();
-            if browser.identity() == identity.0 {
-                if let Some(content) = browser
+            if browser.identity() == identity.0
+                && let Some(content) = browser
                     .detail_mut()
                     .filter(|content| content.identity() == identity.1)
-                {
-                    for (origin, action) in actions {
-                        if &origin == identity {
-                            changed |= service.action(core, content, ctx, routes, window, action);
-                        }
+            {
+                for (origin, action) in actions {
+                    if &origin == identity {
+                        changed |= service.action(core, content, ctx, routes, window, action);
                     }
-                    changed |= service.drain(core, content, ctx);
                 }
+                changed |= service.drain(core, content, ctx);
             }
         }
         changed
@@ -1447,7 +1448,7 @@ impl Workspace {
         for action in settings {
             match &action {
                 crate::settings::view::ViewAction::SetDarkMode(dark) => {
-                    self.theme_transition = Some(*dark)
+                    self.theme_transition = Some(*dark);
                 }
                 crate::settings::view::ViewAction::OpenUrl(url) => self
                     .settings_platform_effects
@@ -1581,15 +1582,13 @@ impl Workspace {
     }
 
     pub(crate) fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {
-        if self.composer_editor_dirty {
-            if let Some(owner) = &self.composer {
-                if let Some(key) = owner.editor.text_key() {
-                    if let Some(node) = keyed_node(ui, key) {
-                        owner.editor.sync(ui.tree_mut(), node);
-                        self.composer_editor_dirty = false;
-                    }
-                }
-            }
+        if self.composer_editor_dirty
+            && let Some(owner) = &self.composer
+            && let Some(key) = owner.editor.text_key()
+            && let Some(node) = keyed_node(ui, key)
+        {
+            owner.editor.sync(ui.tree_mut(), node);
+            self.composer_editor_dirty = false;
         }
         if !self.composer_editor_dirty
             && self.composer_focus_pending
@@ -1738,11 +1737,10 @@ impl Workspace {
     pub(crate) fn new_thread(core: &mut Core) {
         let screen = core
             .active_host()
-            .map(|host| Screen::NewThread {
+            .map_or(Screen::Home, |host| Screen::NewThread {
                 host: host.id.clone(),
                 project: None,
-            })
-            .unwrap_or(Screen::Home);
+            });
         core.navigate(screen);
     }
 

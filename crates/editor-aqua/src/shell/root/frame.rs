@@ -90,14 +90,13 @@ impl RootViews {
             | self.noted.note(Cause::ConnectionAnimation, connecting)
             | self.noted.note(Cause::LoadingAnimation, loading)
             | self.noted.note(Cause::LandingAnimation, landing);
-        if let Some(height) = self.composer_measurement.take() {
-            if self
+        if let Some(height) = self.composer_measurement.take()
+            && self
                 .composer_height
                 .is_none_or(|previous| (previous - height).abs() >= 0.5)
-            {
-                self.composer_height = Some(height);
-                action_changed = self.noted.note(Cause::ComposerHeight, true);
-            }
+        {
+            self.composer_height = Some(height);
+            action_changed = self.noted.note(Cause::ComposerHeight, true);
         }
         let Some(rows) = &self.rows else {
             return action_changed;
@@ -178,7 +177,7 @@ impl RootViews {
                                     item_seq: painted.snapshot.item_seq,
                                     observed_seq: candidate
                                         .as_ref()
-                                        .map(|read| read.observed_seq()),
+                                        .map(editor_conversation::view::transcript::ObservedRead::observed_seq),
                                     bounds_bits: crate::qualification::observation::rect_bits(
                                         painted.bounds,
                                     ),
@@ -274,7 +273,7 @@ impl RootViews {
                                     .is_some_and(|view| view.viewport.state().is_following());
                         }
                         Err(error) => {
-                            tracing::warn!(%error, "could not observe transcript viewport")
+                            tracing::warn!(%error, "could not observe transcript viewport");
                         }
                     }
                 }

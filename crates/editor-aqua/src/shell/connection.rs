@@ -439,7 +439,7 @@ impl ConnectionPresenter {
             } else if t < 0.5 {
                 2.0 * t * t
             } else {
-                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                1.0 - (-2.0f32).mul_add(t, 2.0).powi(2) / 2.0
             };
             section = section.child(line.opacity(opacity).build());
         }

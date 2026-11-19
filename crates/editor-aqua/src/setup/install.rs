@@ -28,13 +28,13 @@ pub enum InstallError {
 }
 
 #[derive(Clone, Default)]
-pub struct Cancel {
+pub(super) struct Cancel {
     requested: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
 }
 
 impl Cancel {
-    pub fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         self.requested.store(true, Ordering::SeqCst);
         self.kill();
     }
@@ -106,7 +106,7 @@ fn failure(lines: &[String]) -> String {
         .to_owned()
 }
 
-pub fn run(
+pub(super) fn run(
     arguments: &[String],
     cancel: &Cancel,
     mut progress: impl FnMut(&str),
@@ -146,7 +146,7 @@ pub fn run(
     payload::write_notices().map_err(InstallError::Notices)
 }
 
-pub fn headless(arguments: &[String]) -> Result<(), InstallError> {
+pub(super) fn headless(arguments: &[String]) -> Result<(), InstallError> {
     let mut all = vec!["install".to_owned(), "--apply".to_owned()];
     all.extend_from_slice(arguments);
     run(&all, &Cancel::default(), |line| eprintln!("{line}"))

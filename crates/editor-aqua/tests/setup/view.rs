@@ -43,7 +43,10 @@ fn rect(app: &UiApp, key: &str) -> aqua_core::Rect {
 
 fn click(app: &mut UiApp, key: &str) {
     let bounds = rect(app, key);
-    let position = Point::new(bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5);
+    let position = Point::new(
+        bounds.w.mul_add(0.5, bounds.x),
+        bounds.h.mul_add(0.5, bounds.y),
+    );
     let pointer = |buttons| PointerEvent {
         contact: 0,
         kind: PointerKind::Mouse,

@@ -70,7 +70,7 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
         .unwrap()
         .unwrap_err();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let next = fetcher.clone().owned_by(&[7], 2);
+    let next = fetcher.owned_by(&[7], 2);
     assert!(
         assets
             .request(Some(&next), &source, "row", 5, noop.clone())

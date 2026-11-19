@@ -64,7 +64,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         row_factory(rows, scope.clone(), markdown, true, allocate)
             .with_row_cache(cache.clone())
             .with_sources(
-                provider.clone(),
+                provider,
                 SelectionDocumentId(415),
                 Rc::new(move |action| capture.borrow_mut().push(action)),
             )
@@ -119,7 +119,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         panic!("expected stored questions")
     };
     let page = artisan_api::CollectionRange {
-        source: reference.source.clone(),
+        source: reference.source,
         start: 0,
         end: 1,
         total: 1,
@@ -137,7 +137,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         &browser,
         &failed,
         Err(editor_aqua::core::client::RangeError::InvalidSource {
-            source_id: artisan_api::ContentId("test failure".to_owned()),
+            source_id: ContentId("test failure".to_owned()),
         }),
         &core,
     );

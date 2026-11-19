@@ -183,9 +183,10 @@ fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Elem
             )
         }))
         .build();
-    match reveal > 0.0 {
-        true => column,
-        false => column.exclude_from_hit_testing().aria_hidden(),
+    if reveal > 0.0 {
+        column
+    } else {
+        column.exclude_from_hit_testing().aria_hidden()
     }
 }
 
@@ -197,9 +198,10 @@ fn rail_view(theme: &ArtisanTheme, width: f32, emit: &Rc<dyn Fn(Event)>) -> Elem
             .absolute_at(Some(anchor.left), Some(anchor.top), None, None)
             .opacity(shown),
     );
-    match shown > 0.0 {
-        true => rail.child(crate::frame::search::rail(theme, emit)).build(),
-        false => rail.build().exclude_from_hit_testing(),
+    if shown > 0.0 {
+        rail.child(crate::frame::search::rail(theme, emit)).build()
+    } else {
+        rail.build().exclude_from_hit_testing()
     }
 }
 

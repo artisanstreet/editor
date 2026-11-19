@@ -49,7 +49,10 @@ impl RowSourceDialogs {
             let result = crate::ui::dialogs::chosen_path(outcome);
             crate::core::runtime::runtime().spawn(async move {
                 if sender.send((generation, result)).await.is_err() {
-                    tracing::debug!(generation, "the source export closed before a path was chosen");
+                    tracing::debug!(
+                        generation,
+                        "the source export closed before a path was chosen"
+                    );
                 }
             });
         });

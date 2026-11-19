@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Debug)]
-pub enum DiffError {
+pub(crate) enum DiffError {
     Read {
         path: PathBuf,
         source: std::io::Error,
@@ -69,8 +69,8 @@ impl fmt::Display for DiffError {
 
 impl std::error::Error for DiffError {}
 
-#[derive(Debug, PartialEq)]
-pub enum MalformedScreen {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MalformedScreen {
     Empty {
         width: u32,
         height: u32,
@@ -98,14 +98,14 @@ impl fmt::Display for MalformedScreen {
     }
 }
 
-pub struct Screen {
+pub(crate) struct Screen {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
 }
 
 impl Screen {
-    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, MalformedScreen> {
+    pub(crate) fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, MalformedScreen> {
         if width == 0 || height == 0 {
             return Err(MalformedScreen::Empty { width, height });
         }
@@ -126,7 +126,7 @@ impl Screen {
         })
     }
 
-    pub fn read(path: &Path) -> Result<Self, DiffError> {
+    pub(crate) fn read(path: &Path) -> Result<Self, DiffError> {
         let image = image::open(path)
             .map_err(|source| DiffError::Decode {
                 path: path.to_owned(),
@@ -148,7 +148,7 @@ impl Screen {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(try_from = "RawTolerance")]
-pub struct Tolerance {
+pub(crate) struct Tolerance {
     channel_threshold: u8,
     max_ratio: f64,
 }
@@ -169,7 +169,7 @@ impl TryFrom<RawTolerance> for Tolerance {
 }
 
 impl Tolerance {
-    pub fn new(channel_threshold: u8, max_ratio: f64) -> Result<Self, String> {
+    pub(crate) fn new(channel_threshold: u8, max_ratio: f64) -> Result<Self, String> {
         if (0.0..=1.0).contains(&max_ratio) {
             Ok(Self {
                 channel_threshold,
@@ -183,8 +183,8 @@ impl Tolerance {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct Bounds {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Bounds {
     pub left: u32,
     pub top: u32,
     pub right: u32,
@@ -192,7 +192,7 @@ pub struct Bounds {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct Difference {
+pub(crate) struct Difference {
     pub pixels: u64,
     pub differing: u64,
     pub ratio: f64,
@@ -201,13 +201,13 @@ pub struct Difference {
     pub bounds: Option<Bounds>,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct SizeMismatch {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SizeMismatch {
     pub reference: (u32, u32),
     pub candidate: (u32, u32),
 }
 
-pub fn compare(
+pub(crate) fn compare(
     reference: &Screen,
     candidate: &Screen,
     channel_threshold: u8,
@@ -265,14 +265,14 @@ pub fn compare(
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Gate {
+pub(crate) struct Gate {
     pub default: Tolerance,
     #[serde(default)]
     pub screens: BTreeMap<String, Tolerance>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-pub enum Outcome {
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum Outcome {
     Pass,
     OverTolerance,
     SizeMismatch,
@@ -283,7 +283,7 @@ pub enum Outcome {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ScreenReport {
+pub(crate) struct ScreenReport {
     pub screen: String,
     pub outcome: Outcome,
     pub tolerance: Tolerance,
@@ -291,7 +291,7 @@ pub struct ScreenReport {
 }
 
 impl Gate {
-    pub fn tolerance(&self, screen: &str) -> Tolerance {
+    pub(crate) fn tolerance(&self, screen: &str) -> Tolerance {
         self.screens.get(screen).copied().unwrap_or(self.default)
     }
 
@@ -309,7 +309,7 @@ impl Gate {
         }
     }
 
-    pub fn judge(
+    pub(crate) fn judge(
         &self,
         screen: &str,
         reference: &Screen,
@@ -338,11 +338,11 @@ impl Gate {
     }
 }
 
-pub fn passed(reports: &[ScreenReport]) -> bool {
+pub(crate) fn passed(reports: &[ScreenReport]) -> bool {
     !reports.is_empty() && reports.iter().all(|report| report.outcome == Outcome::Pass)
 }
 
-pub fn table(reports: &[ScreenReport]) -> String {
+pub(crate) fn table(reports: &[ScreenReport]) -> String {
     let mut lines = vec![format!(
         "{:<28} {:<14} {:>10} {:>10} {:>9} {:>9}",
         "screen", "outcome", "ratio", "limit", "mean err", "max delta"
@@ -371,7 +371,11 @@ pub fn table(reports: &[ScreenReport]) -> String {
     lines.join("\n")
 }
 
-pub fn heat_map(reference: &Screen, candidate: &Screen, channel_threshold: u8) -> Option<Screen> {
+pub(crate) fn heat_map(
+    reference: &Screen,
+    candidate: &Screen,
+    channel_threshold: u8,
+) -> Option<Screen> {
     (reference.width == candidate.width && reference.height == candidate.height).then(|| Screen {
         width: reference.width,
         height: reference.height,
@@ -395,7 +399,7 @@ pub fn heat_map(reference: &Screen, candidate: &Screen, channel_threshold: u8) -
     })
 }
 
-pub fn gate_from(path: &Path) -> Result<Gate, DiffError> {
+pub(crate) fn gate_from(path: &Path) -> Result<Gate, DiffError> {
     let bytes = std::fs::read(path).map_err(|source| DiffError::Read {
         path: path.to_owned(),
         source,
@@ -406,7 +410,7 @@ pub fn gate_from(path: &Path) -> Result<Gate, DiffError> {
     })
 }
 
-pub fn required_screens(manifest: &Path) -> Result<BTreeSet<String>, DiffError> {
+pub(crate) fn required_screens(manifest: &Path) -> Result<BTreeSet<String>, DiffError> {
     let text = std::fs::read_to_string(manifest).map_err(|source| DiffError::Read {
         path: manifest.to_owned(),
         source,
@@ -464,7 +468,7 @@ fn clear_heat_map(directory: &Path, name: &str) -> Result<(), DiffError> {
     }
 }
 
-pub fn judge_directory(
+pub(crate) fn judge_directory(
     gate: &Gate,
     required: &BTreeSet<String>,
     reference: &Path,

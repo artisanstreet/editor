@@ -201,16 +201,14 @@ impl<V: SectionViews> ShellApplication<V> {
             refresh,
             Refresh::Transcript | Refresh::Sections | Refresh::FrameSections
         );
-        let sidebar_done = match sidebar_frame {
-            true => self
-                .views
-                .refresh_sidebar_frame(&self.shell, self.ui.ui_mut(), &window),
-            false => {
-                !sidebar
-                    || self
-                        .views
-                        .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
-            }
+        let sidebar_done = if sidebar_frame {
+            self.views
+                .refresh_sidebar_frame(&self.shell, self.ui.ui_mut(), &window)
+        } else {
+            !sidebar
+                || self
+                    .views
+                    .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
         };
         let transcript_done = !transcript
             || self
@@ -701,13 +699,13 @@ impl<V: SectionViews> ShellApplication<V> {
             }
         }
         let active = ctx.window_state(id).is_some_and(|window| window.focused);
-        if let Some(notifications) = &mut self.notifications {
-            if let Err(error) = notifications.drain(&mut self.shell, ctx, id) {
-                tracing::warn!(
-                    error = %::diagnostics::chain(&error),
-                    "could not activate notification"
-                );
-            }
+        if let Some(notifications) = &mut self.notifications
+            && let Err(error) = notifications.drain(&mut self.shell, ctx, id)
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not activate notification"
+            );
         }
         drop(tm_pre);
         let mut causes = Invalidation::default();
@@ -783,7 +781,7 @@ impl<V: SectionViews> ShellApplication<V> {
             if let Some(deadline) = workspace
                 .composer
                 .as_ref()
-                .and_then(|owner| owner.tooltip_deadline())
+                .and_then(editor_composer::view::ComposerOwner::tooltip_deadline)
             {
                 let delay = deadline.saturating_duration_since(std::time::Instant::now());
                 ctx.request_animation_deadline(id, ctx.now() + delay);
@@ -889,15 +887,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
         #[cfg(feature = "qualification")]
-        if !self.notifications_enabled {
-            if let Err(error) =
+        if !self.notifications_enabled
+            && let Err(error) =
                 crate::qualification::observation::record_native_state(&self.shell, sequence)
-            {
-                tracing::warn!(
-                    error = %::diagnostics::chain(&error),
-                    "could not record qualification state"
-                );
-            }
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not record qualification state"
+            );
         }
         let _tm = Tm::new("fc");
         let _span = crate::core::diagnostics::rebuild_stats::span("on_fc");
@@ -932,33 +929,29 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 (composer.picker.menu == Some(crate::composer::picker::Menu::Model))
                     .then(|| (composer.target.host().clone(), composer.host_instance()))
             };
-            if let (Some(viewport), Some((host_id, Some(instance)))) = (viewport, identity) {
-                if let Some(host) = self.shell.core.host_if_instance(&host_id, instance) {
-                    match owner.model_menu(
-                        &theme,
-                        host,
-                        viewport,
-                        crate::shell::wheel::kept_offset(
-                            self.ui.ui(),
-                            crate::ui::scroll::MODEL_MENU,
-                        )
-                        .y,
-                        &images,
-                        std::time::Instant::now(),
-                    ) {
-                        Ok(content) => {
-                            if let Err(error) = owner.refresh_popup_content(
-                                crate::composer::view::PopupKind::Model,
-                                self.ui.ui_mut(),
-                                content,
-                                ctx.now().as_secs_f64(),
-                            ) {
-                                tracing::warn!(%error, "could not refresh composer model popup");
-                            }
+            if let (Some(viewport), Some((host_id, Some(instance)))) = (viewport, identity)
+                && let Some(host) = self.shell.core.host_if_instance(&host_id, instance)
+            {
+                match owner.model_menu(
+                    &theme,
+                    host,
+                    viewport,
+                    crate::shell::wheel::kept_offset(self.ui.ui(), crate::ui::scroll::MODEL_MENU).y,
+                    &images,
+                    std::time::Instant::now(),
+                ) {
+                    Ok(content) => {
+                        if let Err(error) = owner.refresh_popup_content(
+                            crate::composer::view::PopupKind::Model,
+                            self.ui.ui_mut(),
+                            content,
+                            ctx.now().as_secs_f64(),
+                        ) {
+                            tracing::warn!(%error, "could not refresh composer model popup");
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "could not build composer model popup")
-                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not build composer model popup");
                     }
                 }
             }
@@ -1152,16 +1145,13 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 let _tm = Tm::new("input.pre");
                 self.views.pre_input(self.ui.ui_mut(), input)
             };
-            match pre {
-                Some(consumed) => {
-                    glided = matches!(input, InputEvent::Scroll { .. });
-                    consumed
-                }
-                None => {
-                    let _tm = Tm::new("input.ui");
-                    self.ui.on_input(ctx, id, input);
-                    self.ui.ui().last_input_consumed()
-                }
+            if let Some(consumed) = pre {
+                glided = matches!(input, InputEvent::Scroll { .. });
+                consumed
+            } else {
+                let _tm = Tm::new("input.ui");
+                self.ui.on_input(ctx, id, input);
+                self.ui.ui().last_input_consumed()
             }
         };
         let terminal_changed = {
@@ -1277,10 +1267,10 @@ fn sync_popup(
         *slot = None;
     }
     let Some((element, options)) = content else {
-        if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing()) {
-            if let Err(error) = popup.begin_close(ui, now) {
-                tracing::warn!(%error, "could not close settings popup");
-            }
+        if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing())
+            && let Err(error) = popup.begin_close(ui, now)
+        {
+            tracing::warn!(%error, "could not close settings popup");
         }
         return;
     };

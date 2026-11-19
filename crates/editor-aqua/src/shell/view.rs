@@ -244,10 +244,10 @@ fn measured_composer(
                 .get(node)
                 .and_then(|node| node.parent)
                 .and_then(|parent| tree.rect(parent))
+                && rect.h.is_finite()
+                && rect.h >= 0.0
             {
-                if rect.h.is_finite() && rect.h >= 0.0 {
-                    composer_measurement.set(Some(rect.h));
-                }
+                composer_measurement.set(Some(rect.h));
             }
         })
         .build()

@@ -145,10 +145,9 @@ impl Shell {
             .entry
             .workspace()
             .and_then(|workspace| workspace.palette.as_ref())
+            && let Some(mailbox) = palette.wake_mailbox()
         {
-            if let Some(mailbox) = palette.wake_mailbox() {
-                ctx.bind_mailbox(window, mailbox);
-            }
+            ctx.bind_mailbox(window, mailbox);
         }
         if let Some(workspace) = self.entry.workspace() {
             workspace.inspector.bind(ctx, window);
@@ -192,10 +191,10 @@ impl Shell {
                 if let Some(session) = &composer.session {
                     ctx.bind_mailbox(window, session.wake_mailbox());
                 }
-                if let Some(attachments) = &composer.attachments {
-                    if let Some(mailbox) = attachments.wake_mailbox() {
-                        ctx.bind_mailbox(window, mailbox);
-                    }
+                if let Some(attachments) = &composer.attachments
+                    && let Some(mailbox) = attachments.wake_mailbox()
+                {
+                    ctx.bind_mailbox(window, mailbox);
                 }
             }
         }
@@ -203,10 +202,9 @@ impl Shell {
             .entry
             .workspace()
             .and_then(|workspace| workspace.resource_preview.as_ref())
+            && let Some(mailbox) = preview.wake_mailbox()
         {
-            if let Some(mailbox) = preview.wake_mailbox() {
-                ctx.bind_mailbox(window, mailbox);
-            }
+            ctx.bind_mailbox(window, mailbox);
         }
     }
 
@@ -339,7 +337,7 @@ impl Shell {
         window: AquaWindowId,
         path: String,
         line: Option<u32>,
-        scope: Option<(crate::core::HostId, artisan_api::ThreadId)>,
+        scope: Option<(HostId, ThreadId)>,
     ) {
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.open_reference(&self.core, path, line, scope);

@@ -56,12 +56,11 @@ impl RepositoryContext {
         self.thread = thread;
         self.working = working;
         self.selected = selected;
-        if refresh {
-            if let Some(selected) = &self.selected {
-                if let Some(host) = core.host_mut_if_instance(&selected.host, selected.instance) {
-                    host.load_repository(&selected.project, true);
-                }
-            }
+        if refresh
+            && let Some(selected) = &self.selected
+            && let Some(host) = core.host_mut_if_instance(&selected.host, selected.instance)
+        {
+            host.load_repository(&selected.project, true);
         }
     }
 }

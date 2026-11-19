@@ -101,9 +101,10 @@ impl Default for LatestPresence {
 
 impl LatestPresence {
     pub(crate) fn show(&mut self, visible: bool, now: Instant, reduced_motion: bool) {
-        let (target, transition) = match visible {
-            true => (1.0, POP_IN),
-            false => (0.0, POP_OUT),
+        let (target, transition) = if visible {
+            (1.0, POP_IN)
+        } else {
+            (0.0, POP_OUT)
         };
         if self.shown.target() != target {
             self.shown = self.shown.retarget(target, now, transition, reduced_motion);

@@ -63,12 +63,15 @@ pub fn view_of(phase: &AccountPhase, problem: Option<EmailProblem>) -> View {
                 (false, _) => View::Approved,
             }
         }
-        AccountPhase::Finalizing { approval, .. } => match approval.totp_required {
-            true => View::SecondFactor {
-                step: Step::Verifying,
-            },
-            false => View::Finishing,
-        },
+        AccountPhase::Finalizing { approval, .. } => {
+            if approval.totp_required {
+                View::SecondFactor {
+                    step: Step::Verifying,
+                }
+            } else {
+                View::Finishing
+            }
+        }
         AccountPhase::Error { message } => View::Failed {
             message: message.clone(),
         },

@@ -132,24 +132,24 @@ impl RootViews {
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not advance sidebar overlays"),
         }
-        if let Some(editor) = self.sidebar_overlays.rename_editor() {
-            if let Some(key) = editor.text_key() {
-                let key = aqua_ui::tree::hash_key(key);
-                let nodes: Vec<_> = ui
-                    .tree()
-                    .traverse()
-                    .into_iter()
-                    .filter(|node| {
-                        ui.tree()
-                            .get(*node)
-                            .is_some_and(|record| record.key == Some(key))
-                    })
-                    .collect();
-                if let [node] = nodes.as_slice() {
-                    if editor.sync(ui.tree_mut(), *node) {
-                        ctx.request_frame(window, aqua::prelude::FrameReason::INPUT);
-                    }
-                }
+        if let Some(editor) = self.sidebar_overlays.rename_editor()
+            && let Some(key) = editor.text_key()
+        {
+            let key = aqua_ui::tree::hash_key(key);
+            let nodes: Vec<_> = ui
+                .tree()
+                .traverse()
+                .into_iter()
+                .filter(|node| {
+                    ui.tree()
+                        .get(*node)
+                        .is_some_and(|record| record.key == Some(key))
+                })
+                .collect();
+            if let [node] = nodes.as_slice()
+                && editor.sync(ui.tree_mut(), *node)
+            {
+                ctx.request_frame(window, aqua::prelude::FrameReason::INPUT);
             }
         }
         changed
@@ -197,9 +197,10 @@ impl RootViews {
         now: std::time::Instant,
     ) -> (Option<Element>, Option<Element>, Element) {
         let search = tree.is_some().then(|| self.search_bar(workspace, theme));
-        let ((search, tree), (bar, results)) = match self.sidebar.searching() {
-            true => ((None, None), (search, tree)),
-            false => ((search, tree), (None, None)),
+        let ((search, tree), (bar, results)) = if self.sidebar.searching() {
+            ((None, None), (search, tree))
+        } else {
+            ((search, tree), (None, None))
         };
         let overlay = crate::frame::search::overlay(
             theme,
@@ -247,13 +248,13 @@ impl RootViews {
             footer: account.map(|account| {
                 let emit = self.sidebar.emit();
                 crate::ui::chrome::account::trigger(
-                    &theme,
+                    theme,
                     crate::ui::chrome::account::Trigger {
                         account,
                         menu: self.sidebar.menu(),
                         now,
                         emit: Rc::new(move |event| {
-                            emit(crate::frame::sidebar::Event::Account(event))
+                            emit(crate::frame::sidebar::Event::Account(event));
                         }),
                     },
                 )

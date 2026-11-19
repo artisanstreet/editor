@@ -61,7 +61,7 @@ pub(crate) fn surface(
                     key,
                     Rect::from_edges(
                         rect.x,
-                        rect.y + (rect.h - crate::frame::strip::HEIGHT) * 0.5,
+                        (rect.h - crate::frame::strip::HEIGHT).mul_add(0.5, rect.y),
                         rect.right(),
                         sheet.y,
                     )
@@ -169,9 +169,10 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
         gradient(colors[2], colors[3]),
         aqua_core::GpuiBackground::Solid(colors[4]),
     ];
-    let mode = match parameters[DARK] > 0.5 {
-        true => ThemeMode::Dark,
-        false => ThemeMode::Light,
+    let mode = if parameters[DARK] > 0.5 {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
     };
     let mut items = rest_shadows(ArtisanTheme::for_mode(mode))
         .into_iter()
@@ -196,7 +197,7 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             let radius = (Radius::Shell.px() - inset)
                 .max(0.0)
                 .min(body.w * 0.5)
-                .min((local.h - inset * 2.0).max(0.0) * 0.5);
+                .min(inset.mul_add(-2.0, local.h).max(0.0) * 0.5);
             items.push(DisplayItem::GpuiBackground {
                 bounds: body.translate(bounds.x, bounds.y),
                 corners: aqua_core::CornerRadii {

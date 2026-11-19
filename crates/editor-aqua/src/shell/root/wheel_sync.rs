@@ -61,10 +61,10 @@ impl RootViews {
         if advance.transcript_moved {
             self.observations.note_reader_move();
         }
-        if advance.threads_moved {
-            if let Some(workspace) = shell.entry.workspace_mut() {
-                workspace.sidebar.page_at_viewport(&mut shell.core, true);
-            }
+        if advance.threads_moved
+            && let Some(workspace) = shell.entry.workspace_mut()
+        {
+            workspace.sidebar.page_at_viewport(&mut shell.core, true);
         }
         if advance.active {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -77,10 +77,10 @@ impl RootViews {
             self.follow_tail_early(&mut workspace.conversation, ui);
         }
         let advance = self.wheel.advance(ui);
-        if advance.threads_moved {
-            if let Some(workspace) = shell.entry.workspace_mut() {
-                workspace.sidebar.page_at_viewport(&mut shell.core, true);
-            }
+        if advance.threads_moved
+            && let Some(workspace) = shell.entry.workspace_mut()
+        {
+            workspace.sidebar.page_at_viewport(&mut shell.core, true);
         }
         advance.active
     }

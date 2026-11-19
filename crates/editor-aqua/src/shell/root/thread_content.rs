@@ -360,43 +360,42 @@ impl RootViews {
                     .on_activate(move |_| {
                         actions
                             .borrow_mut()
-                            .push_back(ConversationAction::RetryThread(scope.clone()))
+                            .push_back(ConversationAction::RetryThread(scope.clone()));
                     })
                     .build(),
                 );
             }
             controls.push(notice.build());
         }
-        if workspace.conversation.agent.is_none() {
-            if let Some(error) = core
+        if workspace.conversation.agent.is_none()
+            && let Some(error) = core
                 .host_if_instance(&scope.host, scope.instance)
                 .filter(|host| host.is_live())
                 .and_then(|host| host.thread_summary(&scope.thread))
                 .and_then(|summary| summary.error.as_ref())
-            {
-                let actions = Rc::clone(&self.conversation_actions);
-                let scope = scope.clone();
-                let retry = crate::ui::kit::Button::text(
-                    "retry-thread-controls",
-                    theme,
-                    crate::ui::kit::ButtonTone::Neutral,
-                    "Try again",
+        {
+            let actions = Rc::clone(&self.conversation_actions);
+            let scope = scope.clone();
+            let retry = crate::ui::kit::Button::text(
+                "retry-thread-controls",
+                theme,
+                crate::ui::kit::ButtonTone::Neutral,
+                "Try again",
+            )
+            .on_activate(move |_| {
+                actions
+                    .borrow_mut()
+                    .push_back(ConversationAction::RetryControls(scope.clone()));
+            })
+            .build();
+            controls.push(
+                crate::ui::page::notice(
+                    &theme,
+                    format!("Couldn't refresh questions and goals: {error}"),
                 )
-                .on_activate(move |_| {
-                    actions
-                        .borrow_mut()
-                        .push_back(ConversationAction::RetryControls(scope.clone()))
-                })
-                .build();
-                controls.push(
-                    crate::ui::page::notice(
-                        &theme,
-                        format!("Couldn't refresh questions and goals: {error}"),
-                    )
-                    .action(retry)
-                    .build(),
-                );
-            }
+                .action(retry)
+                .build(),
+            );
         }
         let above_composer = if controls.is_empty() {
             None
@@ -556,12 +555,12 @@ impl RootViews {
             Rc::new(move |action| {
                 links
                     .borrow_mut()
-                    .push_back(ConversationAction::Link(link_scope.clone(), action))
+                    .push_back(ConversationAction::Link(link_scope.clone(), action));
             }),
             Rc::new(move |action| {
                 colors
                     .borrow_mut()
-                    .push_back(ConversationAction::Color(scope.clone(), action))
+                    .push_back(ConversationAction::Color(scope.clone(), action));
             }),
         )
     }

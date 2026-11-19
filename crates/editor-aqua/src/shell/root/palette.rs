@@ -71,7 +71,10 @@ impl RootViews {
             return;
         };
         let emit = self.palette_emit();
-        let session = self.palette.as_ref().map(|view| view.session());
+        let session = self
+            .palette
+            .as_ref()
+            .map(super::super::palette::view::PaletteView::session);
         let dialog = crate::ui::dialog::Dialog::new(
             "command-palette",
             shell.preferences.theme(),

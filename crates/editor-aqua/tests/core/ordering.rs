@@ -520,7 +520,9 @@ fn magic_link_poll_interval_starts_when_pending_state_reaches_ui() {
         requests.recv_timeout(Duration::from_secs(5)).unwrap().0,
         "/v1/auth/magic/request"
     );
-    assert!(requests.recv_timeout(Duration::from_millis(3200)).is_err());
+    requests
+        .recv_timeout(Duration::from_millis(3200))
+        .unwrap_err();
     let mut pending_seen = false;
     let drained_at = Instant::now();
     let deadline = drained_at + Duration::from_secs(5);

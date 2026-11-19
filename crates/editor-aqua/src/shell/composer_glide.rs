@@ -144,19 +144,16 @@ impl ComposerGlide {
             Stage::Away | Stage::Docked(_) => None,
             Stage::Centered(centered) => *centered,
         };
-        match centered {
-            Some(centered) => {
-                let from = centered.composer_bottom + lift - centered.stage_bottom;
-                let start = from + self.shift(now);
-                self.stage = Stage::Launched { from, thread };
-                self.shift = Glide::Resting(start).retarget(0.0, now, MOVE, reduced_motion);
-                self.dusk = self.dusk.retarget(1.0, now, DUSK, reduced_motion);
-            }
-            None => {
-                self.stage = Stage::Launched { from: 0.0, thread };
-                self.shift = Glide::Resting(0.0);
-                self.dusk = Glide::Resting(1.0);
-            }
+        if let Some(centered) = centered {
+            let from = centered.composer_bottom + lift - centered.stage_bottom;
+            let start = from + self.shift(now);
+            self.stage = Stage::Launched { from, thread };
+            self.shift = Glide::Resting(start).retarget(0.0, now, MOVE, reduced_motion);
+            self.dusk = self.dusk.retarget(1.0, now, DUSK, reduced_motion);
+        } else {
+            self.stage = Stage::Launched { from: 0.0, thread };
+            self.shift = Glide::Resting(0.0);
+            self.dusk = Glide::Resting(1.0);
         }
     }
 

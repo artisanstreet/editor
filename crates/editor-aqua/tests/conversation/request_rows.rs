@@ -100,7 +100,7 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
                 Rc::new(move |action: Action| {
                     observed
                         .borrow_mut()
-                        .push((action.clone(), action_scope.bind(action)))
+                        .push((action.clone(), action_scope.bind(action)));
                 })
             },
             Rc::default(),

@@ -281,12 +281,13 @@ pub struct Setup {
 impl Setup {
     #[must_use]
     pub fn fresh(version: &str, default_location: PathBuf, relocatable: bool) -> Self {
-        let location = match relocatable {
-            true => Location::Movable {
+        let location = if relocatable {
+            Location::Movable {
                 chosen: default_location.clone(),
                 default: default_location,
-            },
-            false => Location::Fixed(default_location),
+            }
+        } else {
+            Location::Fixed(default_location)
         };
         Self {
             version: version.to_owned(),

@@ -143,7 +143,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
     app.handle_input(&InputEvent::PointerMove(PointerEvent {
         contact: 0,
         kind: PointerKind::Mouse,
-        position: Point::new(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5),
+        position: Point::new(rect.w.mul_add(0.5, rect.x), rect.h.mul_add(0.5, rect.y)),
         buttons: 0,
     }));
     run_until(&mut app, &mut host, 1.0);

@@ -173,10 +173,7 @@ fn message_hits_follow_the_thread_matches_under_their_own_heading() {
     let lists = Lists {
         inbox: vec![row(&project, "Scene bound fix")],
         history: Vec::new(),
-        hits: vec![
-            found.clone(),
-            hit("the scene bound is 512", (4, 15)).unwrap(),
-        ],
+        hits: vec![found, hit("the scene bound is 512", (4, 15)).unwrap()],
         next_tick: None,
     };
     let listed = entries(&lists, true);

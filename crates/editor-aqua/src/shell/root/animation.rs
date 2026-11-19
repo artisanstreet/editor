@@ -25,17 +25,16 @@ impl RootViews {
             return false;
         }
         let due = self.work_clock.is_none_or(|at| now >= at);
-        let next = match (due, self.work_clock) {
-            (false, Some(at)) => at,
-            _ => {
-                let into_second = shell
-                    .core
-                    .clock()
-                    .timestamp()
-                    .rem_euclid(1_000)
-                    .unsigned_abs();
-                now + std::time::Duration::from_millis(1_000 - into_second)
-            }
+        let next = if let (false, Some(at)) = (due, self.work_clock) {
+            at
+        } else {
+            let into_second = shell
+                .core
+                .clock()
+                .timestamp()
+                .rem_euclid(1_000)
+                .unsigned_abs();
+            now + std::time::Duration::from_millis(1_000 - into_second)
         };
         self.work_clock = Some(next);
         ctx.request_animation_deadline(window, ctx.now() + next.saturating_duration_since(now));

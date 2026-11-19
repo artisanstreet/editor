@@ -88,21 +88,20 @@ impl RootViews {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_input");
             self.navigation_invalidated.set(true);
         }
-        if let InputEvent::Scroll { at, delta } = input {
-            if self.image_preview.is_none()
-                && (delta.x != 0.0 || delta.y != 0.0)
-                && crate::shell::wheel::keyed_node(ui, "conversation-transcript")
-                    .and_then(|node| ui.tree().visual_rect(node))
-                    .is_some_and(|clip| clip.contains(*at))
-            {
-                self.observations.note_reader_move();
-                if delta.y != 0.0 {
-                    self.observations.note_reader_direction(delta.y > 0.0);
-                }
-                self.smooth_scroll.cancel();
-                if delta.y < 0.0 {
-                    crate::conversation::scroll::pause_tail(ui);
-                }
+        if let InputEvent::Scroll { at, delta } = input
+            && self.image_preview.is_none()
+            && (delta.x != 0.0 || delta.y != 0.0)
+            && crate::shell::wheel::keyed_node(ui, "conversation-transcript")
+                .and_then(|node| ui.tree().visual_rect(node))
+                .is_some_and(|clip| clip.contains(*at))
+        {
+            self.observations.note_reader_move();
+            if delta.y != 0.0 {
+                self.observations.note_reader_direction(delta.y > 0.0);
+            }
+            self.smooth_scroll.cancel();
+            if delta.y < 0.0 {
+                crate::conversation::scroll::pause_tail(ui);
             }
         }
         if let Some(dialog) = &self.palette_dialog {

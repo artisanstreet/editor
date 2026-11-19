@@ -195,12 +195,11 @@ impl RootViews {
             Stage::Jumped(_) | Stage::Deepened => {}
         }
         if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit, &reveal.needle) {
-            return match ui.select_text(node, range) {
-                true => {
-                    self.reveal = None;
-                    Progress::Acted
-                }
-                false => Progress::Waiting,
+            return if ui.select_text(node, range) {
+                self.reveal = None;
+                Progress::Acted
+            } else {
+                Progress::Waiting
             };
         }
         if let Stage::Jumped(at) = reveal.stage

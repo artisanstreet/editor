@@ -174,7 +174,12 @@ pub fn card(
 
 #[must_use]
 pub(crate) fn panel_height(viewport_height: f32) -> f32 {
-    (viewport_height - crate::shell::layout::TITLEBAR_HEIGHT - 2.0 * Inset::Frame.px()).max(0.0)
+    2.0f32
+        .mul_add(
+            -Inset::Frame.px(),
+            viewport_height - crate::shell::layout::TITLEBAR_HEIGHT,
+        )
+        .max(0.0)
 }
 
 #[must_use]

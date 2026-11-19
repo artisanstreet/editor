@@ -465,7 +465,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     } = opened;
     let mut app = ui_app(800.0, 600.0);
     let document = SelectionDocumentId(28);
-    let mut markdown = editor_aqua::conversation::presentation::MarkdownOwners::new(document);
+    let mut markdown = MarkdownOwners::new(document);
     markdown.rebind(&mut app, Some(scope.clone()));
     let id = ItemId("reply".into());
     let text = "First paragraph.\n\nSecond paragraph.";
@@ -518,7 +518,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let engine = editor_aqua::ui::markdown::MarkdownEngine::new().unwrap();
     markdown
         .borrow_mut()
-        .prepare_on_realization(&scope, key.clone(), "reply", &engine, "replacement", 2)
+        .prepare_on_realization(&scope, key, "reply", &engine, "replacement", 2)
         .unwrap();
     assert!(!markdown.borrow().accepts_projected(&scope, &proof, text));
     factory.dispose();
@@ -703,7 +703,7 @@ fn agent_tasks_and_reports_read_as_markdown() {
             engine: None,
             thread: None,
         },
-        ..items::item(id.clone(), opened.thread.clone(), 1, user_message(""))
+        ..items::item(id.clone(), opened.thread, 1, user_message(""))
     });
     let report = Slot::Text(TextSection::Report);
     let make_row = |slot, block| {
@@ -862,7 +862,7 @@ fn markdown_edits_keep_equal_funnel_state_and_changed_models_reset_it() {
                     key: key.clone(),
                     id: "item",
                     source,
-                    theme: &theme,
+                    theme,
                     tone: BodyTone::Foreground,
                     order: &[0],
                     glyph: Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
@@ -987,7 +987,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
             status: Status::Running,
             ..items::item(
                 id.clone(),
-                thread.clone(),
+                thread,
                 1,
                 assistant_reply("streamed words so far"),
             )
@@ -1025,7 +1025,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
     .with_row_cache(row_cache)
     .with_reveals(&conversation, &core, owners, false)
     .unwrap();
-    assert!(factory.realize(0, &RowKey::Item(id)).is_ok());
+    factory.realize(0, &RowKey::Item(id)).unwrap();
 }
 
 #[test]
@@ -1059,7 +1059,7 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
             status: Status::Done,
             ..items::item(
                 id.clone(),
-                thread.clone(),
+                thread,
                 1,
                 ItemKind::AssistantMessage {
                     text: TextContent::Stored(ContentRef::from_text("a stored reply")),

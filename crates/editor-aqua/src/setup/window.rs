@@ -39,7 +39,7 @@ pub enum SetupWindowError {
     Run { message: String },
 }
 
-pub fn run(setup: Setup) -> Result<(), SetupWindowError> {
+pub(super) fn run(setup: Setup) -> Result<(), SetupWindowError> {
     let mut config = aqua::AquaConfig::default();
     config.window.title = "Artisan Editor Setup".to_owned();
     config.window.inner_size.width = view::WINDOW.0;

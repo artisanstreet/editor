@@ -279,22 +279,23 @@ impl Drop for PaletteView {
 }
 
 fn row(theme: &ArtisanTheme, index: usize, entry: &super::Entry, selected: bool) -> RowItem {
-    let row = match entry.detail.is_empty() {
-        true => RowItem::new(
+    let row = if entry.detail.is_empty() {
+        RowItem::new(
             index,
             *theme,
             Row::ListItem(Density::Regular),
             Surface::Dialog,
             entry.label.clone(),
-        ),
-        false => RowItem::new(
+        )
+    } else {
+        RowItem::new(
             index,
             *theme,
             Row::ListItem(Density::Tall),
             Surface::Dialog,
             entry.label.clone(),
         )
-        .detail(entry.detail.clone()),
+        .detail(entry.detail.clone())
     };
     row.selected(selected)
 }

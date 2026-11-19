@@ -381,7 +381,7 @@ pub(crate) fn restore(path: &Path, expected_sha256: &str) -> Result<(), RestoreE
         path: path.to_owned(),
         source,
     };
-    if !path.file_name().is_some_and(|name| name == "seed.json")
+    if path.file_name().is_none_or(|name| name != "seed.json")
         || !std::fs::symlink_metadata(path).map_err(read)?.is_file()
     {
         return Err(record_path());

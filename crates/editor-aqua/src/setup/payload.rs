@@ -2,7 +2,7 @@ use artisan_paths::RootError;
 use artisan_payload::{Payload, WritePayloadError};
 use std::path::PathBuf;
 
-pub static AE: Payload<'static> = artisan_payload::payload!("ae.gz");
+pub(super) static AE: Payload<'static> = artisan_payload::payload!("ae.gz");
 static AE_LINUX: Payload<'static> = artisan_payload::payload!("ae-linux.gz");
 static NOTICES: Payload<'static> = artisan_payload::payload!("notices.gz");
 
@@ -25,20 +25,20 @@ pub enum WriteNoticesError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum OpenNoticesError {
+pub(crate) enum OpenNoticesError {
     #[error("write the notices to a temporary file")]
     Write(#[source] WritePayloadError),
     #[error("open the notices")]
     Open(#[source] crate::shell::OpenPathError),
 }
 
-pub struct Staged {
+pub(super) struct Staged {
     _folder: tempfile::TempDir,
     pub ae: PathBuf,
     pub linux_ae: Option<PathBuf>,
 }
 
-pub fn stage() -> Result<Staged, StageError> {
+pub(super) fn stage() -> Result<Staged, StageError> {
     let folder = tempfile::Builder::new()
         .prefix("artisan-setup-")
         .tempdir()
@@ -62,7 +62,7 @@ pub fn stage() -> Result<Staged, StageError> {
     })
 }
 
-pub fn write_notices() -> Result<(), WriteNoticesError> {
+pub(super) fn write_notices() -> Result<(), WriteNoticesError> {
     let folder = artisan_paths::App::Editor
         .dir()
         .map_err(WriteNoticesError::Folder)?;
@@ -74,7 +74,7 @@ pub fn write_notices() -> Result<(), WriteNoticesError> {
         .map_err(WriteNoticesError::Write)
 }
 
-pub fn open_notices() -> Result<(), OpenNoticesError> {
+pub(crate) fn open_notices() -> Result<(), OpenNoticesError> {
     let path = std::env::temp_dir().join("Artisan Editor NOTICES.txt");
     NOTICES.write(&path).map_err(OpenNoticesError::Write)?;
     crate::shell::open_path(&path).map_err(OpenNoticesError::Open)
