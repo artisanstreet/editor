@@ -107,6 +107,12 @@ enum Cleanup {
 }
 
 impl Ending {
+    fn after_stop(outcome: &Outcome) -> Self {
+        Self::Stopped(outcome.failure().map_or(Cleanup::Confirmed, |failure| {
+            Cleanup::Failed(failure.message.clone())
+        }))
+    }
+
     fn unconfirmed(self) -> Self {
         match self {
             Self::Stopped(Cleanup::Confirmed | Cleanup::Unconfirmed) => {
@@ -695,7 +701,11 @@ async fn execute(
                 () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
                 outcome = &mut adapter_outcome => {
                     adapter_finished = true;
-                    break Ending::Finished(outcome);
+                    break if cancel.is_cancelled() {
+                        Ending::after_stop(&outcome)
+                    } else {
+                        Ending::Finished(outcome)
+                    };
                 }
                 () = disk.due() => {
                     if let Some(stopped) = guard_disk(hub, run, &mut disk).await {

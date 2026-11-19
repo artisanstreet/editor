@@ -609,3 +609,51 @@ async fn a_continue_acknowledged_during_a_stop_survives_a_storage_failure() {
         Some((RunStatus::Done, Some(artisan_api::Continuation::Requested)))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_that_lands_as_the_engine_returns_is_still_a_stop() {
+    let stopper: Arc<std::sync::OnceLock<(Hub, ThreadId)>> = Arc::default();
+    let script_stopper = Arc::clone(&stopper);
+    let fixture = fixture(Arc::new(move |_, io| {
+        let stopper = Arc::clone(&script_stopper);
+        Box::pin(async move {
+            let (hub, thread) = stopper
+                .get()
+                .expect("the test names the run to stop")
+                .clone();
+            let runtime = tokio::runtime::Handle::current();
+            drop(std::thread::spawn(move || {
+                runtime
+                    .block_on(hub.cancel(&thread))
+                    .expect("the stop is accepted");
+            }));
+            test_support::wait::wait_until(
+                "the stop to reach the engine while it is still answering",
+                Duration::from_secs(10),
+                || io.cancel.is_cancelled(),
+            );
+            Outcome::retryable(
+                "provider refused to stop".to_owned(),
+                forge_engines::Retry::Overloaded,
+            )
+        })
+    }))
+    .await;
+    stopper
+        .set((fixture.hub.clone(), fixture.thread_id.clone()))
+        .expect("the stopper is set once");
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("work"))
+        .await
+        .unwrap();
+
+    let runs = fixture.settled().await;
+    assert_eq!(runs[0].status(), RunStatus::Cancelled, "{runs:#?}");
+    assert_eq!(runs[0].error(), Some("provider refused to stop"));
+    assert_eq!(
+        fixture.thread().await.parked_until,
+        None,
+        "a stop is not retried"
+    );
+}
