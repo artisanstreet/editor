@@ -172,6 +172,12 @@ enum PlatformError {
         #[source]
         source: std::io::Error,
     },
+    #[error("watch {} for a stop request", path.display())]
+    WatchStop {
+        path: PathBuf,
+        #[source]
+        source: notify::Error,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -280,6 +286,7 @@ async fn serve_recorded(
     let pid_file = config.data_dir.join("forge.pid");
     let forge = forge_http::start(config).await?;
     remove_if_present(&stop_file)?;
+    let stop_watch = StopWatch::start(&stop_file)?;
     std::fs::write(&pid_file, std::process::id().to_string()).map_err(|source| {
         PlatformError::WritePid {
             path: pid_file.clone(),
@@ -290,7 +297,7 @@ async fn serve_recorded(
         .run_until(async {
             tokio::select! {
                 () = stop => {},
-                () = stop_file_appears(&stop_file) => tracing::info!("asked to stop by {}", stop_file.display()),
+                () = stop_watch.appeared(&stop_file) => tracing::info!("asked to stop by {}", stop_file.display()),
             }
         })
         .await;
@@ -311,9 +318,44 @@ fn remove_if_present(path: &std::path::Path) -> Result<(), PlatformError> {
 }
 
 #[cfg(not(unix))]
-async fn stop_file_appears(path: &std::path::Path) {
-    while !path.exists() {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+struct StopWatch {
+    _watcher: notify::RecommendedWatcher,
+    changes: tokio::sync::watch::Receiver<()>,
+}
+
+#[cfg(not(unix))]
+impl StopWatch {
+    fn start(path: &std::path::Path) -> Result<Self, PlatformError> {
+        use notify::Watcher as _;
+        let watching = |source| PlatformError::WatchStop {
+            path: path.to_owned(),
+            source,
+        };
+        let (signal, changes) = tokio::sync::watch::channel(());
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Err(error) = event {
+                    tracing::warn!(%error, "watching for a stop request");
+                }
+                signal.send_replace(());
+            })
+            .map_err(watching)?;
+        let folder = path.parent().unwrap_or(path);
+        watcher
+            .watch(folder, notify::RecursiveMode::NonRecursive)
+            .map_err(watching)?;
+        Ok(Self {
+            _watcher: watcher,
+            changes,
+        })
+    }
+
+    async fn appeared(mut self, path: &std::path::Path) {
+        while !path.exists() {
+            if self.changes.changed().await.is_err() {
+                unreachable!("invariant: the stop watch outlives its own sender");
+            }
+        }
     }
 }
 

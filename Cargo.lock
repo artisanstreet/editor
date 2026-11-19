@@ -2175,6 +2175,7 @@ dependencies = [
  "forge-isolation",
  "forge-runs",
  "forge-store",
+ "notify",
  "reqwest",
  "serde_json",
  "tempfile",

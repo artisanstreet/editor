@@ -31,6 +31,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing.workspace = true
 
+[target.'cfg(not(unix))'.dependencies]
+notify.workspace = true
+
 [build-dependencies]
 build-info.workspace = true
 
