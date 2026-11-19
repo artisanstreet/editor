@@ -1,8 +1,8 @@
 use crate::conversation::scroll::{self, Step};
 use crate::ui::text::wheel_glide::{WheelGlide, WheelInput};
+use aqua::Instant;
 use aqua::UiApp;
 use aqua_core::{InputEvent, NodeId, Point};
-use std::time::Instant;
 
 pub(crate) const THREADS: &str = "sidebar-threads";
 pub use crate::ui::scroll::MODEL_MENU;

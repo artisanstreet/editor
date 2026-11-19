@@ -43,7 +43,7 @@ pub trait SectionViews {
     fn take_invalidation(&mut self) -> Invalidation {
         Invalidation::default()
     }
-    fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
+    fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp, _now: Instant) -> bool {
         false
     }
     fn glide_active(&self) -> bool {
@@ -67,7 +67,7 @@ pub trait SectionViews {
     ) -> bool {
         false
     }
-    fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent) -> Option<bool> {
+    fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent, _now: Instant) -> Option<bool> {
         None
     }
     fn open_composer_images(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
@@ -1173,7 +1173,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             let _tm = Tm::new("input.route");
             let pre = {
                 let _tm = Tm::new("input.pre");
-                self.views.pre_input(self.ui.ui_mut(), event)
+                self.views.pre_input(self.ui.ui_mut(), event, ctx.now())
             };
             if let Some(consumed) = pre {
                 glided = matches!(event, InputEvent::Scroll { .. });
@@ -1246,7 +1246,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn externals(&mut self, frame: &mut ExternalFrame<'_>) {
         let _tm = Tm::new("ext");
-        self.views.advance_glides(&mut self.shell, self.ui.ui_mut());
+        self.views
+            .advance_glides(&mut self.shell, self.ui.ui_mut(), frame.now);
         let supported = Some(false);
         if self.shell.meshes_supported.replace(supported) != supported {
             self.shell.meshes_changed.set(true);

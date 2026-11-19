@@ -57,7 +57,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let advance = self.wheel.advance(ui, std::time::Instant::now());
+        let advance = self.wheel.advance(ui, ctx.now());
         if advance.transcript_moved {
             self.observations.note_reader_move();
         }
@@ -72,11 +72,16 @@ impl RootViews {
         advance.threads_moved
     }
 
-    pub(super) fn advance_wheel_glides(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+    pub(super) fn advance_wheel_glides(
+        &mut self,
+        shell: &mut Shell,
+        ui: &mut UiApp,
+        now: aqua::Instant,
+    ) -> bool {
         if let Some(workspace) = shell.entry.workspace_mut() {
             self.follow_tail_early(&mut workspace.conversation, ui);
         }
-        let advance = self.wheel.advance(ui, std::time::Instant::now());
+        let advance = self.wheel.advance(ui, now);
         if advance.threads_moved
             && let Some(workspace) = shell.entry.workspace_mut()
         {

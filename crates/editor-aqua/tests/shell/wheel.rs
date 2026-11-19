@@ -1,10 +1,11 @@
+use aqua::Instant;
 use aqua_core::{InputEvent, Point, ScrollDelta};
 use aqua_text::{SharedFonts, SharedRuns};
 use editor_aqua::conversation::scroll::{
     SmoothScroll, Step, apply_step, enter_tail, following_tail, pause_tail,
 };
 use editor_aqua::shell::wheel::{Surface, WheelGlides};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const TRANSCRIPT: &str = "conversation-transcript";
 
@@ -104,7 +105,7 @@ fn glide_to_rest(app: &mut aqua::UiApp, glides: &mut WheelGlides, start: Instant
 fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     assert!(following_tail(&app));
@@ -130,7 +131,7 @@ fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
 fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
     let mut smooth = SmoothScroll::default();
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
@@ -148,7 +149,7 @@ fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
             following_tail(&app),
             -rested,
             300.0,
-            Instant::now(),
+            std::time::Instant::now(),
         );
         assert_eq!(step, Step::Idle);
         apply_step(&mut app, step, 0.0);
@@ -161,7 +162,7 @@ fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
 fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reentering_it() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
     assert!(apply_step(
         &mut app,
         Step::Scroll {
@@ -188,7 +189,7 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
 fn a_precise_wheel_gesture_glides_like_a_notch() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     pause_tail(&mut app);
@@ -207,7 +208,7 @@ fn a_precise_wheel_gesture_glides_like_a_notch() {
 fn a_horizontal_gesture_still_cancels_the_glide() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     pause_tail(&mut app);
@@ -251,7 +252,7 @@ fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
     app.mount(|_| model_list(0.0)).unwrap();
     app.build_frame().unwrap();
     let mut glides = WheelGlides::default();
-    let start = Instant::now();
+    let start = Instant::ZERO;
 
     assert_eq!(glides.offer(&app, &notch(3.0), start), Some(Surface::Model));
     glide_to_rest(&mut app, &mut glides, start);

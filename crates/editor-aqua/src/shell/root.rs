@@ -403,8 +403,8 @@ impl SectionViews for RootViews {
         !(quiet && key == built)
     }
 
-    fn advance_glides(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
-        self.advance_wheel_glides(shell, ui)
+    fn advance_glides(&mut self, shell: &mut Shell, ui: &mut UiApp, now: aqua::Instant) -> bool {
+        self.advance_wheel_glides(shell, ui, now)
     }
 
     fn glide_active(&self) -> bool {
@@ -445,8 +445,13 @@ impl SectionViews for RootViews {
         self.step_animation(shell, ui, ctx, window)
     }
 
-    fn pre_input(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<bool> {
-        self.intercept_input(ui, input)
+    fn pre_input(
+        &mut self,
+        ui: &mut UiApp,
+        input: &InputEvent,
+        now: aqua::Instant,
+    ) -> Option<bool> {
+        self.intercept_input(ui, input, now)
     }
     fn build(
         &mut self,

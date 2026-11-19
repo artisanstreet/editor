@@ -1,4 +1,5 @@
-use std::time::{Duration, Instant};
+use aqua::Instant;
+use std::time::Duration;
 
 const LINE_UNIT: f32 = 16.0;
 const NOTCH_LINES: f32 = 3.0;

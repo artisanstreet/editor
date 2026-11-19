@@ -570,18 +570,66 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
         ScrollResolution::Cancelled
     );
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
-    root.advance_glides(&mut shell, &mut resources.ui);
+    root.advance_glides(&mut shell, &mut resources.ui, aqua::Instant::ZERO);
 
     let conversation = shell.entry.workspace_mut().unwrap().conversation_mut();
     conversation.jump(
         &shell.core,
         editor_aqua::conversation::viewport::Jump::Latest,
     );
-    root.advance_glides(&mut shell, &mut resources.ui);
+    root.advance_glides(&mut shell, &mut resources.ui, aqua::Instant::ZERO);
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
-    root.advance_glides(&mut shell, &mut resources.ui);
+    root.advance_glides(&mut shell, &mut resources.ui, aqua::Instant::ZERO);
     assert!(
         following_tail(&resources.ui),
         "jumping to the latest message follows the tail"
+    );
+}
+
+#[test]
+fn a_wheel_notch_on_the_transcript_glides_by_the_frame_clock() {
+    use aqua::prelude::InputEvent;
+    use aqua_core::{Point, ScrollDelta};
+    use std::time::Duration;
+
+    let mut opened = ThreadShell::open("wheel-host", "wheel-thread", Motion::Full);
+    opened.workspace().conversation_mut().landing = None;
+    replies(&mut opened, 80);
+    let window = opened.window("wheel");
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    resources.ui.layout().unwrap();
+    let transcript = keyed(&resources.ui, "conversation-transcript").unwrap();
+    let notch = InputEvent::Scroll {
+        at: Point::new(
+            transcript.x + transcript.w / 2.0,
+            transcript.y + transcript.h / 2.0,
+        ),
+        delta: ScrollDelta { x: 0.0, y: 16.0 },
+    };
+    let frame = aqua::Instant::from_nanos(5_000_000_000);
+    assert_eq!(root.pre_input(&mut resources.ui, &notch, frame), Some(true));
+    assert!(root.glide_active());
+    root.advance_glides(&mut shell, &mut resources.ui, frame);
+    assert!(
+        root.glide_active(),
+        "no frame time has passed, so the glide has not moved"
+    );
+    let later = frame + Duration::from_secs(1);
+    root.advance_glides(&mut shell, &mut resources.ui, later);
+    root.advance_glides(
+        &mut shell,
+        &mut resources.ui,
+        later + Duration::from_millis(16),
+    );
+    assert!(
+        !root.glide_active(),
+        "a second of frames after the notch the glide has come to rest"
     );
 }

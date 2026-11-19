@@ -5,7 +5,12 @@ use aqua::prelude::{AquaWindowId, InputEvent};
 use aqua::{AppCtx, UiApp};
 
 impl RootViews {
-    pub(super) fn intercept_input(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<bool> {
+    pub(super) fn intercept_input(
+        &mut self,
+        ui: &mut UiApp,
+        input: &InputEvent,
+        now: aqua::Instant,
+    ) -> Option<bool> {
         if let InputEvent::PointerDown(pointer, _) = input
             && self.navigation.dismiss(
                 ui,
@@ -73,9 +78,7 @@ impl RootViews {
             return Some(true);
         }
         let _tm = crate::shell::application::Tm::new("pre.wheel");
-        self.wheel
-            .offer(ui, input, std::time::Instant::now())
-            .map(|_| true)
+        self.wheel.offer(ui, input, now).map(|_| true)
     }
 
     #[expect(
