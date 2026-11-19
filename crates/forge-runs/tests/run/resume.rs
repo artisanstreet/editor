@@ -39,7 +39,7 @@ impl Harness for FakeCodex {
 }
 
 async fn agent_settles(fixture: &Fixture, agent: &ItemId) -> AgentInfo {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let info = fixture
                 .hub

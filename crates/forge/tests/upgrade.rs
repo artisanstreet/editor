@@ -81,7 +81,7 @@ async fn start() -> (tempfile::TempDir, Running, upgrade::Gateway) {
         .spawn()
         .unwrap();
     let mut running = Running { child, data };
-    let gateway = tokio::time::timeout(Duration::from_secs(30), async {
+    let gateway = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if let Some(status) = running.child.try_wait().unwrap() {
                 panic!(
@@ -106,7 +106,7 @@ async fn device(data: &std::path::Path, address: std::net::SocketAddr) -> reqwes
     let identity = Identity::generate("upgrade-test").unwrap();
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(10))
+        .timeout(test_support::wait::LIVENESS)
         .use_preconfigured_tls(
             tls::client_config(
                 &identity,
@@ -179,7 +179,7 @@ async fn replacement_preserves_the_listening_port_and_serves_requests_during_gat
         assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while running.child.try_wait().unwrap().is_none() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -225,7 +225,7 @@ async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both
     drop(closed);
     upgrade::write(&active, &unreachable).unwrap();
     let _client = std::net::TcpStream::connect(gateway.address).unwrap();
-    let logged = tokio::time::timeout(Duration::from_secs(10), async {
+    let logged = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let log = std::fs::read_to_string(directory.path().join("forge.log")).unwrap();
             if let Some(line) = log
@@ -240,7 +240,7 @@ async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both
     .await
     .unwrap();
     assert!(logged.contains(&gateway.id), "{logged}");
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let restored = forge_runs::runtime::read::<forge_runs::runtime::Member>(&active)
                 .unwrap()
@@ -259,7 +259,7 @@ async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both
 async fn a_backend_that_dies_is_replaced_before_anyone_connects() {
     let (directory, running, gateway) = start().await;
     signal("-KILL", &[gateway.backend.pid]);
-    let restarted = tokio::time::timeout(Duration::from_secs(60), async {
+    let restarted = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if let Some(current) = upgrade::gateway(&running.data)
                 .unwrap()

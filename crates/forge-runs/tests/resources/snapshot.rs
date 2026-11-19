@@ -9,7 +9,7 @@ async fn kept(fixture: &Fixture, item: &ItemId, written: &Written) -> Vec<u8> {
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let snapshot = fixture.hub.store().resource_snapshot_target(
                 &fixture.thread_id,
@@ -290,7 +290,7 @@ async fn a_reply_keeps_the_file_as_it_was_when_the_reply_was_published() {
         .send_message(&fixture.thread_id, message("plot"))
         .await
         .unwrap();
-    let item = tokio::time::timeout(Duration::from_secs(10), async {
+    let item = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if let Event::Item { item } = events.recv().await.unwrap().event
                 && matches!(item.kind, ItemKind::AssistantMessage { .. })

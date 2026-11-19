@@ -100,7 +100,7 @@ async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
     configure(&fixture, up_address, down, "server").await;
     test_support::wait::eventually(
         "the changed MCP servers to be checked and the check to reach the server",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture.hub.mcp().reachability().probed(2) && up_connections.load(Ordering::SeqCst) > 0
         },
@@ -126,7 +126,7 @@ async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
     configure(&fixture, up_address, down, "other-server").await;
     test_support::wait::eventually(
         "a config change to check the servers again",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             down_connections.load(Ordering::SeqCst) > 0
                 && fixture.hub.mcp().reachability().probed(2)
@@ -154,7 +154,7 @@ async fn servers_configured_before_the_watcher_first_runs_are_still_checked() {
     tokio::spawn(watching);
     test_support::wait::eventually(
         "the watcher to check the servers configured before it first ran",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture.hub.mcp().reachability().probed(2) && up_connections.load(Ordering::SeqCst) > 0
         },

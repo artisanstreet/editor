@@ -20,7 +20,7 @@ async fn reconnecting_clients_receive_live_previews_in_the_same_order() {
         .send_message(&fixture.thread_id, message("start"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), started.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
         .await
         .expect("the engine must start before publishing its live previews");
     for _ in 0..32 {

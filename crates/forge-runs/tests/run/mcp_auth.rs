@@ -16,7 +16,6 @@ use tokio::sync::Notify;
 use url::Url;
 
 const REDIRECT: &str = "http://127.0.0.1:33418/callback";
-const LIMIT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Gate {
@@ -362,10 +361,14 @@ async fn signing_out_during_a_token_exchange_stays_signed_out() {
         let fixture = Arc::clone(&fixture);
         async move { fixture.hub.mcp().sign_out("linear").await }
     });
-    eventually("sign-out to wait for the exchange", LIMIT, || {
-        let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
-        async move { ready }
-    })
+    eventually(
+        "sign-out to wait for the exchange",
+        test_support::wait::LIVENESS,
+        || {
+            let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
+            async move { ready }
+        },
+    )
     .await;
     provider.token_gate.release.notify_one();
     drop(finishing.await.unwrap());
@@ -390,10 +393,14 @@ async fn signing_out_during_a_refresh_stays_signed_out() {
         let fixture = Arc::clone(&fixture);
         async move { fixture.hub.mcp().sign_out("linear").await }
     });
-    eventually("sign-out to wait for the refresh", LIMIT, || {
-        let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
-        async move { ready }
-    })
+    eventually(
+        "sign-out to wait for the refresh",
+        test_support::wait::LIVENESS,
+        || {
+            let ready = signing_out.is_finished() || waiters_on_lifetime(&fixture) == 3;
+            async move { ready }
+        },
+    )
     .await;
     provider.token_gate.release.notify_one();
     drop(launching.await.unwrap());

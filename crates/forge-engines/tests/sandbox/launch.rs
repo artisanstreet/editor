@@ -3,7 +3,6 @@ use crate::{Launch, Turn, UserInput};
 use artisan_api::{EngineConfig, EngineId, Permissions, ThreadId};
 use forge_isolation::Support;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const SCRIPT: &str = r#"
 echo inside > made
@@ -98,7 +97,7 @@ async fn run_script(turn: &Turn, script: &str, args: &[String]) -> Vec<String> {
     command.extend_from_slice(args);
     let mut process = spawn(turn, &command).unwrap();
     let mut lines = Vec::new();
-    while let Some(line) = tokio::time::timeout(Duration::from_secs(10), process.next_line())
+    while let Some(line) = tokio::time::timeout(test_support::wait::LIVENESS, process.next_line())
         .await
         .unwrap()
         .unwrap()

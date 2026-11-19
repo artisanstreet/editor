@@ -46,10 +46,10 @@ async fn a_native_worker_resumed_in_the_same_turn_returns_to_the_inspector() {
         .send_message(&fixture.thread_id, message("work"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), ready.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, ready.notified())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let summary = fixture
                 .hub

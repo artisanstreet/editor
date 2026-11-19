@@ -21,7 +21,7 @@ async fn fixture_on_disk(script: Script, free: Arc<AtomicU64>) -> (Fixture, Arc<
 }
 
 async fn observed_disk(checks: &AtomicU64) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while checks.load(Ordering::Acquire) < 2 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -222,7 +222,7 @@ async fn a_run_on_a_disk_that_goes(from: u64, through: &[u64]) -> (RunStatus, Ve
         checks.store(0, Ordering::Release);
         free.store(next, Ordering::Relaxed);
     }
-    let runs = tokio::time::timeout(Duration::from_secs(10), fixture.settled())
+    let runs = tokio::time::timeout(test_support::wait::LIVENESS, fixture.settled())
         .await
         .expect("the guard stops the run");
     (runs[0].status(), errors(&fixture.items().await))

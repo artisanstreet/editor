@@ -64,13 +64,15 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
     let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
     let (agent, child) = background_agent(&fixture, &parent).await;
     fixture.hub.resume_pending();
-    test_support::wait::eventually("the agent to start", Duration::from_secs(10), || async {
-        fixture.delivered(&child).await
-    })
+    test_support::wait::eventually(
+        "the agent to start",
+        test_support::wait::LIVENESS,
+        || async { fixture.delivered(&child).await },
+    )
     .await;
     let disk =
         rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3")).unwrap();
-    disk.busy_timeout(Duration::from_secs(5)).unwrap();
+    disk.busy_timeout(test_support::wait::LIVENESS).unwrap();
     disk.execute(
         &include_str!("fill_disk_for_thread.sql").replace("__THREAD__", &parent.id.to_string()),
         [],
@@ -80,7 +82,7 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
     release.notify_one();
     test_support::wait::eventually(
         "the agent's run to end",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             !fixture.hub.is_live(&child)
                 && store
@@ -134,7 +136,7 @@ async fn a_finished_background_agent_reports_to_its_parent_in_a_managed_generati
     fixture.hub.resume_pending();
     test_support::wait::eventually(
         "the parent to hear its agent finished",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .items()

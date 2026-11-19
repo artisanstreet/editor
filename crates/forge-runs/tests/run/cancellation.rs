@@ -35,11 +35,11 @@ async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_
             .send_message(&fixture.thread_id, message_on(engine, "work"))
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), ready.notified())
+        tokio::time::timeout(test_support::wait::LIVENESS, ready.notified())
             .await
             .unwrap();
         fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
             .await
             .unwrap();
         assert!(fixture.hub.is_live(&fixture.thread_id));
@@ -83,7 +83,7 @@ async fn a_stop_the_engine_fails_to_clean_up_stays_a_continuable_stop() {
         .send_message(&fixture.thread_id, message("work"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), ready.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, ready.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
@@ -126,7 +126,7 @@ async fn a_stop_the_engine_never_confirms_stays_a_stop_that_says_so() {
         .send_message(&fixture.thread_id, message("work"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), ready.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, ready.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
@@ -312,7 +312,7 @@ async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
         .send_message(&fixture.thread_id, message("rename the module"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), started.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
@@ -405,12 +405,12 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     test_support::wait::eventually(
         "the stop to be shown before the engine confirms it",
-        Duration::from_secs(5),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .hub
@@ -457,7 +457,7 @@ async fn continue_is_accepted_while_a_stop_winds_down_before_the_stop_is_saved()
     let disk = durability::DiskFull::arming(&fixture, "runs");
     disk.strike();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     fixture
@@ -469,7 +469,7 @@ async fn continue_is_accepted_while_a_stop_winds_down_before_the_stop_is_saved()
     winding.release.notify_one();
     test_support::wait::eventually(
         "the stopped run to be saved",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .hub
@@ -492,7 +492,7 @@ async fn stop_then_continue_then_stop_leaves_the_turn_stopped() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
@@ -547,12 +547,12 @@ async fn a_stop_forge_shuts_down_during_is_not_resumed_on_restart() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     fixture.hub.shutdown();
     winding.release.notify_one();
-    fixture.hub.stop(Duration::from_secs(10)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 
     stays_stopped_after_restart(&fixture).await;
     assert_eq!(winding.turns(), 1);
@@ -563,12 +563,12 @@ async fn a_stop_pressed_while_forge_shuts_down_is_not_resumed_on_restart() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.shutdown();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     winding.release.notify_one();
-    fixture.hub.stop(Duration::from_secs(10)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 
     stays_stopped_after_restart(&fixture).await;
 }
@@ -578,25 +578,29 @@ async fn a_continue_acknowledged_during_a_stop_survives_a_storage_failure() {
     let winding = WindingDown::new();
     let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
         .await
         .unwrap();
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
     let disk = durability::DiskFull::arming(&fixture, "continues");
     disk.strike();
     winding.release.notify_one();
-    test_support::wait::within("the stopped run to end", Duration::from_secs(10), async {
-        while fixture.hub.is_live(&fixture.thread_id) {
-            tokio::task::yield_now().await;
-        }
-    })
+    test_support::wait::within(
+        "the stopped run to end",
+        test_support::wait::LIVENESS,
+        async {
+            while fixture.hub.is_live(&fixture.thread_id) {
+                tokio::task::yield_now().await;
+            }
+        },
+    )
     .await;
     assert_eq!(winding.turns(), 1);
 
     disk.clear();
     test_support::wait::eventually(
         "the acknowledged continue to run once storage recovers",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async { winding.turns() == 2 },
     )
     .await;
@@ -629,7 +633,7 @@ async fn a_stop_that_lands_as_the_engine_returns_is_still_a_stop() {
             }));
             test_support::wait::wait_until(
                 "the stop to reach the engine while it is still answering",
-                Duration::from_secs(10),
+                test_support::wait::LIVENESS,
                 || io.cancel.is_cancelled(),
             );
             Outcome::retryable(

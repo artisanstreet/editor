@@ -106,7 +106,7 @@ async fn request_retries_do_not_duplicate_delivery_and_acknowledgments_notify_th
         .await
         .unwrap();
     fixture.wait_for(|items|items.iter().any(|item|matches!(&item.kind,ItemKind::UserMessage { text,.. } if text.inline().is_some_and(|text|text.contains("Coordination receipt:"))))).await;
-    fixture.hub.stop(Duration::from_secs(2)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -135,7 +135,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
         )
         .await
         .unwrap();
-    fixture.hub.stop(Duration::from_secs(2)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
     fixture
         .hub
         .store()
@@ -156,7 +156,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
         fixture.dir.path().to_path_buf(),
         Arc::new(move |_| Arc::clone(&harness)),
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let current = restarted
                 .store()
@@ -192,7 +192,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
         .unwrap()
         .items;
     assert_eq!(items.iter().filter(|item|matches!(&item.kind,ItemKind::UserMessage { text,.. } if text.inline().is_some_and(|text|text.contains("Work dependency")))).count(),1);
-    restarted.stop(Duration::from_secs(2)).await;
+    restarted.stop(test_support::wait::LIVENESS).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -256,7 +256,7 @@ async fn cancelled_watches_never_start_a_notification_turn() {
             .is_empty()
     );
     assert!(fixture.items().await.is_empty());
-    fixture.hub.stop(Duration::from_secs(2)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 }
 
 async fn acknowledged_request(
@@ -336,7 +336,7 @@ async fn a_receipt_that_cannot_be_delivered_does_not_hold_up_the_others() {
         ItemKind::UserMessage { text, .. }
             if text.inline().is_some_and(|text| text.contains(&undeliverable))
     )));
-    fixture.hub.stop(Duration::from_secs(2)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -359,5 +359,5 @@ async fn a_quiet_forge_does_no_periodic_store_work() {
         settled,
         "an idle Forge read or wrote its store with nothing to do"
     );
-    fixture.hub.stop(Duration::from_secs(2)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
 }

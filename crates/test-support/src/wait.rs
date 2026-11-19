@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+pub const LIVENESS: Duration = Duration::from_secs(60);
+
 const FIRST_PAUSE: Duration = Duration::from_micros(50);
 const LONGEST_PAUSE: Duration = Duration::from_millis(10);
 

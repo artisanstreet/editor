@@ -7,7 +7,7 @@ impl DiskFull {
         let conn =
             rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3"))
                 .unwrap();
-        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.busy_timeout(test_support::wait::LIVENESS).unwrap();
         conn.execute_batch(&include_str!("arm_disk_full.sql").replace("__TABLE__", table))
             .unwrap();
         Self(conn)
@@ -25,11 +25,15 @@ impl DiskFull {
 }
 
 async fn working(fixture: &Fixture, live: bool) {
-    test_support::wait::within("the thread's live state", Duration::from_secs(10), async {
-        while fixture.hub.is_live(&fixture.thread_id) != live {
-            tokio::task::yield_now().await;
-        }
-    })
+    test_support::wait::within(
+        "the thread's live state",
+        test_support::wait::LIVENESS,
+        async {
+            while fixture.hub.is_live(&fixture.thread_id) != live {
+                tokio::task::yield_now().await;
+            }
+        },
+    )
     .await;
 }
 
@@ -148,7 +152,7 @@ async fn a_run_whose_end_could_not_be_saved_settles_once_storage_recovers() {
     disk.clear();
     test_support::wait::eventually(
         "the run to settle after storage recovers",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .hub

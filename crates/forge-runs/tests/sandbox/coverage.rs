@@ -194,7 +194,7 @@ async fn a_continued_turn_says_once_that_it_isnt_sandboxed_and_the_next_turn_say
         .send_message(&fixture.thread_id, message("work"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), started.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();

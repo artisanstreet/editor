@@ -23,7 +23,7 @@ async fn native_compaction_forks_overrides_only_the_fork_and_cleans_it_up() {
         trace_dir: None,
     };
     let reply = tokio::time::timeout(
-        Duration::from_secs(15),
+        test_support::wait::LIVENESS,
         compact(turn.clone(), CancellationToken::new()),
     )
     .await
@@ -59,7 +59,7 @@ async fn native_compaction_forks_overrides_only_the_fork_and_cleans_it_up() {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task = tokio::spawn(async move { compact(hanging, task_cancel).await });
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while !dir.path().join("hanging").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -67,7 +67,7 @@ async fn native_compaction_forks_overrides_only_the_fork_and_cleans_it_up() {
     .await
     .unwrap();
     cancel.cancel();
-    let error = tokio::time::timeout(Duration::from_secs(10), task)
+    let error = tokio::time::timeout(test_support::wait::LIVENESS, task)
         .await
         .unwrap()
         .unwrap()

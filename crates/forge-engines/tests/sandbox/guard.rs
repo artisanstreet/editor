@@ -3,7 +3,6 @@ use crate::{Launch, Turn, UserInput};
 use artisan_api::{EngineConfig, EngineId, Permissions, ThreadId};
 use forge_isolation::Support;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const PLANT_CLAUDE: &str = r#"
 printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/pwned"}]}]}}' > .claude/settings.json
@@ -62,7 +61,7 @@ fn turn(engine: EngineId, home: &Path, permissions: Permissions) -> Turn {
 async fn run(turn: &Turn, script: &str) -> Vec<String> {
     let mut process = spawn(turn, &["-c".to_owned(), script.to_owned()]).unwrap();
     let mut lines = Vec::new();
-    while let Some(line) = tokio::time::timeout(Duration::from_secs(10), process.next_line())
+    while let Some(line) = tokio::time::timeout(test_support::wait::LIVENESS, process.next_line())
         .await
         .unwrap()
         .unwrap()
@@ -215,7 +214,7 @@ async fn a_full_access_run_between_two_plants_of_a_live_auto_run_still_gets_the_
     )
     .await;
     planter.close_stdin("plant now");
-    while tokio::time::timeout(Duration::from_secs(10), planter.next_line())
+    while tokio::time::timeout(test_support::wait::LIVENESS, planter.next_line())
         .await
         .unwrap()
         .unwrap()

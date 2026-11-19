@@ -19,7 +19,7 @@ async fn one_pending_call(hub: &Hub) -> String {
     let mut found = Vec::new();
     test_support::wait::eventually(
         "the call to reach the Editors",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || {
             found = pending_calls(hub);
             std::future::ready(found.len() == 1)

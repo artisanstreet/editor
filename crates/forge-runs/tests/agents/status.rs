@@ -103,14 +103,16 @@ async fn an_agent_stopped_before_its_first_run_reports_cancelled_to_its_waiter()
                 .unwrap()
         })
     };
-    test_support::wait::eventually("the waiter to register", Duration::from_secs(5), || async {
-        !fixture.hub.inner.agent_waiters.lock().unwrap().is_empty()
-    })
+    test_support::wait::eventually(
+        "the waiter to register",
+        test_support::wait::LIVENESS,
+        || async { !fixture.hub.inner.agent_waiters.lock().unwrap().is_empty() },
+    )
     .await;
 
     fixture.hub.cancel(&child).await.unwrap();
 
-    let agents = tokio::time::timeout(Duration::from_secs(5), waiting)
+    let agents = tokio::time::timeout(test_support::wait::LIVENESS, waiting)
         .await
         .expect("the waiter hears that the agent was stopped")
         .unwrap();

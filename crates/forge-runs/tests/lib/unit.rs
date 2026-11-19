@@ -312,7 +312,7 @@ impl Fixture {
     async fn settled(&self) -> Vec<artisan_api::Run> {
         test_support::wait::while_progressing(
             "the run to settle",
-            STALL,
+            test_support::wait::LIVENESS,
             || self.hub.store().head(),
             || async {
                 let store = self.hub.store();
@@ -344,7 +344,7 @@ impl Fixture {
     async fn quiescent(&self) {
         test_support::wait::eventually(
             "the hub's run and side tasks to finish",
-            Duration::from_secs(10),
+            test_support::wait::LIVENESS,
             || async move { self.hub.inner.tasks.len() <= self.resident },
         )
         .await;
@@ -353,15 +353,13 @@ impl Fixture {
     async fn wait_for(&self, check: impl Fn(&[Item]) -> bool + Send + Sync) {
         test_support::wait::while_progressing(
             "the thread's items to reach the condition",
-            STALL,
+            test_support::wait::LIVENESS,
             || self.hub.store().head(),
             || async { check(&self.items().await).then_some(()) },
         )
         .await;
     }
 }
-
-const STALL: Duration = Duration::from_secs(10);
 
 async fn undelivered(store: &Store, thread: &ThreadId) -> Vec<Item> {
     let query = ItemsQuery {
@@ -394,7 +392,7 @@ async fn clients_catch_up_on_engine_statuses_after_a_burst_of_changes() {
         fixture.hub.engines().changed(EngineId::Claude);
     }
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if let Event::Engine { status } = events.recv().await.unwrap().event
                 && status.engine == EngineId::Codex
@@ -473,7 +471,7 @@ async fn a_message_whose_sender_hangs_up_mid_send_is_still_delivered() {
     drop(sending);
     test_support::wait::eventually(
         "the message to be saved",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async { !fixture.items().await.is_empty() },
     )
     .await;
@@ -668,7 +666,7 @@ async fn a_transport_switch_during_preparation_never_mixes_session_and_transport
         .unwrap();
     test_support::wait::eventually(
         "the second run to begin",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .hub
@@ -2070,7 +2068,7 @@ async fn controller_shutdown_preserves_undelivered_input() {
         .await
         .unwrap();
     fixture.hub.shutdown();
-    tokio::time::timeout(Duration::from_secs(10), fixture.hub.inner.tasks.wait())
+    tokio::time::timeout(test_support::wait::LIVENESS, fixture.hub.inner.tasks.wait())
         .await
         .expect("owned run exits on controller shutdown");
     assert!(!fixture.hub.is_live(&fixture.thread_id));
@@ -2202,7 +2200,7 @@ async fn at_most_eight_harnesses_execute_at_once() {
             .await
             .unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while started.load(Ordering::SeqCst) < 8 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -2211,7 +2209,7 @@ async fn at_most_eight_harnesses_execute_at_once() {
     .unwrap();
     assert_eq!(started.load(Ordering::SeqCst), 8);
     release.add_permits(10);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while started.load(Ordering::SeqCst) < 10
             || threads.iter().any(|thread| fixture.hub.is_live(thread))
         {
@@ -2384,7 +2382,7 @@ async fn durable_queued_threads_do_not_allocate_live_owners_until_a_slot_is_free
             .unwrap();
         queued.push(thread.id);
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while fixture.hub.lock().len() < 8 {
             tokio::task::yield_now().await;
         }
@@ -2401,7 +2399,7 @@ async fn durable_queued_threads_do_not_allocate_live_owners_until_a_slot_is_free
     fixture.hub.cancel(last).await.unwrap();
     assert!(undelivered(fixture.hub.store(), last).await.is_empty());
     finish.add_permits(32);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if fixture.hub.lock().is_empty()
                 && fixture
@@ -2456,7 +2454,7 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
         .send_message(&fixture.thread_id, message("first"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if fixture
                 .hub
@@ -2658,7 +2656,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
             .unwrap();
         threads.push(thread.id);
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let mut delivered = 0;
             for thread in &threads {
@@ -2694,7 +2692,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
         Arc::new(move |_| Arc::clone(&harness)),
     );
     resumed.resume_pending();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if resumed.lock().is_empty()
                 && resumed
@@ -3394,7 +3392,7 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
         .send_message(&fixture.thread_id, message("start"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), started.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
         .await
         .expect("the engine must start before publishing its live previews");
     let text = LiveTarget::Text {
@@ -3536,7 +3534,7 @@ async fn running_fixture() -> Fixture {
         .send_message(&fixture.thread_id, message("start"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), started.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, started.notified())
         .await
         .expect("the engine starts");
     fixture
@@ -3761,7 +3759,7 @@ async fn large_saved_question_validates_selected_identity_without_expanding_opti
         if questions.inline().unwrap()[0].options.stored().is_some() && answers.len()==1)
     );
     fixture.hub.shutdown();
-    tokio::time::timeout(Duration::from_secs(3), fixture.hub.inner.tasks.wait())
+    tokio::time::timeout(test_support::wait::LIVENESS, fixture.hub.inner.tasks.wait())
         .await
         .unwrap();
 }
@@ -3881,7 +3879,7 @@ async fn a_suggested_next_message_lasts_until_the_thread_runs_again() {
     .await;
     let mut events = fixture.hub.store().subscribe();
     let mut next_suggestion = async move || {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(test_support::wait::LIVENESS, async {
             loop {
                 if let Event::Suggestion { thread_id, text } = events.recv().await.unwrap().event {
                     return (thread_id, text);
@@ -4023,7 +4021,7 @@ async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
         .await
         .unwrap();
     fixture.settled().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while asked.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -4376,7 +4374,7 @@ async fn a_thread_without_a_project_works_in_its_own_folder() {
     for text in ["Sketch a parser", "And test it"] {
         for thread in &threads {
             hub.send_message(thread, message(text)).await.unwrap();
-            tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::time::timeout(test_support::wait::LIVENESS, async {
                 while hub.is_live(thread)
                     || hub
                         .store()
@@ -4490,7 +4488,7 @@ async fn a_stopped_turn_continues_without_a_message() {
     assert_eq!(fixture.settled().await[0].status(), RunStatus::Cancelled);
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while asked.lock().unwrap().len() < 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -4601,7 +4599,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
         .await
         .unwrap();
     fixture.wait_for(|items| items.len() == 2).await;
-    fixture.hub.stop(Duration::from_secs(10)).await;
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
     let Fixture {
         hub,
         thread_id,
@@ -4620,7 +4618,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
         Arc::new(move |_| Arc::clone(&harness)),
     );
     hub.resume_pending();
-    let continued = tokio::time::timeout(Duration::from_secs(10), async {
+    let continued = tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let latest = hub.store().latest_run(&thread_id).await.unwrap().unwrap();
             if latest.status() == RunStatus::Done {
@@ -4761,7 +4759,7 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
             .await
             .unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let mut running = true;
             for thread in [&fixture.thread_id, &child] {
@@ -4782,7 +4780,7 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
     .await
     .expect("parent and child start");
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while fixture.hub.is_live(&fixture.thread_id) || fixture.hub.is_live(&child) {
             tokio::task::yield_now().await;
         }
@@ -4958,7 +4956,7 @@ async fn items_of(hub: &Hub, thread: &ThreadId) -> Vec<Item> {
 }
 
 async fn approval_card(hub: &Hub, thread: &ThreadId) -> Item {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             if let Some(card) = items_of(hub, thread)
                 .await
@@ -5017,7 +5015,7 @@ async fn an_agents_message_to_a_full_access_thread_waits_for_the_user_and_names_
     let sender = sender.as_ref().expect("the message names its sender");
     assert_eq!(sender.thread, caller);
     assert_eq!(sender.engine, EngineId::Claude);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         while heard.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -5143,7 +5141,7 @@ async fn switching_to_full_access_allows_the_card_that_waits() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), asking)
+    tokio::time::timeout(test_support::wait::LIVENESS, asking)
         .await
         .expect("the card is answered")
         .unwrap()
@@ -5186,7 +5184,7 @@ async fn stopping_a_thread_withdraws_the_approval_its_run_waits_on() {
 
     fixture.hub.cancel(&thread).await.unwrap();
 
-    let refused = tokio::time::timeout(Duration::from_secs(10), asking)
+    let refused = tokio::time::timeout(test_support::wait::LIVENESS, asking)
         .await
         .expect("the stop answers the card")
         .unwrap()
@@ -5217,7 +5215,7 @@ async fn an_approval_whose_asker_went_away_is_withdrawn() {
 
     test_support::wait::eventually(
         "the abandoned card to be withdrawn",
-        Duration::from_secs(10),
+        test_support::wait::LIVENESS,
         || async {
             fixture
                 .hub
@@ -5260,7 +5258,7 @@ impl Fixture {
     async fn notified(&self, notify: &Notify) {
         test_support::wait::while_progressing(
             "the harness to be notified",
-            STALL,
+            test_support::wait::LIVENESS,
             || self.hub.store().head(),
             || async {
                 test_support::poll::poll_once(std::pin::pin!(notify.notified()))
@@ -5274,7 +5272,7 @@ impl Fixture {
     async fn latest_run_once(&self, status: RunStatus) -> artisan_api::Run {
         test_support::wait::while_progressing(
             "the thread's latest run to reach the status",
-            STALL,
+            test_support::wait::LIVENESS,
             || self.hub.store().head(),
             || async {
                 self.hub
@@ -5707,7 +5705,7 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
         .send_message(&fixture.thread_id, message_on(EngineId::Codex, "continue"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, entered.notified())
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
@@ -5878,9 +5876,12 @@ async fn a_late_background_title_preserves_a_manual_rename() {
         .send_message(&fixture.thread_id, message("repair the sidebar"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), harness.title_started.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        test_support::wait::LIVENESS,
+        harness.title_started.notified(),
+    )
+    .await
+    .unwrap();
     fixture
         .hub
         .store()
@@ -5894,7 +5895,7 @@ async fn a_late_background_title_preserves_a_manual_rename() {
         .await
         .unwrap();
     harness.release_title.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let querying = fixture
                 .hub
