@@ -817,6 +817,41 @@ async fn connections_beyond_the_handshake_bound_are_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_unpaired_client_cannot_make_forge_read_a_large_pairing_request() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let stranger = device(&invite.forge_certificate, address);
+    let oversized = PairRequest {
+        code: invite.code.clone(),
+        device_name: "x".repeat(64 * 1024),
+    };
+    let refused = stranger
+        .http
+        .post(stranger.url("/pair"))
+        .json(&oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 413);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "laptop".into(),
+    };
+    let paired = stranger
+        .http
+        .post(stranger.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        paired.status(),
+        200,
+        "the refused request did not spend the code"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn private_images_are_never_stored_by_shared_caches() {
     let (_dir, address, store) = forge().await;
     let invite = invite(&store).await.unwrap();

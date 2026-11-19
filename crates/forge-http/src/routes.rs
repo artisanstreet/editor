@@ -43,6 +43,8 @@ pub struct TunnelAuth {
     pub claims: artisan_account::GrantClaims,
 }
 
+const PAIR_BODY_BYTES: usize = 4 * 1024;
+
 pub fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
@@ -117,7 +119,10 @@ pub fn router(app: App) -> Router {
         .route("/fs/list", get(list_dir))
         .layer(middleware::from_fn_with_state(app.clone(), authorize));
     Router::new()
-        .route("/pair", post(pair))
+        .route(
+            "/pair",
+            post(pair).layer(DefaultBodyLimit::max(PAIR_BODY_BYTES)),
+        )
         .merge(authorized)
         .layer(DefaultBodyLimit::max(forge_store::MAX_BLOB_BYTES + 1024))
         .layer(compression())
