@@ -1,8 +1,10 @@
 #![cfg(test)]
 
 use artisan_account::browser::{
-    Arrival, Handoff, Problem, Provider, arrival, bind, done_location, receive, request_target,
+    Arrival, Callback, Handoff, Problem, Provider, ReceiveError, arrival, bind, done_location,
+    receive, request_target,
 };
+use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const RFC_7636_VERIFIER: [u8; 32] = [
@@ -48,22 +50,22 @@ fn only_callbacks_carrying_our_state_are_answers() {
     let state = handoff().state().to_owned();
     assert_eq!(
         arrival(&format!("/callback?code=abc&state={state}"), &state),
-        Arrival::Code("abc".to_owned())
+        Arrival::Callback(Callback::Code("abc".to_owned()))
     );
     assert_eq!(
         arrival(
             &format!("/callback?state={state}&error=email-taken"),
             &state
         ),
-        Arrival::Problem(Problem::EmailTaken)
+        Arrival::Callback(Callback::Problem(Problem::EmailTaken))
     );
     assert_eq!(
         arrival(&format!("/callback?state={state}&error=whatever"), &state),
-        Arrival::Problem(Problem::Unfinished)
+        Arrival::Callback(Callback::Problem(Problem::Unfinished))
     );
     assert_eq!(
         arrival(&format!("/callback?state={state}&code="), &state),
-        Arrival::Problem(Problem::Unfinished)
+        Arrival::Callback(Callback::Problem(Problem::Unfinished))
     );
     assert_eq!(
         arrival("/callback?code=abc&state=forged", &state),
@@ -76,11 +78,11 @@ fn only_callbacks_carrying_our_state_are_answers() {
 fn the_browser_is_sent_back_to_a_done_page_that_names_the_problem() {
     let origin = "https://auth.artisan.st";
     assert_eq!(
-        done_location(origin, &Arrival::Code("abc".to_owned())),
+        done_location(origin, &Callback::Code("abc".to_owned())),
         "https://auth.artisan.st/desktop/done"
     );
     assert_eq!(
-        done_location(origin, &Arrival::Problem(Problem::Denied)),
+        done_location(origin, &Callback::Problem(Problem::Denied)),
         "https://auth.artisan.st/desktop/done?problem=denied"
     );
     assert_eq!(
@@ -108,8 +110,15 @@ async fn the_loopback_ignores_strays_and_answers_the_real_callback() {
     let handoff = handoff();
     let (listener, port) = bind().unwrap();
     let state = handoff.state().to_owned();
-    let waiting =
-        tokio::spawn(async move { receive(listener, &state, "https://auth.artisan.st").await });
+    let waiting = tokio::spawn(async move {
+        receive(
+            listener,
+            &state,
+            "https://auth.artisan.st",
+            Duration::from_secs(60),
+        )
+        .await
+    });
     let stray = get(port, "/favicon.ico").await;
     assert!(stray.starts_with("HTTP/1.1 404"));
     let forged = get(port, "/callback?code=stolen&state=forged").await;
@@ -123,7 +132,24 @@ async fn the_loopback_ignores_strays_and_answers_the_real_callback() {
     assert!(answer.contains("Location: https://auth.artisan.st/desktop/done\r\n"));
     assert_eq!(
         waiting.await.unwrap().unwrap(),
-        Arrival::Code("granted".to_owned())
+        Callback::Code("granted".to_owned())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_browser_that_never_calls_back_ends_the_wait_with_the_reason() {
+    let (listener, _) = bind().unwrap();
+    let within = Duration::from_mins(10);
+    let ended = receive(
+        listener,
+        handoff().state(),
+        "https://auth.artisan.st",
+        within,
+    )
+    .await;
+    assert!(
+        matches!(ended, Err(ReceiveError::TimedOut { after }) if after == within),
+        "{ended:?}"
     );
 }
 

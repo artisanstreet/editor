@@ -9,13 +9,14 @@ use crate::core::{
     services::Services,
 };
 pub use artisan_account::browser::Provider;
-use artisan_account::browser::{self, Arrival, Handoff, Problem};
+use artisan_account::browser::{self, Callback, Handoff, Problem, ReceiveError};
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
 pub use enrollment::LocalForge;
 use enrollment::{AeBinding, BindForgeError};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, time::Duration};
 
+const CORE_URL_OVERRIDE: &str = "AST_CORE_BASE_URL";
 const BROWSER_TIMEOUT: Duration = Duration::from_mins(10);
 pub const AUTH_ORIGIN: &str = "https://auth.artisan.st";
 
@@ -168,7 +169,7 @@ enum Message {
         tokio::sync::oneshot::Sender<()>,
     ),
     Finalized(u64, Result<SessionToken, NetworkError>),
-    BrowserFailed(u64, String),
+    BrowserFailed(u64, Provider, BrowserFailure),
     Synced(
         u64,
         Result<AccountProfile, NetworkError>,
@@ -230,7 +231,14 @@ impl Account {
             .core_url
             .clone()
             .or(stored.base_url)
-            .or_else(|| std::env::var("AST_CORE_BASE_URL").ok())
+            .or_else(|| match std::env::var(CORE_URL_OVERRIDE) {
+                Ok(url) => Some(url),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error @ std::env::VarError::NotUnicode(_)) => {
+                    tracing::warn!(%error, "{CORE_URL_OVERRIDE} is ignored");
+                    None
+                }
+            })
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| "https://api.artisan.st".to_owned());
         let http = CoreSessionClient::new(&base_url).expect("Core HTTP client builds");
@@ -495,23 +503,20 @@ impl Account {
         self.last_error = None;
         self.changed();
         self.sign_in = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let arrival = tokio::time::timeout(
-                BROWSER_TIMEOUT,
-                browser::receive(listener, handoff.state(), &origin),
-            )
-            .await;
-            let message = match arrival {
-                Ok(Ok(Arrival::Code(code))) => Message::Finalized(
+            let callback =
+                browser::receive(listener, handoff.state(), &origin, BROWSER_TIMEOUT).await;
+            let message = match callback {
+                Ok(Callback::Code(code)) => Message::Finalized(
                     generation,
                     http.desktop_redeem(&code, handoff.verifier())
                         .await
                         .map(|(_, token)| token),
                 ),
-                Ok(Ok(Arrival::Problem(problem))) => {
-                    Message::BrowserFailed(generation, problem.message(provider))
+                Ok(Callback::Problem(problem)) => {
+                    Message::BrowserFailed(generation, provider, BrowserFailure::Problem(problem))
                 }
-                Ok(Ok(Arrival::Unrelated) | Err(_)) | Err(_) => {
-                    Message::BrowserFailed(generation, Problem::Unfinished.message(provider))
+                Err(error) => {
+                    Message::BrowserFailed(generation, provider, BrowserFailure::Receive(error))
                 }
             };
             sender.offer(message).await;
@@ -769,9 +774,13 @@ impl Account {
                 self.finalized(result);
                 None
             }
-            Message::BrowserFailed(generation, message) if generation == self.sign_generation => {
+            Message::BrowserFailed(generation, provider, failure)
+                if generation == self.sign_generation =>
+            {
                 self.sign_in = None;
-                self.phase = AccountPhase::Error { message };
+                self.phase = AccountPhase::Error {
+                    message: failure.message(provider),
+                };
                 self.changed();
                 None
             }
@@ -927,6 +936,34 @@ impl Account {
             } else {
                 AccountRequestError::SignOutEverywhere(source)
             }),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum BrowserFailure {
+    Problem(Problem),
+    Receive(ReceiveError),
+}
+
+impl BrowserFailure {
+    fn message(&self, provider: Provider) -> String {
+        match self {
+            Self::Problem(problem) => problem.message(provider),
+            Self::Receive(error) => {
+                tracing::warn!(
+                    provider = provider.name(),
+                    "browser sign-in failed: {}",
+                    ::diagnostics::chain(error)
+                );
+                match error {
+                    ReceiveError::TimedOut { .. } => Problem::Unfinished.message(provider),
+                    ReceiveError::Listen(_) | ReceiveError::Accept(_) => format!(
+                        "Couldn't receive the {} sign-in from your browser. Press the button to try again.",
+                        provider.name()
+                    ),
+                }
+            }
         }
     }
 }

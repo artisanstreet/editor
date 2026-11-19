@@ -32,6 +32,7 @@ x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
 [dev-dependencies]
 axum.workspace = true
 test-support = { workspace = true, features = ["http"] }
+tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
 
 [lints]
 workspace = true

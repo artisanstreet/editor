@@ -89,9 +89,24 @@ impl Problem {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Arrival {
+    Callback(Callback),
+    Unrelated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Callback {
     Code(String),
     Problem(Problem),
-    Unrelated,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiveError {
+    #[error("listen for the browser's sign-in callback")]
+    Listen(#[source] io::Error),
+    #[error("accept the browser's sign-in callback connection")]
+    Accept(#[source] io::Error),
+    #[error("the browser didn't call back within {}s", after.as_secs())]
+    TimedOut { after: Duration },
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -172,18 +187,20 @@ pub fn arrival(target: &str, state: &str) -> Arrival {
     };
     match (field("state") == Some(state), field("code"), field("error")) {
         (false, _, _) => Arrival::Unrelated,
-        (true, _, Some(error)) => Arrival::Problem(Problem::of(error)),
-        (true, Some(code), None) if !code.is_empty() => Arrival::Code(code.to_owned()),
-        (true, _, None) => Arrival::Problem(Problem::Unfinished),
+        (true, _, Some(error)) => Arrival::Callback(Callback::Problem(Problem::of(error))),
+        (true, Some(code), None) if !code.is_empty() => {
+            Arrival::Callback(Callback::Code(code.to_owned()))
+        }
+        (true, _, None) => Arrival::Callback(Callback::Problem(Problem::Unfinished)),
     }
 }
 
 #[must_use]
-pub fn done_location(auth_origin: &str, arrival: &Arrival) -> String {
+pub fn done_location(auth_origin: &str, callback: &Callback) -> String {
     let base = format!("{}/desktop/done", auth_origin.trim_end_matches('/'));
-    match arrival {
-        Arrival::Problem(problem) => format!("{base}?problem={}", problem.slug()),
-        Arrival::Code(_) | Arrival::Unrelated => base,
+    match callback {
+        Callback::Problem(problem) => format!("{base}?problem={}", problem.slug()),
+        Callback::Code(_) => base,
     }
 }
 
@@ -207,10 +224,21 @@ pub async fn receive(
     listener: std::net::TcpListener,
     state: &str,
     auth_origin: &str,
-) -> io::Result<Arrival> {
-    let listener = tokio::net::TcpListener::from_std(listener)?;
+    within: Duration,
+) -> Result<Callback, ReceiveError> {
+    let listener = tokio::net::TcpListener::from_std(listener).map_err(ReceiveError::Listen)?;
+    tokio::time::timeout(within, callback(&listener, state, auth_origin))
+        .await
+        .map_err(|_elapsed| ReceiveError::TimedOut { after: within })?
+}
+
+async fn callback(
+    listener: &tokio::net::TcpListener,
+    state: &str,
+    auth_origin: &str,
+) -> Result<Callback, ReceiveError> {
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (mut stream, _) = listener.accept().await.map_err(ReceiveError::Accept)?;
         let arrival = match read_get_target(&mut stream).await {
             Ok(target) => arrival(&target, state),
             Err(RequestError::NotGet) => Arrival::Unrelated,
@@ -228,16 +256,16 @@ pub async fn receive(
                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     .to_owned()
             }
-            Arrival::Code(_) | Arrival::Problem(_) => format!(
+            Arrival::Callback(callback) => format!(
                 "HTTP/1.1 303 See Other\r\nLocation: {}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                done_location(auth_origin, &arrival)
+                done_location(auth_origin, callback)
             ),
         };
         if let Err(error) = answer(&mut stream, &response).await {
             tracing::warn!(%error, "the browser did not receive the sign-in callback page");
         }
-        if !matches!(arrival, Arrival::Unrelated) {
-            return Ok(arrival);
+        if let Arrival::Callback(callback) = arrival {
+            return Ok(callback);
         }
     }
 }
