@@ -1835,6 +1835,7 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         RunId::new(),
         receiver,
         CancellationToken::new(),
+        turns::StopSignal::default(),
     ))
     .await
     .unwrap();

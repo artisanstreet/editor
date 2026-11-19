@@ -865,6 +865,41 @@ async fn a_continue_pressed_while_the_stop_is_unsaved_brings_back_the_unread_mes
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stop_pressed_while_forge_shuts_down_is_saved_before_the_engine_confirms_it() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    fixture.hub.shutdown();
+    tokio::time::timeout(test_support::wait::LIVENESS, winding.entered.notified())
+        .await
+        .unwrap();
+
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    let saved = fixture
+        .hub
+        .store()
+        .latest_run(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.status(),
+        RunStatus::Cancelled,
+        "the stop is saved when Stop returns, though the engine has not confirmed it"
+    );
+    fixture
+        .hub
+        .store()
+        .recover_thread(fixture.thread_id.clone())
+        .await
+        .unwrap();
+    stays_stopped_after_restart(&fixture).await;
+
+    winding.release.notify_one();
+    fixture.hub.stop(test_support::wait::LIVENESS).await;
+    assert_eq!(winding.turns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
     let fixture = fixture(Arc::new(|_, io| {
         Box::pin(async move {
@@ -897,6 +932,7 @@ async fn a_continue_pressed_as_a_finished_turn_ends_adds_no_error() {
                 through,
                 then: turns::AfterStop::Continue,
             },
+            stop: turns::StopSignal::default(),
             retries,
         });
 

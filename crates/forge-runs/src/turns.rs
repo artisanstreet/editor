@@ -2,6 +2,7 @@ use crate::LiveRun;
 use artisan_api::ThreadId;
 use std::collections::HashMap;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub(crate) enum Turn {
@@ -29,8 +30,14 @@ pub(crate) enum AfterStop {
     Continue,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StopSignal {
+    pub(crate) requested: CancellationToken,
+    pub(crate) saved: CancellationToken,
+}
+
 pub(crate) enum Stopped {
-    Live,
+    Live(CancellationToken),
     Idle,
 }
 
@@ -136,8 +143,9 @@ impl Turns {
                     through,
                     then: AfterStop::Settle,
                 };
+                run.stop.requested.cancel();
                 run.cancel.cancel();
-                Stopped::Live
+                Stopped::Live(run.stop.saved.clone())
             }
             Some(Turn::Unsettled { then, .. }) => {
                 *then = AfterStop::Settle;

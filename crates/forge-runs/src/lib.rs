@@ -133,6 +133,7 @@ struct LiveRun {
     foreground_bytes: usize,
     terminal_bytes: usize,
     phase: turns::Phase,
+    stop: turns::StopSignal,
     retries: u32,
 }
 
@@ -846,10 +847,11 @@ impl Hub {
     }
 
     pub async fn cancel(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
-        let (elsewhere, idle) = {
+        let (elsewhere, idle, stopping) = {
             let _admission = self.inner.admission.lock().await;
             let mut elsewhere = Vec::new();
             let mut idle = Vec::new();
+            let mut stopping = Vec::new();
             for thread in self.agent_tree(thread_id).await? {
                 let route = self.route(&thread).map_err(|source| CancelError::Route {
                     thread: thread.clone(),
@@ -858,13 +860,16 @@ impl Hub {
                 match route {
                     Some(member) => elsewhere.push((thread, member)),
                     None => match self.cancel_owned(&thread).await? {
-                        turns::Stopped::Live => {}
+                        turns::Stopped::Live(saved) => stopping.push(saved),
                         turns::Stopped::Idle => idle.push(thread),
                     },
                 }
             }
-            (elsewhere, idle)
+            (elsewhere, idle, stopping)
         };
+        for saved in stopping {
+            saved.cancelled().await;
+        }
         for thread in idle {
             self.agent_run_ended(&thread).await;
         }
@@ -890,7 +895,7 @@ impl Hub {
             self.cancel_owned(thread_id).await?
         };
         match stopped {
-            turns::Stopped::Live => {}
+            turns::Stopped::Live(saved) => saved.cancelled().await,
             turns::Stopped::Idle => self.agent_run_ended(thread_id).await,
         }
         Ok(())
@@ -1221,6 +1226,7 @@ impl Hub {
     fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
         let (inbox, receiver) = mpsc::channel(64);
         let cancel = CancellationToken::new();
+        let stop = turns::StopSignal::default();
         let run_id = RunId::new();
         self.lock().claim(thread_id.clone(), |retries| LiveRun {
             id: run_id.clone(),
@@ -1232,6 +1238,7 @@ impl Hub {
             foreground_bytes: 0,
             terminal_bytes: 0,
             phase: turns::Phase::Working,
+            stop: stop.clone(),
             retries,
         });
         let hub = self.clone();
@@ -1243,8 +1250,10 @@ impl Hub {
                 run_id.clone(),
                 receiver,
                 cancel.clone(),
+                stop.clone(),
             ))
             .await;
+            stop.saved.cancel();
             let retry_later = match &outcome {
                 Ok(_) => false,
                 Err(error) => {

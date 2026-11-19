@@ -250,6 +250,7 @@ pub(crate) async fn drive(
     run_id: RunId,
     inbox: mpsc::Receiver<Input>,
     cancel: CancellationToken,
+    stop: crate::turns::StopSignal,
 ) -> Result<RunStatus, DriveError> {
     let store = hub.store();
     let continuation = store.continue_request(thread_id).await?;
@@ -306,8 +307,11 @@ pub(crate) async fn drive(
             previous,
             transport,
         },
-        inbox,
-        adapter_cancel.clone(),
+        Control {
+            inbox,
+            cancel: adapter_cancel.clone(),
+            stop,
+        },
         &mut items,
     ))
     .await
@@ -449,6 +453,12 @@ async fn conclude(
     Ok(ended.status())
 }
 
+struct Control {
+    inbox: mpsc::Receiver<Input>,
+    cancel: CancellationToken,
+    stop: crate::turns::StopSignal,
+}
+
 struct Delivery<'a> {
     pending: &'a [artisan_api::Item],
     carry_on: Option<String>,
@@ -570,8 +580,11 @@ async fn execute(
         previous,
         transport,
     }: Delivery<'_>,
-    mut inbox: mpsc::Receiver<Input>,
-    cancel: CancellationToken,
+    Control {
+        mut inbox,
+        cancel,
+        stop,
+    }: Control,
     items: &mut Work,
 ) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
@@ -756,22 +769,19 @@ async fn execute(
     inbox.close();
     cancel.cancel();
     let mut ending = outcome;
-    if !adapter_finished
-        && matches!(ending, Ending::Stopped(_))
-        && !hub.inner.shutdown.is_cancelled()
-    {
-        match announce_stop(hub, run, items, pending).await {
-            Ok(stopped) => *run = stopped,
-            Err(error) => {
-                tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {}", diagnostics::chain(&error));
-            }
-        }
+    let mut announced = !adapter_finished && stop.requested.is_cancelled();
+    if announced {
+        announce_stop(hub, run, items, pending, &stop).await;
     }
     if !adapter_finished {
         let deadline = tokio::time::sleep(Duration::from_secs(45));
         tokio::pin!(deadline);
         loop {
             tokio::select! {
+                () = stop.requested.cancelled(), if !announced => {
+                    announce_stop(hub, run, items, pending, &stop).await;
+                    announced = true;
+                }
                 stopped = &mut adapter_outcome => {
                     if let Some(failure) = stopped.failure() {
                         ending = match ending {
@@ -1803,23 +1813,30 @@ fn open_items(items: &Work) -> Vec<ItemId> {
 
 async fn announce_stop(
     hub: &Hub,
-    run: &Run,
+    run: &mut Run,
     items: &Work,
     pending: &[artisan_api::Item],
-) -> Result<Run, forge_store::SettleRunError> {
+    stop: &crate::turns::StopSignal,
+) {
     let mut stopped = run.clone();
     stopped
         .finish(RunOutcome::Cancelled, None, hub.store().now())
         .expect("invariant: a run announces its stop while it is still running");
-    let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
+    let saved = Box::pin(hub.store().settle_run(forge_store::Settlement {
         run: stopped,
         open: open_items(items),
         attempted: pending.iter().map(|item| item.id.clone()).collect(),
         park: None,
         note: None,
     }))
-    .await?;
-    Ok(stopped)
+    .await;
+    match saved {
+        Ok((stopped, _)) => *run = stopped,
+        Err(error) => {
+            tracing::warn!(thread = %run.thread_id, run = %run.id, "save the stop before the engine confirms it; it is saved when the run ends: {}", diagnostics::chain(&error));
+        }
+    }
+    stop.saved.cancel();
 }
 
 async fn finish(
