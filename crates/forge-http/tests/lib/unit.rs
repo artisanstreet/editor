@@ -780,20 +780,21 @@ async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
     let identity = Identity::generate("artisan-forge").unwrap();
     let acceptor =
         tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&identity).unwrap()));
-    let handshakes = Arc::new(tokio::sync::Semaphore::new(1));
+    let handshakes = handshakes::Handshakes::new(1, 1);
+    let peer: SocketAddr = "192.0.2.7:50000".parse().unwrap();
     let (_silent_client, socket) = tokio::io::duplex(4096);
     let connection = serve_connection(
         socket,
-        "192.0.2.7:50000".parse().unwrap(),
+        peer,
         acceptor,
-        Arc::clone(&handshakes).try_acquire_owned().unwrap(),
+        handshakes.admit(peer.ip()).unwrap(),
         axum::Router::new(),
         CancellationToken::new(),
     );
     tokio::time::timeout(Duration::from_secs(600), connection)
         .await
         .expect("a silent client held its TLS handshake open forever");
-    assert_eq!(handshakes.available_permits(), 1);
+    assert!(handshakes.admit(peer.ip()).is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -801,7 +802,7 @@ async fn connections_beyond_the_handshake_bound_are_refused() {
     use tokio::io::AsyncReadExt as _;
     let (_dir, address, _store) = forge().await;
     let mut silent = Vec::new();
-    for _ in 0..HANDSHAKES_IN_FLIGHT {
+    for _ in 0..handshakes::PER_PEER {
         silent.push(tokio::net::TcpStream::connect(address).await.unwrap());
     }
     let mut refused = tokio::net::TcpStream::connect(address).await.unwrap();

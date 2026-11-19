@@ -23,6 +23,7 @@ mod events;
 mod extensions;
 mod gateway;
 mod generation;
+mod handshakes;
 mod relay;
 mod repository;
 mod routes;
@@ -106,8 +107,6 @@ pub struct PairInvite {
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-const HANDSHAKES_IN_FLIGHT: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -452,7 +451,7 @@ impl Server {
 
     pub async fn run_until(self, stop_requested: impl Future<Output = ()>) {
         let connections = TaskTracker::new();
-        let handshakes = Arc::new(tokio::sync::Semaphore::new(HANDSHAKES_IN_FLIGHT));
+        let handshakes = handshakes::Handshakes::new(handshakes::IN_FLIGHT, handshakes::PER_PEER);
         let store = self.store.clone();
         let hub = self.hub.clone();
         let stop = self.shutdown.clone();
@@ -501,7 +500,7 @@ impl Server {
                     continue;
                 }
             };
-            let handshake = match Arc::clone(&handshakes).try_acquire_owned() {
+            let handshake = match handshakes.admit(peer.ip()) {
                 Ok(handshake) => handshake,
                 Err(refused) => {
                     tracing::debug!(%peer, "refused a connection: {refused}");
@@ -534,7 +533,7 @@ async fn serve_connection<Socket>(
     socket: Socket,
     peer: SocketAddr,
     acceptor: tokio_rustls::TlsAcceptor,
-    handshake: tokio::sync::OwnedSemaphorePermit,
+    handshake: handshakes::Slot,
     app: axum::Router,
     drain: CancellationToken,
 ) where
