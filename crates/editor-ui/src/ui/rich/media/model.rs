@@ -129,11 +129,11 @@ pub(crate) fn services(
     id: &str,
     theme: crate::ui::theme::ArtisanTheme,
     assets: crate::ui::media::model::load::ModelAssets,
-    capability: std::rc::Rc<dyn Fn() -> Option<crate::ui::media::model::load::RendererCapability>>,
+    capability: Rc<dyn Fn() -> Option<crate::ui::media::model::load::RendererCapability>>,
     glyph: crate::ui::rich::narrative::callout::GlyphFactory,
-    effect: std::rc::Rc<dyn Fn(crate::ui::media::preview::Effect)>,
-    hovered: std::rc::Rc<std::cell::Cell<bool>>,
-    invalidate: std::rc::Rc<dyn Fn()>,
+    effect: Rc<dyn Fn(crate::ui::media::preview::Effect)>,
+    hovered: Rc<std::cell::Cell<bool>>,
+    invalidate: Rc<dyn Fn()>,
 ) -> ModelServices {
     use crate::ui::kit::{Button, ButtonTone, IconSize, Media, Space, Spaced, Surface};
     use aqua_core::GpuiBackground;
@@ -143,7 +143,7 @@ pub(crate) fn services(
     };
     let frame_hover = hovered;
     let frame_invalidate = Rc::clone(&invalidate);
-    let frame = std::rc::Rc::new(
+    let frame = Rc::new(
         move |content: Element, width: f32, aspect: f32, _name: &str, dragging: Option<bool>| {
             let mut layers = vec![content];
             if dragging == Some(false) && frame_hover.get() {
@@ -184,7 +184,7 @@ pub(crate) fn services(
         },
     );
     let placeholder_glyph = Rc::clone(&glyph);
-    let placeholder = std::rc::Rc::new(move |message: &str, failed: bool| {
+    let placeholder = Rc::new(move |message: &str, failed: bool| {
         let mut content = ui::Box::new()
             .layout("column")
             .spaced(Space::S4)
@@ -219,12 +219,12 @@ pub(crate) fn services(
             .build()
     });
     let toolbar_id = id.to_owned();
-    let toolbar = std::rc::Rc::new(
+    let toolbar = Rc::new(
         move |shading: Shading,
               moved: bool,
               facts: &str,
-              change: std::rc::Rc<dyn Fn(Shading)>,
-              reset: std::rc::Rc<dyn Fn()>| {
+              change: Rc<dyn Fn(Shading)>,
+              reset: Rc<dyn Fn()>| {
             let selection = crate::ui::segmented_control::SegmentedControl::new(
                 format!("{toolbar_id}-shading"),
                 theme,
@@ -277,7 +277,7 @@ pub(crate) fn services(
                 .build()
         },
     );
-    let copy = std::rc::Rc::new(move |position, path: &str| {
+    let copy = Rc::new(move |position, path: &str| {
         effect(crate::ui::media::preview::Effect::ShowCopyMenu(
             crate::ui::rich::actions::ShowCopyMenu {
                 position,

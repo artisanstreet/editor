@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 pub(crate) fn source_asset_glyph(id: AssetId, edge: f32, tint: aqua_core::GpuiHsla) -> Element {
     let asset = editor_assets::get(id);
-    let source: std::sync::Arc<str> = asset.source.into();
+    let source: Arc<str> = asset.source.into();
     let tint = match asset.presentation {
         Presentation::Tinted => Some(tint),
         Presentation::FullColor => None,

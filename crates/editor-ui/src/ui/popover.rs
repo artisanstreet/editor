@@ -65,7 +65,7 @@ pub struct Popover {
     theme: ArtisanTheme,
     content: Element,
     viewport: aqua_core::Size,
-    dismiss: std::rc::Rc<dyn Fn()>,
+    dismiss: Rc<dyn Fn()>,
 }
 
 impl Popover {
@@ -85,7 +85,7 @@ impl Popover {
             theme,
             content,
             viewport,
-            dismiss: std::rc::Rc::new(dismiss),
+            dismiss: Rc::new(dismiss),
         }
     }
     pub fn into_parts(self) -> (Element, aqua_ui::popup::PopupOptions) {
@@ -108,7 +108,7 @@ impl Popover {
         let mut options = aqua_ui::popup::PopupOptions::menu().at(self.position);
         options.focus = aqua_ui::popup::PopupFocus::Root;
         let dismiss = self.dismiss;
-        options.on_close = Some(std::rc::Rc::new(move |_| dismiss()));
+        options.on_close = Some(Rc::new(move |_| dismiss()));
         (panel, options)
     }
 }
@@ -138,7 +138,7 @@ impl PickerPopupHost {
         options.placement.align = aqua_ui::overlay::Align::Start;
         options.placement.gap = gap;
         options.placement.flip = false;
-        options.on_close = Some(std::rc::Rc::new(on_close));
+        options.on_close = Some(Rc::new(on_close));
         let overlay = app
             .open_popup_measured(owner, content, options)
             .map_err(|error| error.to_string())?;
@@ -167,7 +167,7 @@ pub enum PickerEntrance {
 
 pub struct AnimatedPickerHost {
     popup: PickerPopupHost,
-    factory: Option<std::rc::Rc<dyn Fn() -> Element>>,
+    factory: Option<Rc<dyn Fn() -> Element>>,
     motion: super::picker_motion::MenuMotion,
     entrance: PickerEntrance,
     scale: f32,
@@ -212,7 +212,7 @@ impl AnimatedPickerHost {
         now: f64,
         on_close: impl Fn(aqua_ui::overlay::CloseReason) + 'static,
     ) -> Result<Self, String> {
-        let factory: std::rc::Rc<dyn Fn() -> Element> = std::rc::Rc::new(factory);
+        let factory: Rc<dyn Fn() -> Element> = Rc::new(factory);
         let content = factory();
         let mut host = Self::open_content(
             app,

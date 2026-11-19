@@ -3,7 +3,7 @@ use std::time::Duration;
 
 #[derive(Clone, Default)]
 pub struct WorkingPulse {
-    started: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+    started: Rc<std::cell::Cell<Option<u32>>>,
 }
 
 impl WorkingPulse {

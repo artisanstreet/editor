@@ -182,7 +182,7 @@ impl MarkdownPresenter {
 
     pub(super) fn render_spans_chart(
         &self,
-        layout: &std::sync::Arc<charts::spans::Layout>,
+        layout: &Arc<charts::spans::Layout>,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -485,7 +485,7 @@ impl MarkdownPresenter {
 
     pub(super) fn render_sankey_chart(
         &self,
-        graph: &std::sync::Arc<charts::sankey::Graph>,
+        graph: &Arc<charts::sankey::Graph>,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -584,8 +584,8 @@ impl MarkdownPresenter {
 
     pub(super) fn render_line_chart(
         &self,
-        style: &std::sync::Arc<charts::chart::ChartStyle>,
-        model: &std::sync::Arc<charts::chart::model::Model>,
+        style: &Arc<charts::chart::ChartStyle>,
+        model: &Arc<charts::chart::model::Model>,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,
@@ -727,7 +727,7 @@ impl MarkdownPresenter {
 
     pub(super) fn render_distribution_chart(
         &self,
-        spec: &std::sync::Arc<charts::distribution::Distribution>,
+        spec: &Arc<charts::distribution::Distribution>,
         entry: &RetainedRich,
         envelope: &rich::Envelope,
         id: &str,

@@ -55,7 +55,6 @@
     let_underscore_drop,
     missing_debug_implementations,
     trivial_casts,
-    unused_qualifications,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 extern crate self as editor_ui;

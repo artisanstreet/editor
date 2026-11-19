@@ -3,7 +3,7 @@ use editor_assets::AssetId;
 use std::sync::Arc;
 
 pub fn disclosure_chevron(fraction: f32, edge: f32, color: aqua_core::GpuiHsla) -> Element {
-    let source: std::sync::Arc<str> = editor_assets::get(AssetId::TABLER_CHEVRON_RIGHT)
+    let source: Arc<str> = editor_assets::get(AssetId::TABLER_CHEVRON_RIGHT)
         .source
         .into();
     aqua_ui::element::Canvas::new()
