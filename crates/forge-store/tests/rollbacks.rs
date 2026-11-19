@@ -235,3 +235,42 @@ async fn a_rollback_done_for_an_older_forge_is_reported_by_the_next_forge() {
         "the next Forge tells the user what was set aside"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_whose_swap_failed_is_not_reported_by_the_forge_that_keeps_the_database() {
+    let dir = tempfile::tempdir().expect("create the data folder");
+    thread(
+        &Store::open(dir.path()).expect("this Forge creates its database"),
+        "Kept as it was",
+    )
+    .await;
+    let older = Store::schema_version() - 1;
+    let backup = dir.path().join(format!("forge.sqlite3.schema-{older}"));
+    let database = raw(dir.path());
+    database
+        .execute(
+            include_str!("rollbacks/back_up.sql"),
+            [backup.to_str().expect("a Unicode temp path")],
+        )
+        .expect("an earlier upgrade left a backup for the older Forge");
+    database
+        .execute_batch(include_str!("rollbacks/rollback_journal.sql"))
+        .expect("leave the database outside write-ahead logging");
+    drop(database);
+    let blocker = dir.path().join("forge.sqlite3-shm");
+    std::fs::create_dir(&blocker).expect("plant what stops the swap");
+    let lock = forge_store::DataLock::acquire(dir.path()).expect("hold the data lock");
+
+    let failed = forge_store::admin::roll_back_for(dir.path(), &lock, older)
+        .expect_err("the swap to the older database fails");
+    std::fs::remove_dir(&blocker).expect("clear the blocker");
+    assert_eq!(version(dir.path()), Store::schema_version(), "{failed:?}");
+
+    let store = Store::open_restoring(dir.path(), &lock).expect("this Forge starts again");
+    let state = store.state().await.expect("read the state");
+    assert_eq!(
+        state.database_rollback, None,
+        "nothing was rolled back, so nothing is reported"
+    );
+    assert_eq!(titles(&store).await, ["Kept as it was"]);
+}

@@ -548,35 +548,50 @@ enum Opening {
     Join,
 }
 
+#[derive(Clone, Copy)]
+enum Opened {
+    Upgraded { from: usize },
+    Joined,
+}
+
 fn recover_after_opening(
     writer: &mut Writer,
-    opening: Opening,
+    opened: Opened,
     database: &Path,
 ) -> Result<(), OpenStoreError> {
-    match opening {
-        Opening::Join => Ok(()),
-        Opening::Upgrade => {
-            writer
-                .transact(Durability::Background, |tx| tx.recover_threads(None))
-                .map_err(OpenStoreError::Recover)?;
-            let pending = |source| OpenStoreError::PendingRollback {
+    let from = match opened {
+        Opened::Joined => return Ok(()),
+        Opened::Upgraded { from } => from,
+    };
+    writer
+        .transact(Durability::Background, |tx| tx.recover_threads(None))
+        .map_err(OpenStoreError::Recover)?;
+    let pending = |source| OpenStoreError::PendingRollback {
+        database: database.to_owned(),
+        source: Box::new(source),
+    };
+    let Some(rolled_back) = retained::pending_notice(database).map_err(pending)? else {
+        return Ok(());
+    };
+    if u32::try_from(from).is_ok_and(|from| from < rolled_back.found) {
+        writer
+            .transact(Durability::Acknowledged, |tx| {
+                tx.record_rollback(&rolled_back)
+            })
+            .map_err(|source| OpenStoreError::RecordRollback {
                 database: database.to_owned(),
-                source: Box::new(source),
-            };
-            let Some(rolled_back) = retained::pending_notice(database).map_err(pending)? else {
-                return Ok(());
-            };
-            writer
-                .transact(Durability::Acknowledged, |tx| {
-                    tx.record_rollback(&rolled_back)
-                })
-                .map_err(|source| OpenStoreError::RecordRollback {
-                    database: database.to_owned(),
-                    source,
-                })?;
-            retained::release_notice(database).map_err(pending)
-        }
+                source,
+            })?;
+    } else {
+        tracing::warn!(
+            database = %database.display(),
+            found = rolled_back.found,
+            restored = rolled_back.restored,
+            opened_at = from,
+            "a rollback was started but the database was never swapped; nothing was rolled back"
+        );
     }
+    retained::release_notice(database).map_err(pending)
 }
 
 fn stored_version(connections: &Connections, database: &Path) -> Result<usize, OpenStoreError> {
@@ -820,15 +835,22 @@ impl Store {
         let Environment {
             connections, clock, ..
         } = environment;
-        let recover = matches!(opening, Opening::Upgrade);
         let prepare = |source| OpenStoreError::Database {
             database: database.clone(),
             source,
         };
         let mut conn = writer_connection(&connections, &database)?;
-        if recover {
-            upgrade(&mut conn, &database, upgrading)?;
-        }
+        let opened = match opening {
+            Opening::Upgrade => {
+                let from = conn
+                    .pragma_query_value(None, "user_version", |row| row.get(0))
+                    .at("read the schema version before upgrading")
+                    .map_err(prepare)?;
+                upgrade(&mut conn, &database, upgrading)?;
+                Opened::Upgraded { from }
+            }
+            Opening::Join => Opened::Joined,
+        };
 
         let events = feed::Feed::new(CHANGES);
         let head = Arc::new(AtomicU64::new(0));
@@ -838,7 +860,7 @@ impl Store {
         let mut writer = Writer::new(
             conn,
             Arc::clone(&head),
-            recover.then(|| events.clone()),
+            matches!(opened, Opened::Upgraded { .. }).then(|| events.clone()),
             Arc::clone(&hot),
             writer::Commits {
                 count: Arc::clone(&commits),
@@ -847,7 +869,7 @@ impl Store {
             clock.clone(),
         )
         .map_err(prepare)?;
-        recover_after_opening(&mut writer, opening, &database)?;
+        recover_after_opening(&mut writer, opened, &database)?;
 
         let mut threads = Threads::default();
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
