@@ -304,3 +304,110 @@ fn a_short_credential_is_redacted_wherever_it_stands_alone_and_switches_are_kept
         "login [redacted] failed; {\"password\":\"[redacted]\"}; abc1234 and xabc123 are other words; step 1 of 2"
     );
 }
+
+#[expect(clippy::unwrap_used, reason = "an unreadable folder fails the test")]
+fn trace_named(dir: &Path, prefix: &str) -> String {
+    let mut named: Vec<String> = remaining(dir)
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    assert_eq!(named.len(), 1, "one trace starts with {prefix}: {named:?}");
+    named.pop().unwrap()
+}
+
+#[expect(clippy::unwrap_used, reason = "an unreadable folder fails the test")]
+fn bytes_on_disk(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum()
+}
+
+#[test]
+fn a_trace_still_being_written_is_never_pruned_however_old_or_large() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    let first = Trace::start(dir.path(), "claude-a", Secrets::default()).unwrap();
+    let live = trace_named(dir.path(), "claude-a-");
+    std::fs::File::options()
+        .write(true)
+        .open(dir.path().join(&live))
+        .unwrap()
+        .set_modified(now - 8 * DAY)
+        .unwrap();
+    trace_file(dir.path(), "codex-b-1.jsonl", 64 * MIB, now - 3 * HOUR);
+    trace_file(dir.path(), "codex-c-1.jsonl", 64 * MIB, now - 2 * HOUR);
+    trace_file(dir.path(), "codex-d-1.jsonl", 64 * MIB, now - HOUR);
+
+    let second = Trace::start(dir.path(), "claude-e", Secrets::default()).unwrap();
+    first.trace.record(Kind::Note, "still running");
+    finish(first);
+    finish(second);
+
+    let left = remaining(dir.path());
+    assert!(left.contains(&live), "the live trace was deleted: {left:?}");
+    assert!(
+        !left.contains("codex-b-1.jsonl"),
+        "the oldest finished trace makes room instead: {left:?}"
+    );
+    let kept = std::fs::read_to_string(dir.path().join(&live)).unwrap();
+    assert!(kept.contains("still running"), "{kept}");
+}
+
+#[test]
+fn traces_written_at_once_stay_within_256_mib_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    for (name, age) in [("a", 4), ("b", 3), ("c", 2), ("d", 1)] {
+        trace_file(
+            dir.path(),
+            &format!("codex-{name}-1.jsonl"),
+            47 * MIB,
+            now - age * HOUR,
+        );
+    }
+    let first = Trace::start(dir.path(), "claude-x", Secrets::default()).unwrap();
+    let second = Trace::start(dir.path(), "claude-y", Secrets::default()).unwrap();
+    let chunk = "\u{1}".repeat(256 * 1024);
+
+    for _ in 0..24 {
+        first.trace.record(Kind::Out, &chunk);
+        second.trace.record(Kind::Out, &chunk);
+    }
+    finish(first);
+    finish(second);
+
+    let total = bytes_on_disk(dir.path());
+    assert!(
+        total <= 256 * MIB,
+        "the traces take {} MiB together",
+        total.div_ceil(MIB)
+    );
+    assert_eq!(
+        remaining(dir.path())
+            .iter()
+            .filter(|name| name.starts_with("codex-"))
+            .count(),
+        4,
+        "the finished traces fitted beside the new ones when they started"
+    );
+    let dropped: u64 = ["claude-x-", "claude-y-"]
+        .into_iter()
+        .flat_map(|prefix| {
+            std::fs::read_to_string(dir.path().join(trace_named(dir.path(), prefix)))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter_map(|record| match record["kind"].as_str() {
+                    Some("end") => record["dropped"].as_u64(),
+                    Some("dropped") => record["records"].as_u64(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .sum();
+    assert!(
+        dropped > 0,
+        "the records past the shared budget are counted"
+    );
+}

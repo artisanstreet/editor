@@ -1,8 +1,9 @@
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    Arc, LazyLock, Mutex, PoisonError,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, sync_channel},
 };
 
@@ -10,7 +11,97 @@ const MAX_TRACE_BYTES: usize = 64 * 1024 * 1024;
 const RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const RETAINED_AGE: std::time::Duration = std::time::Duration::from_hours(7 * 24);
 const MAX_RECORD_BYTES: usize = 256 * 1024;
-const RECORD_OVERHEAD_BYTES: usize = 128;
+const RECORD_OVERHEAD_BYTES: usize = 256;
+const END_LINE_BYTES: usize = 128;
+
+static FOLDERS: LazyLock<Mutex<HashMap<PathBuf, Arc<Folder>>>> = LazyLock::new(Mutex::default);
+
+#[derive(Debug, Default)]
+struct Folder {
+    live: Mutex<BTreeSet<Arc<str>>>,
+    completed: AtomicU64,
+    held_live: AtomicU64,
+}
+
+impl Folder {
+    fn of(dir: &Path) -> Arc<Self> {
+        Arc::clone(
+            FOLDERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(dir.to_path_buf())
+                .or_default(),
+        )
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, BTreeSet<Arc<str>>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn admit(&self, bytes: u64) -> bool {
+        self.held_live
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                let held = held.checked_add(bytes)?;
+                (held.saturating_add(self.completed.load(Ordering::Acquire)) <= RETAINED_BYTES)
+                    .then_some(held)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, bytes: u64) {
+        self.held_live.fetch_sub(bytes, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+struct Account {
+    folder: Arc<Folder>,
+    name: Arc<str>,
+    remaining: AtomicUsize,
+    held: AtomicU64,
+}
+
+impl Account {
+    fn reserve(&self, bytes: usize) -> bool {
+        if self
+            .remaining
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(bytes)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if !self.folder.admit(bytes as u64) {
+            self.remaining.fetch_add(bytes, Ordering::Relaxed);
+            return false;
+        }
+        self.held.fetch_add(bytes as u64, Ordering::AcqRel);
+        true
+    }
+
+    fn refund(&self, bytes: usize) {
+        self.remaining.fetch_add(bytes, Ordering::Relaxed);
+        self.unhold(bytes);
+    }
+
+    fn settle(&self, reserved: usize, written: usize) {
+        self.unhold(reserved.saturating_sub(written));
+    }
+
+    fn unhold(&self, bytes: usize) {
+        self.held.fetch_sub(bytes as u64, Ordering::AcqRel);
+        self.folder.release(bytes as u64);
+    }
+
+    fn finish(&self) {
+        let mut live = self.folder.live();
+        let held = self.held.swap(0, Ordering::AcqRel);
+        self.folder.completed.fetch_add(held, Ordering::AcqRel);
+        self.folder.release(held);
+        live.remove(&self.name);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
@@ -60,6 +151,7 @@ struct Record {
     kind: Kind,
     at: i64,
     text: Text,
+    reserved: usize,
 }
 
 impl Record {
@@ -302,10 +394,9 @@ fn frame_end(bytes: &[u8]) -> usize {
 
 #[derive(Debug)]
 struct Sink {
-    name: Arc<str>,
+    account: Arc<Account>,
     secrets: Secrets,
     sender: SyncSender<Record>,
-    remaining: AtomicUsize,
     dropped: Arc<AtomicUsize>,
 }
 
@@ -336,6 +427,12 @@ pub enum StartTraceError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "the engine traces in {} still being written fill the {} MiB they may take together",
+        dir.display(),
+        RETAINED_BYTES / (1024 * 1024)
+    )]
+    NoRoom { dir: PathBuf },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -373,11 +470,15 @@ struct Listed {
 }
 
 pub fn prune(dir: &Path, now: std::time::SystemTime) -> Result<usize, PruneTracesError> {
-    prune_within(dir, now, RETAINED_BYTES)
+    let folder = Folder::of(dir);
+    let live = folder.live();
+    prune_within(dir, &folder, &live, now, RETAINED_BYTES)
 }
 
 fn prune_within(
     dir: &Path,
+    folder: &Folder,
+    live: &BTreeSet<Arc<str>>,
     now: std::time::SystemTime,
     budget: u64,
 ) -> Result<usize, PruneTracesError> {
@@ -398,10 +499,14 @@ fn prune_within(
             source,
         })?;
         let path = entry.path();
-        if path
+        let is_trace = path
             .extension()
-            .is_none_or(|extension| extension != "jsonl")
-        {
+            .is_some_and(|extension| extension == "jsonl");
+        let is_live = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| live.contains(name));
+        if !is_trace || is_live {
             continue;
         }
         let metadata = match entry.metadata().and_then(|metadata| {
@@ -421,75 +526,112 @@ fn prune_within(
             });
         }
     }
-    let doomed = expired(traces, now, budget);
-    for path in &doomed {
-        match std::fs::remove_file(path) {
+    let for_completed = budget.saturating_sub(folder.held_live.load(Ordering::Acquire));
+    let Kept { doomed, bytes } = expired(traces, now, for_completed);
+    folder.completed.store(
+        bytes.saturating_add(doomed.iter().map(|trace| trace.bytes).sum()),
+        Ordering::Release,
+    );
+    for trace in &doomed {
+        match std::fs::remove_file(&trace.path) {
             Ok(()) => {}
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(PruneTracesError::Remove {
-                    path: path.clone(),
+                    path: trace.path.clone(),
                     source,
                 });
             }
         }
+        folder.completed.fetch_sub(trace.bytes, Ordering::AcqRel);
     }
     Ok(doomed.len())
 }
 
-fn expired(mut traces: Vec<Listed>, now: std::time::SystemTime, budget: u64) -> Vec<PathBuf> {
+struct Kept {
+    doomed: Vec<Listed>,
+    bytes: u64,
+}
+
+fn expired(mut traces: Vec<Listed>, now: std::time::SystemTime, budget: u64) -> Kept {
     traces.sort_by_key(|trace| std::cmp::Reverse(trace.modified));
     let oldest = now.checked_sub(RETAINED_AGE);
     let mut total: u64 = 0;
     let mut full = false;
-    traces
+    let mut kept: u64 = 0;
+    let doomed = traces
         .into_iter()
         .filter_map(|trace| {
             total = total.saturating_add(trace.bytes);
             full = full || total > budget;
             let stale = oldest.is_some_and(|oldest| trace.modified < oldest);
-            (full || stale).then_some(trace.path)
+            if full || stale {
+                Some(trace)
+            } else {
+                kept = kept.saturating_add(trace.bytes);
+                None
+            }
         })
-        .collect()
+        .collect();
+    Kept {
+        doomed,
+        bytes: kept,
+    }
 }
 
 impl Trace {
     pub fn start(dir: &Path, name: &str, secrets: Secrets) -> Result<Started, StartTraceError> {
         artisan_paths::private::create_folder(dir).map_err(StartTraceError::CreateFolder)?;
-        let room = RETAINED_BYTES.saturating_sub(MAX_TRACE_BYTES as u64);
-        if let Err(failure) = prune_within(dir, std::time::SystemTime::now(), room) {
-            let error: &dyn std::error::Error = &failure;
-            tracing::warn!(
-                error,
-                "older engine traces stay until the next trace starts"
-            );
-        }
+        let folder = Folder::of(dir);
         let file_name: Arc<str> = Arc::from(format!("{name}-{}.jsonl", artisan_api::now()));
+        {
+            let mut live = folder.live();
+            let room = RETAINED_BYTES.saturating_sub(MAX_TRACE_BYTES as u64);
+            if let Err(failure) =
+                prune_within(dir, &folder, &live, std::time::SystemTime::now(), room)
+            {
+                let error: &dyn std::error::Error = &failure;
+                tracing::warn!(
+                    error,
+                    "older engine traces stay until the next trace starts"
+                );
+            }
+            live.insert(Arc::clone(&file_name));
+        }
+        let account = Arc::new(Account {
+            folder,
+            name: Arc::clone(&file_name),
+            remaining: AtomicUsize::new(MAX_TRACE_BYTES),
+            held: AtomicU64::new(0),
+        });
         let path = dir.join(&*file_name);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let file = options
-            .open(&path)
-            .map_err(|source| StartTraceError::CreateFile {
-                path: path.clone(),
-                source,
-            })?;
+        let opened = if account.reserve(END_LINE_BYTES) {
+            open_trace(&path)
+        } else {
+            Err(StartTraceError::NoRoom {
+                dir: dir.to_path_buf(),
+            })
+        };
+        let file = opened.inspect_err(|_| account.finish())?;
         let (sender, receiver) = sync_channel::<Record>(32);
         let dropped = Arc::new(AtomicUsize::new(0));
         let sink = Arc::new(Sink {
-            name: file_name,
+            account: Arc::clone(&account),
             secrets,
             sender,
-            remaining: AtomicUsize::new(MAX_TRACE_BYTES),
             dropped: Arc::clone(&dropped),
         });
         let writer_path = path.clone();
+        let writer_account = Arc::clone(&account);
         let writer = std::thread::Builder::new()
             .name("engine-trace".into())
-            .spawn(move || write_records(file, &receiver, &dropped, &writer_path))
-            .map_err(|source| StartTraceError::SpawnWriter { path, source })?;
+            .spawn(move || {
+                write_records(file, &receiver, &dropped, &writer_account, &writer_path);
+            })
+            .map_err(|source| {
+                account.finish();
+                StartTraceError::SpawnWriter { path, source }
+            })?;
         Ok(Started {
             trace: Self { sink: Some(sink) },
             writer,
@@ -498,7 +640,9 @@ impl Trace {
 
     #[must_use]
     pub(crate) fn name(&self) -> Option<Arc<str>> {
-        self.sink.as_ref().map(|sink| Arc::clone(&sink.name))
+        self.sink
+            .as_ref()
+            .map(|sink| Arc::clone(&sink.account.name))
     }
 
     #[must_use]
@@ -513,18 +657,12 @@ impl Trace {
     pub fn record(&self, kind: Kind, text: &str) {
         let Some(sink) = &self.sink else { return };
         let text = Text::bounded(&sink.secrets.redact(text));
-        let bytes = text
+        let reserved = text
             .kept()
             .len()
             .saturating_mul(6)
             .saturating_add(RECORD_OVERHEAD_BYTES);
-        if sink
-            .remaining
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(bytes)
-            })
-            .is_err()
-        {
+        if !sink.account.reserve(reserved) {
             sink.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -532,9 +670,10 @@ impl Trace {
             kind,
             at: artisan_api::now(),
             text,
+            reserved,
         };
         if sink.sender.try_send(record).is_err() {
-            sink.remaining.fetch_add(bytes, Ordering::Relaxed);
+            sink.account.refund(reserved);
             sink.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -571,37 +710,61 @@ impl Drop for Stream {
     }
 }
 
-fn write_line(file: &mut impl std::io::Write, value: &serde_json::Value) -> std::io::Result<()> {
-    serde_json::to_writer(&mut *file, value)?;
-    writeln!(file)
+fn open_trace(path: &Path) -> Result<std::fs::File, StartTraceError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .map_err(|source| StartTraceError::CreateFile {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn write_line(file: &mut impl std::io::Write, value: &serde_json::Value) -> std::io::Result<usize> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    Ok(line.len())
 }
 
 fn write_records(
     file: std::fs::File,
     receiver: &Receiver<Record>,
     dropped: &AtomicUsize,
+    account: &Account,
     path: &Path,
 ) {
     let mut file = std::io::BufWriter::new(file);
     let mut written = || -> std::io::Result<()> {
         while let Ok(record) = receiver.recv() {
             let lost = dropped.swap(0, Ordering::Relaxed);
-            if lost > 0 {
+            let marker = if lost > 0 {
                 write_line(
                     &mut file,
                     &serde_json::json!({ "at": record.at, "kind": "dropped", "records": lost }),
-                )?;
-            }
-            write_line(&mut file, &record.json())?;
+                )
+            } else {
+                Ok(0)
+            };
+            let line = marker.and_then(|marker| {
+                write_line(&mut file, &record.json()).map(|line| marker.saturating_add(line))
+            });
+            account.settle(record.reserved, *line.as_ref().unwrap_or(&record.reserved));
+            line?;
             if matches!(record.kind, Kind::Note) {
                 file.flush()?;
             }
         }
         let lost = dropped.swap(0, Ordering::Relaxed);
-        write_line(
+        let end = write_line(
             &mut file,
             &serde_json::json!({ "at": artisan_api::now(), "kind": "end", "dropped": lost }),
-        )?;
+        );
+        account.settle(END_LINE_BYTES, *end.as_ref().unwrap_or(&END_LINE_BYTES));
+        end?;
         file.flush()
     };
     if let Err(failure) = written() {
@@ -612,4 +775,5 @@ fn write_records(
             "the engine trace stopped writing"
         );
     }
+    account.finish();
 }
