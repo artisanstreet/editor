@@ -594,6 +594,7 @@ impl RunSummary {
     }
 }
 
+#[derive(Debug)]
 pub struct Folded {
     pub rows: Vec<Row>,
     pub runs: HashMap<RunId, RunSummary>,
@@ -1292,6 +1293,15 @@ fn summaries(
                     started_at,
                     ended_at: if live { None } else { ended_at },
                     open,
+                    worked: unloaded_work.contains(run_id)
+                        || items.iter().any(|item| {
+                            matches!(
+                                item.kind,
+                                ItemKind::Tool { .. }
+                                    | ItemKind::Agent { .. }
+                                    | ItemKind::Plan { .. }
+                            )
+                        }),
                     doing: live
                         .then(|| {
                             let steps: Vec<&Item> = items
@@ -1302,15 +1312,6 @@ fn summaries(
                             activity::doing(&steps, &agent_names(shown))
                         })
                         .flatten(),
-                    worked: unloaded_work.contains(run_id)
-                        || items.iter().any(|item| {
-                            matches!(
-                                item.kind,
-                                ItemKind::Tool { .. }
-                                    | ItemKind::Agent { .. }
-                                    | ItemKind::Plan { .. }
-                            )
-                        }),
                 },
             )
         })

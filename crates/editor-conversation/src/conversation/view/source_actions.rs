@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 const CLIPBOARD_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum CopySource {
     Text(Arc<str>),
     Live(Arc<ropey::Rope>),

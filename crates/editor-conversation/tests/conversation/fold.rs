@@ -324,7 +324,21 @@ fn every_turn_without_tools_gets_its_header_right_after_its_prompt() {
         .iter()
         .map(|row| match row {
             super::Row::WorkHeader(run) => format!("header {run}"),
-            other => other.anchor().map_or("-", |id| id.as_str()).to_owned(),
+            other @ (super::Row::Projected { .. }
+            | super::Row::Work { .. }
+            | super::Row::EarlierWork { .. }
+            | super::Row::WorkEntry { .. }
+            | super::Row::Chain { .. }
+            | super::Row::Text { .. }
+            | super::Row::Prompt(_)
+            | super::Row::Compaction(_)
+            | super::Row::Image(_)
+            | super::Row::Gap
+            | super::Row::Status(_)
+            | super::Row::AgentResult(_)
+            | super::Row::AgentStatus(..)) => {
+                other.anchor().map_or("-", |id| id.as_str()).to_owned()
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(

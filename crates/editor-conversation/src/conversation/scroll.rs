@@ -5,7 +5,7 @@ use super::viewport::Input;
 use aqua_ui::collection::{CollectionRevealAlignment, FollowMode, FollowState};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SmoothScroll {
     pub destination: Option<f32>,
     pub frame: Option<Instant>,

@@ -46,6 +46,7 @@ struct EntranceState {
     height: Rc<Cell<f32>>,
 }
 
+#[derive(Debug)]
 pub struct EntranceFrame {
     grow: f32,
     reveal: f32,
@@ -66,6 +67,12 @@ pub struct RowMotion {
     arrivals: HashMap<String, (bool, Option<Instant>)>,
     animating: bool,
     refit: Option<Rc<dyn Fn()>>,
+}
+
+impl std::fmt::Debug for RowMotion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowMotion").finish_non_exhaustive()
+    }
 }
 
 impl RowMotion {

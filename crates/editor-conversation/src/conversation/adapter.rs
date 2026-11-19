@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Action {
     OpenAgent(ItemId),
     ToggleWork {
@@ -37,7 +37,7 @@ pub enum Action {
     },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ActionScope {
     scope: String,
     instance: editor_core::HostInstance,
@@ -60,6 +60,7 @@ impl ActionScope {
     }
 }
 
+#[derive(Debug)]
 pub struct ScopedAction {
     scope: String,
     instance: editor_core::HostInstance,
@@ -167,6 +168,7 @@ impl ScopedAction {
     }
 }
 
+#[derive(Debug)]
 pub struct RowModel {
     pub row: Row,
     pub version: u64,
@@ -180,6 +182,7 @@ pub struct RowModel {
     pub end: f32,
 }
 
+#[derive(Debug)]
 pub struct RowSnapshots {
     view: super::thread::ThreadView,
     rows: Vec<(Row, u64)>,
@@ -243,7 +246,17 @@ fn row_model_from(
     let ids: Vec<ItemId> = match row {
         Row::Work { .. } | Row::WorkHeader(_) => Vec::new(),
         Row::Chain { ids, .. } => ids.as_slice().to_vec(),
-        other => other.anchor().cloned().into_iter().collect(),
+        other @ (Row::Projected { .. }
+        | Row::EarlierWork { .. }
+        | Row::WorkEntry { .. }
+        | Row::Text { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Gap
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..)) => other.anchor().cloned().into_iter().collect(),
     };
     let items: HashMap<ItemId, Arc<Item>> = ids
         .iter()

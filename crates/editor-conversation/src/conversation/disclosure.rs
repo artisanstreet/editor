@@ -5,7 +5,7 @@ use editor_ui::motion::MotionCurve;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DisclosureState {
     pub disclosures: HashMap<RowKey, Flight>,
     pub disclosure_clips: HashMap<RowKey, RowClip>,
@@ -14,7 +14,7 @@ pub struct DisclosureState {
     pub disclosure_gaps: HashMap<RowKey, f32>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DisclosureFrame {
     pub active: bool,
     pub refold: bool,
@@ -39,6 +39,7 @@ pub struct RowDisclosure {
     pub hidden: bool,
     pub gap: Option<f32>,
 }
+#[derive(Debug)]
 pub struct Flight {
     members: HashSet<ItemId>,
     retained: Vec<(Row, u64)>,

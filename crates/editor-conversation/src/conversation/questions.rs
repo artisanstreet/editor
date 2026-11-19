@@ -60,6 +60,12 @@ pub struct QuestionPages {
     pub source_view: Option<editor_sources::ContentText>,
 }
 
+impl std::fmt::Debug for QuestionPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionPages").finish_non_exhaustive()
+    }
+}
+
 impl QuestionPages {
     pub(crate) fn sync(
         &mut self,
@@ -260,6 +266,12 @@ pub struct OptionAction {
     action: editor_sources::CollectionAction<QuestionOption>,
 }
 
+impl std::fmt::Debug for OptionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OptionAction").finish_non_exhaustive()
+    }
+}
+
 fn option_preview(
     option: &QuestionOption,
     panel: &QuestionnairePanel,
@@ -290,12 +302,25 @@ pub struct QuestionCollection {
     owner: Option<Owner<Question>>,
 }
 
+impl std::fmt::Debug for QuestionCollection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionCollection").finish_non_exhaustive()
+    }
+}
+
 pub struct QuestionCollectionAction {
     host: HostId,
     instance: HostInstance,
     item: ItemId,
     source: CollectionRef,
     action: editor_sources::CollectionAction<Question>,
+}
+
+impl std::fmt::Debug for QuestionCollectionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionCollectionAction")
+            .finish_non_exhaustive()
+    }
 }
 
 impl QuestionCollectionAction {
@@ -322,7 +347,7 @@ impl QuestionCollection {
         before != after
     }
 
-    pub(crate) fn drain_changed(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_changed(&self, core: &Core) -> bool {
         self.browser().is_some_and(|browser| {
             editor_sources::drain_collection_changed(&mut browser.borrow_mut(), core)
         })

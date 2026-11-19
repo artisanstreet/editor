@@ -12,7 +12,7 @@ use artisan_api::Seq;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RowSnapshot {
     pub row: Row,
     pub version: u64,
@@ -28,6 +28,7 @@ pub struct RowSnapshot {
     )>,
 }
 
+#[derive(Debug)]
 pub struct HeightObservation {
     pub key: RowKey,
     pub version: u64,
@@ -35,12 +36,13 @@ pub struct HeightObservation {
     pub active: Rc<std::cell::Cell<bool>>,
 }
 
+#[derive(Debug)]
 pub struct ViewportObservation {
     pub viewport: CollectionViewport,
     pub active: Rc<std::cell::Cell<bool>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PaintedRow {
     pub snapshot: Rc<RowSnapshot>,
     pub bounds: aqua_core::Rect,
@@ -49,7 +51,7 @@ pub struct PaintedRow {
     pub serial: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ObservationEvents {
     pub viewports: Vec<ViewportObservation>,
     pub heights: Vec<HeightObservation>,
@@ -93,6 +95,13 @@ pub struct StaleViewportError;
 
 #[derive(Clone, Default)]
 pub struct TranscriptObservations(Rc<RefCell<ObservationState>>);
+
+impl std::fmt::Debug for TranscriptObservations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptObservations")
+            .finish_non_exhaustive()
+    }
+}
 
 impl TranscriptObservations {
     #[cfg(feature = "qualification")]
@@ -177,7 +186,20 @@ impl TranscriptObservations {
                     },
                     *block,
                 ),
-                _ => None,
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::WorkHeader(_)
+                | Row::EarlierWork { .. }
+                | Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::Text { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => None,
             };
             let mut state = paint_events.0.borrow_mut();
             #[cfg(feature = "qualification")]
@@ -397,6 +419,12 @@ pub struct ObservedRead {
     snapshot: Rc<RowSnapshot>,
     scope: PresentationScope,
     proof: ReadProof,
+}
+
+impl std::fmt::Debug for ObservedRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservedRead").finish_non_exhaustive()
+    }
 }
 
 enum ReadProof {
@@ -758,7 +786,20 @@ pub fn observer(
             {
                 Some(*first)
             }
-            _ => None,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::WorkHeader(_)
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => None,
         });
     let work_idle = conversation.work_idle() && conversation.load_error.is_none();
     let settled = view.viewport.loaded();

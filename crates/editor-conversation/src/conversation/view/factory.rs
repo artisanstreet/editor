@@ -31,6 +31,7 @@ pub(crate) use self::bubbles::message_author;
 use self::bubbles::{authored, bubble_sender, media_width, truncate, user_bubble};
 use self::stored_rows::plain_block;
 
+#[derive(Debug)]
 pub struct WorkResources {
     pub motion: Rc<RefCell<super::motion::RowMotion>>,
     pub names: HashMap<artisan_api::ItemId, String>,
@@ -61,7 +62,7 @@ struct SnapshotRow {
     held: bool,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum BlobAction {
     Load {
         hash: artisan_api::BlobHash,
@@ -173,6 +174,7 @@ pub enum ConfigureRowsError {
     NoObservations,
 }
 
+#[derive(Debug)]
 pub struct RealizedRow {
     pub model: RowModel,
     pub disclosure: RowDisclosure,
@@ -226,6 +228,13 @@ pub struct RowFactory {
     content_keyed: Cell<bool>,
 }
 
+impl std::fmt::Debug for RowFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowFactory").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct RowFingerprint<'a> {
     pub model: &'a RowModel,
     pub disclosure: &'a RowDisclosure,
@@ -373,7 +382,19 @@ impl RowFactory {
                     block,
                     ..
                 } => (2, *block),
-                _ => (1, 0),
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::WorkHeader(_)
+                | Row::EarlierWork { .. }
+                | Row::WorkEntry { .. }
+                | Row::Text { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => (1, 0),
             };
             let mut queue = queue.borrow_mut();
             let enabled = !crate::conversation::admission::immediate(semantic)
@@ -422,7 +443,20 @@ impl RowFactory {
                         !members.entries().is_empty() || !members.spans().is_empty(),
                     ),
                     Row::WorkHeader(run) => (Some(run), 0, false),
-                    _ => unreachable!("invariant: the arm matched only work rows"),
+                    Row::Projected { .. }
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Text { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => {
+                        unreachable!("invariant: the arm matched only work rows")
+                    }
                 };
                 let work = &self.work;
                 let dispatch = &self.dispatch;
@@ -542,7 +576,13 @@ impl RowFactory {
                     ItemKind::Question { .. } => {
                         self.question_card(&row_owner, item, &mut batches)?
                     }
-                    _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
+                    ItemKind::UserMessage { .. }
+                    | ItemKind::AssistantMessage { .. }
+                    | ItemKind::Image { .. }
+                    | ItemKind::Compaction { .. }
+                    | ItemKind::Error { .. } => {
+                        return Err(RealizeRowError::Unrenderable { key: key.clone() });
+                    }
                 }
             }
             Row::Text {
@@ -598,7 +638,7 @@ impl RowFactory {
                     *slot,
                     *block,
                     reference,
-                    &reveal,
+                    reveal.as_ref(),
                     content_width,
                     &mut batches,
                 )?;
@@ -1033,7 +1073,12 @@ impl RowFactory {
                             ItemKind::Notice { .. } => {
                                 self.notice_row(&row_owner, item, &mut batches)?
                             }
-                            _ => None,
+                            ItemKind::UserMessage { .. }
+                            | ItemKind::AssistantMessage { .. }
+                            | ItemKind::Question { .. }
+                            | ItemKind::Image { .. }
+                            | ItemKind::Compaction { .. }
+                            | ItemKind::Error { .. } => None,
                         }
                     }
                 }
@@ -1143,10 +1188,14 @@ impl RowFactory {
                 };
                 Some(match section {
                     fold::PlainSection::ImageCaption => image_caption(text, self.theme),
-                    _ => aqua_ui::element::Text::new(text.to_owned()).build(),
+                    fold::PlainSection::Error => {
+                        aqua_ui::element::Text::new(text.to_owned()).build()
+                    }
                 })
             }
-            _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
+            Row::Projected { .. } | Row::Text { .. } => {
+                return Err(RealizeRowError::Unrenderable { key: key.clone() });
+            }
         };
         let semantic = row.model.row.semantic();
         let author = message_author(
@@ -1171,7 +1220,15 @@ impl RowFactory {
                     Row::Text {
                         id, slot, block: 0, ..
                     } if slot.is_card() => (Some(id), true),
-                    _ => (None, false),
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::WorkHeader(_)
+                    | Row::EarlierWork { .. }
+                    | Row::Text { .. }
+                    | Row::Compaction(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentStatus(..) => (None, false),
                 };
                 if let Some(id) = id {
                     let fresh = row.disclosure.clip.is_none()
@@ -1239,7 +1296,14 @@ impl RowFactory {
             Row::Chain { .. } | Row::WorkEntry { .. } => "rz_kind_chain",
             Row::Work { .. } | Row::WorkHeader(_) => "rz_kind_work",
             Row::Status(_) => "rz_kind_status",
-            _ => "rz_kind_other",
+            Row::Projected { .. }
+            | Row::EarlierWork { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => "rz_kind_other",
         });
         editor_core::diagnostics::rebuild_stats::record_event(match () {
             () if settled => "rz_settled",
@@ -1278,12 +1342,22 @@ impl RowFactory {
                                 text: TextContent::Inline(source),
                                 ..
                             } => Some(self.inline_text(item, source)),
-                            _ => None,
+                            ItemKind::UserMessage { .. }
+                            | ItemKind::AssistantMessage { .. }
+                            | ItemKind::Tool { .. }
+                            | ItemKind::Agent { .. }
+                            | ItemKind::Question { .. }
+                            | ItemKind::Plan { .. }
+                            | ItemKind::Image { .. }
+                            | ItemKind::Compaction { .. }
+                            | ItemKind::Notice { .. }
+                            | ItemKind::Error { .. } => None,
                         })
                     }),
                 active: Rc::clone(&self.active),
                 revealed: !row.held && !row.disclosure.hidden,
                 reveal_ready: reveal.as_ref().map(|(_, _, ready)| Rc::clone(ready)),
+                live: snapshot_live,
                 stored: stored_proof.map(|proof| {
                     (
                         Rc::downgrade(
@@ -1296,7 +1370,6 @@ impl RowFactory {
                         proof,
                     )
                 }),
-                live: snapshot_live,
             };
             let (height, painted) = observations.callbacks(snapshot, Rc::clone(&self.markdown));
             let height_active = Rc::clone(&self.active);

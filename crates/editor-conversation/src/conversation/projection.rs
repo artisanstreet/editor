@@ -14,13 +14,13 @@ pub struct BodyProjection {
     pub leaves: Range<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ShapeText<'a> {
     Inline(&'a str),
     Live(&'a ropey::Rope),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ShapeSource<'a> {
     pub text: ShapeText<'a>,
     pub message: bool,
@@ -65,6 +65,12 @@ struct BodyShape {
 pub struct Projections {
     bodies: HashMap<BodyKey, BodyProjection>,
     shapes: HashMap<BodyKey, BodyShape>,
+}
+
+impl std::fmt::Debug for Projections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Projections").finish_non_exhaustive()
+    }
 }
 
 fn block_version(signature: u64, seq: u64, running: bool, block: usize, count: usize) -> u64 {

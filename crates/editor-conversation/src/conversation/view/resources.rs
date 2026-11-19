@@ -34,6 +34,13 @@ pub struct ResourceBatches {
     entries: HashMap<ResourceKey, ResourceBatch>,
 }
 
+impl std::fmt::Debug for ResourceBatches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceBatches").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct BatchRelease {
     document: SelectionDocumentId,
     owner: SelectionBatchOwner,
@@ -49,7 +56,7 @@ impl BatchRelease {
     }
 }
 
-fn same_source(left: &Option<SelectionSource>, right: &Option<SelectionSource>) -> bool {
+fn same_source(left: Option<&SelectionSource>, right: Option<&SelectionSource>) -> bool {
     match (left, right) {
         (Some(a), Some(b)) => {
             a.id == b.id
@@ -88,14 +95,12 @@ impl ResourceBatches {
         &mut self,
         keep: &std::collections::HashSet<ResourceKey>,
     ) -> Vec<BatchRelease> {
-        let keys: Vec<_> = self
-            .entries
-            .keys()
-            .filter(|key| !keep.contains(*key))
-            .cloned()
-            .collect();
-        keys.into_iter()
-            .filter_map(|key| self.entries.remove(&key))
+        let (released, kept): (HashMap<_, _>, HashMap<_, _>) = std::mem::take(&mut self.entries)
+            .into_iter()
+            .partition(|(key, _)| !keep.contains(key));
+        self.entries = kept;
+        released
+            .into_values()
             .map(|entry| BatchRelease {
                 document: entry.batch.document(),
                 owner: entry.owner,
@@ -130,7 +135,8 @@ impl ResourceBatches {
         }
         let source = view.selection;
         let changed = self.entries.get(&key).is_none_or(|entry| {
-            entry.batch.document() != document || !same_source(&entry.source, &source)
+            entry.batch.document() != document
+                || !same_source(entry.source.as_ref(), source.as_ref())
         });
         if changed {
             let (owner, revision) = self.entries.get(&key).map_or_else(

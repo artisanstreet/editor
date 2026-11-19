@@ -23,6 +23,12 @@ pub struct RevealQueue {
     rows: HashMap<RowKey, RevealGate>,
     rushed_before: u64,
 }
+
+impl std::fmt::Debug for RevealQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevealQueue").finish_non_exhaustive()
+    }
+}
 struct RevealGate {
     order: (u64, u8, usize),
     seen: Instant,
@@ -83,6 +89,7 @@ impl RevealQueue {
     }
 }
 
+#[derive(Debug)]
 pub struct LiveBlockArrivals {
     high_water: usize,
     pending: bool,

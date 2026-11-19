@@ -5,6 +5,7 @@ use aqua_core::Rect;
 use artisan_api::{Item, Seq, ThreadId};
 use editor_core::{Core, HostId, HostInstance};
 
+#[derive(Debug)]
 pub struct ReadCandidate {
     host: HostId,
     instance: HostInstance,

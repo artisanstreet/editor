@@ -8,6 +8,7 @@ use editor_core::host::ScopedSourceProvider;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
+#[derive(Debug)]
 pub enum RowSourceActionKind {
     Content(SourceAction),
     Questions(QuestionCollectionAction),
@@ -28,9 +29,21 @@ pub struct RowSourceAction {
     pub action: RowSourceActionKind,
 }
 
+impl std::fmt::Debug for RowSourceAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceAction").finish_non_exhaustive()
+    }
+}
+
 pub enum RowSourceEffect {
     SavePath(RowSourceExport),
     Clipboard(editor_sources::CopiedSource),
+}
+
+impl std::fmt::Debug for RowSourceEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceEffect").finish_non_exhaustive()
+    }
 }
 
 pub struct RowSourceExport {
@@ -39,6 +52,12 @@ pub struct RowSourceExport {
     provider: ScopedSourceProvider,
     owner: Weak<RowOwner>,
     export: ExportKind,
+}
+
+impl std::fmt::Debug for RowSourceExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceExport").finish_non_exhaustive()
+    }
 }
 
 enum ExportKind {
@@ -139,7 +158,9 @@ impl RowSourceAction {
                 });
                 (changed, effect)
             }
-            _ => (false, None),
+            RowSourceActionKind::Content(_)
+            | RowSourceActionKind::Questions(_)
+            | RowSourceActionKind::QuestionDetail { .. } => (false, None),
         }
     }
 }

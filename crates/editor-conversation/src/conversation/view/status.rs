@@ -13,7 +13,7 @@ pub(crate) enum StatusText {
     Status(String),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct StatusShimmers {
     scope: Option<crate::conversation::presentation::PresentationScope>,
 }
@@ -26,7 +26,7 @@ impl StatusShimmers {
         self.scope = Some(scope.clone());
     }
     pub(crate) fn render(
-        &mut self,
+        &self,
         row: RowKey,
         text: StatusText,
         live: bool,

@@ -43,7 +43,19 @@ impl RowFactory {
             {
                 u64::try_from(self.work.timestamp / 1_000).ok()
             }
-            _ => None,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::WorkHeader(_)
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => None,
         };
         Some(
             RowFingerprint {
@@ -71,12 +83,14 @@ impl RowFactory {
 
     pub(super) fn live_text(&self, rope: &Arc<ropey::Rope>) -> Rc<str> {
         let at = Arc::as_ptr(rope) as usize;
-        self.live_texts
-            .borrow_mut()
-            .entry(at)
-            .or_insert_with(|| (Arc::clone(rope), Rc::from(rope.to_string())))
-            .1
-            .clone()
+        Rc::clone(
+            &self
+                .live_texts
+                .borrow_mut()
+                .entry(at)
+                .or_insert_with(|| (Arc::clone(rope), Rc::from(rope.to_string())))
+                .1,
+        )
     }
 
     pub(super) fn inline_text(&self, item: &artisan_api::Item, text: &str) -> Rc<str> {

@@ -156,7 +156,9 @@ impl RowFactory {
                 aqua::images::ImageStatus::Ready { width, height } => {
                     Some(width as f32 / height.max(1) as f32)
                 }
-                _ => None,
+                aqua::images::ImageStatus::Pending
+                | aqua::images::ImageStatus::Failed(_)
+                | aqua::images::ImageStatus::Cancelled => None,
             })
             .unwrap_or(16.0 / 9.0);
         let mut frame = if attachment.is_some() {

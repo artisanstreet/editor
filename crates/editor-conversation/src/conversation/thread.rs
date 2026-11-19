@@ -61,7 +61,7 @@ impl ItemUi {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ThreadView {
     pub(crate) thread: ThreadId,
     pub context: HashMap<ItemId, Arc<Item>>,
@@ -285,7 +285,11 @@ impl ThreadView {
             .max();
         let fetch = match fetch {
             Fetch::Refresh if !refreshes(first, newest, page.more) => Fetch::Tail,
-            fetch => fetch,
+            fetch @ (Fetch::Tail
+            | Fetch::Refresh
+            | Fetch::Older { .. }
+            | Fetch::Newer { .. }
+            | Fetch::At { .. }) => fetch,
         };
         let newer: Vec<Arc<Item>> = page
             .items

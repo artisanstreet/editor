@@ -78,12 +78,29 @@ pub(crate) fn approval<E>(
                     "file change",
                     "file changes",
                 )],
-                _ => Vec::new(),
+                ToolKind::AgentMessage { .. }
+                | ToolKind::Agents { .. }
+                | ToolKind::Shell { .. }
+                | ToolKind::Read { .. }
+                | ToolKind::Search { .. }
+                | ToolKind::WebFetch { .. }
+                | ToolKind::WebSearch { .. }
+                | ToolKind::Mcp { .. }
+                | ToolKind::ViewImage { .. }
+                | ToolKind::Workflow { .. }
+                | ToolKind::Other { .. } => Vec::new(),
             };
             (approval.as_ref(), files)
         }
         ItemKind::Plan { approval, .. } => (approval.as_ref(), Vec::new()),
-        _ => (None, Vec::new()),
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => (None, Vec::new()),
     };
     let Some(approval) = approval else {
         return Ok(None);

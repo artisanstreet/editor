@@ -77,7 +77,7 @@ pub enum StoredBodyError {
     },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StoredProof {
     scope: PresentationScope,
     key: BodyKey,
@@ -171,6 +171,12 @@ pub struct StoredConversation {
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     live: Vec<Weak<StoredLeafLease>>,
     order: VecDeque<(BodyKey, usize)>,
+}
+
+impl std::fmt::Debug for StoredConversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredConversation").finish_non_exhaustive()
+    }
 }
 
 impl StoredConversation {
@@ -545,7 +551,9 @@ impl StoredConversation {
             StoredPreparation::Ready(source) if self.owner.source_is_current(&source) => {
                 Some(source.block_count())
             }
-            _ => None,
+            StoredPreparation::Pending
+            | StoredPreparation::Ready(_)
+            | StoredPreparation::Failed(_) => None,
         }
     }
 

@@ -4,7 +4,7 @@ use artisan_api::{ItemId, LiveCoverage, LiveTarget, Status};
 use editor_core::Core;
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LiveBinding {
     pub scope: PresentationScope,
     pub item: ItemId,

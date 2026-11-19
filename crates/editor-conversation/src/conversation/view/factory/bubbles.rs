@@ -29,11 +29,14 @@ pub(super) fn truncate(
 pub(super) fn media_width(reading: f32, slot: Slot, lists: usize) -> f32 {
     use editor_ui::chat_bubble::{ChatBubbleSegment, SURFACE};
     let width = match (slot.is_bubble(), slot.is_card()) {
-        (true, _) => reading.min(ChatBubbleSegment::MAX_WIDTH) - 2.0 * SURFACE.padding_px(),
+        (true, _) => 2.0f32.mul_add(
+            -SURFACE.padding_px(),
+            reading.min(ChatBubbleSegment::MAX_WIDTH),
+        ),
         (false, true) => reading - super::super::CHAIN_INDENT.px(),
         (false, false) => reading,
     };
-    width - lists as f32 * editor_ui::markdown::LIST_INDENT
+    (lists as f32).mul_add(-editor_ui::markdown::LIST_INDENT, width)
 }
 
 pub(super) fn user_bubble(
@@ -79,7 +82,15 @@ pub(super) fn bubble_sender(
 ) -> Option<artisan_api::EngineId> {
     match &item.kind {
         ItemKind::UserMessage { sender, .. } => sender.as_ref().map(|sender| sender.engine),
-        _ => author,
+        ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => author,
     }
 }
 

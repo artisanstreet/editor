@@ -83,11 +83,13 @@ impl RowFactory {
         }
     }
 
+    #[must_use]
     pub fn with_active(mut self, active: Rc<Cell<bool>>) -> Self {
         self.active = active;
         self
     }
 
+    #[must_use]
     pub fn with_settled(
         mut self,
         settled: Rc<RefCell<HashMap<RowKey, u64>>>,
@@ -99,6 +101,7 @@ impl RowFactory {
         self
     }
 
+    #[must_use]
     pub fn with_row_cache(mut self, cache: Rc<RefCell<super::super::row_cache::RowCache>>) -> Self {
         cache.borrow_mut().rebind(Some(self.scope.clone()));
         self.row_cache = cache;
@@ -141,11 +144,13 @@ impl RowFactory {
         Ok(self)
     }
 
+    #[must_use]
     pub fn with_copy(mut self, copy: Rc<dyn Fn(super::super::source_actions::CopySource)>) -> Self {
         self.copy = Some(copy);
         self
     }
 
+    #[must_use]
     pub fn with_blob_images(
         mut self,
         images: editor_core::host::BlobImages,
@@ -155,6 +160,7 @@ impl RowFactory {
         self
     }
 
+    #[must_use]
     pub fn with_admission(
         mut self,
         admission: Rc<RefCell<crate::conversation::admission::RevealQueue>>,
@@ -233,6 +239,7 @@ impl RowFactory {
         Ok(self)
     }
 
+    #[must_use]
     pub fn with_media(
         mut self,
         media: Rc<dyn Fn(&BodyKey, f32) -> Option<editor_ui::markdown::presenter::MediaServices>>,
@@ -241,6 +248,7 @@ impl RowFactory {
         self
     }
 
+    #[must_use]
     pub fn with_observations(
         mut self,
         observations: super::super::transcript::TranscriptObservations,
@@ -249,6 +257,7 @@ impl RowFactory {
         self
     }
 
+    #[must_use]
     pub fn with_engine(
         mut self,
         engine: Rc<RefCell<Option<editor_ui::markdown::MarkdownEngine>>>,

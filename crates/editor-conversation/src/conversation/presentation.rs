@@ -26,7 +26,12 @@ fn prepare_body(
 ) -> Result<PreparationProof, editor_ui::markdown::presenter::PresenterError> {
     match slot {
         Slot::Text(super::fold::TextSection::User) => presenter.prepare_message(engine, source),
-        _ => presenter.prepare(engine, source),
+        Slot::Prose
+        | Slot::Plain(_)
+        | Slot::Text(_)
+        | Slot::Output
+        | Slot::Answer
+        | Slot::Preview => presenter.prepare(engine, source),
     }
 }
 
@@ -91,6 +96,7 @@ impl PresentationScope {
     }
 }
 
+#[derive(Debug)]
 pub struct PreparedElement {
     pub element: Element,
     pub sources: Vec<SelectionSource>,
@@ -103,7 +109,7 @@ pub(crate) struct PreparedProjectedRow {
     pub proof: ProjectedProof,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProjectedProof {
     key: BodyKey,
     source: Rc<str>,
@@ -119,6 +125,7 @@ impl ProjectedProof {
     }
 }
 
+#[derive(Debug)]
 pub struct SelectionOwners {
     document: SelectionDocumentId,
     scope: Option<PresentationScope>,
@@ -222,6 +229,12 @@ pub struct MarkdownOwners {
     media: HashMap<BodyKey, (String, MediaServices)>,
 }
 
+impl std::fmt::Debug for MarkdownOwners {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkdownOwners").finish_non_exhaustive()
+    }
+}
+
 pub struct MarkdownRender<'a> {
     pub key: BodyKey,
     pub id: &'a str,
@@ -237,11 +250,19 @@ pub struct MarkdownRender<'a> {
     pub heatmap: &'a HeatmapServices,
 }
 
+impl std::fmt::Debug for MarkdownRender<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkdownRender").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub enum CodeAction {
     Copy(editor_ui::code_copy::CopyEffect),
     Reference(editor_ui::rich::actions::OpenReference),
 }
 
+#[derive(Debug)]
 pub struct ScopedCodeAction {
     scope: PresentationScope,
     key: BodyKey,
@@ -323,7 +344,7 @@ impl MarkdownOwners {
     }
 
     pub(crate) fn set_realization_media(
-        &mut self,
+        &self,
         scope: &PresentationScope,
         key: &BodyKey,
         id: &str,
@@ -378,7 +399,7 @@ impl MarkdownOwners {
             if let Some(batch) = body.batch.take() {
                 app.release_selection_batch_owner(batch.document(), batch.owner());
             }
-            body.id = request.id.to_owned();
+            request.id.clone_into(&mut body.id);
             body.rendered = None;
             body.projected.clear();
             body.prepared_item_seq = None;
@@ -747,7 +768,7 @@ impl MarkdownOwners {
         })
     }
 
-    pub(crate) fn release_projected_reveal(&mut self, proof: &ProjectedProof) {
+    pub(crate) fn release_projected_reveal(&self, proof: &ProjectedProof) {
         if let Some(body) = self.bodies.get(&proof.key) {
             body.presenter
                 .set_projected_reveal(&body.id, proof.row, None);
@@ -827,9 +848,9 @@ impl MarkdownOwners {
     }
 
     pub fn drain_media(&self) -> bool {
-        self.bodies.values().fold(false, |changed, body| {
-            body.presenter.drain_media() || changed
-        })
+        self.bodies
+            .values()
+            .any(|body| body.presenter.drain_media())
     }
 
     pub fn reveal_heatmaps(&self, app: &mut UiApp) -> bool {

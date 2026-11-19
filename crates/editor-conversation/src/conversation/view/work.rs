@@ -235,7 +235,16 @@ pub(crate) fn activity_row<E>(
             output: Some(output),
             ..
         } if item.status == Status::Failed && output.text.byte_len() > 0 => Some(&output.text),
-        _ => None,
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => None,
     };
     let has_details = failure.is_some()
         || activity::agent_message(item).is_some_and(|message| message.text.byte_len() > 0);

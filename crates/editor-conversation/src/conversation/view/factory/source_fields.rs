@@ -63,7 +63,15 @@ impl RowFactory {
             crate::conversation::content::SourceField::Question(_) => {
                 super::super::request::question_theme(item, self.theme)
             }
-            _ => self.theme,
+            crate::conversation::content::SourceField::Plain(_)
+            | crate::conversation::content::SourceField::Text(_)
+            | crate::conversation::content::SourceField::Prose
+            | crate::conversation::content::SourceField::Notice
+            | crate::conversation::content::SourceField::Output
+            | crate::conversation::content::SourceField::AnswerText
+            | crate::conversation::content::SourceField::ApprovalCommand
+            | crate::conversation::content::SourceField::ApprovalDescription
+            | crate::conversation::content::SourceField::ApprovalReason => self.theme,
         };
         let source = field
             .text(item)

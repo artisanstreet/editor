@@ -36,7 +36,7 @@ const COMPOSER_LIFT_NARROW: Space = Space::S16;
 const NARROW: f32 = 640.0;
 
 fn reading_width(viewport: f32) -> f32 {
-    viewport.min(COLUMN_MAX) - 2.0 * GUTTER.px()
+    2.0f32.mul_add(-GUTTER.px(), viewport.min(COLUMN_MAX))
 }
 
 fn strut(width: f32) -> Element {
@@ -92,7 +92,18 @@ fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Elemen
             "Load newer messages",
             Action::LoadNewer,
         ),
-        _ => return None,
+        Row::Projected { .. }
+        | Row::Work { .. }
+        | Row::WorkHeader(_)
+        | Row::WorkEntry { .. }
+        | Row::Chain { .. }
+        | Row::Text { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..) => return None,
     };
     let button = Button::text(key, theme, ButtonTone::Neutral, label)
         .on_activate(move |_| {
@@ -135,7 +146,18 @@ fn row_frame_with_body_observer(
             .get(id)
             .is_some_and(|item| crate::conversation::activity::category(item).is_some()),
         Row::Text { slot, .. } => slot.is_card(),
-        _ => false,
+        Row::Projected { .. }
+        | Row::Work { .. }
+        | Row::WorkHeader(_)
+        | Row::EarlierWork { .. }
+        | Row::Chain { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Gap
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..) => false,
     };
     let content = content.map(|content| {
         if !chained {

@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MountedReveals {
     scope: Option<PresentationScope>,
     rows: HashMap<RowKey, Weak<RefCell<MountedReveal>>>,
@@ -77,7 +77,7 @@ impl MountedReveals {
     }
 
     pub(crate) fn acquire(
-        &mut self,
+        &self,
         owner: &super::row_cache::RowOwner,
         fresh: impl FnOnce() -> bool,
     ) -> (Rc<PreparedReveal>, bool, Rc<Cell<bool>>) {
@@ -96,7 +96,7 @@ impl MountedReveals {
     }
 
     pub(crate) fn record(
-        &mut self,
+        &self,
         owner: &super::row_cache::RowOwner,
         version: u64,
         block: usize,
@@ -120,7 +120,7 @@ impl MountedReveals {
     }
 
     pub(crate) fn record_stored(
-        &mut self,
+        &self,
         owner: &super::row_cache::RowOwner,
         version: u64,
         block: usize,
@@ -298,7 +298,7 @@ impl MountedReveals {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RevealSync {
     pub reason: &'static str,
     pub frontier_changed: bool,

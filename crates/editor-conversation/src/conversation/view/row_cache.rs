@@ -17,14 +17,20 @@ pub struct RowOwner {
     identity: Option<(RowKey, PresentationScope)>,
 }
 
+impl std::fmt::Debug for RowOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowOwner").finish_non_exhaustive()
+    }
+}
+
 impl Default for RowOwner {
     fn default() -> Self {
         Self {
             motion: RefCell::new(super::motion::RowMotion::default()),
             reveal: RefCell::new(None),
-            sources: RefCell::new(Default::default()),
-            questions: RefCell::new(Default::default()),
-            batches: RefCell::new(Default::default()),
+            sources: RefCell::new(crate::conversation::content::SourceOwners::default()),
+            questions: RefCell::new(crate::conversation::questions::QuestionCollection::default()),
+            batches: RefCell::new(super::resources::ResourceBatches::default()),
             source_ids: RefCell::new(HashMap::new()),
             stored_leaf: RefCell::new(None),
             cleanup: Rc::default(),
@@ -62,7 +68,7 @@ impl RowOwner {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RowCache {
     scope: Option<PresentationScope>,
     rows: HashMap<RowKey, Rc<RowOwner>>,

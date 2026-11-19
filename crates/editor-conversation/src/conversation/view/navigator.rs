@@ -115,6 +115,7 @@ pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32
 pub fn panel_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {
     let pitch = PANEL_ROW.height().unwrap_or_default();
     let full = count as f32 * pitch;
-    ((active as f32 + 0.5) * pitch - viewport_height / 2.0)
+    (active as f32 + 0.5)
+        .mul_add(pitch, -(viewport_height / 2.0))
         .clamp(0.0, (full - viewport_height).max(0.0))
 }

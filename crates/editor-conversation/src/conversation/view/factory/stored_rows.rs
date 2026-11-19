@@ -39,7 +39,7 @@ impl RowFactory {
         slot: Slot,
         block: usize,
         reference: &artisan_api::ContentRef,
-        reveal: &Option<(
+        reveal: Option<&(
             Rc<editor_ui::markdown::reveal::PreparedReveal>,
             bool,
             Rc<Cell<bool>>,
@@ -349,7 +349,7 @@ impl RowFactory {
         let visible = leaf.visible_text().to_owned();
         let color = match section {
             fold::PlainSection::ImageCaption => self.theme.colors.text_muted,
-            _ => self.theme.colors.text,
+            fold::PlainSection::Error => self.theme.colors.text,
         };
         let element = TextRole::Label
             .text(&self.theme, visible.clone())

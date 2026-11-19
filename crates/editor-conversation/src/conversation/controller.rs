@@ -147,6 +147,12 @@ pub struct Conversation {
     clock: editor_core::Clock,
 }
 
+impl std::fmt::Debug for Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Conversation").finish_non_exhaustive()
+    }
+}
+
 fn next_rows_epoch() -> u64 {
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -346,7 +352,9 @@ impl Conversation {
         for effect in effects.into_iter().chain(jump) {
             match effect {
                 Effect::ScrollToEnd => self.scroll.push(ScrollAction::Tail),
-                effect => self.perform(core, vec![effect]),
+                effect @ (Effect::Fetch(_) | Effect::ScrollTo(_)) => {
+                    self.perform(core, vec![effect]);
+                }
             }
         }
     }
@@ -759,7 +767,7 @@ impl Conversation {
     }
 
     pub(crate) fn observe_live_preparation(
-        &mut self,
+        &self,
         core: &Core,
         binding: &super::live::LiveBinding,
         blocks: usize,
@@ -800,7 +808,7 @@ impl Conversation {
         true
     }
 
-    fn observe_live_prose_arrival(&mut self, id: &ItemId) {
+    fn observe_live_prose_arrival(&self, id: &ItemId) {
         if !self.visible_items.contains(id) {
             return;
         }
@@ -1125,7 +1133,20 @@ impl Conversation {
                     {
                         Some(row.key())
                     }
-                    _ => None,
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::WorkHeader(_)
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Text { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => None,
                 })
                 .collect();
             for header in headers {
@@ -1225,7 +1246,12 @@ impl Conversation {
             {
                 self.host_event(core, event, watched);
             }
-            _ => {}
+            CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => {}
         }
     }
 
@@ -1315,7 +1341,14 @@ impl Conversation {
                 self.perform(core, effects);
                 self.rebuild(core);
             }
-            _ => {}
+            HostEvent::ImagesChanged
+            | HostEvent::EngineInstall { .. }
+            | HostEvent::ThreadSummaryChanged { .. }
+            | HostEvent::Changed
+            | HostEvent::WslDistro { .. }
+            | HostEvent::ThreadChanged { .. }
+            | HostEvent::Live { .. }
+            | HostEvent::EditorCall { .. } => {}
         }
     }
 
@@ -1506,7 +1539,11 @@ impl Conversation {
                     }
                     self.rebuild(core);
                 }
-                _ => {}
+                Completion::Held { .. }
+                | Completion::Page { .. }
+                | Completion::Work { .. }
+                | Completion::Agent { .. }
+                | Completion::Answer { .. } => {}
             }
         }
         changed
@@ -1548,7 +1585,12 @@ fn shape_source<'a>(
             item.seq.hash(&mut hasher);
             hasher.finish()
         }
-        _ => 0,
+        fold::Slot::Prose
+        | fold::Slot::Plain(_)
+        | fold::Slot::Text(_)
+        | fold::Slot::Output
+        | fold::Slot::Answer
+        | fold::Slot::Preview => 0,
     };
     match (slot, &item.kind) {
         (fold::Slot::Prose, ItemKind::AssistantMessage { text, .. }) => {
