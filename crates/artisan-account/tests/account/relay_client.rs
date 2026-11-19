@@ -90,8 +90,10 @@ async fn signing_out_ends_open_sockets() {
 async fn signing_out_during_subscribe_ends_it() {
     let core = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let core_url = format!("http://{}", core.local_addr().unwrap());
+    let (reached, reached_core) = tokio::sync::oneshot::channel();
     let hung_core = tokio::spawn(async move {
         let (_tcp, _) = core.accept().await.unwrap();
+        reached.send(()).unwrap();
         std::future::pending::<()>().await;
     });
     let client = RelayClient {
@@ -115,7 +117,10 @@ async fn signing_out_during_subscribe_ends_it() {
                 .map(drop)
         }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(WAIT, reached_core)
+        .await
+        .expect("the subscription reaches the core")
+        .unwrap();
     client.close_all();
     let outcome = tokio::time::timeout(WAIT, subscribing)
         .await
