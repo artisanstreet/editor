@@ -1,3 +1,4 @@
+use super::close;
 use editor_ui::kit::{Media, Picker, Surface, Tone, Tooltip};
 
 const ALL: [Surface; 17] = [
@@ -49,20 +50,19 @@ fn a_banded_card_keeps_the_card_padding_outside_and_none_at_its_seams() {
         "position picks the band"
     );
     let outside = stack[0].padding().top + stack[2].padding().bottom;
-    assert_eq!(
-        outside,
-        2.0 * card,
+    assert!(
+        close(outside, 2.0 * card),
         "the stack's ends carry the card padding"
     );
     let seams = stack
         .windows(2)
         .map(|pair| pair[0].padding().bottom + pair[1].padding().top)
         .sum::<f32>();
-    assert_eq!(seams, 0.0, "bands meet without padding between them");
+    assert!(close(seams, 0.0), "bands meet without padding between them");
     assert!(
         stack
             .iter()
-            .all(|band| band.padding().left == card && band.padding().right == card),
+            .all(|band| close(band.padding().left, card) && close(band.padding().right, card)),
         "every band keeps the card's side padding"
     );
     assert_eq!(
@@ -71,9 +71,8 @@ fn a_banded_card_keeps_the_card_padding_outside_and_none_at_its_seams() {
         "a lone band is a whole card"
     );
     let corners = Band::Middle.corners(Surface::Card.radius_px());
-    assert_eq!(
-        corners.top_left + corners.bottom_right,
-        0.0,
+    assert!(
+        close(corners.top_left + corners.bottom_right, 0.0),
         "a middle band is square"
     );
 }

@@ -1,10 +1,11 @@
+use super::close;
 use editor_ui::kit::button::special::{SEGMENTS, svg, wedges};
 
 #[test]
 fn wedges_tile_the_full_turn_without_gaps() {
     let fan = wedges(0.0, SEGMENTS);
     assert_eq!(fan.len(), SEGMENTS, "one wedge per segment");
-    assert_eq!(fan[0].from_degrees, 0.0, "starts at the top");
+    assert!(close(fan[0].from_degrees, 0.0), "starts at the top");
     assert!(
         (fan[SEGMENTS - 1].to_degrees - 360.0).abs() < 1e-3,
         "ends a full turn later"

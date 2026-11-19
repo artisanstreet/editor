@@ -1,8 +1,7 @@
-#![expect(
-    clippy::float_cmp,
-    clippy::needless_borrow,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-4
+}
+
 #[path = "ui/kit/divider.rs"]
 mod divider;
 #[path = "ui/kit/control/hit_area.rs"]

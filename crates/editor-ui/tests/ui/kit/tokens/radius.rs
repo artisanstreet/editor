@@ -1,8 +1,5 @@
+use super::close;
 use editor_ui::kit::{Corner, Radius, concentric};
-
-fn close(a: f32, b: f32) -> bool {
-    (a - b).abs() < 1e-4
-}
 
 #[test]
 fn every_radius_is_its_parent_minus_the_inset() {

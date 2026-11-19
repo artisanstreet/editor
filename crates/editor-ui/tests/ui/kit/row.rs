@@ -1,3 +1,4 @@
+use super::close;
 use aqua_core::{Point, Size};
 use aqua_reactive::Runtime;
 use aqua_ui::binding::View;
@@ -10,9 +11,11 @@ use editor_ui::theme::{ArtisanTheme, ThemeMode};
 
 #[test]
 fn headings_align_with_menu_item_text() {
-    assert_eq!(
-        Row::Heading.text_inset(Surface::Menu),
-        Row::MenuItem.text_inset(Surface::Menu),
+    assert!(
+        close(
+            Row::Heading.text_inset(Surface::Menu),
+            Row::MenuItem.text_inset(Surface::Menu)
+        ),
         "headings line up with the items they label"
     );
 }
@@ -20,9 +23,11 @@ fn headings_align_with_menu_item_text() {
 #[test]
 fn list_headings_align_with_list_item_text() {
     for density in [Density::Regular, Density::Tall] {
-        assert_eq!(
-            Row::ListHeading.text_inset(Surface::Inset),
-            Row::ListItem(density).text_inset(Surface::Inset),
+        assert!(
+            close(
+                Row::ListHeading.text_inset(Surface::Inset),
+                Row::ListItem(density).text_inset(Surface::Inset)
+            ),
             "a heading in a list lines up with the rows below it"
         );
     }
