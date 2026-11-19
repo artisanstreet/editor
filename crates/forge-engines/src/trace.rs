@@ -258,19 +258,18 @@ const SECRET_ENV_MARKERS: [&str; 7] = [
     "CREDENTIAL",
     "COOKIE",
 ];
-const SWITCH_VALUES: [&str; 8] = ["0", "1", "true", "false", "yes", "no", "on", "off"];
+const SWITCH_NAMES: [&str; 2] = ["NODE_TLS_REJECT_UNAUTHORIZED", "TOKENIZERS_PARALLELISM"];
+const SWITCH_SUFFIXES: [&str; 2] = ["_ENABLED", "_DISABLED"];
 const REDACTED: &str = "[redacted]";
 const HELD_STREAM_BYTES: usize = 16 * 1024;
 
 fn names_a_credential(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
-    key == "OPENCODE_CONFIG_CONTENT" || SECRET_ENV_MARKERS.iter().any(|marker| key.contains(marker))
-}
-
-fn is_switch(value: &str) -> bool {
-    SWITCH_VALUES
-        .iter()
-        .any(|switch| value.trim().eq_ignore_ascii_case(switch))
+    let switch = SWITCH_NAMES.contains(&key.as_str())
+        || SWITCH_SUFFIXES.iter().any(|suffix| key.ends_with(suffix));
+    !switch
+        && (key == "OPENCODE_CONFIG_CONTENT"
+            || SECRET_ENV_MARKERS.iter().any(|marker| key.contains(marker)))
 }
 
 #[must_use]
@@ -316,7 +315,7 @@ impl Secrets {
         let inherited = environment
             .iter()
             .chain(&launch.env)
-            .filter(|(key, value)| names_a_credential(key) && !is_switch(value))
+            .filter(|(key, _)| names_a_credential(key))
             .map(|(_, value)| value.as_str());
         let mut secrets: Vec<Secret> = configured
             .chain(gateway)

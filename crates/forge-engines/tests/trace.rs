@@ -411,3 +411,29 @@ fn traces_written_at_once_stay_within_256_mib_together() {
         "the records past the shared budget are counted"
     );
 }
+
+#[test]
+fn a_credential_that_reads_like_a_switch_is_still_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let environment = [
+        ("DB_PASSWORD".to_owned(), "yes".to_owned()),
+        ("API_TOKEN".to_owned(), "ON".to_owned()),
+        ("TOKENIZERS_PARALLELISM".to_owned(), "false".to_owned()),
+        ("FEATURE_AUTH_ENABLED".to_owned(), "1".to_owned()),
+    ];
+    let started = Trace::start(
+        dir.path(),
+        "claude-switch",
+        Secrets::of(&forge_engines::Launch::default(), &environment),
+    )
+    .unwrap();
+    started.trace.record(
+        Kind::Stderr,
+        "password yes, token ON; {\"stream\":false,\"step\":1}",
+    );
+    finish(started);
+    assert_eq!(
+        of_kind(&records(dir.path()), "stderr")[0]["text"],
+        "password [redacted], token [redacted]; {\"stream\":false,\"step\":1}"
+    );
+}
