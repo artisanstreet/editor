@@ -434,16 +434,11 @@ impl Hub {
             .store
             .send_message(thread_id.clone(), message, acceptance)
             .await?;
-        if !created {
-            return Ok(item);
+        if created && let Err(error) = self.dispatch_accepted(thread_id, &item, saved_engine).await
+        {
+            tracing::warn!(thread = %thread_id, item = %item.id, "hand the saved message to the live run; it waits for the next turn: {}", diagnostics::chain(&error));
+            self.resume_pending();
         }
-        self.dispatch_accepted(thread_id, &item, saved_engine)
-            .await
-            .map_err(|source| SendError::Steer {
-                thread: thread_id.clone(),
-                item: item.id.clone(),
-                source: Box::new(source),
-            })?;
         Ok(item)
     }
 

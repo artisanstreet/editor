@@ -20,17 +20,6 @@ pub enum InputError {
     Images(#[from] forge_store::InputImagesError),
 }
 
-impl InputError {
-    #[must_use]
-    const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Text(text) => error::content(&text.cause),
-            Self::Command { .. } => ErrorClass::BadRequest,
-            Self::Thread(_) | Self::Images(_) => ErrorClass::Internal,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     #[error(transparent)]
@@ -46,13 +35,6 @@ pub enum SendError {
     },
     #[error(transparent)]
     Store(#[from] forge_store::SendMessageError),
-    #[error("hand message {item} to the live run of thread {thread}")]
-    Steer {
-        thread: ThreadId,
-        item: ItemId,
-        #[source]
-        source: Box<InputError>,
-    },
     #[error("hand message {item} for thread {thread} to the generation running it")]
     Peer {
         thread: ThreadId,
@@ -82,7 +64,6 @@ impl SendError {
             Self::ThreadNotFound { .. } => ErrorClass::NotFound,
             Self::Command { .. } => ErrorClass::BadRequest,
             Self::Store(store) => error::input(&store.cause),
-            Self::Steer { source, .. } => source.class(),
             Self::Peer { source, .. } => source.class(),
             Self::ReadThread(_) | Self::Route { .. } | Self::Abandoned { .. } => {
                 ErrorClass::Internal
