@@ -536,8 +536,7 @@ fn device_settings_error(
 }
 
 fn about(theme: &ArtisanTheme, build: &BuildInfo, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let executable = std::env::current_exe().ok();
-    let rows = super::about::rows(build, executable.as_deref())
+    let rows = super::about::rows(build)
         .into_iter()
         .map(|(title, value)| ui::row(theme, title, value, None))
         .collect();

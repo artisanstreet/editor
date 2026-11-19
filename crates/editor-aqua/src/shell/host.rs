@@ -1,4 +1,5 @@
 use crate::core::{Core, CoreEvent, EditorFiles, HostEvent, HostId, Screen};
+use crate::settings::about::BuildInfo;
 use crate::shell::entry::Entry;
 use crate::shell::refresh::{Cause, Invalidation};
 use crate::shell::workspace::{NotificationEffects, Workspace};
@@ -23,6 +24,7 @@ pub struct Shell {
     pub(crate) meshes_changed: std::cell::Cell<bool>,
     pub dialogs: crate::ui::dialogs::DialogRoutes,
     pub(crate) live: crate::shell::live_throttle::LiveThrottle,
+    pub(crate) build: BuildInfo,
     images: ImageAssets,
 }
 
@@ -32,6 +34,27 @@ pub struct ShellUpdates {
     pub(crate) theme_transition: Option<bool>,
     pub(crate) settings_platform_effects: Vec<crate::shell::workspace::SettingsPlatformEffect>,
     pub(crate) causes: Invalidation,
+}
+
+fn running_build() -> BuildInfo {
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        commit: env!("EDITOR_COMMIT").to_owned(),
+        profile: if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+        .to_owned(),
+        target: env!("EDITOR_TARGET").to_owned(),
+        executable: match std::env::current_exe() {
+            Ok(executable) => Some(executable),
+            Err(error) => {
+                tracing::warn!("find the running Editor's executable for About: {error}");
+                None
+            }
+        },
+    }
 }
 
 impl Shell {
@@ -60,18 +83,19 @@ impl Shell {
                 causes.join("; ")
             )
         });
-        Self::from_core(core, images, failure)
+        Self::from_core(core, images, failure, running_build())
     }
 
     #[cfg(feature = "qualification")]
     pub(crate) fn for_qualification(core: Core, images: ImageAssets) -> (Self, ShellUpdates) {
-        Self::from_core(core, images, None)
+        Self::from_core(core, images, None, crate::qualification::build())
     }
 
     fn from_core(
         mut core: Core,
         images: ImageAssets,
         failure: Option<String>,
+        build: BuildInfo,
     ) -> (Self, ShellUpdates) {
         core.set_image_assets(images.clone());
         let mut entry = Entry::new(
@@ -95,6 +119,7 @@ impl Shell {
                 meshes_changed: std::cell::Cell::new(false),
                 dialogs: Default::default(),
                 live: Default::default(),
+                build,
                 images,
             },
             ShellUpdates {

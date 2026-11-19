@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuildInfo {
@@ -6,9 +6,10 @@ pub struct BuildInfo {
     pub commit: String,
     pub profile: String,
     pub target: String,
+    pub executable: Option<PathBuf>,
 }
 
-pub(crate) fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'static str, String)> {
+pub(crate) fn rows(build: &BuildInfo) -> Vec<(&'static str, String)> {
     let mut rows = vec![("Version", build.version.clone())];
     rows.push((
         "Commit",
@@ -20,7 +21,7 @@ pub(crate) fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'stati
     ));
     rows.push(("Profile", build.profile.clone()));
     rows.push(("Target", build.target.clone()));
-    if let Some(executable) = executable {
+    if let Some(executable) = &build.executable {
         rows.push(("Executable", executable.display().to_string()));
     }
     rows

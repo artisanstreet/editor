@@ -237,18 +237,7 @@ impl RootViews {
                 now,
                 true,
             );
-            let build = crate::settings::about::BuildInfo {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                commit: env!("EDITOR_COMMIT").to_owned(),
-                profile: if cfg!(debug_assertions) {
-                    "debug"
-                } else {
-                    "release"
-                }
-                .to_owned(),
-                target: env!("EDITOR_TARGET").to_owned(),
-            };
-            let page = workspace.settings_view(&shell.core, theme, &build, size, true);
+            let page = workspace.settings_view(&shell.core, theme, &shell.build, size, true);
             let dismissed = Rc::clone(&self.settings_dismissed);
             let panel = view::settings_panel(
                 theme,

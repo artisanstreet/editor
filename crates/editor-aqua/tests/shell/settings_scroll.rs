@@ -14,12 +14,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     .unwrap();
     core.navigate(Screen::Settings(SettingsPage::General));
     let controller = SettingsController::default();
-    let build = BuildInfo {
-        version: String::new(),
-        commit: String::new(),
-        profile: String::new(),
-        target: String::new(),
-    };
+    let build = BuildInfo::default();
     let mut resources = ShellResources::new(scale).unwrap();
     let app = &mut resources.ui;
     let dimensions = editor_aqua::shell::layout::Size {
