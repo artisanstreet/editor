@@ -19,9 +19,18 @@ pub enum SettingsSave {
 }
 
 pub(crate) struct Saved {
+    first: u64,
     through: u64,
     changes: Vec<(String, u64)>,
     result: Result<EditorSettings, UpdateConfigError>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Settled {
+    pub(crate) changed: bool,
+    pub(crate) first: u64,
+    pub(crate) through: u64,
+    pub(crate) failure: Option<Arc<SetSettingError>>,
 }
 
 struct Change {
@@ -82,7 +91,14 @@ impl SettingsSaves {
         };
     }
 
-    pub(crate) fn submit(&mut self, key: String, value: serde_json::Value) {
+    pub(crate) fn pending_revision(&self, key: &str) -> Option<u64> {
+        self.latest_by_key
+            .get(key)
+            .copied()
+            .filter(|revision| *revision > self.settled_through)
+    }
+
+    pub(crate) fn submit(&mut self, key: String, value: serde_json::Value) -> u64 {
         self.latest += 1;
         let revision = self.latest;
         self.latest_by_key.insert(key.clone(), revision);
@@ -104,33 +120,39 @@ impl SettingsSaves {
                 )));
             }
         }
+        revision
     }
 
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.saved.peek_order()
     }
 
-    pub(crate) fn settle(&mut self, settings: &mut Settings) -> bool {
-        let Some(saved) = self.saved.drain_one() else {
-            return false;
-        };
+    pub(crate) fn settle(&mut self, settings: &mut Settings) -> Option<Settled> {
+        let saved = self.saved.drain_one()?;
         self.settled_through = saved.through;
-        match saved.result {
+        let (changed, failure) = match saved.result {
             Ok(stored) => {
                 let validated = Settings::validated(stored);
                 self.confirmed = validated.values();
-                if saved.through != self.latest {
-                    return false;
+                if saved.through == self.latest {
+                    let changed = settings.values() != self.confirmed;
+                    *settings = validated;
+                    if matches!(self.state, SettingsSave::Saving) {
+                        self.state = SettingsSave::Saved;
+                    }
+                    (changed, None)
+                } else {
+                    (false, None)
                 }
-                let changed = settings.values() != self.confirmed;
-                *settings = validated;
-                if matches!(self.state, SettingsSave::Saving) {
-                    self.state = SettingsSave::Saved;
-                }
-                changed
             }
             Err(error) => self.fail(settings, saved.changes, error),
-        }
+        };
+        Some(Settled {
+            changed,
+            first: saved.first,
+            through: saved.through,
+            failure,
+        })
     }
 
     fn fail(
@@ -138,7 +160,7 @@ impl SettingsSaves {
         settings: &mut Settings,
         changes: Vec<(String, u64)>,
         error: UpdateConfigError,
-    ) -> bool {
+    ) -> (bool, Option<Arc<SetSettingError>>) {
         let last_key = changes
             .last()
             .map(|(key, _)| key.clone())
@@ -146,11 +168,12 @@ impl SettingsSaves {
         if let UpdateConfigError::Read(error) = error {
             let error = Arc::new(error);
             *settings = Settings::Unreadable(Arc::clone(&error));
-            self.state = SettingsSave::Failed(Arc::new(SetSettingError::Unreadable {
+            let failure = Arc::new(SetSettingError::Unreadable {
                 key: last_key,
                 source: error,
-            }));
-            return true;
+            });
+            self.state = SettingsSave::Failed(Arc::clone(&failure));
+            return (true, Some(failure));
         }
         let superseded = |key: &str, revision: u64| {
             self.latest_by_key
@@ -172,13 +195,13 @@ impl SettingsSaves {
             "saving Editor settings failed"
         );
         if lost.is_empty() {
-            return false;
+            return (false, Some(failure));
         }
         for key in &lost {
             settings.put(key, self.confirmed.get(key).cloned());
         }
-        self.state = SettingsSave::Failed(failure);
-        true
+        self.state = SettingsSave::Failed(Arc::clone(&failure));
+        (true, Some(failure))
     }
 }
 
@@ -195,6 +218,10 @@ async fn write_queued(files: EditorFiles, queue: Arc<Mutex<Queue>>, saved: Deliv
                 Queue::Idle => unreachable!("invariant: only the settings writer idles its queue"),
             }
         };
+        let first = batch
+            .first()
+            .map(|change| change.revision)
+            .expect("invariant: a settings batch is never empty");
         let through = batch
             .last()
             .map(|change| change.revision)
@@ -215,6 +242,7 @@ async fn write_queued(files: EditorFiles, queue: Arc<Mutex<Queue>>, saved: Deliv
         .expect("invariant: saving settings.json does not panic");
         if saved
             .send(Saved {
+                first,
                 through,
                 changes,
                 result,

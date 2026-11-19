@@ -147,6 +147,7 @@ pub struct Core {
     wake: aqua::mailbox::Mailbox<()>,
     opened: Delivery<Opened>,
     saves: SettingsSaves,
+    pub(super) setting_calls: Vec<crate::core::agent_calls::SettingCall>,
     admission: AdmissionOrder,
     dials: HashMap<HostId, Dial>,
     dial_generations: HashMap<HostId, u64>,
@@ -253,6 +254,7 @@ impl Core {
             wake,
             opened,
             saves,
+            setting_calls: Vec::new(),
             admission,
             dials: HashMap::new(),
             dial_generations: HashMap::new(),
@@ -589,6 +591,13 @@ impl Core {
         key: &str,
         value: serde_json::Value,
     ) -> Result<(), SetSettingError> {
+        self.put_setting(key, value).map(drop)
+    }
+    pub(crate) fn put_setting(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<Option<u64>, SetSettingError> {
         if let Settings::Unreadable(source) = &self.settings {
             return Err(SetSettingError::Unreadable {
                 key: key.to_owned(),
@@ -596,16 +605,16 @@ impl Core {
             });
         }
         if self.settings.get(key) == Some(&value) && self.settings.rejected(key).is_none() {
-            return Ok(());
+            return Ok(self.saves.pending_revision(key));
         }
         crate::core::settings::check(key, &value).map_err(|source| SetSettingError::Invalid {
             key: key.to_owned(),
             source,
         })?;
         self.settings.put(key, Some(value.clone()));
-        self.saves.submit(key.to_owned(), value);
+        let revision = self.saves.submit(key.to_owned(), value);
         self.events.push(CoreEvent::SettingsChanged);
-        Ok(())
+        Ok(Some(revision))
     }
     pub const fn settings_save(&self) -> &SettingsSave {
         self.saves.state()
@@ -996,8 +1005,11 @@ impl Core {
                 self.dispatch_events(&mut receive);
             }
             Some(Source::Saved) => {
-                if self.saves.settle(&mut self.settings) {
-                    self.events.push(CoreEvent::SettingsChanged);
+                if let Some(settled) = self.saves.settle(&mut self.settings) {
+                    if settled.changed {
+                        self.events.push(CoreEvent::SettingsChanged);
+                    }
+                    self.answer_setting_calls(&settled);
                 }
                 self.dispatch_events(&mut receive);
             }

@@ -1,3 +1,5 @@
+#[path = "core/agent_calls.rs"]
+mod agent_calls;
 #[path = "core/client/error.rs"]
 mod client_error;
 #[path = "core/connection.rs"]

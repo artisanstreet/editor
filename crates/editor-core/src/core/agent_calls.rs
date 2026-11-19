@@ -1,3 +1,4 @@
+use crate::core::settings_writer::Settled;
 use crate::core::{
     ConnectionStatus, Core, ForgeClient, HostId, Screen, SetSettingError, Settings, SettingsPage,
     config_file::ReadConfigError, store::RemoveHostError,
@@ -39,6 +40,12 @@ enum EditorCallError {
         #[source]
         source: SetSettingError,
     },
+    #[error("save {key}")]
+    NotSaved {
+        key: String,
+        #[source]
+        source: std::sync::Arc<SetSettingError>,
+    },
     #[error("There is no settings page {page}; pages: {pages}.")]
     NoPage { page: String, pages: String },
 }
@@ -55,12 +62,19 @@ async fn send_answer(client: &ForgeClient, id: &str, reply: &EditorReply) {
     }
 }
 
+pub(crate) struct SettingCall {
+    revision: u64,
+    client: ForgeClient,
+    id: String,
+    key: String,
+    value: Value,
+}
+
 enum ImmediateCall {
     HostsList,
     HostRemove { host: String },
     HostSwitch { host: String },
     SettingGet { key: String },
-    SettingSet { key: String, value: Value },
     OpenThread { thread: artisan_api::ThreadId },
     OpenSettings { page: String },
 }
@@ -93,7 +107,10 @@ impl Core {
             EditorCall::HostRemove { host } => ImmediateCall::HostRemove { host },
             EditorCall::HostSwitch { host } => ImmediateCall::HostSwitch { host },
             EditorCall::SettingGet { key } => ImmediateCall::SettingGet { key },
-            EditorCall::SettingSet { key, value } => ImmediateCall::SettingSet { key, value },
+            EditorCall::SettingSet { key, value } => {
+                self.setting_set_call(client, id, key, value);
+                return;
+            }
             EditorCall::OpenThread { thread } => ImmediateCall::OpenThread { thread },
             EditorCall::OpenSettings { page } => ImmediateCall::OpenSettings { page },
         };
@@ -102,6 +119,48 @@ impl Core {
             Err(error) => EditorReply::Error(::diagnostics::chain(&error)),
         };
         answer(client, id, reply);
+    }
+    fn setting_set_call(&mut self, client: ForgeClient, id: String, key: String, value: Value) {
+        let revision = editor_setting(&key).and_then(|_| {
+            self.put_setting(&key, value.clone())
+                .map_err(|source| EditorCallError::Save {
+                    key: key.clone(),
+                    source,
+                })
+        });
+        match revision {
+            Ok(Some(revision)) => self.setting_calls.push(SettingCall {
+                revision,
+                client,
+                id,
+                key,
+                value,
+            }),
+            Ok(None) => answer(
+                client,
+                id,
+                EditorReply::Ok(json!({ "key": key, "value": value })),
+            ),
+            Err(error) => answer(client, id, EditorReply::Error(::diagnostics::chain(&error))),
+        }
+    }
+    pub(super) fn answer_setting_calls(&mut self, settled: &Settled) {
+        let (done, waiting) = std::mem::take(&mut self.setting_calls)
+            .into_iter()
+            .partition(|call| call.revision <= settled.through);
+        self.setting_calls = waiting;
+        for call in done {
+            let reply = match &settled.failure {
+                Some(failure) if call.revision >= settled.first => {
+                    EditorReply::Error(::diagnostics::chain(&EditorCallError::NotSaved {
+                        key: call.key,
+                        source: std::sync::Arc::clone(failure),
+                    }))
+                }
+                Some(_) | None => EditorReply::Ok(json!({ "key": call.key, "value": call.value })),
+            };
+            answer(call.client, call.id, reply);
+        }
     }
     fn mcp_sign_in_call(
         &mut self,
@@ -138,11 +197,6 @@ impl Core {
                     return Err(EditorCallError::Stored { key, source: source.clone() });
                 }
                 Ok(self.settings.get(&key).cloned().unwrap_or_else(|| decl.default_value()))
-            }
-            ImmediateCall::SettingSet { key, value } => {
-                editor_setting(&key)?;
-                self.set_setting(&key, value.clone()).map_err(|source| EditorCallError::Save { key: key.clone(), source })?;
-                Ok(json!({ "key": key, "value": value }))
             }
             ImmediateCall::OpenThread { thread } => { self.navigate(Screen::Thread { host: from.clone(), thread: thread.clone() }); Ok(json!({ "opened": thread })) },
             ImmediateCall::OpenSettings { page } => { let found = SettingsPage::from_name(&page).ok_or_else(|| { let names: Vec<_> = SettingsPage::ALL.iter().map(|(_, name)| *name).collect(); EditorCallError::NoPage { page: page.clone(), pages: names.join(", ") } })?; self.navigate(Screen::Settings(found)); Ok(json!({ "opened": page })) },
