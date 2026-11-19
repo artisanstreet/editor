@@ -515,10 +515,12 @@ pub fn file(path: &Path, dark: bool) -> AssetId {
     if let Some(icon) = find(names, &name) {
         return icon;
     }
-    for (index, _) in name.match_indices('.') {
-        if let Some(icon) = find(extensions, &name[index + 1..]) {
+    let mut rest = name.as_str();
+    while let Some((_, extension)) = rest.split_once('.') {
+        if let Some(icon) = find(extensions, extension) {
             return icon;
         }
+        rest = extension;
     }
     fallback
 }

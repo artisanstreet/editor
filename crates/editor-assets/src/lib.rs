@@ -1,7 +1,3 @@
-#![expect(
-    clippy::string_slice,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use core::fmt;
 use core::str::FromStr;
 
@@ -129,20 +125,34 @@ impl Asset {
         DIMENSIONS.get_or_init(|| {
             ALL.iter()
                 .map(|asset| {
-                    let mut values = asset.view_box?.split_whitespace();
-                    let _: f32 = values.next()?.parse().ok()?;
-                    let _: f32 = values.next()?.parse().ok()?;
-                    let width: f32 = values.next()?.parse().ok()?;
-                    let height: f32 = values.next()?.parse().ok()?;
-                    (values.next().is_none()
-                        && width.is_finite()
-                        && height.is_finite()
-                        && width > 0.0
-                        && height > 0.0)
-                        .then_some((width, height))
+                    asset
+                        .view_box
+                        .map(|view_box| parse_view_box(asset.id, view_box))
                 })
                 .collect()
         })[self.id.index]
+    }
+}
+
+fn parse_view_box(id: AssetId, view_box: &str) -> Dimensions {
+    let values = view_box
+        .split_whitespace()
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            panic!(
+                "invariant: asset {id} has view box {view_box:?} with a non-numeric value: {error}"
+            )
+        });
+    match values.as_slice() {
+        &[_, _, width, height]
+            if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
+        {
+            (width, height)
+        }
+        _ => panic!(
+            "invariant: asset {id} has view box {view_box:?}, not four numbers with a positive size"
+        ),
     }
 }
 
