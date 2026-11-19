@@ -216,8 +216,6 @@ impl MarkdownPresenter {
             element,
             selection_batch: Arc::clone(&entry.selection_batch),
             geometry,
-            #[cfg(test)]
-            list_depth: entry.leaf.context.lists.len(),
             proof: entry.leaf.proof().clone(),
         })
     }

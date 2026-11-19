@@ -1,5 +1,5 @@
 use super::occasion_on;
-use crate::ui::locale::Formats;
+use crate::ui::locale::{Formats, SystemLocales};
 use chrono::NaiveDate;
 use icu_locale_core::locale;
 
@@ -12,8 +12,8 @@ fn occasions_read_as_english_with_locale_clocks_and_dates() {
             .and_then(|day| day.and_hms_opt(9, 30, 0))
             .unwrap()
     };
-    let german = Formats::new(&locale!("de-DE"));
-    let english = Formats::new(&locale!("en-US"));
+    let german = Formats::for_system(&SystemLocales::uniform(locale!("de-DE")));
+    let english = Formats::for_system(&SystemLocales::uniform(locale!("en-US")));
     assert_eq!(occasion_on(&german, at(0), today), "today at 09:30");
     assert_eq!(
         occasion_on(&english, at(1), today),

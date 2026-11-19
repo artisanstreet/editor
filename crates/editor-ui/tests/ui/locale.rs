@@ -5,7 +5,7 @@ use icu_locale_core::{Locale, locale};
 use std::collections::HashMap;
 
 fn formats(locale: &Locale) -> Formats {
-    Formats::new(locale)
+    Formats::for_system(&SystemLocales::uniform(locale.clone()))
 }
 
 #[test]

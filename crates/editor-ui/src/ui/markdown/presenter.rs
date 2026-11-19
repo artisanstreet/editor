@@ -134,8 +134,6 @@ pub struct StoredProjectedMarkdown {
     pub element: Element,
     pub selection_batch: Arc<SelectionSourceBatch>,
     pub geometry: ProjectedGeometry,
-    #[cfg(test)]
-    pub list_depth: usize,
     pub proof: super::stored::LeafProof,
 }
 

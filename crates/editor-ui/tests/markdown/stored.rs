@@ -612,7 +612,6 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert_eq!(selected.id, SelectionSourceId(100));
     assert_eq!(selected.order, [7, 0]);
     assert_eq!(selected.separator.as_ref(), "\n");
-    assert_eq!(first.list_depth, 1);
     assert_eq!(first.geometry.text[0].text.as_ref(), "abc");
     let reveal = Rc::new(crate::ui::markdown::reveal::PreparedReveal::default());
     let now = std::time::Instant::now();

@@ -53,12 +53,7 @@ pub fn decimal(value: f64, fraction_digits: usize) -> String {
 }
 
 impl Formats {
-    #[cfg(test)]
-    pub(crate) fn new(locale: &Locale) -> Self {
-        Self::for_system(&SystemLocales::uniform(locale.clone()))
-    }
-
-    fn for_system(locales: &SystemLocales) -> Self {
+    pub(crate) fn for_system(locales: &SystemLocales) -> Self {
         Self {
             decimal: decimal_formatter(&locales.numbers),
             clock: clock_formatter(&locales.time),
