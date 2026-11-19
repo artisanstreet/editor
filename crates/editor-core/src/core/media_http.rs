@@ -254,9 +254,35 @@ fn public_destination(url: &url::Url) -> bool {
 fn is_public(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_v4(address),
-        IpAddr::V6(address) => address
-            .to_ipv4_mapped()
-            .map_or_else(|| is_public_v6(address), is_public_v4),
+        IpAddr::V6(address) => match V6Route::of(address) {
+            V6Route::Native => is_public_v6(address),
+            V6Route::Embedded(embedded) => is_public_v4(embedded),
+            V6Route::LocalTranslation => false,
+        },
+    }
+}
+
+enum V6Route {
+    Native,
+    Embedded(Ipv4Addr),
+    LocalTranslation,
+}
+
+impl V6Route {
+    fn of(address: Ipv6Addr) -> Self {
+        let v4 = |high: u16, low: u16| {
+            let [a, b] = high.to_be_bytes();
+            let [c, d] = low.to_be_bytes();
+            Ipv4Addr::new(a, b, c, d)
+        };
+        match address.segments() {
+            [0, 0, 0, 0, 0, 0xffff, high, last] | [0x0064, 0xff9b, 0, 0, 0, 0, high, last] => {
+                Self::Embedded(v4(high, last))
+            }
+            [0x0064, 0xff9b, 0x0001, ..] => Self::LocalTranslation,
+            [0x2002, high, last, ..] => Self::Embedded(v4(high, last)),
+            _ => Self::Native,
+        }
     }
 }
 
