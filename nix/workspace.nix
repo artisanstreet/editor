@@ -374,8 +374,7 @@ let
         '';
       };
   };
-  # `nix run .#release`: the dev loop with Cargo's release profile.
-  devRelease = import ./dev.nix {
+  devLoopWithReleaseProfile = import ./dev.nix {
     inherit pkgs;
     profile = "release";
   };
@@ -410,6 +409,6 @@ in
   apps = {
     default = dev;
     inherit dev devfast;
-    release = devRelease;
+    release = devLoopWithReleaseProfile;
   };
 }
