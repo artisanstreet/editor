@@ -75,12 +75,12 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
-    if cfg!(windows) && cli.log.is_none() {
-        cli.log = cli
-            .data
-            .clone()
-            .or_else(|| App::Forge.data().ok())
-            .map(|data| data.join("forge.log"));
+    let data = cli.data.clone().map_or_else(|| App::Forge.data(), Ok);
+    if cfg!(windows)
+        && cli.log.is_none()
+        && let Ok(data) = &data
+    {
+        cli.log = Some(data.join("forge.log"));
     }
     let recent = match init_tracing(cli.log.as_deref()) {
         Ok(recent) => recent,
@@ -89,16 +89,13 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let data_dir = match cli.data.clone() {
-        Some(dir) => dir,
-        None => match App::Forge.data() {
-            Ok(dir) => dir,
-            Err(error) => {
-                tracing::error!("find Forge's data folder: {error}");
-                report(format_args!("find Forge's data folder: {error}"));
-                return std::process::ExitCode::FAILURE;
-            }
-        },
+    let data_dir = match data {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::error!("find Forge's data folder: {error}");
+            report(format_args!("find Forge's data folder: {error}"));
+            return std::process::ExitCode::FAILURE;
+        }
     };
     diagnostics::CrashReporter {
         app: App::Forge,
@@ -288,24 +285,23 @@ async fn serve_recorded(
 ) -> Result<(), RunError> {
     let stop_file = config.data_dir.join("forge.stop");
     let pid_file = config.data_dir.join("forge.pid");
+    let own = std::process::id();
     let forge = forge_http::start(config).await?;
-    remove_if_present(&stop_file)?;
     let stop_watch = StopWatch::start(&stop_file)?;
-    std::fs::write(&pid_file, std::process::id().to_string()).map_err(|source| {
-        PlatformError::WritePid {
-            path: pid_file.clone(),
-            source,
-        }
+    std::fs::write(&pid_file, own.to_string()).map_err(|source| PlatformError::WritePid {
+        path: pid_file.clone(),
+        source,
     })?;
     forge
         .run_until(async {
             tokio::select! {
                 () = stop => {},
-                () = stop_watch.appeared(&stop_file) => tracing::info!("asked to stop by {}", stop_file.display()),
+                () = stop_watch.requested(&stop_file, own) => tracing::info!("asked to stop by {}", stop_file.display()),
             }
         })
         .await;
     remove_if_present(&pid_file)?;
+    remove_if_present(&stop_file)?;
     Ok(())
 }
 
@@ -354,11 +350,29 @@ impl StopWatch {
         })
     }
 
-    async fn appeared(mut self, path: &std::path::Path) {
-        while !path.exists() {
+    async fn requested(mut self, path: &std::path::Path, own: u32) {
+        while !names(path, own) {
             if self.changes.changed().await.is_err() {
                 unreachable!("invariant: the stop watch outlives its own sender");
             }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn names(path: &std::path::Path, own: u32) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match text.trim().parse::<u32>() {
+            Ok(pid) => pid == own,
+            Err(error) => {
+                tracing::debug!(%error, "waiting for a whole stop request");
+                false
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "read the stop request");
+            false
         }
     }
 }
