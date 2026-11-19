@@ -535,6 +535,19 @@ fn retention_target(
     }
 }
 
+fn offline(
+    target: &editor_aqua::settings::preferences::SettingKey,
+) -> Result<(), editor_aqua::settings::preferences::SaveSettingError> {
+    Err(editor_aqua::settings::preferences::SaveSettingError::Send {
+        host: target.host.clone(),
+        key: target.key,
+        source: test_support::editor::forge::inconsistent(
+            &format!("/settings/{}", target.key),
+            "offline",
+        ),
+    })
+}
+
 #[test]
 fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     use editor_aqua::settings::preferences::SettingWrites;
@@ -557,12 +570,12 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
         "a second choice waits for the first to finish"
     );
     let fourteen = writes
-        .complete(Some(&mut settings), &seven, &Err("offline".into()))
+        .complete(Some(&mut settings), &seven, offline(&target))
         .expect("the newer choice is sent after the older one finishes");
     assert_eq!(settings.get(key), Some(&json!(14)));
     assert!(
         writes
-            .complete(Some(&mut settings), &fourteen, &Ok(()))
+            .complete(Some(&mut settings), &fourteen, Ok(()))
             .is_none()
     );
     assert_eq!(settings.get(key), Some(&json!(14)));
@@ -572,7 +585,7 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
         .expect("sent");
     assert!(
         writes
-            .complete(Some(&mut settings), &thirty, &Err("offline".into()))
+            .complete(Some(&mut settings), &thirty, offline(&target))
             .is_none()
     );
     assert_eq!(
@@ -582,12 +595,12 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     );
 
     let sixty = writes
-        .begin(&mut settings, target, json!(60))
+        .begin(&mut settings, target.clone(), json!(60))
         .expect("sent");
     settings.insert(key, json!(45));
     assert!(
         writes
-            .complete(Some(&mut settings), &sixty, &Err("offline".into()))
+            .complete(Some(&mut settings), &sixty, offline(&target))
             .is_none()
     );
     assert_eq!(

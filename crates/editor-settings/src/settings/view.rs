@@ -496,7 +496,7 @@ fn host_setting_failures(
                     "Couldn't save “{}” on {}: {}",
                     setting_label(target.key),
                     host.name,
-                    failure.cause
+                    failure.cause.reason()
                 ),
             ))
             .child(
@@ -1483,7 +1483,10 @@ impl ViewSnapshot {
             mcp_sign_ins: host
                 .into_iter()
                 .flat_map(|host| {
-                    let servers = host.mcp_servers().unwrap_or_default();
+                    let servers = match host.mcp_servers() {
+                        Ok(servers) => servers,
+                        Err(_shown_in_the_mcp_section) => &[],
+                    };
                     servers.iter().filter_map(move |server| {
                         let name = server.name.clone();
                         core.mcp_sign_in(&host.id, &name).map(|sign_in| {

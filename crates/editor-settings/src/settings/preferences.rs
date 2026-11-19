@@ -1,6 +1,7 @@
-use editor_core::{HostId, HostInstance, HostSettings};
+use editor_core::{HostId, HostInstance, HostSettings, client::CallError};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SettingKey {
@@ -15,10 +16,35 @@ pub struct SettingRequest {
     pub(crate) value: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
+pub enum SaveSettingError {
+    #[error("send setting {key} to {host}")]
+    Send {
+        host: HostId,
+        key: &'static str,
+        #[source]
+        source: CallError,
+    },
+}
+
+impl SaveSettingError {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::Send { source, .. } => ::diagnostics::chain(source),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SettingFailure {
     pub(crate) value: Value,
-    pub(crate) cause: String,
+    pub(crate) cause: Arc<SaveSettingError>,
+}
+
+impl PartialEq for SettingFailure {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && Arc::ptr_eq(&self.cause, &other.cause)
+    }
 }
 
 #[derive(Debug)]
@@ -62,27 +88,29 @@ impl SettingWrites {
         &mut self,
         settings: Option<&mut HostSettings>,
         request: &SettingRequest,
-        result: &Result<(), String>,
+        result: Result<(), SaveSettingError>,
     ) -> Option<SettingRequest> {
         let write = self.keys.remove(&request.target)?;
-        match result {
-            Ok(()) => {
+        let saved = result.is_ok();
+        match (result, &write.next) {
+            (Ok(()), _) => {
                 self.failures.remove(&request.target);
             }
-            Err(cause) if write.next.is_none() => {
+            (Err(cause), None) => {
                 self.failures.insert(
                     request.target.clone(),
                     SettingFailure {
                         value: request.value.clone(),
-                        cause: cause.clone(),
+                        cause: Arc::new(cause),
                     },
                 );
             }
-            Err(_) => {}
+            (Err(_superseded_by_the_next_write), Some(_)) => {}
         }
-        let confirmed = match result {
-            Ok(()) => Some(write.sent.clone()),
-            Err(_) => write.confirmed,
+        let confirmed = if saved {
+            Some(write.sent.clone())
+        } else {
+            write.confirmed
         };
         if let Some(next) = write.next {
             self.keys.insert(
@@ -98,7 +126,7 @@ impl SettingWrites {
                 value: next,
             });
         }
-        if result.is_err()
+        if !saved
             && let Some(settings) = settings
             && settings.get(request.target.key) == Some(&write.sent)
         {

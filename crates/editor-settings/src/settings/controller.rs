@@ -10,7 +10,9 @@ use editor_ui::text::editor::{Editor, Mode};
 use super::archive::{ArchiveForm, ArchiveRequest};
 use super::engines::{EngineRequest, EnginesForm};
 use super::extensions::{ExtensionsForm, MutationRequest};
-use super::preferences::{SettingFailure, SettingKey, SettingRequest, SettingWrites};
+use super::preferences::{
+    SaveSettingError, SettingFailure, SettingKey, SettingRequest, SettingWrites,
+};
 use super::prompt::{PromptForm, PromptRequest};
 
 struct HostCompletion {
@@ -20,7 +22,7 @@ struct HostCompletion {
 }
 
 enum Completion {
-    Setting(SettingRequest, Result<(), String>),
+    Setting(SettingRequest, Result<(), SaveSettingError>),
     Archive(ArchiveRequest, Result<(), String>),
     Mcp(Box<MutationRequest>, Result<(), String>),
     Engine(EngineRequest, Result<(), String>),
@@ -375,7 +377,11 @@ impl SettingsController {
                 let result = client
                     .set_setting(request.target.key, &request.value)
                     .await
-                    .map_err(|error| ::diagnostics::chain(&error));
+                    .map_err(|source| SaveSettingError::Send {
+                        host: request.target.host.clone(),
+                        key: request.target.key,
+                        source,
+                    });
                 sender
                     .offer(HostCompletion {
                         host: request.target.host.clone(),
@@ -717,10 +723,8 @@ impl SettingsController {
                 Completion::Setting(request, result) => {
                     if let Err(error) = &result {
                         tracing::warn!(
-                            host = %request.target.host,
                             instance = ?request.target.instance,
-                            key = request.target.key,
-                            %error,
+                            error = %::diagnostics::chain(error),
                             "saving a Forge setting"
                         );
                     }
@@ -730,7 +734,7 @@ impl SettingsController {
                     let next = self.setting_writes.complete(
                         host.map(|host| &mut host.settings),
                         &request,
-                        &result,
+                        result,
                     );
                     if let (Some(next), Some(client)) = (next, client) {
                         self.send_setting(client, next);
