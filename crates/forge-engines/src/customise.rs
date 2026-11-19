@@ -597,7 +597,7 @@ pub enum LaunchError {
     NotText {
         path: PathBuf,
         #[source]
-        source: std::string::FromUtf8Error,
+        source: std::str::Utf8Error,
     },
     #[error("MCP server names must be nonempty and unique: {name:?}")]
     ServerName { name: String },
@@ -687,23 +687,22 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
         EngineId::Codex => {
             let path = home.join(CODEX_CONFIG);
             let guarding = |source| LaunchError::Guard { engine, source };
-            let mut config: toml::Table =
-                match crate::sandbox::guard::read(engine, home, Path::new(CODEX_CONFIG))
-                    .map_err(guarding)?
-                {
-                    Some(bytes) => {
-                        let text =
-                            String::from_utf8(bytes).map_err(|source| LaunchError::NotText {
-                                path: path.clone(),
-                                source,
-                            })?;
-                        toml::from_str(&text).map_err(|source| LaunchError::Parse {
+            let editing = crate::sandbox::guard::edit(engine, home, Path::new(CODEX_CONFIG))
+                .map_err(guarding)?;
+            let mut config: toml::Table = match editing.base() {
+                Some(bytes) => {
+                    let text =
+                        std::str::from_utf8(bytes).map_err(|source| LaunchError::NotText {
                             path: path.clone(),
                             source,
-                        })?
-                    }
-                    None => toml::Table::new(),
-                };
+                        })?;
+                    toml::from_str(text).map_err(|source| LaunchError::Parse {
+                        path: path.clone(),
+                        source,
+                    })?
+                }
+                None => toml::Table::new(),
+            };
             let mut entries = toml::Table::new();
             for server in servers {
                 if server.name.is_empty() || entries.contains_key(&server.name) {
@@ -719,14 +718,9 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                     path: path.clone(),
                     source,
                 })?;
-            crate::sandbox::guard::write(
-                engine,
-                home,
-                Path::new(CODEX_CONFIG),
-                text.as_bytes(),
-                PRIVATE_FILE,
-            )
-            .map_err(guarding)?;
+            editing
+                .write(text.as_bytes(), PRIVATE_FILE)
+                .map_err(guarding)?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {

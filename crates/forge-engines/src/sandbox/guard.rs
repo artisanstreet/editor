@@ -766,20 +766,51 @@ fn forget(manifest: &mut Manifest, relative: &Path) {
     manifest.retain(|path, _| !path.starts_with(relative));
 }
 
-pub(crate) fn read(
+pub(crate) struct Editing {
     engine: EngineId,
-    home: &Path,
+    home: PathBuf,
+    relative: PathBuf,
+    held: Held,
+    base: Option<Vec<u8>>,
+}
+
+pub(crate) fn edit(engine: EngineId, home: &Path, relative: &Path) -> Result<Editing, GuardError> {
+    guarded_only(engine, relative);
+    let held = held(engine, home, relative)?;
+    let snapshot = snapshot_folder(home);
+    let base = match read_manifest(engine, &snapshot)? {
+        Some(manifest) => trusted_copy(engine, &snapshot, &manifest, relative)?,
+        None => live_file(engine, &held.opened, relative)?,
+    };
+    Ok(Editing {
+        engine,
+        home: home.to_path_buf(),
+        relative: relative.to_path_buf(),
+        held,
+        base,
+    })
+}
+
+fn trusted_copy(
+    engine: EngineId,
+    snapshot: &Path,
+    manifest: &Manifest,
     relative: &Path,
 ) -> Result<Option<Vec<u8>>, GuardError> {
-    let reading = |source| GuardError::Read {
-        engine,
-        path: home.join(relative),
-        source,
-    };
-    let Some(opened) = Home::open_existing(home).map_err(reading)? else {
+    let Some(Entry::File { digest: wanted, .. }) = manifest.get(relative) else {
         return Ok(None);
     };
-    live_file(engine, &opened, relative)
+    let copy = snapshot.join(COPIES).join(relative);
+    let bytes = fs::read(&copy).map_err(|source| GuardError::Read {
+        engine,
+        path: copy.clone(),
+        source,
+    })?;
+    if digest(&bytes) == *wanted {
+        Ok(Some(bytes))
+    } else {
+        Err(GuardError::CopyChanged { engine, path: copy })
+    }
 }
 
 fn live_file(
@@ -799,6 +830,23 @@ fn live_file(
     match folder.found(name).map_err(reading)? {
         Found::File { length, .. } => folder.read(name, length).map(Some).map_err(reading),
         Found::Missing | Found::Folder | Found::Link(_) | Found::Other => Ok(None),
+    }
+}
+
+impl Editing {
+    pub(crate) fn base(&self) -> Option<&[u8]> {
+        self.base.as_deref()
+    }
+
+    pub(crate) fn write(self, bytes: &[u8], mode: u32) -> Result<(), GuardError> {
+        put(
+            self.engine,
+            &self.home,
+            &self.held,
+            &self.relative,
+            bytes,
+            mode,
+        )
     }
 }
 

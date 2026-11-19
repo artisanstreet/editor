@@ -110,20 +110,45 @@ pub(crate) mod guard {
         })
     }
 
-    pub(crate) fn read(
+    pub(crate) struct Editing {
+        engine: EngineId,
+        home: PathBuf,
+        relative: PathBuf,
+        base: Option<Vec<u8>>,
+    }
+
+    pub(crate) fn edit(
         engine: EngineId,
         home: &Path,
         relative: &Path,
-    ) -> Result<Option<Vec<u8>>, GuardError> {
+    ) -> Result<Editing, GuardError> {
         let path = home.join(relative);
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(GuardError::Read {
-                engine,
-                path,
-                source,
-            }),
+        let base = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(GuardError::Read {
+                    engine,
+                    path,
+                    source,
+                });
+            }
+        };
+        Ok(Editing {
+            engine,
+            home: home.to_path_buf(),
+            relative: relative.to_path_buf(),
+            base,
+        })
+    }
+
+    impl Editing {
+        pub(crate) fn base(&self) -> Option<&[u8]> {
+            self.base.as_deref()
+        }
+
+        pub(crate) fn write(self, bytes: &[u8], mode: u32) -> Result<(), GuardError> {
+            write(self.engine, &self.home, &self.relative, bytes, mode)
         }
     }
 

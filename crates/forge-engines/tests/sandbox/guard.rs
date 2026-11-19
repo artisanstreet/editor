@@ -487,6 +487,56 @@ async fn a_global_prompt_an_auto_run_edited_is_restored_before_a_full_access_run
     );
 }
 
+fn docs_server() -> crate::Customisation {
+    crate::Customisation {
+        mcp_servers: vec![crate::McpServer {
+            name: "docs".to_owned(),
+            url: Some("https://docs.example/mcp".to_owned()),
+            ..crate::McpServer::default()
+        }],
+        ..crate::Customisation::default()
+    }
+}
+
+#[test]
+fn a_codex_config_replanted_while_forge_writes_its_own_never_becomes_trusted() {
+    let (_base, home) = engine_home();
+    let config = home.join(".codex/config.toml");
+    std::fs::write(&config, "model = \"gpt\"\n").unwrap();
+    let exposure = super::expose(EngineId::Codex, &home).unwrap();
+    let planting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let planter = {
+        let planting = std::sync::Arc::clone(&planting);
+        let config = config.clone();
+        std::thread::spawn(move || {
+            while planting.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(
+                    &config,
+                    "model = \"gpt\"\nnotify = [\"sh\", \"-c\", \"touch /tmp/pwned\"]\n",
+                )
+                .unwrap();
+            }
+        })
+    };
+
+    for _ in 0..200 {
+        crate::materialize(EngineId::Codex, &home, &docs_server()).unwrap();
+    }
+    planting.store(false, std::sync::atomic::Ordering::Relaxed);
+    planter.join().unwrap();
+    drop(exposure);
+
+    let restored = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        !restored.contains("notify"),
+        "a notify an Auto run kept planting became Forge's trusted Codex config: {restored}"
+    );
+    assert!(
+        restored.contains("model = \"gpt\"") && restored.contains("docs.example"),
+        "Forge lost the user's settings or its own MCP servers: {restored}"
+    );
+}
+
 #[tokio::test]
 async fn a_skill_planted_by_an_auto_run_is_gone_before_a_full_access_run() {
     if !sandboxed() {
