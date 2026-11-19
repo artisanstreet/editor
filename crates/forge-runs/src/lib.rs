@@ -67,10 +67,7 @@ use forge_engines::{Engines, Harness, Input};
 use forge_store::Store;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, Mutex, PoisonError,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -118,7 +115,6 @@ struct LiveRun {
     inbox: mpsc::Sender<Input>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
-    cancel_through: Arc<AtomicU64>,
     live: HashMap<LiveTarget, LivePreview>,
     foreground_bytes: usize,
     terminal_bytes: usize,
@@ -128,8 +124,13 @@ struct LiveRun {
 #[derive(Clone, Copy)]
 enum Phase {
     Working,
-    Stopping,
-    ContinueAfterStop,
+    Stopping { through: u64, then: AfterStop },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterStop {
+    Settle,
+    Continue,
 }
 
 const LIVE_TARGET_BYTES: usize = 256 * 1024;
@@ -581,15 +582,14 @@ impl Hub {
         };
         let _admission = self.inner.admission.lock().await;
         let phase = self.lock().get_mut(thread_id).map(|run| {
-            run.phase = match run.phase {
-                Phase::Working => Phase::Working,
-                Phase::Stopping | Phase::ContinueAfterStop => Phase::ContinueAfterStop,
-            };
+            if let Phase::Stopping { then, .. } = &mut run.phase {
+                *then = AfterStop::Continue;
+            }
             run.phase
         });
         match phase {
-            Some(Phase::ContinueAfterStop) => return Ok(()),
-            Some(Phase::Working | Phase::Stopping) => return Err(busy()),
+            Some(Phase::Stopping { .. }) => return Ok(()),
+            Some(Phase::Working) => return Err(busy()),
             None if self.is_live(thread_id) => return Err(busy()),
             None => {}
         }
@@ -621,14 +621,12 @@ impl Hub {
         Ok(())
     }
 
-    fn announce_stopping(&self, thread_id: &ThreadId, run_id: &RunId) {
-        self.lock()
-            .get_mut(thread_id)
-            .filter(|run| &run.id == run_id)
-            .unwrap_or_else(|| {
-                unreachable!("invariant: run {run_id} of thread {thread_id} is live while it stops")
-            })
-            .phase = Phase::Stopping;
+    fn stopped_through(&self, thread_id: &ThreadId) -> Option<u64> {
+        let phase = self.lock().get(thread_id)?.phase;
+        match phase {
+            Phase::Working => None,
+            Phase::Stopping { through, .. } => Some(through),
+        }
     }
 
     pub async fn update_thread(
@@ -868,8 +866,11 @@ impl Hub {
 
     async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
         let cutoff = self.store().head();
-        if let Some(run) = self.lock().get(thread_id) {
-            run.cancel_through.store(cutoff, Ordering::Release);
+        if let Some(run) = self.lock().get_mut(thread_id) {
+            run.phase = Phase::Stopping {
+                through: cutoff,
+                then: AfterStop::Settle,
+            };
             run.cancel.cancel();
         }
         self.store()
@@ -1154,7 +1155,6 @@ impl Hub {
     fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
         let (inbox, receiver) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let cancel_through = Arc::new(AtomicU64::new(0));
         let run_id = RunId::new();
         self.lock().insert(
             thread_id.clone(),
@@ -1163,7 +1163,6 @@ impl Hub {
                 inbox,
                 cancel: cancel.clone(),
                 engine: None,
-                cancel_through: Arc::clone(&cancel_through),
                 live: HashMap::new(),
                 foreground_bytes: 0,
                 terminal_bytes: 0,
@@ -1207,8 +1206,13 @@ impl Hub {
     async fn end_live(&self, thread_id: &ThreadId) -> bool {
         let _admission = self.inner.admission.lock().await;
         let phase = self.lock().get(thread_id).map(|run| run.phase);
-        let continued =
-            matches!(phase, Some(Phase::ContinueAfterStop)) && !self.inner.shutdown.is_cancelled();
+        let continued = matches!(
+            phase,
+            Some(Phase::Stopping {
+                then: AfterStop::Continue,
+                ..
+            })
+        ) && !self.inner.shutdown.is_cancelled();
         if continued && let Err(error) = self.carry_on(thread_id).await {
             tracing::warn!(thread = %thread_id, "continue the turn once its stop wound down: {}", diagnostics::chain(&error));
         }

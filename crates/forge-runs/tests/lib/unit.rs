@@ -47,6 +47,7 @@ use artisan_api::{
 use forge_engines::{EngineEvent, Outcome, RunIo, Turn};
 use futures::future::BoxFuture;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 type Script = Arc<dyn Fn(Turn, RunIo) -> BoxFuture<'static, Outcome> + Send + Sync>;

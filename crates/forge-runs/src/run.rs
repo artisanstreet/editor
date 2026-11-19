@@ -183,13 +183,6 @@ fn carried_usage(carried: Option<&Run>, config: &EngineConfig) -> Usage {
     }
 }
 
-fn cancel_cutoff(hub: &Hub, thread_id: &ThreadId) -> u64 {
-    hub.lock().get(thread_id).map_or(0, |live| {
-        live.cancel_through
-            .load(std::sync::atomic::Ordering::Acquire)
-    })
-}
-
 pub(crate) async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
@@ -269,9 +262,8 @@ pub(crate) async fn drive(
         Err(error) => Ending::Finished(Outcome::failed(diagnostics::chain(&error))),
     };
     adapter_cancel.cancel();
-    let cancel_cutoff = cancel_cutoff(hub, thread_id);
-    if cancel.is_cancelled()
-        && cancel_cutoff > 0
+    let stopped_through = hub.stopped_through(thread_id);
+    if let Some(cancel_cutoff) = stopped_through
         && let Err(error) = store
             .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
             .await
@@ -601,10 +593,7 @@ async fn execute(
         && !hub.inner.shutdown.is_cancelled()
     {
         match announce_stop(hub, run, items, pending).await {
-            Ok(stopped) => {
-                *run = stopped;
-                hub.announce_stopping(&run.thread_id, &run.id);
-            }
+            Ok(stopped) => *run = stopped,
             Err(error) => {
                 tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {}", diagnostics::chain(&error));
             }

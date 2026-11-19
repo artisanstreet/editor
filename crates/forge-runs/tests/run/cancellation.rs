@@ -333,15 +333,25 @@ async fn an_input_the_engine_acknowledges_while_stopping_is_not_sent_again() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_has() {
-    let asked = Asked::default();
-    let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let script: Script = {
-        let asked = Arc::clone(&asked);
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
+struct WindingDown {
+    asked: Asked,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl WindingDown {
+    fn new() -> Self {
+        Self {
+            asked: Asked::default(),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    fn script(&self) -> Script {
+        let asked = Arc::clone(&self.asked);
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
         Arc::new(move |turn, io| {
             let asked = Arc::clone(&asked);
             let entered = Arc::clone(&entered);
@@ -362,8 +372,15 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
                 Outcome::done()
             })
         })
-    };
-    let fixture = fixture(script).await;
+    }
+
+    fn turns(&self) -> usize {
+        self.asked.lock().unwrap().len()
+    }
+}
+
+async fn stopping_fixture(winding: &WindingDown) -> Fixture {
+    let fixture = fixture(winding.script()).await;
     fixture
         .hub
         .send_message(&fixture.thread_id, message("refactor the parser"))
@@ -376,21 +393,31 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
             })
         })
         .await;
+    fixture
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_has() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
         .await
         .unwrap();
-    assert_eq!(
-        fixture
-            .hub
-            .store()
-            .latest_run(&fixture.thread_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status(),
-        RunStatus::Cancelled
-    );
+    test_support::wait::eventually(
+        "the stop to be shown before the engine confirms it",
+        Duration::from_secs(5),
+        || async {
+            fixture
+                .hub
+                .store()
+                .latest_run(&fixture.thread_id)
+                .await
+                .unwrap()
+                .is_some_and(|run| run.status() == RunStatus::Cancelled)
+        },
+    )
+    .await;
     assert!(fixture.hub.is_live(&fixture.thread_id));
 
     fixture
@@ -403,7 +430,7 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
         .continue_turn(&fixture.thread_id)
         .await
         .expect("pressing Continue twice queues it once");
-    release.notify_one();
+    winding.release.notify_one();
 
     let continued = fixture.settled().await.remove(0);
     assert_eq!(continued.status(), RunStatus::Done);
@@ -411,10 +438,73 @@ async fn continue_pressed_while_a_stop_winds_down_carries_the_turn_on_once_it_ha
         continued.continuation,
         Some(artisan_api::Continuation::Requested)
     );
-    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert_eq!(winding.turns(), 2);
     assert!(
         texts(&fixture.items().await)
             .iter()
             .any(|(text, _)| text == "picked it back up")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_is_accepted_while_a_stop_winds_down_before_the_stop_is_saved() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    let disk = durability::DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+        .await
+        .unwrap();
+    fixture
+        .hub
+        .continue_turn(&fixture.thread_id)
+        .await
+        .expect("Continue after Stop is not refused as busy while the stop is still unsaved");
+    disk.clear();
+    winding.release.notify_one();
+    test_support::wait::eventually(
+        "the stopped run to be saved",
+        Duration::from_secs(10),
+        || async {
+            fixture
+                .hub
+                .store()
+                .state()
+                .await
+                .unwrap()
+                .runs
+                .iter()
+                .any(|run| {
+                    run.thread_id == fixture.thread_id && run.status() == RunStatus::Cancelled
+                })
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_then_continue_then_stop_leaves_the_turn_stopped() {
+    let winding = WindingDown::new();
+    let fixture = stopping_fixture(&winding).await;
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), winding.entered.notified())
+        .await
+        .unwrap();
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    winding.release.notify_one();
+
+    let runs = fixture.settled().await;
+    assert_eq!(winding.turns(), 1, "the last Stop wins over the Continue");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status(), RunStatus::Cancelled);
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .continue_pending(&fixture.thread_id)
+            .await
+            .unwrap()
     );
 }

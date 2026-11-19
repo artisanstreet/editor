@@ -1,9 +1,9 @@
 use super::*;
 
-struct DiskFull(rusqlite::Connection);
+pub(super) struct DiskFull(rusqlite::Connection);
 
 impl DiskFull {
-    fn arming(fixture: &Fixture, table: &str) -> Self {
+    pub(super) fn arming(fixture: &Fixture, table: &str) -> Self {
         let conn =
             rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3"))
                 .unwrap();
@@ -13,11 +13,11 @@ impl DiskFull {
         Self(conn)
     }
 
-    fn strike(&self) {
+    pub(super) fn strike(&self) {
         self.0.execute_batch(include_str!("commit.sql")).unwrap();
     }
 
-    fn clear(self) {
+    pub(super) fn clear(self) {
         self.0
             .execute_batch(include_str!("drop_disk_full.sql"))
             .unwrap();
