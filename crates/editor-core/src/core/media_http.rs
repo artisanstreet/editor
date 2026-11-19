@@ -37,8 +37,14 @@ pub struct MediaHttpClient {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RedirectError {
-    #[error("{url} redirected without a readable location")]
+    #[error("{url} redirected without a location")]
     NoLocation { url: String },
+    #[error("{url} redirected to a location that is not visible ASCII")]
+    UnreadableLocation {
+        url: String,
+        #[source]
+        source: reqwest::header::ToStrError,
+    },
     #[error("{url} redirected to an unreadable location")]
     BadLocation {
         url: String,
@@ -209,9 +215,13 @@ fn next_hop(
 ) -> Result<url::Url, RedirectError> {
     let location = headers
         .get(reqwest::header::LOCATION)
-        .and_then(|location| location.to_str().ok())
         .ok_or_else(|| RedirectError::NoLocation {
             url: url.to_string(),
+        })?
+        .to_str()
+        .map_err(|source| RedirectError::UnreadableLocation {
+            url: url.to_string(),
+            source,
         })?;
     let next = url
         .join(location)
