@@ -57,6 +57,7 @@ fn account_file(home: &std::path::Path) -> std::path::PathBuf {
 
 struct FakeCore {
     url: String,
+    address: std::net::SocketAddr,
     shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -64,30 +65,28 @@ struct FakeCore {
 impl FakeCore {
     fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
+        let address = listener.local_addr()?;
+        let url = format!("http://{address}");
         let polls = Arc::new(AtomicUsize::new(0));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = std::thread::spawn({
             let polls = Arc::clone(&polls);
             let shutdown = Arc::clone(&shutdown);
             move || {
-                if listener.set_nonblocking(true).is_err() {
-                    return;
-                }
-                while !shutdown.load(Ordering::SeqCst) {
-                    let accepted = listener
-                        .accept()
-                        .and_then(|(stream, _)| stream.set_nonblocking(false).map(|()| stream));
-                    let Ok(stream) = accepted else {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    };
-                    serve(stream, &polls);
+                for accepted in listener.incoming() {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match accepted {
+                        Ok(stream) => serve(stream, &polls),
+                        Err(_unaccepted) => break,
+                    }
                 }
             }
         });
         Ok(Self {
             url,
+            address,
             shutdown,
             thread: Some(thread),
         })
@@ -97,6 +96,7 @@ impl FakeCore {
 impl Drop for FakeCore {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        drop(std::net::TcpStream::connect(self.address));
         if let Some(thread) = self.thread.take() {
             let _joined = thread.join();
         }
