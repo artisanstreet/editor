@@ -30,14 +30,6 @@ reason = "capture tooling only runs on Windows with the capture feature; elsewhe
 
 [[override]]
 lint = "hawk::dead_public"
-crate = "editor_sources"
-item = "sources::controller::ContentText::completion_for_tests"
-kind = "inherent_method"
-level = "expect"
-reason = "test-only helper behind the test-support feature, used by editor-aqua tests"
-
-[[override]]
-lint = "hawk::dead_public"
 crate = "editor_aqua"
 item = "shell::native_notifications::record_cold_launch"
 kind = "function"
@@ -53,15 +45,6 @@ kind = "inherent_method"
 level = "expect"
 target = "cfg(not(windows))"
 reason = "the Windows build uses this item or compiles a different implementation of it"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "forge_isolation"
-item = "sandbox::landlock::Landlock::abi"
-kind = "inherent_method"
-level = "expect"
-target = "cfg(not(windows))"
-reason = "Linux-only sandbox module, so the Windows run cannot confirm the finding"
 
 [[override]]
 lint = "hawk::unnecessary_public"
@@ -593,3 +576,12 @@ kind = "field"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_aqua"
+item = "measure::saturate_pixels"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows capture recorder and surface size frames with it; they are not compiled elsewhere"
