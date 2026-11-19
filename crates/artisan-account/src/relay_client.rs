@@ -847,7 +847,10 @@ async fn run_pump(
                                 .map_err(SocketError::Encode)?;
                             sink.send(Ws::Text(answer.into())).await.map_err(SocketError::Send)?;
                         }
-                        Ok(ServerFrame::Presence(_)) | Err(_) => {}
+                        Ok(ServerFrame::Presence(_)) => {}
+                        Err(error) => {
+                            tracing::debug!(%error, bytes = text.len(), "skipped a relay frame this build cannot read");
+                        }
                         Ok(frame) => {
                             let terminal = matches!(frame, ServerFrame::ChannelClosed(_) | ServerFrame::Error(_));
                             if frames.send(Ok(frame)).is_err() || terminal {
