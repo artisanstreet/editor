@@ -264,12 +264,26 @@ pub(crate) fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
     .map(drop)
 }
 
-pub(crate) fn path_ok() -> bool {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PathCheckError {
+    #[error("find ae's folder")]
+    Locate(#[source] artisan_paths::RootError),
+    #[error("read the user Path from the registry")]
+    Registry(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("read the link {}", path.display())]
+    Link {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub(crate) fn path_ok() -> Result<bool, PathCheckError> {
     if cfg!(windows) {
-        let Ok(dir) = App::Ae.dir() else {
-            return false;
-        };
-        sys::output(
+        let dir = App::Ae.dir().map_err(PathCheckError::Locate)?;
+        let path = sys::output(
             "powershell.exe",
             &[
                 "-NoProfile",
@@ -277,13 +291,24 @@ pub(crate) fn path_ok() -> bool {
                 "[Environment]::GetEnvironmentVariable('Path','User')",
             ],
         )
-        .is_ok_and(|path| path.split(';').any(|entry| Path::new(entry.trim()) == dir))
+        .map_err(PathCheckError::Registry)?;
+        Ok(path.split(';').any(|entry| Path::new(entry.trim()) == dir))
     } else {
-        unix_link().is_ok_and(|link| {
-            std::fs::read_link(&link)
-                .is_ok_and(|target| target == App::Ae.binary().unwrap_or_default())
-                && link.parent().is_some_and(on_path)
-        })
+        let link = unix_link().map_err(PathCheckError::Home)?;
+        let ae = App::Ae.binary().map_err(PathCheckError::Locate)?;
+        let target = match std::fs::read_link(&link) {
+            Ok(target) => target,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(source) => return Err(PathCheckError::Link { path: link, source }),
+        };
+        Ok(target == ae && link.parent().is_some_and(on_path))
     }
 }
 

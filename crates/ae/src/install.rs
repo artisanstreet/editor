@@ -52,6 +52,8 @@ pub(crate) enum InstallError {
     #[error("Artisan is already installed in {}; uninstall it before choosing another folder", root.display())]
     AlreadyInstalled { root: PathBuf },
     #[error(transparent)]
+    Installed(#[from] InstalledError),
+    #[error(transparent)]
     Ask(#[from] AskError),
     #[error("Artisan {version} has no {} for {system}", app.display_name())]
     Missing {
@@ -151,6 +153,8 @@ pub(crate) enum HandOverError {
 pub(crate) enum RememberedFeedError {
     #[error(transparent)]
     Locate(#[from] LocateError),
+    #[error(transparent)]
+    Installed(#[from] InstalledError),
     #[error("{} should name a release feed URL or `local` but holds {text:?}", path.display())]
     Unparseable { path: PathBuf, text: String },
     #[error("read {}", path.display())]
@@ -431,6 +435,8 @@ pub(crate) enum UpdateError {
     #[error("nothing is installed here; run `ae install`")]
     NothingInstalled,
     #[error(transparent)]
+    Installed(#[from] InstalledError),
+    #[error(transparent)]
     Feed(#[from] RememberedFeedError),
     #[error(transparent)]
     Source(#[from] SourceError),
@@ -448,6 +454,21 @@ pub(crate) enum UpdateError {
 pub(crate) enum UninstallError {
     #[error(transparent)]
     Ask(#[from] AskError),
+    #[error(transparent)]
+    Installed(#[from] InstalledError),
+    #[error("check whether {} has data in {}", app.display_name(), path.display())]
+    Data {
+        app: App,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("find {}'s data folder", app.display_name())]
+    DataFolder {
+        app: App,
+        #[source]
+        source: RootError,
+    },
     #[error(
         "ae is what manages and uninstalls Forge and the Editor; uninstall them first, or together with ae"
     )]
@@ -460,6 +481,8 @@ pub(crate) enum UninstallError {
 pub(crate) enum RemoveChosenError {
     #[error(transparent)]
     Lock(#[from] InstallLockError),
+    #[error(transparent)]
+    Installed(#[from] InstalledError),
     #[error("remove {}", app.display_name())]
     App {
         app: App,
@@ -684,24 +707,30 @@ struct Plan {
 }
 
 impl Plan {
-    fn settle(editor: &EditorPlace, forge: &ForgePlace) -> Self {
+    fn settle(editor: &EditorPlace, forge: &ForgePlace) -> Result<Self, InstalledError> {
         let editor = match editor {
             EditorPlace::Here => EditorTarget::Here,
             EditorPlace::Windows => EditorTarget::Windows,
-            EditorPlace::Keep if installed(App::Editor).is_some() => EditorTarget::Here,
-            EditorPlace::Keep | EditorPlace::Skip => EditorTarget::Nowhere,
+            EditorPlace::Keep => {
+                if installed(App::Editor)?.is_present() {
+                    EditorTarget::Here
+                } else {
+                    EditorTarget::Nowhere
+                }
+            }
+            EditorPlace::Skip => EditorTarget::Nowhere,
         };
         let (forge_here, distros) = match forge {
             ForgePlace::Here => (true, Vec::new()),
             ForgePlace::Wsl(distro) => (false, vec![distro.clone()]),
-            ForgePlace::Keep => (installed(App::Forge).is_some(), kept_in_wsl()),
+            ForgePlace::Keep => (installed(App::Forge)?.is_present(), kept_in_wsl()),
             ForgePlace::Skip => (false, Vec::new()),
         };
-        Self {
+        Ok(Self {
             editor,
             forge_here,
             distros,
-        }
+        })
     }
 
     fn check(&self, release: &Release, version: &str) -> Result<(), InstallError> {
@@ -737,11 +766,12 @@ impl Plan {
         apps
     }
 
-    fn summary(&self, version: &str, root: &Path) -> Vec<String> {
+    fn summary(&self, version: &str, root: &Path) -> Result<Vec<String>, InstalledError> {
         let mut lines = Vec::new();
         for app in self.here() {
             lines.push(summary_line(
                 app,
+                &installed(app)?,
                 version,
                 &app.dir_under(root).display().to_string(),
             ));
@@ -752,7 +782,7 @@ impl Plan {
         if self.editor == EditorTarget::Windows {
             lines.push(format!("Editor   {version} → Windows, with ae"));
         }
-        lines
+        Ok(lines)
     }
 }
 
@@ -805,13 +835,85 @@ const fn this_machine() -> &'static str {
     }
 }
 
-pub(crate) fn installed(app: App) -> Option<String> {
-    let dir = app.dir().ok()?;
-    if !app.binary().ok()?.is_file() {
-        return None;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Installed {
+    Absent,
+    Present(InstalledVersion),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InstalledVersion {
+    Known(String),
+    Missing,
+}
+
+impl Installed {
+    pub(crate) const fn is_present(&self) -> bool {
+        match self {
+            Self::Absent => false,
+            Self::Present(_) => true,
+        }
     }
-    let version = std::fs::read_to_string(dir.join("version")).ok()?;
-    Some(version.trim().to_owned())
+}
+
+impl std::fmt::Display for InstalledVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(version) => f.write_str(version),
+            Self::Missing => f.write_str("unknown version"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InstalledError {
+    #[error("find where {} is installed", app.display_name())]
+    Locate {
+        app: App,
+        #[source]
+        source: RootError,
+    },
+    #[error("check whether {} is installed at {}", app.display_name(), path.display())]
+    Binary {
+        app: App,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("read which {} version is installed from {}", app.display_name(), path.display())]
+    Version {
+        app: App,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub(crate) fn installed(app: App) -> Result<Installed, InstalledError> {
+    let locate = |source| InstalledError::Locate { app, source };
+    let binary = app.binary().map_err(locate)?;
+    match std::fs::metadata(&binary) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_not_a_file) => return Ok(Installed::Absent),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Installed::Absent),
+        Err(source) => {
+            return Err(InstalledError::Binary {
+                app,
+                path: binary,
+                source,
+            });
+        }
+    }
+    let path = app.dir().map_err(locate)?.join("version");
+    match std::fs::read_to_string(&path) {
+        Ok(version) => Ok(Installed::Present(InstalledVersion::Known(
+            version.trim().to_owned(),
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(Installed::Present(InstalledVersion::Missing))
+        }
+        Err(source) => Err(InstalledError::Version { app, path, source }),
+    }
 }
 
 fn resolve(
@@ -843,8 +945,10 @@ fn relocation(location: &Path) -> Result<Option<PathBuf>, InstallError> {
     if location == current {
         return Ok(None);
     }
-    if App::ALL.iter().any(|app| installed(*app).is_some()) {
-        return Err(InstallError::AlreadyInstalled { root: current });
+    for app in App::ALL {
+        if installed(app)?.is_present() {
+            return Err(InstallError::AlreadyInstalled { root: current });
+        }
     }
     Ok(Some(location))
 }
@@ -931,11 +1035,11 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
         None if args.apply => return Err(ui::needs_flag("where Forge goes", "--forge").into()),
         None => choose_forge(&release, &version)?,
     };
-    let plan = Plan::settle(&editor, &forge);
+    let plan = Plan::settle(&editor, &forge)?;
     plan.check(&release, &version)?;
 
     if !args.apply {
-        ui::note("Install", plan.summary(&version, &root).join("\n"));
+        ui::note("Install", plan.summary(&version, &root)?.join("\n"));
         if !args.yes && ui::interactive() && !confirmed("Install?")? {
             ui::outro("Nothing was installed.");
             return Ok(());
@@ -1133,14 +1237,15 @@ fn remembered_origin() -> Result<Origin, RememberedFeedError> {
             path,
             text: text.trim().to_owned(),
         }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Origin::Feed(
-            release::feed_for(
-                installed(App::Ae)
-                    .as_deref()
-                    .unwrap_or(env!("CARGO_PKG_VERSION")),
-            )
-            .to_owned(),
-        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let ours = match installed(App::Ae)? {
+                Installed::Present(InstalledVersion::Known(version)) => version,
+                Installed::Present(InstalledVersion::Missing) | Installed::Absent => {
+                    env!("CARGO_PKG_VERSION").to_owned()
+                }
+            };
+            Ok(Origin::Feed(release::feed_for(&ours).to_owned()))
+        }
         Err(source) => Err(RememberedFeedError::Read { path, source }),
     }
 }
@@ -1162,29 +1267,33 @@ pub(crate) fn install_editor() -> Result<(), InstallEditorError> {
     })?)
 }
 
-fn summary_line(app: App, version: &str, place: &str) -> String {
+fn summary_line(app: App, current: &Installed, version: &str, place: &str) -> String {
     let name = match app {
         App::Ae => "ae",
         App::Forge => "Forge",
         App::Editor => "Editor",
     };
-    let change = match installed(app) {
-        Some(old) if old == version => format!("{version} (reinstall)"),
-        Some(old) => format!("{old} → {version}"),
-        None => version.to_owned(),
+    let change = match current {
+        Installed::Present(InstalledVersion::Known(old)) if old == version => {
+            format!("{version} (reinstall)")
+        }
+        Installed::Present(old) => format!("{old} → {version}"),
+        Installed::Absent => version.to_owned(),
     };
     format!("{name:<8} {change} → {place}")
 }
 
-fn version_hint(app: App, version: &str) -> String {
-    match installed(app) {
-        Some(old) if old == version => format!("{old} installed"),
-        Some(old) => format!("{old} installed, updates to {version}"),
-        None => String::new(),
-    }
+fn version_hint(app: App, version: &str) -> Result<String, InstalledError> {
+    Ok(match installed(app)? {
+        Installed::Present(InstalledVersion::Known(old)) if old == version => {
+            format!("{old} installed")
+        }
+        Installed::Present(old) => format!("{old} installed, updates to {version}"),
+        Installed::Absent => String::new(),
+    })
 }
 
-fn choose_editor(release: &Release, version: &str) -> Result<EditorPlace, AskError> {
+fn choose_editor(release: &Release, version: &str) -> Result<EditorPlace, InstallError> {
     let wsl = platform::in_wsl();
     let mut options = Vec::new();
     if wsl && release.has(App::Editor, "windows") {
@@ -1199,27 +1308,31 @@ fn choose_editor(release: &Release, version: &str) -> Result<EditorPlace, AskErr
         } else {
             format!("On {}", this_machine())
         };
-        options.push((EditorPlace::Here, label, version_hint(App::Editor, version)));
+        options.push((
+            EditorPlace::Here,
+            label,
+            version_hint(App::Editor, version)?,
+        ));
     }
     options.push((EditorPlace::Skip, "Don't install".to_owned(), String::new()));
     let default = options[0].0.clone();
     if !ui::interactive() || options.len() == 1 {
         return Ok(default);
     }
-    cliclack::select("Editor")
+    Ok(cliclack::select("Editor")
         .items(&options)
         .initial_value(default)
         .interact()
-        .map_err(ui::prompt_error)
+        .map_err(ui::prompt_error)?)
 }
 
-fn choose_forge(release: &Release, version: &str) -> Result<ForgePlace, AskError> {
+fn choose_forge(release: &Release, version: &str) -> Result<ForgePlace, InstallError> {
     let mut options = Vec::new();
     if release.has(App::Forge, os()) {
         options.push((
             ForgePlace::Here,
             format!("On {}", this_machine()),
-            version_hint(App::Forge, version),
+            version_hint(App::Forge, version)?,
         ));
     }
     if cfg!(windows) && release.has(App::Forge, "linux") && ui::interactive() {
@@ -1244,11 +1357,11 @@ fn choose_forge(release: &Release, version: &str) -> Result<ForgePlace, AskError
     if !ui::interactive() || options.len() == 1 {
         return Ok(default);
     }
-    cliclack::select("Forge")
+    Ok(cliclack::select("Forge")
         .items(&options)
         .initial_value(default)
         .interact()
-        .map_err(ui::prompt_error)
+        .map_err(ui::prompt_error)?)
 }
 
 #[cfg(unix)]
@@ -1645,6 +1758,17 @@ fn replace_with(
     Ok(Replaced { swaps })
 }
 
+fn occupied(path: &Path) -> Result<bool, ReplaceError> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ReplaceError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
 fn swap_in(
     dir: &Path,
     new: &Path,
@@ -1653,17 +1777,20 @@ fn swap_in(
     swaps: &mut Vec<Swap>,
 ) -> Result<(), ReplaceError> {
     let target = dir.join(name);
-    let aside = if target.symlink_metadata().is_ok() {
-        let aside = (0..ASIDE_SLOTS)
-            .map(|slot| {
-                let mut aside = std::ffi::OsString::from(format!(".old-{slot}-"));
-                aside.push(name);
-                dir.join(aside)
-            })
-            .find(|path| path.symlink_metadata().is_err())
-            .ok_or_else(|| ReplaceError::NoAside {
-                path: target.clone(),
-            })?;
+    let aside = if occupied(&target)? {
+        let mut free = None;
+        for slot in 0..ASIDE_SLOTS {
+            let mut aside = std::ffi::OsString::from(format!(".old-{slot}-"));
+            aside.push(name);
+            let aside = dir.join(aside);
+            if !occupied(&aside)? {
+                free = Some(aside);
+                break;
+            }
+        }
+        let aside = free.ok_or_else(|| ReplaceError::NoAside {
+            path: target.clone(),
+        })?;
         rename(&target, &aside).map_err(|source| ReplaceError::Aside {
             path: target.clone(),
             source,
@@ -1907,7 +2034,7 @@ fn install_in_windows(release: &Release, source: &Source) -> Result<(), InstallI
 
 pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
     ui::intro("Artisan update");
-    if installed(App::Ae).is_none() {
+    if !installed(App::Ae)?.is_present() {
         return Err(UpdateError::NothingInstalled);
     }
     let source = Source::new(Some(&remembered_feed()?), None, false)?;
@@ -1916,17 +2043,22 @@ pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
         return Err(RememberedFeedError::Local.into());
     };
     let version = feed.version().to_owned();
-    let components: Vec<(App, String)> = App::ALL
-        .into_iter()
-        .filter_map(|app| Some((app, installed(app)?)))
-        .collect();
-    let outdated = components
-        .iter()
-        .any(|(_, current)| release::newer(&version, current));
+    let mut components: Vec<(App, InstalledVersion)> = Vec::new();
+    for app in App::ALL {
+        match installed(app)? {
+            Installed::Present(current) => components.push((app, current)),
+            Installed::Absent => {}
+        }
+    }
+    let behind = |current: &InstalledVersion| match current {
+        InstalledVersion::Known(current) => release::newer(&version, current),
+        InstalledVersion::Missing => true,
+    };
+    let outdated = components.iter().any(|(_, current)| behind(current));
     let lines: Vec<String> = components
         .iter()
         .map(|(app, current)| {
-            if release::newer(&version, current) {
+            if behind(current) {
                 format!("{:<8} {current} → {version}", app.id())
             } else {
                 format!("{:<8} {current} ✓ up to date", app.id())
@@ -1969,14 +2101,32 @@ fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
 
 pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
     ui::intro("Artisan uninstall");
-    let present: Vec<App> = App::ALL
-        .into_iter()
-        .filter(|app| app.binary().is_ok_and(|binary| binary.is_file()))
-        .collect();
-    let with_data: Vec<App> = App::ALL
-        .into_iter()
-        .filter(|app| app.data().is_ok_and(|data| data.exists()))
-        .collect();
+    let mut present = Vec::new();
+    let mut with_data = Vec::new();
+    let mut hints = Vec::new();
+    for app in App::ALL {
+        let current = installed(app)?;
+        let data = app
+            .data()
+            .map_err(|source| UninstallError::DataFolder { app, source })?;
+        if data.try_exists().map_err(|source| UninstallError::Data {
+            app,
+            path: data.clone(),
+            source,
+        })? {
+            with_data.push(app);
+        }
+        hints.push((
+            app,
+            match &current {
+                Installed::Present(version) => version.to_string(),
+                Installed::Absent => String::new(),
+            },
+        ));
+        if current.is_present() {
+            present.push(app);
+        }
+    }
     let candidates = removable(&present, &with_data, purge);
     let mut chosen: Vec<App> = if apps.is_empty() {
         candidates.clone()
@@ -1998,11 +2148,11 @@ pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), Unin
         if apps.is_empty() {
             let mut select = cliclack::multiselect("Uninstall").required(true);
             for app in &candidates {
-                select = select.item(
-                    *app,
-                    app.display_name(),
-                    installed(*app).unwrap_or_default(),
-                );
+                let hint = hints
+                    .iter()
+                    .find_map(|(listed, hint)| (listed == app).then_some(hint.as_str()))
+                    .expect("invariant: every app was checked before choosing");
+                select = select.item(*app, app.display_name(), hint);
             }
             chosen = select
                 .initial_values(candidates)
@@ -2078,10 +2228,12 @@ fn remove_chosen(mut chosen: Vec<App>, purge: bool) -> Result<(), RemoveChosenEr
     let installing = install_lock()?;
     chosen.sort();
     chosen.reverse();
-    let remaining: Vec<App> = App::ALL
-        .into_iter()
-        .filter(|app| !chosen.contains(app) && app.binary().is_ok_and(|binary| binary.is_file()))
-        .collect();
+    let mut remaining = Vec::new();
+    for app in App::ALL {
+        if !chosen.contains(&app) && installed(app)?.is_present() {
+            remaining.push(app);
+        }
+    }
     let mut deferred = false;
     for app in chosen {
         deferred |= ui::task(

@@ -279,6 +279,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_update_that_keeps_forge_updates_one_whose_version_file_is_missing() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        assert!(
+            !forge.join("version").exists(),
+            "an interrupted install left Forge without its version file"
+        );
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        test_support::executable::install(&forge_binary(), &stage.join(App::Forge.binary_name()));
+
+        let update = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "keep",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&update.stdout),
+            String::from_utf8_lossy(&update.stderr)
+        );
+        assert!(update.status.success(), "the update succeeds: {said}");
+        assert!(
+            forge.join("version").is_file(),
+            "the installed Forge was updated too: {said}"
+        );
+        assert!(sandbox.listening(), "the updated Forge serves: {said}");
+    }
+
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");

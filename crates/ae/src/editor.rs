@@ -12,6 +12,8 @@ pub(crate) enum OpenError {
     #[error(transparent)]
     Ask(#[from] AskError),
     #[error(transparent)]
+    Installed(#[from] install::InstalledError),
+    #[error(transparent)]
     Install(#[from] InstallEditorError),
     #[error(transparent)]
     Locate(#[from] LocateError),
@@ -26,7 +28,7 @@ pub(crate) enum OpenError {
 }
 
 pub(crate) fn open(path: Option<&Path>) -> Result<(), OpenError> {
-    if install::installed(App::Editor).is_none() {
+    if !install::installed(App::Editor)?.is_present() {
         if !ui::interactive() {
             return Err(OpenError::NotInstalled);
         }

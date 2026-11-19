@@ -15,6 +15,8 @@ const EVERY_APP: &[App] = &[App::Ae, App::Forge, App::Editor];
 pub(crate) enum MigrateError {
     #[error("find where the earlier install kept its files")]
     Locate(#[source] io::Error),
+    #[error(transparent)]
+    Installed(#[from] install::InstalledError),
     #[error("check what the earlier install left in {}", path.display())]
     Inspect {
         path: PathBuf,
@@ -92,10 +94,12 @@ pub(crate) enum MigrateError {
 }
 
 pub(crate) fn migrate(selected: &[App]) -> Result<(), MigrateError> {
-    let done: Vec<App> = App::ALL
-        .into_iter()
-        .filter(|app| selected.contains(app) || install::installed(*app).is_some())
-        .collect();
+    let mut done = Vec::new();
+    for app in App::ALL {
+        if selected.contains(&app) || install::installed(app)?.is_present() {
+            done.push(app);
+        }
+    }
     let old = Old::here().map_err(MigrateError::Locate)?;
     let data_moves = DataMove::here(selected, &old).map_err(MigrateError::Locate)?;
     let work = Work {

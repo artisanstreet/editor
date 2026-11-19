@@ -167,34 +167,57 @@ fn health(problems: &mut Vec<String>, log: Option<&str>) -> bool {
 
 fn local() -> Report {
     let mut problems = Vec::new();
-    let apps: Vec<AppReport> = App::ALL
-        .iter()
-        .filter_map(|app| {
-            let version = install::installed(*app)?;
-            match app.dir() {
-                Ok(dir) => Some(AppReport {
-                    app: app.id().to_owned(),
-                    version,
-                    path: dir.display().to_string(),
-                }),
-                Err(error) => {
-                    problems.push(format!(
-                        "Couldn't find {}'s folder: {}",
-                        app.id(),
-                        diagnostics::chain(&error)
-                    ));
-                    None
-                }
+    let mut apps = Vec::new();
+    let mut present = Vec::new();
+    for app in App::ALL {
+        let version = match install::installed(app) {
+            Ok(install::Installed::Present(version)) => version,
+            Ok(install::Installed::Absent) => continue,
+            Err(error) => {
+                problems.push(format!(
+                    "Couldn't tell whether {} is installed: {}",
+                    app.id(),
+                    diagnostics::chain(&error)
+                ));
+                continue;
             }
-        })
-        .collect();
-    let has = |app: App| install::installed(app).is_some();
-    if has(App::Ae) && !platform::path_ok() {
-        problems.push("`ae` isn't on PATH for new terminals; run `ae install`".to_owned());
+        };
+        present.push(app);
+        match version {
+            install::InstalledVersion::Known(_) => {}
+            install::InstalledVersion::Missing => problems.push(format!(
+                "{} has no version file; run `ae install` to repair it",
+                app.id()
+            )),
+        }
+        match app.dir() {
+            Ok(dir) => apps.push(AppReport {
+                app: app.id().to_owned(),
+                version: version.to_string(),
+                path: dir.display().to_string(),
+            }),
+            Err(error) => problems.push(format!(
+                "Couldn't find {}'s folder: {}",
+                app.id(),
+                diagnostics::chain(&error)
+            )),
+        }
     }
-    let forge = has(App::Forge).then(|| forge(&mut problems));
+    if present.contains(&App::Ae) {
+        match platform::path_ok() {
+            Ok(true) => {}
+            Ok(false) => {
+                problems.push("`ae` isn't on PATH for new terminals; run `ae install`".to_owned());
+            }
+            Err(error) => problems.push(format!(
+                "Couldn't check whether `ae` is on PATH: {}",
+                diagnostics::chain(&error)
+            )),
+        }
+    }
+    let forge = present.contains(&App::Forge).then(|| forge(&mut problems));
 
-    if apps.is_empty() {
+    if present.is_empty() {
         problems.push("Nothing is installed here; run `ae install`".to_owned());
     }
     Report {
