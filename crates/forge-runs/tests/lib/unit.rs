@@ -315,15 +315,21 @@ impl Fixture {
             STALL,
             || self.hub.store().head(),
             || async {
-                (!self.hub.is_live(&self.thread_id)
-                    && !self
-                        .hub
-                        .store()
-                        .pending_threads(8, Vec::new())
-                        .await
-                        .unwrap()
-                        .contains(&self.thread_id))
-                .then_some(())
+                let store = self.hub.store();
+                let before = store.head();
+                let idle = !self.hub.is_live(&self.thread_id);
+                let waiting = store
+                    .pending_threads(8, Vec::new())
+                    .await
+                    .unwrap()
+                    .contains(&self.thread_id);
+                let running = store
+                    .latest_run(&self.thread_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|run| run.status() == RunStatus::Running);
+                let still_idle = !self.hub.is_live(&self.thread_id);
+                (store.head() == before && idle && !waiting && !running && still_idle).then_some(())
             },
         )
         .await;

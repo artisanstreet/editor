@@ -99,9 +99,11 @@ async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
     let down = vacated().await;
     configure(&fixture, up_address, down, "server").await;
     test_support::wait::eventually(
-        "the changed MCP servers to be checked",
+        "the changed MCP servers to be checked and the check to reach the server",
         Duration::from_secs(10),
-        || async { fixture.hub.mcp().reachability().probed(2) },
+        || async {
+            fixture.hub.mcp().reachability().probed(2) && up_connections.load(Ordering::SeqCst) > 0
+        },
     )
     .await;
     let checked = up_connections.load(Ordering::SeqCst);
@@ -151,13 +153,11 @@ async fn servers_configured_before_the_watcher_first_runs_are_still_checked() {
     configure(&fixture, up_address, other_address, "server").await;
     tokio::spawn(watching);
     test_support::wait::eventually(
-        "the servers configured before the watcher ran to be checked",
+        "the watcher to check the servers configured before it first ran",
         Duration::from_secs(10),
-        || async { fixture.hub.mcp().reachability().probed(2) },
+        || async {
+            fixture.hub.mcp().reachability().probed(2) && up_connections.load(Ordering::SeqCst) > 0
+        },
     )
     .await;
-    assert!(
-        up_connections.load(Ordering::SeqCst) > 0,
-        "the watcher checked the server configured before it first ran"
-    );
 }

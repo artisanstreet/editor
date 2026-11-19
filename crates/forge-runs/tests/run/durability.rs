@@ -79,12 +79,17 @@ async fn a_continue_whose_run_could_not_be_saved_is_still_waiting() {
     );
     disk.clear();
     fixture.hub.resume_pending();
-    let continued = fixture.settled().await.remove(0);
+    let mut runs = fixture.settled().await;
+    runs.sort_by_key(|run| run.started_at);
+    let continued = runs
+        .last()
+        .expect("the continue ran once storage recovered");
     assert_eq!(
         continued.continuation,
-        Some(artisan_api::Continuation::Requested)
+        Some(artisan_api::Continuation::Requested),
+        "{runs:#?}"
     );
-    assert_eq!(continued.status(), RunStatus::Done);
+    assert_eq!(continued.status(), RunStatus::Done, "{runs:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -193,5 +198,5 @@ async fn a_run_that_cannot_start_fails_its_message_where_the_user_sees_it() {
         .unwrap()
         .unwrap();
     assert_eq!(run.status(), RunStatus::Failed);
-    assert!(!fixture.hub.is_live(&fixture.thread_id));
+    working(&fixture, false).await;
 }

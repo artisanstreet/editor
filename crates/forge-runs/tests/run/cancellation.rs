@@ -88,7 +88,11 @@ async fn a_stop_the_engine_fails_to_clean_up_stays_a_continuable_stop() {
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs.last().unwrap().status(), RunStatus::Cancelled);
+    assert_eq!(
+        runs.last().unwrap().status(),
+        RunStatus::Cancelled,
+        "{runs:#?}"
+    );
     assert_eq!(
         runs.last().unwrap().error(),
         Some("provider refused to stop")
