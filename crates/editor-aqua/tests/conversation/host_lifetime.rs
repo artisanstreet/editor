@@ -1,28 +1,25 @@
 use artisan_api::{ItemId, ThreadId};
+use axum::http::StatusCode;
 use editor_aqua::conversation::adapter::{Action, ScopedAction};
 use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::stored::StoredConversation;
-use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{Core, HostConfig};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+use test_support::editor::core::{connect, stub_host};
+use test_support::editor::forge::StubForge;
 
-fn config() -> HostConfig {
-    HostConfig {
-        id: HostId("same-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    }
-}
-
-fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new("127.0.0.1:1", &"0".repeat(64), core.identity().unwrap()).unwrap()
-}
-
-fn connect(core: &mut Core, config: &HostConfig) {
-    let client = client(core);
-    test_support::editor::core::connect_client(core, config, client);
+fn forge() -> StubForge {
+    let unavailable = axum::routing::any(|| async {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"code": "internal", "message": "thread unavailable"})),
+        )
+    });
+    editor_aqua::core::runtime::runtime().block_on(StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new().route("/threads/{*rest}", unavailable),
+    ))
 }
 
 fn replace(core: &mut Core, config: &HostConfig) {
@@ -52,7 +49,8 @@ fn wait_for_page(woken: &mpsc::Receiver<()>) {
 fn pending_page_rejects_removed_and_recreated_host() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(directory.path());
-    let config = config();
+    let forge = forge();
+    let config = stub_host("same-host", "Forge", &forge);
     connect(&mut core, &config);
     let thread = ThreadId("thread".into());
     let mut conversation = Conversation::new(&core);
@@ -91,7 +89,8 @@ fn pending_page_rejects_removed_and_recreated_host() {
 fn retained_action_cannot_mutate_a_replacement_with_the_same_host_id() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(directory.path());
-    let config = config();
+    let forge = forge();
+    let config = stub_host("same-host", "Forge", &forge);
     connect(&mut core, &config);
     let thread = ThreadId("thread".into());
     let mut conversation = Conversation::new(&core);
