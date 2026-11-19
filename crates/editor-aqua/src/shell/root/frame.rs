@@ -12,6 +12,13 @@ impl RootViews {
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
+        #[cfg_attr(
+            not(feature = "qualification"),
+            expect(
+                unused_variables,
+                reason = "the frame number only feeds the qualification paint collector"
+            )
+        )]
         frame: u64,
     ) -> bool {
         let lap_start = std::time::Instant::now();
@@ -122,8 +129,6 @@ impl RootViews {
         let painted_count = events.painted.len();
         #[cfg(feature = "qualification")]
         self.qualification_paint.begin_frame(&rows.scope, frame);
-        #[cfg(not(feature = "qualification"))]
-        let _ = frame;
         if let Some(clip) = crate::shell::wheel::keyed_node(ui, "conversation-transcript")
             .and_then(|node| ui.tree().visual_rect(node))
         {
@@ -146,7 +151,7 @@ impl RootViews {
                 .into_iter()
                 .filter_map(|painted| {
                     #[cfg(feature = "qualification")]
-                    let observation = painted.clone();
+                    let observation = std::rc::Rc::clone(&painted);
                     let candidate = painted.capture(
                         &workspace.conversation,
                         &shell.core,

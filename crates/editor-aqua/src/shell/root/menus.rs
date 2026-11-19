@@ -25,12 +25,22 @@ impl RootViews {
             .map(|(_, found)| found.try_recv());
         match pending {
             Some(Ok((browser, icon))) => {
-                let icon = icon
-                    .and_then(|icon| {
-                        aqua::images::DecodedImage::from_rgba(icon.width, icon.height, icon.rgba)
-                            .ok()
-                    })
-                    .and_then(|image| shell.images().insert(image).ok());
+                let icon = icon.and_then(|icon| {
+                    match aqua::images::DecodedImage::from_rgba(icon.width, icon.height, icon.rgba)
+                    {
+                        Ok(image) => match shell.images().insert(image) {
+                            Ok(handle) => Some(handle),
+                            Err(error) => {
+                                tracing::warn!(%error, "the browser icon could not be uploaded");
+                                None
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(%error, "the browser icon could not be decoded");
+                            None
+                        }
+                    }
+                });
                 self.browser_task = None;
                 self.browser = Some(ResolvedBrowser {
                     preferred,
@@ -57,7 +67,9 @@ impl RootViews {
                         let icon = browser
                             .as_ref()
                             .and_then(|browser| crate::shell::browser::icon(&browser.program));
-                        let _ = found.send((browser, icon));
+                        if found.send((browser, icon)).is_err() {
+                            tracing::debug!("the browser lookup finished after its menu moved on");
+                        }
                     });
                 match spawned {
                     Ok(_) => self.browser_task = Some((preferred, receiver)),

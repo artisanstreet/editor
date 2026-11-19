@@ -358,6 +358,14 @@ pub struct ForgeServer {
     task: Option<tokio::task::JoinHandle<Result<(), ForgeFailure>>>,
 }
 
+impl std::fmt::Debug for ForgeServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ForgeServer")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PairingInput {
     pub address: String,
@@ -748,6 +756,7 @@ struct VerifiedInputs {
     editor_settings_sha256: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct VerifiedBootstrap {
     inputs: VerifiedInputs,
     host: HostId,
@@ -756,7 +765,6 @@ pub struct VerifiedBootstrap {
     fixture: ImmutableFixture,
     snapshot: StoreSnapshot,
     server: ForgeServer,
-#[derive(Debug)]
     editor_dir: PathBuf,
 }
 
@@ -1035,7 +1043,9 @@ impl ForgeServer {
         let task = tokio::spawn(async move {
             server
                 .run_until(async {
-                    let _ = stopped.await;
+                    match stopped.await {
+                        Ok(()) | Err(tokio::sync::oneshot::error::RecvError { .. }) => {}
+                    }
                 })
                 .await;
             Ok::<(), ForgeFailure>(())
@@ -1064,7 +1074,9 @@ impl ForgeServer {
 
     async fn stop(&mut self) -> Result<(), ShutdownError> {
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            match stop.send(()) {
+                Ok(()) | Err(()) => {}
+            }
         }
         if let Some(task) = self.task.take() {
             task.await
@@ -1096,7 +1108,9 @@ impl ForgeServer {
 impl Drop for ForgeServer {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            match stop.send(()) {
+                Ok(()) | Err(()) => {}
+            }
         }
         if let Some(task) = self.task.take() {
             task.abort();
@@ -1266,6 +1280,7 @@ pub enum CheckpointDigestError {
     Encode(#[source] serde_json::Error),
 }
 
+#[derive(Debug)]
 pub struct ImmutableFixture {
     input: Vec<u8>,
     fixture: Fixture,
@@ -1280,7 +1295,6 @@ impl ImmutableFixture {
         Self::parse(input)
     }
 
-#[derive(Debug)]
     pub fn parse(input: Vec<u8>) -> Result<Self, FixtureError> {
         let fixture: Fixture = serde_json::from_slice(&input).map_err(FixtureError::Decode)?;
         fixture.validate().map_err(FixtureError::Invalid)?;
