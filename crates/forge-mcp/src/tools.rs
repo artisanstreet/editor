@@ -922,10 +922,14 @@ pub(crate) async fn call(
                 )
                 .await
                 .map_err(forge("search the threads"))?;
-            if page.hits.is_empty() {
-                return Ok("No matches.".to_owned());
-            }
-            Ok(format::search(&page, search.cursor.is_some()))
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if page.hits.is_empty() {
+                    "No matches.".to_owned()
+                } else {
+                    format::search(&page, search.cursor.is_some())
+                },
+            ))
         }
         "grep_threads" => {
             #[derive(Deserialize)]
@@ -956,10 +960,14 @@ pub(crate) async fn call(
                 )
                 .await
                 .map_err(forge("grep the threads"))?;
-            if page.matches.is_empty() && page.next.is_none() {
-                return Ok("No matches.".to_owned());
-            }
-            Ok(format::grep(&page))
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if page.matches.is_empty() && page.next.is_none() {
+                    "No matches.".to_owned()
+                } else {
+                    format::grep(&page)
+                },
+            ))
         }
         "read_thread" => {
             let read: Read = args(arguments)?;
@@ -994,10 +1002,14 @@ pub(crate) async fn call(
                 )
                 .await
                 .map_err(forge("find the threads touching the path"))?;
-            if touches.is_empty() {
-                return Ok("No thread touched a matching path.".to_owned());
-            }
-            Ok(format::touches(&touches))
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if touches.is_empty() {
+                    "No thread touched a matching path.".to_owned()
+                } else {
+                    format::touches(&touches)
+                },
+            ))
         }
         "create_thread" => {
             #[derive(Deserialize)]

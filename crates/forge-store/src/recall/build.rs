@@ -4,14 +4,14 @@ use crate::error::StorageError;
 use crate::writer::{Durability, Job, Writer};
 use artisan_api::Item;
 use rusqlite::{Connection, OptionalExtension};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(crate) const INDEX_VERSION: i64 = 2;
 const BATCH_ITEMS: i64 = 256;
 const REPORT_EVERY: Duration = Duration::from_secs(5);
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_LAST: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallIndex {
@@ -192,7 +192,7 @@ pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
 }
 
 pub(crate) struct Builder {
-    stop: Arc<AtomicBool>,
+    stop: std::sync::mpsc::Sender<()>,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -201,8 +201,7 @@ impl Builder {
         jobs: mpsc::Sender<Job>,
         status: watch::Sender<RecallIndex>,
     ) -> std::io::Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
+        let (stop, stopping) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("forge-store-recall".into())
             .spawn(move || {
@@ -213,7 +212,7 @@ impl Builder {
     }
 
     pub(crate) fn stop(self) -> std::thread::Result<()> {
-        self.stop.store(true, Ordering::Release);
+        drop(self.stop);
         self.thread.join()
     }
 }
@@ -240,11 +239,26 @@ fn batch(jobs: &mpsc::Sender<Job>) -> Reply {
     }
 }
 
-fn build(jobs: &mpsc::Sender<Job>, stop: &AtomicBool) -> RecallIndex {
+fn stop_requested(stop: &std::sync::mpsc::Receiver<()>) -> bool {
+    match stop.try_recv() {
+        Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+    }
+}
+
+fn stopped_while_waiting(stop: &std::sync::mpsc::Receiver<()>, wait: Duration) -> bool {
+    match stop.recv_timeout(wait) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+    }
+}
+
+fn build(jobs: &mpsc::Sender<Job>, stop: &std::sync::mpsc::Receiver<()>) -> RecallIndex {
     let started = Instant::now();
     let mut reported = started;
+    let mut retry = RETRY_FIRST;
     let (mut items, mut skipped) = (0_u64, 0_u64);
-    while !stop.load(Ordering::Acquire) {
+    while !stop_requested(stop) {
         match batch(jobs) {
             Reply::WriterStopped | Reply::Built(Ok(Batch::Abandoned)) => {
                 return RecallIndex::Incomplete;
@@ -253,6 +267,7 @@ fn build(jobs: &mpsc::Sender<Job>, stop: &AtomicBool) -> RecallIndex {
                 items: indexed,
                 skipped: left_out,
             })) => {
+                retry = RETRY_FIRST;
                 items += indexed;
                 skipped += left_out;
                 if reported.elapsed() >= REPORT_EVERY {
@@ -275,10 +290,14 @@ fn build(jobs: &mpsc::Sender<Job>, stop: &AtomicBool) -> RecallIndex {
             Reply::Built(Err(error)) => {
                 tracing::warn!(
                     items,
+                    retry_s = retry.as_secs(),
                     error = %diagnostics::chain(&error),
-                    "the recall index build stopped; search covers what was indexed and the build resumes when Forge next starts"
+                    "a recall index batch failed; search covers what was indexed and the build carries on from there"
                 );
-                return RecallIndex::Incomplete;
+                if stopped_while_waiting(stop, retry) {
+                    return RecallIndex::Incomplete;
+                }
+                retry = (retry * 2).min(RETRY_LAST);
             }
         }
     }

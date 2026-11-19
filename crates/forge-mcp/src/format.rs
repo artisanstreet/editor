@@ -1,7 +1,7 @@
 use crate::transcript::time;
 use artisan_api::{Thread, ThreadId};
 use forge_runs::{AgentInfo, AgentState, Hub};
-use forge_store::{GrepPage, RecallKind, SearchPage, Touch};
+use forge_store::{GrepPage, RecallIndex, RecallKind, SearchPage, Touch};
 use std::fmt::Write as _;
 
 pub(crate) fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
@@ -44,6 +44,18 @@ fn group(out: &mut String, last: &mut Option<ThreadId>, thread: &ThreadId, name:
         writeln!(out, "\n### {}\n", title(name))
             .expect("invariant: writing to a String cannot fail");
         *last = Some(thread.clone());
+    }
+}
+
+pub(crate) fn with_coverage(index: RecallIndex, answer: String) -> String {
+    match index {
+        RecallIndex::Built => answer,
+        RecallIndex::Building => format!(
+            "{answer}\n\nForge is still indexing older items for search, so some may be missing."
+        ),
+        RecallIndex::Incomplete => format!(
+            "{answer}\n\nForge couldn't finish indexing older items for search, so some may be missing until it restarts."
+        ),
     }
 }
 

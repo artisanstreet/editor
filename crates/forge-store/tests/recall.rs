@@ -509,6 +509,10 @@ fn forget_recall_index(dir: &std::path::Path) {
         .expect("make the next start rebuild the recall index");
 }
 
+fn ledger_entry(number: usize) -> String {
+    format!("ledger entry {number:04} closes")
+}
+
 async fn found(store: &Store, text: &str) -> Vec<ItemId> {
     store
         .recall_search(RecallScope::default(), text.into(), false, 100, None)
@@ -562,4 +566,107 @@ async fn a_forge_that_cannot_prepare_its_search_index_refuses_to_start_instead_o
         .expect("messages save once the index is prepared");
     assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
     assert_eq!(found(&store, "heron count").await.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recall_index_batch_that_fails_is_retried_without_restarting_forge() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    let note = store
+        .upsert_item(said(&notes, "the osprey nest has two eggs"))
+        .await
+        .expect("save a note")
+        .id;
+    drop(store);
+    forget_recall_index(dir.path());
+    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
+        .expect("Forge starts and rebuilds the index in the background");
+    advances.store(UNLIMITED, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
+    assert_eq!(found(&store, "osprey nest").await, vec![note]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recall_build_resumed_after_a_restart_finds_every_message_once_despite_writes_and_removals_during_it()
+ {
+    use std::collections::HashSet;
+    const ENTRIES: usize = 600;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let kept = thread(&store, EngineId::Claude, "Kept").await;
+    let removed = thread(&store, EngineId::Claude, "Removed").await;
+    let mut entries = Vec::with_capacity(ENTRIES);
+    for number in 0..ENTRIES {
+        let owner = if number % 3 == 0 { &removed } else { &kept };
+        let saved = store
+            .upsert_item(said(owner, &ledger_entry(number)))
+            .await
+            .expect("save a ledger entry");
+        entries.push(saved.id);
+    }
+    drop(store);
+    forget_recall_index(dir.path());
+    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let (store, lock) = store_counting_advances(dir.path(), &advances, false)
+        .expect("Forge starts and rebuilds the index in the background");
+    let partly = tokio::time::timeout(test_support::wait::LIVENESS, async {
+        loop {
+            if found(&store, &ledger_entry(0)).await.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    partly.expect("the first batch is indexed");
+    assert!(
+        found(&store, &ledger_entry(ENTRIES - 1)).await.is_empty(),
+        "the build stops after its first batch"
+    );
+    drop(store);
+    drop(lock);
+
+    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
+        .expect("the next start resumes the build");
+    let late = store
+        .upsert_item(said(&kept, &ledger_entry(ENTRIES)))
+        .await
+        .expect("save an entry while the index builds")
+        .id;
+    let edited = ENTRIES - 2;
+    let rewritten = store
+        .upsert_item(NewItem {
+            id: entries[edited].clone(),
+            ..said(&kept, "ledger entry rewritten after the audit")
+        })
+        .await
+        .expect("edit an entry the build hasn't reached")
+        .id;
+    let gone = store
+        .remove_inactive_threads(now() + 60_000, HashSet::from([kept.clone()]), usize::MAX)
+        .await
+        .expect("remove a thread while the index builds");
+    assert_eq!(gone.len(), 1);
+    advances.store(UNLIMITED, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
+    for (number, entry) in entries.iter().enumerate() {
+        let hits = found(&store, &ledger_entry(number)).await;
+        let expected = if number % 3 == 0 || number == edited {
+            Vec::new()
+        } else {
+            vec![entry.clone()]
+        };
+        assert_eq!(hits, expected, "entry {number}");
+    }
+    assert_eq!(found(&store, &ledger_entry(ENTRIES)).await, vec![late]);
+    assert_eq!(
+        found(&store, "rewritten after the audit").await,
+        vec![rewritten]
+    );
 }
