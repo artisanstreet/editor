@@ -23,40 +23,34 @@ fn duplicate_labels_keep_distinct_choice_identity_and_text_is_not_a_choice() {
     let answer = QuestionAnswer::Choices {
         ids: vec!["b".into()].into(),
     };
-    assert!(question.validate_answer(&Some(answer.clone())).is_ok());
+    question
+        .validate_answer(Some(&answer))
+        .expect("a known choice id is accepted");
     let encoded = serde_json::to_string(&answer).unwrap();
     assert_eq!(
         serde_json::from_str::<QuestionAnswer>(&encoded).unwrap(),
         answer
     );
-    assert!(
-        question
-            .validate_answer(&Some(QuestionAnswer::Choices {
-                ids: vec!["Same".into()].into()
-            }))
-            .is_err()
-    );
-    assert!(
-        question
-            .validate_answer(&Some(QuestionAnswer::Text {
-                text: "Same".into()
-            }))
-            .is_ok()
-    );
-    assert!(
-        question
-            .validate_answer(&Some(QuestionAnswer::Choices {
-                ids: vec!["a".into(), "b".into()].into()
-            }))
-            .is_err()
-    );
+    question
+        .validate_answer(Some(&QuestionAnswer::Choices {
+            ids: vec!["Same".into()].into(),
+        }))
+        .expect_err("a choice label is not a choice id");
+    question
+        .validate_answer(Some(&QuestionAnswer::Text {
+            text: "Same".into(),
+        }))
+        .expect("a text answer is accepted");
+    question
+        .validate_answer(Some(&QuestionAnswer::Choices {
+            ids: vec!["a".into(), "b".into()].into(),
+        }))
+        .expect_err("a single-select question refuses two choices");
     let mut multi = question;
     multi.multi_select = true;
-    assert!(
-        multi
-            .validate_answer(&Some(QuestionAnswer::Choices {
-                ids: vec!["a".into(), "a".into()].into()
-            }))
-            .is_err()
-    );
+    multi
+        .validate_answer(Some(&QuestionAnswer::Choices {
+            ids: vec!["a".into(), "a".into()].into(),
+        }))
+        .expect_err("the same choice twice is refused");
 }

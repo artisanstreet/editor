@@ -107,10 +107,6 @@ impl ModelAxis {
             Self::Permission => "Permission",
         }
     }
-
-    pub const fn shown(self, options: usize) -> bool {
-        options > 0
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

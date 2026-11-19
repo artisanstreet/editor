@@ -312,14 +312,10 @@ pub fn range<T: DeserializeOwned>(
     }))
 }
 
-#[expect(
-    clippy::ref_option,
-    reason = "forwards to artisan_api::Question's validators, which take &Option"
-)]
 pub fn validate_answer(
     conn: &Connection,
     question: &artisan_api::Question,
-    answer: &Option<artisan_api::QuestionAnswer>,
+    answer: Option<&artisan_api::QuestionAnswer>,
 ) -> Result<()> {
     question
         .validate_answer_structure(answer)
@@ -776,7 +772,7 @@ pub fn validate_answers(
         return Err(AnswerRefused::CountMismatch.into());
     }
     visit_questions(conn, questions, |index, question| {
-        validate_answer(conn, question, &answers[index])
+        validate_answer(conn, question, answers[index].as_ref())
     })
 }
 pub fn answers_equal(

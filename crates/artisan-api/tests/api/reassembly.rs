@@ -1,5 +1,5 @@
 use super::*;
-use crate::CHUNK_RAW_BYTES;
+use crate::tunnel::CHUNK_RAW_BYTES;
 
 fn feed_all(reassembly: &mut Reassembly, channel: &str, bytes: &[u8]) -> Vec<u8> {
     let chunks = crate::chunk_bytes("t-same-name", bytes);

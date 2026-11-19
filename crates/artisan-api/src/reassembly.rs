@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
+use crate::tunnel::{
     BodyDecodeError, REASSEMBLY_MAX_BYTES_PER_CONN, REASSEMBLY_MAX_IN_FLIGHT, TRANSFER_MAX_BYTES,
     TRANSFER_MAX_PARTS, TunnelChunk,
 };
@@ -134,7 +134,7 @@ impl Reassembly {
                 index,
             });
         }
-        let bytes = match crate::decode_chunk_bytes(chunk) {
+        let bytes = match crate::tunnel::decode_chunk_bytes(chunk) {
             Ok(bytes) => bytes,
             Err(source) => {
                 let (channel, transfer) = key;

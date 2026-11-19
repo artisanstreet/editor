@@ -214,7 +214,7 @@ fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
     let answer = artisan_api::QuestionAnswer::Choices {
         ids: vec!["opaque-4999".into()].into(),
     };
-    validate_answer(&conn, &question, &Some(answer.clone())).unwrap();
+    validate_answer(&conn, &question, Some(&answer)).unwrap();
     assert_eq!(
         answer_text(&conn, &question, &answer).unwrap(),
         "Same (option 5000 of 5000)"
@@ -223,7 +223,7 @@ fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
         validate_answer(
             &conn,
             &question,
-            &Some(artisan_api::QuestionAnswer::Choices {
+            Some(&artisan_api::QuestionAnswer::Choices {
                 ids: vec!["Same".into()].into()
             })
         )
@@ -233,7 +233,7 @@ fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
         validate_answer(
             &conn,
             &question,
-            &Some(artisan_api::QuestionAnswer::Choices {
+            Some(&artisan_api::QuestionAnswer::Choices {
                 ids: vec!["opaque-1".into(), "opaque-1".into()].into()
             })
         )

@@ -12,7 +12,7 @@ pub fn native_answers(
         .zip(answers)
         .map(|(question, answer)| {
             question
-                .validate_answer_structure(answer)
+                .validate_answer_structure(answer.as_ref())
                 .map_err(str::to_owned)?;
             match answer {
                 None => Ok(None),

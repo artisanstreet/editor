@@ -75,7 +75,7 @@ pub(super) fn model_menu_items(
     if let Some(config) = &config {
         for axis in super::super::picker::Axis::PICKER {
             let options = picker.axis_options(axis, config, model);
-            if !axis.shown(options.len()) {
+            if options.is_empty() {
                 continue;
             }
             let value = options.iter().find(|option| option.selected).map_or_else(

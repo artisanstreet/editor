@@ -34,7 +34,7 @@ pub fn request_body_bytes(
                         .map_err(|_decode| BodyDecodeError::InvalidBase64)?;
                     Ok((envelope.content_type, raw))
                 }
-                Err(_) => Ok(("application/json".into(), body_json_bytes(body))),
+                Err(_malformed) => Err(BodyDecodeError::MalformedEnvelope),
             }
         }
         _ => Ok(("application/json".into(), body_json_bytes(body))),
@@ -45,11 +45,13 @@ pub fn request_body_bytes(
 pub enum BodyDecodeError {
     #[error("invalid base64url in a $bytes envelope or chunk")]
     InvalidBase64,
+    #[error("a $bytes envelope without a content type and base64url bytes")]
+    MalformedEnvelope,
 }
 
 fn body_json_bytes(body: Option<&serde_json::Value>) -> Vec<u8> {
     body.map_or_else(Vec::new, |value| {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("invariant: a JSON value always serializes")
     })
 }
 
@@ -150,7 +152,6 @@ pub(crate) fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDec
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 #[path = "../tests/tunnel/unit.rs"]
 mod tests;
 

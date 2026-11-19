@@ -639,7 +639,7 @@ impl Decoder {
         let mut form = Map::new();
         for ((question, field), answer) in questions.iter().zip(fields).zip(answers) {
             question
-                .validate_answer_structure(answer)
+                .validate_answer_structure(answer.as_ref())
                 .map_err(str::to_owned)?;
             let given = match answer {
                 None => continue,

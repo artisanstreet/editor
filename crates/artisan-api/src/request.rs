@@ -1,6 +1,6 @@
 use crate::{
-    BlobHash, Decision, EngineConfig, EngineStatus, Item, ItemId, Project, ProjectId, Run, RunId,
-    Seq, Thread, ThreadId,
+    BlobHash, Collection, Decision, EngineConfig, EngineId, EngineStatus, Item, ItemId, PlanStep,
+    Project, ProjectId, Run, RunId, Seq, Thread, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -299,7 +299,7 @@ pub struct DirEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettleThread {
-    pub observed_seq: crate::Seq,
+    pub observed_seq: Seq,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,12 +308,12 @@ pub struct InspectorSummary {
     pub goal: Option<ThreadGoal>,
     #[serde(default)]
     pub questions: Vec<ThreadQuestionnaire>,
-    pub revision: crate::Seq,
+    pub revision: Seq,
     pub terminals: Vec<InspectorTerminal>,
     pub agents: Vec<InspectorAgent>,
     #[serde(default)]
     pub workflows: Vec<InspectorWorkflow>,
-    pub plan: crate::Collection<crate::PlanStep>,
+    pub plan: Collection<PlanStep>,
     pub edits: Option<EditTotals>,
     #[serde(default)]
     pub outline: Vec<OutlineEntry>,
@@ -322,7 +322,7 @@ pub struct InspectorSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutlineEntry {
     pub id: ItemId,
-    pub position: crate::Seq,
+    pub position: Seq,
     pub label: String,
 }
 
@@ -346,7 +346,7 @@ pub enum ThreadGoalState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadQuestionnaire {
     pub id: ItemId,
-    pub questions: crate::Collection<crate::Question>,
+    pub questions: Collection<crate::Question>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,11 +375,11 @@ pub struct InspectorAgent {
     pub description: crate::TextContent,
     pub status: crate::Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine: Option<crate::EngineId>,
+    pub engine: Option<EngineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<crate::EngineConfig>,
+    pub config: Option<EngineConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<ThreadId>,
     #[serde(default)]

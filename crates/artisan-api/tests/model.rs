@@ -1,7 +1,3 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
-)]
 use artisan_api::*;
 
 fn model(id: &str, efforts: &[&str]) -> Model {
@@ -286,7 +282,8 @@ fn custom_compaction_windows_respect_reported_capacity_and_version() {
             .iter()
             .any(|choice| choice.id == "2000000")
     );
-    assert!(model_customizations(&serde_json::json!({"version": 2, "rules": []})).is_err());
+    model_customizations(&serde_json::json!({"version": 2, "rules": []}))
+        .expect_err("an unknown customization version is refused");
 }
 
 #[test]

@@ -43,6 +43,11 @@ fn corrupt_envelopes_fail_loudly() {
         request_body_bytes(Some(&body)).unwrap_err(),
         BodyDecodeError::InvalidBase64
     );
+    let body = serde_json::json!({"$bytes": {"b64u": "aGk"}});
+    assert_eq!(
+        request_body_bytes(Some(&body)).unwrap_err(),
+        BodyDecodeError::MalformedEnvelope
+    );
     let body = serde_json::json!({"$bytes": {"content_type": "image/webp", "b64u": "aGk"}});
     assert_eq!(
         request_body_bytes(Some(&body)).unwrap(),

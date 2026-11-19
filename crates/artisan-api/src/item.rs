@@ -227,6 +227,10 @@ pub enum MessageDirection {
 
 impl MessageDirection {
     #[must_use]
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if hands the field by reference"
+    )]
     fn is_sent(&self) -> bool {
         *self == Self::Sent
     }
@@ -344,7 +348,7 @@ pub enum QuestionAnswer {
 impl Question {
     pub fn validate_answer_structure(
         &self,
-        answer: &Option<QuestionAnswer>,
+        answer: Option<&QuestionAnswer>,
     ) -> Result<(), &'static str> {
         match answer {
             Some(QuestionAnswer::Text { text }) if text.trim().is_empty() => {
@@ -372,7 +376,7 @@ impl Question {
             }
         }
     }
-    pub fn validate_answer(&self, answer: &Option<QuestionAnswer>) -> Result<(), &'static str> {
+    pub fn validate_answer(&self, answer: Option<&QuestionAnswer>) -> Result<(), &'static str> {
         self.validate_answer_structure(answer)?;
         if let Some(QuestionAnswer::Choices { ids }) = answer {
             let choices = self
