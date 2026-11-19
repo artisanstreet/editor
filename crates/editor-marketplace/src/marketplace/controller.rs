@@ -17,6 +17,7 @@ use super::{
 };
 use editor_core::client::CallError;
 
+#[derive(Debug)]
 enum Completion {
     Search(
         CompletionKey,
@@ -29,6 +30,23 @@ enum Completion {
         OperationRequest,
         Result<Vec<CatalogSkill>, OperationError>,
     ),
+}
+
+#[derive(PartialEq, Eq)]
+enum CatalogState {
+    Idle,
+    Loading,
+    Failed(String),
+}
+
+impl CatalogState {
+    fn of(load: &editor_core::ProjectionLoad) -> Self {
+        match (&load.error, load.loading) {
+            (Some(error), _) => Self::Failed(error.clone()),
+            (None, true) => Self::Loading,
+            (None, false) => Self::Idle,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -45,12 +63,15 @@ pub(crate) struct ViewSnapshot {
     notice: Option<String>,
     found_open: bool,
     prompt_hovered: bool,
-    catalog_loading: bool,
-    catalog_error: Option<String>,
+    catalog: CatalogState,
     prompt_error: Option<String>,
     prompt_attention: Option<String>,
 }
 
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the Editor shell and other crates' tests seed the page and search editor directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct MarketplaceController {
     pub page: Marketplace,
     pub search: EditorController,
@@ -76,13 +97,19 @@ impl MarketplaceController {
                 move |event| match event {
                     EditorEvent::Changed => emit(super::view::ViewAction::SearchChanged),
                     EditorEvent::List(key) => emit(super::view::ViewAction::SearchKey(key)),
-                    _ => {}
+                    EditorEvent::PresentationChanged
+                    | EditorEvent::SelectionChanged { .. }
+                    | EditorEvent::Submitted
+                    | EditorEvent::PastedFiles { .. } => {}
                 },
             );
         Self {
             page: Marketplace::default(),
             search,
-            completion: OwnedDelivery::new(NonZeroUsize::new(64).unwrap()),
+            completion: OwnedDelivery::new(
+                NonZeroUsize::new(64)
+                    .expect("invariant: the marketplace delivery capacity is non-zero"),
+            ),
             remote_search: CompletionSlot::default(),
             host_instance: None,
             loading_started: None,
@@ -106,8 +133,9 @@ impl MarketplaceController {
             notice: self.page.notice.clone(),
             found_open: self.page.found_open,
             prompt_hovered: self.prompt_hovered,
-            catalog_loading: host.is_some_and(|host| host.catalog_load().loading),
-            catalog_error: host.and_then(|host| host.catalog_load().error.clone()),
+            catalog: host.map_or(CatalogState::Idle, |host| {
+                CatalogState::of(host.catalog_load())
+            }),
             prompt_error: host.and_then(|host| host.prompt_load().error.clone()),
             prompt_attention: host
                 .and_then(|host| host.global_prompt.as_deref())
@@ -196,7 +224,12 @@ impl MarketplaceController {
                 host,
                 event: HostEvent::Changed | HostEvent::Reset,
             } if self.page.shown && self.page.host.as_ref() == Some(host) => self.sync(core),
-            _ => {}
+            CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => {}
         }
     }
 
@@ -233,7 +266,7 @@ impl MarketplaceController {
             .spawn(&host.id, host.instance(), move |key| async move {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                 let result = Marketplace::search(&client, &request).await;
-                let _ = sender.send(Completion::Search(key, request, result)).await;
+                sender.offer(Completion::Search(key, request, result)).await;
             });
     }
 
@@ -307,8 +340,8 @@ impl MarketplaceController {
         let sender = self.completion.sender();
         runtime::runtime().spawn(async move {
             let result = Marketplace::execute(&client, &request).await;
-            let _ = sender
-                .send(Completion::Operation(id, instance, request, result))
+            sender
+                .offer(Completion::Operation(id, instance, request, result))
                 .await;
         });
     }
@@ -320,7 +353,7 @@ impl MarketplaceController {
         }
     }
 
-    pub(crate) fn retry(&mut self, core: &mut Core) {
+    pub(crate) fn retry(core: &mut Core) {
         if let Some(host) = core
             .active_host()
             .map(|host| host.id.clone())
@@ -344,17 +377,25 @@ impl MarketplaceController {
                     }
                 }
                 Completion::Operation(id, instance, request, result) => {
-                    if core.host_if_instance(&id, instance).is_some() {
-                        if self.page.finish_operation(&request, result) {
-                            if let Some(host) = core.host_mut_if_instance(&id, instance) {
-                                host.invalidate_catalog();
-                            }
-                        }
+                    if core.host_if_instance(&id, instance).is_some()
+                        && self.page.finish_operation(&request, result)
+                        && let Some(host) = core.host_mut_if_instance(&id, instance)
+                    {
+                        host.invalidate_catalog();
                     }
                     self.sync(core);
                 }
             }
         }
         before != self.view_snapshot(core)
+    }
+}
+
+impl std::fmt::Debug for MarketplaceController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarketplaceController")
+            .field("page", &self.page)
+            .field("host_instance", &self.host_instance)
+            .finish_non_exhaustive()
     }
 }

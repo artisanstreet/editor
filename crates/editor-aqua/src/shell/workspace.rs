@@ -1627,7 +1627,7 @@ impl Workspace {
         core: &Core,
         theme: crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
-        crate::marketplace::view::build(&self.marketplace, core, theme, self.marketplace_emit())
+        crate::marketplace::view::build(&self.marketplace, core, &theme, self.marketplace_emit())
     }
 
     pub(crate) fn settings_view(

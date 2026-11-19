@@ -301,7 +301,7 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
-    app.mount(|_| view::build(&controller, &core, ArtisanTheme::resolved(), emit))
+    app.mount(|_| view::build(&controller, &core, &ArtisanTheme::resolved(), emit))
         .unwrap();
     app.set_viewport(1000.0, 900.0, 1.0);
     app.build_frame().unwrap();
@@ -589,7 +589,7 @@ fn marketplace_app(
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
-    let element = view::build(controller, core, ArtisanTheme::resolved(), emit);
+    let element = view::build(controller, core, &ArtisanTheme::resolved(), emit);
     app.mount(|_| element).expect("mount the marketplace");
     app.set_viewport(1000.0, 1600.0, 1.0);
     app.build_frame().expect("lay out the marketplace");

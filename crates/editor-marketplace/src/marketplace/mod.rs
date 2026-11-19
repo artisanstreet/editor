@@ -83,7 +83,11 @@ pub enum ListKey {
     Dismiss,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "other crates' tests seed the page's items and listings directly; making them private is a cross-crate redesign tracked in the lint cleanup report"
+)]
 pub struct Marketplace {
     pub host: Option<HostId>,
     generation: u64,
@@ -165,15 +169,13 @@ impl Marketplace {
     }
 
     pub fn take_search(&mut self, now: Instant) -> Option<SearchRequest> {
-        if self.search_due.is_some_and(|due| now >= due) {
+        self.search_due.is_some_and(|due| now >= due).then(|| {
             self.search_due = None;
-            Some(SearchRequest {
+            SearchRequest {
                 query: self.query.trim().to_owned(),
                 serial: self.search_serial,
-            })
-        } else {
-            None
-        }
+            }
+        })
     }
 
     async fn search(

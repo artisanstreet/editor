@@ -64,7 +64,7 @@ pub fn dispatch(
         ViewAction::ClearSearch => controller.clear_search(core),
         ViewAction::SetKind(kind) => controller.page.set_kind(kind),
         ViewAction::ToggleFound => controller.page.found_open = !controller.page.found_open,
-        ViewAction::Retry => controller.retry(core),
+        ViewAction::Retry => MarketplaceController::retry(core),
         ViewAction::RetrySearch => controller.retry_search(core),
         ViewAction::Navigate(screen) => controller.act(core, Action::Navigate(screen)),
         ViewAction::Operate(operation) => controller.operate(core, operation),
@@ -72,51 +72,67 @@ pub fn dispatch(
     before != controller.view_snapshot(core)
 }
 
-#[derive(Clone)]
-struct Notices {
-    host: bool,
-    attention: Option<String>,
-    errors: Vec<String>,
-    retry: bool,
-    loading: bool,
-    loading_started: Option<std::time::Instant>,
+#[derive(Clone, Copy)]
+struct LoadingMark {
+    started: std::time::Instant,
     reduced_motion: bool,
+}
+
+#[derive(Clone)]
+enum Notices {
+    NoHost,
+    Host {
+        attention: Option<String>,
+        errors: Vec<String>,
+        retry: bool,
+        loading: Option<LoadingMark>,
+    },
+}
+
+impl Notices {
+    fn of(controller: &MarketplaceController, host: Option<&editor_core::HostData>) -> Self {
+        let Some(host) = host else {
+            return Self::NoHost;
+        };
+        let page = &controller.page;
+        let loading = host.catalog_load().loading && page.items.is_empty();
+        Self::Host {
+            attention: host
+                .global_prompt
+                .as_deref()
+                .and_then(presentation::prompt_attention),
+            errors: [
+                host.catalog_load().error.clone(),
+                host.prompt_load().error.clone(),
+                host.mcp_servers().err().map(|error| {
+                    format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error))
+                }),
+                page.notice.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            retry: host.catalog_load().error.is_some() || host.prompt_load().error.is_some(),
+            loading: controller
+                .loading_started()
+                .filter(|_| loading)
+                .map(|started| LoadingMark {
+                    started,
+                    reduced_motion: controller.reduced_motion,
+                }),
+        }
+    }
 }
 
 pub fn build(
     controller: &MarketplaceController,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
+    let theme = *theme;
     let page = &controller.page;
-    let host = core.active_host();
-    let notices = Notices {
-        host: host.is_some(),
-        attention: host
-            .and_then(|host| host.global_prompt.as_deref())
-            .and_then(presentation::prompt_attention),
-        errors: host
-            .into_iter()
-            .flat_map(|host| {
-                [
-                    host.catalog_load().error.clone(),
-                    host.prompt_load().error.clone(),
-                    host.mcp_servers().err().map(|error| {
-                        format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error))
-                    }),
-                ]
-            })
-            .chain([page.notice.clone()])
-            .flatten()
-            .collect(),
-        loading_started: controller.loading_started(),
-        reduced_motion: controller.reduced_motion,
-        retry: host.is_some_and(|host| {
-            host.catalog_load().error.is_some() || host.prompt_load().error.is_some()
-        }),
-        loading: host.is_some_and(|host| host.catalog_load().loading) && page.items.is_empty(),
-    };
+    let notices = Notices::of(controller, core.active_host());
     let rows: Vec<(usize, Entry)> = entries(page).into_iter().enumerate().collect();
     let query = page.query.clone();
     let kind = page.kind;
@@ -135,17 +151,9 @@ pub fn build(
         .key(|(index, _)| format!("marketplace-entry-{index}"))
         .row(move |(index, entry)| {
             let content = match entry {
-                Entry::Hero => hero(
-                    &theme,
-                    &query,
-                    kind,
-                    counts,
-                    &search,
-                    prompt_hovered,
-                    emit.clone(),
-                ),
-                Entry::Notices => notices_view(&theme, &notices, emit.clone()),
-                Entry::Found(summary) => found(&theme, summary, found_open, emit.clone()),
+                Entry::Hero => hero(&theme, &query, kind, counts, &search, prompt_hovered, &emit),
+                Entry::Notices => notices_view(&theme, &notices, &emit),
+                Entry::Found(summary) => found(&theme, summary, found_open, Rc::clone(&emit)),
                 Entry::Group(title) => UiBox::new()
                     .padded(CARD_PADDING)
                     .child(
@@ -159,26 +167,7 @@ pub fn build(
                         .build(),
                     )
                     .build(),
-                Entry::SearchFailed(error) => {
-                    let retry = emit.clone();
-                    UiBox::new()
-                        .padded(CARD_PADDING)
-                        .child(
-                            page::notice(&theme, error.clone())
-                                .action(
-                                    Button::text(
-                                        "marketplace-search-retry",
-                                        theme,
-                                        ButtonTone::Neutral,
-                                        "Try again",
-                                    )
-                                    .on_activate(move |_| retry(ViewAction::RetrySearch))
-                                    .build(),
-                                )
-                                .build(),
-                        )
-                        .build()
-                }
+                Entry::SearchFailed(error) => search_failed(&theme, error, &emit),
                 Entry::Empty(text) => centered(muted(&theme, TextRole::Label, text.clone())),
                 Entry::Item {
                     item,
@@ -189,7 +178,7 @@ pub fn build(
                     .build(
                         &theme,
                         *selected,
-                        item_row(&theme, item, *selected, pending.as_ref(), emit.clone()),
+                        item_row(&theme, item, *selected, pending.as_ref(), Rc::clone(&emit)),
                     )
                     .debug_selector(item.selector()),
             };
@@ -222,6 +211,27 @@ pub fn build(
         .height(Length::Pct(100.0))
         .padded(Space::S24)
         .child(list)
+        .build()
+}
+
+fn search_failed(theme: &ArtisanTheme, error: &str, emit: &Rc<dyn Fn(ViewAction)>) -> Element {
+    let retry = Rc::clone(emit);
+    UiBox::new()
+        .padded(CARD_PADDING)
+        .child(
+            page::notice(theme, error.to_owned())
+                .action(
+                    Button::text(
+                        "marketplace-search-retry",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .on_activate(move |_| retry(ViewAction::RetrySearch))
+                    .build(),
+                )
+                .build(),
+        )
         .build()
 }
 
@@ -261,132 +271,11 @@ fn hero(
     counts: [usize; 2],
     search: &editor_ui::text::mount::EditorController,
     prompt_hovered: bool,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let well = Surface::Composer;
-    let slot = IconButtonSize::Md.edge();
-    let lead = UiBox::new()
-        .width(slot)
-        .height(slot)
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER)
-                .flex_shrink(0.0),
-        )
-        .child(IconSize::Lg.glyph(
-            AssetId::TABLER_SEARCH,
-            theme.colors.text_muted.to_reference_paint(),
-        ))
-        .build();
-    let editor = UiBox::new()
-        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-        .child(
-            search
-                .element_with_chrome(
-                    Mode::SingleLine,
-                    theme,
-                    "Search skills and MCP servers",
-                    true,
-                    false,
-                )
-                .with_key("marketplace-search")
-                .debug_selector("marketplace-search"),
-        )
-        .build();
-    let clear = (!query.is_empty()).then(|| {
-        let emit = emit.clone();
-        IconButton::new(
-            "marketplace-search-clear",
-            *theme,
-            AssetId::TABLER_X,
-            "Clear the search",
-            IconButtonSize::Md,
-            Finish::Plain,
-        )
-        .muted()
-        .within(well)
-        .on_activate(move |_| emit(ViewAction::ClearSearch))
-        .build()
-    });
-    let line = UiBox::new()
-        .height(slot)
-        .spaced(Space::S8)
-        .style(Style::new().align(AlignItems::CENTER))
-        .child(lead)
-        .child(editor)
-        .children(clear)
-        .build();
-    let focus = emit.clone();
-    let field = well
-        .build(theme, vec![line])
-        .style(Style::new().width(Length::Pct(100.0)))
-        .cursor(aqua_core::CursorIcon::Text)
-        .on_input(
-            aqua_ui::input::InputKind::PointerDown,
-            aqua_ui::input::EventPhase::Capture,
-            move |_| {
-                focus(ViewAction::FocusSearch);
-                aqua_ui::input::InputResponse::default()
-            },
-        );
-    let tabs = [
-        (Kind::All, "All".to_owned()),
-        (Kind::Skills, format!("Skills {}", counts[0])),
-        (Kind::Servers, format!("MCP servers {}", counts[1])),
-    ]
-    .into_iter()
-    .map(|(tab, text)| {
-        let emit = emit.clone();
-        Link::new(
-            format!("marketplace-kind-{tab:?}"),
-            *theme,
-            LinkTone::Crumb,
-            text,
-        )
-        .current(kind == tab)
-        .on_activate(move || emit(ViewAction::SetKind(tab)))
-        .build()
-        .role(aqua_core::Role::Tab)
-        .aria_selected(kind == tab)
-        .debug_selector(format!("marketplace-kind-{tab:?}"))
-    });
-    let tabs = UiBox::new()
-        .spaced(Space::S16)
-        .children(tabs)
-        .build()
-        .role(aqua_core::Role::TabList);
-    let action = emit.clone();
-    let hover = emit.clone();
-    let prompt = Link::new(
-        "marketplace-global-prompt",
-        *theme,
-        LinkTone::Crumb,
-        "Global prompt",
-    )
-    .on_activate(move || {
-        action(ViewAction::Navigate(Screen::Settings(
-            SettingsPage::GlobalPrompt,
-        )))
-    })
-    .build()
-    .on_hover_change(move |hovered| hover(ViewAction::PromptHover(hovered)))
-    .debug_selector("marketplace-global-prompt-open");
-    let chevron = IconSize::Sm.glyph(
-        AssetId::TABLER_CHEVRON_RIGHT,
-        if prompt_hovered {
-            theme.colors.text
-        } else {
-            theme.colors.text_muted
-        }
-        .to_reference_paint(),
-    );
-    let prompt = UiBox::new()
-        .spaced(Space::S2)
-        .style(Style::new().align(AlignItems::CENTER))
-        .child(prompt)
-        .child(chevron)
-        .build();
+    let field = search_field(theme, query, search, emit);
+    let tabs = kind_tabs(theme, kind, counts, emit);
+    let prompt = prompt_link(theme, prompt_hovered, emit);
     let controls = UiBox::new()
         .padded(Space::S8)
         .style(
@@ -421,17 +310,172 @@ fn hero(
         .build()
 }
 
-fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    if !state.host {
+fn search_field(
+    theme: &ArtisanTheme,
+    query: &str,
+    search: &editor_ui::text::mount::EditorController,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let well = Surface::Composer;
+    let slot = IconButtonSize::Md.edge();
+    let lead = UiBox::new()
+        .width(slot)
+        .height(slot)
+        .style(
+            Style::new()
+                .align(AlignItems::CENTER)
+                .justify(JustifyContent::CENTER)
+                .flex_shrink(0.0),
+        )
+        .child(IconSize::Lg.glyph(
+            AssetId::TABLER_SEARCH,
+            theme.colors.text_muted.to_reference_paint(),
+        ))
+        .build();
+    let editor = UiBox::new()
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+        .child(
+            search
+                .element_with_chrome(
+                    Mode::SingleLine,
+                    theme,
+                    "Search skills and MCP servers",
+                    true,
+                    false,
+                )
+                .with_key("marketplace-search")
+                .debug_selector("marketplace-search"),
+        )
+        .build();
+    let clear = (!query.is_empty()).then(|| {
+        let emit = Rc::clone(emit);
+        IconButton::new(
+            "marketplace-search-clear",
+            *theme,
+            AssetId::TABLER_X,
+            "Clear the search",
+            IconButtonSize::Md,
+            Finish::Plain,
+        )
+        .muted()
+        .within(well)
+        .on_activate(move |_| emit(ViewAction::ClearSearch))
+        .build()
+    });
+    let line = UiBox::new()
+        .height(slot)
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(lead)
+        .child(editor)
+        .children(clear)
+        .build();
+    let focus = Rc::clone(emit);
+
+    well.build(theme, vec![line])
+        .style(Style::new().width(Length::Pct(100.0)))
+        .cursor(aqua_core::CursorIcon::Text)
+        .on_input(
+            aqua_ui::input::InputKind::PointerDown,
+            aqua_ui::input::EventPhase::Capture,
+            move |_| {
+                focus(ViewAction::FocusSearch);
+                aqua_ui::input::InputResponse::default()
+            },
+        )
+}
+
+fn kind_tabs(
+    theme: &ArtisanTheme,
+    kind: Kind,
+    counts: [usize; 2],
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let tabs = [
+        (Kind::All, "All".to_owned()),
+        (Kind::Skills, format!("Skills {}", counts[0])),
+        (Kind::Servers, format!("MCP servers {}", counts[1])),
+    ]
+    .into_iter()
+    .map(|(tab, text)| {
+        let emit = Rc::clone(emit);
+        Link::new(
+            format!("marketplace-kind-{tab:?}"),
+            *theme,
+            LinkTone::Crumb,
+            text,
+        )
+        .current(kind == tab)
+        .on_activate(move || emit(ViewAction::SetKind(tab)))
+        .build()
+        .role(aqua_core::Role::Tab)
+        .aria_selected(kind == tab)
+        .debug_selector(format!("marketplace-kind-{tab:?}"))
+    });
+
+    UiBox::new()
+        .spaced(Space::S16)
+        .children(tabs)
+        .build()
+        .role(aqua_core::Role::TabList)
+}
+
+fn prompt_link(
+    theme: &ArtisanTheme,
+    prompt_hovered: bool,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let action = Rc::clone(emit);
+    let hover = Rc::clone(emit);
+    let prompt = Link::new(
+        "marketplace-global-prompt",
+        *theme,
+        LinkTone::Crumb,
+        "Global prompt",
+    )
+    .on_activate(move || {
+        action(ViewAction::Navigate(Screen::Settings(
+            SettingsPage::GlobalPrompt,
+        )));
+    })
+    .build()
+    .on_hover_change(move |hovered| hover(ViewAction::PromptHover(hovered)))
+    .debug_selector("marketplace-global-prompt-open");
+    let chevron = IconSize::Sm.glyph(
+        AssetId::TABLER_CHEVRON_RIGHT,
+        if prompt_hovered {
+            theme.colors.text
+        } else {
+            theme.colors.text_muted
+        }
+        .to_reference_paint(),
+    );
+
+    UiBox::new()
+        .spaced(Space::S2)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(prompt)
+        .child(chevron)
+        .build()
+}
+
+fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: &Rc<dyn Fn(ViewAction)>) -> Element {
+    let Notices::Host {
+        attention,
+        errors,
+        retry,
+        loading,
+    } = state
+    else {
         return centered(muted(
             theme,
             TextRole::Label,
             "Pair a Forge to see its skills.".to_owned(),
         ));
-    }
+    };
     let mut body: Vec<Element> = Vec::new();
-    if let Some(attention) = &state.attention {
-        let emit = emit.clone();
+    if let Some(attention) = attention {
+        let emit = Rc::clone(emit);
         body.push(
             page::notice(theme, attention.clone())
                 .action(
@@ -444,7 +488,7 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
                     .on_activate(move |_| {
                         emit(ViewAction::Navigate(Screen::Settings(
                             SettingsPage::GlobalPrompt,
-                        )))
+                        )));
                     })
                     .build(),
                 )
@@ -452,13 +496,12 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
         );
     }
     body.extend(
-        state
-            .errors
+        errors
             .iter()
             .map(|error| page::notice(theme, error.clone()).build()),
     );
-    if state.retry {
-        let emit = emit.clone();
+    if *retry {
+        let emit = Rc::clone(emit);
         body.push(
             Button::text(
                 "marketplace-retry",
@@ -470,8 +513,8 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
             .build(),
         );
     }
-    if let Some(started) = state.loading_started.filter(|_| state.loading) {
-        body.push(centered(wordmark(theme, started, state.reduced_motion)));
+    if let Some(mark) = loading {
+        body.push(centered(wordmark(theme, mark.started, mark.reduced_motion)));
     }
     if body.is_empty() {
         return UiBox::new().build();
@@ -521,6 +564,58 @@ fn found(theme: &ArtisanTheme, summary: &str, open: bool, emit: Rc<dyn Fn(ViewAc
         .build()
 }
 
+fn attention_line(theme: &ArtisanTheme, attention: String) -> Element {
+    let color = tone_color(theme, ChipTone::Warning);
+    UiBox::new()
+        .spaced(Space::S4)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(IconSize::Sm.glyph(
+            AssetId::TABLER_ALERT_TRIANGLE,
+            color.at(Opacity::ToneIcon).to_reference_paint(),
+        ))
+        .child(
+            TextRole::Caption
+                .text(theme, attention)
+                .gpui_source_color(color.to_reference_text_color())
+                .wrap(false)
+                .build(),
+        )
+        .build()
+}
+
+fn engine_marks(
+    theme: &ArtisanTheme,
+    item: &Item,
+    marks: Vec<presentation::EngineMark>,
+) -> Element {
+    let marks = marks.into_iter().map(|mark| {
+        let icon = match mark.engine {
+            EngineId::Claude => AssetId::SVGL_CLAUDE_AI,
+            EngineId::Codex => AssetId::SVGL_OPENAI,
+            EngineId::OpenCode if theme.colors.mode.is_dark() => AssetId::BRANDS_OPENCODE,
+            EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
+        };
+        let selector = format!("{}-mark-{}", item.selector(), mark.engine.as_str());
+        let tip = mark.label;
+        let tooltip_theme = *theme;
+        UiBox::new()
+            .opacity(if mark.lit {
+                1.0
+            } else {
+                Opacity::Unavailable.alpha()
+            })
+            .child(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()))
+            .build()
+            .debug_selector(selector)
+            .pointer_tooltip(move || tooltip(&tooltip_theme, &tip))
+    });
+    UiBox::new()
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0))
+        .children(marks)
+        .build()
+}
+
 fn item_row(
     theme: &ArtisanTheme,
     item: &Item,
@@ -566,24 +661,7 @@ fn item_row(
         .child(caption(theme, meta))
         .build();
     let description = (!description.is_empty()).then(|| caption(theme, description));
-    let attention = attention.map(|attention| {
-        let color = tone_color(theme, ChipTone::Warning);
-        UiBox::new()
-            .spaced(Space::S4)
-            .style(Style::new().align(AlignItems::CENTER))
-            .child(IconSize::Sm.glyph(
-                AssetId::TABLER_ALERT_TRIANGLE,
-                color.at(Opacity::ToneIcon).to_reference_paint(),
-            ))
-            .child(
-                TextRole::Caption
-                    .text(theme, attention)
-                    .gpui_source_color(color.to_reference_text_color())
-                    .wrap(false)
-                    .build(),
-            )
-            .build()
-    });
+    let attention = attention.map(|attention| attention_line(theme, attention));
     let text = UiBox::new()
         .layout("column")
         .spaced(Space::S2)
@@ -599,32 +677,7 @@ fn item_row(
             vec![IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())],
         ))
         .build();
-    let marks = marks.into_iter().map(|mark| {
-        let icon = match mark.engine {
-            EngineId::Claude => AssetId::SVGL_CLAUDE_AI,
-            EngineId::Codex => AssetId::SVGL_OPENAI,
-            EngineId::OpenCode if theme.colors.mode.is_dark() => AssetId::BRANDS_OPENCODE,
-            EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
-        };
-        let selector = format!("{}-mark-{}", item.selector(), mark.engine.as_str());
-        let tip = mark.label;
-        let tooltip_theme = *theme;
-        UiBox::new()
-            .opacity(if mark.lit {
-                1.0
-            } else {
-                Opacity::Unavailable.alpha()
-            })
-            .child(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()))
-            .build()
-            .debug_selector(selector)
-            .pointer_tooltip(move || tooltip(&tooltip_theme, &tip))
-    });
-    let engines = UiBox::new()
-        .spaced(Space::S8)
-        .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0))
-        .children(marks)
-        .build();
+    let engines = engine_marks(theme, item, marks);
     UiBox::new()
         .spaced(Space::S12)
         .style(Style::new().align(AlignItems::CENTER))
@@ -683,6 +736,69 @@ fn install(
     .build()
 }
 
+fn discovered(
+    theme: &ArtisanTheme,
+    row: &presentation::SkillRow,
+    selector: &str,
+    selected: bool,
+    pending: Option<&Operation>,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let disabled = pending.is_some();
+    let id = row.id.clone();
+    let discard_emit = Rc::clone(emit);
+    let discard = IconButton::new(
+        format!("{selector}-discard"),
+        *theme,
+        AssetId::TABLER_TRASH,
+        "Discard",
+        IconButtonSize::Md,
+        Finish::Plain,
+    )
+    .muted()
+    .disabled(disabled)
+    .on_activate(move |_| {
+        discard_emit(ViewAction::Operate(Operation::Skill {
+            id: id.clone(),
+            action: SkillAction::Discard,
+        }));
+    })
+    .build();
+    let id = row.id.clone();
+    let adopt_emit = Rc::clone(emit);
+    let title = match pending {
+        Some(Operation::Skill {
+            id: pending,
+            action: SkillAction::Adopt,
+        }) if pending == &row.id => "Installing…",
+        Some(Operation::Skill {
+            id: pending,
+            action: SkillAction::Discard,
+        }) if pending == &row.id => "Discarding…",
+        _ if selected => "Install ↵",
+        _ => "Install",
+    };
+    let adopt = install(
+        theme,
+        format!("{selector}-install"),
+        title,
+        selected,
+        disabled,
+        move || {
+            adopt_emit(ViewAction::Operate(Operation::Skill {
+                id: id.clone(),
+                action: SkillAction::Adopt,
+            }));
+        },
+    );
+    UiBox::new()
+        .spaced(Space::S4)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(discard)
+        .child(adopt)
+        .build()
+}
+
 fn control(
     theme: &ArtisanTheme,
     item: &Item,
@@ -694,57 +810,7 @@ fn control(
     let disabled = pending.is_some();
     match item {
         Item::Skill(row) if row.origin == SkillOrigin::Discovered => {
-            let id = row.id.clone();
-            let discard_emit = emit.clone();
-            let discard = IconButton::new(
-                format!("{selector}-discard"),
-                *theme,
-                AssetId::TABLER_TRASH,
-                "Discard",
-                IconButtonSize::Md,
-                Finish::Plain,
-            )
-            .muted()
-            .disabled(disabled)
-            .on_activate(move |_| {
-                discard_emit(ViewAction::Operate(Operation::Skill {
-                    id: id.clone(),
-                    action: SkillAction::Discard,
-                }))
-            })
-            .build();
-            let id = row.id.clone();
-            let title = match pending {
-                Some(Operation::Skill {
-                    id: pending,
-                    action: SkillAction::Adopt,
-                }) if pending == &row.id => "Installing…",
-                Some(Operation::Skill {
-                    id: pending,
-                    action: SkillAction::Discard,
-                }) if pending == &row.id => "Discarding…",
-                _ if selected => "Install ↵",
-                _ => "Install",
-            };
-            let adopt = install(
-                theme,
-                format!("{selector}-install"),
-                title,
-                selected,
-                disabled,
-                move || {
-                    emit(ViewAction::Operate(Operation::Skill {
-                        id: id.clone(),
-                        action: SkillAction::Adopt,
-                    }))
-                },
-            );
-            UiBox::new()
-                .spaced(Space::S4)
-                .style(Style::new().align(AlignItems::CENTER))
-                .child(discard)
-                .child(adopt)
-                .build()
+            discovered(theme, row, &selector, selected, pending, &emit)
         }
         Item::Skill(row) => {
             let id = row.id.clone();
@@ -763,7 +829,7 @@ fn control(
                     } else {
                         SkillAction::Disable
                     },
-                }))
+                }));
             })
             .build()
         }
@@ -794,7 +860,7 @@ fn control(
         .on_activate(move |_| {
             emit(ViewAction::Navigate(Screen::Settings(
                 SettingsPage::Extensions,
-            )))
+            )));
         })
         .build(),
     }
@@ -833,7 +899,7 @@ fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: b
         .on_paint(move |bounds| {
             let vector = |color| DisplayItem::GpuiSvg {
                 bounds,
-                source: source.clone(),
+                source: std::sync::Arc::clone(&source),
                 tint: Some(color),
                 opacity: 1.0,
             };
@@ -845,9 +911,9 @@ fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: b
             let slice_width = band_width / 9.0;
             let leading = (bounds.w + band_width).mul_add(progress, -band_width);
             let mut items = vec![vector(muted.to_reference_paint())];
-            for slice in 0..9 {
-                let left = slice_width.mul_add(slice as f32, leading);
-                let position = (slice as f32 + 0.5) / 9.0;
+            for slice in 0..9_u8 {
+                let left = slice_width.mul_add(f32::from(slice), leading);
+                let position = (f32::from(slice) + 0.5) / 9.0;
                 let opacity = (position * std::f32::consts::TAU).cos().mul_add(-0.5, 0.5);
                 items.push(DisplayItem::PushGpuiContentMask {
                     bounds: Rect {
