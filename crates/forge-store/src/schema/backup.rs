@@ -77,7 +77,7 @@ fn backup_name(database: &str, version: usize) -> String {
 }
 
 fn sync(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
+    std::fs::File::options().write(true).open(path)?.sync_all()
 }
 
 fn copy_into(conn: &Connection, target: &str) -> rusqlite::Result<()> {
