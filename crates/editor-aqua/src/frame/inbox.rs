@@ -102,11 +102,7 @@ pub(crate) fn view(
             Aqua::Box()
                 .height(crate::sidebar::geometry::history_height())
                 .styles([Aqua::Style().flex_shrink(0.0)])
-                .child(view::history_toggle(
-                    &theme,
-                    sidebar.history_fraction,
-                    emit,
-                ))
+                .child(view::history_toggle(&theme, sidebar.history_fraction, emit))
                 .build(),
         );
     }
@@ -169,6 +165,19 @@ fn guidance(theme: &ArtisanTheme, text: String, action: Option<Element>) -> Elem
         .build()
 }
 
+fn actionable_notice(
+    theme: &ArtisanTheme,
+    text: impl Into<String>,
+    id: &'static str,
+    label: &'static str,
+    action: ViewAction,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    page::notice(theme, text)
+        .action(button(id, theme, label, action, emit))
+        .build()
+}
+
 pub fn states(
     sidebar: &Sidebar,
     core: &Core,
@@ -177,70 +186,55 @@ pub fn states(
 ) -> Vec<Element> {
     let mut states = Vec::new();
     if let TextSearchStatus::Failed(cause) = sidebar.text_search_status() {
-        states.push(
-            page::notice(theme, format!("Couldn't search messages: {cause}"))
-                .action(button(
-                    "sidebar-search-retry",
-                    theme,
-                    "Try again",
-                    ViewAction::Search,
-                    emit,
-                ))
-                .build(),
-        );
+        states.push(actionable_notice(
+            theme,
+            format!("Couldn't search messages: {cause}"),
+            "sidebar-search-retry",
+            "Try again",
+            ViewAction::Search,
+            emit,
+        ));
     }
     let host = sidebar.host_data(core).filter(|host| host.is_live());
     if let Some(message) = host.and_then(|host| host.rollback_notice().message()) {
-        states.push(
-            page::notice(&theme, message)
-                .action(button(
-                    "sidebar-rollback-dismiss",
-                    theme,
-                    "Dismiss",
-                    ViewAction::DismissRollbackNotice,
-                    emit,
-                ))
-                .build(),
-        );
+        states.push(actionable_notice(
+            theme,
+            message,
+            "sidebar-rollback-dismiss",
+            "Dismiss",
+            ViewAction::DismissRollbackNotice,
+            emit,
+        ));
     }
     if let Some(error) = host.and_then(|host| host.thread_page(false).error()) {
-        states.push(
-            page::notice(theme, error)
-                .action(button(
-                    "sidebar-threads-retry",
-                    theme,
-                    "Try again",
-                    ViewAction::RetryThreads,
-                    emit,
-                ))
-                .build(),
-        );
+        states.push(actionable_notice(
+            theme,
+            error,
+            "sidebar-threads-retry",
+            "Try again",
+            ViewAction::RetryThreads,
+            emit,
+        ));
     }
     if host.is_some_and(crate::core::HostData::project_icons_failed) {
-        states.push(
-            page::notice(theme, "Some project icons didn't load.")
-                .action(button(
-                    "sidebar-metadata-retry",
-                    theme,
-                    "Try again",
-                    ViewAction::RetryProjectIcons,
-                    emit,
-                ))
-                .build(),
-        );
+        states.push(actionable_notice(
+            theme,
+            "Some project icons didn't load.",
+            "sidebar-metadata-retry",
+            "Try again",
+            ViewAction::RetryProjectIcons,
+            emit,
+        ));
     }
     if let Some(error) = &sidebar.error {
-        states.push(
-            page::notice(theme, error.clone())
-                .action(button(
-                    "sidebar-error-dismiss",
-                    theme,
-                    "Dismiss",
-                    ViewAction::DismissError,
-                    emit,
-                ))
-                .build(),
-        );
+        states.push(actionable_notice(
+            theme,
+            error.clone(),
+            "sidebar-error-dismiss",
+            "Dismiss",
+            ViewAction::DismissError,
+            emit,
+        ));
     }
     let lists = &sidebar.lists;
     let empty = lists.inbox.is_empty() && lists.history.is_empty() && lists.hits.is_empty();

@@ -879,8 +879,7 @@ fn a_full_set_of_open_drafts_refuses_a_new_one_until_one_settles_and_closes() {
                 "thread:new".into(),
                 client.clone(),
             )
-            .err()
-            .expect("every slot holds an open draft");
+            .expect_err("every slot holds an open draft");
         assert_eq!(full.host, config.id);
         assert_eq!(full.scope, "thread:new");
 

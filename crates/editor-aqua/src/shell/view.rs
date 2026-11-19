@@ -235,7 +235,7 @@ fn measured_composer(
         .and_then(|instance| core.host_if_instance(&host_id, instance))
         .ok_or(BuildError::ComposerHostGone { host: host_id })?;
     let card = owner.surface(
-        &*theme,
+        theme,
         host,
         placeholder,
         parts.questionnaires,

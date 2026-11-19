@@ -135,9 +135,9 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
     core.add_test_host(&config, client.clone());
     let original = core.host(&config.id).unwrap().instance();
     let host = core.host_mut(&config.id).unwrap();
-    host.settings.insert("suggestions".into(), json!(false));
-    host.settings.insert("suggestions".into(), json!(true));
-    host.settings.insert("summary_titles".into(), json!(true));
+    host.settings.insert("suggestions", json!(false));
+    host.settings.insert("suggestions", json!(true));
+    host.settings.insert("summary_titles", json!(true));
     let request = SettingRequest {
         target: SettingKey {
             host: config.id.clone(),
@@ -163,8 +163,7 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
     core.add_test_host(&config, client);
     let host = core.host_mut(&config.id).unwrap();
     assert_ne!(host.instance(), original);
-    host.settings
-        .insert("suggestions".into(), json!("replacement"));
+    host.settings.insert("suggestions", json!("replacement"));
     settings.set_host_setting_for(
         &mut core,
         config.id.clone(),
@@ -559,7 +558,7 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     let target = retention_target(&mut core);
     let key = target.key;
     let mut settings = editor_aqua::core::HostSettings::new(target.host.clone());
-    settings.insert(key.into(), json!(90));
+    settings.insert(key, json!(90));
     let mut writes = SettingWrites::default();
 
     let seven = writes
@@ -599,7 +598,7 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     let sixty = writes
         .begin(&mut settings, target, json!(60))
         .expect("sent");
-    settings.insert(key.into(), json!(45));
+    settings.insert(key, json!(45));
     assert!(
         writes
             .complete(Some(&mut settings), &sixty, &Err("offline".into()))
@@ -987,7 +986,7 @@ fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
     .unwrap();
     let (_silent, id) = silent_host(&mut core, "Desk");
     core.host_mut(&id).unwrap().settings.insert(
-        "mcp_servers".into(),
+        "mcp_servers",
         json!([{"name": "linear", "url": "https://mcp.linear.app/mcp"}]),
     );
     core.navigate(Screen::Settings(SettingsPage::Extensions));

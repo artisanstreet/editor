@@ -99,7 +99,7 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
         client,
     );
     let mut sessions = DraftSessions::default();
-    let mut owner = ComposerOwner::new(
+    let owner = ComposerOwner::new(
         &core,
         &mut sessions,
         ComposerTarget::NewThread {
@@ -154,7 +154,7 @@ fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
         client,
     );
     let mut sessions = DraftSessions::default();
-    let mut owner = ComposerOwner::new(
+    let owner = ComposerOwner::new(
         &core,
         &mut sessions,
         ComposerTarget::NewThread {

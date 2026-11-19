@@ -1209,7 +1209,7 @@ impl Workspace {
         let actions = Rc::clone(&self.question_source_actions);
         service
             .render(ui, content, theme, move |action| {
-                actions.borrow_mut().push_back(action)
+                actions.borrow_mut().push_back(action);
             })
             .map(Some)
     }
@@ -1290,12 +1290,12 @@ impl Workspace {
         {
             let browser = browser.borrow();
             if let Some(content) = browser.detail() {
-                let identity = identity.clone();
+                let identity = *identity;
                 let actions = Rc::clone(&self.question_option_detail_actions);
                 Some(
                     service
                         .render(ui, content, theme, move |action| {
-                            actions.borrow_mut().push_back((identity.clone(), action));
+                            actions.borrow_mut().push_back((identity, action));
                         })
                         .map_err(|source| BuildError::Selection {
                             surface: "question option detail",
