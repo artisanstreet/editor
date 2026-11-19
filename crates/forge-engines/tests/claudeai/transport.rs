@@ -38,7 +38,12 @@ fn an_unreadable_stream_event_fails_the_stream_instead_of_vanishing() {
 #[tokio::test]
 async fn an_uploaded_image_is_one_form_part_around_its_exact_bytes() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("shot \"one\".png");
+    let name = if cfg!(windows) {
+        "shot one.png"
+    } else {
+        "shot \"one\".png"
+    };
+    let path = dir.path().join(name);
     let image: Vec<u8> = (0..=255).cycle().take(300_000).collect();
     std::fs::write(&path, &image).unwrap();
     let body = super::multipart(&path, "edge").await.unwrap();
