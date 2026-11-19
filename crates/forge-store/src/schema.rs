@@ -1,4 +1,5 @@
 use crate::content::ContentError;
+use crate::error::AtStep as _;
 use crate::error::StorageError;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -51,8 +52,6 @@ pub enum MigrationFailure {
     Content(#[from] ContentError),
     #[error(transparent)]
     Storage(#[from] StorageError),
-    #[error("SQLite failed")]
-    Sql(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -108,60 +107,66 @@ mod model_migration_tests;
 mod released_tests;
 
 enum Step {
-    Sql(&'static str),
+    Sql {
+        file: &'static str,
+        sql: &'static str,
+    },
     Rust(fn(&Connection) -> Result<()>),
     Stamped(fn(&crate::content::Stamped<'_>) -> Result<()>),
 }
 
+macro_rules! sql {
+    ($file:literal) => {
+        Step::Sql {
+            file: $file,
+            sql: include_str!(concat!("sql/", $file)),
+        }
+    };
+}
+
 const MIGRATIONS: &[&[Step]] = &[
-    &[Step::Sql(include_str!("sql/migrations/v01.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v02.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v03.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v04.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v05.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v06.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v07.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v08.sql"))],
-    &[
-        Step::Sql(include_str!("sql/migrations/v09.sql")),
-        Step::Rust(backfill_edit_totals),
-    ],
+    &[sql!("migrations/v01.sql")],
+    &[sql!("migrations/v02.sql")],
+    &[sql!("migrations/v03.sql")],
+    &[sql!("migrations/v04.sql")],
+    &[sql!("migrations/v05.sql")],
+    &[sql!("migrations/v06.sql")],
+    &[sql!("migrations/v07.sql")],
+    &[sql!("migrations/v08.sql")],
+    &[sql!("migrations/v09.sql"), Step::Rust(backfill_edit_totals)],
     &[Step::Rust(migrate_payloads)],
-    &[Step::Sql(include_str!("sql/migrations/v11.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v12.sql"))],
+    &[sql!("migrations/v11.sql")],
+    &[sql!("migrations/v12.sql")],
+    &[sql!("migrations/v13.sql"), Step::Stamped(migrate_sources)],
     &[
-        Step::Sql(include_str!("sql/migrations/v13.sql")),
-        Step::Stamped(migrate_sources),
+        sql!("migrations/v14.sql"),
+        Step::Stamped(migrate_collections),
     ],
-    &[Step::Sql(COLLECTIONS), Step::Stamped(migrate_collections)],
-    &[Step::Sql(SOURCE_INDEXES)],
-    &[Step::Sql(include_str!("sql/migrations/v16.sql"))],
-    &[
-        Step::Rust(migrate_approvals),
-        Step::Sql(include_str!("sql/migrations/v17.sql")),
-    ],
-    &[Step::Sql(include_str!("sql/migrations/v18.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v19.sql"))],
+    &[sql!("migrations/v15.sql")],
+    &[sql!("migrations/v16.sql")],
+    &[Step::Rust(migrate_approvals), sql!("migrations/v17.sql")],
+    &[sql!("migrations/v18.sql")],
+    &[sql!("migrations/v19.sql")],
     &[],
-    &[Step::Sql(include_str!("sql/migrations/v21.sql"))],
+    &[sql!("migrations/v21.sql")],
     &[
-        Step::Sql(include_str!("sql/migrations/v22_a.sql")),
+        sql!("migrations/v22_a.sql"),
         Step::Rust(backfill_work),
-        Step::Sql(include_str!("sql/migrations/v22_b.sql")),
+        sql!("migrations/v22_b.sql"),
     ],
-    &[Step::Sql(include_str!("sql/migrations/v23.sql"))],
+    &[sql!("migrations/v23.sql")],
     &[Step::Rust(migrate_model_permissions)],
-    &[Step::Sql(include_str!("sql/migrations/v25.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v26.sql"))],
-    &[Step::Sql(include_str!("sql/migrations/v27.sql"))],
+    &[sql!("migrations/v25.sql")],
+    &[sql!("migrations/v26.sql")],
+    &[sql!("migrations/v27.sql")],
     &[
-        Step::Sql(include_str!("sql/migrations/v28_a.sql")),
+        sql!("migrations/v28_a.sql"),
         Step::Rust(backfill_outline),
-        Step::Sql(include_str!("sql/migrations/v28_b.sql")),
+        sql!("migrations/v28_b.sql"),
     ],
-    &[Step::Sql(include_str!("sql/migrations/v29.sql"))],
+    &[sql!("migrations/v29.sql")],
     &[],
-    &[Step::Sql(include_str!("sql/migrations/v31.sql"))],
+    &[sql!("migrations/v31.sql")],
 ];
 
 pub(crate) const fn version() -> usize {
@@ -176,7 +181,8 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
             [artisan_api::MODEL_CONFIGS_KEY],
             |row| row.get::<_, String>(0),
         )
-        .optional()?
+        .optional()
+        .at("migrations/kv_value.sql")?
     else {
         return Ok(());
     };
@@ -211,7 +217,8 @@ fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     conn.execute(
         include_str!("sql/migrations/set_kv_value.sql"),
         rusqlite::params![artisan_api::MODEL_CONFIGS_KEY, configs.to_string()],
-    )?;
+    )
+    .at("migrations/set_kv_value.sql")?;
     Ok(())
 }
 
@@ -223,13 +230,21 @@ fn body(item: &str, text: &str) -> Result<serde_json::Value> {
 }
 
 fn backfill_work(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/work_candidates.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/mark_work.sql"))?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        if frozen::folds_into_work(&body(&id, &row.get::<_, String>(1)?)?) {
-            update.execute([id])?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/work_candidates.sql"))
+        .at("migrations/work_candidates.sql")?;
+    let mut rows = select.query([]).at("migrations/work_candidates.sql")?;
+    let mut update = conn
+        .prepare(include_str!("sql/migrations/mark_work.sql"))
+        .at("migrations/mark_work.sql")?;
+    while let Some(row) = rows.next().at("migrations/work_candidates.sql")? {
+        let id: String = row.get(0).at("migrations/work_candidates.sql")?;
+        if frozen::folds_into_work(&body(
+            &id,
+            &row.get::<_, String>(1)
+                .at("migrations/work_candidates.sql")?,
+        )?) {
+            update.execute([id]).at("migrations/mark_work.sql")?;
         }
     }
     Ok(())
@@ -259,9 +274,12 @@ pub(crate) fn legacy_approval(item: &mut serde_json::Value) {
 fn migrate_approvals(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let approvals: Vec<(String, String, String)> = conn
-        .prepare(include_str!("sql/migrations/approvals.sql"))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        .prepare(include_str!("sql/migrations/approvals.sql"))
+        .at("migrations/approvals.sql")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .at("migrations/approvals.sql")?
+        .collect::<rusqlite::Result<_>>()
+        .at("migrations/approvals.sql")?;
     for (id, thread, body) in approvals {
         let mut value: Value = crate::read::from_body(&body)?;
         let target = value
@@ -275,7 +293,8 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
                     rusqlite::params![target, thread],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
-                .optional()?
+                .optional()
+                .at("migrations/approval_target.sql")?
                 .map(|(id, body)| crate::read::from_body(&body).map(|body| (id, body)))
                 .transpose()?,
             None => None,
@@ -285,22 +304,21 @@ fn migrate_approvals(conn: &Connection) -> Result<()> {
             conn.execute(
                 include_str!("sql/migrations/set_item_body.sql"),
                 rusqlite::params![target, gated.to_string()],
-            )?;
-            conn.execute(include_str!("sql/migrations/delete_item.sql"), [&id])?;
+            )
+            .at("migrations/set_item_body.sql")?;
+            conn.execute(include_str!("sql/migrations/delete_item.sql"), [&id])
+                .at("migrations/delete_item.sql")?;
         } else {
             legacy_approval(&mut value);
             conn.execute(
                 include_str!("sql/migrations/approval_as_tool.sql"),
                 rusqlite::params![id, value.to_string()],
-            )?;
+            )
+            .at("migrations/approval_as_tool.sql")?;
         }
     }
     Ok(())
 }
-
-const COLLECTIONS: &str = include_str!("sql/migrations/v14.sql");
-
-const SOURCE_INDEXES: &str = include_str!("sql/migrations/v15.sql");
 
 pub(crate) fn migrate(conn: &mut Connection, upgrade: &Upgrade) -> Result<(), SchemaError> {
     migrate_to(conn, MIGRATIONS.len(), upgrade)
@@ -371,47 +389,66 @@ fn apply(
     steps: &[Step],
     now: artisan_api::Timestamp,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().at("begin the migration")?;
     for step in steps {
         match step {
-            Step::Sql(sql) => tx.execute_batch(sql)?,
+            Step::Sql { file, sql } => tx.execute_batch(sql).at(file)?,
             Step::Rust(translate) => translate(&tx)?,
             Step::Stamped(translate) => translate(&crate::content::Stamped { conn: &tx, now })?,
         }
     }
-    tx.pragma_update(None, "user_version", next)?;
-    tx.commit()?;
+    tx.pragma_update(None, "user_version", next)
+        .at("record the new schema version")?;
+    tx.commit().at("commit the migration")?;
     Ok(())
 }
 
 fn backfill_edit_totals(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/edit_tools.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/set_edit_totals.sql"))?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let item = body(&id, &row.get::<_, String>(1)?)?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/edit_tools.sql"))
+        .at("migrations/edit_tools.sql")?;
+    let mut rows = select.query([]).at("migrations/edit_tools.sql")?;
+    let mut update = conn
+        .prepare(include_str!("sql/migrations/set_edit_totals.sql"))
+        .at("migrations/set_edit_totals.sql")?;
+    while let Some(row) = rows.next().at("migrations/edit_tools.sql")? {
+        let id: String = row.get(0).at("migrations/edit_tools.sql")?;
+        let item = body(
+            &id,
+            &row.get::<_, String>(1).at("migrations/edit_tools.sql")?,
+        )?;
         if let Some(stats) = item.pointer("/kind/tool").and_then(frozen::edit_totals) {
-            update.execute(rusqlite::params![id, stats.added, stats.removed])?;
+            update
+                .execute(rusqlite::params![id, stats.added, stats.removed])
+                .at("migrations/set_edit_totals.sql")?;
         }
     }
     Ok(())
 }
 
 fn backfill_outline(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/user_messages.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/set_outline.sql"))?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let item = body(&id, &row.get::<_, String>(1)?)?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/user_messages.sql"))
+        .at("migrations/user_messages.sql")?;
+    let mut rows = select.query([]).at("migrations/user_messages.sql")?;
+    let mut update = conn
+        .prepare(include_str!("sql/migrations/set_outline.sql"))
+        .at("migrations/set_outline.sql")?;
+    while let Some(row) = rows.next().at("migrations/user_messages.sql")? {
+        let id: String = row.get(0).at("migrations/user_messages.sql")?;
+        let item = body(
+            &id,
+            &row.get::<_, String>(1).at("migrations/user_messages.sql")?,
+        )?;
         let label =
             frozen::outline_entry(conn, &item).map_err(|source| MigrationFailure::Outline {
                 item: id.clone(),
                 source,
             })?;
         if let Some(label) = label {
-            update.execute(rusqlite::params![id, label])?;
+            update
+                .execute(rusqlite::params![id, label])
+                .at("migrations/set_outline.sql")?;
         }
     }
     Ok(())
@@ -539,24 +576,31 @@ fn canonical_question(item: &str, body: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 fn migrate_payloads(conn: &Connection) -> Result<()> {
-    let mut select = conn.prepare(include_str!("sql/migrations/threads.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/set_thread_body.sql"))?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let text: String = row.get(1)?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/threads.sql"))
+        .at("migrations/threads.sql")?;
+    let mut rows = select.query([]).at("migrations/threads.sql")?;
+    let mut update = conn
+        .prepare(include_str!("sql/migrations/set_thread_body.sql"))
+        .at("migrations/set_thread_body.sql")?;
+    while let Some(row) = rows.next().at("migrations/threads.sql")? {
+        let id: String = row.get(0).at("migrations/threads.sql")?;
+        let text: String = row.get(1).at("migrations/threads.sql")?;
         let mut value: serde_json::Value = crate::read::from_body(&text)?;
         if let Some(config) = value.get_mut("config") {
             canonical_config(config);
         }
-        update.execute(rusqlite::params![id, value.to_string()])?;
+        update
+            .execute(rusqlite::params![id, value.to_string()])
+            .at("migrations/set_thread_body.sql")?;
     }
     for key in ["default_engine_config", "model_engine_configs"] {
         let value: Option<String> = conn
             .query_row(include_str!("sql/migrations/kv_value.sql"), [key], |row| {
                 row.get(0)
             })
-            .optional()?;
+            .optional()
+            .at("migrations/kv_value.sql")?;
         if let Some(value) = value {
             let mut value: serde_json::Value = crate::read::from_body(&value)?;
             if key == "model_engine_configs" {
@@ -571,17 +615,25 @@ fn migrate_payloads(conn: &Connection) -> Result<()> {
             conn.execute(
                 include_str!("sql/migrations/set_kv_value.sql"),
                 rusqlite::params![key, value.to_string()],
-            )?;
+            )
+            .at("migrations/set_kv_value.sql")?;
         }
     }
-    let mut select = conn.prepare(include_str!("sql/migrations/questions.sql"))?;
-    let mut rows = select.query([])?;
-    let mut update = conn.prepare(include_str!("sql/migrations/set_item_body.sql"))?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let mut value: serde_json::Value = crate::read::from_body(&row.get::<_, String>(1)?)?;
+    let mut select = conn
+        .prepare(include_str!("sql/migrations/questions.sql"))
+        .at("migrations/questions.sql")?;
+    let mut rows = select.query([]).at("migrations/questions.sql")?;
+    let mut update = conn
+        .prepare(include_str!("sql/migrations/set_item_body.sql"))
+        .at("migrations/set_item_body.sql")?;
+    while let Some(row) = rows.next().at("migrations/questions.sql")? {
+        let id: String = row.get(0).at("migrations/questions.sql")?;
+        let mut value: serde_json::Value =
+            crate::read::from_body(&row.get::<_, String>(1).at("migrations/questions.sql")?)?;
         canonical_question(&id, &mut value)?;
-        update.execute(rusqlite::params![id, value.to_string()])?;
+        update
+            .execute(rusqlite::params![id, value.to_string()])
+            .at("migrations/set_item_body.sql")?;
     }
     Ok(())
 }
@@ -605,3 +657,7 @@ mod folded_text_migration_tests;
 #[cfg(test)]
 #[path = "../tests/schema/frozen_migration.rs"]
 mod frozen_migration_tests;
+
+#[cfg(test)]
+#[path = "../tests/schema/failure.rs"]
+mod failure_tests;
