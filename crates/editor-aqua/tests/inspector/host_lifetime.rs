@@ -5,12 +5,13 @@ use editor_aqua::{
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
+use test_support::net::ClosingListener;
 
-fn config() -> HostConfig {
+fn config(forge: &ClosingListener) -> HostConfig {
     HostConfig {
         id: HostId("same-host".into()),
         name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
+        address: forge.address().to_string(),
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     }
@@ -37,7 +38,8 @@ fn pending_dialog(core: &Core, config: &HostConfig) -> TerminalDialog {
 fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(directory.path());
-    let config = config();
+    let forge = ClosingListener::bind();
+    let config = config(&forge);
     test_support::editor::core::connect(&mut core, &config);
     let mut current = pending_dialog(&core, &config);
     assert!(current.drain(&core));
@@ -68,7 +70,8 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
 fn inspector_scope_rejects_same_id_host_replacement_until_followed() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(directory.path());
-    let config = config();
+    let forge = ClosingListener::bind();
+    let config = config(&forge);
     test_support::editor::core::connect(&mut core, &config);
     let mut conversation = editor_aqua::conversation::controller::Conversation::new(&core);
     conversation.open = Some((config.id.clone(), ThreadId("thread".into())));
@@ -88,7 +91,8 @@ fn inspector_scope_rejects_same_id_host_replacement_until_followed() {
 fn a_fetch_that_finished_before_retry_does_not_cancel_the_retry() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(directory.path());
-    let config = config();
+    let forge = ClosingListener::bind();
+    let config = config(&forge);
     test_support::editor::core::connect(&mut core, &config);
     let mut dialog = pending_dialog(&core, &config);
     dialog.fetch(&core);

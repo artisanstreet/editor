@@ -186,10 +186,14 @@ fn two_editors_changing_different_settings_keep_both() {
 }
 
 fn forge(core: &mut Core, id: &str) -> HostId {
+    forge_at(core, id, "127.0.0.1:1")
+}
+
+fn forge_at(core: &mut Core, id: &str, address: &str) -> HostId {
     let config = HostConfig {
         id: HostId(id.to_owned()),
         name: id.to_owned(),
-        address: "127.0.0.1:1".to_owned(),
+        address: address.to_owned(),
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     };
@@ -289,7 +293,8 @@ fn stored_settings_that_break_their_declaration_are_ignored_everywhere() {
 fn opening_a_thread_its_forge_cannot_send_says_why() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut core = test_support::editor::core::test_core(directory.path());
-    let host = forge(&mut core, "silent-forge");
+    let refusing = test_support::net::ClosingListener::bind();
+    let host = forge_at(&mut core, "refusing-forge", &refusing.address().to_string());
     let thread = ThreadId("unknown-thread".into());
     core.navigate(Screen::Thread {
         host: host.clone(),

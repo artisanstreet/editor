@@ -11,10 +11,11 @@ fn a_model_choice_forge_did_not_save_stays_chosen_with_a_retry() {
     let mut core = test_support::editor::core::test_core(directory.path());
     let identity = Identity::generate("picker-test").expect("identity");
     let pin = fingerprint(identity.certificate_der().expect("certificate").as_ref());
+    let refusing = test_support::net::ClosingListener::bind();
     let config = HostConfig {
         id: HostId("unreachable-forge".into()),
         name: "Unreachable".into(),
-        address: "127.0.0.1:1".into(),
+        address: refusing.address().to_string(),
         fingerprint: pin.clone(),
         kind: HostKind::Remote,
     };
