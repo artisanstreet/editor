@@ -79,3 +79,43 @@ fn an_answer_in_flight_keeps_its_controls_disabled_after_the_item_leaves_the_win
     );
     assert!(conversation.answer_tasks.is_empty());
 }
+
+#[test]
+fn an_answer_forge_refuses_shows_forge_reason_on_the_card() {
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
+    let id = ItemId("asked".into());
+    approve(&mut conversation, &core, &id);
+    let Some(AnswerState::Sending(request)) = answer_state(&conversation, &id) else {
+        panic!("submitting an answer starts sending it");
+    };
+    let failure = artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+        item: Some(id.clone()),
+        reason: artisan_api::AnswerRefusal::AnsweredDifferently,
+    });
+    let message = failure.to_string();
+    enqueue(
+        &conversation,
+        Completion::Answer {
+            origin: origin(&conversation),
+            item: id.clone(),
+            request,
+            result: Err(CallError {
+                method: "POST".parse().expect("POST is an HTTP method"),
+                path: format!("/items/{id}/answer"),
+                failure: Box::new(CallFailure::Answer(
+                    editor_core::client::ResponseError::Refused {
+                        status: 409.try_into().expect("409 is an HTTP status"),
+                        error: artisan_api::ApiError::new(failure, message),
+                    },
+                )),
+            }),
+        },
+    );
+    conversation.drain(&mut core);
+    assert_eq!(
+        answer_state(&conversation, &id)
+            .as_ref()
+            .and_then(AnswerState::error),
+        Some("Couldn't send the answer: This question was already answered differently.")
+    );
+}

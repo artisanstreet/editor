@@ -15,7 +15,7 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     editor_aqua::core::runtime::runtime().block_on(sender.status(ConnectionStatus::Offline {
         attempt: 1,
         reason: "dns error: failed to lookup address".into(),
-        code: None,
+        fault: None,
     }));
     test_support::wait::wait_until("the host goes offline", Duration::from_secs(10), || {
         core.drain_with(|_, _| {});
@@ -61,7 +61,7 @@ fn screen_readers_hear_a_lost_connection_only_after_one_was_lost() {
         ConnectionStatus::Offline {
             attempt: 1,
             reason: "Forge's event stream closed".into(),
-            code: None,
+            fault: None,
         },
         ConnectionStatus::Reconnecting { attempt: 1 },
     ] {

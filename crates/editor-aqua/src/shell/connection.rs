@@ -1,3 +1,4 @@
+use crate::core::client::ForgeFault;
 use crate::core::{ConnectionStatus, Core, HostData, HostId, HostInstance};
 use crate::ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
@@ -237,7 +238,7 @@ impl ConnectionPresenter {
             self.commands.borrow_mut().clear();
             self.host = Some(identity.clone());
         }
-        let code = match &host.status {
+        let fault = match &host.status {
             ConnectionStatus::Live => {
                 self.phase = None;
                 self.mark.reset();
@@ -245,21 +246,27 @@ impl ConnectionPresenter {
                 return None;
             }
             ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => None,
-            ConnectionStatus::Offline { code, reason, .. } => {
+            ConnectionStatus::Offline { fault, reason, .. } => {
                 self.last_failure = Some(reason.clone());
-                *code
+                *fault
             }
         };
-        let failure = match code {
-            Some(artisan_api::ErrorCode::Unauthorized) => Some((
+        let failure = match fault {
+            Some(ForgeFault::Unauthorized) => Some((
                 "Could not authenticate with Forge",
                 "The paired credential was rejected. Add a fresh Forge invitation to pair this client again.",
             )),
-            Some(artisan_api::ErrorCode::VersionMismatch) => Some((
+            Some(ForgeFault::Incompatible) => Some((
                 "Forge and Editor versions differ",
                 "Update Forge or the Editor so both use the same protocol.",
             )),
-            _ => None,
+            Some(
+                ForgeFault::Unrecognised
+                | ForgeFault::Unreachable
+                | ForgeFault::Unreadable
+                | ForgeFault::Failed,
+            )
+            | None => None,
         };
         if let Some((title, detail)) = failure {
             self.phase = None;

@@ -1499,13 +1499,8 @@ impl Conversation {
                                 view.answers.remove(&item);
                             }
                             Err(error) => {
-                                view.answers.insert(
-                                    item,
-                                    AnswerState::Failed(format!(
-                                        "Couldn't send the answer: {}",
-                                        diagnostics::chain(&error)
-                                    )),
-                                );
+                                view.answers
+                                    .insert(item, AnswerState::Failed(answer_failure(&error)));
                             }
                         }
                     }
@@ -1516,6 +1511,27 @@ impl Conversation {
         }
         changed
     }
+}
+
+fn answer_failure(error: &editor_core::client::CallError) -> String {
+    use artisan_api::Failure;
+    let why = match error.refused() {
+        Some(
+            failure @ (Failure::Thread(_)
+            | Failure::Run(_)
+            | Failure::Draft(_)
+            | Failure::Setting(_)
+            | Failure::Project(_)
+            | Failure::Mcp(_)
+            | Failure::Agent(_)
+            | Failure::Auth(_)
+            | Failure::Resource(_)
+            | Failure::Extension(_)
+            | Failure::Engine(_)),
+        ) => failure.to_string(),
+        Some(Failure::Internal | Failure::Legacy { .. }) | None => diagnostics::chain(error),
+    };
+    format!("Couldn't send the answer: {why}")
 }
 
 fn shape_source<'a>(

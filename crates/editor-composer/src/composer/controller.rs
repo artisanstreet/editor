@@ -437,8 +437,11 @@ impl Composer {
                 TurnAction::Unpark => "Couldn't cancel the pickup",
                 TurnAction::Permissions => "Couldn't change access",
             };
-            if let Some(error) = completion.error {
-                let error = diagnostics::chain(&error);
+            if let Some(error) = completion
+                .error
+                .as_ref()
+                .and_then(|error| turn_failure(completion.action, error))
+            {
                 tracing::warn!(thread = %completion.thread, action = ?completion.action, %error, "turn action failed");
                 self.notice = Some(format!("{failed}: {error}"));
             }
@@ -1193,6 +1196,38 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     config.model = model.map(|model| model.id.clone());
     config.effort = None;
     Some(config)
+}
+
+fn turn_failure(action: TurnAction, error: &editor_core::client::CallError) -> Option<String> {
+    use artisan_api::{Failure, RunFailure};
+    match (action, error.refused()) {
+        (
+            TurnAction::Continue,
+            Some(Failure::Run(
+                RunFailure::AlreadyWorking { .. } | RunFailure::NothingToContinue { .. },
+            )),
+        )
+        | (TurnAction::ClearGoal, Some(Failure::Run(RunFailure::NoGoal { .. }))) => None,
+        (
+            _,
+            Some(
+                failure @ (Failure::Thread(_)
+                | Failure::Run(_)
+                | Failure::Draft(_)
+                | Failure::Setting(_)
+                | Failure::Project(_)
+                | Failure::Mcp(_)
+                | Failure::Agent(_)
+                | Failure::Auth(_)
+                | Failure::Resource(_)
+                | Failure::Extension(_)
+                | Failure::Engine(_)),
+            ),
+        ) => Some(failure.to_string()),
+        (_, Some(Failure::Internal | Failure::Legacy { .. }) | None) => {
+            Some(diagnostics::chain(error))
+        }
+    }
 }
 
 #[cfg(test)]

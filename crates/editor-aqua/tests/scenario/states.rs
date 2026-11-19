@@ -2,13 +2,22 @@ use artisan_api::EngineId;
 use test_support::scenario::{Key, Modifiers, NamedKey, Opening, Role, Scenario};
 
 #[test]
-fn a_thread_forge_does_not_have_says_it_could_not_load_and_offers_a_retry() {
+fn a_thread_forge_does_not_have_says_so_without_an_empty_state_or_a_retry() {
     let mut editor = Scenario::replaying(EngineId::Claude, "reply")
         .thread("thread-a", "Greeting")
         .open(Opening::Thread("missing"));
-    insta::assert_snapshot!(editor.settle("the load failure", |view| {
-        view.shows("Couldn't load this thread") && view.find(Role::Button, "Try again").is_some()
-    }));
+    let settled = editor.settle("the missing thread", |view| {
+        view.shows("This thread isn't on this Forge.")
+    });
+    assert!(
+        !settled.contains("No messages yet."),
+        "a missing thread isn't shown as an empty one:\n{settled}"
+    );
+    assert!(
+        !settled.contains("Try again"),
+        "nothing can bring a missing thread back:\n{settled}"
+    );
+    insta::assert_snapshot!(settled);
 }
 
 #[test]

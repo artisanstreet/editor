@@ -142,6 +142,7 @@ impl ThreadPage {
 #[derive(Clone, Debug)]
 pub enum ThreadUnavailable {
     Failed(Arc<LoadThreadError>),
+    Missing,
     Deleted,
 }
 
@@ -153,6 +154,7 @@ impl std::fmt::Display for ThreadUnavailable {
                 "Couldn't load this thread. {}",
                 error.source.fault().sentence()
             ),
+            Self::Missing => formatter.write_str("This thread isn't on this Forge."),
             Self::Deleted => {
                 formatter.write_str("This thread was deleted after a long time without activity.")
             }
@@ -500,6 +502,11 @@ impl HostData {
                 self.accept_thread(thread);
             }
             Err(source) => {
+                let missing = matches!(
+                    source.refused(),
+                    Some(artisan_api::Failure::Thread(artisan_api::ThreadFailure::NotFound { thread }))
+                        if *thread == id
+                );
                 let error = LoadThreadError {
                     host: self.id.clone(),
                     thread: id.clone(),
@@ -508,12 +515,18 @@ impl HostData {
                 tracing::warn!(
                     host = %self.id,
                     thread = %id,
+                    missing,
                     error = %::diagnostics::chain(&error),
                     "couldn't load a thread"
                 );
+                let unavailable = if missing {
+                    ThreadUnavailable::Missing
+                } else {
+                    ThreadUnavailable::Failed(Arc::new(error))
+                };
                 self.thread_pages
                     .unavailable
-                    .insert(id.clone(), ThreadUnavailable::Failed(Arc::new(error)));
+                    .insert(id.clone(), unavailable);
             }
         }
         self.thread_pages.retire_removed();

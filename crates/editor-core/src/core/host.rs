@@ -1648,17 +1648,35 @@ enum ReadAckFailure {
 }
 
 fn read_ack_failure(error: &crate::core::client::CallError) -> ReadAckFailure {
-    use artisan_api::ErrorCode;
-    match error.api_code() {
+    use artisan_api::{ErrorCode, Failure};
+    match error.refused() {
         Some(
-            ErrorCode::NotFound
-            | ErrorCode::BadRequest
-            | ErrorCode::Conflict
-            | ErrorCode::Unauthorized
-            | ErrorCode::VersionMismatch,
+            Failure::Thread(_)
+            | Failure::Run(_)
+            | Failure::Draft(_)
+            | Failure::Setting(_)
+            | Failure::Project(_)
+            | Failure::Mcp(_)
+            | Failure::Agent(_)
+            | Failure::Auth(_)
+            | Failure::Resource(_)
+            | Failure::Extension(_)
+            | Failure::Engine(_)
+            | Failure::Legacy {
+                code:
+                    ErrorCode::NotFound
+                    | ErrorCode::BadRequest
+                    | ErrorCode::Conflict
+                    | ErrorCode::Unauthorized
+                    | ErrorCode::VersionMismatch,
+            },
         ) => ReadAckFailure::Refused,
-        Some(ErrorCode::Internal | ErrorCode::EngineUnavailable) | None => {
-            ReadAckFailure::Transient
-        }
+        Some(
+            Failure::Internal
+            | Failure::Legacy {
+                code: ErrorCode::Internal | ErrorCode::EngineUnavailable,
+            },
+        )
+        | None => ReadAckFailure::Transient,
     }
 }

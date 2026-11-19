@@ -1,4 +1,4 @@
-use artisan_api::{ApiError, ErrorCode, ThreadId};
+use artisan_api::{ApiError, AuthFailure, ErrorCode, Failure, ThreadFailure, ThreadId};
 use editor_core::client::{CallError, CallFailure, ForgeFault, ResponseError};
 use editor_core::{HostId, LoadThreadError, ThreadUnavailable};
 use std::sync::Arc;
@@ -11,6 +11,14 @@ fn call(failure: CallFailure) -> CallError {
     }
 }
 
+fn typed(status: reqwest::StatusCode, failure: Failure) -> CallError {
+    let message = failure.to_string();
+    call(CallFailure::Answer(ResponseError::Refused {
+        status,
+        error: ApiError::new(failure, message),
+    }))
+}
+
 fn refused(status: reqwest::StatusCode, code: ErrorCode) -> CallError {
     call(CallFailure::Answer(ResponseError::Refused {
         status,
@@ -21,6 +29,26 @@ fn refused(status: reqwest::StatusCode, code: ErrorCode) -> CallError {
 #[test]
 fn forge_failures_map_to_what_went_wrong_for_the_reader() {
     let cases = [
+        (
+            typed(
+                reqwest::StatusCode::NOT_FOUND,
+                Failure::Thread(ThreadFailure::NotFound {
+                    thread: ThreadId("missing".into()),
+                }),
+            ),
+            ForgeFault::Unrecognised,
+        ),
+        (
+            typed(
+                reqwest::StatusCode::UNAUTHORIZED,
+                Failure::Auth(AuthFailure::NotPaired),
+            ),
+            ForgeFault::Unauthorized,
+        ),
+        (
+            typed(reqwest::StatusCode::FORBIDDEN, Failure::Internal),
+            ForgeFault::Failed,
+        ),
         (
             refused(reqwest::StatusCode::NOT_FOUND, ErrorCode::NotFound),
             ForgeFault::Unrecognised,

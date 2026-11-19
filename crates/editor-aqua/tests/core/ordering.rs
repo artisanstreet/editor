@@ -661,14 +661,14 @@ fn host_list_changes_only_when_a_host_crosses_the_live_boundary() {
             .status(ConnectionStatus::Offline {
                 attempt: 1,
                 reason: "first".into(),
-                code: None,
+                fault: None,
             })
             .await;
         sender
             .status(ConnectionStatus::Offline {
                 attempt: 2,
                 reason: "second".into(),
-                code: None,
+                fault: None,
             })
             .await;
         sender.status(ConnectionStatus::Live).await;

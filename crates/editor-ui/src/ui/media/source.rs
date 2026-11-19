@@ -19,7 +19,7 @@ pub struct MediaRequest {
 pub enum MediaFailure {
     #[error("the file does not exist")]
     Missing,
-    #[error("the host did not answer")]
+    #[error("Forge did not answer")]
     Unreachable,
     #[error("the file could not be read")]
     Unreadable,

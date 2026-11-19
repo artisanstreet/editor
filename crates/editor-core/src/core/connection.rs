@@ -1,4 +1,4 @@
-use crate::core::client::{CallError, ForgeClient, ResponseError};
+use crate::core::client::{CallError, ForgeClient, ForgeFault, ResponseError};
 use crate::core::delivery::MappedSender;
 use crate::core::host::HostMessage;
 use crate::core::hosts::HostId;
@@ -37,7 +37,7 @@ pub enum ConnectionStatus {
     Offline {
         attempt: u32,
         reason: String,
-        code: Option<artisan_api::ErrorCode>,
+        fault: Option<ForgeFault>,
     },
 }
 
@@ -90,13 +90,15 @@ pub enum SessionError {
 }
 
 impl SessionError {
-    fn code(&self) -> Option<artisan_api::ErrorCode> {
+    fn fault(&self) -> Option<ForgeFault> {
         match self {
-            Self::State(error) => error.api_code(),
-            Self::Refused(error) => Some(error.code()),
-            Self::ProtocolChanged { .. } => Some(artisan_api::ErrorCode::VersionMismatch),
+            Self::State(error) => Some(error.fault()),
+            Self::Refused(error) => Some(error.fault()),
+            Self::ProtocolChanged { .. } => Some(ForgeFault::Incompatible),
             Self::Subscribe(error) => match &*error.failure {
-                artisan_account::relay_client::CallFailure::Refused(error) => Some(error.code),
+                artisan_account::relay_client::CallFailure::Refused(error) => {
+                    Some(ForgeFault::of(&error.failure))
+                }
                 artisan_account::relay_client::CallFailure::Closed
                 | artisan_account::relay_client::CallFailure::Open(_)
                 | artisan_account::relay_client::CallFailure::Exchange(_)
@@ -189,7 +191,7 @@ pub async fn run(
         if updates.receiver_gone() {
             return;
         }
-        let (reason, code) = match result {
+        let (reason, fault) = match result {
             Ok(End::Reset) => {
                 since = None;
                 attempt = 0;
@@ -198,7 +200,7 @@ pub async fn run(
             Ok(End::Observation) => continue,
             Ok(End::Dropped) => return,
             Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
-            Err(error) => (::diagnostics::chain(&error), error.code()),
+            Err(error) => (::diagnostics::chain(&error), error.fault()),
         };
         if live_since.is_some_and(|live: tokio::time::Instant| live.elapsed() >= HEALTHY_STREAM) {
             attempt = 0;
@@ -208,7 +210,7 @@ pub async fn run(
             .deliver(Update::Status(ConnectionStatus::Offline {
                 attempt,
                 reason,
-                code,
+                fault,
             }))
             .await
         {

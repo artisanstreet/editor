@@ -1,4 +1,4 @@
-use artisan_api::{ApiError, ErrorCode};
+use artisan_api::{ApiError, ErrorCode, Failure};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NewClientError {
@@ -43,7 +43,7 @@ pub enum CallFailure {
     Build(#[source] reqwest::Error),
     #[error("reach Forge")]
     Reach(#[source] reqwest::Error),
-    #[error("Forge did not answer")]
+    #[error("Forge refused the call")]
     Answer(#[source] ResponseError),
     #[error("read Forge's answer")]
     Read(#[source] ReadBodyError),
@@ -193,8 +193,8 @@ pub enum RelayClientError {
 
 impl CallError {
     #[must_use]
-    pub fn api_code(&self) -> Option<ErrorCode> {
-        self.failure.api_code()
+    pub fn refused(&self) -> Option<&Failure> {
+        self.failure.refused()
     }
 
     #[must_use]
@@ -214,7 +214,26 @@ pub enum ForgeFault {
 }
 
 impl ForgeFault {
-    const fn of(code: ErrorCode) -> Self {
+    #[must_use]
+    pub const fn of(failure: &Failure) -> Self {
+        match failure {
+            Failure::Auth(_) => Self::Unauthorized,
+            Failure::Legacy { code } => Self::of_code(*code),
+            Failure::Thread(_)
+            | Failure::Run(_)
+            | Failure::Draft(_)
+            | Failure::Setting(_)
+            | Failure::Project(_)
+            | Failure::Mcp(_)
+            | Failure::Agent(_)
+            | Failure::Resource(_)
+            | Failure::Extension(_)
+            | Failure::Engine(_)
+            | Failure::Internal => Self::of_code(failure.code()),
+        }
+    }
+
+    const fn of_code(code: ErrorCode) -> Self {
         match code {
             ErrorCode::NotFound => Self::Unrecognised,
             ErrorCode::Unauthorized => Self::Unauthorized,
@@ -244,10 +263,10 @@ impl CallFailure {
     fn fault(&self) -> ForgeFault {
         use artisan_account::relay_client::CallFailure as Relay;
         match self {
-            Self::Answer(error) => ForgeFault::of(error.code()),
+            Self::Answer(error) => error.fault(),
             Self::Incompatible { .. } => ForgeFault::Incompatible,
             Self::Relay(error) => match &*error.failure {
-                Relay::Refused(error) => ForgeFault::of(error.code),
+                Relay::Refused(error) => ForgeFault::of(&error.failure),
                 Relay::Closed | Relay::Open(_) | Relay::Exchange(_) | Relay::TimedOut => {
                     ForgeFault::Unreachable
                 }
@@ -262,25 +281,26 @@ impl CallFailure {
     }
 
     #[must_use]
-    fn api_code(&self) -> Option<ErrorCode> {
+    fn refused(&self) -> Option<&Failure> {
+        use artisan_account::relay_client::CallFailure as Relay;
         match self {
-            Self::Answer(error) => Some(error.code()),
-            Self::Incompatible { .. } => Some(ErrorCode::VersionMismatch),
+            Self::Answer(error) => error.refused(),
             Self::Relay(error) => match &*error.failure {
-                artisan_account::relay_client::CallFailure::Refused(error) => Some(error.code),
-                artisan_account::relay_client::CallFailure::Closed
-                | artisan_account::relay_client::CallFailure::Open(_)
-                | artisan_account::relay_client::CallFailure::Exchange(_)
-                | artisan_account::relay_client::CallFailure::TimedOut
-                | artisan_account::relay_client::CallFailure::Decode(_)
-                | artisan_account::relay_client::CallFailure::Bytes(_)
-                | artisan_account::relay_client::CallFailure::TooLarge { .. } => None,
+                Relay::Refused(error) => Some(&error.failure),
+                Relay::Closed
+                | Relay::Open(_)
+                | Relay::Exchange(_)
+                | Relay::TimedOut
+                | Relay::Decode(_)
+                | Relay::Bytes(_)
+                | Relay::TooLarge { .. } => None,
             },
             Self::Build(_)
             | Self::Reach(_)
             | Self::Read(_)
             | Self::Decode(_)
             | Self::Inconsistent { .. }
+            | Self::Incompatible { .. }
             | Self::StreamingBody
             | Self::EncodeBody(_)
             | Self::Task(_) => None,
@@ -290,17 +310,28 @@ impl CallFailure {
 
 impl ResponseError {
     #[must_use]
-    pub(crate) const fn code(&self) -> ErrorCode {
+    pub const fn refused(&self) -> Option<&Failure> {
         match self {
+            Self::Refused { error, .. } => Some(&error.failure),
+            Self::Unexplained { .. } | Self::Unreadable { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn fault(&self) -> ForgeFault {
+        match self {
+            Self::Refused { error, .. } if !error.failure.is_legacy() => {
+                ForgeFault::of(&error.failure)
+            }
             Self::Refused { status, .. }
             | Self::Unexplained { status, .. }
             | Self::Unreadable { status, .. }
                 if matches!(status.as_u16(), 401 | 403) =>
             {
-                ErrorCode::Unauthorized
+                ForgeFault::Unauthorized
             }
-            Self::Refused { error, .. } => error.code,
-            Self::Unexplained { .. } | Self::Unreadable { .. } => ErrorCode::Internal,
+            Self::Refused { error, .. } => ForgeFault::of(&error.failure),
+            Self::Unexplained { .. } | Self::Unreadable { .. } => ForgeFault::Failed,
         }
     }
 }

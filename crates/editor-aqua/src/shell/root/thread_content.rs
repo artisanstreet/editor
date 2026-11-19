@@ -78,14 +78,7 @@ impl RootViews {
                             )
                             .await
                             .map(std::sync::Arc::<[u8]>::from)
-                            .map_err(|error| {
-                                use crate::ui::media::source::MediaFailure;
-                                match error.api_code() {
-                                    Some(artisan_api::ErrorCode::NotFound) => MediaFailure::Missing,
-                                    Some(_) => MediaFailure::Unreadable,
-                                    None => MediaFailure::Unreachable,
-                                }
-                            })
+                            .map_err(|error| media_failure(&error))
                     })
                 },
             );
@@ -341,13 +334,18 @@ impl RootViews {
         let jump = (self.latest.shown() || presence > 0.0).then(|| {
             crate::shell::thread_navigation::jump_to_latest(theme, presence, Rc::clone(&dispatch))
         });
+        let unavailable = workspace
+            .conversation
+            .agent
+            .is_none()
+            .then(|| {
+                core.host_if_instance(&scope.host, scope.instance)
+                    .and_then(|host| host.thread_unavailable(&scope.thread))
+            })
+            .flatten();
         let mut controls = Vec::new();
         controls.extend(jump);
-        if workspace.conversation.agent.is_none()
-            && let Some(unavailable) = core
-                .host_if_instance(&scope.host, scope.instance)
-                .and_then(|host| host.thread_unavailable(&scope.thread))
-        {
+        if let Some(unavailable) = &unavailable {
             let mut notice = crate::ui::page::notice(&theme, unavailable.to_string());
             if matches!(unavailable, crate::core::ThreadUnavailable::Failed(_)) {
                 let actions = Rc::clone(&self.conversation_actions);
@@ -443,6 +441,10 @@ impl RootViews {
                     reduced_motion,
                     "conversation-loading",
                 )),
+                None if unavailable.is_some() => {
+                    self.thread_loading.reset();
+                    view::centered_body(aqua_ui::element::Box::new().build())
+                }
                 None => {
                     self.thread_loading.reset();
                     view::conversation_notice(&theme, "No messages yet.".to_owned(), false)
@@ -582,5 +584,21 @@ impl RootViews {
             }),
             scale: window.scale_factor as f32,
         }
+    }
+}
+
+fn media_failure(error: &crate::core::client::CallError) -> crate::ui::media::source::MediaFailure {
+    use crate::ui::media::source::MediaFailure;
+    use artisan_api::{ErrorCode, Failure, ResourceFailure, ThreadFailure};
+    match error.refused() {
+        Some(
+            Failure::Resource(ResourceFailure::FileNotFound { .. })
+            | Failure::Thread(ThreadFailure::NotFound { .. })
+            | Failure::Legacy {
+                code: ErrorCode::NotFound,
+            },
+        ) => MediaFailure::Missing,
+        Some(_) => MediaFailure::Unreadable,
+        None => MediaFailure::Unreachable,
     }
 }

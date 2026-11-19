@@ -494,3 +494,95 @@ fn scrolling_far_back_keeps_a_bounded_window_and_reloads_newer_threads() {
         "threads outside the window are released"
     );
 }
+
+fn refusing_forge(
+    refusal: serde_json::Value,
+) -> (
+    tempfile::TempDir,
+    test_support::http::StubServer,
+    Core,
+    HostId,
+) {
+    let router = axum::Router::new().route(
+        "/threads/{id}",
+        axum::routing::get(move || {
+            let refusal = refusal.clone();
+            async move { (axum::http::StatusCode::NOT_FOUND, axum::Json(refusal)) }
+        }),
+    );
+    let server = runtime().block_on(test_support::http::StubServer::serve(router));
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().to_owned(),
+    })
+    .expect("core opens");
+    let identity = Identity::generate("refusing-forge").expect("identity");
+    let config = HostConfig {
+        id: HostId("refusing-forge".into()),
+        name: "Refusing".into(),
+        address: server.url().trim_start_matches("http://").to_owned(),
+        fingerprint: fingerprint(identity.certificate_der().expect("certificate").as_ref()),
+        kind: HostKind::Remote,
+    };
+    core.add_test_host(&config, ForgeClient::plain_for_tests(server.url()));
+    core.host_mut(&config.id)
+        .expect("host")
+        .test_stop_connection();
+    (directory, server, core, config.id)
+}
+
+fn opened(refusal: serde_json::Value) -> editor_core::ThreadUnavailable {
+    let (_directory, _server, mut core, host) = refusing_forge(refusal);
+    let thread = ThreadId("gone-thread".into());
+    core.navigate(editor_core::Screen::Thread {
+        host: host.clone(),
+        thread: thread.clone(),
+    });
+    let mut unavailable = None;
+    wait_until("the thread lookup settles", Duration::from_secs(20), || {
+        core.drain_with(|_, _| {});
+        unavailable = core
+            .host(&host)
+            .and_then(|forge| forge.thread_unavailable(&thread))
+            .cloned();
+        unavailable.is_some()
+    });
+    unavailable.expect("the lookup settled")
+}
+
+#[test]
+fn a_thread_forge_says_is_missing_shows_as_missing_without_a_retry() {
+    let refusal = artisan_api::ApiError::new(
+        artisan_api::Failure::Thread(artisan_api::ThreadFailure::NotFound {
+            thread: ThreadId("gone-thread".into()),
+        }),
+        "Thread gone-thread doesn't exist on this Forge.".into(),
+    );
+    let unavailable = opened(serde_json::to_value(&refusal).expect("encode"));
+    assert!(
+        matches!(unavailable, editor_core::ThreadUnavailable::Missing),
+        "{unavailable}"
+    );
+    assert_eq!(unavailable.to_string(), "This thread isn't on this Forge.");
+}
+
+#[test]
+fn an_older_forge_refusing_a_thread_shows_the_generic_failure() {
+    let unavailable = opened(serde_json::json!({
+        "code": "not_found",
+        "message": "thread gone-thread not found",
+    }));
+    let editor_core::ThreadUnavailable::Failed(error) = &unavailable else {
+        panic!("a legacy refusal is not read as a typed missing thread: {unavailable}");
+    };
+    assert_eq!(
+        error.source.refused(),
+        Some(&artisan_api::Failure::Legacy {
+            code: artisan_api::ErrorCode::NotFound
+        })
+    );
+    assert_eq!(
+        unavailable.to_string(),
+        "Couldn't load this thread. Forge didn't recognise it."
+    );
+}

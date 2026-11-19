@@ -57,7 +57,7 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         app
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    let failed = "Couldn't load tracks/intro.ogg: the host did not answer";
+    let failed = "Couldn't load tracks/intro.ogg: Forge did not answer";
     let mut app = loop {
         assets.drain();
         let app = mount(render());

@@ -1,6 +1,6 @@
 ---
 source: crates/editor-aqua/tests/scenario/states.rs
-expression: "editor.settle(\"the load failure\", |view|\n{\n    view.shows(\"Couldn't load this thread\") &&\n    view.find(Role::Button, \"Try again\").is_some()\n})"
+expression: settled
 ---
 Group "Artisan Editor" [focused]
   Button "Hide sidebar"
@@ -18,10 +18,7 @@ Group "Artisan Editor" [focused]
   Button "Minimize window"
   Button "Maximize window"
   Button "Close window"
-  Label "No messages yet."
-  Label "Couldn't load this thread. Forge didn't recognise it."
-  Button "Try again"
-    Label "Try again"
+  Label "This thread isn't on this Forge."
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView
