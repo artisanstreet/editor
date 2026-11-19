@@ -118,12 +118,14 @@ impl ReplayingEngine {
 
     #[must_use]
     pub fn launches(&self) -> usize {
-        std::fs::read_to_string(self.folder.join("launches")).map_or(0, |count| {
-            count
+        match std::fs::read_to_string(self.folder.join("launches")) {
+            Ok(count) => count
                 .trim()
                 .parse()
-                .expect("the launch counter holds a number")
-        })
+                .expect("the launch counter holds a number"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("read the replaying engine's launch counter: {error}"),
+        }
     }
 
     #[must_use]
