@@ -42,6 +42,31 @@ pub enum SideQueryError {
     Stop(#[source] StopCompletionError),
 }
 
+impl SideQueryError {
+    #[must_use]
+    pub fn exceeds_context(&self) -> bool {
+        match self {
+            Self::Refused(refusal) => matches!(refusal, Refusal::ContextLimit(_)),
+            Self::Complete(error) => matches!(error.refusal(), Some(Refusal::ContextLimit(_))),
+            Self::Open(_)
+            | Self::NoSavedMessage { .. }
+            | Self::Create(_)
+            | Self::PrepareTimedOut { .. }
+            | Self::Cancelled
+            | Self::TimedOut { .. }
+            | Self::Stream(_)
+            | Self::Protocol(_)
+            | Self::CalledTool
+            | Self::Truncated
+            | Self::Declined
+            | Self::UnknownStop { .. }
+            | Self::NoAnswer
+            | Self::Sandbox(_)
+            | Self::Stop(_) => false,
+        }
+    }
+}
+
 const PREPARE_LIMIT: Duration = Duration::from_secs(30);
 const ANSWER_LIMIT: Duration = Duration::from_secs(180);
 

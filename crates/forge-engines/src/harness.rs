@@ -232,6 +232,19 @@ pub enum SideQueryError {
     },
 }
 
+impl SideQueryError {
+    #[must_use]
+    pub fn exceeds_context(&self) -> bool {
+        match self {
+            Self::Unsupported { .. } | Self::Cancelled { .. } => false,
+            Self::Claude { source, .. } => source.exceeds_context(),
+            Self::Codex { source, .. } => source.exceeds_context(),
+            Self::OpenCode { source, .. } => source.exceeds_context(),
+            Self::ClaudeAi { source, .. } => source.exceeds_context(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SetTitleError {
     #[error("name Claude thread {thread}")]

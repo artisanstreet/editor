@@ -46,6 +46,7 @@ mod mentions;
 mod native;
 pub mod opencode;
 pub mod process;
+mod provider;
 mod question;
 mod reasoning;
 mod retained;

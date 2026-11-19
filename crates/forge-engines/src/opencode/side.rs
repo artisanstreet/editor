@@ -1,3 +1,4 @@
+use super::decoder::{TurnFailure, exceeds_context};
 use super::*;
 use crate::{SideReply, SideUsage};
 use artisan_api::{ItemKind, Phase, Status};
@@ -37,8 +38,31 @@ pub enum SideQueryError {
     CompactionEvent(#[source] serde_json::Error),
     #[error("OpenCode compaction failed: {error}")]
     Failed { error: String },
+    #[error("OpenCode fork {fork} is over the model's context limit: {error}")]
+    ContextLimit { fork: String, error: String },
     #[error("OpenCode compaction was interrupted")]
     Interrupted,
+}
+
+impl SideQueryError {
+    #[must_use]
+    pub const fn exceeds_context(&self) -> bool {
+        match self {
+            Self::ContextLimit { .. } => true,
+            Self::Cancelled
+            | Self::TimedOut
+            | Self::Server(_)
+            | Self::Subscribe(_)
+            | Self::Api { .. }
+            | Self::NoForkId
+            | Self::Prompt { .. }
+            | Self::StreamClosed
+            | Self::Decode(_)
+            | Self::CompactionEvent(_)
+            | Self::Failed { .. }
+            | Self::Interrupted => false,
+        }
+    }
 }
 
 pub(super) async fn compact(
@@ -123,7 +147,11 @@ async fn query(
                         }
                     }
                     if decoder.idle() {
-                        if let Some(error) = decoder.error.take() { return Err(SideQueryError::Failed { error }); }
+                        match decoder.error.take() {
+                            Some(TurnFailure::ContextLimit(error)) => return Err(SideQueryError::ContextLimit { fork: session, error }),
+                            Some(TurnFailure::Failed(error)) => return Err(SideQueryError::Failed { error }),
+                            None => {}
+                        }
                         return Ok(reply);
                     }
                 }
@@ -178,8 +206,16 @@ fn compact_event(data: &str, session: &str) -> Result<Option<SideReply>, SideQue
             }))
         }
         Some("session.compaction.failed" | "session.execution.failed") => {
-            Err(SideQueryError::Failed {
-                error: body["error"].to_string(),
+            let error = &body["error"];
+            Err(if exceeds_context(error) {
+                SideQueryError::ContextLimit {
+                    fork: session.to_owned(),
+                    error: error.to_string(),
+                }
+            } else {
+                SideQueryError::Failed {
+                    error: error.to_string(),
+                }
             })
         }
         Some("session.execution.interrupted") => Err(SideQueryError::Interrupted),

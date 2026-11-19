@@ -1856,6 +1856,55 @@ async fn cancelled_branch_compaction_releases_the_source_completion() {
 }
 
 #[tokio::test]
+async fn compaction_reports_a_context_limit_only_when_claude_ai_rejects_the_prompts_length() {
+    use reqwest::StatusCode;
+    let work = tempfile::tempdir().unwrap();
+    let turn = turn(work.path(), None, Permissions::Full);
+    let too_long = json!({ "type": "invalid_request_error", "message": "prompt is too long: 213519 tokens > 200000 maximum" });
+    let unrelated = json!({ "type": "invalid_request_error", "message": "context_management: Extra inputs are not permitted" });
+    let body = |error: &Value| json!({ "type": "error", "error": error }).to_string();
+    let streamed = |error: &Value| {
+        Reply::Ends(vec![
+            start("m1"),
+            json!({ "type": "error", "error": error }),
+        ])
+    };
+    let refused =
+        |status, body: &str| Reply::Refuses(super::transport::refusal(status, false, body));
+    for (reply, exceeds_context) in [
+        (refused(StatusCode::BAD_REQUEST, &body(&too_long)), true),
+        (
+            refused(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &body(
+                    &json!({ "type": "request_too_large", "message": "Request exceeds the maximum allowed number of bytes." }),
+                ),
+            ),
+            true,
+        ),
+        (streamed(&too_long), true),
+        (refused(StatusCode::BAD_REQUEST, &body(&unrelated)), false),
+        (
+            refused(
+                StatusCode::BAD_REQUEST,
+                &body(
+                    &json!({ "type": "invalid_request_error", "message": "The prompt is too large for this tool's context; pick a smaller file." }),
+                ),
+            ),
+            false,
+        ),
+        (streamed(&unrelated), false),
+    ] {
+        let script = Script::default();
+        script.replies.lock().unwrap().push(reply);
+        let error = super::side::compact_with(&script, &turn, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.exceeds_context(), exceeds_context, "{error:?}");
+    }
+}
+
+#[tokio::test]
 async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallback() {
     let work = tempfile::tempdir().unwrap();
     let source = turn(work.path(), Some("claude.ai:source"), Permissions::Full);

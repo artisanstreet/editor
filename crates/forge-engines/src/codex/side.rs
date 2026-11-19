@@ -1,5 +1,5 @@
 use super::goal::CallError;
-use super::protocol::{Frame, Item, Notification, TurnStatus};
+use super::protocol::{CodexError, Frame, Item, Notification, TurnStatus};
 use super::server::{self, AttachError, Ended};
 use super::turn_overrides;
 use crate::{SideReply, SideUsage, Turn};
@@ -39,6 +39,8 @@ pub enum SideQueryError {
     },
     #[error("Codex fork {fork} failed: {message}")]
     Failed { fork: String, message: String },
+    #[error("Codex fork {fork} ran out of the model's context window: {message}")]
+    ContextLimit { fork: String, message: String },
     #[error("Codex fork {fork} was interrupted")]
     Interrupted { fork: String },
     #[error("Codex exited during the side query: {ended}")]
@@ -47,6 +49,27 @@ pub enum SideQueryError {
     Overloaded(#[source] server::Overloaded),
     #[error("decode Codex output during the side query")]
     Decode(#[source] serde_json::Error),
+}
+
+impl SideQueryError {
+    #[must_use]
+    pub const fn exceeds_context(&self) -> bool {
+        match self {
+            Self::ContextLimit { .. } => true,
+            Self::Attach(_)
+            | Self::Cancelled
+            | Self::TimedOut { .. }
+            | Self::Call { .. }
+            | Self::NoThread { .. }
+            | Self::Refuse { .. }
+            | Self::TurnEnd { .. }
+            | Self::Failed { .. }
+            | Self::Interrupted { .. }
+            | Self::Exited { .. }
+            | Self::Overloaded(_)
+            | Self::Decode(_) => false,
+        }
+    }
 }
 
 pub(super) async fn side_query(
@@ -117,6 +140,18 @@ async fn query(
         }
     }
     answer
+}
+
+fn failed(fork: String, error: Option<CodexError>) -> SideQueryError {
+    let exceeds_context = error.as_ref().is_some_and(CodexError::exceeds_context);
+    let message = error
+        .and_then(|error| error.message)
+        .unwrap_or_else(|| "no reason given".to_owned());
+    if exceeds_context {
+        SideQueryError::ContextLimit { fork, message }
+    } else {
+        SideQueryError::Failed { fork, message }
+    }
 }
 
 struct Fork<'a> {
@@ -228,14 +263,7 @@ impl Fork<'_> {
                 Notification::TurnCompleted(notice) => {
                     self.turn = None;
                     return match notice.turn.status {
-                        TurnStatus::Failed => Err(SideQueryError::Failed {
-                            fork: forked,
-                            message: notice
-                                .turn
-                                .error
-                                .and_then(|error| error.message)
-                                .unwrap_or_else(|| "no reason given".to_owned()),
-                        }),
+                        TurnStatus::Failed => Err(failed(forked, notice.turn.error)),
                         TurnStatus::Interrupted => {
                             Err(SideQueryError::Interrupted { fork: forked })
                         }
@@ -289,3 +317,7 @@ impl Fork<'_> {
         serde_json::from_str::<Frame>(&line).map_err(SideQueryError::Decode)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/codex/side.rs"]
+mod tests;

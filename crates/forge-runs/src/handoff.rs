@@ -526,7 +526,7 @@ async fn summarize(
                     }
                 }
                 Err(failure) => {
-                    if share.is_some() && !context_overflow(&diagnostics::chain(&failure)) {
+                    if share.is_some() && !failure.exceeds_context() {
                         return Err(ContextError::Summarize {
                             thread: thread.id.clone(),
                             engine,
@@ -555,20 +555,6 @@ async fn summarize(
             )
         }),
     })
-}
-
-fn context_overflow(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    [
-        "context",
-        "too long",
-        "too large",
-        "too many tokens",
-        "payload-too-large",
-        "overflow",
-    ]
-    .iter()
-    .any(|needle| error.contains(needle))
 }
 
 fn render(summary: &str, tail: &str) -> String {

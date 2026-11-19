@@ -479,6 +479,9 @@ impl ClaudeAiDecoder {
         self.failure = Some(match str_at(error, "type").unwrap_or_default() {
             "overloaded_error" | "api_error" => Refusal::Overloaded(message),
             "rate_limit_error" => super::transport::rate_limit(&message),
+            _ if crate::provider::exceeds_context(error) => {
+                Refusal::ContextLimit(format!("claude.ai stopped the answer: {message}"))
+            }
             _ => Refusal::Other(format!("claude.ai stopped the answer: {message}")),
         });
     }

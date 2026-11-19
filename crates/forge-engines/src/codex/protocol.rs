@@ -166,6 +166,9 @@ pub(super) struct CodexError {
 }
 
 impl CodexError {
+    pub(super) fn exceeds_context(&self) -> bool {
+        self.codex_error_info.as_ref().and_then(Value::as_str) == Some("contextWindowExceeded")
+    }
     pub(super) fn is_refusal(&self) -> bool {
         self.codex_error_info
             .as_ref()

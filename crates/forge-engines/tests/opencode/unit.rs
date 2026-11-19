@@ -144,7 +144,7 @@ fn replay(case: &str) -> Vec<Step> {
     }
     steps.push(Step::Idle(decoder.as_ref().is_some_and(Decoder::idle)));
     if let Some(error) = decoder.and_then(|decoder| decoder.error) {
-        steps.push(Step::RunError(error));
+        steps.push(Step::RunError(error.into_message()));
     }
     merge_live(steps)
 }

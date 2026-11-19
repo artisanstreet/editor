@@ -463,7 +463,7 @@ async fn drive(
             Ok(decoder
                 .error
                 .take()
-                .map_or(Outcome::Done, Outcome::failed))
+                .map_or(Outcome::Done, |failure| Outcome::failed(failure.into_message())))
         } => result,
     }
 }

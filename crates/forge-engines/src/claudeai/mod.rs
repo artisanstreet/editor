@@ -602,7 +602,9 @@ fn refused(error: &impl Refused) -> Outcome {
             Outcome::retryable(message.clone(), Retry::Overloaded)
         }
         Some(Refusal::ConversationGone) => Outcome::failed("The claude.ai conversation is gone."),
-        Some(Refusal::Other(message)) => Outcome::failed(message.clone()),
+        Some(Refusal::ContextLimit(message) | Refusal::Other(message)) => {
+            Outcome::failed(message.clone())
+        }
         None => Outcome::retryable(
             format!("Could not reach claude.ai: {}", diagnostics::chain(error)),
             Retry::Overloaded,

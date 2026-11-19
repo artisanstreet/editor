@@ -80,6 +80,38 @@ pub enum Method {
     Delete,
 }
 
+pub enum TurnFailure {
+    ContextLimit(String),
+    Failed(String),
+}
+
+impl TurnFailure {
+    fn of(error: &Value) -> Self {
+        let message = error_message(error);
+        if exceeds_context(error) {
+            Self::ContextLimit(message)
+        } else {
+            Self::Failed(message)
+        }
+    }
+
+    #[must_use]
+    pub fn into_message(self) -> String {
+        match self {
+            Self::ContextLimit(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+pub(super) fn exceeds_context(error: &Value) -> bool {
+    error["type"] == "provider.invalid-request"
+        && (error["status"] == 413
+            || error["response"]["body"].as_str().is_some_and(|body| {
+                serde_json::from_str::<Value>(body)
+                    .is_ok_and(|body| crate::provider::exceeds_context(&body["error"]))
+            }))
+}
+
 #[derive(Default)]
 pub struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
@@ -105,7 +137,7 @@ pub struct Decoder {
     model: Option<String>,
     title: Option<String>,
     step_error: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<TurnFailure>,
     cancelled: bool,
     goals: HashMap<String, Goal>,
     awaiting_goal: Option<GoalChange>,
@@ -412,7 +444,7 @@ impl Decoder {
                 }
                 if root {
                     self.turn_open = false;
-                    self.error = Some(message);
+                    self.error = Some(TurnFailure::of(&data["error"]));
                 }
             }
             "session.step.started" => {
@@ -456,7 +488,7 @@ impl Decoder {
                     let message = "OpenCode completed a text without its required final body";
                     out.push(error_item(event, parent, ErrorKind::Api, message, false));
                     if root {
-                        self.error = Some(message.to_owned());
+                        self.error = Some(TurnFailure::Failed(message.to_owned()));
                     }
                     return out;
                 };
@@ -1168,7 +1200,7 @@ impl Decoder {
                 false,
             ));
             if self.root.as_deref() == Some(session) {
-                self.error = Some(message.to_owned());
+                self.error = Some(TurnFailure::Failed(message.to_owned()));
                 self.turn_open = false;
             }
             return;

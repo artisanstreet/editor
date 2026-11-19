@@ -70,6 +70,7 @@ pub enum Refusal {
     },
     RateLimited(String),
     Overloaded(String),
+    ContextLimit(String),
     Other(String),
 }
 
@@ -90,7 +91,9 @@ impl std::fmt::Display for Refusal {
                 write!(f, "Claude.ai reported that your {message} was reached.")
             }
             Self::Overloaded(message) => write!(f, "claude.ai is overloaded ({message})"),
-            Self::RateLimited(message) | Self::Other(message) => f.write_str(message),
+            Self::RateLimited(message) | Self::ContextLimit(message) | Self::Other(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -120,6 +123,12 @@ pub fn refusal(status: reqwest::StatusCode, challenge_header: bool, body: &str) 
         429 => rate_limit(&message),
         500..=599 => Refusal::Overloaded(message),
         _ if code == "overloaded_error" => Refusal::Overloaded(message),
+        413 => Refusal::ContextLimit(format!(
+            "claude.ai refused the request ({status}): {message}"
+        )),
+        _ if crate::provider::exceeds_context(error) => Refusal::ContextLimit(format!(
+            "claude.ai refused the request ({status}): {message}"
+        )),
         _ => Refusal::Other(format!(
             "claude.ai refused the request ({status}): {message}"
         )),
@@ -610,6 +619,7 @@ impl Transport {
             | Refusal::UsageLimit { .. }
             | Refusal::RateLimited(_)
             | Refusal::Overloaded(_)
+            | Refusal::ContextLimit(_)
             | Refusal::Other(_) => return,
         };
         self.writer.submit(change);

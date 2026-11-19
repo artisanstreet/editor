@@ -29,6 +29,30 @@ pub enum SideQueryError {
     Exited { code: Option<i32>, stderr: String },
     #[error("the Claude fork failed: {reason}")]
     Failed { reason: String },
+    #[error(
+        "the Claude fork's prompt is over the model's context limit ({terminal_reason}): {reason}"
+    )]
+    ContextLimit {
+        terminal_reason: &'static str,
+        reason: String,
+    },
+}
+
+impl SideQueryError {
+    #[must_use]
+    pub const fn exceeds_context(&self) -> bool {
+        match self {
+            Self::ContextLimit { .. } => true,
+            Self::ClaudeAiSession { .. }
+            | Self::Spawn(_)
+            | Self::Send { .. }
+            | Self::Read(_)
+            | Self::Cancelled
+            | Self::TimedOut { .. }
+            | Self::Exited { .. }
+            | Self::Failed { .. } => false,
+        }
+    }
 }
 
 pub(super) async fn side_query(
@@ -178,12 +202,21 @@ fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf])
 fn reply_of(frame: &Value) -> Result<SideReply, SideQueryError> {
     let reached_for_a_tool = frame["subtype"] == "error_max_turns";
     if frame["is_error"].as_bool() == Some(true) && !reached_for_a_tool {
-        return Err(SideQueryError::Failed {
-            reason: frame["result"]
-                .as_str()
-                .or_else(|| frame["subtype"].as_str())
-                .unwrap_or("no reason given")
-                .to_owned(),
+        let reason = frame["result"]
+            .as_str()
+            .or_else(|| frame["subtype"].as_str())
+            .unwrap_or("no reason given")
+            .to_owned();
+        return Err(match frame["terminal_reason"].as_str() {
+            Some("prompt_too_long") => SideQueryError::ContextLimit {
+                terminal_reason: "prompt_too_long",
+                reason,
+            },
+            Some("blocking_limit") => SideQueryError::ContextLimit {
+                terminal_reason: "blocking_limit",
+                reason,
+            },
+            _ => SideQueryError::Failed { reason },
         });
     }
     let usage = &frame["usage"];
