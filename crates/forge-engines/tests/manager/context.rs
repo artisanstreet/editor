@@ -1,6 +1,7 @@
 use super::*;
 use artisan_api::SignInState;
 use std::os::unix::fs::PermissionsExt as _;
+use test_support::wait::{LIVENESS, eventually, within};
 
 fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
@@ -23,14 +24,28 @@ fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
     (directory, engines, home)
 }
 
-async fn wait_until(mut ready: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !ready() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+async fn codex_until(engines: &Engines, what: &str, ready: impl Fn(&EngineStatus) -> bool + Sync) {
+    let mut changes = engines.subscribe();
+    within(what, LIVENESS, async {
+        while !ready(&engines.status(EngineId::Codex)) {
+            match changes.recv().await {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    panic!("the engines stopped publishing while waiting for {what}")
+                }
+            }
         }
     })
-    .await
-    .unwrap();
+    .await;
+}
+
+async fn marked(path: &Path) {
+    eventually(
+        &format!("the fake engine to mark {}", path.display()),
+        LIVENESS,
+        || std::future::ready(path.exists()),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -45,13 +60,10 @@ esac
 "#,
     );
     engines.login(EngineId::Codex).unwrap();
-    wait_until(|| matches!(engines.status(EngineId::Codex).sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
+    codex_until(&engines, "the login link", |status| matches!(&status.sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
     engines.cancel_login(EngineId::Codex);
-    wait_until(|| {
-        matches!(
-            engines.status(EngineId::Codex).sign_in,
-            SignInState::SignedIn { .. }
-        )
+    codex_until(&engines, "the sign-in check after cancelling", |status| {
+        matches!(status.sign_in, SignInState::SignedIn { .. })
     })
     .await;
 }
@@ -68,7 +80,7 @@ app_server model1
     );
     let owner = engines.clone();
     let first = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-    wait_until(|| home.join("started").exists()).await;
+    marked(&home.join("started")).await;
     let owner = engines.clone();
     let (started, waiting) = tokio::sync::oneshot::channel();
     let second = tokio::spawn(async move {
@@ -77,7 +89,12 @@ app_server model1
     });
     waiting.await.unwrap();
     std::fs::write(home.join("release"), "").unwrap();
-    assert_eq!(first.await.unwrap(), second.await.unwrap());
+    assert_eq!(
+        within("the first refresh", LIVENESS, first).await.unwrap(),
+        within("the second refresh", LIVENESS, second)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         std::fs::read_to_string(home.join("calls"))
             .unwrap()
@@ -106,26 +123,28 @@ esac
     );
     let owner = engines.clone();
     let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-    wait_until(|| home.join("started").exists()).await;
+    marked(&home.join("started")).await;
     engines.logout(EngineId::Codex).unwrap();
-    wait_until(|| engines.status(EngineId::Codex).sign_in == SignInState::SignedOut).await;
+    codex_until(&engines, "the sign-out", |status| {
+        status.sign_in == SignInState::SignedOut
+    })
+    .await;
     std::fs::write(home.join("model"), "new-model2").unwrap();
     engines.login(EngineId::Codex).unwrap();
-    wait_until(|| {
-        engines.status(EngineId::Codex).sign_in == SignInState::SignedIn { account: None }
+    codex_until(&engines, "the new sign-in", |status| {
+        status.sign_in == SignInState::SignedIn { account: None }
     })
     .await;
     std::fs::write(home.join("release"), "").unwrap();
     assert!(
-        old.await.unwrap().is_empty(),
+        within("the old refresh", LIVENESS, old)
+            .await
+            .unwrap()
+            .is_empty(),
         "old context must not commit even though public account state is identical"
     );
-    wait_until(|| {
-        engines
-            .status(EngineId::Codex)
-            .models
-            .iter()
-            .any(|model| model.id == "new-model2")
+    codex_until(&engines, "the new account's models", |status| {
+        status.models.iter().any(|model| model.id == "new-model2")
     })
     .await;
     assert!(
@@ -150,7 +169,7 @@ esac
     );
     let old_binary = engines.binary(EngineId::Codex).unwrap();
     engines.login(EngineId::Codex).unwrap();
-    wait_until(|| home.join("started").exists()).await;
+    marked(&home.join("started")).await;
     let layout = Layout::new(directory.path());
     for version in ["2.0.0", "3.0.0"] {
         let next = layout
@@ -163,9 +182,9 @@ esac
     install::prune(&layout, EngineId::Codex).unwrap();
     assert!(old_binary.is_file());
     engines.cancel_login(EngineId::Codex);
-    wait_until(|| {
+    eventually("the old version to be pruned", LIVENESS, || {
         install::prune(&layout, EngineId::Codex).unwrap();
-        !old_binary.exists()
+        std::future::ready(!old_binary.exists())
     })
     .await;
 }
