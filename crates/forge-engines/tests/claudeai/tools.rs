@@ -1,4 +1,5 @@
 use super::*;
+use crate::claudeai::rules::Grammar;
 
 fn call(name: &str, input: Value) -> Call {
     Call {
@@ -355,6 +356,10 @@ async fn a_stop_ends_the_command_and_what_it_started() {
     reason = "test helper takes owned JSON literals"
 )]
 fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
+    project_rules_in(home, project, &permissions, Grammar::default())
+}
+
+fn project_rules_in(home: &Path, project: &Path, permissions: &Value, grammar: Grammar) -> Rules {
     let dir = project.join(".claude");
     std::fs::create_dir_all(&dir).expect("the settings dir");
     std::fs::write(
@@ -362,7 +367,7 @@ fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
         json!({ "permissions": permissions }).to_string(),
     )
     .expect("settings");
-    Rules::load(home, project)
+    Rules::load_for(home, project, grammar)
 }
 
 #[test]
@@ -391,10 +396,11 @@ fn a_compound_command_is_not_allowed_by_a_rule_for_its_first_part() {
 fn a_denied_command_is_refused_even_under_full_access_however_it_is_dressed() {
     let home = tempfile::tempdir().expect("a home");
     let project = tempfile::tempdir().expect("a project");
-    let rules = project_rules(
+    let rules = project_rules_in(
         home.path(),
         project.path(),
-        json!({ "deny": ["Bash(rm:*)"] }),
+        &json!({ "deny": ["Bash(rm:*)"] }),
+        Grammar::Posix,
     );
     for command in [
         " rm -rf /",

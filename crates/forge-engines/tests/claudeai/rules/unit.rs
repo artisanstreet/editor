@@ -10,6 +10,21 @@ fn call(name: &str, input: Value) -> Call {
 }
 
 fn rules(home: &Path, project: &Path, allow: &str, ask: &str, deny: &str) -> Rules {
+    rules_in(home, project, allow, ask, deny, Grammar::default())
+}
+
+fn posix_rules(home: &Path, project: &Path, allow: &str, ask: &str, deny: &str) -> Rules {
+    rules_in(home, project, allow, ask, deny, Grammar::Posix)
+}
+
+fn rules_in(
+    home: &Path,
+    project: &Path,
+    allow: &str,
+    ask: &str,
+    deny: &str,
+    grammar: Grammar,
+) -> Rules {
     let dir = project.join(".claude");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -24,7 +39,7 @@ fn rules(home: &Path, project: &Path, allow: &str, ask: &str, deny: &str) -> Rul
         .to_string(),
     )
     .unwrap();
-    Rules::load(home, project)
+    Rules::load_for(home, project, grammar)
 }
 
 #[test]
@@ -181,7 +196,7 @@ fn denied(rules: &Rules, command: &str) -> bool {
 fn a_deny_holds_however_the_command_is_dressed() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    let rules = rules(home.path(), project.path(), "[]", "[]", r#"["Bash(rm:*)"]"#);
+    let rules = posix_rules(home.path(), project.path(), "[]", "[]", r#"["Bash(rm:*)"]"#);
     for command in [
         "rm -rf x",
         "  rm -rf x",
@@ -223,7 +238,7 @@ fn a_deny_holds_however_the_command_is_dressed() {
 fn an_allow_vouches_only_for_a_line_it_covers_whole() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    let rules = rules(
+    let rules = posix_rules(
         home.path(),
         project.path(),
         r#"["Bash(npm run test:*)", "Bash(git status)", "Bash(git push *)"]"#,
