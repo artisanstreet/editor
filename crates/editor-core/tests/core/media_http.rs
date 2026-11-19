@@ -39,18 +39,19 @@ async fn serve(listener: tokio::net::TcpListener, accepted: Arc<AtomicUsize>) {
 #[test]
 fn consecutive_media_loads_share_one_connection() {
     let accepted = Arc::new(AtomicUsize::new(0));
-    let url = runtime().block_on(async {
+    let address = runtime().block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a local media server");
-        let url = format!(
-            "http://{}/image.png",
-            listener.local_addr().expect("address")
-        );
+        let address = listener.local_addr().expect("address");
         runtime().spawn(serve(listener, Arc::clone(&accepted)));
-        url
+        address
     });
-    let http = media_http::client_trusting_the_first_hop_for_tests();
+    let url = format!("http://{address}/image.png");
+    let http =
+        media_http::MediaHttpClient::new(media_http::AddressPolicy::PublicInternetAnd(vec![
+            address,
+        ]));
     for _ in 0..3 {
         let response = runtime().block_on(within(
             "the media response",

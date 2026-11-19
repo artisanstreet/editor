@@ -10,20 +10,43 @@ use tokio_util::task::AbortOnDropHandle;
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 
+#[derive(Debug)]
 pub struct MediaResponse {
     pub status: reqwest::StatusCode,
     pub body: Vec<u8>,
 }
 
-enum FirstHop {
-    Public,
-    #[cfg(feature = "test-support")]
-    Unchecked(reqwest::Client),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddressPolicy {
+    PublicInternet,
+    PublicInternetAnd(Vec<SocketAddr>),
 }
 
+impl AddressPolicy {
+    fn admits(&self, url: &url::Url) -> bool {
+        public_destination(url)
+            || match self {
+                Self::PublicInternet => false,
+                Self::PublicInternetAnd(endpoints) => {
+                    endpoint(url).is_some_and(|endpoint| endpoints.contains(&endpoint))
+                }
+            }
+    }
+}
+
+fn endpoint(url: &url::Url) -> Option<SocketAddr> {
+    let address = match url.host()? {
+        url::Host::Ipv4(address) => IpAddr::V4(address),
+        url::Host::Ipv6(address) => IpAddr::V6(address),
+        url::Host::Domain(_) => return None,
+    };
+    Some(SocketAddr::new(address, url.port_or_known_default()?))
+}
+
+#[derive(Debug)]
 pub struct MediaHttpClient {
-    public: reqwest::Client,
-    first_hop: FirstHop,
+    http: reqwest::Client,
+    policy: Arc<AddressPolicy>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -119,42 +142,29 @@ fn public_client() -> reqwest::Client {
         .expect("build public media HTTP client")
 }
 
-static SHARED: LazyLock<Arc<MediaHttpClient>> = LazyLock::new(|| {
-    Arc::new(MediaHttpClient {
-        public: public_client(),
-        first_hop: FirstHop::Public,
-    })
-});
+static SHARED: LazyLock<Arc<MediaHttpClient>> =
+    LazyLock::new(|| Arc::new(MediaHttpClient::new(AddressPolicy::PublicInternet)));
 
 pub fn client() -> Arc<MediaHttpClient> {
     Arc::clone(&SHARED)
 }
 
-#[cfg(feature = "test-support")]
-#[must_use]
-pub fn client_trusting_the_first_hop_for_tests() -> MediaHttpClient {
-    MediaHttpClient {
-        public: public_client(),
-        first_hop: FirstHop::Unchecked(
-            builder()
-                .build()
-                .expect("build the unchecked media HTTP client"),
-        ),
-    }
-}
-
 impl MediaHttpClient {
+    #[must_use]
+    pub fn new(policy: AddressPolicy) -> Self {
+        Self {
+            http: public_client(),
+            policy: Arc::new(policy),
+        }
+    }
+
     pub fn get(
         &self,
         url: &str,
         follow_redirects: bool,
     ) -> BoxFuture<'static, Result<MediaResponse, MediaFetchError>> {
-        let public = self.public.clone();
-        let first = match &self.first_hop {
-            FirstHop::Public => None,
-            #[cfg(feature = "test-support")]
-            FirstHop::Unchecked(client) => Some(client.clone()),
-        };
+        let client = self.http.clone();
+        let policy = Arc::clone(&self.policy);
         let requested = url.to_owned();
         let parsed = url::Url::parse(url);
         Box::pin(async move {
@@ -165,12 +175,11 @@ impl MediaHttpClient {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err(MediaFetchError::Scheme { url: requested });
             }
-            if first.is_none() && !public_destination(&url) {
+            if !policy.admits(&url) {
                 return Err(MediaFetchError::NotPublic { url: requested });
             }
             let task = AbortOnDropHandle::new(runtime().spawn(async move {
                 let mut url = url;
-                let mut client = first.unwrap_or_else(|| public.clone());
                 for _ in 0..=MAX_REDIRECTS {
                     let response = client.get(url.clone()).send().await.map_err(|source| {
                         MediaFetchError::Fetch {
@@ -188,8 +197,8 @@ impl MediaHttpClient {
                             })?;
                         return Ok(MediaResponse { status, body });
                     }
-                    url = next_hop(&url, response.headers()).map_err(MediaFetchError::Redirect)?;
-                    client = public.clone();
+                    url = next_hop(&url, response.headers(), &policy)
+                        .map_err(MediaFetchError::Redirect)?;
                 }
                 Err(MediaFetchError::Redirect(RedirectError::TooMany {
                     url: url.to_string(),
@@ -210,6 +219,7 @@ fn follows(status: reqwest::StatusCode) -> bool {
 fn next_hop(
     url: &url::Url,
     headers: &reqwest::header::HeaderMap,
+    policy: &AddressPolicy,
 ) -> Result<url::Url, RedirectError> {
     let location = headers
         .get(reqwest::header::LOCATION)
@@ -223,7 +233,7 @@ fn next_hop(
             url: url.to_string(),
             source,
         })?;
-    if !public_destination(&next) {
+    if !policy.admits(&next) {
         return Err(RedirectError::NotPublic {
             url: url.to_string(),
             to: next.to_string(),
