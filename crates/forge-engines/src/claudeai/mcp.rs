@@ -291,8 +291,8 @@ impl Image {
 }
 
 struct Warm {
-    config: String,
-    clients: Vec<Arc<Client>>,
+    context: String,
+    clients: Vec<(String, Arc<Client>)>,
     generation: u64,
 }
 
@@ -328,27 +328,14 @@ impl Servers {
                 true
             })
             .collect();
-        let config = fingerprint(&servers, cwd, sandbox);
-        let mut warm: HashMap<String, Arc<Client>> = HashMap::new();
-        if let Some(thread) = &thread {
-            let previous = lock(&WARM).remove(thread);
-            if let Some(previous) = previous {
-                if previous.config == config {
-                    for client in previous.clients {
-                        if client.transport.alive() {
-                            warm.insert(client.server.clone(), client);
-                        } else {
-                            tracing::info!(thread, server = %client.server, "an MCP server stopped since the last turn; starting it again");
-                        }
-                    }
-                } else {
-                    tracing::info!(
-                        thread,
-                        "the thread's MCP servers changed; the old ones shut down"
-                    );
-                }
-            }
-        }
+        let context = context_key(cwd, sandbox);
+        let keys: HashMap<&str, String> = servers
+            .iter()
+            .map(|server| (server.name.as_str(), server_key(server)))
+            .collect();
+        let mut warm = thread
+            .as_deref()
+            .map_or_else(HashMap::new, |thread| still_warm(thread, &context, &keys));
         let started = futures::future::join_all(
             servers
                 .iter()
@@ -386,8 +373,23 @@ impl Servers {
             let retired = keep_warm(
                 thread.clone(),
                 Warm {
-                    config,
-                    clients: connected.clients.clone(),
+                    context,
+                    clients: connected
+                        .clients
+                        .iter()
+                        .map(|client| {
+                            let key =
+                                keys.get(client.server.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        unreachable!(
+                                            "invariant: connected MCP server {} was asked for",
+                                            client.server
+                                        )
+                                    });
+                            (key, Arc::clone(client))
+                        })
+                        .collect(),
                     generation,
                 },
             );
@@ -586,17 +588,44 @@ fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
     }
 }
 
-fn fingerprint(servers: &[&McpServer], cwd: &Path, sandbox: &Sandbox) -> String {
+fn still_warm(
+    thread: &str,
+    context: &str,
+    keys: &HashMap<&str, String>,
+) -> HashMap<String, Arc<Client>> {
+    let mut warm = HashMap::new();
+    let Some(previous) = lock(&WARM).remove(thread) else {
+        return warm;
+    };
+    if previous.context != context {
+        tracing::info!(
+            thread,
+            "the thread's folder or sandbox changed; its MCP servers shut down"
+        );
+        return warm;
+    }
+    for (key, client) in previous.clients {
+        let unchanged = keys.get(client.server.as_str()) == Some(&key);
+        if unchanged && client.transport.alive() {
+            warm.insert(client.server.clone(), client);
+        } else if unchanged {
+            tracing::info!(thread, server = %client.server, "an MCP server stopped since the last turn; starting it again");
+        }
+    }
+    warm
+}
+
+fn context_key(cwd: &Path, sandbox: &Sandbox) -> String {
     let mut hash = Sha256::new();
     hash.update(cwd.to_string_lossy().as_bytes());
     hash.update([u8::from(sandbox.confined())]);
-    for server in servers {
-        hash.update([0]);
-        hash.update(
-            serde_json::to_vec(server).expect("invariant: an MCP server config serializes"),
-        );
-    }
     hex::encode(hash.finalize())
+}
+
+fn server_key(server: &McpServer) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(server).expect("invariant: an MCP server config serializes"),
+    ))
 }
 
 async fn connect_client(

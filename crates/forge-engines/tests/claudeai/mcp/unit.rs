@@ -568,6 +568,35 @@ async fn a_thread_keeps_its_servers_between_turns() {
 }
 
 #[tokio::test]
+async fn a_new_gateway_address_for_the_next_turn_keeps_the_other_servers_warm() {
+    let dir = tempfile::tempdir().expect("a dir");
+    let log = dir.path().join("log");
+    let gateway = |token: &str| fake_stdio("artisan", &[("FAKE_TAG", token)]);
+    let local = fake_stdio("local", &[("FAKE_LOG", &log.to_string_lossy())]);
+    for token in ["first-run", "second-run"] {
+        drop(
+            for_thread(
+                "thread-gateway",
+                Servers::connect(
+                    &[local.clone(), gateway(token)],
+                    Path::new("."),
+                    &Sandbox::Open,
+                ),
+            )
+            .await,
+        );
+    }
+    let starts = log_lines(&log)
+        .iter()
+        .filter(|line| *line == "start")
+        .count();
+    assert_eq!(
+        starts, 1,
+        "a run's fresh gateway address restarted the thread's other MCP servers"
+    );
+}
+
+#[tokio::test]
 async fn only_the_most_recently_used_threads_keep_servers_warm() {
     let config = vec![fake_stdio("capped", &[])];
     let threads: Vec<String> = (0..MAX_WARM_THREADS + 4)
