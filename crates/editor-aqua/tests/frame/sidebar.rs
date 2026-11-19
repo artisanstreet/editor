@@ -10,7 +10,7 @@ fn narrow_windows_force_collapse_and_restore_the_preferred_open_state() {
     assert!(sidebar.open());
     sidebar.fit(900.0, now, true);
     assert!(!sidebar.open());
-    assert_eq!(sidebar.width(now), COLLAPSED_WIDTH);
+    test_support::assert_near!(sidebar.width(now), COLLAPSED_WIDTH);
     (sidebar.emit())(Event::Toggle);
     sidebar.take_events(now, true);
     assert!(!sidebar.open());
@@ -18,13 +18,13 @@ fn narrow_windows_force_collapse_and_restore_the_preferred_open_state() {
     assert!(!sidebar.open());
     sidebar.fit(1000.0, now, true);
     assert!(sidebar.open());
-    assert_eq!(sidebar.width(now), OPEN_WIDTH);
+    test_support::assert_near!(sidebar.width(now), OPEN_WIDTH);
     (sidebar.emit())(Event::Toggle);
     sidebar.take_events(now, true);
     sidebar.fit(720.0, now, true);
     sidebar.fit(1200.0, now, true);
     assert!(!sidebar.open());
-    assert_eq!(sidebar.width(now), COLLAPSED_WIDTH);
+    test_support::assert_near!(sidebar.width(now), COLLAPSED_WIDTH);
 }
 
 #[test]
@@ -41,18 +41,18 @@ fn responsive_collapse_keeps_room_for_the_thread_during_interrupted_motion() {
     let interrupted_width = sidebar.width(halfway);
     sidebar.fit(1200.0, halfway, false);
     assert!(sidebar.open());
-    assert_eq!(sidebar.width(halfway), interrupted_width);
+    test_support::assert_near!(sidebar.width(halfway), interrupted_width);
     sidebar.fit(720.0, halfway + Duration::from_millis(10), false);
     assert!(!sidebar.open());
     assert!(720.0 - sidebar.width(halfway) - 12.0 >= 600.0);
     let settled = now + Duration::from_secs(2);
     sidebar.tick(settled, false);
-    assert_eq!(sidebar.width(settled), COLLAPSED_WIDTH);
+    test_support::assert_near!(sidebar.width(settled), COLLAPSED_WIDTH);
     sidebar.fit(1200.0, settled, true);
-    assert_eq!(sidebar.width(settled), OPEN_WIDTH);
+    test_support::assert_near!(sidebar.width(settled), OPEN_WIDTH);
     assert!(!sidebar.animating());
     sidebar.fit(720.0, settled, false);
     sidebar.fit(720.0, settled, true);
-    assert_eq!(sidebar.width(settled), COLLAPSED_WIDTH);
+    test_support::assert_near!(sidebar.width(settled), COLLAPSED_WIDTH);
     assert!(!sidebar.animating());
 }

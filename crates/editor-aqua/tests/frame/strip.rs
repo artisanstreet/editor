@@ -85,7 +85,7 @@ fn the_outline_chevron_follows_the_title_without_squeezing_the_labels() {
     };
     for label in ["artisanstreet", "Open PR list"] {
         assert!(width(&plain, label) > 0.0);
-        assert_eq!(width(&plain, label), width(&outlined, label), "{label}");
+        test_support::assert_near!(width(&plain, label), width(&outlined, label), "{label}");
     }
     let title_right = outlined
         .labels

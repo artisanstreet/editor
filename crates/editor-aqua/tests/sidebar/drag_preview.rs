@@ -95,8 +95,8 @@ fn preview_tracks_offset_without_blocking_hit_testing_and_closes_on_drag_end() {
     );
     app.build_frame().unwrap();
     let bounds = app.tree().visual_rect(preview_root).unwrap();
-    assert_eq!(bounds.x, -35.0);
-    assert_eq!(bounds.y, -15.0);
+    test_support::assert_near!(bounds.x, -35.0);
+    test_support::assert_near!(bounds.y, -15.0);
     app.build_frame().unwrap();
     assert_eq!(app.tree().visual_rect(preview_root).unwrap(), bounds);
     assert!(!preview.sync(&mut app, Some(instance), None).unwrap());

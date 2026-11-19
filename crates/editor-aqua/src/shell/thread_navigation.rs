@@ -106,7 +106,7 @@ impl LatestPresence {
         } else {
             (0.0, POP_OUT)
         };
-        if self.shown.target() != target {
+        if self.shown.target().total_cmp(&target).is_ne() {
             self.shown = self.shown.retarget(target, now, transition, reduced_motion);
         }
     }

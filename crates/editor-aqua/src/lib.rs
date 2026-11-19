@@ -63,6 +63,7 @@ pub use editor_core as core;
 pub mod frame;
 pub use editor_inspector as inspector;
 mod logging;
+mod measure;
 pub use editor_marketplace as marketplace;
 #[cfg(feature = "qualification")]
 pub mod qualification;

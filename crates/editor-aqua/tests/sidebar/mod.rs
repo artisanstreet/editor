@@ -143,12 +143,12 @@ fn history_motion_runs_to_its_end_and_reports_one_final_rebuild() {
     assert!(sidebar.advance_motion(start + Duration::from_millis(100), false));
     assert!(sidebar.history_fraction > 0.0 && sidebar.history_fraction < 1.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(2), false));
-    assert_eq!(sidebar.history_fraction, 1.0);
+    test_support::assert_near!(sidebar.history_fraction, 1.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(3), false));
     assert!(!sidebar.advance_motion(start + Duration::from_secs(4), false));
     sidebar.toggle_history(&mut core);
     assert!(sidebar.advance_motion(start + Duration::from_secs(10), true));
-    assert_eq!(sidebar.history_fraction, 0.0);
+    test_support::assert_near!(sidebar.history_fraction, 0.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(11), true));
     assert!(!sidebar.advance_motion(start + Duration::from_secs(12), true));
     assert!(!sidebar.history_visible());

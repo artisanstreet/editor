@@ -43,13 +43,13 @@ fn the_trigger_stays_lit_while_open_and_entries_unlight_on_close() {
     menu.apply(Event::Hover(Spot::Settings, true), now, false);
     let now = settled(&mut menu, now);
     assert!(menu.highlight(Spot::Trigger).lit());
-    assert_eq!(menu.highlight(Spot::Settings).opacity(now), 1.0);
-    assert_eq!(menu.highlight(Spot::Settings).scale(now), 1.0);
+    test_support::assert_near!(menu.highlight(Spot::Settings).opacity(now), 1.0);
+    test_support::assert_near!(menu.highlight(Spot::Settings).scale(now), 1.0);
     menu.apply(Event::Dismissed, now, false);
     let now = settled(&mut menu, now);
     assert!(!menu.highlight(Spot::Trigger).lit());
-    assert_eq!(menu.highlight(Spot::Settings).opacity(now), 0.0);
-    assert_eq!(menu.highlight(Spot::Settings).scale(now), REST_SCALE);
+    test_support::assert_near!(menu.highlight(Spot::Settings).opacity(now), 0.0);
+    test_support::assert_near!(menu.highlight(Spot::Settings).scale(now), REST_SCALE);
 }
 
 #[test]
@@ -69,5 +69,5 @@ fn reduced_motion_jumps_straight_to_the_end_state() {
     menu.apply(Event::Toggle, now, true);
     menu.apply(Event::Hover(Spot::Theme, true), now, true);
     assert!(!menu.animating());
-    assert_eq!(menu.highlight(Spot::Theme).opacity(now), 1.0);
+    test_support::assert_near!(menu.highlight(Spot::Theme).opacity(now), 1.0);
 }

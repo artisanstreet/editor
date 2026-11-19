@@ -76,7 +76,7 @@ fn the_open_drawer_runs_the_full_height_of_the_card_over_the_composer() {
     assert_eq!((clip.x, clip.y, clip.bottom()), (0.0, 0.0, HEIGHT));
     let sheet = sheet(tree);
     assert!(sheet.x < 0.0, "the sheet tucks under the card's left edge");
-    assert_eq!(sheet.right(), PANEL);
+    test_support::assert_near!(sheet.right(), PANEL);
     assert_eq!((sheet.y, sheet.bottom()), (0.0, HEIGHT));
     let composer = tree.rect(keyed(tree, "composer")).unwrap();
     let probe = Point::new(PANEL / 2.0, composer.y + composer.h / 2.0);

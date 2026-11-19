@@ -83,26 +83,27 @@ fn grid(box_width: f32, box_height: f32, params: Params) -> (u32, u32) {
         .min(resolution / sampled.0)
         .min(resolution * 1.5 / sampled.1);
     (
-        (sampled.0 * reduction).round().max(1.0) as u32,
-        (sampled.1 * reduction).round().max(1.0) as u32,
+        crate::measure::saturate((sampled.0 * reduction).round().max(1.0)),
+        crate::measure::saturate((sampled.1 * reduction).round().max(1.0)),
     )
 }
 
 #[must_use]
 pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Params) -> Mask {
     let (width, height) = grid(box_width, box_height, params);
-    let scale = (width as f32 / source.width() as f32).min(height as f32 / source.height() as f32);
+    let scale = (crate::measure::exact(width) / crate::measure::exact(source.width()))
+        .min(crate::measure::exact(height) / crate::measure::exact(source.height()));
     let drawn = (
-        source.width() as f32 * scale,
-        source.height() as f32 * scale,
+        crate::measure::exact(source.width()) * scale,
+        crate::measure::exact(source.height()) * scale,
     );
-    let top = height as f32 - drawn.1;
+    let top = crate::measure::exact(height) - drawn.1;
     let fade_right = params.fade_right.clamp(0.0, 1.0);
     Mask::from_fn(width, height, |x, y| {
         let Some([r, g, b, a]) = area(
             source,
-            (x as f32) / scale,
-            (y as f32 - top) / scale,
+            crate::measure::exact(x) / scale,
+            (crate::measure::exact(y) - top) / scale,
             1.0 / scale,
         ) else {
             return false;
@@ -110,7 +111,9 @@ pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Param
         let luminance = b.mul_add(0.0722, g.mul_add(0.7152, r * 0.2126)) / 255.0;
         let threshold = (f32::from(THRESHOLDS[((y % 4) * 4 + x % 4) as usize]) + 0.5) / 16.0;
         let fade = if fade_right > 0.0 {
-            1.0 - ((x as f32 / width as f32 - (1.0 - fade_right)) / fade_right).max(0.0)
+            1.0 - ((crate::measure::exact(x) / crate::measure::exact(width) - (1.0 - fade_right))
+                / fade_right)
+                .max(0.0)
         } else {
             1.0
         };
@@ -124,15 +127,15 @@ pub fn dither(source: Source<'_>, box_width: f32, box_height: f32, params: Param
 
 #[must_use]
 pub fn paint(mask: &Mask, paint: Paint) -> RgbaImage {
-    let width = mask.width() as f32;
+    let width = crate::measure::exact(mask.width());
     RgbaImage::from_fn(mask.width(), mask.height(), |x, y| {
         let reveal = if paint.fade_in_left > 0.0 {
-            ((x as f32 + 0.5) / width / paint.fade_in_left).min(1.0)
+            ((crate::measure::exact(x) + 0.5) / width / paint.fade_in_left).min(1.0)
         } else {
             1.0
         };
         let alpha = if mask.lit(x, y) {
-            (255.0 * paint.opacity * reveal).round() as u8
+            crate::measure::channel((255.0 * paint.opacity * reveal).round())
         } else {
             0
         };
@@ -145,19 +148,25 @@ fn area(source: Source<'_>, left: f32, top: f32, span: f32) -> Option<[f32; 4]> 
     let bottom = top + span;
     if right <= 0.0
         || bottom <= 0.0
-        || left >= source.width() as f32
-        || top >= source.height() as f32
+        || left >= crate::measure::exact(source.width())
+        || top >= crate::measure::exact(source.height())
     {
         return None;
     }
-    let columns = (left.max(0.0).floor() as u32)..(right.min(source.width() as f32).ceil() as u32);
-    let rows = (top.max(0.0).floor() as u32)..(bottom.min(source.height() as f32).ceil() as u32);
+    let columns = crate::measure::saturate(left.max(0.0).floor())
+        ..crate::measure::saturate(right.min(crate::measure::exact(source.width())).ceil());
+    let rows = crate::measure::saturate(top.max(0.0).floor())
+        ..crate::measure::saturate(bottom.min(crate::measure::exact(source.height())).ceil());
     let mut total = [0.0_f32; 4];
     let mut weight = 0.0_f32;
     for y in rows {
-        let cover_y = (bottom.min(y as f32 + 1.0) - top.max(y as f32)).max(0.0);
+        let cover_y = (bottom.min(crate::measure::exact(y) + 1.0)
+            - top.max(crate::measure::exact(y)))
+        .max(0.0);
         for x in columns.clone() {
-            let cover = cover_y * (right.min(x as f32 + 1.0) - left.max(x as f32)).max(0.0);
+            let cover = cover_y
+                * (right.min(crate::measure::exact(x) + 1.0) - left.max(crate::measure::exact(x)))
+                    .max(0.0);
             let pixel = source.image.get_pixel(x, y);
             for (sum, channel) in total.iter_mut().zip(pixel.0) {
                 *sum = f32::from(channel).mul_add(cover, *sum);

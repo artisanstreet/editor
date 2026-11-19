@@ -6,7 +6,7 @@ fn a_fade_eases_toward_its_target_and_settles_exactly() {
     let start = Instant::now();
     let (mut fade, mut moving) = EdgeFade::default().step(1.0, false, start);
     assert!(moving);
-    assert_eq!(fade.shown(), 0.0);
+    test_support::assert_near!(fade.shown(), 0.0);
     let mut now = start;
     let mut previous = 0.0;
     for _ in 0..200 {
@@ -19,7 +19,7 @@ fn a_fade_eases_toward_its_target_and_settles_exactly() {
         }
     }
     assert!(!moving);
-    assert_eq!(fade.shown(), 1.0);
+    test_support::assert_near!(fade.shown(), 1.0);
 }
 
 #[test]
@@ -38,7 +38,7 @@ fn a_fade_can_reverse_midway_without_jumping() {
 fn reduced_motion_jumps_straight_to_the_target() {
     let (fade, moving) = EdgeFade::default().step(0.75, true, Instant::now());
     assert!(!moving);
-    assert_eq!(fade.shown(), 0.75);
+    test_support::assert_near!(fade.shown(), 0.75);
 }
 
 #[test]
@@ -90,10 +90,10 @@ fn an_unscrolled_entrance_reveals_edges_from_clear() {
                 );
                 alphas.push(app.tree().paint(node).unwrap().gpui_shadows[0].color.a);
             }
-            assert_eq!(alphas[0], alphas[1]);
+            test_support::assert_near!(alphas[0], alphas[1]);
             match millis {
-                0 => assert_eq!(alphas[0], 0.0),
-                1_000 => assert_eq!(alphas[0], 1.0),
+                0 => test_support::assert_near!(alphas[0], 0.0),
+                1_000 => test_support::assert_near!(alphas[0], 1.0),
                 _ => assert!(alphas[0] > previous && alphas[0] < 1.0),
             }
             previous = alphas[0];
@@ -112,7 +112,7 @@ fn an_unscrolled_entrance_reveals_edges_from_clear() {
             true,
             start
         ));
-        assert_eq!(app.tree().paint(node).unwrap().gpui_shadows[0].color.a, 1.0);
+        test_support::assert_near!(app.tree().paint(node).unwrap().gpui_shadows[0].color.a, 1.0);
     }
 }
 
@@ -146,8 +146,8 @@ fn restored_edges_are_immediate_and_later_scroll_changes_still_animate() {
     app.build_frame().unwrap();
     let top = keyed(&app, "top").unwrap();
     let bottom = keyed(&app, "bottom").unwrap();
-    assert_eq!(app.tree().paint(top).unwrap().gpui_shadows[0].color.a, 1.0);
-    assert_eq!(
+    test_support::assert_near!(app.tree().paint(top).unwrap().gpui_shadows[0].color.a, 1.0);
+    test_support::assert_near!(
         app.tree().paint(bottom).unwrap().gpui_shadows[0].color.a,
         0.5
     );

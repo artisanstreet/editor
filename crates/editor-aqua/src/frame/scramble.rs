@@ -62,18 +62,21 @@ fn glyph_at(index: usize, tick: u32) -> char {
 
 #[must_use]
 fn cell_char(cell: Cell, index: usize, elapsed_ms: f64) -> Option<char> {
-    let local = (index as f64).mul_add(-STAGGER_MS, elapsed_ms);
+    let local = crate::measure::index(index).mul_add(-STAGGER_MS, elapsed_ms);
     match local {
         local if local < 0.0 => cell.from,
         local if local >= SETTLE_MS => cell.to,
-        local => Some(glyph_at(index, (local / TICK_MS).floor() as u32)),
+        local => Some(glyph_at(
+            index,
+            crate::measure::saturate_tick((local / TICK_MS).floor()),
+        )),
     }
 }
 
 #[must_use]
 pub fn total_ms(cells: &[Vec<Cell>]) -> f64 {
     let count = cells.iter().map(Vec::len).sum::<usize>();
-    (count.saturating_sub(1) as f64).mul_add(STAGGER_MS, SETTLE_MS)
+    crate::measure::index(count.saturating_sub(1)).mul_add(STAGGER_MS, SETTLE_MS)
 }
 
 #[must_use]

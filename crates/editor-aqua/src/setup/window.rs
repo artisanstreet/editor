@@ -191,11 +191,11 @@ impl Application for SetupApplication {
         if let Some(window) = ctx.window_state(id) {
             let ui = self.ui.ui_mut();
             ui.set_viewport(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
-                window.scale_factor as f32,
+                crate::measure::narrow(window.inner_size.width),
+                crate::measure::narrow(window.inner_size.height),
+                crate::measure::narrow(window.scale_factor),
             );
-            set_window_scale(ui, window.scale_factor as f32);
+            set_window_scale(ui, crate::measure::narrow(window.scale_factor));
         }
         ctx.bind_mailbox(id, &self.work);
         if let Some(effect) = self.setup.started() {
@@ -266,7 +266,7 @@ impl Application for SetupApplication {
     fn on_window_event(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, event: &WindowEvent) {
         self.ui.on_window_event(ctx, id, event);
         if let WindowEvent::ScaleChanged(_, scale) = event {
-            set_window_scale(self.ui.ui_mut(), *scale as f32);
+            set_window_scale(self.ui.ui_mut(), crate::measure::narrow(*scale));
             self.rebuild(ctx, id);
         }
     }

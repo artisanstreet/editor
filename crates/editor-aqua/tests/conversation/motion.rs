@@ -42,13 +42,13 @@ fn compaction_completes_entrance_and_plays_checkpoint_after_settling() {
     let mut motion = CompactionMotion::first_seen(CompactionPhase::Running, true, now);
     let (start, active) = motion.advance(CompactionPhase::Running, true, now);
     assert!(active);
-    assert_eq!(start.open, 0.0);
+    test_support::assert_near!(start.open, 0.0);
     let (rest, _) = motion.advance(
         CompactionPhase::Running,
         true,
         now + Duration::from_millis(600),
     );
-    assert_eq!(rest.open, 1.0);
+    test_support::assert_near!(rest.open, 1.0);
     let (swap, _) = motion.advance(
         CompactionPhase::Done,
         true,
@@ -332,7 +332,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
     app.build_frame().unwrap();
     assert!(following_tail(&app));
     let root = app.tree().root().unwrap();
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 300.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 300.0);
     assert!(!apply_step(&mut app, Step::FollowTail, 0.0));
 
     assert_eq!(
@@ -355,7 +355,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
         0.0
     ));
     app.build_frame().unwrap();
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 120.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 120.0);
     assert!(!following_tail(&app));
 
     assert_eq!(
@@ -364,7 +364,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
     );
     app.build_frame().unwrap();
     assert!(following_tail(&app));
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 300.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 300.0);
 
     assert!(pause_tail(&mut app));
     assert_eq!(

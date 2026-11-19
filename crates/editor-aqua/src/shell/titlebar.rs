@@ -189,7 +189,7 @@ impl Titlebar {
     }
 
     fn controls(&self, theme: ArtisanTheme, window: &ObservedWindowState) -> Element {
-        let stroke = (1.0 / window.scale_factor) as f32;
+        let stroke = crate::measure::narrow(1.0 / window.scale_factor);
         UiBox::new()
             .layout("row")
             .height(Length::Pct(100.0))

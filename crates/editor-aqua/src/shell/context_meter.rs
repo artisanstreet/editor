@@ -15,7 +15,7 @@ impl ContextReading {
     }
 
     pub(crate) fn percent(&self) -> f64 {
-        (self.context_tokens as f64 / self.window_tokens as f64 * 100.0).clamp(0.0, 100.0)
+        (crate::measure::ratio(self.context_tokens, self.window_tokens) * 100.0).clamp(0.0, 100.0)
     }
 
     pub(crate) fn percent_sentence(&self) -> String {

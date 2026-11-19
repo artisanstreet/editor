@@ -581,7 +581,7 @@ impl RootViews {
                     }
                 })
             }),
-            scale: window.scale_factor as f32,
+            scale: crate::measure::narrow(window.scale_factor),
         }
     }
 }

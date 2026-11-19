@@ -248,7 +248,7 @@ impl SectionViews for RootViews {
         let Some(workspace) = shell.entry.workspace_mut() else {
             return false;
         };
-        let width = (window.inner_size.width as f32
+        let width = (crate::measure::narrow(window.inner_size.width)
             - self.sidebar.width(std::time::Instant::now())
             - crate::frame::view::SHEET_PADDING)
             .max(0.0);
@@ -308,7 +308,7 @@ impl SectionViews for RootViews {
         let now = std::time::Instant::now();
         let reduced = Self::reduced(ui);
         let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
-            .unwrap_or((window.inner_size.height as f32 - 260.0).max(0.0));
+            .unwrap_or((crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
         let tree = workspace
             .sidebar
             .host
@@ -355,7 +355,7 @@ impl SectionViews for RootViews {
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
-            .unwrap_or((window.inner_size.height as f32 - 260.0).max(0.0));
+            .unwrap_or((crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
         let element = crate::frame::inbox::view(
             &workspace.sidebar,
             &shell.core,
@@ -391,8 +391,8 @@ impl SectionViews for RootViews {
             && self.color_menu.is_none()
             && self.sidebar_drag.is_none();
         let viewport = layout::Size {
-            width: window.inner_size.width as f32,
-            height: window.inner_size.height as f32,
+            width: crate::measure::narrow(window.inner_size.width),
+            height: crate::measure::narrow(window.inner_size.height),
         };
         let card_width = (viewport.width
             - self.sidebar.width(shell.core.clock().now())

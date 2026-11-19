@@ -182,8 +182,8 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             layer,
         })
         .collect::<Vec<_>>();
-    for (inset, background) in layers.into_iter().enumerate() {
-        let inset = inset as f32;
+    for (inset, background) in (0_u8..).zip(layers) {
+        let inset = f32::from(inset);
         let (commands, body) = outline::split(local, tab, inset);
         let gradient_top = tab
             .filter(|tab| {

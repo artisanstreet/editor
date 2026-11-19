@@ -56,14 +56,17 @@ pub fn cells(width: f32, height: f32) -> Vec<Cell> {
     if width <= 0.0 || height <= 0.0 {
         return Vec::new();
     }
-    let rows = (height / TILE.1).ceil() as u32;
-    let columns = (width / TILE.0).ceil() as u32;
+    let rows = crate::measure::saturate((height / TILE.1).ceil());
+    let columns = crate::measure::saturate((width / TILE.0).ceil());
     (0..rows)
         .flat_map(|row| (0..columns).map(move |column| (column, row)))
         .flat_map(|(column, row)| {
-            CELLS
-                .iter()
-                .map(move |(x, y)| (column as f32 * TILE.0 + x, row as f32 * TILE.1 + y))
+            CELLS.iter().map(move |(x, y)| {
+                (
+                    crate::measure::exact(column) * TILE.0 + x,
+                    crate::measure::exact(row) * TILE.1 + y,
+                )
+            })
         })
         .filter_map(|(x, y)| {
             let center = ((x + CELL.0 / 2.0) / width, (y + CELL.1 / 2.0) / height);

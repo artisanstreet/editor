@@ -6,19 +6,19 @@ use std::time::{Duration, Instant};
 fn css_ease_curve_matches_known_points() {
     let ease = CubicBezier::new(0.25, 0.1, 0.25, 1.0);
     assert!((ease.sample(0.5) - 0.802_403).abs() < 1e-4);
-    assert_eq!(ease.sample(0.0), 0.0);
-    assert_eq!(ease.sample(1.0), 1.0);
+    test_support::assert_near!(ease.sample(0.0), 0.0);
+    test_support::assert_near!(ease.sample(1.0), 1.0);
 }
 
 #[test]
 fn collapsing_runs_from_open_to_collapsed_and_settles() {
     let start = Instant::now();
     let glide = Glide::Resting(OPEN_WIDTH).retarget(COLLAPSED_WIDTH, start, RESIZE, false);
-    assert_eq!(glide.value(start, RESIZE), OPEN_WIDTH);
+    test_support::assert_near!(glide.value(start, RESIZE), OPEN_WIDTH);
     let middle = glide.value(start + RESIZE.duration / 2, RESIZE);
     assert!(middle < OPEN_WIDTH && middle > COLLAPSED_WIDTH);
     let end = start + RESIZE.duration;
-    assert_eq!(glide.value(end, RESIZE), COLLAPSED_WIDTH);
+    test_support::assert_near!(glide.value(end, RESIZE), COLLAPSED_WIDTH);
     assert_eq!(glide.settle(end), Glide::Resting(COLLAPSED_WIDTH));
 }
 
@@ -29,7 +29,7 @@ fn reversing_mid_flight_returns_from_where_it_is_in_less_time() {
     let turn = start + Duration::from_millis(30);
     let at_turn = closing.value(turn, RESIZE);
     let opening = closing.retarget(OPEN_WIDTH, turn, RESIZE, false);
-    assert_eq!(opening.value(turn, RESIZE), at_turn);
+    test_support::assert_near!(opening.value(turn, RESIZE), at_turn);
     assert!(opening.settle(turn + Duration::from_millis(1)).running());
     assert_eq!(
         opening.settle(turn + Duration::from_millis(150)),

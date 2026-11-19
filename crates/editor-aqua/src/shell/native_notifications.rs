@@ -136,10 +136,8 @@ impl NativeNotifications {
             } else {
                 theme.colors.red.solid
             };
-            let count = attention
-                .waiting
-                .saturating_add(attention.stopped)
-                .min(u32::MAX as usize) as u32;
+            let count = u32::try_from(attention.waiting.saturating_add(attention.stopped))
+                .unwrap_or(u32::MAX);
             ctx.request_window(WindowRequest::SetBadge(
                 window,
                 (count > 0).then(|| TaskbarBadge {

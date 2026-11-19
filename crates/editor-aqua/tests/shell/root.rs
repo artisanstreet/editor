@@ -89,7 +89,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
         resources.ui.build_frame().unwrap();
         let transcript_opacity =
             |ui: &mut aqua::UiApp| text_opacity(ui, "Loaded transcript message");
-        assert_eq!(
+        test_support::assert_near!(
             transcript_opacity(&mut resources.ui),
             0.0,
             "landing must initially hide loaded rows"
@@ -134,7 +134,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
         let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
         resources.ui.refresh(vec![element]).unwrap();
         resources.ui.build_frame().unwrap();
-        assert_eq!(
+        test_support::assert_near!(
             transcript_opacity(&mut resources.ui),
             1.0,
             "the next rebuilt scene must expose loaded rows"
@@ -144,7 +144,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             "visible transcripts must still allow ordinary subtree refreshes"
         );
         resources.ui.build_frame().unwrap();
-        assert_eq!(
+        test_support::assert_near!(
             transcript_opacity(&mut resources.ui),
             1.0,
             "later subtree refreshes must preserve visible scene text"
@@ -170,12 +170,16 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             resized.inner_size.width = width;
             resized.inner_size.height = height;
             assert!(root.resize_needs_rebuild(&shell, &resized));
-            resources.ui.set_viewport(width as f32, height as f32, 1.0);
+            resources.ui.set_viewport(
+                test_support::float::narrow(width),
+                test_support::float::narrow(height),
+                1.0,
+            );
             let element = root.build(&mut shell, &mut resources.ui, &resized).unwrap();
             resources.ui.refresh(vec![element]).unwrap();
             resources.ui.build_frame().unwrap();
             assert!(!root.resize_needs_rebuild(&shell, &resized));
-            assert_eq!(transcript_opacity(&mut resources.ui), 1.0);
+            test_support::assert_near!(transcript_opacity(&mut resources.ui), 1.0);
         }
     }
 }
@@ -462,7 +466,7 @@ fn ctrl_b_collapses_the_rendered_sidebar() {
         aqua_core::Modifiers::CONTROL,
     );
     rebuild(&mut root, &mut shell, &mut resources.ui, &window);
-    assert_eq!(keyed(&resources.ui, sidebar).unwrap().w, open);
+    test_support::assert_near!(keyed(&resources.ui, sidebar).unwrap().w, open);
 }
 
 #[test]

@@ -116,7 +116,8 @@ fn find_folded(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
 pub fn estimated_row(rows: &[usize], depth: (u32, u32)) -> Option<usize> {
     let last = rows.len().checked_sub(1)?;
     let share = f64::from(depth.0) / f64::from(depth.1.max(1));
-    let index = (share.clamp(0.0, 1.0) * last as f64).round() as usize;
+    let index =
+        crate::measure::saturate_row((share.clamp(0.0, 1.0) * crate::measure::index(last)).round());
     rows.get(index.min(last)).copied()
 }
 

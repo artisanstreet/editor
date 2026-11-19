@@ -71,9 +71,9 @@ impl WordmarkLoader {
                 let slice_width = band / 9.0;
                 let leading = (bounds.w + band).mul_add(progress, -band);
                 let mut items = vec![vector(muted.fade(opacity).to_reference_paint())];
-                for slice in 0..9 {
-                    let left = slice_width.mul_add(slice as f32, leading);
-                    let position = (slice as f32 + 0.5) / 9.0;
+                for slice in 0_u8..9 {
+                    let left = slice_width.mul_add(f32::from(slice), leading);
+                    let position = (f32::from(slice) + 0.5) / 9.0;
                     let strength = (position * std::f32::consts::TAU).cos().mul_add(-0.5, 0.5);
                     items.push(DisplayItem::PushGpuiContentMask {
                         bounds: Rect {

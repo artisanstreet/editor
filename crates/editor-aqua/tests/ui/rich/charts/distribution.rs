@@ -8,11 +8,11 @@ fn equal_model_retains_threshold_and_hover_changed_model_resets_both() {
     chart.set_threshold(3.0);
     chart.hover(0.5, 0.5);
     chart.replace(source);
-    assert_eq!(chart.threshold(), 3.0);
+    test_support::assert_near!(chart.threshold(), 3.0);
     assert_eq!(chart.selected(), Some((0.5, 0.5)));
     assert_eq!(chart.generation(), 0);
     chart.replace(r#"{"mode":"histogram","bins":4,"series":[{"values":[10,20,30,40]}]}"#);
-    assert_eq!(chart.threshold(), 25.0);
+    test_support::assert_near!(chart.threshold(), 25.0);
     assert_eq!(chart.selected(), None);
     assert_eq!(chart.generation(), 1);
 }

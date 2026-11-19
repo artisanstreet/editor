@@ -28,7 +28,11 @@ fn shown_with_motion(setup: &Setup, reduced_motion: bool) -> (UiApp, Rc<RefCell<
         },
     );
     app.mount(|_| element).expect("mount setup");
-    app.set_viewport(view::WINDOW.0 as f32, view::WINDOW.1 as f32, 1.0);
+    app.set_viewport(
+        test_support::float::narrow(view::WINDOW.0),
+        test_support::float::narrow(view::WINDOW.1),
+        1.0,
+    );
     app.build_frame().expect("lay out setup");
     (app, heard)
 }
@@ -79,7 +83,7 @@ fn with_three_distros() -> Setup {
 
 fn card_fits(app: &UiApp) -> bool {
     let card = rect(app, "artisan-setup-card");
-    card.y >= 0.0 && card.y + card.h <= view::WINDOW.1 as f32
+    card.y >= 0.0 && f64::from(card.y + card.h) <= view::WINDOW.1
 }
 
 #[test]

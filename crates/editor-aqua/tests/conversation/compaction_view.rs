@@ -161,7 +161,7 @@ fn a_rebuilt_model_switch_label_never_paints_a_frame_without_its_shimmer() {
             "the frame painted right after a rebuild still shimmers"
         );
         assert!(
-            (phases[0] - (now / 2.0) as f32).abs() < 0.001,
+            (f64::from(phases[0]) - now / 2.0).abs() < 0.001,
             "the sweep continues across rebuilds instead of restarting: {phases:?} at {now}"
         );
     }

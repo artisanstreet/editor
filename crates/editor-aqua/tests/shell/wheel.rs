@@ -106,7 +106,7 @@ fn a_wheel_notch_up_from_the_tail_leaves_the_transcript_where_the_glide_ends() {
     assert!(enter_tail(&mut app));
     app.build_frame().unwrap();
     assert!(following_tail(&app));
-    assert_eq!(offset(&app), 300.0);
+    test_support::assert_near!(offset(&app), 300.0);
 
     assert!(pause_tail(&mut app));
     assert_eq!(
@@ -150,7 +150,7 @@ fn frames_after_the_glide_never_snap_the_transcript_back_to_the_tail() {
         assert_eq!(step, Step::Idle);
         apply_step(&mut app, step, 0.0);
         app.build_frame().unwrap();
-        assert_eq!(offset(&app), rested);
+        test_support::assert_near!(offset(&app), rested);
     }
 }
 
@@ -167,7 +167,7 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
         0.0
     ));
     app.build_frame().unwrap();
-    assert_eq!(offset(&app), 100.0);
+    test_support::assert_near!(offset(&app), 100.0);
 
     assert_eq!(
         glides.offer(&mut app, &notch(1.0)),
@@ -255,7 +255,7 @@ fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
     app.build_frame().unwrap();
     let kept =
         editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
-    assert_eq!(kept, rested);
+    test_support::assert_near!(kept, rested);
 }
 
 #[test]

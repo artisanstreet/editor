@@ -38,9 +38,9 @@ fn swift_presents_received_text_and_blocks_without_decorative_delay() {
     assert!(reveal.fades(1, Arc::clone(&text)).is_empty());
     assert_eq!(reveal.visible_end(1, &text), text.len());
     assert_eq!(reveal.block_entrance(1), None);
-    assert_eq!(reveal.block_panel_height(1), 0.0);
+    test_support::assert_near!(reveal.block_panel_height(1), 0.0);
     reveal.update_block_height(1, 100.0);
-    assert_eq!(reveal.block_panel_height(1), 100.0);
+    test_support::assert_near!(reveal.block_panel_height(1), 100.0);
     assert!(!reveal.is_animating());
 }
 
@@ -104,16 +104,16 @@ fn geometry_retains_measured_block_and_clips_to_last_reported_line() {
     assert!(reveal.update_block_height(3, 120.0));
     let (opacity, offset) = reveal.block_entrance(3).unwrap();
     assert!(opacity > 0.0 && offset > 0.0);
-    assert_eq!(reveal.block_panel_height(3), 0.0);
+    test_support::assert_near!(reveal.block_panel_height(3), 0.0);
     reveal.report_frontier(Some(124.0));
     reveal.report_frontier(Some(115.0));
     assert!(reveal.update_visible_height(100.0, 80.0));
-    assert_eq!(reveal.visible_height(), 24.0);
+    test_support::assert_near!(reveal.visible_height(), 24.0);
     reveal.begin_frame(now + Duration::from_millis(250), false, true, false, false);
-    assert_eq!(reveal.block_panel_height(3), 120.0);
+    test_support::assert_near!(reveal.block_panel_height(3), 120.0);
     reveal.report_frontier(Some(220.0));
     assert!(reveal.update_visible_height(100.0, 80.0));
-    assert_eq!(reveal.visible_height(), 80.0);
+    test_support::assert_near!(reveal.visible_height(), 80.0);
 }
 
 #[test]

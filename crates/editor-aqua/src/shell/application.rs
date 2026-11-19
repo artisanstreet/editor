@@ -835,11 +835,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if let Some(window) = ctx.window_state(id) {
             let ui = self.ui.ui_mut();
             ui.set_viewport(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
-                window.scale_factor as f32,
+                crate::measure::narrow(window.inner_size.width),
+                crate::measure::narrow(window.inner_size.height),
+                crate::measure::narrow(window.scale_factor),
             );
-            set_window_scale(ui, window.scale_factor as f32);
+            set_window_scale(ui, crate::measure::narrow(window.scale_factor));
         }
         self.shell.preferences.system =
             editor_ui::preferences::SystemAccess::from_os(ctx.system_preferences());
@@ -920,8 +920,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         }
         let viewport = ctx.window_state(id).map(|window| {
             aqua_core::Size::new(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
+                crate::measure::narrow(window.inner_size.width),
+                crate::measure::narrow(window.inner_size.height),
             )
         });
         let theme = self.shell.preferences.theme();
@@ -1077,7 +1077,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             self.shell.dialogs.clear();
         }
         if let WindowEvent::ScaleChanged(_, scale) = event {
-            set_window_scale(self.ui.ui_mut(), *scale as f32);
+            set_window_scale(self.ui.ui_mut(), crate::measure::narrow(*scale));
         }
         match event {
             WindowEvent::Resized(..) => {

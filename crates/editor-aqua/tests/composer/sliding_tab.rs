@@ -34,9 +34,9 @@ fn choosing_another_tab_mid_slide_continues_from_where_it_is() {
     let reached = tab.span().0;
     tab.aim(52.0, at(start, 60));
     tab.advance(at(start, 60));
-    assert_eq!(tab.span().0, reached);
+    test_support::assert_near!(tab.span().0, reached);
     tab.advance(at(start, 1_000));
-    assert_eq!(tab.span().0, 52.0);
+    test_support::assert_near!(tab.span().0, 52.0);
 }
 
 #[test]
@@ -47,5 +47,5 @@ fn aiming_at_the_same_tab_every_frame_does_not_restart_the_slide() {
     tab.aim(52.0, at(start, 200));
     tab.advance(at(start, 1_000));
     assert!(tab.settled());
-    assert_eq!(tab.span().0, 52.0);
+    test_support::assert_near!(tab.span().0, 52.0);
 }

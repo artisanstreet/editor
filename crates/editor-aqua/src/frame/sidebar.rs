@@ -123,7 +123,7 @@ impl Sidebar {
         } else {
             COLLAPSED_WIDTH
         };
-        if self.width.target() != target || (reduced && self.width.running()) {
+        if self.width.target().total_cmp(&target).is_ne() || (reduced && self.width.running()) {
             if self.width.value(now, RESIZE) > visible_width {
                 self.width = Glide::Resting(visible_width);
             }
@@ -147,7 +147,7 @@ impl Sidebar {
 
     fn show_search(&mut self, shown: bool, now: Instant, reduced: bool) {
         let target = f32::from(u8::from(shown && !self.open()));
-        if self.search.target() == target {
+        if self.search.target().total_cmp(&target).is_eq() {
             return;
         }
         self.search_motion = if target > 0.5 {

@@ -15,8 +15,8 @@ fn the_outline_does_not_cross_the_tab_opening() {
                     PathCommand::Move(to) | PathCommand::Arc { to, .. } => to,
                     PathCommand::Line(to) => {
                         assert!(
-                            from.y != body.y + inset
-                                || to.y != from.y
+                            (from.y - (body.y + inset)).abs() > 1e-3
+                                || (to.y - from.y).abs() > 1e-3
                                 || !(from.x.min(to.x) < center && center < from.x.max(to.x)),
                             "the card's horizontal outline must stop at the selected tab"
                         );
@@ -88,11 +88,11 @@ fn moving_lips_only_rasterize_the_top_of_the_sheet() {
                         | PathCommand::Close => None,
                     })
                     .fold(f32::NEG_INFINITY, f32::max);
-                assert_eq!(max_y, body.y + 1.0);
+                test_support::assert_near!(max_y, body.y + 1.0);
                 assert!(max_y <= sheet.y + 20.0);
-                assert_eq!(body.bottom(), sheet.bottom() - inset);
-                assert_eq!(body.x, sheet.x + inset);
-                assert_eq!(body.right(), sheet.right() - inset);
+                test_support::assert_near!(body.bottom(), sheet.bottom() - inset);
+                test_support::assert_near!(body.x, sheet.x + inset);
+                test_support::assert_near!(body.right(), sheet.right() - inset);
                 assert_eq!(top.last(), Some(&PathCommand::Close));
             }
         }

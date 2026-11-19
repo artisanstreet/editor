@@ -235,7 +235,8 @@ pub(crate) fn compare(
         max_channel_delta = max_channel_delta.max(worst);
         if worst > channel_threshold {
             differing += 1;
-            let (x, y) = ((index % width) as u32, (index / width) as u32);
+            let x = u32::try_from(index % width).expect("invariant: screenshot columns fit in u32");
+            let y = u32::try_from(index / width).expect("invariant: screenshot rows fit in u32");
             bounds = Some(bounds.map_or(
                 Bounds {
                     left: x,
@@ -256,8 +257,8 @@ pub(crate) fn compare(
     Ok(Difference {
         pixels,
         differing,
-        ratio: differing as f64 / pixels as f64,
-        mean_channel_error: total_error as f64 / (pixels * 4 * 255) as f64,
+        ratio: test_support::float::ratio(differing, pixels),
+        mean_channel_error: test_support::float::ratio(total_error, pixels * 4 * 255),
         max_channel_delta,
         bounds,
     })

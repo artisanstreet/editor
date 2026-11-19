@@ -27,8 +27,8 @@ impl RootViews {
             self.dispose_color_menu(ui);
         }
         let viewport = layout::Size {
-            width: window.inner_size.width as f32,
-            height: window.inner_size.height as f32,
+            width: crate::measure::narrow(window.inner_size.width),
+            height: crate::measure::narrow(window.inner_size.height),
         };
         if let Some(entry) = shell
             .entry

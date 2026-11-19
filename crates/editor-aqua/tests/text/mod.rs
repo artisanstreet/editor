@@ -1184,7 +1184,7 @@ fn inline_source_paints_follow_shaped_slot_and_preserve_layer_order() {
         ) => {
             assert_eq!(a, b);
             assert!(a.w > 0.0 && a.h > 0.0);
-            assert_eq!(widths.left, 1.0);
+            test_support::assert_near!(widths.left, 1.0);
         }
         _ => unreachable!(),
     }

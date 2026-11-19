@@ -72,7 +72,7 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
         (expanded_access.y - collapsed_access.y - children * 1.25).abs() < 1.0,
         "accessibility must follow the completed layout in physical pixels at 1.25 DPI"
     );
-    assert_eq!(
+    test_support::assert_near!(
         expanded_access.y,
         expanded.y * 1.25,
         "the final About hit target and accessibility rectangle must agree"
