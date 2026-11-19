@@ -90,3 +90,12 @@ fn the_environment_picks_each_category_with_lc_all_first() {
         SystemLocales::uniform(locale!("en-US"))
     );
 }
+
+#[test]
+fn a_negative_value_that_rounds_to_zero_is_plain_zero() {
+    let english = formats(&locale!("en-US"));
+    assert_eq!(english.decimal(-0.001, 2), "0.00");
+    assert_eq!(english.decimal(-0.4, 0), "0");
+    assert_eq!(english.trimmed(-0.0001, 2), "0");
+    assert_eq!(english.decimal(-1.5, 2), "-1.50");
+}

@@ -5,7 +5,7 @@ use icu_datetime::fieldsets::{T, YMD};
 use icu_datetime::input::{Date, DateTime, Time};
 use icu_datetime::options::YearStyle;
 use icu_decimal::DecimalFormatter;
-use icu_decimal::input::Decimal;
+use icu_decimal::input::{Decimal, SignDisplay};
 use icu_locale_core::{Locale, locale};
 use std::fmt;
 use std::sync::LazyLock;
@@ -108,6 +108,7 @@ fn fixed(value: f64, fraction_digits: usize) -> Option<Decimal> {
     value.is_finite().then(|| {
         Decimal::try_from_str(&format!("{value:.fraction_digits$}"))
             .expect("invariant: a finite f64 prints as a plain decimal")
+            .with_sign_display(SignDisplay::Negative)
     })
 }
 

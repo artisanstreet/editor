@@ -14,3 +14,20 @@ fn compact_numbers_keep_the_suffix_and_take_the_locale_separator() {
     assert_eq!(compact_number(&english, 0.126), "0.13");
     assert_eq!(compact_number(&english, f64::INFINITY), "–");
 }
+
+#[test]
+fn a_value_that_rounds_up_to_the_next_thousand_takes_the_next_suffix() {
+    let english = Formats::new(&locale!("en-US"));
+    assert_eq!(compact_number(&english, 999_950.0), "1M");
+    assert_eq!(compact_number(&english, -999_950.0), "-1M");
+    assert_eq!(compact_number(&english, 999_499.0), "999k");
+    assert_eq!(compact_number(&english, 9_999.6), "10k");
+    assert_eq!(compact_number(&english, 999_999_999.0), "1B");
+}
+
+#[test]
+fn a_negative_value_that_rounds_to_zero_shows_no_minus_sign() {
+    let english = Formats::new(&locale!("en-US"));
+    assert_eq!(compact_number(&english, -0.001), "0");
+    assert_eq!(compact_number(&english, -0.25), "-0.25");
+}

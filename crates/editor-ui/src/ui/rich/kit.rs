@@ -63,28 +63,44 @@ pub(crate) fn format_number(value: f64) -> String {
     crate::ui::locale::with_system(|formats| compact_number(formats, value))
 }
 
+const SUFFIXES: [&str; 4] = ["", "k", "M", "B"];
+
 pub fn compact_number(formats: &crate::ui::locale::Formats, value: f64) -> String {
     if !value.is_finite() {
         return "–".to_owned();
     }
     let magnitude = value.abs();
-    let (scaled, suffix) = if magnitude >= 1e9 {
-        (value / 1e9, "B")
-    } else if magnitude >= 1e6 {
-        (value / 1e6, "M")
-    } else if magnitude >= 1e4 {
-        (value / 1e3, "k")
-    } else {
-        (value, "")
+    let mut index = match magnitude {
+        magnitude if magnitude >= 1e9 => 3,
+        magnitude if magnitude >= 1e6 => 2,
+        magnitude if magnitude >= 1e4 => 1,
+        _ => 0,
     };
-    let decimals = if scaled.abs() >= 100.0 {
-        0
-    } else if scaled.abs() >= 10.0 {
-        1
-    } else {
-        2
-    };
-    format!("{}{suffix}", formats.trimmed(scaled, decimals))
+    let mut scaled = value / 1e3_f64.powi(i32::try_from(index).expect("invariant: four suffixes"));
+    loop {
+        let decimals = significant_decimals(scaled);
+        let carry = if index == 0 { 1e4 } else { 1e3 };
+        if index + 1 < SUFFIXES.len() && rounded(scaled, decimals).abs() >= carry {
+            index += 1;
+            scaled /= 1e3;
+            continue;
+        }
+        return format!("{}{}", formats.trimmed(scaled, decimals), SUFFIXES[index]);
+    }
+}
+
+fn significant_decimals(scaled: f64) -> usize {
+    match scaled.abs() {
+        magnitude if magnitude >= 100.0 => 0,
+        magnitude if magnitude >= 10.0 => 1,
+        _ => 2,
+    }
+}
+
+fn rounded(value: f64, decimals: usize) -> f64 {
+    format!("{value:.decimals$}")
+        .parse()
+        .expect("invariant: a finite f64 printed with fixed decimals parses back")
 }
 
 pub(crate) fn with_unit(value: &str, unit: Option<&str>) -> String {
