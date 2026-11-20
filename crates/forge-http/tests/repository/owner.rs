@@ -2,7 +2,7 @@ use super::*;
 async fn command(path: &Path, args: &[&str]) {
     let mut command = tokio::process::Command::new("git");
     command.arg("-C").arg(path).args(args);
-    let output = forge_engines::process::probe(command, Duration::from_secs(3), 64 * 1024)
+    let output = forge_engines::process::probe(command, test_support::wait::LIVENESS, 64 * 1024)
         .await
         .unwrap();
     assert!(
@@ -99,7 +99,7 @@ async fn a_fifo_icon_is_rejected_without_waiting_for_a_writer() {
         .unwrap();
     assert!(status.success());
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), icon_file(&path))
+        tokio::time::timeout(test_support::wait::LIVENESS, icon_file(&path))
             .await
             .unwrap()
             .unwrap()
