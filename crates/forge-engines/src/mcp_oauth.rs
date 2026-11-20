@@ -12,26 +12,48 @@ const MAX_REDIRECTS: usize = 5;
 const MAX_EXPIRES_IN_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 
 #[derive(Clone, Debug)]
-pub struct Http(reqwest::Client);
+pub struct Http {
+    fetch: reqwest::Client,
+    post: reqwest::Client,
+}
+
+fn client(policy: reqwest::redirect::Policy) -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("artisan-forge/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(policy)
+        .build()
+        .expect("invariant: the OAuth HTTP client builds with the default TLS backend")
+}
 
 impl Http {
     #[must_use]
     pub fn new() -> Self {
-        let policy = reqwest::redirect::Policy::custom(|attempt| {
+        let fetch = reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS || !is_secure(attempt.url()) {
                 attempt.stop()
             } else {
                 attempt.follow()
             }
         });
-        Self(
-            reqwest::Client::builder()
-                .user_agent(concat!("artisan-forge/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(15))
-                .redirect(policy)
-                .build()
-                .expect("invariant: the OAuth HTTP client builds with the default TLS backend"),
-        )
+        let post = reqwest::redirect::Policy::custom(|attempt| {
+            let same_origin = attempt
+                .previous()
+                .first()
+                .is_some_and(|first| first.origin() == attempt.url().origin());
+            if attempt.previous().len() >= MAX_REDIRECTS
+                || !is_secure(attempt.url())
+                || !same_origin
+            {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
+        Self {
+            fetch: client(fetch),
+            post: client(post),
+        }
     }
 }
 
@@ -219,6 +241,8 @@ pub enum ResponseError {
     },
     #[error("{url} redirected to {location}, which isn't HTTPS")]
     InsecureRedirect { url: Box<Url>, location: Box<Url> },
+    #[error("{url} redirected a request carrying credentials to {location}, another origin")]
+    CrossOriginRedirect { url: Box<Url>, location: Box<Url> },
     #[error("reading the answer from {url}")]
     Read {
         url: Box<Url>,
@@ -395,11 +419,19 @@ async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, Res
             .get(header::LOCATION)
             .and_then(|location| location.to_str().ok())
             .and_then(|location| response.url().join(location).ok());
-        if let Some(location) = location.filter(|location| !is_secure(location)) {
-            return Err(ResponseError::InsecureRedirect {
-                url: Box::new(url.clone()),
-                location: Box::new(location),
-            });
+        if let Some(location) = location {
+            if !is_secure(&location) {
+                return Err(ResponseError::InsecureRedirect {
+                    url: Box::new(url.clone()),
+                    location: Box::new(location),
+                });
+            }
+            if location.origin() != response.url().origin() {
+                return Err(ResponseError::CrossOriginRedirect {
+                    url: Box::new(url.clone()),
+                    location: Box::new(location),
+                });
+            }
         }
     }
     let status = response.status();
@@ -471,7 +503,7 @@ pub async fn probe(
         source,
     })?;
     let mut request = http
-        .0
+        .post
         .post(url.clone())
         .timeout(TIMEOUT)
         .header(header::CONTENT_TYPE, "application/json")
@@ -722,7 +754,7 @@ async fn first_document<T: serde::de::DeserializeOwned>(
 ) -> Result<Option<T>, DiscoveryError> {
     for candidate in candidates {
         let answer = send(
-            http.0
+            http.fetch
                 .get(candidate.url().clone())
                 .header(header::ACCEPT, "application/json"),
             candidate.url(),
@@ -840,7 +872,7 @@ pub async fn register(
         "token_endpoint_auth_method": "none",
     });
     let answer: RegistrationAnswer = send(
-        http.0
+        http.post
             .post(endpoint.url().clone())
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json")
@@ -1046,7 +1078,7 @@ async fn tokens(
     let issuer = || discovery.issuer.clone();
     let endpoint = discovery.token_endpoint.url();
     let answer = send(
-        http.0
+        http.post
             .post(endpoint.clone())
             .header(header::ACCEPT, "application/json")
             .form(form),
@@ -1073,6 +1105,7 @@ async fn tokens(
         ),
         ResponseError::Unreachable { .. }
         | ResponseError::InsecureRedirect { .. }
+        | ResponseError::CrossOriginRedirect { .. }
         | ResponseError::Read { .. }
         | ResponseError::TooLarge { .. }
         | ResponseError::Status { .. }

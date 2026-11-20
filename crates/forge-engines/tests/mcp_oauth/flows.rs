@@ -520,6 +520,49 @@ async fn a_redirect_to_plain_http_is_not_followed() {
     );
 }
 
+#[tokio::test]
+async fn a_token_request_is_not_sent_again_to_another_origin() {
+    let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let elsewhere = Base::default();
+    let counted = Arc::clone(&received);
+    let _elsewhere = serve(
+        &elsewhere,
+        Router::new().route(
+            "/token",
+            post(move |form: String| {
+                let counted = Arc::clone(&counted);
+                async move {
+                    assert!(form.contains("refresh-1"), "{form}");
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Code::BAD_REQUEST
+                }
+            }),
+        ),
+    )
+    .await;
+    let target = elsewhere.url("/token");
+    let (base, _stub) = token_stub(move || {
+        (Code::TEMPORARY_REDIRECT, [("location", target.clone())]).into_response()
+    })
+    .await;
+    let answer = refreshed(&base).await;
+    assert!(
+        matches!(
+            answer,
+            Err(TokenError::Request {
+                source: ResponseError::CrossOriginRedirect { .. },
+                ..
+            })
+        ),
+        "a cross-origin redirect gave {answer:?}"
+    );
+    assert_eq!(
+        received.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the refresh token was sent to another origin"
+    );
+}
+
 #[test]
 fn challenge_parameters() {
     let challenge = r#"Bearer error="invalid_token", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="read write""#;
