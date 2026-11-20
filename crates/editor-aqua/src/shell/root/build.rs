@@ -42,7 +42,7 @@ impl RootViews {
             self.connection.reset();
             self.thread_loading.reset();
             self.thread_landing.reset();
-            self.link_failure.close(ui);
+            shell.failures.close(ui);
             self.workspace_key = None;
             self.settings_panel = None;
             return Ok(entry);
@@ -508,7 +508,7 @@ impl RootViews {
         })();
         self.mount_palette(shell, ui);
         self.mount_resource(shell, ui);
-        self.link_failure.mount(ui, &shell.preferences.theme());
+        shell.failures.mount(ui, &shell.preferences.theme());
         if self.sync_image_preview(shell, ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_preview");
             self.conversation_invalidated.set(true);

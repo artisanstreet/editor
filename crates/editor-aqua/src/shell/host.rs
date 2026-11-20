@@ -14,6 +14,7 @@ pub(crate) const WINDOW_NAME: &str = "Artisan Editor";
 
 pub struct Shell {
     pub titlebar: crate::shell::titlebar::Titlebar,
+    pub failures: crate::shell::action_failure::ActionFailureDialog,
     pub core: Core,
     pub entry: Entry,
     pub preferences: Preferences,
@@ -116,6 +117,7 @@ impl Shell {
         (
             Self {
                 titlebar: crate::shell::titlebar::Titlebar::default(),
+                failures: crate::shell::action_failure::ActionFailureDialog::default(),
                 core,
                 entry,
                 preferences,
@@ -259,7 +261,7 @@ impl Shell {
                 (None, Vec::new())
             };
         entry_effects.append(&mut settings_platform_effects);
-        let settings_platform_effects = entry_effects;
+        let mut settings_platform_effects = entry_effects;
         drop(tm_b);
         let tm_c = crate::shell::application::Tm::new("sd.events");
         let watched = entry_watched_thread(&self.entry);
@@ -277,6 +279,11 @@ impl Shell {
                 None => false,
             };
             preferences_changed |= matches!(event, CoreEvent::SettingsChanged);
+            if let CoreEvent::OpenUrl(url) = &event {
+                settings_platform_effects.push(
+                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url.clone()),
+                );
+            }
             if let Some(effects) = entry.handle_event(core, &event, window_active, ui) {
                 notifications.push(effects);
             }

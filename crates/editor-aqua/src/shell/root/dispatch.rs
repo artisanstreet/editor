@@ -1,4 +1,5 @@
 use super::{ConversationAction, ImagePreview, PreviewOrigin, RootViews};
+use crate::shell::action_failure::CopySubject;
 use crate::shell::host::Shell;
 use crate::shell::refresh::Cause;
 use aqua::prelude::AquaWindowId;
@@ -135,7 +136,8 @@ impl RootViews {
                         }
                         crate::ui::media::preview::Effect::Clipboard(text) => {
                             if let Err(error) = ctx.clipboard().set_text(text) {
-                                tracing::warn!(%error, "could not copy media path");
+                                shell.failures.copy(CopySubject::MediaPath, &error);
+                                changed = true;
                             }
                             continue;
                         }
@@ -169,7 +171,8 @@ impl RootViews {
                 }
                 ConversationAction::Copy(_, source) => {
                     if let Err(error) = ctx.clipboard().set_text(source.into_text()) {
-                        tracing::warn!(%error, "could not copy full content");
+                        shell.failures.copy(CopySubject::Content, &error);
+                        changed = true;
                     }
                 }
                 ConversationAction::Link(_, LinkAction::OpenReference(reference)) => {
@@ -181,11 +184,7 @@ impl RootViews {
                 }
                 ConversationAction::Link(_, LinkAction::OpenUrl(url)) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(
-                            error = %::diagnostics::chain(&error),
-                            "could not open URL"
-                        );
-                        self.link_failure.show(url, &error);
+                        shell.failures.link(url, &error);
                         changed = true;
                     }
                 }
@@ -224,7 +223,8 @@ impl RootViews {
             match effect {
                 ColorCopyEffect::Clipboard(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy color");
+                        shell.failures.copy(CopySubject::Color, &error);
+                        changed = true;
                     }
                 }
                 ColorCopyEffect::Search(text) => {
@@ -236,11 +236,12 @@ impl RootViews {
                         && let Err(error) = browser.search(&text)
                     {
                         tracing::warn!(
-                            %error,
                             browser = %browser.name,
                             program = %browser.program.display(),
-                            "could not start a browser search"
+                            "the browser search did not start"
                         );
+                        shell.failures.search(&error);
+                        changed = true;
                     }
                 }
                 ColorCopyEffect::RequestFrame => {

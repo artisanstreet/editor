@@ -363,28 +363,28 @@ impl<V: SectionViews> ShellApplication<V> {
         }
     }
 
-    fn update(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, updates: ShellUpdates) {
+    fn update(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, updates: ShellUpdates) -> bool {
+        let mut failed = false;
         for effect in updates.settings_platform_effects {
             match effect {
                 crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(
-                            error = %::diagnostics::chain(&error),
-                            "could not open URL"
-                        );
+                        self.shell.failures.link(url, &error);
+                        failed = true;
                     }
                 }
                 crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
                     if let Err(error) = crate::setup::open_notices() {
-                        tracing::warn!(
-                            error = %::diagnostics::chain(&error),
-                            "could not open the third-party notices"
-                        );
+                        self.shell.failures.notices(&error);
+                        failed = true;
                     }
                 }
                 crate::shell::workspace::SettingsPlatformEffect::CopyText(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy text");
+                        self.shell
+                            .failures
+                            .copy(crate::shell::action_failure::CopySubject::Text, &error);
+                        failed = true;
                     }
                 }
             }
@@ -416,6 +416,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 }
             }
         }
+        failed
     }
 
     #[expect(
@@ -752,7 +753,7 @@ impl<V: SectionViews> ShellApplication<V> {
         if let Some(workspace) = self.shell.entry.workspace_mut() {
             domain_changed |= causes.note(
                 Cause::CodeActions,
-                workspace.drain_code_actions(&self.shell.core, ctx, id),
+                workspace.drain_code_actions(&self.shell.core, &mut self.shell.failures, ctx, id),
             );
             domain_changed |= causes.note(
                 Cause::QuestionSource,
@@ -762,6 +763,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 Cause::Inspector,
                 workspace.drain_inspector(
                     &mut self.shell.core,
+                    &mut self.shell.failures,
                     &self.shell.dialogs,
                     self.ui.ui_mut(),
                     ctx,
@@ -791,7 +793,7 @@ impl<V: SectionViews> ShellApplication<V> {
         }
         aqua_core::checkpoint::reach();
         let tm_update = Tm::new("drain.update");
-        self.update(ctx, id, updates);
+        domain_changed |= causes.note(Cause::WorkspaceActions, self.update(ctx, id, updates));
         drop(tm_update);
         aqua_core::checkpoint::reach();
         let tm_sync = Tm::new("drain.sync");
@@ -1024,7 +1026,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             }
             refresh |= causes.note(
                 Cause::CodeActions,
-                workspace.drain_code_actions(&self.shell.core, ctx, id),
+                workspace.drain_code_actions(&self.shell.core, &mut self.shell.failures, ctx, id),
             );
             refresh |= causes.note(Cause::CodeFrame, workspace.take_code_frame(ctx.now()));
             if workspace

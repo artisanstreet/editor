@@ -28,6 +28,7 @@ pub struct InspectorOwner {
     ids: SourceIds,
     terminal_hovered: bool,
     copied_until: Option<aqua::Instant>,
+    copy_failure: Option<Box<dyn std::error::Error>>,
     reveal_pending: bool,
     scope: u64,
     pulse_starts: Rc<RefCell<HashMap<usize, u32>>>,
@@ -44,6 +45,10 @@ impl InspectorOwner {
         &self.inspector
     }
 
+    pub fn take_copy_failure(&mut self) -> Option<Box<dyn std::error::Error>> {
+        self.copy_failure.take()
+    }
+
     pub fn new(ids: SourceIds) -> Self {
         Self {
             inspector: Inspector::default(),
@@ -55,6 +60,7 @@ impl InspectorOwner {
             ids,
             terminal_hovered: false,
             copied_until: None,
+            copy_failure: None,
             reveal_pending: false,
             scope: 0,
             pulse_starts: Rc::default(),
@@ -627,12 +633,15 @@ impl InspectorOwner {
                             && core.host_if_instance(&job.host, job.instance).is_some()
                             && job.output_source.is_none()
                         {
-                            if let Err(error) = ctx.clipboard().set_text(job.copy_output()) {
-                                tracing::warn!(%error, "could not copy shell output");
+                            match ctx.clipboard().set_text(job.copy_output()) {
+                                Ok(()) => {
+                                    let deadline =
+                                        ctx.now() + std::time::Duration::from_millis(1750);
+                                    self.copied_until = Some(deadline);
+                                    ctx.request_animation_deadline(window, deadline);
+                                }
+                                Err(error) => self.copy_failure = Some(Box::new(error)),
                             }
-                            let deadline = ctx.now() + std::time::Duration::from_millis(1750);
-                            self.copied_until = Some(deadline);
-                            ctx.request_animation_deadline(window, deadline);
                         }
                     }
                     super::TerminalAction::Hover(hovered) => self.terminal_hovered = hovered,

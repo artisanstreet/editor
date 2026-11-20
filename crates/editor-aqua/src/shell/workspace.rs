@@ -616,6 +616,7 @@ impl Workspace {
     pub(crate) fn drain_code_actions(
         &mut self,
         core: &Core,
+        failures: &mut crate::shell::action_failure::ActionFailureDialog,
         ctx: &mut aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
     ) -> bool {
@@ -636,7 +637,10 @@ impl Workspace {
                             self.request_code_frame(ctx, window);
                             self.wake_code_at(ctx, window, deadline);
                         }
-                        Err(error) => tracing::warn!(%error, "could not copy code"),
+                        Err(error) => {
+                            failures.copy(crate::shell::action_failure::CopySubject::Code, &error);
+                            changed = true;
+                        }
                     }
                 }
                 CodeAction::Copy(CopyEffect::RequestFrame) => self.request_code_frame(ctx, window),
@@ -897,6 +901,7 @@ impl Workspace {
     pub(crate) fn drain_inspector(
         &mut self,
         core: &mut Core,
+        failures: &mut crate::shell::action_failure::ActionFailureDialog,
         routes: &crate::ui::dialogs::DialogRoutes,
         ui: &mut aqua::UiApp,
         ctx: &mut aqua::AppCtx<'_>,
@@ -913,6 +918,13 @@ impl Workspace {
                 window,
                 action,
             );
+        }
+        if let Some(error) = self.inspector.take_copy_failure() {
+            failures.copy(
+                crate::shell::action_failure::CopySubject::ShellOutput,
+                &*error,
+            );
+            changed = true;
         }
         changed | self.inspector.drain(core, ui, ctx)
     }

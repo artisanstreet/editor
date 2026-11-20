@@ -127,7 +127,6 @@ pub struct RootViews {
     #[cfg(feature = "qualification")]
     qualification_paint: crate::qualification::observation::PaintCollector,
     settings: Option<crate::ui::dialog::DialogHost>,
-    link_failure: crate::shell::link_failure::LinkFailureDialog,
     settings_panel: Option<(Element, f32)>,
     settings_dismissed: Rc<Cell<bool>>,
     workspace_key: Option<u64>,

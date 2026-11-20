@@ -350,14 +350,6 @@ impl Entry {
             workspace.dispose_terminal_dialog(ui);
             workspace.inspector.release(ui);
         }
-        if let CoreEvent::OpenUrl(url) = event
-            && let Err(error) = crate::shell::open_url(url)
-        {
-            tracing::warn!(
-                error = %::diagnostics::chain(&error),
-                "could not open URL"
-            );
-        }
         let mounted = self.sync(core);
         self.land(core);
         let effects = self

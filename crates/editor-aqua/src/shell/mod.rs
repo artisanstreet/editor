@@ -2,10 +2,10 @@ pub mod composer_glide;
 pub mod connection;
 pub mod context_meter;
 pub mod layout;
-pub mod link_failure;
 pub use crate::ui::menu_keys;
 pub mod resource_preview;
 
+pub mod action_failure;
 pub mod application;
 pub use crate::ui::dialogs;
 pub mod entry;

@@ -39,11 +39,7 @@ impl RootViews {
                 }
                 Command::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(
-                            error = %::diagnostics::chain(&error),
-                            "could not open repository URL"
-                        );
-                        self.link_failure.show(url, &error);
+                        shell.failures.link(url, &error);
                     }
                 }
                 Command::Settle {

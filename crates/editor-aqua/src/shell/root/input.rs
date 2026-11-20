@@ -247,10 +247,12 @@ impl RootViews {
             | self.dispatch_resource(shell, ui, ctx)
             | self.dispatch_conversation(shell, ui, ctx, window)
             | self.sync_sidebar(shell, ui, ctx, window);
-        let link_changed = match self.link_failure.drain(ui) {
-            Some(crate::shell::link_failure::Effect::CopyUrl(url)) => {
+        let link_changed = match shell.failures.drain(ui) {
+            Some(crate::shell::action_failure::Effect::CopyUrl(url)) => {
                 if let Err(error) = ctx.clipboard().set_text(url) {
-                    tracing::warn!(%error, "could not copy the link that failed to open");
+                    shell
+                        .failures
+                        .copy(crate::shell::action_failure::CopySubject::Link, &error);
                 }
                 true
             }

@@ -1,4 +1,5 @@
 use super::RootViews;
+use crate::shell::action_failure::CopySubject;
 use crate::shell::host::Shell;
 use aqua::prelude::AquaWindowId;
 use aqua::{AppCtx, UiApp};
@@ -67,12 +68,14 @@ impl RootViews {
             match event {
                 Action::CopyPath { text, .. } => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy resource path");
+                        shell.failures.copy(CopySubject::ResourcePath, &error);
+                        changed = true;
                     }
                 }
                 Action::CopyFile { text, .. } => {
                     if let Err(error) = ctx.clipboard().set_text(text.to_string()) {
-                        tracing::warn!(%error, "could not copy resource");
+                        shell.failures.copy(CopySubject::File, &error);
+                        changed = true;
                     }
                 }
                 Action::Dismiss { .. } => {
