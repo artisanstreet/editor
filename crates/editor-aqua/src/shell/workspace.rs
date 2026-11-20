@@ -322,6 +322,10 @@ impl Workspace {
     }
 
     pub(crate) fn retire(&mut self) -> NotificationEffects {
+        if let Some(composer) = &self.composer {
+            composer.controller.borrow_mut().release();
+        }
+        self.draft_sessions.retire();
         NotificationEffects {
             withdraw: self.notifications.retain_hosts(&[]),
             show: Vec::new(),

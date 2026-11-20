@@ -329,7 +329,7 @@ impl Entry {
         }
     }
 
-    pub(crate) fn handle_event(
+    pub fn handle_event(
         &mut self,
         core: &mut Core,
         event: &CoreEvent,

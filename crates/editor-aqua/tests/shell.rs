@@ -10,6 +10,8 @@ mod browser;
 mod connection;
 #[path = "shell/dialogs.rs"]
 mod dialogs;
+#[path = "shell/entry.rs"]
+mod entry;
 #[path = "shell/gating.rs"]
 mod gating;
 #[path = "shell/host.rs"]

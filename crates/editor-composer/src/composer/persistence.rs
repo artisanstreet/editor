@@ -397,6 +397,17 @@ impl DraftSessions {
         Ok(lease)
     }
 
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "each session keeps itself in its own file, so the order sessions retire in is irrelevant"
+    )]
+    pub fn retire(&mut self) {
+        for (_, session) in self.sessions.drain() {
+            session.forget_unforgotten();
+            session.retire();
+        }
+    }
+
     pub fn retain_hosts(&mut self, core: &Core) {
         self.sessions.retain(|(id, instance, _), session| {
             if core.host_if_instance(id, *instance).is_some() {
