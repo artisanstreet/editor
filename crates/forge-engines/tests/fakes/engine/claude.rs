@@ -3,7 +3,6 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
 
 const REPLAYED: &str = r#"{"type":"user","isReplay":true,"message":{"content":"go"}}"#;
 const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m"}"#;
@@ -12,7 +11,6 @@ const NO_BACKGROUND: &str = r#"{"type":"system","subtype":"background_tasks_chan
 const SYNC_ID: &str = "artisan-test-sync";
 const SYNC: &str =
     r#"{"type":"control_request","request_id":"artisan-test-sync","request":{"subtype":"sync"}}"#;
-const OUTLAST_THE_SETTLE_GRACE: Duration = Duration::from_secs(1);
 
 pub(crate) fn interrupt() -> ExitCode {
     let _alive = alive("cli");
@@ -168,7 +166,11 @@ pub(crate) fn long_turn() -> ExitCode {
     );
     let input = follow_input();
     let synced_before_the_grace = synced(&input);
-    std::thread::sleep(OUTLAST_THE_SETTLE_GRACE);
+    let countdown_over = std::env::var_os("ARTISAN_TEST_COUNTDOWN_GATE")
+        .expect("a long turn waits at ARTISAN_TEST_COUNTDOWN_GATE");
+    std::fs::File::open(countdown_over)
+        .and_then(|gate| gate.lock_shared())
+        .expect("the test opens the long turn's gate once Forge's input countdown ended");
     if !synced_before_the_grace || !synced(&input) {
         emit(
             r#"{"type":"result","subtype":"error_during_execution","errors":["input closed mid-turn"],"usage":{}}"#,

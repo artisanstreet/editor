@@ -125,8 +125,40 @@ async fn input_stays_open_while_a_background_agent_works() {
 #[tokio::test]
 async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
     let dir = tempfile::tempdir().unwrap();
-    let mut running =
-        super::scenario::start(super::scenario::turn(dir.path(), "claude-long-turn", &[]));
+    let gate_path = dir.path().join("countdown-gate");
+    let gate = std::fs::File::create(&gate_path).unwrap();
+    gate.lock().unwrap();
+    let gate_env = gate_path.to_string_lossy().into_owned();
+    let mut turn = super::scenario::turn(
+        dir.path(),
+        "claude-long-turn",
+        &[("ARTISAN_TEST_COUNTDOWN_GATE", &gate_env)],
+    );
+    let traces = dir.path().join("data/traces");
+    turn.trace_dir = Some(traces.clone());
+    let mut running = super::scenario::start(turn);
+    test_support::wait::eventually(
+        "the turn to stop Forge's input countdown",
+        test_support::wait::LIVENESS,
+        || {
+            std::future::ready(
+                std::fs::read_dir(&traces)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|entry| {
+                        std::fs::read_to_string(entry.path()).is_ok_and(|trace| {
+                            trace.contains("a turn started while input was counting down")
+                        })
+                    }),
+            )
+        },
+    )
+    .await;
+    tokio::time::pause();
+    tokio::time::sleep(super::SETTLED_INPUT_GRACE * 4).await;
+    tokio::time::resume();
+    gate.unlock().unwrap();
     let outcome = running
         .outcome(std::time::Duration::from_secs(20))
         .await

@@ -178,7 +178,6 @@ impl AppServer {
             return;
         }
         respond(id, &json!({ "status": "unsubscribed" }));
-        std::thread::sleep(Duration::from_millis(100));
         self.writers.remove(thread);
         emit_json(&json!({ "method": "thread/closed", "params": { "threadId": thread } }));
     }
@@ -247,7 +246,6 @@ impl AppServer {
                     turn: turn.clone(),
                 });
                 std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(500));
                     emit_json(&json!({
                         "id": 900,
                         "method": "item/commandExecution/requestApproval",
@@ -264,7 +262,6 @@ impl AppServer {
 }
 
 fn reply(thread: &str, turn: &str, text: &str, slow_gate: Option<&Path>) {
-    std::thread::sleep(Duration::from_millis(300));
     if text == "slow" {
         let slow_gate = slow_gate.expect("a slow turn waits at ARTISAN_TEST_SLOW_GATE");
         File::open(slow_gate)

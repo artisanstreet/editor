@@ -544,6 +544,9 @@ fn move_door(
         (Door::HeldForReply, Moved::Result(_)) => {
             engine.note("result; input stays open: a steer or title request is on its way");
         }
+        (Door::Open, Moved::Frame) if from == Door::Settling => {
+            engine.note("a turn started while input was counting down; input stays open");
+        }
         (Door::Settling, _) => engine.note(&format!(
             "background work ended; input closes in {}s unless more starts ({jobs})",
             SETTLED_INPUT_GRACE.as_secs()
