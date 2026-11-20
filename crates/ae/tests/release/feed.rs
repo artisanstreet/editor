@@ -323,6 +323,63 @@ async fn an_oversized_artifact_leaves_no_file_behind() {
     assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
 }
 
+async fn tag_serving(
+    served: &'static [u8],
+    key: &ed25519_dalek::SigningKey,
+) -> test_support::http::StubServer {
+    use ed25519_dalek::Signer as _;
+    let signature = base64::engine::general_purpose::STANDARD.encode(key.sign(served).to_bytes());
+    test_support::http::StubServer::serve(
+        axum::Router::new()
+            .route(
+                "/download/v1.2.3/release.json",
+                axum::routing::get(move || async move { served }),
+            )
+            .route(
+                "/download/v1.2.3/release.json.sig",
+                axum::routing::get(move || async move { signature }),
+            ),
+    )
+    .await
+}
+
+async fn resolve_pinned(served: &'static [u8]) -> Result<Release, ResolveError> {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let tag = tag_serving(served, &key).await;
+    let pin = Source::Pinned(Pin {
+        manifest: format!("{}/download/v1.2.3/release.json", tag.url()),
+        version: semver::Version::parse("1.2.3").expect("version"),
+    });
+    resolve_signed(&pin, Carried::default(), &key.verifying_key(), LIMITS).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_install_takes_the_release_its_tag_serves() {
+    let resolved = resolve_pinned(br#"{"version":"1.2.3","commit":"a","artifacts":[]}"#)
+        .await
+        .expect("the pinned release");
+    match resolved {
+        Release::Feed(feed) => assert_eq!(feed.version(), "1.2.3"),
+        Release::Local { .. } | Release::Bundled(_) => panic!("not a signed release"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_install_refuses_another_validly_signed_release() {
+    let Err(error) = resolve_pinned(br#"{"version":"1.2.4","commit":"a","artifacts":[]}"#).await
+    else {
+        panic!("a signed 1.2.4 served for the 1.2.3 pin was accepted");
+    };
+    assert!(
+        matches!(
+            &error,
+            ResolveError::WrongPin { found, pin, .. } if found == "1.2.4" && pin.to_string() == "1.2.3"
+        ),
+        "{}",
+        diagnostics::chain(&error)
+    );
+}
+
 #[test]
 fn an_unreadable_local_version_is_reported_instead_of_invented() {
     let dir = tempfile::tempdir().unwrap();

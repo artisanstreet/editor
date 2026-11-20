@@ -53,8 +53,23 @@ pub(crate) fn carrier(os: &str) -> App {
 pub(crate) enum Source {
     Bundled,
     Url(String),
-    Pinned(semver::Version),
+    Pinned(Pin),
     Dir(PathBuf),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Pin {
+    manifest: String,
+    version: semver::Version,
+}
+
+impl Pin {
+    fn tagged(version: semver::Version) -> Self {
+        Self {
+            manifest: pinned_manifest(&version),
+            version,
+        }
+    }
 }
 
 fn tag(version: &semver::Version) -> String {
@@ -124,14 +139,12 @@ impl Source {
                     })?,
                 )
             }
-            (None, Some(version)) => {
-                Self::Pinned(semver::Version::parse(version).map_err(|source| {
-                    SourceError::Version {
-                        version: version.to_owned(),
-                        source,
-                    }
-                })?)
-            }
+            (None, Some(version)) => Self::Pinned(Pin::tagged(
+                semver::Version::parse(version).map_err(|source| SourceError::Version {
+                    version: version.to_owned(),
+                    source,
+                })?,
+            )),
             (None, None) if bundled || bundle::FORGE.present() => Self::Bundled,
             (None, None) => Self::Url(feed_for(env!("CARGO_PKG_VERSION")).to_owned()),
         })
@@ -141,7 +154,7 @@ impl Source {
         match self {
             Self::Bundled => "this installer".to_owned(),
             Self::Url(url) => url.clone(),
-            Self::Pinned(version) => pinned_manifest(version),
+            Self::Pinned(pin) => pin.manifest.clone(),
             Self::Dir(dir) => dir.display().to_string(),
         }
     }
@@ -158,7 +171,7 @@ impl Source {
                 Some(DEFAULT_FEED)
             }
             Self::Url(url) => Some(url),
-            Self::Pinned(version) => Some(feed_for(&version.to_string())),
+            Self::Pinned(pin) => Some(feed_for(&pin.version.to_string())),
             Self::Bundled => Some(feed_for(env!("CARGO_PKG_VERSION"))),
             Self::Dir(_) => None,
         }
@@ -169,18 +182,18 @@ impl Source {
             Self::Bundled => name.to_owned(),
             Self::Dir(dir) => dir.join(name).display().to_string(),
             Self::Url(manifest) => beside(manifest, name),
-            Self::Pinned(version) => beside(&pinned_manifest(version), name),
+            Self::Pinned(pin) => beside(&pin.manifest, name),
         }
     }
 
     fn immutable(&self, version: &str) -> Result<Self, ResolveError> {
         match self {
-            Self::Url(url) if url.starts_with(RELEASES) => Ok(Self::Pinned(
+            Self::Url(url) if url.starts_with(RELEASES) => Ok(Self::Pinned(Pin::tagged(
                 semver::Version::parse(version).map_err(|source| ResolveError::Version {
                     version: version.to_owned(),
                     source,
                 })?,
-            )),
+            ))),
             Self::Bundled | Self::Url(_) | Self::Pinned(_) | Self::Dir(_) => Ok(self.clone()),
         }
     }
@@ -355,7 +368,7 @@ pub(crate) struct Feed {
 }
 
 pub(crate) enum Release {
-    Feed(Feed),
+    Feed(Box<Feed>),
     Local { dir: PathBuf },
     Bundled(Carried),
 }
@@ -568,21 +581,21 @@ async fn resolve_signed(
         source: error,
     })?;
     if let Source::Pinned(pin) = source
-        && !pins(pin, &manifest.version)
+        && !pins(&pin.version, &manifest.version)
     {
         return Err(ResolveError::WrongPin {
             from: source.argument(),
             found: manifest.version,
-            pin: pin.clone(),
+            pin: pin.version.clone(),
         });
     }
-    Ok(Release::Feed(Feed {
+    Ok(Release::Feed(Box::new(Feed {
         manifest,
         source: source.clone(),
         assets,
         http,
         limits,
-    }))
+    })))
 }
 
 async fn fetch(
