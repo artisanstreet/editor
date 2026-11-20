@@ -63,6 +63,38 @@ impl AnswerState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AnswerRequest(pub(crate) u64);
+
+#[derive(Clone, Debug)]
+pub(crate) enum ItemAnswer {
+    Sending {
+        request: AnswerRequest,
+        _task: Arc<tokio_util::task::AbortOnDropHandle<()>>,
+    },
+    Failed(String),
+}
+
+impl ItemAnswer {
+    #[must_use]
+    pub(crate) fn state(&self) -> AnswerState {
+        match self {
+            Self::Sending { .. } => AnswerState::Sending,
+            Self::Failed(error) => AnswerState::Failed(error.clone()),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn sending(&self) -> bool {
+        matches!(self, Self::Sending { .. })
+    }
+
+    #[must_use]
+    pub(crate) fn sent_by(&self, sent: AnswerRequest) -> bool {
+        matches!(self, Self::Sending { request, .. } if *request == sent)
+    }
+}
+
 impl ItemUi {
     pub(crate) fn fresh(&self, now: std::time::Instant) -> bool {
         self.arrived
@@ -81,7 +113,7 @@ pub struct ThreadView {
     pub(crate) live: Shared<HashMap<LiveTarget, LiveText>>,
     pub viewport: Viewport,
     pub ui: Shared<HashMap<ItemId, ItemUi>>,
-    pub(crate) answers: Shared<HashMap<ItemId, AnswerState>>,
+    pub(crate) answers: Shared<HashMap<ItemId, ItemAnswer>>,
     pub(crate) work_open: Shared<HashMap<RunId, bool>>,
     pub runs: Shared<HashMap<RunId, Run>>,
 }
@@ -126,7 +158,7 @@ impl ThreadView {
     }
 
     pub(crate) fn abandon_answers(&mut self) {
-        self.answers.retain(|_, state| !state.sending());
+        self.answers.retain(|_, answer| !answer.sending());
     }
 
     pub(crate) fn resume(&mut self) -> Vec<Effect> {
@@ -152,7 +184,7 @@ impl ThreadView {
             + self.work.len() * size_of::<(Seq, WorkSpan)>()
             + self.positions.capacity() * size_of::<(ItemId, Seq)>()
             + self.ui.capacity() * size_of::<(ItemId, ItemUi)>()
-            + self.answers.capacity() * size_of::<(ItemId, AnswerState)>()
+            + self.answers.capacity() * size_of::<(ItemId, ItemAnswer)>()
             + self.work_open.capacity() * size_of::<(RunId, bool)>()
             + self.runs.capacity() * size_of::<(RunId, Run)>()
     }

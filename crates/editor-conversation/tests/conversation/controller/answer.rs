@@ -1,5 +1,6 @@
 use super::reset_tests::{enqueue, finish_tail, fixture_at, origin};
 use super::*;
+use crate::conversation::thread::{AnswerRequest, AnswerState, ItemAnswer};
 use artisan_api::Decision;
 use editor_core::Clock;
 use editor_core::client::{CallError, CallFailure};
@@ -30,14 +31,28 @@ fn refused(conversation: &Conversation, id: &ItemId, request: AnswerRequest) -> 
 }
 
 fn answer_state(conversation: &Conversation, id: &ItemId) -> Option<AnswerState> {
-    conversation.view.as_ref()?.answers.get(id).cloned()
+    conversation
+        .view
+        .as_ref()?
+        .answers
+        .get(id)
+        .map(ItemAnswer::state)
 }
 
 fn in_flight(conversation: &Conversation, id: &ItemId) -> Option<AnswerRequest> {
-    conversation
-        .answer_tasks
-        .get(id)
-        .map(|(request, _)| *request)
+    match conversation.view.as_ref()?.answers.get(id)? {
+        ItemAnswer::Sending { request, .. } => Some(*request),
+        ItemAnswer::Failed(_) => None,
+    }
+}
+
+fn sending(conversation: &Conversation) -> usize {
+    conversation.view.as_ref().map_or(0, |view| {
+        view.answers
+            .values()
+            .filter(|answer| answer.sending())
+            .count()
+    })
 }
 
 #[test]
@@ -62,7 +77,7 @@ fn an_answer_in_flight_keeps_its_controls_disabled_after_the_item_leaves_the_win
 
     approve(&mut conversation, &core, &id);
     assert_eq!(answer_state(&conversation, &id), Some(AnswerState::Sending));
-    assert_eq!(conversation.answer_tasks.len(), 1);
+    assert_eq!(sending(&conversation), 1);
     assert_eq!(in_flight(&conversation, &id), Some(request));
 
     enqueue(
@@ -85,7 +100,7 @@ fn an_answer_in_flight_keeps_its_controls_disabled_after_the_item_leaves_the_win
             .and_then(AnswerState::error)
             .is_some_and(|error| error.starts_with("Couldn't send the answer"))
     );
-    assert!(conversation.answer_tasks.is_empty());
+    assert_eq!(sending(&conversation), 0);
 }
 
 #[test]

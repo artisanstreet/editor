@@ -1,7 +1,7 @@
 use super::controller::{Conversation, ScrollAction};
 use super::fold::{self, Row, RowKey, RunSummary};
 use super::shared::Shared;
-use super::thread::{AnswerState, ItemUi};
+use super::thread::{AnswerState, ItemAnswer, ItemUi};
 use super::viewport::Input;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
 use editor_core::Core;
@@ -135,13 +135,13 @@ impl ScopedAction {
                     .view
                     .as_ref()
                     .and_then(|view| view.answers.get(&id))
-                    .is_some_and(AnswerState::sending);
+                    .is_some_and(ItemAnswer::sending);
                 conversation.answer(core, id.clone(), answer);
                 let after = conversation
                     .view
                     .as_ref()
                     .and_then(|view| view.answers.get(&id))
-                    .is_some_and(AnswerState::sending);
+                    .is_some_and(ItemAnswer::sending);
                 before != after
             }
             Action::Jump(position) => {
@@ -258,8 +258,14 @@ impl RowLayout<'_> {
     pub(crate) fn states<'b>(
         &'b self,
         row: &'b Row,
-    ) -> impl Iterator<Item = (&'b ItemId, Option<&'b ItemUi>, Option<&'b AnswerState>)> {
-        row_ids(row).map(|id| (id, self.view.ui.get(id), self.view.answers.get(id)))
+    ) -> impl Iterator<Item = (&'b ItemId, Option<&'b ItemUi>, Option<AnswerState>)> {
+        row_ids(row).map(|id| {
+            (
+                id,
+                self.view.ui.get(id),
+                self.view.answers.get(id).map(ItemAnswer::state),
+            )
+        })
     }
 }
 
@@ -314,7 +320,7 @@ fn row_model_from(
             ui.insert(id.clone(), item_ui.clone());
         }
         if let Some(answer) = answer {
-            answers.insert(id.clone(), answer.clone());
+            answers.insert(id.clone(), answer);
         }
     }
     let run = row.run().and_then(|run| runs.get(run)).cloned();

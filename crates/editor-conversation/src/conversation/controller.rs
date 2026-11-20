@@ -1,7 +1,7 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
 use super::shared::Shared;
-use super::thread::{self, AnswerState, ThreadView};
+use super::thread::{self, AnswerRequest, ItemAnswer, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use editor_core::{
@@ -106,9 +106,6 @@ struct Pending {
 }
 const SLOW_PAGE: std::time::Duration = std::time::Duration::from_secs(1);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AnswerRequest(u64);
-
 enum Completion {
     Held {
         origin: Origin,
@@ -184,7 +181,6 @@ pub struct Conversation {
     page_task: Option<AbortOnDropHandle<()>>,
     work_task: Option<AbortOnDropHandle<()>>,
     agent_task: Option<AbortOnDropHandle<()>>,
-    answer_tasks: HashMap<ItemId, (AnswerRequest, AbortOnDropHandle<()>)>,
     next_answer: u64,
     delivery: Delivery<Completion>,
     scroll: Vec<ScrollAction>,
@@ -268,7 +264,6 @@ impl Conversation {
             page_task: None,
             work_task: None,
             agent_task: None,
-            answer_tasks: HashMap::new(),
             next_answer: 0,
             delivery: Delivery::new(
                 const { NonZeroUsize::new(64).expect("invariant: the delivery capacity 64 is nonzero") },
@@ -1338,7 +1333,6 @@ impl Conversation {
     }
 
     fn abandon_answers(&mut self) {
-        self.answer_tasks.clear();
         if let Some(view) = &mut self.view {
             view.abandon_answers();
         }
@@ -1353,14 +1347,11 @@ impl Conversation {
             return;
         };
         let Some(view) = &mut self.view else { return };
-        if view.answers.get(&item).is_some_and(AnswerState::sending) {
+        if view.answers.get(&item).is_some_and(ItemAnswer::sending) {
             return;
         }
         let request = AnswerRequest(self.next_answer);
         self.next_answer = self.next_answer.wrapping_add(1);
-        view.answers
-            .make_mut()
-            .insert(item.clone(), AnswerState::Sending);
         let client = host.client.clone();
         let origin = Origin {
             host: host.id.clone(),
@@ -1369,22 +1360,23 @@ impl Conversation {
         };
         let sender = self.delivery.sender();
         let id = item.clone();
-        self.answer_tasks.insert(
+        let task = AbortOnDropHandle::new(runtime().spawn(async move {
+            let result = client.answer(&id, &answer).await;
+            sender
+                .offer(Completion::Answer {
+                    origin,
+                    item: id,
+                    request,
+                    result,
+                })
+                .await;
+        }));
+        view.answers.make_mut().insert(
             item,
-            (
+            ItemAnswer::Sending {
                 request,
-                AbortOnDropHandle::new(runtime().spawn(async move {
-                    let result = client.answer(&id, &answer).await;
-                    sender
-                        .offer(Completion::Answer {
-                            origin,
-                            item: id,
-                            request,
-                            result,
-                        })
-                        .await;
-                })),
-            ),
+                _task: Arc::new(task),
+            },
         );
         self.rebuild(core);
     }
@@ -1484,7 +1476,6 @@ impl Conversation {
                 self.page_task = None;
                 self.work_task = None;
                 self.agent_task = None;
-                self.answer_tasks.clear();
                 self.work_reading = None;
                 self.landing = self.landing.map(|_| Landing::Loading);
                 let effects = view.reset();
@@ -1683,15 +1674,10 @@ impl Conversation {
                     request,
                     result,
                 } if self.accepts(core, &origin) => {
-                    let current = self
-                        .answer_tasks
-                        .get(&item)
-                        .is_some_and(|(sending, _)| *sending == request);
-                    if current {
-                        self.answer_tasks.remove(&item);
-                    }
                     if let Some(view) = self.view.as_mut().filter(|view| {
-                        current && view.answers.get(&item).is_some_and(AnswerState::sending)
+                        view.answers
+                            .get(&item)
+                            .is_some_and(|answer| answer.sent_by(request))
                     }) {
                         changed = true;
                         match result {
@@ -1701,7 +1687,7 @@ impl Conversation {
                             Err(error) => {
                                 view.answers
                                     .make_mut()
-                                    .insert(item, AnswerState::Failed(answer_failure(&error)));
+                                    .insert(item, ItemAnswer::Failed(answer_failure(&error)));
                             }
                         }
                     }

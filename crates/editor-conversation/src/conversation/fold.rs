@@ -1,6 +1,6 @@
 use super::activity;
 use super::phase::{self, Phase};
-use super::thread::ThreadView;
+use super::thread::{ItemAnswer, ThreadView};
 use artisan_api::{
     Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunOutcome,
     RunStatus, Seq, Status, Timestamp,
@@ -1511,7 +1511,10 @@ fn version(
             item.seq.hash(&mut hasher);
         }
         view.ui.get(id).hash(&mut hasher);
-        view.answers.get(id).hash(&mut hasher);
+        view.answers
+            .get(id)
+            .map(ItemAnswer::state)
+            .hash(&mut hasher);
         for target in [
             LiveTarget::Text {
                 item_id: id.clone(),
