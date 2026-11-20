@@ -1,7 +1,7 @@
 #[cfg(unix)]
 mod tests {
     use artisan_paths::App;
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::TcpStream;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
@@ -30,19 +30,39 @@ mod tests {
             .expect("make the script runnable");
     }
 
+    enum Listen {
+        AnyPort,
+        Reserved(PortReservation),
+    }
+
+    impl Listen {
+        fn configured(&self) -> String {
+            match self {
+                Self::AnyPort => "127.0.0.1:0".to_owned(),
+                Self::Reserved(port) => port.address().to_string(),
+            }
+        }
+    }
+
     struct Sandbox {
         root: tempfile::TempDir,
         installed: PathBuf,
-        address: SocketAddr,
+        listen: Listen,
     }
 
     impl Sandbox {
-        fn new(address: SocketAddr) -> Self {
-            Self::with_previous(address, &forge_binary())
+        fn new() -> Self {
+            Self::with_previous(&forge_binary(), Listen::AnyPort)
         }
 
-        fn with_previous(address: SocketAddr, previous: &Path) -> Self {
-            assert!(address.ip().is_loopback(), "{address} is not loopback");
+        fn released() -> Self {
+            Self::with_previous(
+                &released_forge(),
+                Listen::Reserved(PortReservation::loopback()),
+            )
+        }
+
+        fn with_previous(previous: &Path, listen: Listen) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("artisan-install-rollback ")
                 .tempdir()
@@ -54,14 +74,14 @@ mod tests {
             test_support::executable::install(previous, &installed);
             std::fs::write(
                 data.join("config.json"),
-                format!(r#"{{"listen": "{address}"}}"#),
+                format!(r#"{{"listen": "{}"}}"#, listen.configured()),
             )
             .expect("write Forge's config");
             script(&root.path().join("bin/systemctl"), NO_SYSTEMD);
             Self {
                 root,
                 installed,
-                address,
+                listen,
             }
         }
 
@@ -83,7 +103,16 @@ mod tests {
         }
 
         fn listening(&self) -> bool {
-            TcpStream::connect_timeout(&self.address, Duration::from_millis(250)).is_ok()
+            let answers =
+                |address| TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok();
+            match &self.listen {
+                Listen::AnyPort => {
+                    forge_http::upgrade::gateway(&self.installed.with_file_name("data"))
+                        .expect("read the gateway Forge recorded")
+                        .is_some_and(|gateway| answers(gateway.address))
+                }
+                Listen::Reserved(port) => answers(port.address()),
+            }
         }
 
         fn start_released(&self) {
@@ -122,8 +151,7 @@ mod tests {
 
     #[test]
     fn a_forge_update_that_cannot_start_puts_the_previous_forge_back_running() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let started = sandbox.ae(&["forge", "start"]);
         assert!(
             started.status.success(),
@@ -166,8 +194,7 @@ mod tests {
 
     #[test]
     fn the_earlier_install_is_removed_only_once_the_new_one_is_in_place() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let earlier = sandbox.root.path().join("data/artisan/bin/ae");
         script(&earlier, "#!/bin/sh\necho the earlier ae\n");
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
@@ -242,8 +269,7 @@ mod tests {
     fn a_first_update_that_fails_after_upgrading_the_database_puts_the_released_forge_back_running()
     {
         use std::io::Read as _;
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let sandbox = Sandbox::released();
         let data = App::Forge
             .dir_under(&artisan_street(sandbox.root.path()))
             .join("data");
@@ -305,8 +331,7 @@ mod tests {
     fn a_failed_first_start_puts_the_released_forge_back_without_the_new_database(
         before: Option<&[u8]>,
     ) {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let sandbox = Sandbox::released();
         let data = App::Forge
             .dir_under(&artisan_street(sandbox.root.path()))
             .join("data");
@@ -374,8 +399,7 @@ mod tests {
     #[test]
     fn an_update_that_cannot_read_the_database_version_leaves_the_released_forge_running() {
         use std::io::Read as _;
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let sandbox = Sandbox::released();
         let database = App::Forge
             .dir_under(&artisan_street(sandbox.root.path()))
             .join("data")
@@ -418,8 +442,7 @@ mod tests {
 
     #[test]
     fn an_update_that_keeps_forge_updates_one_whose_version_file_is_missing() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
         assert!(
             !forge.join("version").exists(),
@@ -456,8 +479,7 @@ mod tests {
 
     #[test]
     fn an_update_after_an_install_cut_short_between_its_renames_still_updates_forge() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
         std::fs::rename(&sandbox.installed, forge.join(".old-0-forge"))
             .expect("the cut-short install had moved Forge aside");
@@ -529,8 +551,7 @@ mod tests {
     fn a_first_update_cut_short_after_the_new_forge_upgraded_the_database_is_rolled_back_by_the_next_ae()
      {
         use std::io::Read as _;
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let sandbox = Sandbox::released();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
         let data = forge.join("data");
         let database = data.join("forge.sqlite3");
@@ -600,8 +621,7 @@ mod tests {
     #[test]
     fn a_record_of_an_interrupted_install_that_cannot_be_read_says_how_out_and_never_blocks_uninstalling()
      {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
         let journal = forge.join(".install-journal");
         std::fs::write(&journal, "{\"entries\":[").expect("leave a record that doesn't read");
@@ -622,8 +642,7 @@ mod tests {
 
     #[test]
     fn a_version_file_that_cannot_be_read_neither_blocks_repairing_nor_uninstalling_forge() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
         let version = forge.join("version");
         std::fs::create_dir(&version).expect("leave a version that doesn't read as a file");
@@ -676,8 +695,7 @@ mod tests {
 
     #[test]
     fn an_installer_run_for_another_one_never_deletes_an_ae_that_isnt_artisans() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let theirs = sandbox.root.path().join("home/.local/bin/ae");
         script(&theirs, "#!/bin/sh\necho my own ae\n");
         let stage = ae_only_stage(&sandbox);
@@ -731,8 +749,7 @@ mod tests {
 
     #[test]
     fn an_ae_link_from_a_dotfile_manager_is_only_replaced_with_consent() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let dotfiles = sandbox.root.path().join("home/dotfiles/bin/ae");
         script(&dotfiles, "#!/bin/sh\necho my own ae\n");
         let link = sandbox.root.path().join("home/.local/bin/ae");
@@ -779,8 +796,7 @@ mod tests {
     #[test]
     fn consent_handed_over_from_an_interactive_install_replaces_only_the_ae_it_was_given_for() {
         const THEIRS: &str = "#!/bin/sh\necho my own ae\n";
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let theirs = sandbox.root.path().join("home/.local/bin/ae");
         script(&theirs, THEIRS);
         let stage = ae_only_stage(&sandbox);
@@ -832,8 +848,7 @@ mod tests {
 
     #[test]
     fn a_failed_install_keeps_the_ae_that_isnt_artisans_and_a_successful_one_replaces_it() {
-        let port = PortReservation::loopback();
-        let sandbox = Sandbox::new(port.address());
+        let sandbox = Sandbox::new();
         let theirs = sandbox.root.path().join("home/.local/bin/ae");
         script(&theirs, "#!/bin/sh\necho my own ae\n");
         let blocker = App::Ae.dir_under(&artisan_street(sandbox.root.path()));
