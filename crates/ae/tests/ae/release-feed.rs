@@ -1,18 +1,44 @@
 use super::*;
 use std::io::{BufRead as _, Write as _};
 
+struct Served {
+    address: std::net::SocketAddr,
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(std::net::TcpStream::connect_timeout(
+            &self.address,
+            test_support::wait::LIVENESS,
+        ));
+        let stopped = self.server.take().map(std::thread::JoinHandle::join);
+        if !std::thread::panicking() {
+            stopped
+                .expect("invariant: the feed is served until it is dropped")
+                .expect("the feed served only release files");
+        }
+    }
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "a test fixture; a failure fails the test"
 )]
-fn serve(directory: std::path::PathBuf, requests: usize) -> (String, std::thread::JoinHandle<()>) {
+fn serve(directory: std::path::PathBuf) -> (String, Served) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let feed = format!(
-        "http://{}/nightly/release.json",
-        listener.local_addr().unwrap()
-    );
+    let address = listener.local_addr().unwrap();
+    let feed = format!("http://{address}/nightly/release.json");
+    let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = std::sync::Arc::clone(&stopping);
     let server = std::thread::spawn(move || {
-        for stream in listener.incoming().take(requests) {
+        for stream in listener.incoming() {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             let mut stream = stream.unwrap();
             let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
@@ -40,7 +66,14 @@ fn serve(directory: std::path::PathBuf, requests: usize) -> (String, std::thread
             }
         }
     });
-    (feed, server)
+    (
+        feed,
+        Served {
+            address,
+            stopping,
+            server: Some(server),
+        },
+    )
 }
 
 #[test]
@@ -48,7 +81,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
     let home = tempfile::tempdir().unwrap();
     let directory = home.path().join("release");
     let key = SigningKey::from_bytes(&[7; 32]);
-    let (feed, server) = serve(directory.clone(), 8);
+    let (feed, server) = serve(directory.clone());
     publish(&directory, &key, "1.0.0");
     let mut command = ae();
     isolate(&mut command, home.path());
@@ -99,7 +132,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
         env!("CARGO_PKG_VERSION"),
         "the recorded version is the installer's own"
     );
-    server.join().unwrap();
+    drop(server);
 }
 
 #[expect(
@@ -140,7 +173,7 @@ fn agreeing_to_replace_an_ae_that_isnt_artisans_carries_through_to_the_releases_
     let home = tempfile::tempdir().unwrap();
     let directory = home.path().join("release");
     let key = SigningKey::from_bytes(&[7; 32]);
-    let (feed, server) = serve(directory.clone(), 8);
+    let (feed, server) = serve(directory.clone());
     let ours = App::Ae.dir_under(&artisan_street(home.path())).join("ae");
     publish(&directory, &key, "1.0.0");
     let theirs = plant_their_ae(home.path());
@@ -171,5 +204,5 @@ fn agreeing_to_replace_an_ae_that_isnt_artisans_carries_through_to_the_releases_
         String::from_utf8_lossy(&updated.stderr)
     );
     assert_eq!(std::fs::read_link(&theirs).unwrap(), ours);
-    server.join().unwrap();
+    drop(server);
 }
