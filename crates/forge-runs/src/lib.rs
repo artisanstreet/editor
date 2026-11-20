@@ -1583,11 +1583,12 @@ fn sort_snapshot(snapshot: &mut [Event]) {
     snapshot.sort_by(|left, right| snapshot_key(left).cmp(&snapshot_key(right)));
 }
 
-fn snapshot_key(event: &Event) -> (Option<&ThreadId>, Option<&LiveTarget>) {
+fn snapshot_key(event: &Event) -> (Option<&ThreadId>, Option<&LiveTarget>, Option<&str>) {
     match event {
         Event::Live {
             thread_id, target, ..
-        } => (Some(thread_id), Some(target)),
+        } => (Some(thread_id), Some(target), None),
+        Event::EditorCall { id, .. } => (None, None, Some(id)),
         Event::Hello { .. }
         | Event::Project { .. }
         | Event::Thread { .. }
@@ -1599,7 +1600,6 @@ fn snapshot_key(event: &Event) -> (Option<&ThreadId>, Option<&LiveTarget>) {
         | Event::Suggestion { .. }
         | Event::Engine { .. }
         | Event::EngineInstall { .. }
-        | Event::EditorCall { .. }
-        | Event::Reset => (event.thread_id(), None),
+        | Event::Reset => (event.thread_id(), None, None),
     }
 }

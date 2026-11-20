@@ -70,6 +70,51 @@ async fn a_call_whose_caller_went_away_is_no_longer_offered() {
     fixture.hub.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnecting_editors_receive_waiting_calls_in_one_order() {
+    let fixture = fixture(Arc::new(|_turn, _io| Box::pin(async { Outcome::done() }))).await;
+    let mut offered_live = fixture.hub.store().subscribe_local_live();
+    let mut callers = Vec::new();
+    for _ in 0..16 {
+        callers.push(tokio::spawn({
+            let hub = fixture.hub.clone();
+            async move { hub.call_editor(EditorCall::HostsList).await }
+        }));
+        test_support::wait::within(
+            "the call to reach the Editors",
+            test_support::wait::LIVENESS,
+            async {
+                while !matches!(
+                    offered_live.recv().await.unwrap().event,
+                    Event::EditorCall { .. }
+                ) {}
+            },
+        )
+        .await;
+    }
+
+    let offered = pending_calls(&fixture.hub);
+    assert_eq!(offered.len(), 16);
+    let mut made = offered.clone();
+    made.sort();
+    assert_eq!(
+        offered, made,
+        "every reconnecting Editor must see the waiting calls in one order"
+    );
+
+    for id in &offered {
+        assert!(
+            fixture
+                .hub
+                .answer_editor_call(id, EditorReply::Ok(serde_json::json!([])))
+        );
+    }
+    for caller in callers {
+        caller.await.unwrap().unwrap();
+    }
+    fixture.hub.shutdown();
+}
+
 type ActingDuringTheRun = (String, Result<GatewayCaller, GatewayRefusal>);
 
 #[tokio::test(flavor = "multi_thread")]
