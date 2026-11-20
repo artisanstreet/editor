@@ -242,3 +242,37 @@ async fn a_thread_whose_run_cannot_start_is_retried_less_and_less_often() {
     assert_eq!(waits, [1, 2, 4, 8, 16]);
     disk.clear();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_continue_with_nothing_stopped_keeps_a_failing_threads_wait() {
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let disk = DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("build it"))
+        .await
+        .unwrap();
+    let first = deferred_wait(&fixture).await;
+    tokio::time::advance(first).await;
+    let second = deferred_wait(&fixture).await;
+
+    let continued = fixture.hub.continue_turn(&fixture.thread_id).await;
+
+    assert!(
+        matches!(
+            continued,
+            Err(ContinueError::Refused {
+                reason: ContinueRefusal::NothingStopped,
+                ..
+            })
+        ),
+        "{continued:?}"
+    );
+    assert_eq!(
+        deferred_wait(&fixture).await,
+        second,
+        "a refused Continue started the failing thread's backoff over"
+    );
+    disk.clear();
+}

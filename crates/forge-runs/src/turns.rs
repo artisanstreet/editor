@@ -245,7 +245,7 @@ impl Turns {
         }
     }
 
-    pub(crate) fn carry_on(&mut self, thread: &ThreadId) -> Continued {
+    pub(crate) fn carry_on(&self, thread: &ThreadId) -> Continued {
         match self.0.get(thread) {
             Some(Turn::Live(run)) => match run.phase {
                 Phase::Working => Continued::Busy,
@@ -265,11 +265,7 @@ impl Turns {
                     Continued::NothingStopped
                 }
             }
-            Some(Turn::Deferred { .. }) => {
-                self.0.remove(thread);
-                Continued::Idle
-            }
-            None => Continued::Idle,
+            Some(Turn::Deferred { .. }) | None => Continued::Idle,
         }
     }
 

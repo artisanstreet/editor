@@ -641,6 +641,7 @@ impl Hub {
                     return Err(refused(ContinueRefusal::NothingStopped));
                 }
                 self.store().request_continue(thread_id.clone()).await?;
+                self.lock().undefer(thread_id);
                 self.resume_pending();
                 Ok(())
             }

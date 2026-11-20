@@ -133,6 +133,12 @@ async fn a_new_message_or_a_continue_starts_a_failing_thread_without_its_wait() 
     );
 
     assert_eq!(turns.carry_on(&thread()), Continued::Idle);
+    assert_eq!(
+        turns.waiting(Instant::now()).count(),
+        1,
+        "asking whether a Continue applies leaves the wait until the Continue is accepted"
+    );
+    turns.undefer(&thread());
     assert_eq!(turns.waiting(Instant::now()).count(), 0);
     assert!(!turns.holds(&thread()));
 }
