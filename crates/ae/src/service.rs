@@ -301,7 +301,7 @@ enum StopMode {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ServicePath {
-    kept: String,
+    kept: Option<String>,
     unrepresentable: Vec<PathBuf>,
 }
 
@@ -322,7 +322,7 @@ fn service_path(installer: &std::ffi::OsStr, temporary: &Path) -> ServicePath {
         }
     }
     ServicePath {
-        kept: kept.join(":"),
+        kept: (!kept.is_empty()).then(|| kept.join(":")),
         unrepresentable,
     }
 }
@@ -356,7 +356,7 @@ fn this_unit(mode: StopMode) -> Result<String, LocateError> {
     Ok(unit_text(
         &paths::binary(App::Forge)?,
         mode,
-        path.as_ref().map(|path| path.kept.as_str()),
+        path.as_ref().and_then(|path| path.kept.as_deref()),
     ))
 }
 

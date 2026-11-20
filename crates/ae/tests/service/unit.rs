@@ -24,7 +24,10 @@ fn the_service_keeps_lasting_tools_and_drops_a_shells_temporary_ones() {
 
     let path = service_path(std::ffi::OsStr::new(installer), Path::new("/tmp"));
 
-    assert_eq!(path.kept, "/home/a/.nix-profile/bin:/usr/bin:/bin");
+    assert_eq!(
+        path.kept.as_deref(),
+        Some("/home/a/.nix-profile/bin:/usr/bin:/bin")
+    );
     assert!(path.unrepresentable.is_empty());
 }
 
@@ -36,13 +39,28 @@ fn a_path_folder_that_is_not_unicode_is_left_out_and_named_instead_of_emptying_t
 
     let path = service_path(installer, Path::new("/tmp"));
 
-    assert_eq!(path.kept, "/usr/local/bin:/usr/bin");
+    assert_eq!(path.kept.as_deref(), Some("/usr/local/bin:/usr/bin"));
     assert_eq!(
         path.unrepresentable,
         [PathBuf::from(std::ffi::OsStr::from_bytes(
             b"/home/a/caf\xe9/bin"
         ))]
     );
+}
+
+#[test]
+fn a_path_of_only_temporary_tools_leaves_the_service_on_systemds_own_path() {
+    let installer = "/nix/store/abc-git/bin:/tmp/nix-shell.x/bin:";
+
+    let path = service_path(std::ffi::OsStr::new(installer), Path::new("/tmp"));
+
+    assert_eq!(path.kept, None);
+    let unit = unit_text(
+        Path::new("/home/a/.local/share/artisan-street/forge/forge"),
+        StopMode::Gateway,
+        path.kept.as_deref(),
+    );
+    assert!(!unit.contains("PATH="), "{unit}");
 }
 
 #[test]
