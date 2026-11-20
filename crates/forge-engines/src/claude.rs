@@ -710,6 +710,13 @@ fn launch_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf
         }
         _ => {}
     }
+    if config.permissions == Permissions::Auto && !readable.is_empty() {
+        let deny: Vec<String> = readable
+            .iter()
+            .map(|dir| format!("Edit(/{}/**)", dir.to_string_lossy().replace('\\', "/")))
+            .collect();
+        settings.insert("permissions".into(), json!({ "deny": deny }));
+    }
     if !settings.is_empty() {
         args.extend(["--settings".to_owned(), Value::Object(settings).to_string()]);
     }

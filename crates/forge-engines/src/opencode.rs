@@ -660,15 +660,22 @@ const fn agent_name(permissions: Permissions) -> &'static str {
     }
 }
 
+fn folder_pattern(dir: &Path) -> String {
+    format!("{}/*", dir.to_string_lossy().replace('\\', "/"))
+}
+
 fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     match permissions {
         Permissions::Auto => {
             let mut external = serde_json::Map::from_iter([("*".to_owned(), json!("deny"))]);
             for dir in readable {
-                let pattern = format!("{}/*", dir.to_string_lossy().replace('\\', "/"));
-                external.insert(pattern, json!("allow"));
+                external.insert(folder_pattern(dir), json!("allow"));
             }
-            json!({ "*": "allow", "bash": "ask", "external_directory": external })
+            let mut edit = serde_json::Map::from_iter([("*".to_owned(), json!("allow"))]);
+            for dir in readable {
+                edit.insert(folder_pattern(dir), json!("deny"));
+            }
+            json!({ "*": "allow", "bash": "ask", "edit": edit, "external_directory": external })
         }
         Permissions::Full => {
             json!({ "*": "allow", "external_directory": "allow", "doom_loop": "allow" })

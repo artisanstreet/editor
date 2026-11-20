@@ -247,6 +247,24 @@ fn each_permission_level_is_an_agent_opencode_knows_and_auto_stays_in_its_worktr
         Some(&"*"),
         "OpenCode lets the last matching rule win, so the deny must come before the allowed folders"
     );
+    assert_eq!(
+        auto["edit"],
+        serde_json::json!({
+            "*": "allow",
+            format!("{}/*", blobs.to_string_lossy().replace('\\', "/")): "deny",
+        }),
+        "Auto reads the folders Forge shares but never edits them"
+    );
+    assert_eq!(
+        auto["edit"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .map(String::as_str),
+        Some("*"),
+        "the folder deny must come after the allow it narrows"
+    );
     let full = rules(artisan_api::Permissions::Full);
     assert_eq!(full["external_directory"], "allow");
     assert!(full.get("bash").is_none(), "nothing asks: {full}");
