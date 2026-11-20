@@ -46,6 +46,8 @@ jobs:
         run: cargo fmt -- --check
       - name: Dependency advisories, licences and bans
         run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --locked check advisories licenses bans
+      - name: Unused dependencies
+        run: nix shell --inputs-from . nixpkgs#cargo-machete --command cargo machete
       - name: Third-party notices match Cargo.lock
         run: |
           nix shell --inputs-from . nixpkgs#cargo-about --command bash -c '
