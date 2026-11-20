@@ -189,7 +189,7 @@ fn founding_forge() -> bool {
     if in_forge_subgroup && started_by_systemd {
         return true;
     }
-    test_support::sandbox_missing(format_args!(
+    test_support::delegation_missing(format_args!(
         "run this test as the main process of a systemd unit with Delegate=yes and DelegateSubgroup=forge"
     ));
     false
@@ -287,7 +287,7 @@ fn an_engine_whose_watcher_cannot_start_does_not_run() {
         .expect("an engine tree");
     let mut engine = Command::new("/bin/sh");
     engine.args(["-c", "touch \"$1\"", "sh"]).arg(&ran);
-    forge_isolation::contain(&mut engine, None, &tree).expect("the engine is contained");
+    forge_isolation::contain(&mut engine, &tree).expect("the engine is contained");
     let spawned = engine.spawn();
     std::fs::write(engines.join("pids.max"), "max").expect("lift the limit");
     let spawned = spawned.map(|mut child| child.wait().expect("the engine exits"));

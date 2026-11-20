@@ -3,14 +3,6 @@ use test_support::scenario::{Key, Modifiers, NamedKey, Opening, Role, Scenario};
 
 const COMPOSER: &str = "Message";
 
-fn turn_snapshots() -> insta::Settings {
-    let mut settings = insta::Settings::clone_current();
-    if test_support::scenario::auto_runs_unsandboxed() {
-        settings.set_snapshot_suffix("unsandboxed");
-    }
-    settings
-}
-
 #[track_caller]
 fn assert_focus_returns_to_the_composer(editor: &test_support::scenario::Editor, after: &str) {
     let focused = editor.view(|view| view.focused());
@@ -50,7 +42,6 @@ fn a_message_sent_from_the_composer_streams_its_reply_into_the_thread() {
         })
     );
     editor.click(Role::Button, "Send message");
-    let _host = turn_snapshots().bind_to_scope();
     editor.settle("the turn to start", |view| view.shows("Say hello"));
     assert_focus_returns_to_the_composer(&editor, "Send");
     insta::assert_snapshot!(
@@ -96,7 +87,6 @@ fn stop_ends_the_turn_and_continue_picks_the_work_back_up() {
     let mut editor = Scenario::replaying(EngineId::Claude, "stop-before-acknowledgement")
         .thread("thread-a", "Parser")
         .open(Opening::Thread("thread-a"));
-    let _host = turn_snapshots().bind_to_scope();
     editor.click(Role::TextInput, COMPOSER);
     editor.type_text("Refactor the parser");
     editor.press(Key::Named(NamedKey::Enter), Modifiers::NONE);
@@ -137,7 +127,6 @@ fn an_approval_answered_in_the_thread_lets_the_turn_finish() {
     let mut editor = Scenario::replaying(EngineId::OpenCode, "permission")
         .thread("thread-a", "Echo")
         .open(Opening::Thread("thread-a"));
-    let _host = turn_snapshots().bind_to_scope();
     editor.click(Role::TextInput, COMPOSER);
     editor.type_text("Echo hello");
     editor.press(Key::Named(NamedKey::Enter), Modifiers::NONE);

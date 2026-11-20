@@ -1,4 +1,4 @@
-use super::{on_this_host, replaying};
+use super::replaying;
 use artisan_api::{Answer, Decision, EngineId, ItemKind, Permissions, RunStatus, Status};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -44,11 +44,11 @@ async fn an_opencode_permission_answered_by_the_user_reaches_opencode_and_the_tu
     assert_eq!(screen.runs(&thread), [(RunStatus::Done, None)]);
     assert_eq!(
         screen.transcript(&thread),
-        on_this_host(&[
+        [
             "you: Echo hello (Done)",
             "assistant: I'll run the shell command first. (Done)",
             "shell: echo hello (Done)",
             "assistant: It printed hello. (Done)",
-        ])
+        ]
     );
 }

@@ -6,7 +6,7 @@ async fn native_job_drop_closes_pipes_held_by_its_own_descendants() {
         .raw_arg("/d /s /c \"echo ready& ping -n 30 127.0.0.1 >NUL\"")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = owned_command(command, Sandbox::Open).unwrap();
+    let mut child = owned_command(command, forge_isolation::Containment::Shared).unwrap();
     let mut pipe = BufReader::new(child.stdout().take().unwrap());
     let mut ready = String::new();
     tokio::time::timeout(

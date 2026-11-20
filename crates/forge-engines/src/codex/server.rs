@@ -216,11 +216,7 @@ async fn attach_current(key: u64, window: Option<u64>) -> Option<Result<Attachme
 
 fn launch_key(turn: &Turn) -> u64 {
     let mut hasher = DefaultHasher::new();
-    let guard = super::ProjectGuard::of(turn);
-    guard.hash(&mut hasher);
-    if guard == super::ProjectGuard::Forge {
-        turn.cwd.hash(&mut hasher);
-    }
+    (process::containment(turn) == forge_isolation::Containment::OwnCgroup).hash(&mut hasher);
     turn.binary.hash(&mut hasher);
     turn.home.hash(&mut hasher);
     turn.launch.args.hash(&mut hasher);

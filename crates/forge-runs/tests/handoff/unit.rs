@@ -79,7 +79,6 @@ async fn summarized_against(
         Arc::new(move |_| Arc::clone(&harness)),
         crate::Surroundings {
             disk: crate::disk::Probe::system(),
-            sandbox: crate::sandbox::Host::Enforced(crate::tests::FULL_COVERAGE),
             stop_deadline: crate::STOP_DEADLINE,
         },
         None,

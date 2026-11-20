@@ -1,4 +1,4 @@
-use super::{on_this_host, replaying};
+use super::replaying;
 use artisan_api::{Answer, Decision, EngineId, ItemKind, Permissions, RunStatus, Status};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -40,13 +40,13 @@ async fn a_codex_command_approval_answered_by_the_user_reaches_codex_and_the_tur
     assert_eq!(screen.runs(&thread), [(RunStatus::Done, None)]);
     assert_eq!(
         screen.transcript(&thread),
-        on_this_host(&[
+        [
             "you: Touch a.txt twice (Done)",
             "assistant: I’ll run the two requested shell calls separately, requesting escalation for each. (Done)",
             "shell: touch a.txt (Done)",
             "shell: touch a.txt (Done)",
             "assistant: done (Done)",
-        ])
+        ]
     );
 }
 
@@ -69,11 +69,12 @@ async fn a_codex_session_held_by_another_process_fails_the_follow_up_and_says_wh
         "the follow-up fails and names the other Codex process: {runs:?}"
     );
     let shown = screen.transcript(&thread);
-    let refused = on_this_host(&[
+    let refused = [
         "you: Take notes (Done)",
         "assistant: Noted. (Done)",
         "you: Add the follow-up (Failed)",
-    ]);
+    ]
+    .map(str::to_owned);
     assert_eq!(
         shown.get(..refused.len()),
         Some(refused.as_slice()),

@@ -12,6 +12,7 @@ mod expansion;
 #[path = "../tests/fakes/support.rs"]
 mod fake_engine;
 mod harness;
+mod home;
 mod install;
 mod manager;
 mod marketplace;
@@ -25,7 +26,6 @@ mod question;
 mod reasoning;
 mod retained;
 mod rpc;
-mod sandbox;
 pub mod trace;
 #[cfg(test)]
 #[path = "../tests/transcript/unit.rs"]
@@ -62,7 +62,6 @@ pub use marketplace::{
     FetchSkillError, SKILLS_SH_URL, SearchSkillsError, fetch_skill, search_skills,
 };
 pub use mentions::{with_skill_mentions, with_thread_mentions};
-pub use sandbox::shared_git_folder;
 pub use usage::UsageCache;
 pub(crate) use usage::has_usage_reader;
 

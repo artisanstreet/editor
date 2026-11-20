@@ -35,8 +35,6 @@ pub struct Launch {
     pub gateway_mcp: Vec<(String, String)>,
     pub mcp_servers: Vec<McpServer>,
     pub readable: Vec<PathBuf>,
-    pub tool_caches: Option<PathBuf>,
-    pub git_common: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

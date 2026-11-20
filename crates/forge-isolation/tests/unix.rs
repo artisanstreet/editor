@@ -53,7 +53,7 @@ fn stand_in_for_forge() -> ! {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        contain(&mut engine, None, &tree).expect("the engine is contained");
+        contain(&mut engine, &tree).expect("the engine is contained");
         let mut child = engine.spawn().expect("the engine starts");
         let group = child.id();
         child.wait().expect("the engine exits");

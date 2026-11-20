@@ -249,7 +249,7 @@ fn abandoned(owner: RunOwner) -> Result<bool, StartTimeError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LeftoverError {
+pub(crate) enum LeftoverError {
     #[error("list the engine run cgroups in {}", path.display())]
     List {
         path: PathBuf,
@@ -262,14 +262,6 @@ pub enum LeftoverError {
         #[source]
         source: StartTimeError,
     },
-    #[error("read whether engine run cgroup {} still has processes", path.display())]
-    Events {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("{} names no populated state", path.display())]
-    NoState { path: PathBuf },
     #[error("name engine run cgroup {}", path.display())]
     Name {
         path: PathBuf,
@@ -360,35 +352,6 @@ fn sweep_leftover_runs(engines: &Path) -> Sweep {
     sweep
 }
 
-fn has_processes(group: &Path) -> Result<bool, LeftoverError> {
-    let path = group.join("cgroup.events");
-    let events = match std::fs::read_to_string(&path) {
-        Ok(events) => events,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => return Err(LeftoverError::Events { path, source }),
-    };
-    populated(&events).ok_or(LeftoverError::NoState { path })
-}
-
-pub(crate) fn leftovers_alive() -> Result<bool, LeftoverError> {
-    let Some(engines) = ENGINES_FOLDER.get() else {
-        return Ok(false);
-    };
-    let Leftovers {
-        abandoned,
-        failures,
-    } = leftovers(engines);
-    let mut unknown = failures.into_iter().next();
-    for group in abandoned {
-        match has_processes(&group) {
-            Ok(true) => return Ok(true),
-            Ok(false) => {}
-            Err(failure) => unknown = unknown.or(Some(failure)),
-        }
-    }
-    unknown.map_or(Ok(false), Err)
-}
-
 fn swept(sweep: Sweep) -> impl Iterator<Item = Outcome> {
     const SWEEP: &str = "run cgroups left by an earlier Forge are killed and removed";
     let ended = Outcome::Applied(format!(
@@ -397,10 +360,7 @@ fn swept(sweep: Sweep) -> impl Iterator<Item = Outcome> {
     ));
     let failed = sweep.failures.into_iter().map(|failure| Outcome::Skipped {
         measure: SWEEP.to_owned(),
-        reason: format!(
-            "{}; engine configuration stays guarded while such a cgroup has processes",
-            diagnostics::chain(&failure)
-        ),
+        reason: diagnostics::chain(&failure),
     });
     std::iter::once(ended).chain(failed)
 }

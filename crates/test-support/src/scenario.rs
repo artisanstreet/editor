@@ -11,10 +11,5 @@ pub use editor_aqua::core::SettingsPage;
 pub use view::{Found, Scrolled, View};
 #[cfg(windows)]
 mod uia;
-
-#[must_use]
-pub fn auto_runs_unsandboxed() -> bool {
-    forge_runs::auto_notice_on_this_host().is_some()
-}
 #[cfg(windows)]
 pub use uia::{NativeEditor, Uia};

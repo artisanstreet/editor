@@ -119,6 +119,6 @@ async fn a_run_launched_in_auto_cannot_start_a_full_access_agent_after_its_threa
     assert_eq!(
         agent.permissions,
         Permissions::Auto,
-        "a still-sandboxed run started an agent with Full access"
+        "a run launched in Auto started an agent with Full access"
     );
 }

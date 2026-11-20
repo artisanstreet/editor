@@ -43,7 +43,7 @@ async fn traced_child() {
         ..crate::McpServer::default()
     });
     let turn = Turn {
-        thread_id: ThreadId::from("redaction"),
+        thread_id: artisan_api::ThreadId::from("redaction"),
         engine: EngineId::Codex,
         binary: "/bin/sh".into(),
         home: home.clone(),

@@ -1,41 +1,11 @@
 use crate::Hub;
 use artisan_api::{CreateProject, ProjectId, Thread, ThreadId, Timestamp};
 use forge_store::{CreateProjectError, ReadProjectError};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const FOLDER_WORDS: usize = 4;
 const FOLDER_WORDS_BYTES: usize = 48;
 const LEGACY_KEY: usize = 12;
-const GIT_COMMON_RECORD: &str = "git-common.json";
-
-type GitCommonRecord = BTreeMap<PathBuf, Option<PathBuf>>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum GitCommonError {
-    #[error("read the shared git folders recorded for project {project} in {}", path.display())]
-    Read {
-        project: ProjectId,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("parse the shared git folders recorded for project {project} in {}", path.display())]
-    Parse {
-        project: ProjectId,
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("record the shared git folder of {} for project {project} in {}", folder.display(), path.display())]
-    Write {
-        project: ProjectId,
-        folder: PathBuf,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnsureScratchProjectError {
@@ -114,57 +84,6 @@ pub(crate) enum RemoveScratchFolderError {
 impl Hub {
     pub(crate) fn scratch_root(&self) -> PathBuf {
         self.data_dir().join("scratch")
-    }
-
-    pub(crate) fn sandbox_tool_caches(&self, project: &ProjectId) -> PathBuf {
-        self.data_dir()
-            .join("sandbox")
-            .join(project.as_str())
-            .join("caches")
-    }
-
-    pub(crate) fn sandbox_git_common(
-        &self,
-        project: &ProjectId,
-        folder: &Path,
-    ) -> Result<Option<PathBuf>, GitCommonError> {
-        let record_folder = self.data_dir().join("sandbox").join(project.as_str());
-        let path = record_folder.join(GIT_COMMON_RECORD);
-        let mut record: GitCommonRecord = match std::fs::read(&path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|source| GitCommonError::Parse {
-                    project: project.clone(),
-                    path: path.clone(),
-                    source,
-                })?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => GitCommonRecord::new(),
-            Err(source) => {
-                return Err(GitCommonError::Read {
-                    project: project.clone(),
-                    path,
-                    source,
-                });
-            }
-        };
-        if let Some(common) = record.get(folder) {
-            return Ok(common.clone());
-        }
-        let common = forge_engines::shared_git_folder(folder);
-        record.insert(folder.to_path_buf(), common.clone());
-        let writing = |source| GitCommonError::Write {
-            project: project.clone(),
-            folder: folder.to_path_buf(),
-            path: path.clone(),
-            source,
-        };
-        let bytes = serde_json::to_vec(&record).map_err(|source| writing(source.into()))?;
-        std::fs::create_dir_all(&record_folder).map_err(writing)?;
-        let mut file = tempfile::NamedTempFile::new_in(&record_folder).map_err(writing)?;
-        std::io::Write::write_all(&mut file, &bytes).map_err(writing)?;
-        file.persist(&path)
-            .map_err(|failure| writing(failure.error))?;
-        Ok(common)
     }
 
     pub async fn ensure_scratch_project(&self) -> Result<(), EnsureScratchProjectError> {

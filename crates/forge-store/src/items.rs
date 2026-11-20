@@ -103,7 +103,6 @@ operation_error!(
     "read when the next parked turn is due"
 );
 operation_error!(ContinuePendingError(StorageError), "read whether thread {thread} waits to continue", thread: ThreadId);
-operation_error!(TurnUnsandboxedError(StorageError), "read whether the current turn of thread {thread} said it isn't sandboxed", thread: ThreadId);
 operation_error!(CancelledItemsError(StorageError), "read the items run {run} left open", run: RunId);
 operation_error!(RestoreInputsError(WriteFailure), "restore the undelivered inputs of thread {thread}", thread: ThreadId);
 operation_error!(CancelInputsError(WriteFailure), "cancel the inputs of thread {thread} through seq {through}", thread: ThreadId, through: Seq);
@@ -444,25 +443,6 @@ impl Store {
         })
         .await
         .map_err(|cause| ContinuePendingError {
-            thread: asked,
-            cause: Box::new(cause),
-        })
-    }
-
-    pub async fn turn_said_unsandboxed(
-        &self,
-        thread: &ThreadId,
-    ) -> Result<bool, TurnUnsandboxedError> {
-        let asked = thread.clone();
-        let thread = thread.clone();
-        self.read(move |conn| {
-            conn.prepare_cached(include_str!("sql/items/turn_unsandboxed.sql"))
-                .at("items/turn_unsandboxed.sql")?
-                .query_row([thread.as_str()], |row| row.get(0))
-                .at("items/turn_unsandboxed.sql")
-        })
-        .await
-        .map_err(|cause| TurnUnsandboxedError {
             thread: asked,
             cause: Box::new(cause),
         })

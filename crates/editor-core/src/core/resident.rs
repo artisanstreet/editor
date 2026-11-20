@@ -191,8 +191,7 @@ impl ResidentBytes for Item {
                         NoticeKind::Reroute { model } => model.capacity(),
                         NoticeKind::YouShouldKnow { .. }
                         | NoticeKind::Safety
-                        | NoticeKind::Info
-                        | NoticeKind::Unsandboxed { .. } => 0,
+                        | NoticeKind::Info => 0,
                     }
             }
             ItemKind::Error { message, .. } => message.resident_bytes(),

@@ -158,8 +158,6 @@ impl UsageCache {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadClaudeUsageError {
-    #[error("restore Claude's configuration before asking for usage")]
-    Guard(#[source] crate::sandbox::GuardError),
     #[error("run claude /usage")]
     Probe(#[source] crate::process::ProbeError),
     #[error("claude /usage printed no JSON")]
@@ -171,8 +169,7 @@ pub(crate) enum ReadClaudeUsageError {
 }
 
 async fn read_claude(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>, ReadClaudeUsageError> {
-    let mut command =
-        engine_command(EngineId::Claude, binary, home).map_err(ReadClaudeUsageError::Guard)?;
+    let mut command = engine_command(EngineId::Claude, binary, home);
     command
         .args([
             "-p",
@@ -288,8 +285,6 @@ fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadCodexUsageError {
-    #[error("restore Codex's configuration before asking for rate limits")]
-    Guard(#[source] crate::sandbox::GuardError),
     #[error("codex rate limits timed out after {}s", CODEX_TIMEOUT.as_secs())]
     TimedOut,
     #[error("ask codex app-server")]
@@ -308,8 +303,7 @@ async fn read_codex_inner(
     binary: &Path,
     home: &Path,
 ) -> Result<Vec<UsageWindow>, ReadCodexUsageError> {
-    let command =
-        engine_command(EngineId::Codex, binary, home).map_err(ReadCodexUsageError::Guard)?;
+    let command = engine_command(EngineId::Codex, binary, home);
     let mut session = crate::rpc::Session::codex(command)
         .await
         .map_err(ReadCodexUsageError::Call)?;

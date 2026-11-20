@@ -76,10 +76,6 @@ pub enum ReconcileSkillsError {
     },
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) type SkillsFolderError = crate::sandbox::GuardError;
-
-#[cfg(not(target_os = "linux"))]
 pub(crate) type SkillsFolderError = io::Error;
 
 pub fn reconcile_skills(
@@ -107,12 +103,6 @@ pub fn reconcile_skills(
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
-    #[error("restore {engine}'s configuration before changing it")]
-    Guard {
-        engine: EngineId,
-        #[source]
-        source: crate::sandbox::GuardError,
-    },
     #[error("bringing the global prompt in line for {engine}")]
     Prompt {
         engine: EngineId,
@@ -145,8 +135,6 @@ pub(crate) fn materialize(
     home: &Path,
     c: &Customisation,
 ) -> Result<Launch, MaterializeError> {
-    crate::sandbox::guard::restore(engine, home)
-        .map_err(|source| MaterializeError::Guard { engine, source })?;
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
             match prompt::reconcile(engine, home, prompt, false) {
@@ -278,56 +266,6 @@ fn inspect(path: &Path, owned: &[PathBuf]) -> io::Result<Entry> {
     Ok(Entry::Theirs)
 }
 
-#[cfg(target_os = "linux")]
-fn skills_folder(engine: EngineId) -> &'static Path {
-    Path::new(match engine {
-        EngineId::Claude => ".claude/skills",
-        EngineId::Codex => ".codex/skills",
-        EngineId::OpenCode => "config/opencode/skills",
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn sync_skills(
-    engine: EngineId,
-    home: &Path,
-    wanted: &BTreeMap<String, PathBuf>,
-    owned: &[PathBuf],
-) -> Result<(), SkillsFolderError> {
-    use crate::sandbox::guard::{self, Placed};
-    let folder = skills_folder(engine);
-    let entries = guard::entries(engine, home, folder)?;
-    let ours = |target: &Path| owned.iter().any(|root| target.starts_with(root));
-    for (name, placed) in &entries {
-        let keep = name.to_str().is_some_and(|name| wanted.contains_key(name));
-        if !keep
-            && let Placed::Link(target) = placed
-            && ours(target)
-        {
-            guard::remove(engine, home, &folder.join(name))?;
-            tracing::debug!(%engine, link = %home.join(folder).join(name).display(), "removed a stale skill link");
-        }
-    }
-    for (name, target) in wanted {
-        let placed = entries
-            .iter()
-            .find(|(found, _)| found.as_os_str() == std::ffi::OsStr::new(name))
-            .map(|(_, placed)| placed);
-        match placed {
-            Some(Placed::Link(current)) if current == target => continue,
-            Some(Placed::Link(current)) if ours(current) => {}
-            Some(Placed::Link(_) | Placed::Other) => {
-                tracing::debug!(%engine, skill = %name, "a skill folder of the user's has this name; leaving it");
-                continue;
-            }
-            None => {}
-        }
-        guard::link(engine, home, &folder.join(name), target)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
 fn sync_skills(
     engine: EngineId,
     home: &Path,
@@ -340,7 +278,6 @@ fn sync_skills(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn sync_skill_folder(
     engine_skills: &Path,
     wanted: &BTreeMap<String, PathBuf>,
@@ -379,7 +316,6 @@ fn sync_skill_folder(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
 fn copied_skill_matches(link: &Path, target: &Path) -> io::Result<bool> {
     use std::io::Read as _;
     let path = link.join(COPY_MARKER);
@@ -414,7 +350,6 @@ fn remove_entry(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn staging_root(engine_skills: &Path) -> PathBuf {
     engine_skills.with_file_name(".artisan-skills-staging")
 }
@@ -440,7 +375,6 @@ fn other_process_leftover<'name>(file_name: &'name str, kind: &str) -> Option<&'
     (process != std::process::id()).then_some(name)
 }
 
-#[cfg(not(target_os = "linux"))]
 fn discard_other_processes_leftovers(staging: &Path) {
     let entries = match fs::read_dir(staging) {
         Ok(entries) => entries,
@@ -492,7 +426,6 @@ fn swap_in(prepared: &Path, destination: &Path, retired: &Path) -> io::Result<()
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
 fn publish(prepared: &Path, link: &Path, staging: &Path) -> io::Result<()> {
     let retired = staging.join(staged_name("retired", link_name(link)));
     swap_in(prepared, link, &retired).inspect_err(|_| {
@@ -502,7 +435,6 @@ fn publish(prepared: &Path, link: &Path, staging: &Path) -> io::Result<()> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
 fn place(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
     fs::create_dir_all(staging)?;
     let prepared = staging.join(staged_name("prepared", link_name(link)));
@@ -522,7 +454,6 @@ fn place(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn publish_copy(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
     fs::create_dir_all(staging)?;
     let prepared = staging.join(staged_name("copy", link_name(link)));
@@ -571,10 +502,10 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
     #[error("write Forge's {engine} launch configuration")]
-    Guard {
+    Config {
         engine: EngineId,
         #[source]
-        source: crate::sandbox::GuardError,
+        source: crate::home::ConfigError,
     },
     #[error("encode {}", path.display())]
     EncodeJson {
@@ -659,10 +590,10 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
     match engine {
         EngineId::Claude => {
             let path = home.join(CLAUDE_MCP_CONFIG);
-            let guarding = |source| LaunchError::Guard { engine, source };
+            let configuring = |source| LaunchError::Config { engine, source };
             if servers.is_empty() {
-                crate::sandbox::guard::remove(engine, home, Path::new(CLAUDE_MCP_CONFIG))
-                    .map_err(guarding)?;
+                crate::home::remove_config(engine, home, Path::new(CLAUDE_MCP_CONFIG))
+                    .map_err(configuring)?;
             } else {
                 let config = json!({ "mcpServers": claude_servers(servers) });
                 let text = serde_json::to_string_pretty(&config).map_err(|source| {
@@ -671,14 +602,14 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                         source,
                     }
                 })?;
-                crate::sandbox::guard::write(
+                crate::home::write_config(
                     engine,
                     home,
                     Path::new(CLAUDE_MCP_CONFIG),
                     text.as_bytes(),
                     PRIVATE_FILE,
                 )
-                .map_err(guarding)?;
+                .map_err(configuring)?;
                 launch.args = vec![
                     "--mcp-config".to_owned(),
                     path.to_string_lossy().into_owned(),
@@ -687,9 +618,9 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
         }
         EngineId::Codex => {
             let path = home.join(CODEX_CONFIG);
-            let guarding = |source| LaunchError::Guard { engine, source };
-            let editing = crate::sandbox::guard::edit(engine, home, Path::new(CODEX_CONFIG))
-                .map_err(guarding)?;
+            let configuring = |source| LaunchError::Config { engine, source };
+            let editing = crate::home::edit_config(engine, home, Path::new(CODEX_CONFIG))
+                .map_err(configuring)?;
             let mut config: toml::Table = match editing.base() {
                 Some(bytes) => {
                     let text =
@@ -721,7 +652,7 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 })?;
             editing
                 .write(text.as_bytes(), PRIVATE_FILE)
-                .map_err(guarding)?;
+                .map_err(configuring)?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -986,15 +917,14 @@ mod reform_tests;
 #[path = "../tests/customise/catalog_read.rs"]
 mod catalog_read_tests;
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 #[path = "../tests/customise/marker_budget.rs"]
 mod marker_budget_tests;
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 #[path = "../tests/customise/copied_reconciliation.rs"]
 mod copied_reconciliation_tests;
 
 #[cfg(test)]
-#[cfg(not(target_os = "linux"))]
 #[path = "../tests/customise/publish_copy.rs"]
 mod publish_copy_tests;

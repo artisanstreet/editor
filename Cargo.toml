@@ -84,7 +84,6 @@ semver = "=1.0.28"
 palette = "0.7"
 rustix = "=1.1.6"
 notify = "=8.2.0"
-landlock = "=0.4.7"
 windows = "=0.62.2"
 addr2line = { version = "=0.27.1", default-features = false, features = ["std", "loader"] }
 backtrace = "=0.3.76"

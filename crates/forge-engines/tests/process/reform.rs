@@ -5,7 +5,7 @@ async fn dropping_the_owner_closes_pipes_held_by_descendants() {
     command
         .args(["-c", "sleep 30 & echo ready; wait"])
         .stdout(Stdio::piped());
-    let mut child = owned_command(command, Sandbox::Open).unwrap();
+    let mut child = owned_command(command, forge_isolation::Containment::Shared).unwrap();
     let mut pipe = BufReader::new(child.stdout().take().unwrap());
     let mut ready = String::new();
     pipe.read_line(&mut ready).await.unwrap();
@@ -38,7 +38,7 @@ async fn oversized_engine_line_is_a_protocol_error() {
     let home = base.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let turn = Turn {
-        thread_id: ThreadId::from("bounded-output"),
+        thread_id: artisan_api::ThreadId::from("bounded-output"),
         engine: EngineId::Codex,
         binary: "/bin/sh".into(),
         home: home.clone(),

@@ -234,26 +234,26 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
         launch: crate::Launch::default(),
         trace_dir: None,
     };
-    let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (_, params) = super::thread_params(&turn);
     assert_eq!(params["serviceTier"], "priority");
     assert_eq!(params["config"]["model_context_window"], 1_000_000);
     turn.session_id = Some("saved-session".into());
-    let (method, resumed) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (method, resumed) = super::thread_params(&turn);
     assert_eq!(method, "thread/resume");
     assert_eq!(resumed["config"]["model_context_window"], 1_000_000);
     turn.config.options.remove("context_window");
-    let (_, standard) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (_, standard) = super::thread_params(&turn);
     assert!(standard["config"].get("model_context_window").is_none());
     let mut overrides = json!({});
-    super::turn_overrides(&turn, super::ProjectGuard::Codex, &mut overrides);
+    super::turn_overrides(&turn, &mut overrides);
     assert_eq!(overrides["serviceTierForTurn"], "priority");
     assert_eq!(overrides["model"], "gpt-6.1-sol");
 
     turn.config.speed = Some("standard".into());
-    let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (_, params) = super::thread_params(&turn);
     assert!(params.get("serviceTier").is_none(), "{params}");
     let mut overrides = json!({});
-    super::turn_overrides(&turn, super::ProjectGuard::Codex, &mut overrides);
+    super::turn_overrides(&turn, &mut overrides);
     assert_eq!(overrides["serviceTierForTurn"], "default");
 }
 
@@ -271,7 +271,7 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
         launch: crate::Launch::default(),
         trace_dir: None,
     };
-    let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (_, params) = super::thread_params(&turn);
     assert_eq!(
         (
             &params["sandbox"],
@@ -286,7 +286,7 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     );
 
     let mut overrides = json!({});
-    super::turn_overrides(&turn, super::ProjectGuard::Codex, &mut overrides);
+    super::turn_overrides(&turn, &mut overrides);
     assert_eq!(
         (
             &overrides["sandboxPolicy"],
@@ -301,62 +301,17 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     );
 
     turn.config.permissions = artisan_api::Permissions::Full;
-    let (_, params) = super::thread_params(&turn, super::ProjectGuard::Codex);
+    let (_, params) = super::thread_params(&turn);
     assert_eq!(params["sandbox"], "danger-full-access");
     assert_eq!(params["approvalPolicy"], "never");
     assert!(params.get("approvalsReviewer").is_none(), "{params}");
     let mut overrides = json!({});
-    super::turn_overrides(&turn, super::ProjectGuard::Codex, &mut overrides);
+    super::turn_overrides(&turn, &mut overrides);
     assert_eq!(
         overrides["sandboxPolicy"],
         json!({ "type": "dangerFullAccess" })
     );
     assert_eq!(overrides["approvalPolicy"], "never");
-}
-
-#[test]
-fn inside_forges_sandbox_auto_keeps_the_reviewer_but_not_codexs_own_sandbox() {
-    let turn = crate::Turn {
-        thread_id: artisan_api::ThreadId::new(),
-        engine: artisan_api::EngineId::Codex,
-        binary: "codex".into(),
-        home: "/home".into(),
-        cwd: "/work".into(),
-        config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
-        session_id: None,
-        input: crate::UserInput::default(),
-        launch: crate::Launch::default(),
-        trace_dir: None,
-    };
-    let (_, params) = super::thread_params(&turn, super::ProjectGuard::Forge);
-    assert_eq!(
-        (
-            &params["sandbox"],
-            &params["approvalPolicy"],
-            &params["approvalsReviewer"]
-        ),
-        (
-            &json!("danger-full-access"),
-            &json!("on-request"),
-            &json!("auto_review")
-        ),
-        "Codex's bubblewrap can't start inside Landlock, so every command would fail"
-    );
-    let mut overrides = json!({});
-    super::turn_overrides(&turn, super::ProjectGuard::Forge, &mut overrides);
-    assert_eq!(
-        (
-            &overrides["sandboxPolicy"],
-            &overrides["approvalPolicy"],
-            &overrides["approvalsReviewer"]
-        ),
-        (
-            &json!({ "type": "dangerFullAccess" }),
-            &json!("on-request"),
-            &json!("auto_review")
-        ),
-        "each turn keeps Codex's sandbox off while Forge's holds"
-    );
 }
 
 #[test]

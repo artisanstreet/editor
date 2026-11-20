@@ -460,18 +460,6 @@ pub enum NoticeKind {
     Reroute { model: String },
     Info,
     YouShouldKnow { heads_up: bool },
-    Unsandboxed { reason: UnsandboxedReason },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnsandboxedReason {
-    KernelWithoutLandlock,
-    KernelWithoutTruncationRule,
-    Windows,
-    MacOs,
-    OtherOs,
-    StartedWithFullAccess,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

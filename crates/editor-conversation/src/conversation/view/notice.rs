@@ -18,9 +18,7 @@ pub(crate) fn render<E>(
     };
     let (asset, prefix) = match kind {
         NoticeKind::Goal { state } => (AssetId::TABLER_TARGET_ARROW, format!("Goal {state}: ")),
-        NoticeKind::Safety | NoticeKind::Unsandboxed { .. } => {
-            (AssetId::TABLER_SHIELD_LOCK, String::new())
-        }
+        NoticeKind::Safety => (AssetId::TABLER_SHIELD_LOCK, String::new()),
         NoticeKind::Reroute { model } => (
             AssetId::TABLER_ARROW_RIGHT,
             format!("Switched to {model}: "),

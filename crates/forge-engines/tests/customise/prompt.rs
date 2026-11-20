@@ -15,57 +15,7 @@ fn an_unreadable_ownership_record_keeps_an_external_edit() {
         "{applied:?}"
     );
     assert_eq!(fs::read_to_string(&file).unwrap(), "edited outside Artisan");
-    assert!(!crate::sandbox::forge_records(&home).join(BACKUPS).exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn links_planted_where_forge_once_kept_its_prompt_records_lead_nowhere() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("claude");
-    let key = root.path().join("id_ed25519");
-    let elsewhere = root.path().join("elsewhere");
-    fs::write(&key, "PRIVATE KEY").unwrap();
-    fs::create_dir_all(&elsewhere).unwrap();
-    fs::create_dir_all(home.join(".claude")).unwrap();
-    fs::write(home.join(".claude/CLAUDE.md"), "the user's own prompt").unwrap();
-    fs::create_dir_all(home.join(".artisan")).unwrap();
-    std::os::unix::fs::symlink(&key, home.join(".artisan/global-prompt.artisan-tmp")).unwrap();
-    std::os::unix::fs::symlink(&elsewhere, home.join(".artisan/backups")).unwrap();
-
-    let applied = apply_prompt(EngineId::Claude, &home, "canonical", true);
-
-    assert_eq!(applied, Some(PromptApplied::Synced));
-    assert_eq!(fs::read_to_string(&key).unwrap(), "PRIVATE KEY");
-    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
-    assert_eq!(
-        fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap(),
-        "canonical"
-    );
-    let backups: Vec<_> = fs::read_dir(crate::sandbox::forge_records(&home).join(BACKUPS))
-        .unwrap()
-        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
-        .collect();
-    assert_eq!(backups, ["the user's own prompt"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_prompt_file_replaced_with_a_link_is_not_read_through() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("claude");
-    let key = root.path().join("id_ed25519");
-    fs::write(&key, "PRIVATE KEY").unwrap();
-    fs::create_dir_all(home.join(".claude")).unwrap();
-    std::os::unix::fs::symlink(&key, home.join(".claude/CLAUDE.md")).unwrap();
-
-    let file = read_prompt_file(EngineId::Claude, &home).unwrap();
-
-    assert!(
-        matches!(&file.text, Err(reason) if !reason.contains("PRIVATE KEY")),
-        "{:?}",
-        file.text
-    );
+    assert!(!crate::home::forge_records(&home).join(BACKUPS).exists());
 }
 
 #[test]

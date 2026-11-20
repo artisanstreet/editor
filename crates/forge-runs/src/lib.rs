@@ -17,7 +17,6 @@ pub mod resources;
 mod retention;
 mod run;
 pub mod runtime;
-mod sandbox;
 mod scratch;
 mod side;
 mod turns;
@@ -49,7 +48,6 @@ pub use operation::{
 };
 pub use retention::{RemoveInactiveThreadsError, SettingKind};
 pub use run::PrepareError;
-pub use sandbox::auto_notice_on_this_host;
 pub use scratch::{EnsureScratchProjectError, ThreadFolderError};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
@@ -100,13 +98,11 @@ struct Inner {
     agents: agents::AgentWatch,
     approvals: approvals::OwnApprovals,
     disk: disk::Probe,
-    sandbox: sandbox::Host,
     stop_deadline: std::time::Duration,
 }
 
 struct Surroundings {
     disk: disk::Probe,
-    sandbox: sandbox::Host,
     stop_deadline: std::time::Duration,
 }
 
@@ -114,7 +110,6 @@ impl Surroundings {
     fn system() -> Self {
         Self {
             disk: disk::Probe::system(),
-            sandbox: forge_isolation::support().into(),
             stop_deadline: STOP_DEADLINE,
         }
     }
@@ -268,7 +263,6 @@ impl Hub {
     ) -> Self {
         let Surroundings {
             disk,
-            sandbox,
             stop_deadline,
         } = surroundings;
         let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
@@ -294,7 +288,6 @@ impl Hub {
                 agents: agents::AgentWatch::default(),
                 approvals: approvals::OwnApprovals::default(),
                 disk,
-                sandbox,
                 stop_deadline,
             }),
         };

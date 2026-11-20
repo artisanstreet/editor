@@ -127,29 +127,27 @@ jobs:
         run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
       - name: Tests
         run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets) and not binary(contract)'
-      - name: Sandbox and cgroup tests as the main process of a delegated service
+      - name: Cgroup tests as the main process of a delegated service
         shell: bash
         run: |
           set -euo pipefail
-          abi="$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))')"
-          echo "Sandbox tests ran on kernel $(uname -r) with Landlock ABI $abi; LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unlisted)" | tee -a "$GITHUB_STEP_SUMMARY"
           nix develop .#cargo-linux --command cargo test --locked -p forge-isolation -p forge-engines --no-run --message-format=json \
             | jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test) | [.target.name, .executable, (.manifest_path | rtrimstr("/Cargo.toml"))] | @tsv' \
-            > "$RUNNER_TEMP/sandbox-tests.tsv"
-          test "$(cut -f1 "$RUNNER_TEMP/sandbox-tests.tsv" | grep -cxE 'forge_engines|sandbox|unix|linux')" -eq 4
+            > "$RUNNER_TEMP/cgroup-tests.tsv"
+          test "$(cut -f1 "$RUNNER_TEMP/cgroup-tests.tsv" | grep -cxE 'forge_engines|unix|linux')" -eq 3
           while IFS=$'\t' read -r target executable crate; do
             case "$target" in
-              forge_engines) filters=(sandbox:: process:: an_auto_write_runs_inside_the_runs_sandbox) ;;
-              sandbox | unix | linux) filters=() ;;
+              forge_engines) filters=(process::) ;;
+              unix | linux) filters=() ;;
               *) continue ;;
             esac
             sudo systemd-run --uid="$(id -u)" --gid="$(id -g)" \
               -p Delegate=yes -p DelegateSubgroup=forge \
               --wait --pipe --collect --quiet \
               --working-directory="$crate" \
-              -E ARTISAN_SANDBOX_REQUIRED=6 -E HOME="$HOME" -E PATH="$PATH" -E CARGO_MANIFEST_DIR="$crate" \
+              -E ARTISAN_DELEGATION_REQUIRED=1 -E HOME="$HOME" -E PATH="$PATH" -E CARGO_MANIFEST_DIR="$crate" \
               "$executable" "${filters[@]}" --test-threads=1
-          done < "$RUNNER_TEMP/sandbox-tests.tsv"
+          done < "$RUNNER_TEMP/cgroup-tests.tsv"
       - name: Qualification tests
         run: nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'not binary(budgets)'
       - name: Performance budgets
@@ -370,7 +368,7 @@ jobs:
       - run: rustup show
       - name: Build service integration fixtures
         run: cargo build --locked -p ae -p forge
-      - name: Engine, sandbox and run tests on the shipped ARM target
+      - name: Engine, isolation and run tests on the shipped ARM target
         run: cargo nextest run --locked -p forge-engines -p forge-isolation -p forge-runs -p forge -p ae --no-fail-fast
       - *save-target
       - *sccache-stats

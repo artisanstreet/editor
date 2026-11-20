@@ -26,7 +26,7 @@ pub mod sse;
 pub mod transcript;
 
 #[cfg(unix)]
-pub const SANDBOX_REQUIRED: &str = "ARTISAN_SANDBOX_REQUIRED";
+const DELEGATION_REQUIRED: &str = "ARTISAN_DELEGATION_REQUIRED";
 
 #[expect(
     clippy::print_stderr,
@@ -37,10 +37,10 @@ pub fn skipped(why: std::fmt::Arguments<'_>) {
 }
 
 #[cfg(unix)]
-pub fn sandbox_missing(why: std::fmt::Arguments<'_>) {
+pub fn delegation_missing(why: std::fmt::Arguments<'_>) {
     assert!(
-        std::env::var_os(SANDBOX_REQUIRED).is_none(),
-        "{SANDBOX_REQUIRED} is set, so this test must run, but {why}"
+        std::env::var_os(DELEGATION_REQUIRED).is_none(),
+        "{DELEGATION_REQUIRED} is set, so this test must run, but {why}"
     );
     skipped(why);
 }

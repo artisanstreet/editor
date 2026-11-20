@@ -51,7 +51,7 @@ async fn gone(pid: &str, what: &str) {
 #[cfg(unix)]
 async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
     let id = shells
-        .start("sleep 30 & echo $!", work, &Sandbox::Open)
+        .start("sleep 30 & echo $!", work, Containment::Shared)
         .unwrap();
     settled(shells, &id, "the launcher to exit", |state| {
         exited(state) && printed(state, "\n")
@@ -70,7 +70,7 @@ async fn leave_running(shells: &Shells, work: &Path) -> (String, String) {
 #[cfg(unix)]
 fn start_and_kill_past_the_retention_bound(shells: &Shells, work: &Path) {
     for _ in 0..MAX_KEPT_SHELLS {
-        let id = shells.start("sleep 30", work, &Sandbox::Open).unwrap();
+        let id = shells.start("sleep 30", work, Containment::Shared).unwrap();
         shells.kill(&id).unwrap();
     }
 }
@@ -84,7 +84,7 @@ async fn a_background_command_runs_and_reports_its_output_and_exit() {
         .start(
             "echo hello; sleep 0.2; echo done; exit 3",
             work.path(),
-            &Sandbox::Open,
+            Containment::Shared,
         )
         .unwrap();
     settled(&shells, &id, "the first line", |state| {
@@ -109,7 +109,7 @@ async fn killing_a_shell_stops_it_and_says_so() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start("echo up; sleep 30", work.path(), &Sandbox::Open)
+        .start("echo up; sleep 30", work.path(), Containment::Shared)
         .unwrap();
     settled(&shells, &id, "the shell to start", |state| {
         printed(state, "up")
@@ -127,12 +127,12 @@ async fn an_id_from_another_turn_never_reads_this_turns_shell() {
     let work = tempfile::tempdir().unwrap();
     let earlier = Shells::default();
     let old = earlier
-        .start("echo old", work.path(), &Sandbox::Open)
+        .start("echo old", work.path(), Containment::Shared)
         .unwrap();
     drop(earlier);
     let shells = Shells::default();
     let id = shells
-        .start("echo new", work.path(), &Sandbox::Open)
+        .start("echo new", work.path(), Containment::Shared)
         .unwrap();
     assert_ne!(id, old, "ids are not reused across turns");
     let error = shells.read(&old).unwrap_err();
@@ -145,7 +145,7 @@ async fn a_shell_that_leaves_a_command_running_still_reports_its_exit() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start("sleep 30 & echo started", work.path(), &Sandbox::Open)
+        .start("sleep 30 & echo started", work.path(), Containment::Shared)
         .unwrap();
     settled(&shells, &id, "the launcher to exit", |state| {
         exited(state) && printed(state, "started")
@@ -165,7 +165,7 @@ async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
         .start(
             "head -c 300000 /dev/zero | tr '\\0' a; echo; echo tail-marker",
             work.path(),
-            &Sandbox::Open,
+            Containment::Shared,
         )
         .unwrap();
     settled(&shells, &id, "the whole output", |state| {
@@ -199,17 +199,17 @@ async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished(
     let running: Vec<String> = (0..MAX_RUNNING_SHELLS)
         .map(|_| {
             shells
-                .start("sleep 30", work.path(), &Sandbox::Open)
+                .start("sleep 30", work.path(), Containment::Shared)
                 .unwrap()
         })
         .collect();
     let refused = shells
-        .start("sleep 30", work.path(), &Sandbox::Open)
+        .start("sleep 30", work.path(), Containment::Shared)
         .unwrap_err();
     assert!(refused.contains("KillShell"), "{refused}");
     shells.kill(&running[0]).unwrap();
     let replacement = shells
-        .start("sleep 30", work.path(), &Sandbox::Open)
+        .start("sleep 30", work.path(), Containment::Shared)
         .unwrap();
     for id in running.iter().skip(1).chain([&replacement]) {
         shells.kill(id).unwrap();
@@ -217,7 +217,7 @@ async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished(
     let mut finished = Vec::new();
     for _ in 0..200 {
         let id = shells
-            .start("sleep 30", work.path(), &Sandbox::Open)
+            .start("sleep 30", work.path(), Containment::Shared)
             .unwrap();
         shells.kill(&id).unwrap();
         finished.push(id);
@@ -241,7 +241,7 @@ async fn stopping_the_run_ends_what_a_shell_started() {
     let work = tempfile::tempdir().unwrap();
     let shells = Shells::default();
     let id = shells
-        .start("sleep 30 & echo $!; wait", work.path(), &Sandbox::Open)
+        .start("sleep 30 & echo $!; wait", work.path(), Containment::Shared)
         .unwrap();
     settled(&shells, &id, "the grandchild's pid", |state| {
         printed(state, "\n")
@@ -270,7 +270,7 @@ async fn commands_a_finished_shell_left_running_count_toward_the_limit() {
         leave_running(&shells, work.path()).await;
     }
     let refused = shells
-        .start("sleep 30 & echo started", work.path(), &Sandbox::Open)
+        .start("sleep 30 & echo started", work.path(), Containment::Shared)
         .unwrap_err();
     assert!(refused.contains("KillShell"), "{refused}");
 }

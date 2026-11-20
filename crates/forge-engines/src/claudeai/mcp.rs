@@ -1,4 +1,4 @@
-use crate::sandbox::Sandbox;
+use forge_isolation::Containment;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -312,7 +312,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Servers {
-    pub(crate) async fn connect(servers: &[McpServer], cwd: &Path, sandbox: &Sandbox) -> Self {
+    pub(crate) async fn connect(
+        servers: &[McpServer],
+        cwd: &Path,
+        containment: Containment,
+    ) -> Self {
         let thread = THREAD.try_with(Clone::clone).ok();
         let mut seen = HashSet::new();
         let servers: Vec<&McpServer> = servers
@@ -328,7 +332,7 @@ impl Servers {
                 true
             })
             .collect();
-        let context = context_key(cwd, sandbox);
+        let context = context_key(cwd, containment);
         let keys: HashMap<&str, String> = servers
             .iter()
             .map(|server| (server.name.as_str(), server_key(server)))
@@ -343,7 +347,7 @@ impl Servers {
                 .map(|server| async move {
                     (
                         server.name.clone(),
-                        connect_client(server, cwd, sandbox).await,
+                        connect_client(server, cwd, containment).await,
                     )
                 }),
         )
@@ -600,7 +604,7 @@ fn still_warm(
     if previous.context != context {
         tracing::info!(
             thread,
-            "the thread's folder or sandbox changed; its MCP servers shut down"
+            "the thread's folder or permissions changed; its MCP servers shut down"
         );
         return warm;
     }
@@ -615,10 +619,10 @@ fn still_warm(
     warm
 }
 
-fn context_key(cwd: &Path, sandbox: &Sandbox) -> String {
+fn context_key(cwd: &Path, containment: Containment) -> String {
     let mut hash = Sha256::new();
     hash.update(cwd.to_string_lossy().as_bytes());
-    hash.update([u8::from(sandbox.confined())]);
+    hash.update([u8::from(containment == Containment::OwnCgroup)]);
     hex::encode(hash.finalize())
 }
 
@@ -631,13 +635,13 @@ fn server_key(server: &McpServer) -> String {
 async fn connect_client(
     server: &McpServer,
     cwd: &Path,
-    sandbox: &Sandbox,
+    containment: Containment,
 ) -> Result<Client, String> {
     let resolved = resolve(server, &|name| std::env::var(name).ok()).inspect_err(|reason| {
         tracing::warn!(server = %server.name, step = "reading its config", "an MCP server could not start: {reason}");
     })?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
-    let transport = Transport::open(&resolved, cwd, deadline, sandbox)
+    let transport = Transport::open(&resolved, cwd, deadline, containment)
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -1113,7 +1117,7 @@ impl Transport {
         server: &Resolved,
         cwd: &Path,
         deadline: Instant,
-        sandbox: &Sandbox,
+        containment: Containment,
     ) -> Result<Self, OpenError> {
         match &server.url {
             Some(url) if server.sse => Ok(Self::Stream(
@@ -1127,7 +1131,7 @@ impl Transport {
                 server,
                 cwd,
                 MAX_MESSAGE_BYTES,
-                sandbox,
+                containment,
             )?)),
         }
     }
@@ -1346,7 +1350,7 @@ impl Stream {
         server: &Resolved,
         cwd: &Path,
         max_line: usize,
-        sandbox: &Sandbox,
+        containment: Containment,
     ) -> Result<Self, OpenError> {
         let mut command = tokio::process::Command::new(&server.command);
         command
@@ -1356,13 +1360,12 @@ impl Stream {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child =
-            crate::process::owned_command(command, sandbox.clone()).map_err(|source| {
-                OpenError::Spawn {
-                    command: server.command.clone(),
-                    source,
-                }
-            })?;
+        let mut child = crate::process::owned_command(command, containment).map_err(|source| {
+            OpenError::Spawn {
+                command: server.command.clone(),
+                source,
+            }
+        })?;
         let stdin = child
             .stdin()
             .take()

@@ -201,13 +201,14 @@ enum Read {
 }
 
 pub(crate) async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
-    let sandbox = match crate::sandbox::Sandbox::for_turn(&turn).await {
-        Ok(sandbox) => sandbox,
-        Err(error) => return Outcome::failed(diagnostics::chain(&error)),
-    };
     let runtime = mcp::for_thread(
         turn.thread_id.as_str(),
-        Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
+        Runtime::build(
+            &turn.home,
+            &turn.cwd,
+            &turn.launch.mcp_servers,
+            crate::process::containment(&turn),
+        ),
     )
     .await;
     let outcome = drive_with(&runtime, backend, turn, io).await;
@@ -632,7 +633,6 @@ async fn run_call(
         tools::plan(
             call,
             inbox.permissions,
-            tools::Confinement::of(&ctx.runtime.sandbox),
             &allowed,
             &ctx.runtime.rules,
             &ctx.runtime.mcp,

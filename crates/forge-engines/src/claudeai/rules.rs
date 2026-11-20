@@ -62,36 +62,14 @@ pub enum ReadRefusal {
     Unsettled(#[source] Arc<LoadSettingsError>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Grants {
-    All,
-    EngineOnly,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Origin {
-    #[default]
-    Engine,
-    Project,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum AcceptEdits {
-    #[default]
-    Off,
-    ByProject,
-    ByEngine,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
     grammar: Grammar,
     broken: Vec<Arc<LoadSettingsError>>,
     allow: Vec<Rule>,
-    project_allow: Vec<Rule>,
     ask: Vec<Rule>,
     deny: Vec<Rule>,
-    accept_edits: AcceptEdits,
+    accept_edits: bool,
     home: PathBuf,
     cwd: PathBuf,
     root: PathBuf,
@@ -159,30 +137,21 @@ impl Rules {
             ..Self::default()
         };
         let user_home = std::env::home_dir().unwrap_or_else(|| home.to_path_buf());
-        let mut files = vec![(
-            home.join(".claude").join("settings.json"),
-            root,
-            Origin::Engine,
-        )];
+        let mut files = vec![(home.join(".claude").join("settings.json"), root)];
         for dir in project.into_iter().rev() {
-            files.push((
-                dir.join(".claude").join("settings.json"),
-                dir.to_path_buf(),
-                Origin::Project,
-            ));
+            files.push((dir.join(".claude").join("settings.json"), dir.to_path_buf()));
             files.push((
                 dir.join(".claude").join("settings.local.json"),
                 dir.to_path_buf(),
-                Origin::Project,
             ));
         }
-        for (file, root, origin) in files {
+        for (file, root) in files {
             let anchors = Anchors {
                 user_home: &user_home,
                 root: &root,
                 cwd,
             };
-            if let Err(error) = rules.read_file(&file, &anchors, origin) {
+            if let Err(error) = rules.read_file(&file, &anchors) {
                 let logged: &dyn std::error::Error = &error;
                 tracing::warn!(
                     error = logged,
@@ -194,12 +163,7 @@ impl Rules {
         rules
     }
 
-    fn read_file(
-        &mut self,
-        path: &Path,
-        anchors: &Anchors<'_>,
-        origin: Origin,
-    ) -> Result<(), LoadSettingsError> {
+    fn read_file(&mut self, path: &Path, anchors: &Anchors<'_>) -> Result<(), LoadSettingsError> {
         let bytes = match files::read_bounded(path, MAX_SETTINGS_BYTES) {
             Ok(bytes) => bytes,
             Err(ReadFileError::Open { source, .. })
@@ -244,19 +208,10 @@ impl Rules {
         let deny =
             rule_texts(permissions.get("deny")).ok_or_else(|| malformed("permissions.deny"))?;
         if mode == Some("acceptEdits") {
-            self.accept_edits = match (self.accept_edits, origin) {
-                (AcceptEdits::ByEngine, _) | (_, Origin::Engine) => AcceptEdits::ByEngine,
-                (AcceptEdits::Off | AcceptEdits::ByProject, Origin::Project) => {
-                    AcceptEdits::ByProject
-                }
-            };
+            self.accept_edits = true;
         }
         let grammar = self.grammar;
-        let granted = match origin {
-            Origin::Engine => &mut self.allow,
-            Origin::Project => &mut self.project_allow,
-        };
-        push(granted, &allow, List::Allow, anchors, path, grammar);
+        push(&mut self.allow, &allow, List::Allow, anchors, path, grammar);
         push(&mut self.ask, &ask, List::Ask, anchors, path, grammar);
         push(&mut self.deny, &deny, List::Deny, anchors, path, grammar);
         Ok(())
@@ -268,20 +223,12 @@ impl Rules {
     }
 
     #[must_use]
-    pub(crate) const fn accept_edits(&self, grants: Grants) -> bool {
-        matches!(
-            (self.accept_edits, grants),
-            (AcceptEdits::ByEngine, _) | (AcceptEdits::ByProject, Grants::All)
-        )
+    pub(crate) const fn accept_edits(&self) -> bool {
+        self.accept_edits
     }
 
     #[must_use]
     pub(crate) fn verdict(&self, call: &Call) -> Option<Verdict> {
-        self.verdict_granting(call, Grants::All)
-    }
-
-    #[must_use]
-    pub(crate) fn verdict_granting(&self, call: &Call, grants: Grants) -> Option<Verdict> {
         let facts = self.facts(call);
         if let Some(rule) = self.deny.iter().find(|rule| rule.touches(&facts)) {
             return Some(Verdict::Deny(format!(
@@ -292,21 +239,16 @@ impl Rules {
         if self.ask.iter().any(|rule| rule.touches(&facts)) {
             return Some(Verdict::Ask);
         }
-        if self.allows(&facts, grants) {
+        if self.allows(&facts) {
             return Some(Verdict::Allow);
         }
         None
     }
 
-    fn allows(&self, facts: &Facts<'_>, grants: Grants) -> bool {
-        let project: &[Rule] = match grants {
-            Grants::All => &self.project_allow,
-            Grants::EngineOnly => &[],
-        };
+    fn allows(&self, facts: &Facts<'_>) -> bool {
         let named: Vec<&Rule> = self
             .allow
             .iter()
-            .chain(project)
             .filter(|rule| rule.names(facts.tool))
             .collect();
         if named.iter().any(|rule| matches!(rule.spec, Spec::Any)) {

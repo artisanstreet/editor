@@ -35,7 +35,7 @@ const LEGACY_RECORD: &str = ".artisan/global-prompt.sha256";
 const BACKUPS: &str = "backups";
 
 fn record_path(home: &Path) -> PathBuf {
-    crate::sandbox::forge_records(home).join(RECORD)
+    crate::home::forge_records(home).join(RECORD)
 }
 
 fn in_home<'path>(home: &Path, path: &'path Path) -> &'path Path {
@@ -49,7 +49,7 @@ fn in_home<'path>(home: &Path, path: &'path Path) -> &'path Path {
 }
 
 fn read_text(home: &Path, path: &Path) -> io::Result<Option<String>> {
-    crate::sandbox::home::read(home, in_home(home, path))?
+    crate::home::read(home, in_home(home, path))?
         .map(|bytes| {
             String::from_utf8(bytes)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -58,10 +58,7 @@ fn read_text(home: &Path, path: &Path) -> io::Result<Option<String>> {
 }
 
 fn present(home: &Path, path: &Path) -> bool {
-    !matches!(
-        crate::sandbox::home::read(home, in_home(home, path)),
-        Ok(None)
-    )
+    !matches!(crate::home::read(home, in_home(home, path)), Ok(None))
 }
 
 fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathBuf)> {
@@ -139,11 +136,11 @@ pub enum ApplyPromptError {
         source: io::Error,
     },
     #[error("writing the {engine} global prompt {}", path.display())]
-    Guard {
+    Config {
         engine: EngineId,
         path: PathBuf,
         #[source]
-        source: crate::sandbox::GuardError,
+        source: crate::home::ConfigError,
     },
 }
 
@@ -156,7 +153,7 @@ impl ApplyPromptError {
             Self::Write { path, source, .. } => {
                 format!("Couldn't write {}: {source}.", display(home, path))
             }
-            Self::Guard { path, source, .. } => {
+            Self::Config { path, source, .. } => {
                 format!(
                     "Couldn't write {}: {}.",
                     display(home, path),
@@ -191,7 +188,7 @@ fn read_record(engine: EngineId, home: &Path) -> Result<Option<String>, ApplyPro
     let recorded = match fs::read(&path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            crate::sandbox::home::read(home, Path::new(LEGACY_RECORD)).map_err(|source| {
+            crate::home::read(home, Path::new(LEGACY_RECORD)).map_err(|source| {
                 ApplyPromptError::ReadRecord {
                     engine,
                     path: home.join(LEGACY_RECORD),
@@ -236,7 +233,7 @@ pub(super) fn reconcile(
         if !(first_takeover || unchanged || force) {
             return Ok((Reconciled::Drifted, on_disk));
         }
-        let backups = crate::sandbox::forge_records(home).join(BACKUPS);
+        let backups = crate::home::forge_records(home).join(BACKUPS);
         let stamp = artisan_api::now();
         if (first_takeover || force) && !normalize_prompt(&on_disk).is_empty() {
             back_up(&read, on_disk.as_bytes(), &backups, stamp).map_err(|source| {
@@ -247,9 +244,9 @@ pub(super) fn reconcile(
                 }
             })?;
         }
-        let guarding = |path: &Path| {
+        let configuring = |path: &Path| {
             let path = path.to_path_buf();
-            move |source| ApplyPromptError::Guard {
+            move |source| ApplyPromptError::Config {
                 engine,
                 path,
                 source,
@@ -272,22 +269,22 @@ pub(super) fn reconcile(
                     }
                 })?;
             }
-            crate::sandbox::guard::remove(engine, home, in_home(home, path))
-                .map_err(guarding(path))?;
+            crate::home::remove_config(engine, home, in_home(home, path))
+                .map_err(configuring(path))?;
         }
         let recorded = if normalize_prompt(canonical).is_empty() {
-            crate::sandbox::guard::remove(engine, home, in_home(home, &prompt))
-                .map_err(guarding(&prompt))?;
+            crate::home::remove_config(engine, home, in_home(home, &prompt))
+                .map_err(configuring(&prompt))?;
             prompt_digest("")
         } else {
-            crate::sandbox::guard::write(
+            crate::home::write_config(
                 engine,
                 home,
                 in_home(home, &prompt),
                 canonical.as_bytes(),
                 PROMPT_MODE,
             )
-            .map_err(guarding(&prompt))?;
+            .map_err(configuring(&prompt))?;
             prompt_digest(canonical)
         };
         write_if_changed(&record_file, recorded.as_bytes()).map_err(|source| {

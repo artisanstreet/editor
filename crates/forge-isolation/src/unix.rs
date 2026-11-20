@@ -91,7 +91,6 @@ impl Watch {
 
 pub(crate) fn contain(
     command: &mut std::process::Command,
-    sandbox: Option<crate::Ruleset>,
     tree: &crate::EngineTree,
 ) -> Result<(), ContainError> {
     #[cfg(target_os = "linux")]
@@ -104,11 +103,7 @@ pub(crate) fn contain(
         #[cfg(target_os = "macos")]
         crate::macos::yield_disk()?;
         rustix::process::nice(ENGINE_NICENESS)?;
-        lead_group_watched_by(forge_alive, &watch)?;
-        if let Some(ruleset) = &sandbox {
-            ruleset.restrict_self()?;
-        }
-        Ok(())
+        lead_group_watched_by(forge_alive, &watch)
     };
     unsafe {
         command.pre_exec(enter);

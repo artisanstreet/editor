@@ -503,11 +503,7 @@ impl Editor {
 
     fn steady(&self, text: &str) -> String {
         let folder = self.directory.path().display().to_string();
-        let text = text.replace(&folder, "[scenario]");
-        match forge_runs::auto_notice_on_this_host() {
-            Some(notice) => steady(&text.replace(notice, "[unsandboxed notice]")),
-            None => steady(&text),
-        }
+        steady(&text.replace(&folder, "[scenario]"))
     }
 
     fn inspect<T>(&self, look: impl FnOnce(&View<'_>) -> T) -> Option<T> {

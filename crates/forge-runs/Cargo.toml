@@ -14,7 +14,6 @@ artisan-api.workspace = true
 diagnostics.workspace = true
 forge-content.workspace = true
 forge-engines.workspace = true
-forge-isolation.workspace = true
 forge-store.workspace = true
 fs2.workspace = true
 serde.workspace = true

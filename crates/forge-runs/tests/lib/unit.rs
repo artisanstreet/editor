@@ -45,8 +45,6 @@ mod resume;
 mod retention_tests;
 #[path = "../runtime/registry.rs"]
 mod runtime_registry;
-#[path = "../sandbox/coverage.rs"]
-mod sandbox_coverage;
 #[path = "../scratch/folders.rs"]
 mod scratch_folders;
 use artisan_api::{
@@ -161,29 +159,6 @@ async fn fixture_with_parts(
         harness_for,
         Surroundings {
             disk,
-            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
-            stop_deadline: STOP_DEADLINE,
-        },
-        false,
-    )
-    .await
-}
-
-pub(crate) const FULL_COVERAGE: forge_isolation::Coverage = forge_isolation::Coverage {
-    truncation: forge_isolation::Reach::Blocked,
-    socket_files: forge_isolation::Reach::Blocked,
-    abstract_sockets: forge_isolation::Reach::Blocked,
-    signals: forge_isolation::Reach::Blocked,
-};
-
-async fn fixture_on_host(script: Script, host: sandbox::Host) -> Fixture {
-    let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
-    fixture_in(
-        EngineId::Claude,
-        Arc::new(move |_| Arc::clone(&harness)),
-        Surroundings {
-            disk: disk::Probe::system(),
-            sandbox: host,
             stop_deadline: STOP_DEADLINE,
         },
         false,
@@ -198,7 +173,6 @@ async fn fixture_stopping_within(script: Script, stop_deadline: Duration) -> Fix
         Arc::new(move |_| Arc::clone(&harness)),
         Surroundings {
             disk: disk::Probe::system(),
-            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
             stop_deadline,
         },
         false,
@@ -213,7 +187,6 @@ async fn fixture_in_generation(script: Script) -> Fixture {
         Arc::new(move |_| Arc::clone(&harness)),
         Surroundings {
             disk: disk::Probe::system(),
-            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
             stop_deadline: STOP_DEADLINE,
         },
         true,
@@ -5894,7 +5867,6 @@ async fn a_stop_during_a_handoff_that_never_winds_down_says_the_engine_did_not_c
         Arc::new(move |_| Arc::clone(&harness)),
         Surroundings {
             disk: disk::Probe::system(),
-            sandbox: sandbox::Host::Enforced(FULL_COVERAGE),
             stop_deadline: Duration::from_millis(200),
         },
         false,

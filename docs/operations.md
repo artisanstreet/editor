@@ -26,39 +26,11 @@ A root chosen with `ae install --location` is remembered in a `location` file in
 
 `ae status` shows what is installed, whether Forge runs and answers its health check, where its log is, and every problem it found. `ae status --json` prints the same for scripts.
 
-## Engine sandbox
+## Permission modes
 
-In every permission mode except Full access, an engine's whole process tree (its shells, MCP servers and tools, and the claude.ai transport's shells and MCP servers) may write only to:
+Forge doesn't confine engines itself; in Auto each engine's own harness does. Claude runs in its auto permission mode, and Codex runs in its `workspace-write` sandbox with its reviewer deciding what else may run. Full access runs every engine without limits.
 
-- the thread's project folder, plus the repository's shared git folder when the project is a git worktree or submodule whose shared folder lists the project back (a `.git` pointer the engine wrote can't name any other folder),
-- the engine's home, `<root>/forge/data/engines/<engine>/home` (and `CODEX_HOME` when it points elsewhere),
-- a temporary folder for the run, exported as `TMPDIR`, `TMP` and `TEMP` and removed when the engine exits,
-- the shared temporary folders: `/tmp`, `/dev/shm` and Forge's own `$TMPDIR`,
-- the project's sandbox tool caches, `<root>/forge/data/sandbox/<project>/caches`, which the run gets as `XDG_CACHE_HOME`, `CARGO_HOME`, `npm_config_cache`, the pnpm store (`pnpm_config_store_dir` and `npm_config_store_dir`), `BUN_INSTALL_CACHE_DIR`, `GRADLE_USER_HOME`, `GOMODCACHE` and Maven's `-Dmaven.repo.local`, so `cargo build`, `pnpm install` and the like work and download once per project,
-- `/dev/null`, `/dev/zero`, `/dev/full` and the terminal devices.
-
-Your own tool caches (`~/.cache`, `~/.cargo`, `~/.npm`, `~/.local/share/pnpm`, `~/.gradle`, `~/.m2`, `~/go`) are read-only to sandboxed runs, because what is written there runs later outside the sandbox: a crate's `build.rs`, a binary on `PATH`, a compiled sccache entry. An Auto run therefore doesn't reuse what you have already downloaded, and an engine whose own launch sets `XDG_CACHE_HOME` (OpenCode without `OPENCODE_HOME`) keeps that cache inside its home. The rest of your home stays read-only too: dotfiles and shell rc files, `~/.ssh`, `~/.gitconfig`, `~/.config` and everything else. Any other write fails with `Permission denied`, even when approved; switch the thread to Full access for that. Sandboxed processes can't gain privileges, so `sudo` and other setuid programs fail.
-
-The engine's home stays writable, but the parts of it that run outside the sandbox are guarded: Claude's `settings.json`, `settings.local.json`, `plugins`, `hooks`, `commands` and `agents` and the MCP servers in `.claude.json`; Codex's `config.toml`, `hooks.json`, `plugins` and `rules`; OpenCode's `opencode.json(c)`, `config.json`, plugins, tools, commands and agents. When the first Auto run of an engine starts, Forge copies them to `<home>.guarded-config`. Before any unsandboxed launch, sign-in or usage check, and when the last Auto run ends, every guarded file that changed in between is put back, so a hook or `notify` command an Auto run planted never reaches a Full-access run. A change you or a Full-access run make while no Auto run of that engine is going is kept; one made while an Auto run is going is put back too, and the log says which file.
-
-What the sandbox doesn't restrict, so an engine set on escaping still can:
-
-- Reading: engines read every file you can, including other threads' transcripts in the shared engine home.
-- The network, TCP included: local services that run commands for whoever asks (an sccache server, a dev server with remote code execution) act outside the sandbox.
-- Unix socket files, below Landlock ABI 9 (Linux 7.1): the session bus at `/run/user/<uid>/bus` (`systemd-run --user`), the Docker socket and other daemons stay reachable and run commands unsandboxed. On ABI 9 and newer a sandboxed engine reaches only sockets beneath its writable folders and your SSH agent (`$SSH_AUTH_SOCK`), so git over SSH keeps working while the session bus, systemd and Docker are closed; a gpg agent outside those folders is closed too.
-- Below ABI 6 (Linux 6.12): abstract Unix sockets made outside the sandbox and signals to processes outside it; from ABI 6 a sandboxed engine can only signal and connect within its own run.
-- Below ABI 3 (Linux 6.2): truncating files outside its folders. Such runs say "This run is only partly sandboxed".
-- A process of a Full-access run that is still going reads its configuration live: a guarded file an Auto run changes mid-run is only put back at the next launch, and Claude's shell snapshots in the engine home are not guarded.
-- The project itself, including its `.git/hooks` and `.git/config`, is writable by design, so code an Auto run writes there runs whenever you run the project or git.
-
-Forge logs the Landlock ABI and exactly which of these channels it closes when it starts. Each run's Artisan gateway credential lives only in that engine process's environment, which a sandboxed process can't read. Agents, new threads and messages started through Artisan's tools never get more access than the stricter of the thread's mode and the mode its running engine was launched in.
-
-| Mode | Linux | Windows | macOS |
-| --- | --- | --- | --- |
-| Auto | Enforced by Landlock with every write right and scope the kernel's ABI offers, required in full, so none is silently dropped. Codex's own bubblewrap sandbox can't start inside Landlock, so Forge turns it off and Codex keeps its reviewer. A kernel without Landlock runs the engine unsandboxed and the run says "This run isn't sandboxed"; ABI 1 and 2 say "This run is only partly sandboxed". | Not sandboxed, and every Auto run says so. AppContainer blocks the loopback connections engines make to Forge and to OpenCode's server, and a restricted token needs lasting ACL changes on your folders. | Not sandboxed, and every Auto run says so. |
-| Full access | Not sandboxed. | Not sandboxed. | Not sandboxed. |
-
-A run that starts under Full access and is switched to Auto finishes unsandboxed and says so; the next run is sandboxed. A run switched from Auto to Full access stays sandboxed until it ends, and so do the agents it starts. The claude.ai transport's Read, Write and Edit tools run inside Forge and follow its permission rules, not the sandbox.
+Where Forge runs in a delegated cgroup, every Auto run gets its own cgroup, and when the run ends Forge kills everything in it, including processes detached with `setsid`. Processes a Full-access run detaches, such as a dev server, outlive the run. Agents, new threads and messages started through Artisan's tools never get more access than the stricter of the thread's mode and the mode its running engine was launched in.
 
 ## Forge is unhealthy
 

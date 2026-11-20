@@ -149,7 +149,7 @@ impl Session {
 
     pub(crate) fn load(home: &Path) -> Result<Option<Self>, LoadSessionError> {
         let path = Self::path(home);
-        let bytes = match crate::sandbox::home::read(home, Path::new(SESSION_FILE)) {
+        let bytes = match crate::home::read(home, Path::new(SESSION_FILE)) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(source) => return Err(LoadSessionError::Read { path, source }),
@@ -173,7 +173,7 @@ impl Session {
                 path: path.clone(),
                 source,
             })?;
-        crate::sandbox::home::write(home, Path::new(SESSION_FILE), text.as_bytes(), SESSION_MODE)
+        crate::home::write(home, Path::new(SESSION_FILE), text.as_bytes(), SESSION_MODE)
             .map_err(|source| SaveSessionError::Write { path, source })
     }
 
@@ -199,11 +199,9 @@ impl Session {
         let _guard = FILE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::sandbox::home::remove(home, Path::new(SESSION_FILE)).map_err(|source| {
-            RemoveSessionError {
-                path: Self::path(home),
-                source,
-            }
+        crate::home::remove(home, Path::new(SESSION_FILE)).map_err(|source| RemoveSessionError {
+            path: Self::path(home),
+            source,
         })
     }
 

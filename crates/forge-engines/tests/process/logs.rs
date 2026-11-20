@@ -7,7 +7,7 @@ async fn engine_stderr_stays_out_of_the_logs() {
     let home = base.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let turn = Turn {
-        thread_id: ThreadId::from("stderr-logs"),
+        thread_id: artisan_api::ThreadId::from("stderr-logs"),
         engine: EngineId::Codex,
         binary: "/bin/sh".into(),
         home: home.clone(),

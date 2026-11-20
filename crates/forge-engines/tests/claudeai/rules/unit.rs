@@ -182,7 +182,7 @@ fn accept_edits_is_read_from_the_project_settings() {
         r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
     )
     .unwrap();
-    assert!(Rules::load(home.path(), project.path()).accept_edits(Grants::All));
+    assert!(Rules::load(home.path(), project.path()).accept_edits());
 }
 
 fn denied(rules: &Rules, command: &str) -> bool {

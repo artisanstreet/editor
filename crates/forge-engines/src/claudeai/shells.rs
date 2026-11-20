@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::sandbox::Sandbox;
 use encoding_rs::{DecoderResult, Encoding};
+use forge_isolation::Containment;
 use process_wrap::tokio::ChildWrapper;
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
@@ -97,7 +97,7 @@ impl Shells {
         &self,
         command: &str,
         cwd: &Path,
-        sandbox: &Sandbox,
+        containment: Containment,
     ) -> Result<String, String> {
         let mut shells = self
             .shells
@@ -127,7 +127,7 @@ impl Shells {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::process::owned_command(shell, sandbox.clone())
+        let mut child = crate::process::owned_command(shell, containment)
             .map_err(|error| format!("The command could not start: {error:#}"))?;
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();

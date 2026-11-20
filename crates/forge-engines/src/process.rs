@@ -1,7 +1,6 @@
 use crate::Turn;
-use crate::sandbox::Sandbox;
 use crate::trace::{Kind, Secrets, Trace};
-use artisan_api::{EngineId, ThreadId};
+use artisan_api::EngineId;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -15,20 +14,6 @@ const PROBE_STDERR_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    #[error("restore {engine}'s configuration before starting thread {thread}")]
-    Guard {
-        engine: EngineId,
-        thread: ThreadId,
-        #[source]
-        source: crate::sandbox::GuardError,
-    },
-    #[error("sandbox {engine} thread {thread}")]
-    Sandbox {
-        engine: EngineId,
-        thread: ThreadId,
-        #[source]
-        source: Box<crate::sandbox::SandboxError>,
-    },
     #[error("make the process tree of {}", program.display())]
     Tree {
         program: PathBuf,
@@ -229,12 +214,7 @@ fn spawn_now(
         || turn.launch.args.clone(),
         |gateway| gateway.claude_args(&turn.launch.args),
     );
-    let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home)
-        .map_err(|source| SpawnError::Guard {
-            engine: turn.engine,
-            thread: turn.thread_id.clone(),
-            source,
-        })?;
+    let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home);
     command
         .args(args)
         .args(&launch_args)
@@ -263,16 +243,23 @@ fn spawn_now(
                 |started| started.trace,
             )
         });
-    let sandbox = Sandbox::build(turn).map_err(|source| SpawnError::Sandbox {
-        engine: turn.engine,
-        thread: turn.thread_id.clone(),
-        source: Box::new(source),
-    })?;
-    spawn_command(command, trace, sandbox, StderrUse::Traced)
+    spawn_command(command, trace, containment(turn), StderrUse::Traced)
+}
+
+pub(crate) const fn containment(turn: &Turn) -> forge_isolation::Containment {
+    match turn.config.permissions {
+        artisan_api::Permissions::Auto => forge_isolation::Containment::OwnCgroup,
+        artisan_api::Permissions::Full => forge_isolation::Containment::Shared,
+    }
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError> {
-    spawn_command(command, Trace::default(), Sandbox::Open, StderrUse::Traced)
+    spawn_command(
+        command,
+        Trace::default(),
+        forge_isolation::Containment::Shared,
+        StderrUse::Traced,
+    )
 }
 
 #[derive(Debug)]
@@ -319,12 +306,11 @@ impl Drop for OwnedChild {
 #[derive(Debug)]
 struct Teardown {
     tree: forge_isolation::EngineTree,
-    sandbox: Sandbox,
 }
 
 impl Teardown {
     fn run(self) {
-        end_tree(&self.tree, &self.sandbox);
+        end_tree(&self.tree);
     }
 
     fn detach(self) {
@@ -350,34 +336,24 @@ impl Teardown {
     }
 }
 
-fn end_tree(tree: &forge_isolation::EngineTree, sandbox: &Sandbox) {
+fn end_tree(tree: &forge_isolation::EngineTree) {
     if let Err(failure) = tree.end() {
         let error: &dyn std::error::Error = &failure;
-        tracing::warn!(
-            error,
-            "an engine run's processes may outlive it; its engine's configuration stays guarded until Forge exits"
-        );
-        sandbox.outlived();
+        tracing::warn!(error, "an engine run's processes may outlive it");
     }
 }
 
 pub(crate) fn owned_command(
     mut command: Command,
-    sandbox: Sandbox,
+    containment: forge_isolation::Containment,
 ) -> Result<OwnedChild, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
-    sandbox.prepare(&mut command);
-    let containment = if sandbox.confined() {
-        forge_isolation::Containment::OwnCgroup
-    } else {
-        forge_isolation::Containment::Shared
-    };
     let tree =
         forge_isolation::EngineTree::new(containment).map_err(|source| SpawnError::Tree {
             program: program.clone(),
             source,
         })?;
-    forge_isolation::contain(command.as_std_mut(), sandbox.ruleset(), &tree).map_err(|source| {
+    forge_isolation::contain(command.as_std_mut(), &tree).map_err(|source| {
         SpawnError::Contain {
             program: program.clone(),
             source,
@@ -396,11 +372,11 @@ pub(crate) fn owned_command(
             }
             Ok(OwnedChild {
                 child,
-                teardown: Some(Teardown { tree, sandbox }),
+                teardown: Some(Teardown { tree }),
             })
         }
         Err(source) => {
-            Teardown { tree, sandbox }.detach();
+            Teardown { tree }.detach();
             Err(SpawnError::Start { program, source })
         }
     }
@@ -409,12 +385,12 @@ pub(crate) fn owned_command(
 fn spawn_command(
     mut command: Command,
     trace: Trace,
-    sandbox: Sandbox,
+    containment: forge_isolation::Containment,
     stderr_use: StderrUse,
 ) -> Result<EngineProcess, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
     command.stdout(Stdio::piped());
-    let mut child = owned_command(command, sandbox)?;
+    let mut child = owned_command(command, containment)?;
     trace.record(Kind::Note, &format!("started (pid {:?})", child.id()));
     let stdin = child.stdin().take().map(|stdin| StdinWriter {
         program: program.clone(),
@@ -609,7 +585,7 @@ pub async fn probe(
     let mut process = spawn_command(
         command,
         Trace::default(),
-        Sandbox::Open,
+        forge_isolation::Containment::Shared,
         StderrUse::Captured(Arc::clone(&captured)),
     )
     .map_err(ProbeError::Spawn)?;
@@ -677,6 +653,11 @@ mod gateway_tests;
 #[cfg(unix)]
 #[path = "../tests/process/logs.rs"]
 mod log_tests;
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "../tests/process/cgroup.rs"]
+mod cgroup_tests;
 
 #[cfg(test)]
 #[cfg(unix)]

@@ -27,18 +27,6 @@ pub enum PrepareError {
         #[source]
         source: Box<crate::scratch::ThreadFolderError>,
     },
-    #[error("find the shared git folder of thread {thread}")]
-    GitCommon {
-        thread: ThreadId,
-        #[source]
-        source: Box<crate::scratch::GitCommonError>,
-    },
-    #[error("run the shared git folder task of thread {thread}")]
-    GitCommonTask {
-        thread: ThreadId,
-        #[source]
-        source: tokio::task::JoinError,
-    },
     #[error("read what {engine} gets at launch")]
     Customisation {
         engine: EngineId,
@@ -717,11 +705,6 @@ async fn execute(
     {
         live.launched = Some(turn.config.permissions);
     }
-    let mut coverage = turn_coverage(hub, run, turn.config.permissions).await;
-    if let Some(reason) = coverage.observe(turn.config.permissions) {
-        announce_unsandboxed(hub, &run.thread_id, &run.id, reason).await;
-    }
-    let (covered_thread, covered_run) = (run.thread_id.clone(), run.id.clone());
     let mut delivered: HashSet<_> = initial_ids.iter().cloned().collect();
     let (forward, adapter_inbox) = mpsc::channel(64);
     let approvals = Arc::new(Mutex::new(Approvals {
@@ -761,9 +744,6 @@ async fn execute(
                 }
                 let waiting = match &input {
                     Input::SetPermissions(permissions) => {
-                        if let Some(reason) = coverage.observe(*permissions) {
-                            announce_unsandboxed(hub, &covered_thread, &covered_run, reason).await;
-                        }
                         approvals_lock(&approvals).set(*permissions)
                     }
                     Input::Steer(_) | Input::Answer { .. } | Input::ClearGoal => Vec::new(),
@@ -993,74 +973,9 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
     true
 }
 
-async fn turn_coverage(hub: &Hub, run: &Run, launched: Permissions) -> crate::sandbox::Coverage {
-    match hub.store().turn_said_unsandboxed(&run.thread_id).await {
-        Ok(true) => crate::sandbox::Coverage::Announced,
-        Ok(false) => crate::sandbox::Coverage::new(hub.inner.sandbox, launched),
-        Err(error) => {
-            tracing::warn!(
-                thread = %run.thread_id,
-                run = %run.id,
-                "read whether this turn said it isn't sandboxed, so this run says it: {}",
-                diagnostics::chain(&error)
-            );
-            crate::sandbox::Coverage::new(hub.inner.sandbox, launched)
-        }
-    }
-}
-
-async fn announce_unsandboxed(
-    hub: &Hub,
-    thread: &ThreadId,
-    run: &RunId,
-    reason: artisan_api::UnsandboxedReason,
-) {
-    let notice = new_item(
-        ItemId::new(),
-        thread,
-        Some(run),
-        None,
-        None,
-        Status::Done,
-        ItemKind::Notice {
-            kind: artisan_api::NoticeKind::Unsandboxed { reason },
-            text: crate::sandbox::notice(reason).into(),
-        },
-    );
-    if let Err(error) = hub.store().upsert_item(notice).await {
-        tracing::warn!(
-            %thread,
-            %run,
-            ?reason,
-            "store the notice that the run isn't sandboxed: {}",
-            diagnostics::chain(&error)
-        );
-    }
-}
-
 pub(crate) struct Prepared {
     pub(crate) turn: Turn,
     pub(crate) gateway: crate::gateway::GatewayPass,
-}
-
-async fn git_common(
-    hub: &Hub,
-    thread: &artisan_api::Thread,
-    folder: &std::path::Path,
-) -> Result<Option<PathBuf>, PrepareError> {
-    let owner = hub.clone();
-    let project = thread.project_id.clone();
-    let folder = folder.to_path_buf();
-    tokio::task::spawn_blocking(move || owner.sandbox_git_common(&project, &folder))
-        .await
-        .map_err(|source| PrepareError::GitCommonTask {
-            thread: thread.id.clone(),
-            source,
-        })?
-        .map_err(|source| PrepareError::GitCommon {
-            thread: thread.id.clone(),
-            source: Box::new(source),
-        })
 }
 
 pub(crate) async fn prepare(
@@ -1116,8 +1031,6 @@ pub(crate) async fn prepare(
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
-    launch.tool_caches = Some(hub.sandbox_tool_caches(&thread.project_id));
-    launch.git_common = git_common(hub, thread, &cwd).await?;
     let mut config = thread.config.clone();
     match session.transport_option() {
         Some(option) => {

@@ -254,11 +254,7 @@ fn discard(turn: &Turn, fork: Option<&str>) {
         directory.join(format!("{fork}.jsonl")),
         directory.join(fork),
     ] {
-        let removed = match path.strip_prefix(&turn.home) {
-            Ok(relative) => crate::sandbox::home::remove(&turn.home, relative),
-            Err(_outside_the_home) => remove_outside(&path),
-        };
-        if let Err(error) = removed {
+        if let Err(error) = remove(&path) {
             tracing::debug!(path = %path.display(), %error, "couldn't remove a Claude fork's files");
         }
     }
@@ -331,7 +327,7 @@ fn base36(mut value: u32) -> String {
 #[path = "../../tests/claude/side.rs"]
 mod tests;
 
-fn remove_outside(path: &Path) -> std::io::Result<()> {
+fn remove(path: &Path) -> std::io::Result<()> {
     let removed = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
         Ok(_) => std::fs::remove_file(path),

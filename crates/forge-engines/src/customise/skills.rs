@@ -162,9 +162,6 @@ enum QuarantineError {
         #[source]
         source: io::Error,
     },
-    #[cfg(target_os = "linux")]
-    #[error("move the skill out of the engine's folder")]
-    Take(#[source] crate::sandbox::GuardError),
     #[error("put the skill in its place in quarantine")]
     Swap(#[source] io::Error),
     #[error("record when the skill was quarantined in {}", path.display())]
@@ -175,46 +172,6 @@ enum QuarantineError {
     },
 }
 
-#[cfg(target_os = "linux")]
-fn quarantine_entries(engine: EngineId, home: &Path, root: &Path, owned: &[PathBuf]) {
-    use crate::sandbox::guard::{self, Placed};
-    let folder = super::skills_folder(engine);
-    let entries = match guard::entries(engine, home, folder) {
-        Ok(entries) => entries,
-        Err(failure) => {
-            let error: &dyn std::error::Error = &failure;
-            tracing::warn!(%engine, error, "couldn't look for skills Artisan didn't install");
-            return;
-        }
-    };
-    for (name, placed) in entries {
-        if name.as_encoded_bytes().starts_with(b".") {
-            continue;
-        }
-        if let Placed::Link(target) = &placed
-            && owned.iter().any(|root| target.starts_with(root))
-        {
-            continue;
-        }
-        let to = root.join(&name);
-        let moved = fs::create_dir_all(root)
-            .map_err(|source| QuarantineError::Folder {
-                path: root.to_path_buf(),
-                source,
-            })
-            .and_then(|()| {
-                let incoming = root.join(super::staged_name("incoming", &name));
-                guard::take(engine, home, &folder.join(&name), &incoming)
-                    .map_err(QuarantineError::Take)?;
-                let retired = root.join(super::staged_name("retired", &name));
-                super::swap_in(&incoming, &to, &retired).map_err(QuarantineError::Swap)
-            })
-            .and_then(|()| stamp(root, &name));
-        report_quarantine(engine, &name, &to, moved);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
 fn quarantine_entries(engine: EngineId, home: &Path, root: &Path, owned: &[PathBuf]) {
     let Some(engine_skills) = paths(engine, home).map(|paths| paths.skills) else {
         return;
@@ -337,7 +294,6 @@ fn expire_quarantined(engine: EngineId, root: &Path) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn replace_quarantined(found: &Path, to: &Path, root: &Path) -> io::Result<()> {
     let name = super::link_name(to);
     let incoming = root.join(super::staged_name("incoming", name));
@@ -726,12 +682,10 @@ fn counts(folder: &Path) -> io::Result<(u32, u64)> {
     Ok((count, bytes))
 }
 
-#[cfg(not(target_os = "linux"))]
 pub(super) fn measure(folder: &Path) -> io::Result<(String, u32, u64)> {
     measure_inner(folder, false)
 }
 
-#[cfg(not(target_os = "linux"))]
 pub(super) fn measure_cached(folder: &Path) -> io::Result<(String, u32, u64)> {
     measure_inner(folder, true)
 }
@@ -1105,94 +1059,6 @@ fn forget_quarantine_marker(copy: &Found) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn native_entry<'home>(
-    homes: &'home [(EngineId, Option<PathBuf>)],
-    copy: &Found,
-) -> Option<(&'home Path, PathBuf)> {
-    let home = homes
-        .iter()
-        .find(|(engine, _)| *engine == copy.engine)?
-        .1
-        .as_deref()?;
-    let relative = copy.folder.strip_prefix(home).ok()?;
-    relative
-        .starts_with(super::skills_folder(copy.engine))
-        .then(|| (home, relative.to_path_buf()))
-}
-
-#[cfg(target_os = "linux")]
-fn remove_copy(homes: &[(EngineId, Option<PathBuf>)], copy: &Found) -> io::Result<()> {
-    match native_entry(homes, copy) {
-        Some((home, relative)) => {
-            crate::sandbox::guard::remove(copy.engine, home, &relative).map_err(io::Error::other)
-        }
-        None => super::remove_entry(&copy.folder),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_copy(_homes: &[(EngineId, Option<PathBuf>)], copy: &Found) -> io::Result<()> {
-    super::remove_entry(&copy.folder)
-}
-
-#[cfg(target_os = "linux")]
-fn move_copy_out(homes: &[(EngineId, Option<PathBuf>)], copy: &Found, to: &Path) -> io::Result<()> {
-    match native_entry(homes, copy) {
-        Some((home, relative)) => {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            crate::sandbox::guard::take(copy.engine, home, &relative, to).map_err(io::Error::other)
-        }
-        None => move_folder(&copy.folder, to),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn move_copy_out(
-    _homes: &[(EngineId, Option<PathBuf>)],
-    copy: &Found,
-    to: &Path,
-) -> io::Result<()> {
-    move_folder(&copy.folder, to)
-}
-
-#[cfg(target_os = "linux")]
-fn put_back(
-    homes: &[(EngineId, Option<PathBuf>)],
-    engine: EngineId,
-    original: &Path,
-    backup: &Path,
-) -> io::Result<()> {
-    let native = homes
-        .iter()
-        .find(|(home_engine, _)| *home_engine == engine)
-        .and_then(|(_, home)| home.as_deref())
-        .and_then(|home| {
-            let relative = original.strip_prefix(home).ok()?;
-            relative
-                .starts_with(super::skills_folder(engine))
-                .then_some((home, relative))
-        });
-    match native {
-        Some((home, relative)) => {
-            crate::sandbox::guard::give(engine, home, relative, backup).map_err(io::Error::other)
-        }
-        None => move_folder(backup, original),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn put_back(
-    _homes: &[(EngineId, Option<PathBuf>)],
-    _engine: EngineId,
-    original: &Path,
-    backup: &Path,
-) -> io::Result<()> {
-    move_folder(backup, original)
-}
-
 pub fn discard_skill(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
@@ -1204,7 +1070,7 @@ pub fn discard_skill(
     };
     let name = first.name.clone();
     for copy in &copies {
-        remove_copy(homes, copy).map_err(|source| DiscardSkillError::Delete {
+        super::remove_entry(&copy.folder).map_err(|source| DiscardSkillError::Delete {
             path: copy.folder.clone(),
             source,
         })?;
@@ -1280,7 +1146,7 @@ pub fn adopt_skill(
         path: staging.clone(),
         source,
     })?;
-    let mut moved: Vec<(EngineId, PathBuf, PathBuf)> = Vec::new();
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let result = (|| -> Result<(), AdoptSkillError> {
         import_folder(&first.folder, &staging, &name).map_err(|source| {
             AdoptSkillError::Import {
@@ -1292,12 +1158,12 @@ pub fn adopt_skill(
         let stamp = artisan_api::now();
         for copy in &copies {
             let to = backups.join(format!("{}-{name}-{stamp}", copy.engine));
-            move_copy_out(homes, copy, &to).map_err(|source| AdoptSkillError::Backup {
+            move_folder(&copy.folder, &to).map_err(|source| AdoptSkillError::Backup {
                 engine: copy.engine,
                 name: name.clone(),
                 source,
             })?;
-            moved.push((copy.engine, copy.folder.clone(), to));
+            moved.push((copy.folder.clone(), to));
         }
         fs::rename(staging.join(&name), c.skills_dir.join(&name)).map_err(|source| {
             AdoptSkillError::Publish {
@@ -1308,8 +1174,8 @@ pub fn adopt_skill(
     })();
     if let Err(error) = result {
         let mut rollback_errors = Vec::new();
-        for (engine, original, backup) in moved.into_iter().rev() {
-            if let Err(restore) = put_back(homes, engine, &original, &backup) {
+        for (original, backup) in moved.into_iter().rev() {
+            if let Err(restore) = move_folder(&backup, &original) {
                 rollback_errors.push(format!(
                     "{} remains backed up at {}: {restore}",
                     original.display(),

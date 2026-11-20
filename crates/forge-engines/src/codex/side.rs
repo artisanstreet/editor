@@ -182,7 +182,7 @@ impl Fork<'_> {
                 .await?;
             (method, forked)
         } else {
-            let (_, mut params) = super::thread_params(turn, super::ProjectGuard::of(turn));
+            let (_, mut params) = super::thread_params(turn);
             params["ephemeral"] = json!(true);
             params["approvalPolicy"] = json!("never");
             params["sandbox"] = json!("read-only");
@@ -201,7 +201,7 @@ impl Fork<'_> {
             "threadId": forked,
             "input": [{ "type": "text", "text": turn.input.text, "text_elements": [] }],
         });
-        turn_overrides(turn, super::ProjectGuard::of(turn), &mut params);
+        turn_overrides(turn, &mut params);
         params["approvalPolicy"] = json!("never");
         params["sandboxPolicy"] = json!({ "type": "readOnly" });
         if let Some(params) = params.as_object_mut() {

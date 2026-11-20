@@ -225,7 +225,7 @@ async fn clashing_names_reach_their_own_server() {
             fake_stdio("a_b", &[("FAKE_TAG", "two:")]),
         ],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -277,7 +277,7 @@ async fn an_image_waits_for_the_message_once() {
     let servers = Servers::connect(
         &[fake_stdio("shots", &[("FAKE_TOOLS", "image")])],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     let (client, tool) = servers.find("mcp__shots__image").expect("the tool");
@@ -307,7 +307,7 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
             &[("FAKE_TOOLS", "slow"), ("FAKE_LOG", &log.to_string_lossy())],
         )],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -345,7 +345,7 @@ async fn a_server_ping_is_answered_and_not_taken_for_the_reply() {
     let servers = Servers::connect(
         &[fake_stdio("pinger", &[("FAKE_TOOLS", "ping")])],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     let (client, tool) = servers.find("mcp__pinger__ping").expect("the tool");
@@ -360,8 +360,8 @@ async fn a_server_ping_is_answered_and_not_taken_for_the_reply() {
 async fn an_oversized_line_fails_its_call_and_the_server_carries_on() {
     let server = fake_stdio("big", &[("FAKE_TOOLS", "big,echo"), ("FAKE_BIG", "200000")]);
     let resolved = resolve(&server, &|_| None).expect("the config");
-    let stream =
-        Stream::stdio(&resolved, Path::new("."), 64 * 1024, &Sandbox::Open).expect("the server");
+    let stream = Stream::stdio(&resolved, Path::new("."), 64 * 1024, Containment::Shared)
+        .expect("the server");
     let transport = Transport::Stream(stream);
     let deadline = || Instant::now() + Duration::from_secs(20);
     transport
@@ -467,7 +467,7 @@ async fn a_failed_start_tells_the_model_why_without_the_servers_output() {
             ],
         )],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert_eq!(
@@ -496,7 +496,7 @@ async fn servers_connect_at_once() {
         .collect();
     let configs = [fake_stdio("one", &env), fake_stdio("two", &env)];
     let (servers, ()) = tokio::join!(
-        Servers::connect(&configs, Path::new("."), &Sandbox::Open,),
+        Servers::connect(&configs, Path::new("."), Containment::Shared,),
         async {
             logged(&log, "initialize", 2).await;
             gate.unlock().expect("the test opens the gate");
@@ -520,7 +520,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     for _ in 0..2 {
         let servers = for_thread(
             "thread-warm",
-            Servers::connect(&config, Path::new("."), &Sandbox::Open),
+            Servers::connect(&config, Path::new("."), Containment::Shared),
         )
         .await;
         let (client, tool) = servers.find("mcp__warm__echo").expect("the tool");
@@ -538,7 +538,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     drop(
         for_thread(
             "thread-warm",
-            Servers::connect(&changed, Path::new("."), &Sandbox::Open),
+            Servers::connect(&changed, Path::new("."), Containment::Shared),
         )
         .await,
     );
@@ -547,7 +547,7 @@ async fn a_thread_keeps_its_servers_between_turns() {
     drop(
         for_thread(
             "thread-other",
-            Servers::connect(&changed, Path::new("."), &Sandbox::Open),
+            Servers::connect(&changed, Path::new("."), Containment::Shared),
         )
         .await,
     );
@@ -567,7 +567,7 @@ async fn a_new_gateway_address_for_the_next_turn_keeps_the_other_servers_warm() 
                 Servers::connect(
                     &[local.clone(), gateway(token)],
                     Path::new("."),
-                    &Sandbox::Open,
+                    Containment::Shared,
                 ),
             )
             .await,
@@ -593,7 +593,7 @@ async fn only_the_most_recently_used_threads_keep_servers_warm() {
         drop(
             for_thread(
                 thread,
-                Servers::connect(&config, Path::new("."), &Sandbox::Open),
+                Servers::connect(&config, Path::new("."), Containment::Shared),
             )
             .await,
         );
@@ -713,7 +713,7 @@ async fn headers_are_expanded_and_sent_and_a_lost_session_starts_again() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -755,7 +755,7 @@ async fn a_streamed_answer_returns_before_the_stream_closes() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -796,7 +796,7 @@ async fn an_http_server_that_refuses_is_named_with_its_status_only() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert_eq!(
@@ -853,7 +853,7 @@ async fn a_legacy_sse_server_is_connected_and_called() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());
@@ -951,7 +951,7 @@ async fn an_http_server_is_connected_listed_and_called() {
             ..McpServer::default()
         }],
         Path::new("."),
-        &Sandbox::Open,
+        Containment::Shared,
     )
     .await;
     assert!(servers.failures().is_empty(), "{:?}", servers.failures());

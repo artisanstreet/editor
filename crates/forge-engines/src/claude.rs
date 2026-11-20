@@ -238,14 +238,11 @@ fn set_title(turn: &Turn, title: &str) -> Result<(), SetTitleError> {
         source,
     })?;
     record.push(b'\n');
-    let appended = match path.strip_prefix(&turn.home) {
-        Ok(relative) => crate::sandbox::home::append(&turn.home, relative, &record),
-        Err(_outside_the_home) => std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| file.write_all(&record)),
-    };
-    appended.map_err(|source| SetTitleError::Append { path, source })
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&record))
+        .map_err(|source| SetTitleError::Append { path, source })
 }
 
 fn apply_env(turn: &mut Turn) {

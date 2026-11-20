@@ -49,7 +49,6 @@ pub use item::{
     AgentAction, Approval, ApprovalRequest, Decision, ErrorKind, FileChange, FileOp, Item,
     ItemKind, MessageDirection, ModelSwitch, NamedModel, NoticeKind, Output, Phase, PlanStep,
     Question, QuestionAnswer, QuestionOption, SearchMode, Sender, Status, StepStatus, ToolKind,
-    UnsandboxedReason,
 };
 pub use model::{
     Capability, ChoiceSemantic, ConfigBinding, CustomizationScope, DiscoveryState, FieldSource,

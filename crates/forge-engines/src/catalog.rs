@@ -1220,7 +1220,7 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Result<Option<Value>
                 serde_json::to_vec(&digest).expect("invariant: a catalog digest serializes");
             let home = home.to_path_buf();
             tokio::task::spawn_blocking(move || {
-                let written = crate::sandbox::home::write(
+                let written = crate::home::write(
                     &home,
                     Path::new(MODELS_DEV_CACHE),
                     &bytes,

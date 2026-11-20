@@ -54,7 +54,7 @@ async fn stand_in_for_forge() -> ! {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let _engine = owned_command(engine, Sandbox::Open).unwrap();
+    let _engine = owned_command(engine, forge_isolation::Containment::Shared).unwrap();
     println!("{ENGINE_STARTED}");
     std::future::pending().await
 }

@@ -8,7 +8,7 @@ fn claude_turn(home: &std::path::Path, permissions: artisan_api::Permissions) ->
     let mut config = artisan_api::EngineConfig::new(EngineId::Claude);
     config.permissions = permissions;
     Turn {
-        thread_id: ThreadId::from("gateway"),
+        thread_id: artisan_api::ThreadId::from("gateway"),
         engine: EngineId::Claude,
         binary: "/bin/sh".into(),
         home: home.into(),
@@ -19,15 +19,6 @@ fn claude_turn(home: &std::path::Path, permissions: artisan_api::Permissions) ->
         launch,
         trace_dir: None,
     }
-}
-
-#[cfg(target_os = "linux")]
-async fn line(process: &mut EngineProcess) -> String {
-    tokio::time::timeout(std::time::Duration::from_secs(5), process.next_line())
-        .await
-        .expect("the engine answers within the bound")
-        .unwrap()
-        .expect("the engine prints a line")
 }
 
 async fn lines(mut process: EngineProcess) -> Vec<String> {
@@ -74,55 +65,5 @@ async fn claude_reaches_the_gateway_through_its_own_environment_not_a_shared_fil
         lines[count + 2..],
         ["no file holds it"],
         "the gateway credential sits in the engine home every thread shares"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn a_sandboxed_run_cannot_read_another_runs_gateway_credential() {
-    if let forge_isolation::Support::Unavailable(reason) = forge_isolation::support() {
-        test_support::sandbox_missing(format_args!(
-            "this kernel can't enforce the sandbox ({reason:?})"
-        ));
-        return;
-    }
-    let base = tempfile::tempdir().unwrap();
-    let home = base.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let holder = claude_turn(&home, artisan_api::Permissions::Full);
-    let mut holder = spawn(
-        &holder,
-        &["-c".into(), "echo $$; read _".into(), "sh".into()],
-    )
-    .await
-    .unwrap();
-    let holder_pid = line(&mut holder).await;
-    let mut reader = claude_turn(&home, artisan_api::Permissions::Auto);
-    reader.launch = crate::Launch::default();
-    let probe = r#"tr '\0' '\n' < "/proc/$1/environ" 2>&1 | grep -c gateway-token; grep -rl gateway-token . ; echo done"#;
-    let read = async |permissions| {
-        let mut reader = reader.clone();
-        reader.config.permissions = permissions;
-        let process = spawn(
-            &reader,
-            &["-c".into(), probe.into(), "sh".into(), holder_pid.clone()],
-        )
-        .await
-        .unwrap();
-        lines(process).await
-    };
-    let unconfined = read(artisan_api::Permissions::Full).await;
-    let sandboxed = read(artisan_api::Permissions::Auto).await;
-    holder.close_stdin("the test is done");
-    holder.wait().await;
-    assert_eq!(
-        unconfined.first().map(String::as_str),
-        Some("1"),
-        "an unsandboxed process of the same user reads the holder's environment: {unconfined:?}"
-    );
-    assert_eq!(
-        sandboxed,
-        ["0", "done"],
-        "a sandboxed run read another run's gateway credential"
     );
 }

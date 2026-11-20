@@ -4,7 +4,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 version.workspace = true
-description = "Keeps Forge responsive while engines saturate the machine (cgroups on Linux, process priorities on Windows, I/O policy on macOS) and confines engine writes in restricted modes (Landlock on Linux)."
+description = "Keeps Forge responsive while engines saturate the machine (cgroups on Linux, process priorities on Windows, I/O policy on macOS)."
 
 [lib]
 test = false
@@ -20,7 +20,6 @@ rustix = { workspace = true, features = ["event", "fs", "pipe", "process", "std"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 diagnostics.workspace = true
-landlock.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
