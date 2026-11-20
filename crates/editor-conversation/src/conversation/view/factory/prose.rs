@@ -64,7 +64,7 @@ impl RowFactory {
         };
         let live = self.prose_live(cx, id, running, saved)?;
         self.content_keyed
-            .set(shape_count.is_some() && live.is_none());
+            .set(shape_count.is_some() && (live.is_none() || sealed));
         let live_source = live.as_ref().map(|binding| self.live_text(&binding.text));
         let source = live_source
             .as_ref()

@@ -47,6 +47,10 @@
     "limit": 800,
     "reason": "each delta adds a row and the transcript follows the tail by it, so every realized node moves and is republished with its new bounds; measured 630 to 705"
   },
+  "stream_allocated_kib_per_frame": {
+    "limit": 4096,
+    "reason": "a streamed delta realizes only the reply's new and previous tail blocks, because sealed blocks are keyed by their content; measured about 3200, and realizing every block of the reply on each delta measures about 13000"
+  },
   "finish_window_rebuilds": {
     "limit": 1,
     "reason": "a reply that finishes as stored content refreshes only the transcript section; measured 0, and the margin covers one late host-wide change"

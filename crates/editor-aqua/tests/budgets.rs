@@ -195,6 +195,11 @@ fn stream(editor: &mut Editor, ledger: &mut Ledger) {
         span.most_published(),
         "",
     );
+    ledger.measure(
+        "stream_allocated_kib_per_frame",
+        span.most_allocated() / 1024,
+        "",
+    );
     upsert(editor, &text, Status::Done);
     let finished = editor.settle("the finished reply", stored(&text));
     ledger.measure(
