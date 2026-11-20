@@ -20,8 +20,8 @@ use editor_core::{Core, Problem, Screen, SettingsPage};
 use editor_ui::{
     kit::{
         Button, ButtonSize, ButtonTone, Finish, IconButton, IconButtonSize, IconSize, Label, Link,
-        LinkTone, ProblemNotice, Row, RowItem, Space, Spaced, Surface, TextRole, Tooltip,
-        surface::band::Band,
+        LinkTone, Orientation, ProblemNotice, Row, RowItem, Space, Spaced, Surface, TabList,
+        TextRole, Tooltip, surface::band::Band,
     },
     page,
     status_chip::{ChipTone, tone_color},
@@ -404,33 +404,40 @@ fn kind_tabs(
     counts: [usize; 2],
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let tabs = [
-        (Kind::All, "All".to_owned()),
-        (Kind::Skills, format!("Skills {}", counts[0])),
-        (Kind::Servers, format!("MCP servers {}", counts[1])),
-    ]
-    .into_iter()
-    .map(|(tab, text)| {
-        let emit = Rc::clone(emit);
-        Link::new(
-            format!("marketplace-kind-{tab:?}"),
-            *theme,
-            LinkTone::Crumb,
-            text,
-        )
-        .current(kind == tab)
-        .on_activate(move || emit(ViewAction::SetKind(tab)))
-        .build()
-        .role(aqua_core::Role::Tab)
-        .aria_selected(kind == tab)
-        .debug_selector(format!("marketplace-kind-{tab:?}"))
-    });
-
-    UiBox::new()
-        .spaced(Space::S16)
-        .children(tabs)
-        .build()
-        .role(aqua_core::Role::TabList)
+    const KINDS: [Kind; 3] = [Kind::All, Kind::Skills, Kind::Servers];
+    let select = Rc::clone(emit);
+    let tabs = KINDS
+        .into_iter()
+        .zip([
+            "All".to_owned(),
+            format!("Skills {}", counts[0]),
+            format!("MCP servers {}", counts[1]),
+        ])
+        .map(|(tab, text)| {
+            let emit = Rc::clone(emit);
+            let link = Link::new(
+                format!("marketplace-kind-{tab:?}"),
+                *theme,
+                LinkTone::Crumb,
+                text,
+            )
+            .current(kind == tab)
+            .on_activate(move || emit(ViewAction::SetKind(tab)))
+            .build()
+            .debug_selector(format!("marketplace-kind-{tab:?}"));
+            (link, kind == tab)
+        });
+    tabs.fold(
+        TabList::new(
+            "marketplace-kinds",
+            "Kind",
+            Orientation::Horizontal,
+            UiBox::new().spaced(Space::S16),
+            move |index| select(ViewAction::SetKind(KINDS[index])),
+        ),
+        |list, (link, selected)| list.tab(link, selected),
+    )
+    .build(theme)
 }
 
 fn prompt_link(

@@ -8,7 +8,8 @@ use editor_assets::AssetId;
 use editor_ui::{
     kit::{
         Density, Divider, Finish, HitArea, IconButton, IconButtonSize, IconSize, Inset, Link,
-        LinkTone, Picker, Radius, Row, RowItem, Space, Spaced, Surface, TextRole,
+        LinkTone, Orientation, Picker, Radius, Row, RowItem, Space, Spaced, Surface, TabList,
+        TextRole,
     },
     theme::{ArtisanTheme, Opacity},
 };
@@ -618,11 +619,19 @@ pub(crate) fn model_menu(
             .unwrap_or_else(|| engine_icon(theme, config.engine))
     });
     let item_height = model_item_height(items.len());
-    let mut buttons = UiBox::new()
-        .layout("column")
-        .width(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER)
-        .gap(MODEL_ITEM_GAP)
-        .style(Style::new().flex_shrink(0.0));
+    let panes: Vec<_> = items.iter().map(|item| item.pane).collect();
+    let select = Rc::clone(dispatch);
+    let mut buttons = TabList::new(
+        "composer-panes",
+        "Model settings",
+        Orientation::Vertical,
+        UiBox::new()
+            .layout("column")
+            .width(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER)
+            .gap(MODEL_ITEM_GAP)
+            .style(Style::new().flex_shrink(0.0)),
+        move |index| select(ComposerAction::SelectPane(panes[index])),
+    );
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
         let action = Rc::clone(dispatch);
@@ -634,22 +643,21 @@ pub(crate) fn model_menu(
             item.value.clone(),
         )
         .detail(item.label)
-        .role(Role::Tab)
         .nested(pane_radius, 0.0)
         .hoverable(target != pane)
         .on_activate(move || action(ComposerAction::SelectPane(target)));
         if let Some(icon) = model_icon.filter(|_| target.is_none()) {
             side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
         }
-        buttons = buttons.child(
+        buttons = buttons.tab(
             side.build()
                 .style(
                     Style::new()
                         .height(Length::Px(item_height))
                         .flex_shrink(0.0),
                 )
-                .aria_label(item.name())
-                .aria_selected(target == pane),
+                .aria_label(item.name()),
+            target == pane,
         );
     }
     let mut pane_body = UiBox::new()
@@ -724,7 +732,7 @@ pub(crate) fn model_menu(
                     0.0
                 },
             ))
-            .child(buttons.build())
+            .child(buttons.build(theme))
             .child(
                 UiBox::new()
                     .width(MODEL_ITEM_GUTTER)

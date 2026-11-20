@@ -22,3 +22,5 @@ mod row;
 mod special;
 #[path = "ui/kit/surface.rs"]
 mod surface;
+#[path = "ui/kit/control/tab_list.rs"]
+mod tab_list;

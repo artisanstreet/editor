@@ -725,3 +725,67 @@ fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
         "the name ends before the Edit button: {painted:?} vs {bounds:?}"
     );
 }
+
+#[test]
+fn arrow_keys_move_focus_and_the_kind_through_the_kind_tabs() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role};
+    use editor_aqua::marketplace::presentation::Kind;
+    use editor_aqua::marketplace::view::ViewAction;
+    use std::{cell::RefCell, rc::Rc};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let (controller, _forge) = marketplace_host(&mut core);
+    let chosen = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&chosen);
+    let mut app = marketplace_app(
+        &controller,
+        &core,
+        Rc::new(move |action| {
+            if let ViewAction::SetKind(kind) = action {
+                sink.borrow_mut().push(kind);
+            }
+        }),
+    );
+    let semantics = app.tree().emit_semantics();
+    let tabs: Vec<_> = semantics
+        .iter()
+        .filter(|node| node.role == Role::Tab)
+        .collect();
+    assert_eq!(tabs.len(), 3, "All, Skills and MCP servers are tabs");
+    assert!(
+        semantics.iter().any(|node| node.role == Role::TabList),
+        "the kinds are a tab list"
+    );
+    let all = tabs[0].node;
+    assert!(app.tree_mut().set_focused(Some(all)));
+    let mut focused = Vec::new();
+    for key in [
+        NamedKey::Right,
+        NamedKey::End,
+        NamedKey::Home,
+        NamedKey::Left,
+    ] {
+        let event = KeyEvent {
+            key: Key::Named(key),
+            modifiers: Modifiers::NONE,
+            repeat: false,
+        };
+        app.handle_input(&InputEvent::KeyDown(event));
+        app.handle_input(&InputEvent::KeyUp(event));
+        focused.extend(
+            app.tree()
+                .emit_semantics()
+                .into_iter()
+                .find(|node| node.focused)
+                .map(|node| node.label),
+        );
+    }
+    assert_eq!(
+        *chosen.borrow(),
+        [Kind::Skills, Kind::Servers, Kind::All, Kind::Servers]
+    );
+    assert_eq!(
+        focused,
+        ["Skills 0", "MCP servers 0", "All", "MCP servers 0"]
+    );
+}

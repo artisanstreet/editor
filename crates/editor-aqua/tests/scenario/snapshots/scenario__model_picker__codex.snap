@@ -3,9 +3,10 @@ source: crates/editor-aqua/tests/scenario/model_picker.rs
 expression: "editor.settle_part(\"the Codex tab\", Role::Menu, None, |view|\n{\n    view.focused().is_some_and(|focused|\n    {\n        focused.role == Role::Button && focused.label.as_deref() ==\n        Some(\"Codex\")\n    })\n})"
 ---
 Menu
-  Tab "Model" [selected]
-    Label
-    Label "Model"
+  TabList "Model settings"
+    Tab "Model" [selected]
+      Label
+      Label "Model"
   Image
   Button "Claude Code"
   Button "Codex" [selected, focused]
