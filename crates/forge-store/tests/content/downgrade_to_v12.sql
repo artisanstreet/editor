@@ -1,4 +1,5 @@
 DROP TABLE resource_capture;
+ALTER TABLE pair_codes DROP COLUMN redeemed_by;
 DROP TRIGGER item_content_owner_delete;
 DROP TRIGGER outline_revision_insert;
 DROP TRIGGER outline_revision_update;

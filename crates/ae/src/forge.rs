@@ -51,12 +51,6 @@ pub(crate) enum PairError {
         #[source]
         source: PairCodeError,
     },
-    #[error("list the devices paired with the Forge in {}", data.display())]
-    Devices {
-        data: PathBuf,
-        #[source]
-        source: DevicesError,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -179,7 +173,6 @@ pub(crate) fn pair(json: bool) -> Result<(), PairError> {
         ui::warning("Forge isn't running; the Editor can't pair until it is (`ae forge start`).");
     }
     let code = forge_store::PairCodeHash::of(&invite.code);
-    let issued = artisan_api::now();
     let progress = ui::Progress::spinner("Waiting for an Editor");
     loop {
         let left = (invite.expires_at - artisan_api::now()) / 1000;
@@ -193,24 +186,24 @@ pub(crate) fn pair(json: bool) -> Result<(), PairError> {
             left % 60
         ));
         let admin = administer(&data)?;
-        let pending = admin
-            .pair_code_pending(&code)
+        let state = admin
+            .pair_code_state(&code)
             .map_err(|source| PairError::Pending {
                 data: data.clone(),
                 source,
             })?;
-        if !pending {
-            let devices = admin.devices().map_err(|source| PairError::Devices {
-                data: data.clone(),
-                source,
-            })?;
-            let paired = devices
-                .iter()
-                .filter(|device| device.created_at >= issued)
-                .max_by_key(|device| device.created_at)
-                .map_or("an Editor that was already paired", |device| {
-                    device.name.as_str()
-                });
+        let paired = match state {
+            forge_store::PairCodeState::Waiting => None,
+            forge_store::PairCodeState::Paired(device) => Some(device.name),
+            forge_store::PairCodeState::PairedThenRemoved => {
+                Some("an Editor that has since been removed".to_owned())
+            }
+            forge_store::PairCodeState::Gone => {
+                progress.fail("The code is no longer valid; run `ae pair` again");
+                return Err(PairError::Expired);
+            }
+        };
+        if let Some(paired) = paired {
             progress.done(format!("Paired {paired}"));
             ui::outro("Done.");
             return Ok(());

@@ -147,8 +147,11 @@ impl Admin {
         })
     }
 
-    pub fn pair_code_pending(&self, code: &PairCodeHash) -> Result<bool, PairCodeError> {
-        crate::pairing::pair_code_pending(&self.conn, code).map_err(|cause| PairCodeError {
+    pub fn pair_code_state(
+        &self,
+        code: &PairCodeHash,
+    ) -> Result<crate::PairCodeState, PairCodeError> {
+        crate::pairing::pair_code_state(&self.conn, code).map_err(|cause| PairCodeError {
             cause: Box::new(cause),
         })
     }

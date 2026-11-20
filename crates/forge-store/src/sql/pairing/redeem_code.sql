@@ -1,1 +1,1 @@
-DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2
+UPDATE pair_codes SET redeemed_by = ?2 WHERE code_sha256 = ?1

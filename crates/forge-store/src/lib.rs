@@ -71,7 +71,7 @@ pub use items::{
 };
 pub use pairing::{
     AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,
-    PairCodeHash, PairDeviceError, RevokeDeviceError, TouchDeviceError,
+    PairCodeHash, PairCodeState, PairDeviceError, RevokeDeviceError, TouchDeviceError,
 };
 pub use progress::Progress;
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};

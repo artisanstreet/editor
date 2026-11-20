@@ -4,7 +4,7 @@ use crate::error::{StorageError, operation_error};
 use artisan_api::{DeviceId, Timestamp};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -316,14 +316,14 @@ impl Store {
     ) -> Result<Option<DeviceId>, PairDeviceError> {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
-            if tx
-                .execute(
-                    include_str!("sql/pairing/redeem_code.sql"),
+            let redeemable: bool = tx
+                .query_row(
+                    include_str!("sql/pairing/redeemable.sql"),
                     params![code.hex(), tx.now()],
+                    |row| row.get(0),
                 )
-                .at("pairing/redeem_code.sql")?
-                == 0
-            {
+                .at("pairing/redeemable.sql")?;
+            if !redeemable {
                 return Ok(None);
             }
             let id: String = tx
@@ -338,6 +338,11 @@ impl Store {
                     |row| row.get(0),
                 )
                 .at("pairing/authorize.sql")?;
+            tx.execute(
+                include_str!("sql/pairing/redeem_code.sql"),
+                params![code.hex(), id],
+            )
+            .at("pairing/redeem_code.sql")?;
             Ok(Some(DeviceId(id)))
         })
         .await
@@ -473,11 +478,35 @@ pub(crate) fn add_pair_code(
     Ok(())
 }
 
-pub(crate) fn pair_code_pending(conn: &Connection, code: &PairCodeHash) -> Result<bool> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairCodeState {
+    Waiting,
+    Paired(Device),
+    PairedThenRemoved,
+    Gone,
+}
+
+pub(crate) fn pair_code_state(conn: &Connection, code: &PairCodeHash) -> Result<PairCodeState> {
     conn.query_row(
-        include_str!("sql/pairing/code_pending.sql"),
+        include_str!("sql/pairing/code_state.sql"),
         [code.hex()],
-        |row| row.get(0),
+        |row| {
+            let redeemed: Option<String> = row.get(0)?;
+            let device: Option<String> = row.get(1)?;
+            Ok(match (redeemed, device) {
+                (None, _) => PairCodeState::Waiting,
+                (Some(_), None) => PairCodeState::PairedThenRemoved,
+                (Some(_), Some(id)) => PairCodeState::Paired(Device {
+                    id: DeviceId(id),
+                    name: row.get(2)?,
+                    public_key: row.get(3)?,
+                    created_at: row.get(4)?,
+                    last_seen: row.get(5)?,
+                }),
+            })
+        },
     )
-    .at("pairing/code_pending.sql")
+    .optional()
+    .map(|state| state.unwrap_or(PairCodeState::Gone))
+    .at("pairing/code_state.sql")
 }

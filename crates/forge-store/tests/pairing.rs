@@ -1,5 +1,5 @@
 use artisan_api::now;
-use forge_store::{CertificateError, DeviceCertificate, PairCodeHash, Store};
+use forge_store::{CertificateError, DeviceCertificate, PairCodeHash, PairCodeState, Store};
 
 #[tokio::test]
 async fn a_pair_code_typed_in_lowercase_with_spaces_still_pairs() {
@@ -92,4 +92,55 @@ async fn a_device_rekeyed_by_another_process_is_refused_next() {
         .execute(include_str!("pairing/rekey.sql"), [device.as_str()])
         .unwrap();
     assert_eq!(store.is_authorized(&certificate).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_pair_code_names_the_device_that_redeemed_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let code = PairCodeHash::of("ABCD2345");
+    store.add_pair_code(code, now() + 60_000).await.unwrap();
+    let admin = forge_store::admin::Admin::open(dir.path()).unwrap();
+    assert_eq!(
+        admin.pair_code_state(&code).unwrap(),
+        PairCodeState::Waiting
+    );
+    let paired = store
+        .pair_device(
+            code,
+            "Laptop".into(),
+            DeviceCertificate::from_der(b"laptop certificate"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .add_device(
+            "Desktop".into(),
+            DeviceCertificate::from_der(b"desktop certificate"),
+        )
+        .await
+        .unwrap();
+    let PairCodeState::Paired(device) = admin.pair_code_state(&code).unwrap() else {
+        panic!("the redeemed code names no device");
+    };
+    assert_eq!((device.id, device.name.as_str()), (paired, "Laptop"));
+    assert!(
+        store
+            .pair_device(
+                code,
+                "Intruder".into(),
+                DeviceCertificate::from_der(b"intruder certificate"),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a code pairs once"
+    );
+    assert_eq!(
+        admin
+            .pair_code_state(&PairCodeHash::of("ZZZZ9999"))
+            .unwrap(),
+        PairCodeState::Gone
+    );
 }
