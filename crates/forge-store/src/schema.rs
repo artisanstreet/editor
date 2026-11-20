@@ -167,6 +167,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[sql!("migrations/v29.sql")],
     &[],
     &[sql!("migrations/v31.sql")],
+    &[sql!("migrations/v32.sql")],
 ];
 
 pub(crate) const fn version() -> usize {
@@ -669,3 +670,7 @@ mod frozen_migration_tests;
 #[cfg(test)]
 #[path = "../tests/schema/failure.rs"]
 mod failure_tests;
+
+#[cfg(test)]
+#[path = "../tests/schema/diff_totals_migration.rs"]
+mod diff_totals_migration_tests;

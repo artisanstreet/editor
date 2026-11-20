@@ -122,7 +122,7 @@ fn stored_edit_counts_are_not_zeroed_when_status_changes() {
         "--- old\n+++ new\n@@ -1,1 +1,1 @@\n{}",
         "-old\n+new\n".repeat(3000)
     );
-    let expected = diff_totals(&diff);
+    let expected = diff::totals(&diff);
     let source = stored(&conn, &diff);
     let tool = ToolKind::Edit {
         changes: vec![artisan_api::FileChange {
@@ -182,4 +182,41 @@ fn stamped(conn: &Connection) -> Stamped<'_> {
         conn,
         now: artisan_api::now(),
     }
+}
+#[test]
+fn a_stored_reply_is_not_scanned_as_a_diff() {
+    let conn = database();
+    stored(&conn, &"- prose that looks like a removal\n".repeat(4000));
+    assert_eq!(
+        conn.query_row(include_str!("count_diffs.sql"), [], |row| row
+            .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+#[test]
+fn a_diff_first_stored_as_prose_counts_its_lines_once_an_edit_uses_it() {
+    let conn = database();
+    let diff = format!("@@ -1,2 +1,2 @@\n{}", "-old\n+new\n+more\n".repeat(3000));
+    let source = stored(&conn, &diff);
+    let tool = ToolKind::Edit {
+        changes: vec![artisan_api::FileChange {
+            path: "a".into(),
+            op: artisan_api::FileOp::Modify,
+            diff: Some(TextContent::Stored(source)),
+        }]
+        .into(),
+    };
+    let expected = Some(EditTotals {
+        added: 6000,
+        removed: 3000,
+    });
+    assert_eq!(edit_totals(&conn, &tool).unwrap(), expected);
+    assert_eq!(edit_totals(&conn, &tool).unwrap(), expected);
+    assert_eq!(
+        conn.query_row(include_str!("count_diffs.sql"), [], |row| row
+            .get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
 }

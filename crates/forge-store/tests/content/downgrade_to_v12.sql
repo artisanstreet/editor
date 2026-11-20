@@ -19,6 +19,7 @@ DROP TABLE content_dependencies;
 DROP TABLE item_content;
 DROP TABLE content_chunks;
 DROP TABLE content;
+DROP TABLE content_diffs;
 DROP TABLE continues;
 DROP TABLE coordination_events;
 DROP TABLE coordination_records;

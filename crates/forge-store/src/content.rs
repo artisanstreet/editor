@@ -8,6 +8,8 @@ use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
 
+mod diff;
+
 pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_ITEM_BYTES: usize = 512 * 1024;
@@ -469,28 +471,47 @@ pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
     Ok(text)
 }
 
-fn diff_totals(diff: &str) -> EditTotals {
-    let mut totals = EditTotals::default();
-    let mut in_hunk = false;
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            in_hunk = false;
-            continue;
-        }
-        if line.starts_with("@@") {
-            in_hunk = true;
-            continue;
-        }
-        if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
-            continue;
-        }
-        if line.starts_with('+') {
-            totals.added = totals.added.saturating_add(1);
-        } else if line.starts_with('-') {
-            totals.removed = totals.removed.saturating_add(1);
-        }
+fn stored_diff_totals(conn: &Connection, source: &ContentRef) -> Result<EditTotals> {
+    let cached = conn
+        .prepare_cached(include_str!("sql/content/diff_totals.sql"))
+        .at("content/diff_totals.sql")?
+        .query_row([source.id.as_str()], |row| {
+            Ok(EditTotals {
+                added: row.get(0)?,
+                removed: row.get(1)?,
+            })
+        })
+        .optional()
+        .at("content/diff_totals.sql")?;
+    if let Some(totals) = cached {
+        return Ok(totals);
     }
-    totals
+    let mut scan = diff::DiffScan::default();
+    let mut offset = 0;
+    while offset < source.bytes {
+        let part = range(
+            conn,
+            &source.id,
+            &ContentQuery {
+                offset,
+                limit: None,
+            },
+        )?
+        .ok_or_else(|| ContentError::Missing {
+            content: source.id.clone(),
+        })?;
+        if !(part.total == source.bytes && part.start == offset && part.end > offset) {
+            return Err(damaged(&source.id, Damage::DescriptorMismatch));
+        }
+        offset = part.end;
+        scan.feed(part.text.as_bytes());
+    }
+    let totals = scan.finish();
+    conn.prepare_cached(include_str!("sql/content/insert_diff_totals.sql"))
+        .at("content/insert_diff_totals.sql")?
+        .execute(params![source.id.as_str(), totals.added, totals.removed])
+        .at("content/insert_diff_totals.sql")?;
+    Ok(totals)
 }
 
 pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
@@ -523,19 +544,8 @@ pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<E
         };
         for diff in slice.iter().filter_map(|change| change.diff.as_ref()) {
             let count = match diff {
-                TextContent::Inline(text) => diff_totals(text),
-                TextContent::Stored(source) => conn
-                    .query_row(
-                        include_str!("sql/content/diff_totals.sql"),
-                        [source.id.as_str()],
-                        |row| {
-                            Ok(EditTotals {
-                                added: row.get(0)?,
-                                removed: row.get(1)?,
-                            })
-                        },
-                    )
-                    .at("content/diff_totals.sql")?,
+                TextContent::Inline(text) => diff::totals(text),
+                TextContent::Stored(source) => stored_diff_totals(conn, source)?,
             };
             total.added = total.added.saturating_add(count.added);
             total.removed = total.removed.saturating_add(count.removed);
@@ -655,15 +665,12 @@ pub(crate) fn store_source(conn: &Stamped<'_>, value: &str) -> Result<ContentRef
         .query_row([source.id.as_str()], |row| row.get(0))
         .at("content/exists.sql")?;
     if !exists {
-        let totals = diff_totals(value);
         conn.prepare_cached(include_str!("sql/content/insert.sql"))
             .at("content/insert.sql")?
             .execute(params![
                 source.id.as_str(),
                 source.bytes,
                 source.lines,
-                totals.added,
-                totals.removed,
                 conn.now
             ])
             .at("content/insert.sql")?;
