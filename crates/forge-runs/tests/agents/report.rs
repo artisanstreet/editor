@@ -272,3 +272,58 @@ async fn a_follow_up_cancelled_before_it_runs_settles_without_reporting_again() 
     );
     fixture.hub.shutdown();
 }
+
+async fn overview_agents(fixture: &Fixture) -> Vec<ItemId> {
+    fixture
+        .hub
+        .store()
+        .inspector(&fixture.thread_id)
+        .await
+        .unwrap()
+        .agents
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_agent_leaves_the_thread_overview_without_its_parent_asking() {
+    let release = Arc::new(Notify::new());
+    let fixture = fixture_in_generation(Arc::new({
+        let release = Arc::clone(&release);
+        move |turn, io| {
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                if turn.input.text == "review it" {
+                    release.notified().await;
+                    io.emit(reply("verdict", "looks fine")).await;
+                }
+                Outcome::done()
+            })
+        }
+    }))
+    .await;
+    let store = fixture.hub.store();
+    let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
+    let (agent, child) = background_agent(&fixture, &parent).await;
+    fixture.hub.resume_pending();
+    test_support::wait::eventually(
+        "the agent to start",
+        test_support::wait::LIVENESS,
+        || async { fixture.delivered(&child).await },
+    )
+    .await;
+    assert_eq!(overview_agents(&fixture).await, vec![agent.clone()]);
+    release.notify_one();
+    test_support::wait::eventually(
+        "the finished agent to leave the overview",
+        test_support::wait::LIVENESS,
+        || async { overview_agents(&fixture).await.is_empty() },
+    )
+    .await;
+    assert_eq!(
+        store.item(&agent).await.unwrap().unwrap().status,
+        Status::Done
+    );
+    fixture.hub.shutdown();
+}
