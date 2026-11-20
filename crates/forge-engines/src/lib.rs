@@ -71,7 +71,7 @@ use std::sync::Arc;
 #[must_use]
 pub fn harness(engine: EngineId) -> Arc<dyn Harness> {
     match engine {
-        EngineId::Claude => Arc::new(claude::ClaudeHarness),
+        EngineId::Claude => Arc::new(claude::ClaudeHarness::new(Arc::new(claude::WallClock))),
         EngineId::OpenCode => Arc::new(opencode::OpenCodeHarness),
         EngineId::Codex => Arc::new(codex::CodexHarness),
     }

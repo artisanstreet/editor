@@ -1,4 +1,4 @@
-use super::ClaudeHarness;
+use super::{ClaudeHarness, InputGrace, WallClock};
 use crate::{Harness as _, Input, Outcome, RunIo, Turn, UserInput, fake_engine};
 use artisan_api::{EngineConfig, EngineId, ThreadId};
 use std::path::Path;
@@ -57,11 +57,28 @@ impl Running {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct Elapsed;
+
+impl InputGrace for Elapsed {
+    fn length(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn countdown(&self) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
 pub(super) fn start(turn: Turn) -> Running {
+    start_with(turn, std::sync::Arc::new(WallClock))
+}
+
+pub(super) fn start_with(turn: Turn, grace: std::sync::Arc<dyn InputGrace>) -> Running {
     let (inputs, inbox) = mpsc::channel(8);
     let (events, mut received) = mpsc::channel(256);
     let cancel = CancellationToken::new();
-    let outcome = tokio::spawn(ClaudeHarness.run(
+    let outcome = tokio::spawn(ClaudeHarness::new(grace).run(
         turn,
         RunIo {
             inbox,

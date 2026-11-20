@@ -80,11 +80,7 @@ impl Harness for ClaudeAiHarness {
         turn: Turn,
         title: String,
     ) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
-        <crate::claude::ClaudeHarness as Harness>::set_title(
-            &crate::claude::ClaudeHarness,
-            turn,
-            title,
-        )
+        crate::claude::retitle(turn, title)
     }
 
     fn compact(

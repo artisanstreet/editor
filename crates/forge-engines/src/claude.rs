@@ -21,14 +21,57 @@ use tokio_util::sync::CancellationToken;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_secs(5);
-#[cfg(not(test))]
 const SETTLED_INPUT_GRACE: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const SETTLED_INPUT_GRACE: Duration = Duration::from_millis(300);
 const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 
+pub(crate) trait InputGrace: Send + Sync + std::fmt::Debug {
+    fn length(&self) -> Duration;
+    fn countdown(&self) -> BoxFuture<'static, ()>;
+}
+
 #[derive(Debug)]
-pub struct ClaudeHarness;
+pub(crate) struct WallClock;
+
+impl InputGrace for WallClock {
+    fn length(&self) -> Duration {
+        SETTLED_INPUT_GRACE
+    }
+
+    fn countdown(&self) -> BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(SETTLED_INPUT_GRACE))
+    }
+}
+
+pub(crate) fn retitle(
+    turn: Turn,
+    title: String,
+) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+    let thread = turn.thread_id.clone();
+    Box::pin(async move {
+        match turn
+            .session_id
+            .as_deref()
+            .and_then(|session| session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX))
+        {
+            Some(native) => rename_on_claude_ai(&turn, native, &title).await,
+            None => set_title(&turn, &title).map_err(|source| crate::SetTitleError::Claude {
+                thread,
+                source: Box::new(source),
+            }),
+        }
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeHarness {
+    grace: std::sync::Arc<dyn InputGrace>,
+}
+
+impl ClaudeHarness {
+    pub(crate) fn new(grace: std::sync::Arc<dyn InputGrace>) -> Self {
+        Self { grace }
+    }
+}
 
 impl Harness for ClaudeHarness {
     fn set_title(
@@ -36,20 +79,7 @@ impl Harness for ClaudeHarness {
         turn: Turn,
         title: String,
     ) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
-        let thread = turn.thread_id.clone();
-        Box::pin(async move {
-            match turn
-                .session_id
-                .as_deref()
-                .and_then(|session| session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX))
-            {
-                Some(native) => rename_on_claude_ai(&turn, native, &title).await,
-                None => set_title(&turn, &title).map_err(|source| crate::SetTitleError::Claude {
-                    thread,
-                    source: Box::new(source),
-                }),
-            }
-        })
+        retitle(turn, title)
     }
 
     fn compact(
@@ -87,7 +117,7 @@ impl Harness for ClaudeHarness {
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
-        Box::pin(run(turn, io))
+        Box::pin(run(turn, io, std::sync::Arc::clone(&self.grace)))
     }
 
     fn side_query(
@@ -225,7 +255,7 @@ fn apply_env(turn: &mut Turn) {
     }
 }
 
-async fn run(turn: Turn, io: RunIo) -> Outcome {
+async fn run(turn: Turn, io: RunIo, grace: std::sync::Arc<dyn InputGrace>) -> Outcome {
     match turn.config.options.get("transport").and_then(Value::as_str) {
         Some(CLAUDE_AI_TRANSPORT) => return Box::pin(crate::claudeai::run(turn, io)).await,
         Some(CLAUDE_AI_UNAVAILABLE) => {
@@ -242,13 +272,13 @@ async fn run(turn: Turn, io: RunIo) -> Outcome {
         }
         _ => {}
     }
-    run_claude_code(turn, io).await
+    run_claude_code(turn, io, grace.as_ref()).await
 }
 
 pub const CLAUDE_AI_TRANSPORT: &str = "claude.ai";
 pub const CLAUDE_AI_UNAVAILABLE: &str = "claude.ai-unavailable";
 
-async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
+async fn run_claude_code(mut turn: Turn, mut io: RunIo, grace: &dyn InputGrace) -> Outcome {
     apply_env(&mut turn);
     let mut decoder = ClaudeDecoder::default();
     let mut session = turn.session_id.clone();
@@ -293,6 +323,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
             &mut io,
             &mut next,
             &mut inbox_open,
+            grace,
         )
         .await;
         let finished = match finished {
@@ -303,9 +334,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
                     tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), error, "Claude protocol exchange failed");
                 }
                 engine.kill().await;
-                for event in decoder.finish() {
-                    io.emit(event).await;
-                }
+                emit_finished(&mut decoder, &io).await;
                 return Outcome::failed(format!(
                     "Claude protocol exchange failed: {}",
                     diagnostics::chain(&failure)
@@ -313,9 +342,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
             }
         };
         let (exit, cancelled) = reap(&mut engine, &io.cancel, finished.cancelled).await;
-        for event in decoder.finish() {
-            io.emit(event).await;
-        }
+        emit_finished(&mut decoder, &io).await;
         if let Some(id) = decoder.session() {
             session = Some(id.to_owned());
         }
@@ -350,6 +377,12 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         return Outcome::cancelled();
     }
     outcome.unwrap_or_else(|| Outcome::failed("Claude produced no result"))
+}
+
+async fn emit_finished(decoder: &mut ClaudeDecoder, io: &RunIo) {
+    for event in decoder.finish() {
+        io.emit(event).await;
+    }
 }
 
 fn exited_without_result(exit: &Exit, stderr: &StderrWritten) -> Outcome {
@@ -389,13 +422,13 @@ async fn drive(
     io: &mut RunIo,
     next: &mut VecDeque<(UserInput, bool)>,
     inbox_open: &mut bool,
+    grace: &dyn InputGrace,
 ) -> Result<Finished, ExchangeError> {
     let mut cancelling = false;
-    let grace = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
-    tokio::pin!(grace);
+    let interrupted = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
+    tokio::pin!(interrupted);
     let mut door = Door::Open;
-    let settle = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
-    tokio::pin!(settle);
+    let mut settle: Option<BoxFuture<'static, ()>> = None;
     loop {
         tokio::select! {
             line = engine.next_line() => {
@@ -428,19 +461,25 @@ async fn drive(
                     || door.after_frame(session),
                     |ending| door.after_result(session, ending),
                 );
-                if next == Door::Settling && door != Door::Settling {
-                    settle.as_mut().reset(tokio::time::Instant::now() + SETTLED_INPUT_GRACE);
+                match (door, next) {
+                    (Door::Settling, Door::Settling) => {}
+                    (_, Door::Settling) => settle = Some(grace.countdown()),
+                    (
+                        _,
+                        Door::Open | Door::HeldForReply | Door::HeldForBackground | Door::Closed,
+                    ) => settle = None,
                 }
                 let why = ending.map_or(Moved::Frame, Moved::Result);
-                move_door(engine, decoder, &mut door, next, why);
+                move_door(engine, decoder, grace, &mut door, next, why);
             }
-            () = &mut settle, if door == Door::Settling => {
+            () = counted_down(&mut settle), if settle.is_some() => {
+                settle = None;
                 let next = door.after_grace(Session {
                     in_turn: decoder.in_turn(),
                     awaiting_input: decoder.awaiting_input(),
                     background: decoder.background_running(),
                 });
-                move_door(engine, decoder, &mut door, next, Moved::Grace);
+                move_door(engine, decoder, grace, &mut door, next, Moved::Grace);
             }
             input = io.inbox.recv(), if *inbox_open && !cancelling => match input {
                 Some(Input::Steer(steer)) => {
@@ -488,18 +527,25 @@ async fn drive(
                 if engine.send(&interrupt).await.is_err() {
                     engine.kill().await;
                 }
-                grace.as_mut().reset(tokio::time::Instant::now() + INTERRUPT_GRACE);
+                interrupted.as_mut().reset(tokio::time::Instant::now() + INTERRUPT_GRACE);
             }
-            () = &mut grace, if cancelling => {
+            () = &mut interrupted, if cancelling => {
                 tracing::warn!(%thread, session = ?decoder.session(), "Claude did not stop after an interrupt; killing it");
                 engine.kill().await;
-                grace.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(3600));
+                interrupted.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(3600));
             }
         }
     }
     Ok(Finished {
         cancelled: cancelling,
     })
+}
+
+async fn counted_down(settle: &mut Option<BoxFuture<'static, ()>>) {
+    match settle {
+        Some(countdown) => countdown.await,
+        None => std::future::pending().await,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -512,6 +558,7 @@ enum Moved {
 fn move_door(
     engine: &mut EngineProcess,
     decoder: &ClaudeDecoder,
+    grace: &dyn InputGrace,
     door: &mut Door,
     next: Door,
     why: Moved,
@@ -524,7 +571,7 @@ fn move_door(
     match (next, why) {
         (Door::Closed, Moved::Grace) => engine.close_stdin(&format!(
             "no background work for {}s ({jobs})",
-            SETTLED_INPUT_GRACE.as_secs()
+            grace.length().as_secs()
         )),
         (Door::Closed, Moved::Result(ending)) => engine.close_stdin(&format!(
             "result (cancelling: {}; {jobs})",
@@ -549,7 +596,7 @@ fn move_door(
         }
         (Door::Settling, _) => engine.note(&format!(
             "background work ended; input closes in {}s unless more starts ({jobs})",
-            SETTLED_INPUT_GRACE.as_secs()
+            grace.length().as_secs()
         )),
         (Door::Open | Door::HeldForReply | Door::HeldForBackground, _) => {}
     }

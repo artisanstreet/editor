@@ -5,7 +5,10 @@ use std::time::Duration;
 #[tokio::test]
 async fn a_steer_is_answered_while_a_monitor_outlives_the_reply() {
     let dir = tempfile::tempdir().unwrap();
-    let mut running = scenario::start(scenario::turn(dir.path(), "claude-monitor-steer", &[]));
+    let mut running = scenario::start_with(
+        scenario::turn(dir.path(), "claude-monitor-steer", &[]),
+        std::sync::Arc::new(scenario::Elapsed),
+    );
     let replied = dir.path().join("replied");
     test_support::wait::eventually(
         "the first reply to be handled",

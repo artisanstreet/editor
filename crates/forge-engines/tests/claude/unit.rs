@@ -25,7 +25,7 @@ async fn generated_title_is_persisted_without_replacing_the_claude_transcript() 
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let history = "{\"type\":\"user\",\"message\":{\"content\":\"repair the sidebar\"}}\n";
     std::fs::write(&path, history).unwrap();
-    super::ClaudeHarness
+    super::ClaudeHarness::new(std::sync::Arc::new(super::WallClock))
         .set_title(turn, "Fix sidebar titles".to_owned())
         .await
         .unwrap();
@@ -122,6 +122,37 @@ async fn input_stays_open_while_a_background_agent_works() {
     }
 }
 
+#[derive(Debug, Default)]
+struct HeldGrace {
+    started: std::sync::atomic::AtomicUsize,
+    alive: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct Alive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl super::InputGrace for HeldGrace {
+    fn length(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
+    fn countdown(&self) -> futures::future::BoxFuture<'static, ()> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.alive.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let alive = Alive(std::sync::Arc::clone(&self.alive));
+        Box::pin(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        })
+    }
+}
+
 #[tokio::test]
 async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
     let dir = tempfile::tempdir().unwrap();
@@ -136,7 +167,8 @@ async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
     );
     let traces = dir.path().join("data/traces");
     turn.trace_dir = Some(traces.clone());
-    let mut running = super::scenario::start(turn);
+    let grace = std::sync::Arc::new(HeldGrace::default());
+    let mut running = super::scenario::start_with(turn, std::sync::Arc::<HeldGrace>::clone(&grace));
     test_support::wait::eventually(
         "the turn to stop Forge's input countdown",
         test_support::wait::LIVENESS,
@@ -155,7 +187,16 @@ async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
         },
     )
     .await;
-    tokio::time::sleep(super::SETTLED_INPUT_GRACE * 4).await;
+    assert_eq!(
+        grace.started.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the agent's report started one input countdown"
+    );
+    assert_eq!(
+        grace.alive.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the countdown outlived the turn that stopped it, so it would close Claude's input mid-turn"
+    );
     gate.unlock().unwrap();
     let outcome = running
         .outcome(test_support::wait::LIVENESS)
@@ -195,7 +236,8 @@ async fn a_side_query_answers_from_a_fork_and_leaves_the_thread_alone() {
     turn.input.text = "What next?".into();
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        super::ClaudeHarness.side_query(turn, tokio_util::sync::CancellationToken::new()),
+        super::ClaudeHarness::new(std::sync::Arc::new(super::WallClock))
+            .side_query(turn, tokio_util::sync::CancellationToken::new()),
     )
     .await
     .expect("the fork answers")
