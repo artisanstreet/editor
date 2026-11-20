@@ -599,6 +599,7 @@ impl RunSummary {
 pub struct Folded {
     pub rows: Vec<Row>,
     pub runs: BTreeMap<RunId, RunSummary>,
+    pub turns: Turns,
 }
 
 pub(crate) const fn in_composer_strip(item: &Item) -> bool {
@@ -615,7 +616,8 @@ fn run_order(run: &Run) -> (Timestamp, &RunId) {
     (run.started_at, &run.id)
 }
 
-struct Turns {
+#[derive(Clone, Debug, Default)]
+pub struct Turns {
     roots: HashMap<RunId, RunId>,
 }
 
@@ -650,35 +652,6 @@ impl Turns {
     fn of(&self, run: &RunId) -> RunId {
         self.roots.get(run).unwrap_or(run).clone()
     }
-}
-
-pub(crate) fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
-    let find = |id: &RunId| {
-        latest
-            .filter(|latest| &latest.id == id)
-            .or_else(|| view.runs.get(id))
-    };
-    let mut current = run.clone();
-    while let Some(carried) = find(&current).filter(|run| run.continuation.is_some()) {
-        let previous = view
-            .runs
-            .values()
-            .chain(latest)
-            .filter(|other| run_order(other) < run_order(carried))
-            .max_by_key(|other| run_order(other));
-        match previous {
-            Some(previous)
-                if !matches!(
-                    previous.status(),
-                    RunStatus::Done | RunStatus::Failed | RunStatus::Refused
-                ) =>
-            {
-                current = previous.id.clone();
-            }
-            _ => break,
-        }
-    }
-    current
 }
 
 fn ended_empty(item: &Item) -> bool {
@@ -872,7 +845,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
     if scope.is_none() {
         rows = head_every_run(rows, &shown, &run_starts, latest, &turn);
     }
-    Folded { rows, runs }
+    Folded { rows, runs, turns }
 }
 
 fn head_every_run(
@@ -1370,7 +1343,7 @@ const STATUS_GAP: f32 = 32.0;
     clippy::too_many_lines,
     reason = "the spacing rules between every pair of row kinds read as one table"
 )]
-pub(crate) fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
+pub fn gap(view: &ThreadView, turns: &Turns, rows: &[(Row, u64)], index: usize) -> f32 {
     let run_of = |row: &Row| -> Option<RunId> {
         match row {
             Row::Work { run, .. }
@@ -1383,7 +1356,7 @@ pub(crate) fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                 run,
                 ..
             } if !slot.is_bubble() => run.clone(),
-            Row::Status(run) => Some(turn_of(view, None, run)),
+            Row::Status(run) => Some(turns.of(run)),
             other @ (Row::Projected { .. }
             | Row::Text { .. }
             | Row::Prompt(_)
@@ -1395,7 +1368,7 @@ pub(crate) fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                 .anchor()
                 .and_then(|id| view.item(id))
                 .and_then(|item| item.run_id.as_ref())
-                .map(|run| turn_of(view, None, run)),
+                .map(|run| turns.of(run)),
         }
     };
     let row = &rows[index].0;

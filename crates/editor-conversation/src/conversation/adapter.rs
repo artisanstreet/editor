@@ -187,6 +187,7 @@ pub struct RowSnapshots {
     view: super::thread::ThreadView,
     rows: Vec<(Row, u64)>,
     runs: BTreeMap<RunId, RunSummary>,
+    turns: fold::Turns,
     agent: bool,
     composer_height: Option<f32>,
 }
@@ -197,6 +198,7 @@ impl RowSnapshots {
             view: conversation.view.as_ref()?.clone(),
             rows: conversation.rows.clone(),
             runs: conversation.runs.clone(),
+            turns: conversation.turns.clone(),
             agent: conversation.agent.is_some(),
             composer_height,
         })
@@ -211,6 +213,7 @@ impl RowSnapshots {
             &self.view,
             &self.rows,
             &self.runs,
+            &self.turns,
             self.agent,
             self.composer_height,
             index,
@@ -228,6 +231,7 @@ pub fn row_model(
         view,
         &conversation.rows,
         &conversation.runs,
+        &conversation.turns,
         conversation.agent.is_some(),
         composer_height,
         index,
@@ -238,6 +242,7 @@ fn row_model_from(
     view: &super::thread::ThreadView,
     rows: &[(Row, u64)],
     runs: &BTreeMap<RunId, RunSummary>,
+    turns: &fold::Turns,
     agent: bool,
     composer_height: Option<f32>,
     index: usize,
@@ -277,7 +282,7 @@ fn row_model_from(
         .and_then(|item| item.run_id.as_ref())
         .and_then(|run| view.runs.get(run))
         .map(|run| run.engine);
-    let gap = fold::gap(view, rows, index);
+    let gap = fold::gap(view, turns, rows, index);
     let end = if index + 1 == rows.len() {
         if agent {
             24.0

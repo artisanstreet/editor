@@ -1,4 +1,4 @@
-use super::{Item, ItemKind, TextSection, ThreadView, fold, turn_of};
+use super::{Item, ItemKind, TextSection, ThreadView, fold};
 use artisan_api::{
     ContentId, ContentRef, ItemId, Run, RunId, RunStatus, Status, TextContent, ThreadId,
 };
@@ -240,11 +240,11 @@ fn a_continuation_started_in_the_same_millisecond_carries_on_the_stopped_turn() 
         run("run-b", RunStatus::Running, 1_000, true),
     ]);
 
+    let folded = fold(&view, None, None);
     assert_eq!(
-        turn_of(&view, None, &RunId("run-b".into())),
+        folded.turns.of(&RunId("run-b".into())),
         RunId("run-a".into())
     );
-    let folded = fold(&view, None, None);
     assert!(
         folded.runs[&RunId("run-a".into())].live(),
         "the stopped turn shows its continuation running, not Stopped"
@@ -287,7 +287,6 @@ fn a_finished_turn_ends_the_continuation_chain() {
     ] {
         let id = RunId(id.into());
         assert_eq!(turns.of(&id), RunId(root.into()), "{id}");
-        assert_eq!(turn_of(&view, None, &id), RunId(root.into()), "{id}");
     }
 }
 

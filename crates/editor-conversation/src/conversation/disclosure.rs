@@ -200,7 +200,7 @@ impl DisclosureState {
         &mut self,
         rows: &[(Row, u64)],
         row_heights: &HashMap<RowKey, f32>,
-        view: Option<&ThreadView>,
+        view: Option<(&ThreadView, &fold::Turns)>,
         now: Instant,
         reduce_motion: bool,
     ) -> DisclosureFrame {
@@ -321,13 +321,13 @@ impl DisclosureState {
     reason = "both gaps come from the same spacing table; only an exact match means no motion"
 )]
 fn trailing_gap(
-    view: Option<&ThreadView>,
+    view: Option<(&ThreadView, &fold::Turns)>,
     rows: &[(Row, u64)],
     header: &RowKey,
     flight: &Flight,
     fraction: f32,
 ) -> Option<(RowKey, f32)> {
-    let view = view?;
+    let (view, turns) = view?;
     let index = rows.iter().position(|(row, _)| row.key() == *header)?;
     let members = rows[index + 1..]
         .iter()
@@ -335,7 +335,7 @@ fn trailing_gap(
         .count();
     let after = index + 1 + members;
     let trailing = rows.get(after)?;
-    let closed = fold::gap(view, &[rows[index].clone(), trailing.clone()], 1);
-    let open = fold::gap(view, &rows[after - 1..=after], 1);
+    let closed = fold::gap(view, turns, &[rows[index].clone(), trailing.clone()], 1);
+    let open = fold::gap(view, turns, &rows[after - 1..=after], 1);
     (closed != open).then(|| (trailing.0.key(), (open - closed).mul_add(fraction, closed)))
 }

@@ -123,6 +123,7 @@ pub struct Conversation {
     rows_epoch: u64,
     row_positions: RefCell<(u64, usize, HashMap<RowKey, usize>)>,
     pub(crate) runs: BTreeMap<RunId, RunSummary>,
+    pub(crate) turns: fold::Turns,
     pub disclosures: DisclosureState,
     pub question_pages: super::questions::QuestionPages,
     question_collection: super::questions::QuestionCollection,
@@ -206,6 +207,7 @@ impl Conversation {
             rows_epoch: next_rows_epoch(),
             row_positions: RefCell::new((0, 0, HashMap::new())),
             runs: BTreeMap::new(),
+            turns: fold::Turns::default(),
             disclosures: DisclosureState::default(),
             question_pages: super::questions::QuestionPages::default(),
             question_collection: super::questions::QuestionCollection::default(),
@@ -687,6 +689,7 @@ impl Conversation {
             }
             self.disclosures.index_disclosure_rows(&self.rows);
             self.runs = folded.runs;
+            self.turns = folded.turns;
             super::open_timing::rebuilt(
                 caller_line,
                 fold_time,
@@ -700,6 +703,7 @@ impl Conversation {
                 self.rows_epoch = next_rows_epoch();
             }
             self.runs.clear();
+            self.turns = fold::Turns::default();
         }
         self.follow_reply_tail(core);
     }
@@ -809,7 +813,7 @@ impl Conversation {
         let frame = self.disclosures.advance_disclosures(
             &self.rows,
             &self.row_heights,
-            self.view.as_ref(),
+            self.view.as_ref().map(|view| (view, &self.turns)),
             now,
             reduce_motion,
         );

@@ -144,3 +144,15 @@ fn clone_the_row_snapshot_of_a_full_window(bencher: divan::Bencher<'_, '_>) {
     let rows = expanded(&view, folded.rows, &folded.runs);
     bencher.bench_local(|| (view.clone(), rows.clone(), folded.runs.clone()));
 }
+
+#[divan::bench(sample_count = 20)]
+fn space_every_row_of_continued_turns(bencher: divan::Bencher<'_, '_>) {
+    let view = continued_turns();
+    let folded = fold(&view, None, None);
+    let rows = expanded(&view, folded.rows, &folded.runs);
+    bencher.bench_local(|| {
+        (0..rows.len())
+            .map(|index| editor_conversation::fold::gap(&view, &folded.turns, &rows, index))
+            .sum::<f32>()
+    });
+}
