@@ -385,6 +385,10 @@ impl RootViews {
                 ),
                 reduced,
                 &workspace.inspector_emit(),
+                &crate::frame::overview::OverviewPanel::in_window(
+                    viewport.height,
+                    &self.overview_edges,
+                ),
             ),
             (true, crate::shell::workspace::SidePanel::Inspector) => {
                 let panel = workspace

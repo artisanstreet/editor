@@ -192,6 +192,7 @@ pub struct RootViews {
     pending_stall: PendingStall,
     read_watch: Option<read_watch::ReadWatch>,
     transcript_edges: crate::ui::scroll_edge::ScrollEdges,
+    overview_edges: crate::ui::scroll_edge::ScrollEdges,
     scroll_request: Option<crate::conversation::controller::ScrollAction>,
     composer_measurement: Rc<Cell<Option<f32>>>,
     composer_height: Option<f32>,

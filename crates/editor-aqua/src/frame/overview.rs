@@ -3,6 +3,7 @@ use crate::inspector::{AgentCard, Inspector, InspectorAction, agent_card, render
 use crate::shell::context_meter::ContextReading;
 use crate::ui::hint_card::{Phrase, hint_card};
 use crate::ui::kit::{Divider, IconSize, Inset, Row, RowItem, Space, Spaced, Surface, TextRole};
+use crate::ui::scroll_edge::{Edge, ScrollEdges};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::Role;
 use aqua_core::scene::GpuiQuadPulse;
@@ -18,8 +19,9 @@ const SURFACE: Surface = Surface::Inset;
 const WIDTH: f32 = 320.0;
 const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
-const VISIBLE_AGENTS: u16 = 8;
 pub const AGENTS_KEY: &str = "artisan-overview-agents";
+pub const AGENTS_EDGE_TOP: &str = "artisan-overview-agents-edge-top";
+pub const AGENTS_EDGE_BOTTOM: &str = "artisan-overview-agents-edge-bottom";
 const OUTER_WIDTH: f32 = WIDTH + 2.0 * Inset::Frame.px();
 
 #[must_use]
@@ -101,11 +103,17 @@ impl Overview {
 }
 
 #[must_use]
+pub fn agents_edge_color(theme: &ArtisanTheme) -> Oklch {
+    crate::ui::chrome::card::Surfaces::of(theme).inner
+}
+
+#[must_use]
 pub fn card(
     theme: &ArtisanTheme,
     overview: &Overview,
     reduced: bool,
     emit: &Rc<dyn Fn(InspectorAction)>,
+    panel: &OverviewPanel<'_>,
 ) -> Option<Element> {
     if !overview.has_facts() && overview.agents.is_empty() {
         return None;
@@ -140,17 +148,10 @@ pub fn card(
                 .iter()
                 .map(|agent| subagent(theme, agent, reduced, Rc::clone(emit))),
         );
-        let row_height = Row::MenuItem
-            .height()
-            .expect("invariant: menu rows have a fixed height");
-        Scroll::new()
+        let list = Scroll::new()
             .layout("column")
             .preserve_offset(true)
-            .style(
-                Style::new()
-                    .max_height(Length::Px(row_height * f32::from(VISIBLE_AGENTS)))
-                    .flex_shrink(0.0),
-            )
+            .style(shrinking())
             .child(rows.build())
             .build()
             .with_key(AGENTS_KEY)
@@ -159,19 +160,55 @@ pub fn card(
                 overview.agents.len(),
                 "agent",
                 "agents",
-            ))
+            ));
+        let edge = agents_edge_color(theme);
+        UiBox::new()
+            .layout("column")
+            .style(shrinking())
+            .child(list)
+            .child(panel.edges.band(AGENTS_EDGE_TOP, Edge::Top, edge))
+            .child(panel.edges.band(AGENTS_EDGE_BOTTOM, Edge::Bottom, edge))
+            .build()
     });
-    let content = UiBox::new()
+    let fixed = UiBox::new()
         .layout("column")
+        .style(Style::new().flex_shrink(0.0))
         .children(facts)
         .children(rule)
+        .build();
+    let content = UiBox::new()
+        .layout("column")
+        .style(shrinking())
+        .child(fixed)
         .children(agents)
         .build();
     Some(frame(
-        SURFACE.build(theme, vec![content]),
+        SURFACE
+            .build(theme, vec![content])
+            .style(Style::new().max_height(Length::Px(panel.height))),
         AlignItems::START,
         "artisan-thread-overview",
     ))
+}
+
+#[derive(Debug)]
+pub struct OverviewPanel<'a> {
+    height: f32,
+    edges: &'a ScrollEdges,
+}
+
+impl<'a> OverviewPanel<'a> {
+    #[must_use]
+    pub fn in_window(window_height: f32, edges: &'a ScrollEdges) -> Self {
+        Self {
+            height: panel_height(window_height),
+            edges,
+        }
+    }
+}
+
+fn shrinking() -> Style {
+    Style::new().flex_shrink(1.0).min_height(Length::Px(0.0))
 }
 
 #[must_use]
