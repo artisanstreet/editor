@@ -1,4 +1,4 @@
-use crate::plan::{Action, Ending, Stop};
+use crate::plan::{Action, Ending, Policy, Stop};
 use serde_json::json;
 use test_support::transcript::{Source, Step, Transcript};
 
@@ -19,10 +19,15 @@ pub(crate) fn progress(number: usize) -> String {
 }
 
 pub(crate) fn script(actions: &[Action]) -> Transcript {
+    let mut policy = Policy::default();
     let launches = actions
         .iter()
         .flat_map(|action| match action {
-            Action::Turn { number, ending, .. } => launches(*number, *ending, *number == 1),
+            Action::Turn { number, ending, .. } => launches(*number, *ending, *number == 1, policy),
+            Action::Toggle(toggle) => {
+                policy.toggle(*toggle);
+                Vec::new()
+            }
             Action::Draft { .. }
             | Action::Restart(_)
             | Action::StepClock { .. }
@@ -32,7 +37,7 @@ pub(crate) fn script(actions: &[Action]) -> Transcript {
     Transcript::new(Source::Synthetic, launches)
 }
 
-fn launches(number: usize, ending: Ending, first: bool) -> Vec<Vec<Step>> {
+fn launches(number: usize, ending: Ending, first: bool, policy: Policy) -> Vec<Vec<Step>> {
     let text = message(number);
     match ending {
         Ending::Replies => vec![
@@ -53,23 +58,30 @@ fn launches(number: usize, ending: Ending, first: bool) -> Vec<Vec<Step>> {
             ]
             .concat(),
         ],
-        Ending::ForgeDies(stop) => vec![
-            [
+        Ending::ForgeDies(stop) => {
+            let interrupted = [
                 started(&text, first),
                 vec![assistant(&progress(number))],
                 stopped(stop),
             ]
-            .concat(),
-            [
-                started(CONTINUE, false),
+            .concat();
+            if policy.carries_on() {
                 vec![
-                    assistant(&reply(number)),
-                    result(&reply(number)),
-                    Step::Closed,
-                ],
-            ]
-            .concat(),
-        ],
+                    interrupted,
+                    [
+                        started(CONTINUE, false),
+                        vec![
+                            assistant(&reply(number)),
+                            result(&reply(number)),
+                            Step::Closed,
+                        ],
+                    ]
+                    .concat(),
+                ]
+            } else {
+                vec![interrupted]
+            }
+        }
     }
 }
 

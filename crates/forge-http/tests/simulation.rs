@@ -18,13 +18,13 @@ use artisan_api::{
 use client::{Editor, Outcome};
 use forge::Forge;
 use observer::{Observer, Screen};
-use plan::{Action, Delivery, Ending};
+use plan::{Action, Delivery, Ending, Policy, Toggle};
 use std::io::Write as _;
 use std::time::Duration;
 use test_support::replay::ReplayingEngine;
 use test_support::transcript::Transcript;
 
-const FIXED_SEEDS: [u64; 4] = [1, 7, 42, 0x5EED];
+const FIXED_SEEDS: [u64; 6] = [1, 3, 7, 42, 45, 0x5EED];
 
 #[test]
 fn forge_keeps_its_promises_under_seeded_faults() {
@@ -90,6 +90,7 @@ struct Session {
     acknowledged: Vec<(ItemId, String)>,
     draft: DraftSnapshot,
     expected_replies: Vec<String>,
+    policy: Policy,
 }
 
 fn simulate(seed: u64) {
@@ -177,6 +178,7 @@ impl Session {
             acknowledged: Vec::new(),
             draft,
             expected_replies: Vec::new(),
+            policy: Policy::default(),
         }
     }
 
@@ -191,7 +193,34 @@ impl Session {
             Action::Restart(stop) => self.forge.restart(stop),
             Action::StepClock { by_ms } => self.forge.clock().step(by_ms),
             Action::DropEvents { after } => self.observer.cut_next_stream(after),
+            Action::Toggle(toggle) => self.toggle(toggle),
         }
+    }
+
+    fn toggle(&mut self, toggle: Toggle) {
+        let address = self.forge.address();
+        let request = match toggle {
+            Toggle::ContinueAfterRestart(on) => self
+                .editor
+                .http()
+                .put(Editor::url(address, "/settings/continue_after_restart"))
+                .json(&on),
+            Toggle::Archived(on) => self
+                .editor
+                .http()
+                .patch(Editor::url(address, &format!("/threads/{}", self.thread)))
+                .json(&artisan_api::UpdateThread {
+                    archived: Some(on),
+                    ..artisan_api::UpdateThread::default()
+                }),
+        };
+        let status = self
+            .runtime
+            .block_on(request.send())
+            .unwrap_or_else(|error| panic!("{toggle:?} reaches a running Forge: {error}"))
+            .status();
+        assert!(status.is_success(), "{toggle:?} answered {status}");
+        self.policy.toggle(toggle);
     }
 
     fn turn(&mut self, number: usize, delivery: Delivery, ending: Ending) {
@@ -268,11 +297,19 @@ impl Session {
                     |_, screen| assistant_says(screen, &thread, &progress),
                 );
                 self.forge.restart(stop);
-                self.expected_replies.push(engine::reply(number));
-                let reply = engine::reply(number);
-                self.wait("the turn to carry on after Forge restarted", |_, screen| {
-                    assistant_says(screen, &thread, &reply) && !screen.live(&thread)
-                });
+                if self.policy.carries_on() {
+                    self.expected_replies.push(engine::reply(number));
+                    let reply = engine::reply(number);
+                    self.wait("the turn to carry on after Forge restarted", |_, screen| {
+                        assistant_says(screen, &thread, &reply) && !screen.live(&thread)
+                    });
+                } else {
+                    self.wait_settled(
+                        &thread,
+                        before + 1,
+                        "the interrupted turn to stay ended after Forge restarted",
+                    );
+                }
             }
         }
     }

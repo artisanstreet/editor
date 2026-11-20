@@ -45,6 +45,40 @@ pub(crate) enum Delivery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Toggle {
+    ContinueAfterRestart(bool),
+    Archived(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Policy {
+    continue_after_restart: bool,
+    archived: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            continue_after_restart: true,
+            archived: false,
+        }
+    }
+}
+
+impl Policy {
+    pub(crate) const fn toggle(&mut self, toggle: Toggle) {
+        match toggle {
+            Toggle::ContinueAfterRestart(on) => self.continue_after_restart = on,
+            Toggle::Archived(on) => self.archived = on,
+        }
+    }
+
+    pub(crate) const fn carries_on(self) -> bool {
+        self.continue_after_restart && !self.archived
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
     Turn {
         number: usize,
@@ -62,6 +96,7 @@ pub(crate) enum Action {
     DropEvents {
         after: usize,
     },
+    Toggle(Toggle),
 }
 
 const MIN_ACTIONS: u64 = 6;
@@ -73,7 +108,7 @@ pub(crate) fn plan(seed: u64) -> Vec<Action> {
     let mut turns = 0;
     let mut drafts = 0;
     let mut actions: Vec<Action> = (0..count)
-        .map(|_| match rng.below(10) {
+        .map(|_| match rng.below(12) {
             0..=4 => {
                 turns += 1;
                 Action::Turn {
@@ -93,6 +128,8 @@ pub(crate) fn plan(seed: u64) -> Vec<Action> {
             8 => Action::StepClock {
                 by_ms: i64::try_from(rng.below(20_001)).expect("a small step") - 10_000,
             },
+            9 => Action::Toggle(Toggle::ContinueAfterRestart(rng.chance(50))),
+            10 => Action::Toggle(Toggle::Archived(rng.chance(50))),
             _ => Action::DropEvents {
                 after: usize::try_from(rng.below(6)).expect("a small count"),
             },
