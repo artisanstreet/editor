@@ -384,3 +384,47 @@ fn coming_back_while_the_first_page_loads_keeps_waiting_for_it() {
         )
     )));
 }
+
+fn answering(conversation: &Conversation, id: &ItemId) -> Option<u64> {
+    match conversation.view.as_ref()?.answers.get(id)? {
+        ItemAnswer::Sending { request, .. } => Some(request.0),
+        ItemAnswer::Failed(_) => None,
+    }
+}
+
+#[test]
+fn an_answer_abandoned_by_leaving_the_thread_can_be_given_again_on_return() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+    let asked = ItemId("first-item".into());
+    let approve = Answer::Approval {
+        decision: artisan_api::Decision::AllowOnce,
+    };
+    conversation.answer(&core, asked.clone(), approve.clone());
+    let abandoned = answering(&conversation, &asked).expect("the answer is being sent");
+
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
+    let origin = held(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "second"),
+    );
+    conversation.landed();
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
+
+    assert_eq!(shown(&conversation), "first");
+    assert!(
+        conversation
+            .view
+            .as_ref()
+            .unwrap()
+            .answers
+            .get(&asked)
+            .is_none(),
+        "the cancelled send leaves the card's controls enabled"
+    );
+    conversation.answer(&core, asked.clone(), approve);
+    let again = answering(&conversation, &asked).expect("the answer is sent again");
+    assert_ne!(again, abandoned, "answering again starts a new send");
+}
