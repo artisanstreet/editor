@@ -336,8 +336,10 @@ pub struct WslDistro {
     pub running: bool,
 }
 
-pub fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
-    text.lines()
+pub fn parse_wsl_listing(verbose: &str, running: &str) -> Vec<WslDistro> {
+    let running: std::collections::HashSet<&str> = running.lines().map(str::trim).collect();
+    verbose
+        .lines()
         .skip(1)
         .filter_map(|line| {
             let line = line.trim();
@@ -346,12 +348,12 @@ pub fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
                 .map_or((false, line), |rest| (true, rest));
 
             let mut fields = line.split_whitespace();
-            let name = fields.next()?.to_owned();
-            let state = fields.next()?;
+            let name = fields.next()?;
+            fields.next()?;
             Some(WslDistro {
-                name,
+                name: name.to_owned(),
                 default,
-                running: state.eq_ignore_ascii_case("running"),
+                running: running.contains(name),
             })
         })
         .collect()
@@ -361,11 +363,12 @@ pub async fn wsl_state() -> Result<Vec<WslDistro>, WslStateError> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }
-    Ok(parse_wsl_verbose(
-        &wsl_listing(&["--list", "--verbose"])
-            .await
-            .map_err(WslStateError)?,
-    ))
+    let (verbose, running) = tokio::try_join!(
+        wsl_listing(&["--list", "--verbose"]),
+        wsl_listing(&["--list", "--running", "--quiet"]),
+    )
+    .map_err(WslStateError)?;
+    Ok(parse_wsl_listing(&verbose, &running))
 }
 
 pub(crate) async fn start_wsl_forge(distro: String) -> Result<(), StartWslForgeError> {
