@@ -57,8 +57,8 @@ async fn bind() -> Result<(TcpListener, String), std::io::Error> {
 pub enum CallbackError {
     #[error("The browser didn't come back within 10 minutes; start the sign-in again.")]
     TimedOut,
-    #[error("The sign-in was refused: {reason}")]
-    Denied { reason: String },
+    #[error("The sign-in was refused ({}).", .code.code())]
+    Denied { code: Refusal },
     #[error("accepting the browser's redirect")]
     Accept(#[source] std::io::Error),
 }
@@ -93,11 +93,52 @@ pub async fn wait_for_code(
         };
         match callback(&target, &state) {
             Callback::Code(code) => return Ok(Some((code, stream))),
-            Callback::Denied(reason) => {
-                respond(stream, Page::failed("the server", &reason)).await;
-                return Err(CallbackError::Denied { reason });
+            Callback::Denied(code) => {
+                let denied = CallbackError::Denied { code };
+                respond(stream, Page::failed("the server", &denied.to_string())).await;
+                return Err(denied);
             }
             Callback::Other => respond(stream, Page::not_found()).await,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    InvalidRequest,
+    UnauthorizedClient,
+    AccessDenied,
+    UnsupportedResponseType,
+    InvalidScope,
+    ServerError,
+    TemporarilyUnavailable,
+    Unrecognized,
+}
+
+impl Refusal {
+    fn of(code: &str) -> Self {
+        match code {
+            "invalid_request" => Self::InvalidRequest,
+            "unauthorized_client" => Self::UnauthorizedClient,
+            "access_denied" => Self::AccessDenied,
+            "unsupported_response_type" => Self::UnsupportedResponseType,
+            "invalid_scope" => Self::InvalidScope,
+            "server_error" => Self::ServerError,
+            "temporarily_unavailable" => Self::TemporarilyUnavailable,
+            _ => Self::Unrecognized,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::AccessDenied => "access_denied",
+            Self::UnsupportedResponseType => "unsupported_response_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::ServerError => "server_error",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::Unrecognized => "an OAuth error code Artisan doesn't know",
         }
     }
 }
@@ -105,7 +146,7 @@ pub async fn wait_for_code(
 #[derive(Debug, PartialEq, Eq)]
 enum Callback {
     Code(String),
-    Denied(String),
+    Denied(Refusal),
     Other,
 }
 
@@ -121,13 +162,7 @@ fn callback(target: &str, state: &str) -> Callback {
         return Callback::Other;
     }
     if let Some(error) = pairs.get("error") {
-        return Callback::Denied(
-            pairs
-                .get("error_description")
-                .filter(|description| !description.trim().is_empty())
-                .unwrap_or(error)
-                .clone(),
-        );
+        return Callback::Denied(Refusal::of(error));
     }
     pairs
         .get("code")

@@ -97,7 +97,7 @@ async fn only_this_attempts_callback_brings_back_a_code() {
 }
 
 #[tokio::test]
-async fn a_denied_sign_in_fails_with_the_servers_reason() {
+async fn a_denied_sign_in_shows_the_oauth_code_and_never_the_providers_description() {
     let (listener, port) = listening().await;
     let waiting = tokio::spawn(wait_for_code(
         listener,
@@ -107,18 +107,26 @@ async fn a_denied_sign_in_fails_with_the_servers_reason() {
     let response = answer(
         port,
         &format!(
-            "GET /callback?state={ENCODED_STATE}&error=access_denied&error_description=You%20said%20no HTTP/1.1\r\n\r\n"
+            "GET /callback?state={ENCODED_STATE}&error=access_denied&error_description=token%20sk-secret%20rejected HTTP/1.1\r\n\r\n"
         ),
     )
     .await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
-    assert!(response.contains("You said no"), "{response:?}");
+    assert!(response.contains("access_denied"), "{response:?}");
+    assert!(
+        !response.contains("sk-secret"),
+        "the browser page doesn't repeat the provider's description: {response:?}"
+    );
     let ended = within("the refusal", LIMIT, waiting)
         .await
         .expect("the wait runs to the end");
-    assert!(
-        matches!(ended, Err(CallbackError::Denied { ref reason }) if reason == "You said no"),
-        "a refusal ended as {ended:?}"
+    let Err(denied @ CallbackError::Denied { .. }) = ended else {
+        panic!("a refusal ended as {ended:?}");
+    };
+    assert_eq!(
+        denied.to_string(),
+        "The sign-in was refused (access_denied).",
+        "the Editor shows the code, not the provider's description"
     );
 }
 
