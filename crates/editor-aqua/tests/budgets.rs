@@ -1,4 +1,4 @@
-#![cfg(all(feature = "qualification", target_os = "linux"))]
+#![cfg(all(feature = "qualification", any(target_os = "linux", windows)))]
 #![expect(
     unsafe_code,
     clippy::undocumented_unsafe_blocks,

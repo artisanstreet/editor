@@ -81,6 +81,7 @@
   },
   "scroll_access_nodes_published_per_frame": {
     "limit": 260,
-    "reason": "a scrolled frame republishes only the nodes that moved into or out of view; measured 223"
+    "windows": 380,
+    "reason": "a scrolled frame republishes only the nodes that moved into or out of view; measured 223 on Linux and 325 on the Windows CI runner"
   }
 }

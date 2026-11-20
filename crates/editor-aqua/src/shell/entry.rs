@@ -264,7 +264,7 @@ impl Entry {
     }
 
     #[cfg(feature = "qualification")]
-    pub fn qualification_account(&self) -> Option<&str> {
+    pub(crate) fn qualification_account(&self) -> Option<&str> {
         self.workspace.as_ref().map(|(account, _)| account.as_str())
     }
 

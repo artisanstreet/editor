@@ -3,7 +3,7 @@ use crate::shell::host::Shell;
 use aqua::UiApp;
 
 impl RootViews {
-    pub fn qualification_observation(
+    pub(crate) fn qualification_observation(
         &self,
         shell: &Shell,
         ui: &UiApp,

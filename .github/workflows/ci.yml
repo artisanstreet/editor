@@ -283,7 +283,12 @@ jobs:
       - name: Installer scenarios that write the user's registry
         run: cargo nextest run --locked -p ae --run-ignored only --no-fail-fast --test-threads 1
       - name: Qualification and capture tests
-        run: cargo nextest run --locked -p editor-aqua --features capture --no-fail-fast
+        run: cargo nextest run --locked -p editor-aqua --features capture --no-fail-fast -E 'not binary(budgets)'
+      - name: Performance budgets with a screen reader connected
+        shell: bash
+        run: |
+          echo '## Performance budgets on Windows' >> "$GITHUB_STEP_SUMMARY"
+          cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'binary(budgets)'
       - name: Screens match their baselines on the WARP reference renderer
         shell: bash
         env:

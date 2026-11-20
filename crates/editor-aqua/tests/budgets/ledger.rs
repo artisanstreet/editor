@@ -7,7 +7,18 @@ use std::io::Write as _;
 #[serde(deny_unknown_fields)]
 struct Budget {
     limit: u64,
+    windows: Option<u64>,
     reason: String,
+}
+
+impl Budget {
+    fn limit(&self) -> u64 {
+        if cfg!(windows) {
+            self.windows.unwrap_or(self.limit)
+        } else {
+            self.limit
+        }
+    }
 }
 
 pub(crate) struct Ledger {
@@ -55,7 +66,7 @@ impl Ledger {
                 .expect("the job summary opens for appending");
             let mut table = String::from("| Budget | Measured | Limit |\n| --- | ---: | ---: |\n");
             for (name, measured, _, budget) in &rows {
-                writeln!(table, "| `{name}` | {measured} | {} |", budget.limit)
+                writeln!(table, "| `{name}` | {measured} | {} |", budget.limit())
                     .expect("formatting into a String cannot fail");
             }
             summary
@@ -64,17 +75,19 @@ impl Ledger {
         }
         let overruns: Vec<_> = rows
             .iter()
-            .filter(|(_, measured, _, budget)| *measured > budget.limit)
+            .filter(|(_, measured, _, budget)| *measured > budget.limit())
             .map(|(name, measured, detail, budget)| {
                 if detail.is_empty() {
                     format!(
                         "{name} measured {measured} against a budget of {}: {}",
-                        budget.limit, budget.reason
+                        budget.limit(),
+                        budget.reason
                     )
                 } else {
                     format!(
                         "{name} measured {measured} against a budget of {} ({detail}): {}",
-                        budget.limit, budget.reason
+                        budget.limit(),
+                        budget.reason
                     )
                 }
             })
