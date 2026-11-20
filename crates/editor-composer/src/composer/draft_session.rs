@@ -359,6 +359,12 @@ pub struct DraftSession {
     state: State,
 }
 
+fn park(parked: &mut Vec<DraftBody>, body: DraftBody) {
+    if !parked.contains(&body) {
+        parked.push(body);
+    }
+}
+
 fn fold_back(sent: &DraftBody, typed: DraftBody) -> DraftBody {
     if typed == *sent {
         return typed;
@@ -369,21 +375,50 @@ fn fold_back(sent: &DraftBody, typed: DraftBody) -> DraftBody {
         files,
         config,
         project,
-        follow_ups: mut parked,
+        follow_ups,
     } = typed;
-    if !text.trim().is_empty() || !images.is_empty() || !files.is_empty() {
-        parked.push(DraftBody {
-            text,
-            images,
-            files,
-            config,
-            project,
+    let mut parked = sent.follow_ups.clone();
+    for body in follow_ups {
+        park(&mut parked, body);
+    }
+    let rest = DraftBody {
+        text,
+        images,
+        files,
+        config,
+        project,
+        follow_ups: Vec::new(),
+    };
+    let resent = rest
+        == DraftBody {
             follow_ups: Vec::new(),
-        });
+            ..sent.clone()
+        };
+    let holds_something =
+        !rest.text.trim().is_empty() || !rest.images.is_empty() || !rest.files.is_empty();
+    if holds_something && !resent {
+        park(&mut parked, rest);
     }
     DraftBody {
         follow_ups: parked,
         ..sent.clone()
+    }
+}
+
+fn keep_parked(earlier: &DraftBody, body: DraftBody) -> DraftBody {
+    let mut parked = earlier
+        .follow_ups
+        .iter()
+        .filter(|parked| !body.follow_ups.contains(parked))
+        .cloned()
+        .collect::<Vec<_>>();
+    if parked.is_empty() {
+        return body;
+    }
+    parked.extend(body.follow_ups);
+    DraftBody {
+        follow_ups: parked,
+        ..body
     }
 }
 
@@ -990,6 +1025,7 @@ impl DraftSession {
         let over_hand_back = stale && self.handed_back == Some(self.epoch);
         let body = match draft.outgoing().filter(|_| over_hand_back) {
             Some(failed) => fold_back(&failed.sent, body),
+            None if stale => keep_parked(&draft.body, body),
             None => body,
         };
         if draft.body == body {
@@ -1247,6 +1283,13 @@ impl DraftSession {
                         let mut next = waiting.remove(0);
                         next.follow_ups = waiting;
                         draft.body = next;
+                        draft.edits.edit();
+                        replaced = true;
+                    }
+                } else {
+                    let body = keep_parked(&outgoing.sent, draft.body.clone());
+                    if body != draft.body {
+                        draft.body = body;
                         draft.edits.edit();
                         replaced = true;
                     }

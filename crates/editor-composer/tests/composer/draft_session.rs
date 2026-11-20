@@ -537,6 +537,89 @@ fn a_send_that_fails_while_no_composer_shows_it_comes_back_with_the_later_text_b
     );
 }
 
+fn retried_with_text_parked() -> (DraftSession, Submission) {
+    let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
+    state.posted(Err(not_sent(&first)), thread());
+    state.submit(submission("second-attempt", "send this"));
+    write(&mut state);
+    saved(
+        &mut state,
+        3,
+        &handed_back("send this", &["typed meanwhile"]),
+    );
+    let retried = post(&mut state);
+    assert_eq!(
+        state.shown(),
+        None,
+        "a composer opened while the retry is on its way starts empty"
+    );
+    (state, retried)
+}
+
+#[test]
+fn text_parked_beside_a_retried_send_stays_when_the_retry_fails_too() {
+    let (mut state, retried) = retried_with_text_parked();
+    type_in(&mut state, typed("typed in a reopened composer"));
+    state.posted(Err(not_sent(&retried)), thread());
+    assert_eq!(
+        state.shown(),
+        Some(&handed_back(
+            "send this",
+            &["typed meanwhile", "typed in a reopened composer"]
+        )),
+        "both texts typed while sending stay beside the message"
+    );
+}
+
+#[test]
+fn text_parked_beside_a_retried_send_comes_back_when_the_retry_is_in() {
+    let (mut state, _) = retried_with_text_parked();
+    type_in(&mut state, typed("typed in a reopened composer"));
+    let epoch = state.epoch();
+    state.posted(Ok(()), thread());
+    assert_ne!(state.epoch(), epoch, "the composer shows the parked text");
+    assert_eq!(
+        state.body(),
+        &handed_back("typed in a reopened composer", &["typed meanwhile"]),
+        "the text parked beside the message is still in the draft"
+    );
+    state.queue(
+        typed("typed in a reopened composer, and more"),
+        epoch,
+        false,
+    );
+    assert_eq!(
+        state.body(),
+        &handed_back(
+            "typed in a reopened composer, and more",
+            &["typed meanwhile"]
+        ),
+        "typing before the composer shows the parked text doesn't drop it"
+    );
+}
+
+#[test]
+fn text_parked_beside_a_retried_send_survives_reopening_the_editor_while_it_is_on_its_way() {
+    let (closing, _) = retried_with_text_parked();
+    let mut state = reopened(closing.kept());
+    assert_eq!(state.shown(), None);
+    type_in(&mut state, typed("typed after reopening"));
+    load(
+        &mut state,
+        3,
+        &handed_back("send this", &["typed meanwhile"]),
+    );
+    let resent = post(&mut state);
+    state.posted(Err(not_sent(&resent)), thread());
+    assert_eq!(
+        state.shown(),
+        Some(&handed_back(
+            "send this",
+            &["typed meanwhile", "typed after reopening"]
+        ))
+    );
+}
+
 #[test]
 fn typing_into_a_composer_that_has_not_shown_the_failed_send_yet_keeps_the_message() {
     let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
