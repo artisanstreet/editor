@@ -69,11 +69,10 @@ fn tampered_payload_fails_the_signature() {
     let mut token = token;
     token.pop();
     token.push('A');
-    assert_eq!(
-        parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
-            .unwrap_err()
-            .kind,
-        GrantErrorKind::Signature
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+    assert!(
+        matches!(rejected, Err(GrantError::Signature(_))),
+        "{rejected:?}"
     );
 }
 
@@ -91,11 +90,10 @@ fn ttl_over_300s_is_rejected() {
     let mut claims = claims();
     claims.exp = claims.iat + 301;
     let token = compact(&claims, &key);
-    assert_eq!(
-        parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
-            .unwrap_err()
-            .kind,
-        GrantErrorKind::Ttl
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+    assert!(
+        matches!(rejected, Err(GrantError::Ttl { max_ttl_s: 300 })),
+        "{rejected:?}"
     );
 }
 
@@ -105,21 +103,16 @@ fn wrong_audience_and_binding_are_rejected() {
     let mut wrong_aud = claims();
     wrong_aud.aud = Aud::One("ast-core".into());
     let token = compact(&wrong_aud, &key);
-    assert_eq!(
-        parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
-            .unwrap_err()
-            .kind,
-        GrantErrorKind::Audience
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+    assert!(
+        matches!(rejected, Err(GrantError::Audience)),
+        "{rejected:?}"
     );
     let mut wrong_mid = claims();
     wrong_mid.mid = "mch_22222222222222222222222222".into();
     let token = compact(&wrong_mid, &key);
-    assert_eq!(
-        parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
-            .unwrap_err()
-            .kind,
-        GrantErrorKind::Binding
-    );
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+    assert!(matches!(rejected, Err(GrantError::Binding)), "{rejected:?}");
 }
 
 #[test]
@@ -175,4 +168,109 @@ fn array_aud_is_tolerated_but_core_emits_singular() {
     tolerated.aud = Aud::Many(vec!["other".into(), AUD_RELAY.into()]);
     let token = compact(&tolerated, &key);
     parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params()).unwrap();
+}
+
+fn signed(header: &serde_json::Value, payload: &[u8], key: &ed25519_dalek::SigningKey) -> String {
+    use ed25519_dalek::Signer as _;
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(payload)
+    );
+    let signature = key.sign(input.as_bytes());
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+}
+
+fn header() -> serde_json::Value {
+    serde_json::json!({"alg": "EdDSA", "kid": "test-key-1", "typ": "JWT"})
+}
+
+#[test]
+fn signed_claims_that_no_longer_match_the_grant_say_so_with_their_cause() {
+    let key = signing_key();
+    let mut drifted = serde_json::to_value(claims()).unwrap();
+    drifted["sub"] = serde_json::json!(42);
+    let token = signed(&header(), drifted.to_string().as_bytes(), &key);
+
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+
+    let Err(failure @ GrantError::Claims(UnverifiedGrantError::Json { index: 1, .. })) = rejected
+    else {
+        panic!("drifted claims were classified as {rejected:?}");
+    };
+    assert!(
+        std::error::Error::source(&failure)
+            .and_then(std::error::Error::source)
+            .is_some_and(<dyn std::error::Error>::is::<serde_json::Error>),
+        "the JSON cause was dropped"
+    );
+}
+
+#[test]
+fn a_signed_payload_that_isnt_base64_is_a_claims_decoding_failure_not_a_bad_id() {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+    let key = signing_key();
+    let input = format!(
+        "{}.not*base64",
+        URL_SAFE_NO_PAD.encode(header().to_string())
+    );
+    let signature = URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).to_bytes());
+    let token = format!("{input}.{signature}");
+
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params());
+
+    assert!(
+        matches!(
+            rejected,
+            Err(GrantError::Claims(UnverifiedGrantError::Base64 {
+                index: 1,
+                ..
+            }))
+        ),
+        "{rejected:?}"
+    );
+}
+
+#[test]
+fn a_header_that_isnt_eddsa_and_a_short_signature_are_told_apart() {
+    let key = signing_key();
+    let not_eddsa = signed(
+        &serde_json::json!({"alg": "HS256", "kid": "test-key-1"}),
+        serde_json::to_string(&claims()).unwrap().as_bytes(),
+        &key,
+    );
+    let token = compact(&claims(), &key);
+    let (unsigned, _signature) = token.rsplit_once('.').unwrap();
+    let short = format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode([1_u8; 10]));
+
+    let not_eddsa = parse_and_verify_jwt(&not_eddsa, key.verifying_key().as_bytes(), &params());
+    let short = parse_and_verify_jwt(&short, key.verifying_key().as_bytes(), &params());
+
+    assert!(
+        matches!(
+            not_eddsa,
+            Err(GrantError::Header(UnverifiedGrantError::NotEdDsa { .. }))
+        ),
+        "{not_eddsa:?}"
+    );
+    assert!(
+        matches!(short, Err(GrantError::SignatureLength { length: 10 })),
+        "{short:?}"
+    );
+}
+
+#[test]
+fn a_rejected_grant_never_repeats_its_token_in_what_is_logged() {
+    let key = signing_key();
+    let mut drifted = serde_json::to_value(claims()).unwrap();
+    drifted["mid"] = serde_json::json!("mch_SENTINEL");
+    let token = signed(&header(), drifted.to_string().as_bytes(), &key);
+
+    let rejected = parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
+        .expect_err("another machine's grant is refused");
+    let logged = format!("{rejected} {rejected:?}");
+
+    assert!(!logged.contains("SENTINEL"), "{logged}");
+    assert!(!logged.contains(&token), "{logged}");
 }

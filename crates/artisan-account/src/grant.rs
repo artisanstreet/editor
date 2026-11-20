@@ -126,32 +126,55 @@ pub struct CnfHolder {
     pub jwk: CnfJwk,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GrantErrorKind {
-    Version,
+#[derive(Debug, thiserror::Error)]
+pub enum GrantError {
+    #[error("the grant isn't three non-empty dot-separated parts")]
+    Shape,
+    #[error("read the grant's header")]
+    Header(#[source] UnverifiedGrantError),
+    #[error("decode the grant's signature")]
+    SignatureEncoding(#[source] base64::DecodeError),
+    #[error("the grant's signature is {length} bytes, not 64")]
+    SignatureLength { length: usize },
+    #[error("read the grant's claims")]
+    Claims(#[source] UnverifiedGrantError),
+    #[error("the issuer's key isn't an Ed25519 public key")]
+    IssuerKey(#[source] ed25519_dalek::SignatureError),
+    #[error("the grant's signature doesn't verify against the issuer's key")]
+    Signature(#[source] ed25519_dalek::SignatureError),
+    #[error(
+        "the grant is protocol version {found}, not {}",
+        crate::PROTOCOL_VERSION
+    )]
+    Version { found: u32 },
+    #[error("the grant comes from another issuer")]
     Issuer,
+    #[error("the grant is for another audience")]
     Audience,
-    Time,
-    Ttl,
-    Scope,
+    #[error("the grant is bound to another account or machine")]
     Binding,
-    Key,
+    #[error("the grant's account or machine id isn't a Core id")]
     Id,
+    #[error("the grant's jti is empty or over 256 bytes")]
     Jti,
-    Signature,
-    Encoding,
+    #[error("the grant isn't valid at this time")]
+    Time,
+    #[error("the grant's lifetime is not positive or over {max_ttl_s} s")]
+    Ttl { max_ttl_s: i64 },
+    #[error("the grant's scopes are empty, repeated or lack relay:connect")]
+    Scope,
+    #[error("the grant's confirmation key")]
+    Key(#[source] CnfKeyError),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("grant rejected: {kind:?}")]
-pub struct GrantError {
-    kind: GrantErrorKind,
-}
-
-impl GrantError {
-    const fn of(kind: GrantErrorKind) -> Self {
-        Self { kind }
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum CnfKeyError {
+    #[error("the key isn't an Ed25519 OKP key")]
+    NotEd25519,
+    #[error("decode the key")]
+    Encoding(#[source] base64::DecodeError),
+    #[error("the key is {length} bytes, not 32")]
+    Length { length: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,61 +189,56 @@ pub struct VerifyParams {
 
 pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
     if claims.cnf.jwk.kty != "OKP" || claims.cnf.jwk.crv != "Ed25519" {
-        return Err(GrantError::of(GrantErrorKind::Key));
+        return Err(GrantError::Key(CnfKeyError::NotEd25519));
     }
     let raw = URL_SAFE_NO_PAD
         .decode(claims.cnf.jwk.x.as_bytes())
-        .map_err(|_cause| GrantError::of(GrantErrorKind::Key))?;
-    if raw.len() != 32 {
-        return Err(GrantError::of(GrantErrorKind::Key));
-    }
-    let mut key = [0_u8; 32];
-    key.copy_from_slice(&raw);
-    Ok(key)
+        .map_err(|source| GrantError::Key(CnfKeyError::Encoding(source)))?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_wrong_length| GrantError::Key(CnfKeyError::Length { length: raw.len() }))
 }
 
 fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
     if claims.v != crate::PROTOCOL_VERSION {
-        return Err(GrantError::of(GrantErrorKind::Version));
+        return Err(GrantError::Version { found: claims.v });
     }
     if claims.iss != params.expected_iss {
-        return Err(GrantError::of(GrantErrorKind::Issuer));
+        return Err(GrantError::Issuer);
     }
     if !claims.aud.contains(params.expected_aud.as_str()) {
-        return Err(GrantError::of(GrantErrorKind::Audience));
+        return Err(GrantError::Audience);
     }
     if claims.sub != params.expected_sub || claims.mid != params.expected_mid {
-        return Err(GrantError::of(GrantErrorKind::Binding));
+        return Err(GrantError::Binding);
     }
     if !is_account_id(&claims.sub) || !is_machine_id(&claims.mid) {
-        return Err(GrantError::of(GrantErrorKind::Id));
+        return Err(GrantError::Id);
     }
     if claims.jti.is_empty() || claims.jti.len() > 256 {
-        return Err(GrantError::of(GrantErrorKind::Jti));
+        return Err(GrantError::Jti);
     }
     if claims.iat > params.now_sec.saturating_add(SKEW_S)
         || claims.exp <= params.now_sec.saturating_sub(SKEW_S)
     {
-        return Err(GrantError::of(GrantErrorKind::Time));
+        return Err(GrantError::Time);
     }
     if let Some(nbf) = claims.nbf
         && params.now_sec < nbf
     {
-        return Err(GrantError::of(GrantErrorKind::Time));
+        return Err(GrantError::Time);
     }
     let ttl = claims.exp.saturating_sub(claims.iat);
     if ttl <= 0 || ttl > params.max_ttl_s {
-        return Err(GrantError::of(GrantErrorKind::Ttl));
-    }
-    if claims.scope.is_empty() {
-        return Err(GrantError::of(GrantErrorKind::Scope));
+        return Err(GrantError::Ttl {
+            max_ttl_s: params.max_ttl_s,
+        });
     }
     let unique: BTreeSet<Scope> = claims.scope.iter().copied().collect();
-    if unique.len() != claims.scope.len() {
-        return Err(GrantError::of(GrantErrorKind::Scope));
-    }
-    if !unique.contains(&Scope::RelayConnect) {
-        return Err(GrantError::of(GrantErrorKind::Scope));
+    if claims.scope.is_empty()
+        || unique.len() != claims.scope.len()
+        || !unique.contains(&Scope::RelayConnect)
+    {
+        return Err(GrantError::Scope);
     }
     cnf_public_key(claims)?;
     Ok(())
@@ -232,42 +250,38 @@ pub fn parse_and_verify_jwt(
     params: &VerifyParams,
 ) -> Result<GrantClaims, GrantError> {
     let (signing_input, signature) = split_compact(compact)?;
-    let claims: GrantClaims =
-        unverified_part(compact, 1).map_err(|_decode| GrantError::of(GrantErrorKind::Id))?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(issuer_pubkey)
-        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
-    let signature = ed25519_dalek::Signature::from_slice(&signature)
-        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
+    let key =
+        ed25519_dalek::VerifyingKey::from_bytes(issuer_pubkey).map_err(GrantError::IssuerKey)?;
     key.verify_strict(signing_input.as_bytes(), &signature)
-        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
+        .map_err(GrantError::Signature)?;
+    let claims: GrantClaims = unverified_part(compact, 1).map_err(GrantError::Claims)?;
     verify_claims(&claims, params)?;
     Ok(claims)
 }
 
-fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
+fn split_compact(compact: &str) -> Result<(String, ed25519_dalek::Signature), GrantError> {
     let mut parts = compact.split('.');
     let (Some(header), Some(payload), Some(signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return Err(GrantError::of(GrantErrorKind::Encoding));
+        return Err(GrantError::Shape);
     };
     if header.is_empty() || payload.is_empty() || signature.is_empty() {
-        return Err(GrantError::of(GrantErrorKind::Encoding));
+        return Err(GrantError::Shape);
     }
-    check_header(compact)?;
+    unverified_kid(compact).map_err(GrantError::Header)?;
     let signature = URL_SAFE_NO_PAD
         .decode(signature.as_bytes())
-        .map_err(|_cause| GrantError::of(GrantErrorKind::Encoding))?;
-    if signature.len() != 64 {
-        return Err(GrantError::of(GrantErrorKind::Signature));
-    }
-    Ok((format!("{header}.{payload}"), signature))
-}
-
-fn check_header(compact: &str) -> Result<(), GrantError> {
-    unverified_kid(compact)
-        .map(drop)
-        .map_err(|_header| GrantError::of(GrantErrorKind::Signature))
+        .map_err(GrantError::SignatureEncoding)?;
+    let signature = <[u8; 64]>::try_from(signature.as_slice()).map_err(|_wrong_length| {
+        GrantError::SignatureLength {
+            length: signature.len(),
+        }
+    })?;
+    Ok((
+        format!("{header}.{payload}"),
+        ed25519_dalek::Signature::from_bytes(&signature),
+    ))
 }
 
 #[derive(Deserialize)]

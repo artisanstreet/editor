@@ -19,7 +19,7 @@ pub use frames::{
     PresenceFrame, ReadyFrame, ServerFrame, read_server_frame,
 };
 pub use grant::{
-    AUD_RELAY, Aud, CnfHolder, CnfJwk, GrantClaims, GrantError, GrantErrorKind, Role, Scope,
+    AUD_RELAY, Aud, CnfHolder, CnfJwk, CnfKeyError, GrantClaims, GrantError, Role, Scope,
     UnverifiedGrantError, VerifyParams, cnf_public_key, is_account_id, is_machine_id,
     parse_and_verify_jwt, unverified_jti, unverified_kid,
 };
