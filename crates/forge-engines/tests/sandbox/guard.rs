@@ -815,3 +815,59 @@ fn a_config_link_planted_during_an_auto_run_is_replaced_without_writing_its_targ
     );
     assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
 }
+
+fn claude_state(home: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(home.join(".claude/.claude.json")).unwrap()).unwrap()
+}
+
+fn trusted_project_servers_survive(change: impl FnOnce(&Path)) {
+    let (_base, home) = engine_home();
+    let state = home.join(".claude/.claude.json");
+    std::fs::write(
+        &state,
+        r#"{"projects":{"/work/app":{"mcpServers":{"mine":{"command":"tool"}},"history":["kept"]},"/work/other":{"allowedTools":[]}}}"#,
+    )
+    .unwrap();
+    let exposure = super::expose(EngineId::Claude, &home).unwrap();
+    change(&state);
+
+    let restored = super::restore(EngineId::Claude, &home);
+    drop(exposure);
+
+    restored.unwrap();
+    assert_eq!(
+        claude_state(&home)["projects"]["/work/app"]["mcpServers"],
+        serde_json::json!({ "mine": { "command": "tool" } }),
+        "the user's project MCP server is gone after the Auto run"
+    );
+}
+
+#[test]
+fn a_project_entry_an_auto_run_removed_gets_its_trusted_mcp_servers_back() {
+    trusted_project_servers_survive(|state| {
+        std::fs::write(
+            state,
+            r#"{"projects":{"/work/other":{"allowedTools":[]}},"numStartups":3}"#,
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn a_state_file_an_auto_run_deleted_gets_its_trusted_project_mcp_servers_back() {
+    trusted_project_servers_survive(|state| std::fs::remove_file(state).unwrap());
+}
+
+#[test]
+fn a_project_entry_an_auto_run_replaced_with_a_scalar_gets_its_trusted_mcp_servers_back() {
+    trusted_project_servers_survive(|state| {
+        std::fs::write(state, r#"{"projects":{"/work/app":7,"/work/other":{}}}"#).unwrap();
+    });
+}
+
+#[test]
+fn projects_an_auto_run_replaced_with_a_scalar_get_their_trusted_mcp_servers_back() {
+    trusted_project_servers_survive(|state| {
+        std::fs::write(state, r#"{"projects":"gone"}"#).unwrap();
+    });
+}

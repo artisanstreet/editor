@@ -1200,6 +1200,48 @@ fn claude_servers(engine: EngineId, home: &Home) -> Result<HashMap<String, Value
     Ok(claude_state(engine, home)?.map_or_else(HashMap::new, |(_, state)| servers_of(&state)))
 }
 
+fn restore_project_servers(
+    state: &mut serde_json::Map<String, Value>,
+    trusted: &HashMap<String, Value>,
+) {
+    let trusted_projects: BTreeMap<&str, &Value> = trusted
+        .iter()
+        .filter(|(project, _)| !project.is_empty())
+        .map(|(project, servers)| (project.as_str(), servers))
+        .collect();
+    if trusted_projects.is_empty() && !matches!(state.get("projects"), Some(Value::Object(_))) {
+        return;
+    }
+    let projects = state
+        .entry("projects")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !projects.is_object() {
+        *projects = Value::Object(serde_json::Map::new());
+    }
+    let projects = projects
+        .as_object_mut()
+        .expect("invariant: Claude's projects were just made an object");
+    for (project, settings) in projects.iter_mut() {
+        if !trusted_projects.contains_key(project.as_str())
+            && let Some(settings) = settings.as_object_mut()
+        {
+            settings.remove("mcpServers");
+        }
+    }
+    for (project, servers) in trusted_projects {
+        let settings = projects
+            .entry(project.to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !settings.is_object() {
+            *settings = Value::Object(serde_json::Map::new());
+        }
+        settings
+            .as_object_mut()
+            .expect("invariant: the project's settings were just made an object")
+            .insert("mcpServers".to_owned(), servers.clone());
+    }
+}
+
 fn restore_claude_servers(
     engine: EngineId,
     home: &Home,
@@ -1241,16 +1283,7 @@ fn restore_claude_servers(
         Some(servers) => object.insert("mcpServers".to_owned(), servers.clone()),
         None => object.remove("mcpServers"),
     };
-    if let Some(projects) = object.get_mut("projects").and_then(Value::as_object_mut) {
-        for (project, settings) in projects.iter_mut() {
-            if let Some(settings) = settings.as_object_mut() {
-                match trusted.get(project) {
-                    Some(servers) => settings.insert("mcpServers".to_owned(), servers.clone()),
-                    None => settings.remove("mcpServers"),
-                };
-            }
-        }
-    }
+    restore_project_servers(object, &trusted);
     let bytes = serde_json::to_vec(&state).map_err(|source| GuardError::State {
         engine,
         path: path.clone(),
