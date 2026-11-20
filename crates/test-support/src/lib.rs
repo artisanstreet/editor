@@ -26,6 +26,7 @@ pub mod sse;
 #[cfg(feature = "transcript")]
 pub mod transcript;
 
+#[cfg(unix)]
 pub const SANDBOX_REQUIRED: &str = "ARTISAN_SANDBOX_REQUIRED";
 
 #[expect(
@@ -36,6 +37,7 @@ pub fn skipped(why: std::fmt::Arguments<'_>) {
     eprintln!("SKIPPED: {why}");
 }
 
+#[cfg(unix)]
 pub fn sandbox_missing(why: std::fmt::Arguments<'_>) {
     assert!(
         std::env::var_os(SANDBOX_REQUIRED).is_none(),
