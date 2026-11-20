@@ -83,6 +83,29 @@ enum ReplayError {
     Unexpected { actual: Signature },
     #[error("a {protocol:?} launch cannot replay {step:?}")]
     WrongStep { protocol: Protocol, step: Step },
+    #[error("Forge gave the engine no {server} MCP gateway in {variable}")]
+    NoGateway {
+        server: String,
+        variable: String,
+        #[source]
+        source: std::env::VarError,
+    },
+    #[error("the {server} MCP gateway address {url} is not a loopback HTTP address")]
+    GatewayAddress { server: String, url: String },
+    #[error("call the {server} MCP gateway")]
+    Call {
+        server: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the {server} MCP gateway answered {answer}")]
+    CallRefused { server: String, answer: String },
+    #[error("wait at the gate {}", path.display())]
+    Gate {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,7 +175,7 @@ fn replay() -> Result<Ending, ReplayError> {
         launches: transcript.launches(),
     })?;
     match protocol {
-        Protocol::Stdio => stdio(steps),
+        Protocol::Stdio => stdio(steps, &dir),
         Protocol::Http => http(steps).map(|()| Ending::Finished),
     }
 }
@@ -177,6 +200,48 @@ fn next_launch(dir: &Path) -> Result<usize, ReplayError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Signature(Vec<(&'static str, Option<Value>)>);
+
+use test_support::transcript::ANY;
+
+impl Signature {
+    fn admits(&self, actual: &Self) -> bool {
+        self.0.len() == actual.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&actual.0)
+                .all(|((pointer, wanted), (seen, got))| {
+                    pointer == seen
+                        && match (wanted, got) {
+                            (Some(Value::String(wanted)), Some(Value::String(got)))
+                                if wanted.contains(ANY) =>
+                            {
+                                fits(wanted, got)
+                            }
+                            _ => wanted == got,
+                        }
+                })
+    }
+}
+
+fn fits(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split(ANY);
+    let Some(rest) = parts.next().and_then(|first| text.strip_prefix(first)) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    let mut rest = rest;
+    for part in middle {
+        let Some((_, after)) = rest.split_once(part) else {
+            return false;
+        };
+        rest = after;
+    }
+    rest.ends_with(last)
+}
 
 impl std::fmt::Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -261,7 +326,7 @@ impl Ids {
         let actual_frame: Value = serde_json::from_str(actual).unwrap_or(Value::Null);
         let expected = self.signature(&recorded, &recorded);
         let seen = self.signature(&actual_frame, &recorded);
-        if expected != seen {
+        if !expected.admits(&seen) {
             return Err(ReplayError::Mismatch {
                 expected,
                 actual: seen,
@@ -296,7 +361,80 @@ fn stdin_lines() -> mpsc::Receiver<String> {
     received
 }
 
-fn stdio(steps: &[Step]) -> Result<Ending, ReplayError> {
+fn gateway_variable(server: &str) -> String {
+    let name: String = server
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("ARTISAN_GATEWAY_{name}")
+}
+
+fn call(server: &str, request: &Value) -> Result<(), ReplayError> {
+    use std::io::Read as _;
+    let variable = gateway_variable(server);
+    let url = std::env::var(&variable).map_err(|source| ReplayError::NoGateway {
+        server: server.to_owned(),
+        variable,
+        source,
+    })?;
+    let (address, path) = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .ok_or_else(|| ReplayError::GatewayAddress {
+            server: server.to_owned(),
+            url: url.clone(),
+        })?;
+    let body = request.to_string();
+    let failed = |source| ReplayError::Call {
+        server: server.to_owned(),
+        source,
+    };
+    let mut stream = std::net::TcpStream::connect(address).map_err(failed)?;
+    write!(
+        stream,
+        "POST /{path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .map_err(failed)?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).map_err(failed)?;
+    log(&format!("call {server}: {answer}"));
+    let reply = answer
+        .split_once("\r\n\r\n")
+        .map(|(head, body)| (head, serde_json::from_str::<Value>(body)));
+    let succeeded = matches!(&reply, Some((head, Ok(reply)))
+        if head.starts_with("HTTP/1.1 200")
+            && reply.get("error").is_none()
+            && reply.pointer("/result/isError") != Some(&Value::Bool(true)));
+    if succeeded {
+        Ok(())
+    } else {
+        Err(ReplayError::CallRefused {
+            server: server.to_owned(),
+            answer,
+        })
+    }
+}
+
+fn wait_at(dir: &Path, name: &str) -> Result<(), ReplayError> {
+    let path = dir.join(format!("{name}.gate"));
+    let gate = |source| ReplayError::Gate {
+        path: path.clone(),
+        source,
+    };
+    let file = std::fs::File::open(&path).map_err(gate)?;
+    file.lock_shared().map_err(gate)?;
+    log(&format!("passed the gate {name}"));
+    Ok(())
+}
+
+fn stdio(steps: &[Step], dir: &Path) -> Result<Ending, ReplayError> {
     let input = stdin_lines();
     let mut ids = Ids::default();
     let mut closed = false;
@@ -320,6 +458,8 @@ fn stdio(steps: &[Step]) -> Result<Ending, ReplayError> {
                 closed = true;
             }
             Step::Exit { code } => return Ok(Ending::Died { code: *code }),
+            Step::Call { server, request } => call(server, request)?,
+            Step::Gate { name } => wait_at(dir, name)?,
             Step::Request { .. } => {
                 return Err(ReplayError::WrongStep {
                     protocol: Protocol::Stdio,
@@ -388,7 +528,11 @@ fn http(steps: &[Step]) -> Result<(), ReplayError> {
                 taken: false,
             })),
             Step::Out { .. } => Ok(None),
-            Step::In { .. } | Step::Closed | Step::Exit { .. } => Err(ReplayError::WrongStep {
+            Step::In { .. }
+            | Step::Call { .. }
+            | Step::Gate { .. }
+            | Step::Closed
+            | Step::Exit { .. } => Err(ReplayError::WrongStep {
                 protocol: Protocol::Http,
                 step: step.clone(),
             }),
@@ -470,7 +614,11 @@ fn events(server: Arc<Server>) -> Response {
                         taken.await;
                     }
                 }
-                Step::In { .. } | Step::Closed | Step::Exit { .. } => {
+                Step::In { .. }
+                | Step::Call { .. }
+                | Step::Gate { .. }
+                | Step::Closed
+                | Step::Exit { .. } => {
                     unreachable!(
                         "invariant: HTTP launches were checked to hold only output and requests"
                     )

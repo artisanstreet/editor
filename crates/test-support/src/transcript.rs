@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const CHECK: &str = "--check-transcript";
+pub const ANY: &str = "{{any}}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +24,13 @@ pub enum Step {
         method: String,
         path: String,
         reply: Value,
+    },
+    Call {
+        server: String,
+        request: Value,
+    },
+    Gate {
+        name: String,
     },
     Closed,
     Exit {
@@ -54,6 +62,13 @@ enum Line {
         path: String,
         reply: Value,
     },
+    Call {
+        server: String,
+        request: Value,
+    },
+    Gate {
+        name: String,
+    },
     Closed,
     Exit {
         code: u8,
@@ -74,6 +89,8 @@ impl From<Step> for Line {
                 path,
                 reply,
             },
+            Step::Call { server, request } => Self::Call { server, request },
+            Step::Gate { name } => Self::Gate { name },
             Step::Closed => Self::Closed,
             Step::Exit { code } => Self::Exit { code },
         }
@@ -214,6 +231,8 @@ impl Transcript {
                     path,
                     reply,
                 },
+                (Line::Call { server, request }, true) => Step::Call { server, request },
+                (Line::Gate { name }, true) => Step::Gate { name },
                 (Line::Closed, true) => Step::Closed,
                 (Line::Exit { code }, true) => Step::Exit { code },
             };

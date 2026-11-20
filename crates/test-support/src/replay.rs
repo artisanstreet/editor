@@ -103,9 +103,30 @@ impl ReplayingEngine {
     }
 
     #[must_use]
+    pub fn gate(&self, name: &str) -> Gate {
+        let path = self.folder.join(format!("{name}.gate"));
+        let file = std::fs::File::create(&path)
+            .unwrap_or_else(|error| panic!("create the gate {}: {error}", path.display()));
+        file.lock()
+            .unwrap_or_else(|error| panic!("close the gate {}: {error}", path.display()));
+        Gate { file }
+    }
+
+    #[must_use]
     pub fn log(&self) -> String {
         std::fs::read_to_string(self.folder.join("replay.log"))
             .unwrap_or_else(|error| format!("no replay log: {error}"))
+    }
+}
+
+#[derive(Debug)]
+pub struct Gate {
+    file: std::fs::File,
+}
+
+impl Gate {
+    pub fn open(self) {
+        self.file.unlock().expect("the test opens a gate it holds");
     }
 }
 

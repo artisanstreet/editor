@@ -1,5 +1,5 @@
 use super::{on_this_host, replaying};
-use artisan_api::{EngineId, Event, Permissions, RunStatus};
+use artisan_api::{EngineId, Event, ItemKind, Permissions, RunStatus, Status};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_reply_reaches_the_client_and_a_resumed_stream_shows_the_same_thread() {
@@ -133,4 +133,80 @@ async fn a_claude_turn_leaves_a_complete_trace_of_its_frames() {
         .collect();
     assert_eq!(ends.len(), 1, "{trace:?}");
     assert_eq!(ends[0]["dropped"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_agent_spawned_through_the_gateway_reports_back_to_its_parent() {
+    let replay = replaying(EngineId::Claude, "background-agent").await;
+    let report = replay.gate("report");
+    let thread = replay.thread(Permissions::Auto).await;
+    let since = replay.head().await;
+    replay
+        .send(&thread, "Have an agent review the parser")
+        .await;
+    let spawned = replay.settled(since, &thread, 1).await;
+    assert_eq!(spawned.runs(&thread), [(RunStatus::Done, None)]);
+    let agent = spawned
+        .item(&thread, |item| matches!(item.kind, ItemKind::Agent { .. }))
+        .expect("the parent shows the agent it started")
+        .clone();
+    let ItemKind::Agent {
+        thread: Some(child),
+        background: true,
+        ..
+    } = &agent.kind
+    else {
+        panic!("the agent runs in the background on its own thread: {agent:#?}");
+    };
+    assert_eq!(agent.status, Status::Running, "the agent is still working");
+
+    report.open();
+    let reported = replay.settled(since, &thread, 2).await;
+
+    assert_eq!(
+        reported.runs(&thread),
+        [(RunStatus::Done, None), (RunStatus::Done, None)],
+        "the agent's report starts the parent's next turn"
+    );
+    assert_eq!(
+        reported.runs(child),
+        [(RunStatus::Done, None)],
+        "the agent's own turn finished"
+    );
+    assert_eq!(
+        reported.transcript(child),
+        on_this_host(&[
+            "you: Review the parser for unhandled input. (Done)",
+            "assistant: The parser rejects every malformed input. (Done)",
+        ])
+    );
+    let parent = reported.transcript(&thread);
+    assert!(
+        parent.contains(&"assistant: The review found nothing to fix. (Done)".to_owned()),
+        "the parent answered the report: {parent:#?}"
+    );
+    let report = reported
+        .item(&thread, |item| {
+            matches!(
+                &item.kind,
+                ItemKind::UserMessage {
+                    from_agent: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("the report arrives as a message from the agent");
+    assert!(
+        matches!(&report.kind, ItemKind::UserMessage { text, .. }
+            if text.inline().is_some_and(|text| text.ends_with("The parser rejects every malformed input."))),
+        "{report:#?}"
+    );
+    assert_eq!(
+        reported
+            .item(&thread, |item| item.id == agent.id)
+            .map(|item| item.status),
+        Some(Status::Done),
+        "the parent shows the agent finished"
+    );
+    assert_eq!(replay.launches(), 3, "parent, agent, then the parent again");
 }

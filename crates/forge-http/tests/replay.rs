@@ -230,6 +230,10 @@ impl Replay {
     fn launches(&self) -> usize {
         self.engine_files.launches()
     }
+
+    fn gate(&self, name: &str) -> test_support::replay::Gate {
+        self.engine_files.gate(name)
+    }
 }
 
 impl Drop for Replay {

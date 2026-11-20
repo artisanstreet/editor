@@ -311,7 +311,11 @@ fn shapes(transcript: &Transcript) -> BTreeSet<String> {
                 .ok()
                 .and_then(|frame| shape(&frame)),
             Step::Request { reply, .. } => shape(reply),
-            Step::In { .. } | Step::Closed | Step::Exit { .. } => None,
+            Step::In { .. }
+            | Step::Call { .. }
+            | Step::Gate { .. }
+            | Step::Closed
+            | Step::Exit { .. } => None,
         })
         .collect()
 }
