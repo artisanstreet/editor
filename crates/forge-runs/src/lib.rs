@@ -45,7 +45,7 @@ pub use operation::{
     AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
     ContinueRefusal, SendError, StopFailure, UpdateError,
 };
-pub use retention::RemoveInactiveThreadsError;
+pub use retention::{RemoveInactiveThreadsError, SettingKind};
 pub use run::PrepareError;
 pub use sandbox::auto_notice_on_this_host;
 pub use scratch::{EnsureScratchProjectError, ThreadFolderError};

@@ -57,7 +57,11 @@ async fn a_retention_setting_that_is_not_a_number_of_days_is_reported_not_ignore
     let removed = fixture.hub.remove_inactive_threads().await;
 
     assert!(
-        matches!(removed, Err(RemoveInactiveThreadsError::NotDays)),
+        matches!(
+            &removed,
+            Err(RemoveInactiveThreadsError::NotDays { kind: SettingKind::Text, value })
+                if value == "\"30\""
+        ),
         "{removed:?}"
     );
 }

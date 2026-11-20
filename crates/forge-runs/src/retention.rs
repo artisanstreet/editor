@@ -11,10 +11,10 @@ pub enum RemoveInactiveThreadsError {
     #[error("read Forge's {THREAD_RETENTION_DAYS_KEY} setting")]
     Days(#[source] ReadSettingError),
     #[error(
-        "Forge's {THREAD_RETENTION_DAYS_KEY} setting is not a whole number of days up to {}",
+        "Forge's {THREAD_RETENTION_DAYS_KEY} setting is {kind} {value}, not a whole number of days up to {}",
         u32::MAX
     )]
-    NotDays,
+    NotDays { kind: SettingKind, value: String },
     #[error("remove the threads inactive since {cutoff}")]
     Remove {
         cutoff: Timestamp,
@@ -27,6 +27,40 @@ pub enum RemoveInactiveThreadsError {
         #[source]
         source: CollectBlobsError,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKind {
+    Text,
+    Number,
+    Flag,
+    List,
+    Map,
+}
+
+impl SettingKind {
+    fn of(value: &serde_json::Value) -> Option<Self> {
+        match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(_) => Some(Self::Text),
+            serde_json::Value::Number(_) => Some(Self::Number),
+            serde_json::Value::Bool(_) => Some(Self::Flag),
+            serde_json::Value::Array(_) => Some(Self::List),
+            serde_json::Value::Object(_) => Some(Self::Map),
+        }
+    }
+}
+
+impl std::fmt::Display for SettingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Text => "the text",
+            Self::Number => "the number",
+            Self::Flag => "the flag",
+            Self::List => "the list",
+            Self::Map => "the map",
+        })
+    }
 }
 
 impl Hub {
@@ -77,13 +111,16 @@ impl Hub {
                     .map(artisan_api::SettingDecl::default_value)
             })
             .unwrap_or(serde_json::Value::Null);
-        if value.is_null() {
+        let Some(kind) = SettingKind::of(&value) else {
             return Ok(None);
-        }
+        };
         let days = value
             .as_u64()
             .and_then(|days| u32::try_from(days).ok())
-            .ok_or(RemoveInactiveThreadsError::NotDays)?;
+            .ok_or_else(|| RemoveInactiveThreadsError::NotDays {
+                kind,
+                value: value.to_string(),
+            })?;
         Ok(Some(days).filter(|days| *days > 0))
     }
 
