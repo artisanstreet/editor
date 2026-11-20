@@ -663,6 +663,14 @@ impl DraftSession {
         self.handed_back = Some(self.epoch);
     }
 
+    fn dropped(&self, work: &'static str) {
+        tracing::info!(
+            scope = %self.scope,
+            work,
+            "this draft's Forge pairing was removed, so its work is dropped"
+        );
+    }
+
     const fn draft(&self) -> Option<&Draft> {
         match &self.state {
             State::Open(draft) => Some(draft),
@@ -850,9 +858,11 @@ impl DraftSession {
     }
 
     pub(crate) fn adopt(&mut self, image: PendingUpload) {
-        if let State::Open(draft) = &mut self.state {
-            draft.adopt(image);
-        }
+        let State::Open(draft) = &mut self.state else {
+            self.dropped("an image handed over from the composer");
+            return;
+        };
+        draft.adopt(image);
     }
 
     pub(crate) fn view_closed(&mut self) {
@@ -881,6 +891,7 @@ impl DraftSession {
 
     pub(crate) fn image_read(&mut self, key: AdoptionKey, bytes: Arc<[u8]>) {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a handed-over image that was read");
             return;
         };
         if let Some(index) = draft.adoption(&self.scope, key) {
@@ -904,6 +915,7 @@ impl DraftSession {
         result: Result<BlobHash, AdoptImageError>,
     ) -> Option<BlobHash> {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a handed-over image's upload result");
             return None;
         };
         let index = draft.adoption(&self.scope, key)?;
@@ -957,6 +969,7 @@ impl DraftSession {
 
     pub fn queue(&mut self, body: DraftBody, seen: u64, uploading: bool) -> bool {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("an edit");
             return false;
         };
         draft.uploading = uploading;
@@ -985,6 +998,7 @@ impl DraftSession {
 
     pub fn submit(&mut self, submission: Submission) {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a message sent from the composer");
             return;
         };
         if draft.in_flight().is_some() {
@@ -1088,6 +1102,7 @@ impl DraftSession {
 
     pub fn loaded(&mut self, result: Result<DraftSnapshot, CallError>) {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a draft load's result");
             return;
         };
         let request = std::mem::replace(&mut draft.request, Request::Idle);
@@ -1133,6 +1148,7 @@ impl DraftSession {
 
     pub fn written(&mut self, result: Result<DraftWriteResult, CallError>) {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a draft write's result");
             return;
         };
         let Request::Writing {
@@ -1178,6 +1194,7 @@ impl DraftSession {
 
     pub fn posted(&mut self, result: Result<(), PostMessageError>, thread: ThreadId) {
         let State::Open(draft) = &mut self.state else {
+            self.dropped("a sent message's result");
             return;
         };
         let request = std::mem::replace(&mut draft.request, Request::Idle);
