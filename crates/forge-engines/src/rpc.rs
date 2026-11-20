@@ -149,53 +149,74 @@ impl std::fmt::Debug for EngineText {
     }
 }
 
+fn written(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.is_empty())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RpcError {
-    code: Option<i64>,
-    said: EngineText,
+pub struct RpcError(Answer);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Answer {
+    Refused {
+        code: Option<i64>,
+        said: Option<EngineText>,
+    },
+    WithoutResult,
 }
 
 impl RpcError {
     pub(crate) fn refusal(error: &Value) -> Self {
-        let message = error["message"].as_str().unwrap_or_default();
-        let detail = error["data"]["message"]
-            .as_str()
-            .or_else(|| error["data"].as_str());
-        Self {
+        let message = written(error["message"].as_str());
+        let detail = written(
+            error["data"]["message"]
+                .as_str()
+                .or_else(|| error["data"].as_str()),
+        );
+        let said = match (message, detail) {
+            (Some(message), Some(detail)) if detail.starts_with(message) => Some(detail.to_owned()),
+            (Some(message), Some(detail)) => Some(format!("{message}: {detail}")),
+            (None, Some(said)) | (Some(said), None) => Some(said.to_owned()),
+            (None, None) => None,
+        };
+        Self(Answer::Refused {
             code: error["code"].as_i64(),
-            said: EngineText(match detail {
-                Some(detail) if detail.starts_with(message) => detail.to_owned(),
-                Some(detail) if message.is_empty() => detail.to_owned(),
-                Some(detail) => format!("{message}: {detail}"),
-                None => message.to_owned(),
-            }),
-        }
+            said: said.map(EngineText),
+        })
     }
 
-    fn without_result() -> Self {
-        Self {
-            code: None,
-            said: EngineText(String::new()),
-        }
+    const fn without_result() -> Self {
+        Self(Answer::WithoutResult)
     }
 
     #[must_use]
     pub const fn code(&self) -> Option<i64> {
-        self.code
+        match self.0 {
+            Answer::Refused { code, .. } => code,
+            Answer::WithoutResult => None,
+        }
     }
 
     #[must_use]
-    pub fn said(&self) -> &str {
-        &self.said.0
+    pub fn said(&self) -> Option<&str> {
+        match &self.0 {
+            Answer::Refused {
+                said: Some(EngineText(said)),
+                ..
+            } => Some(said),
+            Answer::Refused { said: None, .. } | Answer::WithoutResult => None,
+        }
     }
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (self.code, self.said.0.is_empty()) {
-            (_, true) => f.write_str("the engine answered without a result or a reason"),
-            (Some(code), false) => write!(f, "the engine refused with code {code}"),
-            (None, false) => f.write_str("the engine refused"),
+        match self.0 {
+            Answer::WithoutResult => f.write_str("the engine answered without a result"),
+            Answer::Refused {
+                code: Some(code), ..
+            } => write!(f, "the engine refused with code {code}"),
+            Answer::Refused { code: None, .. } => f.write_str("the engine refused"),
         }
     }
 }
@@ -207,11 +228,9 @@ pub(crate) fn told(error: &(dyn std::error::Error + 'static)) -> String {
     let mut text = diagnostics::chain(error);
     let mut cause = Some(error);
     while let Some(current) = cause {
-        if let Some(refusal) = current.downcast_ref::<RpcError>()
-            && !refusal.said().is_empty()
-        {
+        if let Some(said) = current.downcast_ref::<RpcError>().and_then(RpcError::said) {
             text.push_str(". The engine said: ");
-            text.push_str(refusal.said());
+            text.push_str(said);
         }
         cause = current.source();
     }

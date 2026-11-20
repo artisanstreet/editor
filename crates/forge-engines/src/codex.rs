@@ -297,7 +297,9 @@ impl Run {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(Outcome::Cancelled),
             Err(RequestError::Refused(source))
-                if source.said().contains(ACTIVE_WRITER)
+                if source
+                    .said()
+                    .is_some_and(|said| said.contains(ACTIVE_WRITER))
                     && let Some(session) = turn.session_id.clone() =>
             {
                 return Err(RunError::SessionBusy { session, source });

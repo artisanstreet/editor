@@ -18,7 +18,7 @@ fn replies_correlate_out_of_order_and_unknown_ids_do_not_consume_requests() {
         .unwrap()
         .result
         .unwrap_err();
-    assert_eq!(refused.said(), "rejected: details");
+    assert_eq!(refused.said(), Some("rejected: details"));
     assert!(state.requests.is_empty());
 }
 
@@ -43,4 +43,26 @@ fn an_engine_refusal_logs_its_code_but_never_what_the_engine_wrote() {
         told(&refused).contains(reflected),
         "the run's failure no longer tells the user why Codex refused"
     );
+}
+
+#[test]
+fn a_refusal_without_a_message_still_reads_as_a_refusal_not_a_missing_result() {
+    let mut state = State::default();
+    let refused_id = state.request("thread/start", json!({}));
+    let empty_id = state.request("thread/read", json!({}));
+
+    let refused = state
+        .respond(&json!(refused_id), None, Some(&json!({ "code": -32001 })))
+        .unwrap()
+        .result
+        .unwrap_err();
+    let empty = state
+        .respond(&json!(empty_id), None, None)
+        .unwrap()
+        .result
+        .unwrap_err();
+
+    assert_eq!(refused.said(), None);
+    assert_eq!(refused.to_string(), "the engine refused with code -32001");
+    assert_eq!(empty.to_string(), "the engine answered without a result");
 }
