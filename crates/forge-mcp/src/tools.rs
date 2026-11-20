@@ -2095,9 +2095,32 @@ fn sanitized_url(written: &str) -> String {
                 .port()
                 .map(|port| format!(":{port}"))
                 .unwrap_or_default();
-            format!("{}://{host}{port}{}", url.scheme(), url.path())
+            let path: Vec<&str> = url
+                .path()
+                .split('/')
+                .map(|segment| {
+                    if looks_like_token(segment) {
+                        REDACTED
+                    } else {
+                        segment
+                    }
+                })
+                .collect();
+            format!("{}://{host}{port}{}", url.scheme(), path.join("/"))
         },
     )
+}
+
+const TOKEN_CHARACTERS: usize = 20;
+
+fn looks_like_token(text: &str) -> bool {
+    text.len() >= TOKEN_CHARACTERS
+        && text.bytes().any(|byte| byte.is_ascii_digit())
+        && text.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'=' | b'%')
+        })
 }
 
 fn names_secret(key: &str) -> bool {
@@ -2116,7 +2139,7 @@ fn redacted_arg(arg: &str) -> String {
     if arg.contains("://") {
         return sanitized_url(arg);
     }
-    if looks_secret(arg) {
+    if looks_secret(arg) || looks_like_token(arg) {
         return REDACTED.to_owned();
     }
     for separator in ['=', ':'] {

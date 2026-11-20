@@ -8,6 +8,43 @@ use forge_store::Store;
 use serde_json::json;
 use std::time::Duration;
 
+fn listed_servers() -> serde_json::Value {
+    json!([
+        {
+            "name": "search",
+            "url": "https://alice:hunter2@api.example.com:8443/mcp?api_key=query-secret#fragment-secret"
+        },
+        {
+            "name": "zap",
+            "url": "https://mcp.example.com/api/mcp/s/9f8e7d6c5b4a39281706f5e4d3c2b1a0/sse"
+        },
+        {
+            "name": "bare",
+            "command": "uvx",
+            "args": ["mcp-server-search", "AbCd1234EfGh5678IjKl9012MnOp"]
+        },
+        {
+            "name": "local",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@example/server",
+                "--api-key=flag-secret",
+                "--token",
+                "spaced-secret",
+                "GITHUB_TOKEN=pair-secret",
+                "--header",
+                "Authorization: Bearer header-secret",
+                "sk-bare-secret",
+                "https://bob:arg-secret@hooks.example.com/in?sig=signed-secret",
+                "--port",
+                "8080"
+            ],
+            "env": { "API_KEY": "env-secret" }
+        }
+    ])
+}
+
 #[tokio::test]
 async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
     let directory = tempfile::tempdir().unwrap();
@@ -34,34 +71,7 @@ async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
         .await
         .unwrap();
     store
-        .set_setting(
-            "mcp_servers".to_owned(),
-            json!([
-                {
-                    "name": "search",
-                    "url": "https://alice:hunter2@api.example.com:8443/mcp?api_key=query-secret#fragment-secret"
-                },
-                {
-                    "name": "local",
-                    "command": "npx",
-                    "args": [
-                        "-y",
-                        "@example/server",
-                        "--api-key=flag-secret",
-                        "--token",
-                        "spaced-secret",
-                        "GITHUB_TOKEN=pair-secret",
-                        "--header",
-                        "Authorization: Bearer header-secret",
-                        "sk-bare-secret",
-                        "https://bob:arg-secret@hooks.example.com/in?sig=signed-secret",
-                        "--port",
-                        "8080"
-                    ],
-                    "env": { "API_KEY": "env-secret" }
-                }
-            ]),
-        )
+        .set_setting("mcp_servers".to_owned(), listed_servers())
         .await
         .unwrap();
     let hub = Hub::new(
@@ -92,6 +102,8 @@ async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
         "arg-secret",
         "signed-secret",
         "env-secret",
+        "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        "AbCd1234EfGh5678IjKl9012MnOp",
     ] {
         assert!(!output.contains(secret), "{secret} leaked: {output}");
     }
@@ -100,6 +112,8 @@ async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
         "npx -y @example/server --api-key=<redacted> --token <redacted> GITHUB_TOKEN=<redacted>",
         "https://hooks.example.com/in --port 8080",
         "env API_KEY",
+        "https://mcp.example.com/api/mcp/s/<redacted>/sse",
+        "uvx mcp-server-search <redacted>",
     ] {
         assert!(output.contains(shown), "{shown} missing: {output}");
     }
