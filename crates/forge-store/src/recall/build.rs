@@ -10,8 +10,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub(crate) const INDEX_VERSION: i64 = 2;
 const BATCH_ITEMS: i64 = 256;
 const REPORT_EVERY: Duration = Duration::from_secs(5);
-const RETRY_FIRST: Duration = Duration::from_secs(1);
-const RETRY_LAST: Duration = Duration::from_secs(300);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryPace {
+    pub first: Duration,
+    pub last: Duration,
+}
+
+impl RetryPace {
+    pub(crate) const SYSTEM: Self = Self {
+        first: Duration::from_secs(1),
+        last: Duration::from_secs(300),
+    };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallIndex {
@@ -200,12 +211,13 @@ impl Builder {
     pub(crate) fn spawn(
         jobs: mpsc::Sender<Job>,
         status: watch::Sender<RecallIndex>,
+        pace: RetryPace,
     ) -> std::io::Result<Self> {
         let (stop, stopping) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("forge-store-recall".into())
             .spawn(move || {
-                let reached = build(&jobs, &stopping);
+                let reached = build(&jobs, &stopping, pace);
                 status.send_replace(reached);
             })?;
         Ok(Self { stop, thread })
@@ -258,10 +270,14 @@ fn stopped_while_waiting(stop: &std::sync::mpsc::Receiver<()>, wait: Duration) -
     }
 }
 
-fn build(jobs: &mpsc::Sender<Job>, stop: &std::sync::mpsc::Receiver<()>) -> RecallIndex {
+fn build(
+    jobs: &mpsc::Sender<Job>,
+    stop: &std::sync::mpsc::Receiver<()>,
+    pace: RetryPace,
+) -> RecallIndex {
     let started = Instant::now();
     let mut reported = started;
-    let mut retry = RETRY_FIRST;
+    let mut retry = pace.first;
     let (mut items, mut skipped) = (0_u64, 0_u64);
     while !stop_requested(stop) {
         match batch(jobs) {
@@ -272,7 +288,7 @@ fn build(jobs: &mpsc::Sender<Job>, stop: &std::sync::mpsc::Receiver<()>) -> Reca
                 items: indexed,
                 skipped: left_out,
             })) => {
-                retry = RETRY_FIRST;
+                retry = pace.first;
                 items += indexed;
                 skipped += left_out;
                 if reported.elapsed() >= REPORT_EVERY {
@@ -302,7 +318,7 @@ fn build(jobs: &mpsc::Sender<Job>, stop: &std::sync::mpsc::Receiver<()>) -> Reca
                 if stopped_while_waiting(stop, retry) {
                     return RecallIndex::Incomplete;
                 }
-                retry = (retry * 2).min(RETRY_LAST);
+                retry = (retry * 2).min(pace.last);
             }
         }
     }

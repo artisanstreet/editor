@@ -75,7 +75,7 @@ pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
     GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, PrepareIndexError,
     RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError, RecallTouchingError,
-    SearchCursor, SearchHit, SearchPage, Touch,
+    RetryPace, SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
@@ -677,6 +677,7 @@ fn recall_builder(
     conn: &Connection,
     jobs: &mpsc::Sender<Job>,
     database: &Path,
+    pace: RetryPace,
 ) -> Result<(Option<recall::Builder>, watch::Receiver<RecallIndex>), OpenStoreError> {
     let state = recall::index_state(conn).map_err(|source| OpenStoreError::RecallState {
         database: database.to_owned(),
@@ -685,7 +686,7 @@ fn recall_builder(
     match state {
         recall::IndexState::Building { .. } => {
             let (status, watching) = watch::channel(RecallIndex::Building);
-            recall::Builder::spawn(jobs.clone(), status)
+            recall::Builder::spawn(jobs.clone(), status, pace)
                 .map(|builder| (Some(builder), watching))
                 .map_err(|source| OpenStoreError::Spawn {
                     thread: "recall index builder",
@@ -839,6 +840,7 @@ impl Store {
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
         let upgrading = schema::Upgrade::of(&environment);
+        let recall_retry = environment.recall_retry;
         let Environment {
             connections, clock, ..
         } = environment;
@@ -880,7 +882,8 @@ impl Store {
 
         let mut threads = Threads::default();
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
-        let (builder, recall_index) = recall_builder(writer.connection(), &jobs, &database)?;
+        let (builder, recall_index) =
+            recall_builder(writer.connection(), &jobs, &database, recall_retry)?;
         threads.writer = Some(
             std::thread::Builder::new()
                 .name("forge-store-writer".into())

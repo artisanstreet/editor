@@ -1,4 +1,5 @@
 use crate::progress::Progress;
+use crate::recall::RetryPace;
 use artisan_api::WallClock;
 use rusqlite::Connection;
 use std::path::Path;
@@ -40,6 +41,7 @@ pub struct Environment {
     pub connections: Connections,
     pub clock: WallClock,
     pub progress: Progress,
+    pub recall_retry: RetryPace,
 }
 
 impl Environment {
@@ -49,6 +51,7 @@ impl Environment {
             connections: Connections::system(),
             clock: WallClock::system(),
             progress: Progress::every(PROGRESS_EVERY),
+            recall_retry: RetryPace::SYSTEM,
         }
     }
 }

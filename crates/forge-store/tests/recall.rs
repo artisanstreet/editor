@@ -455,21 +455,48 @@ async fn forge_starts_with_a_damaged_item_and_still_finds_the_rest() {
 
 const UNLIMITED: usize = usize::MAX;
 
+struct Advances {
+    budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    refused: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Advances {
+    fn allowing(budget: usize) -> Self {
+        Self {
+            budget: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(budget)),
+            refused: std::sync::Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn lift(&self) {
+        self.budget
+            .store(UNLIMITED, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn refused(&self) {
+        tokio::time::timeout(test_support::wait::LIVENESS, self.refused.notified())
+            .await
+            .expect("the recall index build is refused an advance in time");
+    }
+}
+
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "every other statement is authorised as usual"
 )]
 fn store_counting_advances(
     dir: &std::path::Path,
-    advances: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    advances: &Advances,
     refuse_index_tables: bool,
 ) -> Result<(Store, forge_store::DataLock), forge_store::OpenStoreError> {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::atomic::Ordering;
-    let budget = std::sync::Arc::clone(advances);
+    let budget = std::sync::Arc::clone(&advances.budget);
+    let refused = std::sync::Arc::clone(&advances.refused);
     let connections = forge_store::Connections::new(move |path| {
         let mut conn = rusqlite::Connection::open(path)?;
         let budget = std::sync::Arc::clone(&budget);
+        let refused = std::sync::Arc::clone(&refused);
         conn.authorizer(Some(move |context: AuthContext<'_>| match context.action {
             AuthAction::CreateTable {
                 table_name: "item_text",
@@ -482,7 +509,10 @@ fn store_counting_advances(
                     (left != UNLIMITED).then(|| left.saturating_sub(1))
                 });
                 match spent {
-                    Ok(0) => Authorization::Deny,
+                    Ok(0) => {
+                        refused.notify_one();
+                        Authorization::Deny
+                    }
                     Ok(_) | Err(_) => Authorization::Allow,
                 }
             }
@@ -495,6 +525,10 @@ fn store_counting_advances(
         &lock,
         forge_store::Environment {
             connections,
+            recall_retry: forge_store::RetryPace {
+                first: std::time::Duration::ZERO,
+                last: std::time::Duration::ZERO,
+            },
             ..forge_store::Environment::system()
         },
     )?;
@@ -546,7 +580,7 @@ async fn a_forge_that_cannot_prepare_its_search_index_refuses_to_start_instead_o
         .expect("save a note");
     drop(store);
     forget_recall_index(dir.path());
-    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(UNLIMITED));
+    let advances = Advances::allowing(UNLIMITED);
 
     let refused = store_counting_advances(dir.path(), &advances, true)
         .map(drop)
@@ -579,11 +613,12 @@ async fn a_recall_index_batch_that_fails_is_retried_without_restarting_forge() {
         .id;
     drop(store);
     forget_recall_index(dir.path());
-    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let advances = Advances::allowing(0);
 
     let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
         .expect("Forge starts and rebuilds the index in the background");
-    advances.store(UNLIMITED, std::sync::atomic::Ordering::SeqCst);
+    advances.refused().await;
+    advances.lift();
 
     assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
     assert_eq!(found(&store, "osprey nest").await, vec![note]);
@@ -609,19 +644,15 @@ async fn a_recall_build_resumed_after_a_restart_finds_every_message_once_despite
     }
     drop(store);
     forget_recall_index(dir.path());
-    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let advances = Advances::allowing(1);
     let (store, lock) = store_counting_advances(dir.path(), &advances, false)
         .expect("Forge starts and rebuilds the index in the background");
-    let partly = tokio::time::timeout(test_support::wait::LIVENESS, async {
-        loop {
-            if found(&store, &ledger_entry(0)).await.len() == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    partly.expect("the first batch is indexed");
+    advances.refused().await;
+    assert_eq!(
+        found(&store, &ledger_entry(0)).await.len(),
+        1,
+        "the first batch is indexed"
+    );
     assert!(
         found(&store, &ledger_entry(ENTRIES - 1)).await.is_empty(),
         "the build stops after its first batch"
@@ -629,7 +660,7 @@ async fn a_recall_build_resumed_after_a_restart_finds_every_message_once_despite
     drop(store);
     drop(lock);
 
-    let advances = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let advances = Advances::allowing(0);
     let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
         .expect("the next start resumes the build");
     let late = store
@@ -651,7 +682,7 @@ async fn a_recall_build_resumed_after_a_restart_finds_every_message_once_despite
         .await
         .expect("remove a thread while the index builds");
     assert_eq!(gone.len(), 1);
-    advances.store(UNLIMITED, std::sync::atomic::Ordering::SeqCst);
+    advances.lift();
 
     assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
     for (number, entry) in entries.iter().enumerate() {
