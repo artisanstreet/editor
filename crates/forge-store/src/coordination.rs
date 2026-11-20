@@ -599,7 +599,8 @@ impl Store {
         expected_revision: Option<u64>,
     ) -> Result<Record, CoordinationPutError> {
         let putting = caller.clone();
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&content);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let thread =
                 read::thread(tx, &caller)?.ok_or_else(|| CoordinationFailure::CallerGone {
                     thread: caller.clone(),

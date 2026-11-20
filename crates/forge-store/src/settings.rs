@@ -87,7 +87,8 @@ impl Store {
         value: serde_json::Value,
     ) -> Result<bool, SetSettingError> {
         let saved = key.clone();
-        self.write_acknowledged(move |tx| {
+        let bytes = key.len().saturating_add(crate::encoded::len(&value));
+        self.write_acknowledged_carrying(bytes, move |tx| {
             if read::setting(tx, &key)?.is_some() {
                 return Ok(false);
             }
@@ -130,7 +131,8 @@ impl Store {
         &self,
         mutations: Vec<artisan_api::McpMutation>,
     ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&mutations);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(read::from_value)
                 .transpose()?
@@ -376,7 +378,11 @@ impl Store {
         value: String,
     ) -> Result<bool, SetMcpSecretError> {
         let named = server.clone();
-        self.write_acknowledged(move |tx| {
+        let bytes = server
+            .len()
+            .saturating_add(url.len())
+            .saturating_add(value.len());
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(read::from_value)
                 .transpose()?
@@ -410,12 +416,17 @@ impl Store {
     pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<(), SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
-        self.write_acknowledged(move |tx| crate::secrets::set_secret(tx, &key, value.as_deref()))
-            .await
-            .map_err(|cause| SetSecretError {
-                key: saved,
-                cause: Box::new(cause),
-            })
+        let bytes = key
+            .len()
+            .saturating_add(value.as_ref().map_or(0, String::len));
+        self.write_acknowledged_carrying(bytes, move |tx| {
+            crate::secrets::set_secret(tx, &key, value.as_deref())
+        })
+        .await
+        .map_err(|cause| SetSecretError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn secret_or_insert(
@@ -425,12 +436,15 @@ impl Store {
     ) -> Result<String, SetSecretError> {
         let saved = key.to_owned();
         let key = key.to_owned();
-        self.write_acknowledged(move |tx| crate::secrets::secret_or_insert(tx, &key, &value))
-            .await
-            .map_err(|cause| SetSecretError {
-                key: saved,
-                cause: Box::new(cause),
-            })
+        let bytes = key.len().saturating_add(value.len());
+        self.write_acknowledged_carrying(bytes, move |tx| {
+            crate::secrets::secret_or_insert(tx, &key, &value)
+        })
+        .await
+        .map_err(|cause| SetSecretError {
+            key: saved,
+            cause: Box::new(cause),
+        })
     }
 }
 

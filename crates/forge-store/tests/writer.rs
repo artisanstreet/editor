@@ -165,3 +165,197 @@ async fn a_failed_item_save_says_which_step_of_saving_it_failed() {
         .await
         .expect("the item saves once nothing refuses it");
 }
+
+struct StalledWriter {
+    _directory: tempfile::TempDir,
+    store: forge_store::Store,
+    parent: artisan_api::ThreadId,
+    project: artisan_api::ProjectId,
+    blocker: rusqlite::Connection,
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+async fn stalled_writer() -> StalledWriter {
+    use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId};
+    let directory = tempfile::tempdir().unwrap();
+    let store = forge_store::Store::open(directory.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/agents".into(),
+            name: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let parent = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.clone(),
+            config: EngineConfig::new(EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let blocker = rusqlite::Connection::open(directory.path().join("forge.sqlite3")).unwrap();
+    blocker
+        .execute_batch(include_str!("writer/begin_immediate.sql"))
+        .unwrap();
+    StalledWriter {
+        _directory: directory,
+        store,
+        parent,
+        project,
+        blocker,
+    }
+}
+
+fn agent_item(
+    parent: &artisan_api::ThreadId,
+    child: &artisan_api::ThreadId,
+) -> forge_store::NewItem {
+    use artisan_api::{EngineId, ItemId, ItemKind, Status};
+    forge_store::NewItem {
+        id: ItemId::new(),
+        thread_id: parent.clone(),
+        run_id: None,
+        parent_id: None,
+        native_id: None,
+        status: Status::Running,
+        kind: ItemKind::Agent {
+            name: None,
+            description: "review".into(),
+            prompt: None,
+            agent_id: None,
+            context_used: None,
+            model: None,
+            background: false,
+            result: None,
+            label: None,
+            engine: Some(EngineId::Codex),
+            thread: Some(child.clone()),
+        },
+    }
+}
+
+fn large_message() -> artisan_api::SendMessage {
+    artisan_api::SendMessage {
+        id: artisan_api::ItemId::new(),
+        text: "p".repeat(8 * MIB),
+        images: Vec::new(),
+        config: None,
+        draft: None,
+    }
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+async fn released_after_measuring<F: Future + Send>(
+    store: &forge_store::Store,
+    blocker: rusqlite::Connection,
+    write: F,
+) -> (usize, F::Output) {
+    let mut write = std::pin::pin!(write);
+    let mut queued = 0;
+    std::future::poll_fn(|cx| {
+        assert!(
+            write.as_mut().poll(cx).is_pending(),
+            "the write waits behind the stalled writer"
+        );
+        queued = store.queued_write_bytes();
+        std::task::Poll::Ready(())
+    })
+    .await;
+    blocker
+        .execute_batch(include_str!("writer/rollback.sql"))
+        .unwrap();
+    drop(blocker);
+    let output = write.await;
+    assert_eq!(
+        store.queued_write_bytes(),
+        0,
+        "a finished write gives its bytes back"
+    );
+    (queued, output)
+}
+
+#[tokio::test]
+async fn a_queued_agent_spawn_holds_its_prompt_against_the_write_budget() {
+    use artisan_api::{CreateThread, EngineConfig, EngineId, ThreadId};
+    let stalled = stalled_writer().await;
+    let child = ThreadId::new();
+    let spawn = stalled.store.spawn_agent(
+        agent_item(&stalled.parent, &child),
+        CreateThread {
+            id: child.clone(),
+            project_id: stalled.project.clone(),
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: Some(stalled.parent.clone()),
+            spawned_by: None,
+        },
+        large_message(),
+        forge_store::Acceptance::default(),
+    );
+    let (queued, spawned) = released_after_measuring(&stalled.store, stalled.blocker, spawn).await;
+    assert!(
+        queued >= 8 * MIB,
+        "a queued 8 MiB agent prompt counted as {queued} bytes"
+    );
+    let (_, thread, prompt) = spawned.unwrap();
+    assert_eq!(thread.id, child);
+    assert_eq!(prompt.thread_id, child);
+}
+
+#[tokio::test]
+async fn a_queued_agent_report_holds_its_text_against_the_write_budget() {
+    let stalled = stalled_writer().await;
+    let settle = stalled.store.settle_agent(
+        None,
+        forge_store::AgentReport {
+            thread: stalled.parent.clone(),
+            message: large_message(),
+            acceptance: forge_store::Acceptance::default(),
+        },
+    );
+    let (queued, settled) = released_after_measuring(&stalled.store, stalled.blocker, settle).await;
+    assert!(
+        queued >= 8 * MIB,
+        "a queued 8 MiB agent report counted as {queued} bytes"
+    );
+    assert_eq!(settled.unwrap().0.thread_id, stalled.parent);
+}
+
+#[tokio::test]
+async fn a_queued_first_setting_holds_its_value_against_the_write_budget() {
+    let stalled = stalled_writer().await;
+    let write = stalled
+        .store
+        .set_setting_if_absent("large".into(), serde_json::Value::String("v".repeat(MIB)));
+    let (queued, saved) = released_after_measuring(&stalled.store, stalled.blocker, write).await;
+    assert!(
+        queued >= MIB,
+        "a queued 1 MiB setting counted as {queued} bytes"
+    );
+    assert!(saved.unwrap());
+}
+
+#[tokio::test]
+async fn a_queued_secret_holds_its_value_against_the_write_budget() {
+    let stalled = stalled_writer().await;
+    let write = stalled.store.set_secret("large", Some("s".repeat(8 * MIB)));
+    let (queued, saved) = released_after_measuring(&stalled.store, stalled.blocker, write).await;
+    assert!(
+        queued >= 8 * MIB,
+        "a queued 8 MiB secret counted as {queued} bytes"
+    );
+    saved.unwrap();
+}

@@ -221,7 +221,11 @@ impl Store {
     ) -> Result<(Item, EngineId), SettleAgentError> {
         let blob_dir = self.inner.blob_dir.clone();
         let parent = report.thread.clone();
-        self.write(move |tx| {
+        let bytes = agent
+            .as_ref()
+            .map_or(0, |agent| crate::encoded::len(&agent.kind))
+            .saturating_add(crate::encoded::len(&report.message));
+        self.write_carrying(bytes, move |tx| {
             if let Some(agent) = agent {
                 tx.upsert_item(agent)?;
             }
@@ -249,7 +253,10 @@ impl Store {
     ) -> Result<(Item, Thread, Item), SpawnAgentError> {
         let blob_dir = self.inner.blob_dir.clone();
         let (agent_id, parent) = (agent.id.clone(), agent.thread_id.clone());
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&agent.kind)
+            .saturating_add(crate::encoded::len(&child))
+            .saturating_add(crate::encoded::len(&prompt));
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let agent = tx.upsert_item(agent)?;
             let child = tx.create_thread(child)?;
             let (prompt, _, _) =
@@ -653,7 +660,8 @@ impl Store {
     ) -> Result<Item, AnswerQuestionError> {
         let blob_dir = self.inner.blob_dir.clone();
         let item = id.clone();
-        self.write_acknowledged(move |tx| answer(tx, &id, answers, &blob_dir))
+        let bytes = crate::encoded::len(&answers);
+        self.write_acknowledged_carrying(bytes, move |tx| answer(tx, &id, answers, &blob_dir))
             .await
             .map_err(|cause| AnswerQuestionError {
                 item,
