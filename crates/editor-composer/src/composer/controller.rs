@@ -768,7 +768,7 @@ impl Composer {
         events
     }
 
-    fn reconcile(&mut self) {
+    pub(crate) fn reconcile(&mut self) {
         let Some(session) = &self.session else {
             return;
         };
@@ -997,6 +997,23 @@ impl Composer {
         } else {
             (super::view::Primary::Send, !ready)
         }
+    }
+
+    pub(crate) fn unsendable(&self) -> editor_core::Problem {
+        let uploading = self
+            .attachments
+            .as_ref()
+            .is_some_and(Attachments::uploading);
+        let empty = self.editor.borrow().text().trim().is_empty()
+            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
+            && self.files.is_empty();
+        editor_core::Problem::new(match (uploading, empty) {
+            (true, _) => "This message can't be sent until its images finish uploading.",
+            (false, true) => "This message has nothing to send. Type it again, then send it.",
+            (false, false) => {
+                "This message couldn't be sent again. Check that its Forge is connected, then try again."
+            }
+        })
     }
 
     pub fn send(&mut self, host: &HostData) -> bool {

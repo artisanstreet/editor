@@ -2076,11 +2076,58 @@ fn a_send_that_fails_while_another_thread_is_open_comes_back_and_resends_as_the_
     });
 }
 
-#[test]
-fn an_image_pasted_after_a_send_fails_but_before_the_composer_catches_up_stays() {
+#[expect(
+    clippy::future_not_send,
+    reason = "the composer is UI-thread state, driven here on the test's one thread"
+)]
+async fn composer_whose_send_failed(
+    core: &Core,
+    host: &HostId,
+    sessions: &mut DraftSessions,
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (editor_aqua::composer::view::ComposerOwner, DraftHandle) {
     use editor_aqua::composer::controller::ComposerTarget;
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::view::{ComposerAction, ComposerOwner};
+
+    let owner = editor_aqua::composer::view::ComposerOwner::new(
+        core,
+        sessions,
+        ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        },
+        std::rc::Rc::new(|_| {}),
+    );
+    let sending = DraftHandle::clone(owner.controller.borrow().session.as_ref().unwrap());
+    answer_empty_draft(listener, acceptor, 0).await;
+    wait_for_session(&sending, DraftSession::is_loaded).await;
+    {
+        let mut composer = owner.controller.borrow_mut();
+        composer.sync(core);
+        composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
+        composer.editor.borrow_mut().set_text("send me");
+        composer.edited();
+        assert!(composer.send(core.host(host).unwrap()));
+    }
+    let (mut socket, route, body) = composer_request(listener, acceptor).await;
+    assert!(route.starts_with("PUT /drafts/"), "{route}");
+    respond(
+        &mut socket,
+        json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+    )
+    .await;
+    drop(socket);
+    let (posting, route, _) = composer_request(listener, acceptor).await;
+    assert_eq!(route, "POST /threads HTTP/1.1");
+    refuse(posting).await;
+    wait_for_session(&sending, DraftSession::send_failed).await;
+    (owner, sending)
+}
+
+#[test]
+fn an_image_pasted_after_a_send_fails_but_before_the_composer_catches_up_stays() {
+    use editor_aqua::composer::view::ComposerAction;
     use editor_aqua::ui::text::mount::EditorEvent;
 
     let (directory, mut core, _config, _client) = fixture();
@@ -2088,38 +2135,8 @@ fn an_image_pasted_after_a_send_fails_but_before_the_composer_catches_up_stays()
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "pasting-after-failure");
         let mut sessions = DraftSessions::default();
-        let owner = ComposerOwner::new(
-            &core,
-            &mut sessions,
-            ComposerTarget::NewThread {
-                host: host.clone(),
-                project: Some(artisan_api::ProjectId::from("project")),
-            },
-            std::rc::Rc::new(|_| {}),
-        );
-        let sending = DraftHandle::clone(owner.controller.borrow().session.as_ref().unwrap());
-        answer_empty_draft(&listener, &acceptor, 0).await;
-        wait_for_session(&sending, DraftSession::is_loaded).await;
-        {
-            let mut composer = owner.controller.borrow_mut();
-            composer.sync(&core);
-            composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
-            composer.editor.borrow_mut().set_text("send me");
-            composer.edited();
-            assert!(composer.send(core.host(&host).unwrap()));
-        }
-        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
-        assert!(route.starts_with("PUT /drafts/"), "{route}");
-        respond(
-            &mut socket,
-            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
-        )
-        .await;
-        drop(socket);
-        let (posting, route, _) = composer_request(&listener, &acceptor).await;
-        assert_eq!(route, "POST /threads HTTP/1.1");
-        refuse(posting).await;
-        wait_for_session(&sending, DraftSession::send_failed).await;
+        let (owner, _) =
+            composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
 
         let image = directory.path().join("pasted.png");
         std::fs::write(&image, pasted_png()).unwrap();
@@ -2142,6 +2159,28 @@ fn an_image_pasted_after_a_send_fails_but_before_the_composer_catches_up_stays()
                 .map(|attachments| attachments.items.len()),
             Some(1),
             "the image pasted after the failure is still in the composer"
+        );
+    });
+}
+
+#[test]
+fn trying_again_before_the_composer_catches_up_with_the_failure_sends_again() {
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::view::ComposerAction;
+
+    let (_directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "retrying-before-sync");
+        let mut sessions = DraftSessions::default();
+        let (owner, sending) =
+            composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
+
+        owner.dispatch_with_change(&mut core, ComposerAction::RetryDraft, None);
+
+        assert!(
+            sending.read(DraftSession::sending),
+            "trying again sends the message instead of doing nothing"
         );
     });
 }

@@ -317,8 +317,11 @@ impl ComposerOwner {
                     session.read(super::super::draft_session::DraftSession::send_failed)
                 });
                 if resend {
+                    composer.reconcile();
                     if composer.send(host) {
                         effects.push(ComposerEffect::EditorChanged);
+                    } else {
+                        composer.notice = Some(composer.unsendable());
                     }
                 } else if let Some(session) = &composer.session {
                     session.retry();
