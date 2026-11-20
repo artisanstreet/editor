@@ -254,6 +254,58 @@ fn a_page_loaded_before_a_delete_does_not_bring_back_its_running_run() {
 }
 
 #[test]
+fn a_deleted_threads_guards_retire_once_no_older_request_can_bring_it_back() {
+    let mut forge = forge();
+    publish_and_apply(
+        &mut forge,
+        vec![
+            Event::Thread {
+                thread: thread("busy", 1, 1, false),
+            },
+            Event::Run {
+                run: run("busy", 2, artisan_api::RunState::Running),
+            },
+        ],
+    );
+    forge
+        .host_mut()
+        .stop_optimistically(&ThreadId("busy".into()));
+    publish_and_apply(
+        &mut forge,
+        vec![
+            Event::ThreadRemoved {
+                thread_id: ThreadId("busy".into()),
+            },
+            Event::Thread {
+                thread: thread("other", 4, 4, false),
+            },
+        ],
+    );
+    assert!(title(&forge, "busy").is_none());
+
+    publish_and_apply(
+        &mut forge,
+        vec![
+            Event::Thread {
+                thread: thread("busy", 5, 5, false),
+            },
+            Event::Run {
+                run: run("busy", 6, artisan_api::RunState::Running),
+            },
+        ],
+    );
+    assert_eq!(
+        title(&forge, "busy").as_deref(),
+        Some("busy"),
+        "with no request outstanding from before the delete, Forge's newer word stands"
+    );
+    assert!(
+        working(&forge, "busy"),
+        "the stop made before the delete no longer holds the run stopped"
+    );
+}
+
+#[test]
 fn a_queued_older_run_event_does_not_undo_a_newer_page() {
     let mut forge = forge();
     start_loading(&mut forge, false, ThreadPageDirection::Latest).respond(ThreadsPage {
