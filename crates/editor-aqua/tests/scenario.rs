@@ -8,6 +8,8 @@ mod model_picker;
 mod palette;
 #[path = "scenario/settings.rs"]
 mod settings;
+#[path = "scenario/sidebar.rs"]
+mod sidebar;
 #[path = "scenario/states.rs"]
 mod states;
 #[path = "scenario/thread.rs"]
