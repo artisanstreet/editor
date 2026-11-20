@@ -62,6 +62,12 @@ pub enum ReadRefusal {
     Unsettled(#[source] Arc<LoadSettingsError>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Engine,
+    Project,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
     grammar: Grammar,
@@ -137,21 +143,30 @@ impl Rules {
             ..Self::default()
         };
         let user_home = std::env::home_dir().unwrap_or_else(|| home.to_path_buf());
-        let mut files = vec![(home.join(".claude").join("settings.json"), root)];
+        let mut files = vec![(
+            home.join(".claude").join("settings.json"),
+            root,
+            Origin::Engine,
+        )];
         for dir in project.into_iter().rev() {
-            files.push((dir.join(".claude").join("settings.json"), dir.to_path_buf()));
+            files.push((
+                dir.join(".claude").join("settings.json"),
+                dir.to_path_buf(),
+                Origin::Project,
+            ));
             files.push((
                 dir.join(".claude").join("settings.local.json"),
                 dir.to_path_buf(),
+                Origin::Project,
             ));
         }
-        for (file, root) in files {
+        for (file, root, origin) in files {
             let anchors = Anchors {
                 user_home: &user_home,
                 root: &root,
                 cwd,
             };
-            if let Err(error) = rules.read_file(&file, &anchors) {
+            if let Err(error) = rules.read_file(&file, &anchors, origin) {
                 let logged: &dyn std::error::Error = &error;
                 tracing::warn!(
                     error = logged,
@@ -163,7 +178,12 @@ impl Rules {
         rules
     }
 
-    fn read_file(&mut self, path: &Path, anchors: &Anchors<'_>) -> Result<(), LoadSettingsError> {
+    fn read_file(
+        &mut self,
+        path: &Path,
+        anchors: &Anchors<'_>,
+        origin: Origin,
+    ) -> Result<(), LoadSettingsError> {
         let bytes = match files::read_bounded(path, MAX_SETTINGS_BYTES) {
             Ok(bytes) => bytes,
             Err(ReadFileError::Open { source, .. })
@@ -207,11 +227,11 @@ impl Rules {
         let ask = rule_texts(permissions.get("ask")).ok_or_else(|| malformed("permissions.ask"))?;
         let deny =
             rule_texts(permissions.get("deny")).ok_or_else(|| malformed("permissions.deny"))?;
-        if mode == Some("acceptEdits") {
-            self.accept_edits = true;
-        }
         let grammar = self.grammar;
-        push(&mut self.allow, &allow, List::Allow, anchors, path, grammar);
+        if origin == Origin::Engine {
+            self.accept_edits |= mode == Some("acceptEdits");
+            push(&mut self.allow, &allow, List::Allow, anchors, path, grammar);
+        }
         push(&mut self.ask, &ask, List::Ask, anchors, path, grammar);
         push(&mut self.deny, &deny, List::Deny, anchors, path, grammar);
         Ok(())

@@ -6,14 +6,20 @@ use super::super::{Grammar, Rules, Verdict};
 use crate::claudeai::tools::Call;
 
 fn rules(project: &Path, grammar: Grammar, allow: &Value, deny: &Value) -> Rules {
-    let settings = project.join(".claude");
-    std::fs::create_dir_all(&settings).expect("the settings folder");
-    std::fs::write(
-        settings.join("settings.json"),
-        json!({ "permissions": { "allow": allow, "deny": deny } }).to_string(),
-    )
-    .expect("the settings");
-    Rules::load_for(&project.join("home"), project, grammar)
+    let home = project.join("home");
+    for (folder, permissions) in [
+        (&home, json!({ "allow": allow })),
+        (&project.to_path_buf(), json!({ "deny": deny })),
+    ] {
+        let settings = folder.join(".claude");
+        std::fs::create_dir_all(&settings).expect("the settings folder");
+        std::fs::write(
+            settings.join("settings.json"),
+            json!({ "permissions": permissions }).to_string(),
+        )
+        .expect("the settings");
+    }
+    Rules::load_for(&home, project, grammar)
 }
 
 fn verdict(rules: &Rules, command: &str) -> Option<Verdict> {

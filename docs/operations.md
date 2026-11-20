@@ -28,9 +28,9 @@ A root chosen with `ae install --location` is remembered in a `location` file in
 
 ## Permission modes
 
-Forge doesn't confine engines itself; in Auto each engine's own harness does. Claude runs in its auto permission mode, Codex runs in its `workspace-write` sandbox with its reviewer deciding what else may run, and OpenCode may not read or write anything outside its worktree except the folders Forge hands it, and asks before every shell command. Full access runs every engine without limits.
+Forge doesn't confine engines itself; in Auto each engine's own harness does, except claude.ai, whose tools run inside Forge. In Auto, claude.ai asks before anything only a project's own settings would allow: allow rules and `acceptEdits` in a project's `.claude/settings.json` or `.claude/settings.local.json` never skip approval, while the engine's own Claude settings still can, and a project's ask and deny rules still apply. Claude runs in its auto permission mode, Codex runs in its `workspace-write` sandbox with its reviewer deciding what else may run, and OpenCode may not read or write anything outside its worktree except the folders Forge hands it, and asks before every shell command. Full access runs every engine without limits.
 
-Where Forge runs in a delegated cgroup, every Auto run gets its own cgroup, and when the run ends Forge kills everything in it, including processes detached with `setsid`. Processes a Full-access run detaches, such as a dev server, outlive the run. Agents, new threads and messages started through Artisan's tools never get more access than the stricter of the thread's mode and the mode its running engine was launched in.
+Where Forge runs in a delegated cgroup, every Auto launch gets its own cgroup, and Forge kills everything in it, including processes detached with `setsid`, when that launch ends, which is normally the end of the run. A Codex Auto app-server is shared by the runs that use it and outlives them: its cgroup is killed when the server exits, which is once it has no runs and every thread on it has been idle for 30 minutes. Processes a Full-access run detaches, such as a dev server, outlive the run. Agents, new threads and messages started through Artisan's tools never get more access than the stricter of the thread's mode and the mode its running engine was launched in.
 
 ## Forge is unhealthy
 
