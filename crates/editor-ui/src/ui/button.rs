@@ -105,10 +105,10 @@ impl Button {
                 inset: false,
                 color: t.colors.ring.at(Opacity::FocusRing).to_paint(),
             }]);
-        live::track(element)
+        let element = live::track(element)
             .cursor(CursorIcon::Pointer)
             .focus_visible_style(focus)
-            .hover_style(Style::new())
-            .pressed_style(Style::new().transform(aqua_core::Transform2D::translate(0.0, 1.0)))
+            .hover_style(Style::new());
+        super::kit::control::pressable(element, &t, 1.0)
     }
 }

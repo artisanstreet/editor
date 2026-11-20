@@ -2,6 +2,8 @@ fn close(a: f32, b: f32) -> bool {
     (a - b).abs() < 1e-4
 }
 
+#[path = "ui/code_copy.rs"]
+mod code_copy;
 #[path = "ui/kit/divider.rs"]
 mod divider;
 #[path = "ui/kit/control/hit_area.rs"]
