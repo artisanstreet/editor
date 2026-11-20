@@ -54,7 +54,7 @@ async fn protocol_output_errors_fail_even_after_a_successful_result() {
             &env,
         ));
         let outcome = running
-            .outcome(std::time::Duration::from_secs(5))
+            .outcome(test_support::wait::LIVENESS)
             .await
             .expect("protocol failure must not await a blocked process");
         assert_eq!(outcome.status(), RunStatus::Failed);
