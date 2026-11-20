@@ -98,12 +98,11 @@ fn still_removable(
         return Ok(false);
     }
     let ids = serde_json::to_string(family).map_err(StorageError::encode::<[ThreadId]>)?;
-    let eligible = conn
+    let eligible: usize = conn
         .prepare_cached(ELIGIBLE)
         .at("retention/eligible.sql")?
-        .query_map(params![cutoff, ids], |row| row.get::<_, String>(0))
-        .at("retention/eligible.sql")?
-        .count();
+        .query_row(params![cutoff, ids], |row| row.get(0))
+        .at("retention/eligible.sql")?;
     if eligible != family.len() {
         return Ok(false);
     }
@@ -216,3 +215,7 @@ fn family_root<'a>(
     }
     root
 }
+
+#[cfg(test)]
+#[path = "../tests/retention/unit.rs"]
+mod tests;

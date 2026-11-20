@@ -1,4 +1,4 @@
-SELECT t.id
+SELECT COUNT(*)
 FROM threads t
 WHERE t.id IN (SELECT value FROM json_each(?2))
   AND MAX(COALESCE(json_extract(t.body, '$.activity_at'), 0),
