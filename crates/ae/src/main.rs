@@ -45,7 +45,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "Install or reinstall the Editor and Forge (asks where)")]
-    Install(install::InstallArgs),
+    Install(Box<install::InstallArgs>),
     #[command(about = "Update what is installed to the newest release")]
     Update {
         #[arg(long, short, help = "Don't ask to confirm")]

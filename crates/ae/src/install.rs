@@ -663,8 +663,19 @@ pub(crate) struct InstallArgs {
     bundled_editor: Option<PathBuf>,
     #[arg(long, hide = true)]
     bundled_linux_ae: Option<PathBuf>,
-    #[arg(long, hide = true, value_name = "PATH")]
+    #[arg(long, hide = true, value_name = "PATH", requires = "replace_ae_found")]
     replace_ae: Option<PathBuf>,
+    #[arg(long, hide = true, value_name = "WHAT", value_parser = platform::Found::parse, requires = "replace_ae")]
+    replace_ae_found: Option<platform::Found>,
+}
+
+impl InstallArgs {
+    fn agreed(&self) -> Option<platform::Consent> {
+        Some(platform::Consent {
+            path: self.replace_ae.clone()?,
+            found: self.replace_ae_found.clone()?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1170,7 +1181,7 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
             return Ok(());
         }
     }
-    let Some(placement) = place_ae(args.yes, args.apply, args.replace_ae.as_deref())? else {
+    let Some(placement) = place_ae(args.yes, args.apply, args.agreed().as_ref())? else {
         ui::outro("Nothing was installed.");
         return Ok(());
     };
@@ -1230,7 +1241,7 @@ fn confirmed(question: &str) -> Result<bool, AskError> {
 
 struct AePlacement {
     replaceable: platform::Replaceable,
-    agreed: Option<PathBuf>,
+    agreed: Option<platform::Consent>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1244,7 +1255,7 @@ pub(crate) enum PlaceAeError {
 fn place_ae(
     yes: bool,
     apply: bool,
-    agreed: Option<&Path>,
+    agreed: Option<&platform::Consent>,
 ) -> Result<Option<AePlacement>, PlaceAeError> {
     let (file, replaceable) = match platform::existing_ae()? {
         platform::ExistingAe::Artisans(replaceable) => {
@@ -1255,7 +1266,8 @@ fn place_ae(
         }
         platform::ExistingAe::Foreign { path, replaceable } => (path, replaceable),
     };
-    let replace = if agreed == Some(file.as_path()) {
+    let found = replaceable.consent(&file);
+    let replace = if agreed == Some(&found) {
         true
     } else if ui::interactive() && !apply {
         confirmed(&format!(
@@ -1271,14 +1283,14 @@ fn place_ae(
     };
     Ok(replace.then_some(AePlacement {
         replaceable,
-        agreed: Some(file),
+        agreed: Some(found),
     }))
 }
 
 #[derive(Debug)]
 struct Forwarded {
     yes: bool,
-    replace_ae: Option<PathBuf>,
+    replace_ae: Option<platform::Consent>,
 }
 
 impl Forwarded {
@@ -1287,9 +1299,11 @@ impl Forwarded {
         if self.yes {
             arguments.push("--yes".into());
         }
-        if let Some(path) = &self.replace_ae {
+        if let Some(consent) = &self.replace_ae {
             arguments.push("--replace-ae".into());
-            arguments.push(path.clone().into_os_string());
+            arguments.push(consent.path.clone().into_os_string());
+            arguments.push("--replace-ae-found".into());
+            arguments.push(consent.found.argument().into());
         }
         arguments
     }

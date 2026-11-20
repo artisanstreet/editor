@@ -703,6 +703,65 @@ mod tests {
         );
     }
 
+    fn consent_to_replace(contents: &str) -> String {
+        use sha2::Digest as _;
+        format!("file:{}", hex::encode(sha2::Sha256::digest(contents)))
+    }
+
+    #[test]
+    fn consent_handed_over_from_an_interactive_install_replaces_only_the_ae_it_was_given_for() {
+        const THEIRS: &str = "#!/bin/sh\necho my own ae\n";
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let theirs = sandbox.root.path().join("home/.local/bin/ae");
+        script(&theirs, THEIRS);
+        let stage = ae_only_stage(&sandbox);
+        let handed_over = |found: &str| {
+            sandbox.ae(&[
+                "install",
+                "--apply",
+                "--editor",
+                "none",
+                "--forge",
+                "none",
+                "--replace-ae",
+                &theirs.to_string_lossy(),
+                "--replace-ae-found",
+                found,
+                "--from",
+                &stage,
+            ])
+        };
+
+        let changed_since = handed_over(&consent_to_replace("#!/bin/sh\necho an older ae\n"));
+
+        assert!(
+            !changed_since.status.success(),
+            "consent given for another file doesn't cover this one"
+        );
+        assert!(
+            String::from_utf8_lossy(&changed_since.stderr).contains("--yes"),
+            "{}",
+            String::from_utf8_lossy(&changed_since.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("their ae is still there"),
+            THEIRS
+        );
+
+        let agreed = handed_over(&consent_to_replace(THEIRS));
+
+        assert!(
+            agreed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&agreed.stderr)
+        );
+        assert_eq!(
+            std::fs::read_link(&theirs).expect("ae is linked"),
+            artisans_ae(&sandbox)
+        );
+    }
+
     #[test]
     fn a_failed_install_keeps_the_ae_that_isnt_artisans_and_a_successful_one_replaces_it() {
         let port = PortReservation::loopback();

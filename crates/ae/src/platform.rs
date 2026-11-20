@@ -124,11 +124,45 @@ pub(crate) enum LaunchEditorError {
 enum Held {
     Nothing,
     Link(PathBuf),
+    File { sha256: String },
     Other,
 }
 
 #[derive(Debug)]
 pub(crate) struct Replaceable(Held);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Found(Held);
+
+impl Found {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        let held = match value.split_once(':') {
+            Some(("link", target)) => Held::Link(PathBuf::from(target)),
+            Some(("file", sha256)) => Held::File {
+                sha256: sha256.to_owned(),
+            },
+            None if value == "nothing" => Held::Nothing,
+            None if value == "other" => Held::Other,
+            Some(_) | None => return Err(format!("{value:?} doesn't describe a file")),
+        };
+        Ok(Self(held))
+    }
+
+    pub(crate) fn argument(&self) -> String {
+        match &self.0 {
+            Held::Nothing => "nothing".to_owned(),
+            Held::Link(target) => format!("link:{}", target.to_string_lossy()),
+            Held::File { sha256 } => format!("file:{sha256}"),
+            Held::Other => "other".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Consent {
+    pub(crate) path: PathBuf,
+    pub(crate) found: Found,
+}
 
 #[derive(Debug)]
 pub(crate) enum ExistingAe {
@@ -140,8 +174,12 @@ pub(crate) enum ExistingAe {
 }
 
 fn held(link: &Path) -> std::io::Result<Held> {
+    use sha2::Digest as _;
     match link.symlink_metadata() {
         Ok(metadata) if metadata.is_symlink() => Ok(Held::Link(std::fs::read_link(link)?)),
+        Ok(metadata) if metadata.is_file() => Ok(Held::File {
+            sha256: hex::encode(sha2::Sha256::digest(std::fs::read(link)?)),
+        }),
         Ok(_) => Ok(Held::Other),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Held::Nothing),
         Err(error) => Err(error),
@@ -152,7 +190,16 @@ fn artisans(held: &Held, binary: &Path) -> bool {
     match held {
         Held::Nothing => true,
         Held::Link(target) => target == binary,
-        Held::Other => false,
+        Held::File { .. } | Held::Other => false,
+    }
+}
+
+impl Replaceable {
+    pub(crate) fn consent(&self, path: &Path) -> Consent {
+        Consent {
+            path: path.to_owned(),
+            found: Found(self.0.clone()),
+        }
     }
 }
 
