@@ -9,6 +9,8 @@ use std::sync::LazyLock;
 const THREADS: usize = 300;
 const MESSAGES: usize = 40;
 const ARCHIVED: usize = 60;
+const LONG_LINE_THREADS: usize = 30;
+const LONG_LINE_BYTES: usize = 60 * 1024;
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -36,7 +38,7 @@ fn message(thread: usize, index: usize) -> String {
     format!("Thread {thread} reply {index}. {}", paragraph.repeat(16))
 }
 
-static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
+fn empty_store() -> (tempfile::TempDir, tokio::runtime::Runtime, Store, ProjectId) {
     let dir = tempfile::tempdir().expect("bench: temp dir");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -44,28 +46,56 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         .build()
         .expect("bench: runtime");
     let store = Store::open(dir.path()).expect("bench: store");
+    let project = runtime
+        .block_on(store.create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/app".into(),
+            name: None,
+        }))
+        .expect("bench: project")
+        .id;
+    (dir, runtime, store, project)
+}
+
+async fn new_thread(store: &Store, project: &ProjectId, thread: usize) -> ThreadId {
+    store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.clone(),
+            config: EngineConfig::new(EngineId::Claude),
+            title: Some(format!("Thread {thread}")),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .expect("bench: thread")
+        .id
+}
+
+static LONG_LINES: LazyLock<Fixture> = LazyLock::new(|| {
+    let (dir, runtime, store, project) = empty_store();
+    let line = "minified(bundle);".repeat(LONG_LINE_BYTES / 17);
     runtime.block_on(async {
-        let project = store
-            .create_project(CreateProject {
-                id: ProjectId::new(),
-                path: "/work/app".into(),
-                name: None,
-            })
-            .await
-            .expect("bench: project");
-        for thread in 0..THREADS {
-            let id = store
-                .create_thread(CreateThread {
-                    id: ThreadId::new(),
-                    project_id: project.id.clone(),
-                    config: EngineConfig::new(EngineId::Claude),
-                    title: Some(format!("Thread {thread}")),
-                    parent_thread_id: None,
-                    spawned_by: None,
-                })
+        for thread in 0..LONG_LINE_THREADS {
+            let id = new_thread(&store, &project, thread).await;
+            store
+                .upsert_item(said(&id, format!("{line} heron")))
                 .await
-                .expect("bench: thread")
-                .id;
+                .expect("bench: item");
+        }
+    });
+    Fixture {
+        _dir: dir,
+        runtime,
+        store,
+    }
+});
+
+static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
+    let (dir, runtime, store, project) = empty_store();
+    runtime.block_on(async {
+        for thread in 0..THREADS {
+            let id = new_thread(&store, &project, thread).await;
             for index in 0..MESSAGES {
                 let text = if thread < ARCHIVED && index == 0 {
                     format!("{} archived pelican", message(thread, index))
@@ -105,7 +135,10 @@ fn main() {
 }
 
 fn search(bencher: Bencher<'_, '_>, query: &str) {
-    let fixture = &*FIXTURE;
+    search_in(bencher, &FIXTURE, query);
+}
+
+fn search_in(bencher: Bencher<'_, '_>, fixture: &Fixture, query: &str) {
     bencher.bench_local(|| {
         fixture
             .runtime
@@ -145,4 +178,9 @@ fn missing_accented_word(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = 10)]
 fn missing_two_letters(bencher: Bencher<'_, '_>) {
     search(bencher, "qz");
+}
+
+#[divan::bench(sample_count = 10)]
+fn match_at_the_end_of_a_long_line(bencher: Bencher<'_, '_>) {
+    search_in(bencher, &LONG_LINES, "heron");
 }

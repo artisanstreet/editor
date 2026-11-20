@@ -83,6 +83,11 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 editor-aqua = { path = ".", features = ["test-support"] }
 test-support = { workspace = true, features = ["shell", "net", "tokio", "http"] }
+divan.workspace = true
+
+[[bench]]
+name = "notifications"
+harness = false
 
 [build-dependencies]
 artisan-payload.workspace = true

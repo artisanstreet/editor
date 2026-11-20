@@ -8,6 +8,7 @@ const SMALL_FENCES: usize = 200;
 const STREAMED_BYTES: usize = 200 * 1024;
 const DELTA_BYTES: usize = 50;
 const SHAPED_BYTES: usize = 64 * 1024;
+const RICH_STEPS: usize = 100;
 
 fn long_fence() -> String {
     let mut source = String::from("Here is the renderer:\n\n```rust\n");
@@ -32,6 +33,20 @@ fn many_fences() -> String {
         .expect("bench: write to a String");
     }
     source.push_str("Streaming tail");
+    source
+}
+
+fn rich_fences_in_a_list() -> String {
+    let mut source = String::from("Here is every measurement:\n\n");
+    for step in 0..RICH_STEPS {
+        writeln!(
+            source,
+            "{}. Step {step}\n\n   ```artisan-heatmap\n   {{\"values\":[[{step},2],[3,4]]}}\n   ```\n",
+            step + 1
+        )
+        .expect("bench: write to a String");
+    }
+    source.push_str("And it keeps streaming");
     source
 }
 
@@ -171,4 +186,9 @@ fn prepare_after_a_long_closed_fence(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = 10)]
 fn prepare_after_many_fences(bencher: Bencher<'_, '_>) {
     prepare_growing(bencher, &many_fences());
+}
+
+#[divan::bench(sample_count = 10)]
+fn prepare_after_rich_fences_inside_list_items(bencher: Bencher<'_, '_>) {
+    prepare_growing(bencher, &rich_fences_in_a_list());
 }

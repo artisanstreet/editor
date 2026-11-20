@@ -39,10 +39,22 @@ divan.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 editor-conversation = { path = ".", features = ["test-support"] }
-test-support = { workspace = true, features = ["clock", "editor-core"] }
+test-support = { workspace = true, features = ["clock", "editor-core", "editor", "tokio", "http", "net"] }
 
 [[bench]]
 name = "fold"
+harness = false
+
+[[bench]]
+name = "thread"
+harness = false
+
+[[bench]]
+name = "factory"
+harness = false
+
+[[bench]]
+name = "controller"
 harness = false
 
 [lints]
