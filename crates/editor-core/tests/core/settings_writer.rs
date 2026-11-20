@@ -40,14 +40,15 @@ impl Folder {
 
     fn slow_disk(&self) {
         std::fs::remove_file(self.settings()).expect("remove settings.json");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(self.settings())
-                .status()
-                .expect("mkfifo")
-                .success(),
-            "mkfifo makes settings.json wait for the test"
-        );
+        fifo(&self.settings());
+    }
+
+    fn save_opened(&self) -> File {
+        let opened = last_save_opened(&self.settings());
+        let next = self.directory.path().join("next-settings.json");
+        fifo(&next);
+        std::fs::rename(&next, self.settings()).expect("give the next save its own settings.json");
+        opened
     }
 
     fn read_only(&self) {
@@ -69,7 +70,18 @@ impl Folder {
     }
 }
 
-fn reader_opened(path: &Path) -> File {
+fn fifo(path: &Path) {
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo")
+            .success(),
+        "mkfifo makes settings.json wait for the test"
+    );
+}
+
+fn last_save_opened(path: &Path) -> File {
     let (opened, writer) = std::sync::mpsc::channel();
     let path = path.to_owned();
     std::thread::spawn(move || {
@@ -80,7 +92,7 @@ fn reader_opened(path: &Path) -> File {
         opened.send(fifo).expect("the test waits for the save");
     });
     writer
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(test_support::wait::LIVENESS)
         .expect("a save reads settings.json")
 }
 
@@ -103,12 +115,12 @@ fn an_older_failed_save_does_not_undo_a_newer_choice() {
     folder.slow_disk();
     core.set_setting("browser", json!("second"))
         .expect("the first change is taken");
-    let first_save = reader_opened(&folder.settings());
+    let first_save = folder.save_opened();
     core.set_setting("browser", json!("third"))
         .expect("the newer change is taken");
     folder.read_only();
     answer(first_save, &json!({"browser": "first"}));
-    let second_save = reader_opened(&folder.settings());
+    let second_save = last_save_opened(&folder.settings());
     core.drain();
     core.drain();
 
@@ -135,12 +147,12 @@ fn a_rolled_back_change_stays_reported_after_a_later_save_lands() {
     folder.slow_disk();
     core.set_setting("browser", json!("second"))
         .expect("the first change is taken");
-    let first_save = reader_opened(&folder.settings());
+    let first_save = folder.save_opened();
     core.set_setting("dark_mode", json!(true))
         .expect("the other change is taken");
     folder.read_only();
     answer(first_save, &json!({"browser": "first", "dark_mode": false}));
-    let second_save = reader_opened(&folder.settings());
+    let second_save = last_save_opened(&folder.settings());
     folder.writable();
     answer(
         second_save,
@@ -216,7 +228,7 @@ fn closing_the_editor_waits_for_every_queued_settings_change() {
     folder.slow_disk();
     core.set_setting("dark_mode", json!(true))
         .expect("the first change is taken");
-    let first_save = reader_opened(&folder.settings());
+    let first_save = last_save_opened(&folder.settings());
     core.set_setting("browser", json!("helium"))
         .expect("the queued change is taken");
     drop(core);
