@@ -74,6 +74,10 @@ fn the_last_store_dropped_on_the_writer_thread_does_not_wait_for_the_recall_buil
 fn a_start_with_no_database_upgrade_never_asks_systemd_for_more_time() {
     let dir = tempfile::tempdir().expect("create the data folder");
     drop(Store::open(dir.path()).expect("the first start creates the database"));
+    rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database beside the store")
+        .execute_batch(include_str!("../recall/forget_index.sql"))
+        .expect("make the next start reset the recall index");
     let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = Arc::clone(&beats);
     let lock = DataLock::acquire(dir.path()).expect("hold the data folder");
@@ -81,7 +85,7 @@ fn a_start_with_no_database_upgrade_never_asks_systemd_for_more_time() {
     let store = Store::open_restoring_in(
         &lock,
         Environment {
-            progress: crate::Progress::every(Duration::MAX).with_heartbeat(move || {
+            progress: crate::Progress::every(Duration::ZERO).with_heartbeat(move || {
                 counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }),
             ..Environment::system()

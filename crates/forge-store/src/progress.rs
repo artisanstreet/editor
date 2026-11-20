@@ -70,13 +70,13 @@ impl std::fmt::Debug for Progress {
 }
 
 pub(crate) fn watch(conn: &mut Connection, step: Step, pace: &Progress) -> rusqlite::Result<()> {
-    if step.upgrades() {
-        (pace.heartbeat)();
+    let heartbeat = step.upgrades().then(|| Arc::clone(&pace.heartbeat));
+    if let Some(heartbeat) = &heartbeat {
+        heartbeat();
     }
     let started = Instant::now();
     let mut reported = started;
     let every = pace.every;
-    let heartbeat = Arc::clone(&pace.heartbeat);
     conn.progress_handler(
         OPERATIONS_PER_CHECK,
         Some(move || {
@@ -86,7 +86,9 @@ pub(crate) fn watch(conn: &mut Connection, step: Step, pace: &Progress) -> rusql
                     elapsed_s = started.elapsed().as_secs(),
                     "still {step} before Forge serves"
                 );
-                heartbeat();
+                if let Some(heartbeat) = &heartbeat {
+                    heartbeat();
+                }
             }
             false
         }),
@@ -96,3 +98,7 @@ pub(crate) fn watch(conn: &mut Connection, step: Step, pace: &Progress) -> rusql
 pub(crate) fn unwatch(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.progress_handler(0, None::<fn() -> bool>)
 }
+
+#[cfg(test)]
+#[path = "../tests/progress/unit.rs"]
+mod tests;
