@@ -4613,24 +4613,6 @@ fn parse_xy_axis_categories(rest: &str) -> Vec<String> {
         .collect()
 }
 
-#[allow(dead_code)]
-fn parse_xy_series_line(line: &str) -> Option<(String, Vec<String>)> {
-    let mut parts = line.splitn(2, ' ');
-    let series = parts.next()?.trim().to_string();
-    let rest = parts.next()?.trim();
-    let values = rest
-        .trim_matches(|ch| ch == '[' || ch == ']')
-        .split(',')
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if series.is_empty() {
-        None
-    } else {
-        Some((series, values))
-    }
-}
-
 fn parse_state_diagram(input: &str) -> Result<ParseOutput> {
     let mut graph = Graph::new();
     graph.kind = DiagramKind::State;

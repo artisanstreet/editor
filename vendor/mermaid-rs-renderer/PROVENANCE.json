@@ -33,6 +33,10 @@
     {
       "file": "src/render.rs",
       "reason": "PNG output (write_output_png, resvg colour and font helpers and their tests) removed."
+    },
+    {
+      "file": "src/parser.rs",
+      "reason": "Dead parse_xy_series_line removed."
     }
   ],
   "omitted_upstream_files": [
@@ -497,8 +501,8 @@
     {
       "path": "src/parser.rs",
       "upstream_sha256": "043aa5df6e944be02e50d879a2c4c384fae4dd9a06ad540b5e8c8b55d6972dd1",
-      "sha256": "043aa5df6e944be02e50d879a2c4c384fae4dd9a06ad540b5e8c8b55d6972dd1",
-      "modified": false
+      "sha256": "e9ad3731b49123ebbfbab4c9b0631e1fb83764026beea9a5b2d6d0d21d80a36b",
+      "modified": true
     },
     {
       "path": "src/render.rs",
