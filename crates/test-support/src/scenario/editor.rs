@@ -342,8 +342,26 @@ fn window(core: Core) -> Window {
     }
 }
 
-impl Editor {
-    fn start(scenario: Scenario, opening: Opening) -> Self {
+struct Prepared {
+    directory: TempDir,
+    files: EditorFiles,
+    screen: Screen,
+    forges: Vec<ForgeServer>,
+    engine: ReplayingEngine,
+    hosts: usize,
+}
+
+impl Prepared {
+    fn core(files: EditorFiles, screen: Screen) -> Core {
+        let mut core = editor_aqua::qualification::sign_in::open_signed_in(files)
+            .expect("open the signed-in Editor's core");
+        core.navigate(screen);
+        core
+    }
+}
+
+impl Scenario {
+    fn prepare(self, opening: Opening) -> Prepared {
         let directory = tempfile::tempdir().expect("create the scenario folder");
         let work = directory.path().join("work");
         let editor_dir = directory.path().join("editor");
@@ -351,7 +369,7 @@ impl Editor {
             std::fs::create_dir_all(folder)
                 .unwrap_or_else(|error| panic!("create {}: {error}", folder.display()));
         }
-        let served = serve(scenario, directory.path(), &work);
+        let served = serve(self, directory.path(), &work);
         let files = EditorFiles { dir: editor_dir };
         join_forges(&files, "Test", &served.invites).expect("sign the Editor in to its Forges");
         let host = &served
@@ -359,9 +377,50 @@ impl Editor {
             .first()
             .expect("invariant: a scenario starts with one Forge")
             .host;
-        let mut core = editor_aqua::qualification::sign_in::open_signed_in(files)
-            .expect("open the signed-in Editor's core");
-        core.navigate(screen(opening, host));
+        let screen = screen(opening, host);
+        let hosts = served.invites.len();
+        Prepared {
+            directory,
+            files,
+            screen,
+            forges: served.forges,
+            engine: served.engine,
+            hosts,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Scenario {
+    #[must_use]
+    pub fn open_native(self, opening: Opening) -> super::uia::NativeEditor {
+        let Prepared {
+            directory,
+            files,
+            screen,
+            forges,
+            engine,
+            ..
+        } = self.prepare(opening);
+        super::uia::NativeEditor::open(
+            move || Prepared::core(files, screen),
+            (WIDTH, HEIGHT),
+            (directory, forges, engine),
+        )
+    }
+}
+
+impl Editor {
+    fn start(scenario: Scenario, opening: Opening) -> Self {
+        let Prepared {
+            directory,
+            files,
+            screen,
+            forges,
+            engine,
+            hosts,
+        } = scenario.prepare(opening);
+        let core = Prepared::core(files, screen);
         let Window {
             mut aqua,
             mut app,
@@ -381,15 +440,14 @@ impl Editor {
         aqua.dispatch_window_event(&mut app, id, &WindowEvent::Resized(id, size));
         aqua.dispatch_input(&mut app, id, &InputEvent::Focused(true));
         bridge.connect();
-        let hosts = served.invites.len();
         let mut editor = Self {
             aqua,
             app,
             id,
             bridge,
             published,
-            engine: served.engine,
-            forges: served.forges,
+            engine,
+            forges,
             stopped: Vec::new(),
             directory,
         };

@@ -5,14 +5,21 @@
 )]
 
 use super::editor::Editor;
-use aqua::AccessSink;
+use crate::replay::ReplayingEngine;
+use aqua::{AccessSink, Aqua, AquaConfig};
 use aqua_a11y_uia::{Connection, UiaAdapter};
 use aqua_protocol::{A11yActionRequest, AccessTreeUpdate};
+use editor_aqua::core::Core;
+use editor_aqua::qualification::fixture::ForgeServer;
+use editor_aqua::shell::application::ShellApplication;
+use editor_aqua::shell::host::ShellResources;
+use editor_aqua::shell::root::RootViews;
 use std::fmt::Write as _;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HWND;
+use tempfile::TempDir;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoCreateInstance,
     CoInitializeEx,
@@ -24,18 +31,21 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState_Indeterminate, ToggleState_On,
     UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID, UIA_CheckBoxControlTypeId,
     UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DocumentControlTypeId,
-    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId,
-    UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_PATTERN_ID,
-    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_SliderControlTypeId, UIA_TabControlTypeId,
-    UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_TogglePatternId, UIA_ValuePatternId,
-    UIA_WindowControlTypeId,
+    UIA_E_ELEMENTNOTAVAILABLE, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
+    UIA_GroupControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_PATTERN_ID, UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId,
+    UIA_RadioButtonControlTypeId, UIA_ScrollBarControlTypeId, UIA_SliderControlTypeId,
+    UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_TogglePatternId,
+    UIA_ValuePatternId, UIA_WindowControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNA,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, GetClassNameW,
+    GetWindowThreadProcessId, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
+    SW_SHOWNA, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
+use windows::core::BOOL;
 use windows::core::w;
 
 const ANSWER: Duration = Duration::from_secs(20);
@@ -69,9 +79,27 @@ enum Request {
     Invoke { name: String },
     Toggle { name: String },
     Expand { name: String },
+    SetValue { name: String, value: String },
 }
 
-type Reply = Result<String, String>;
+#[derive(Debug)]
+enum Failure {
+    Vanished(String),
+    Native(String),
+    Missing(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vanished(text) => write!(f, "an element vanished mid-read: {text}"),
+            Self::Native(text) => f.write_str(text),
+            Self::Missing(name) => write!(f, "UI Automation has no element named {name:?}"),
+        }
+    }
+}
+
+type Reply = Result<String, Failure>;
 
 pub struct Uia {
     hwnd: isize,
@@ -80,11 +108,15 @@ pub struct Uia {
     client: Option<JoinHandle<()>>,
 }
 
-fn native(error: &windows::core::Error) -> String {
-    format!("{error} ({:?})", error.code())
+fn native(error: &windows::core::Error) -> Failure {
+    let text = format!("{error} ({:?})", error.code());
+    match error.code().0.cast_unsigned() {
+        UIA_E_ELEMENTNOTAVAILABLE => Failure::Vanished(text),
+        _ => Failure::Native(text),
+    }
 }
 
-fn absent<T>(result: windows::core::Result<T>) -> Result<Option<T>, String> {
+fn absent<T>(result: windows::core::Result<T>) -> Result<Option<T>, Failure> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.code().is_ok() => Ok(None),
@@ -129,7 +161,7 @@ struct Seen {
     states: Vec<&'static str>,
 }
 
-unsafe fn seen(element: &IUIAutomationElement) -> Result<Seen, String> {
+unsafe fn seen(element: &IUIAutomationElement) -> Result<Seen, Failure> {
     unsafe {
         let kind = kind(
             element
@@ -207,7 +239,7 @@ unsafe fn write_tree(
     walker: &IUIAutomationTreeWalker,
     element: &IUIAutomationElement,
     depth: usize,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     unsafe {
         let seen = seen(element)?;
         let structural = matches!(seen.kind.as_str(), "Group" | "Pane" | "Custom")
@@ -246,7 +278,7 @@ unsafe fn find<P: windows::core::Interface>(
     element: &IUIAutomationElement,
     name: &str,
     pattern: UIA_PATTERN_ID,
-) -> Result<Option<P>, String> {
+) -> Result<Option<P>, Failure> {
     unsafe {
         if element.CurrentName().map_err(|error| native(&error))? == name
             && let Some(found) = absent(element.GetCurrentPatternAs::<P>(pattern))?
@@ -270,7 +302,6 @@ unsafe fn answer(client: &IUIAutomation, hwnd: isize, request: &Request) -> Repl
             .ElementFromHandle(HWND(hwnd as *mut core::ffi::c_void))
             .map_err(|error| native(&error))?;
         let walker = client.ControlViewWalker().map_err(|error| native(&error))?;
-        let missing = |name: &str| format!("UI Automation has no element named {name:?}");
         match request {
             Request::Tree => {
                 let mut out = String::new();
@@ -279,7 +310,7 @@ unsafe fn answer(client: &IUIAutomation, hwnd: isize, request: &Request) -> Repl
             }
             Request::Invoke { name } => {
                 find::<IUIAutomationInvokePattern>(&walker, &root, name, UIA_InvokePatternId)?
-                    .ok_or_else(|| missing(name))?
+                    .ok_or_else(|| Failure::Missing(name.clone()))?
                     .Invoke()
                     .map(|()| String::new())
                     .map_err(|error| native(&error))
@@ -290,14 +321,21 @@ unsafe fn answer(client: &IUIAutomation, hwnd: isize, request: &Request) -> Repl
                 name,
                 UIA_ExpandCollapsePatternId,
             )?
-            .ok_or_else(|| missing(name))?
+            .ok_or_else(|| Failure::Missing(name.clone()))?
             .Expand()
             .map(|()| String::new())
             .map_err(|error| native(&error)),
             Request::Toggle { name } => {
                 find::<IUIAutomationTogglePattern>(&walker, &root, name, UIA_TogglePatternId)?
-                    .ok_or_else(|| missing(name))?
+                    .ok_or_else(|| Failure::Missing(name.clone()))?
                     .Toggle()
+                    .map(|()| String::new())
+                    .map_err(|error| native(&error))
+            }
+            Request::SetValue { name, value } => {
+                find::<IUIAutomationValuePattern>(&walker, &root, name, UIA_ValuePatternId)?
+                    .ok_or_else(|| Failure::Missing(name.clone()))?
+                    .SetValue(&windows::core::BSTR::from(value.as_str()))
                     .map(|()| String::new())
                     .map_err(|error| native(&error))
             }
@@ -315,7 +353,10 @@ fn client(hwnd: isize, requests: Receiver<Request>, replies: Sender<Reply>) -> J
         for request in requests {
             let reply = match &client {
                 Ok(client) => unsafe { answer(client, hwnd, &request) },
-                Err(error) => Err(format!("start UI Automation: {}", native(error))),
+                Err(error) => Err(Failure::Native(format!(
+                    "start UI Automation: {}",
+                    native(error)
+                ))),
             };
             if replies.send(reply).is_err() {
                 return;
@@ -377,6 +418,12 @@ impl Editor {
 
     #[track_caller]
     fn ask(&mut self, uia: &Uia, request: &Request) -> String {
+        self.reply(uia, request)
+            .unwrap_or_else(|error| panic!("UI Automation failed {request:?}: {error}"))
+    }
+
+    #[track_caller]
+    fn reply(&mut self, uia: &Uia, request: &Request) -> Reply {
         uia.requests
             .as_ref()
             .expect("invariant: the UI Automation client runs until the reader drops")
@@ -387,8 +434,7 @@ impl Editor {
             pump_messages();
             self.frame();
             match uia.replies.try_recv() {
-                Ok(Ok(answer)) => return answer,
-                Ok(Err(error)) => panic!("UI Automation failed {request:?}: {error}"),
+                Ok(reply) => return reply,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     panic!("the UI Automation client stopped during {request:?}")
@@ -408,7 +454,11 @@ impl Editor {
         let mut previous = String::new();
         let mut quiet_since = Instant::now();
         loop {
-            let tree = self.ask(uia, &Request::Tree);
+            let tree = match self.reply(uia, &Request::Tree) {
+                Ok(tree) => tree,
+                Err(Failure::Vanished(_)) => String::new(),
+                Err(error) => panic!("UI Automation failed to read the tree: {error}"),
+            };
             if !done(&tree) || tree != previous {
                 quiet_since = Instant::now();
             }
@@ -469,6 +519,207 @@ impl Drop for Uia {
 impl std::fmt::Debug for Uia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Uia")
+            .field("hwnd", &self.hwnd)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct NativeEditor {
+    hwnd: isize,
+    requests: Option<Sender<Request>>,
+    replies: Receiver<Reply>,
+    client: Option<JoinHandle<()>>,
+    window: Option<JoinHandle<()>>,
+    closed: Receiver<Result<(), String>>,
+    _prepared: (TempDir, Vec<ForgeServer>, ReplayingEngine),
+}
+
+struct Search {
+    process: u32,
+    found: Option<HWND>,
+}
+
+unsafe extern "system" fn editor_window(hwnd: HWND, search: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(search.0 as *mut Search) };
+    let mut process = 0;
+    let _thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process)) };
+    let mut class = [0u16; 32];
+    let length = unsafe { GetClassNameW(hwnd, &mut class) };
+    let aqua = length > 0
+        && String::from_utf16_lossy(&class[..length.unsigned_abs() as usize]) == "AquaShell32";
+    if process == search.process && aqua && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        search.found = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+fn find_editor_window() -> Option<isize> {
+    let mut search = Search {
+        process: std::process::id(),
+        found: None,
+    };
+    let enumerated = unsafe {
+        EnumWindows(
+            Some(editor_window),
+            LPARAM(std::ptr::from_mut(&mut search) as isize),
+        )
+    };
+    match (search.found, enumerated) {
+        (Some(hwnd), _) => Some(hwnd.0 as isize),
+        (None, Ok(())) => None,
+        (None, Err(error)) => panic!("list this process's windows: {}", native(&error)),
+    }
+}
+
+fn run_native(
+    core: impl FnOnce() -> Core,
+    (width, height): (f64, f64),
+    closed: &Sender<Result<(), String>>,
+) {
+    let mut config = AquaConfig::default();
+    "Artisan Editor".clone_into(&mut config.window.title);
+    config.window.inner_size.width = width;
+    config.window.inner_size.height = height;
+    let ran = Aqua::new(config).and_then(|aqua| {
+        let resources = ShellResources::for_runtime(&aqua, 1.0)
+            .ok_or_else(|| "lay out the Editor at scale 1".to_owned())?;
+        let app = ShellApplication::for_qualification(core(), resources, RootViews::default());
+        aqua.run(app)
+    });
+    let _reported = closed.send(ran);
+}
+
+impl NativeEditor {
+    pub(super) fn open(
+        core: impl FnOnce() -> Core + Send + 'static,
+        size: (f64, f64),
+        kept: (TempDir, Vec<ForgeServer>, ReplayingEngine),
+    ) -> Self {
+        let (closed_sender, closed) = channel();
+        let window = std::thread::spawn(move || run_native(core, size, &closed_sender));
+        let deadline = Instant::now() + ANSWER;
+        let hwnd = loop {
+            if let Some(hwnd) = find_editor_window() {
+                break hwnd;
+            }
+            if let Ok(ran) = closed.try_recv() {
+                panic!("the Editor's native window closed before it was shown: {ran:?}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the Editor's native window did not appear within {ANSWER:?}"
+            );
+            std::thread::park_timeout(Duration::from_millis(10));
+        };
+        let (requests, received) = channel();
+        let (answered, replies) = channel();
+        Self {
+            hwnd,
+            requests: Some(requests),
+            replies,
+            client: Some(client(hwnd, received, answered)),
+            window: Some(window),
+            closed,
+            _prepared: kept,
+        }
+    }
+}
+
+impl NativeEditor {
+    #[track_caller]
+    fn ask(&self, request: &Request) -> String {
+        self.reply(request)
+            .unwrap_or_else(|error| panic!("UI Automation failed {request:?}: {error}"))
+    }
+
+    #[track_caller]
+    fn reply(&self, request: &Request) -> Reply {
+        self.requests
+            .as_ref()
+            .expect("invariant: the UI Automation client runs until the reader drops")
+            .send(request.clone())
+            .expect("the UI Automation client is running");
+        self.replies
+            .recv_timeout(ANSWER)
+            .unwrap_or_else(|error| panic!("UI Automation did not answer {request:?}: {error}"))
+    }
+
+    #[track_caller]
+    pub fn uia_settle(&self, what: &str, done: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + ANSWER;
+        let mut previous = String::new();
+        let mut quiet_since = Instant::now();
+        loop {
+            let tree = match self.reply(&Request::Tree) {
+                Ok(tree) => tree,
+                Err(Failure::Vanished(_)) => String::new(),
+                Err(error) => panic!("UI Automation failed to read the tree: {error}"),
+            };
+            if !done(&tree) || tree != previous {
+                quiet_since = Instant::now();
+            }
+            if quiet_since.elapsed() >= QUIET {
+                return tree;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {ANSWER:?} waiting for {what}; UI Automation sees:\n{tree}"
+            );
+            previous = tree;
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+    }
+
+    #[track_caller]
+    pub fn uia_set_value(&self, name: &str, value: &str) {
+        self.ask(&Request::SetValue {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+
+    #[track_caller]
+    pub fn close(mut self) {
+        let posted = unsafe {
+            PostMessageW(
+                Some(HWND(self.hwnd as *mut core::ffi::c_void)),
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+        assert!(
+            posted.is_ok(),
+            "ask the Editor's window to close: {posted:?}"
+        );
+        match self.closed.recv_timeout(ANSWER) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("the Editor's window loop failed: {error}"),
+            Err(error) => panic!("the Editor's window did not close within {ANSWER:?}: {error}"),
+        }
+        if let Some(window) = self.window.take() {
+            window
+                .join()
+                .expect("the Editor's window thread finishes cleanly");
+        }
+    }
+}
+
+impl Drop for NativeEditor {
+    fn drop(&mut self) {
+        self.requests.take();
+        if let Some(client) = self.client.take() {
+            client
+                .join()
+                .expect("the UI Automation client thread finishes cleanly");
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeEditor")
             .field("hwnd", &self.hwnd)
             .finish_non_exhaustive()
     }

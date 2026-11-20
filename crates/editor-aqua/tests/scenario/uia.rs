@@ -74,3 +74,28 @@ fn a_screen_reader_opens_settings_from_the_account_menu_and_flips_a_switch() {
         switch(tree, "Show all models").is_some_and(|line| line.contains("[checked"))
     });
 }
+
+#[test]
+fn the_editors_own_window_answers_a_screen_reader_across_an_update() {
+    let editor = Scenario::replaying(EngineId::Claude, "reply")
+        .thread("thread-a", "Greeting")
+        .exchange(
+            "thread-a",
+            "What does the parser do?",
+            "It turns text into tokens.",
+        )
+        .open_native(Opening::Thread("thread-a"));
+    let shown = editor.uia_settle("the revisited thread in the Editor's window", |tree| {
+        tree.contains("\"It turns text into tokens.\"") && named(tree, "Message").is_some()
+    });
+    assert!(
+        named(&shown, "Artisan Editor").is_some(),
+        "the window itself is the Editor:\n{shown}"
+    );
+    editor.uia_set_value("Message", "Say hello");
+    editor.uia_settle(
+        "the draft to reach UI Automation through the window",
+        |tree| named(tree, "Message").is_some_and(|line| line.contains("value=\"Say hello\"")),
+    );
+    editor.close();
+}
