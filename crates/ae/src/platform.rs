@@ -339,7 +339,7 @@ pub(crate) fn path_ok() -> Result<bool, PathCheckError> {
             ],
         )
         .map_err(PathCheckError::Registry)?;
-        Ok(path.split(';').any(|entry| Path::new(entry.trim()) == dir))
+        Ok(windows_path_lists(&path, &dir))
     } else {
         let link = unix_link().map_err(PathCheckError::Home)?;
         let ae = App::Ae.binary().map_err(PathCheckError::Locate)?;
@@ -357,6 +357,12 @@ pub(crate) fn path_ok() -> Result<bool, PathCheckError> {
         };
         Ok(target == ae && link.parent().is_some_and(on_path))
     }
+}
+
+fn windows_path_lists(path: &str, dir: &Path) -> bool {
+    let folded = |folder: &str| folder.trim().trim_end_matches(['\\', '/']).to_lowercase();
+    let wanted = folded(&dir.display().to_string());
+    path.split(';').any(|entry| folded(entry) == wanted)
 }
 
 pub(crate) fn unix_link() -> Result<PathBuf, EnvPathError> {
@@ -678,3 +684,7 @@ pub(crate) fn has_desktop() -> bool {
 pub(crate) fn in_wsl() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
+
+#[cfg(test)]
+#[path = "../tests/platform/unit.rs"]
+mod tests;
