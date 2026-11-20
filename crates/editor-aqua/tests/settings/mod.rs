@@ -47,10 +47,20 @@ fn mcp_program_is_trimmed_and_blank_programs_are_refused() {
     );
 }
 
+fn host_target(
+    core: &editor_aqua::core::Core,
+    id: &editor_aqua::core::HostId,
+) -> Option<(String, editor_aqua::core::HostInstance)> {
+    core.host(id).map(|host| (id.0.clone(), host.instance()))
+}
+
 #[test]
 fn mcp_completion_cannot_close_reopened_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let host = add_host(&mut core, "host");
     let mut form = ExtensionsForm::default();
-    form.sync_host(Some("host".into()));
+    form.sync_host(host_target(&core, &host));
     form.open(None);
     form.fields.name = "first".into();
     form.fields.command = "server".into();
@@ -60,6 +70,82 @@ fn mcp_completion_cannot_close_reopened_form() {
     form.complete(&request, Ok(()));
     assert!(form.editing.is_some());
     assert_eq!(form.fields.name, "second");
+}
+
+#[test]
+fn switching_hosts_mid_save_keeps_the_mcp_form_and_its_outcome_with_its_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let first = add_host(&mut core, "first-forge");
+    let second = add_host(&mut core, "second-forge");
+    let mut form = ExtensionsForm::default();
+    let save_on_first = |form: &mut ExtensionsForm| {
+        form.sync_host(host_target(&core, &first));
+        form.open(None);
+        form.fields.name = "github".into();
+        form.fields.command = "github-mcp".into();
+        let request = form.save().unwrap();
+        form.sync_host(host_target(&core, &second));
+        assert!(form.editing.is_none() && !form.saving);
+        request
+    };
+
+    let failing = save_on_first(&mut form);
+    form.sync_host(host_target(&core, &first));
+    assert!(form.saving, "the save on the first Forge is still running");
+    assert_eq!(form.fields.name, "github");
+    form.sync_host(host_target(&core, &second));
+    form.complete(
+        &failing,
+        Err(editor_aqua::core::Problem::new("Forge refused")),
+    );
+    assert!(
+        form.editing.is_none(),
+        "the second Forge's form stays closed"
+    );
+    form.sync_host(host_target(&core, &first));
+    assert!(!form.saving);
+    assert!(
+        form.editing.is_some(),
+        "a failed save leaves its form open to try again"
+    );
+    assert_eq!(form.fields.command, "github-mcp");
+
+    let saved = save_on_first(&mut form);
+    form.complete(&saved, Ok(()));
+    form.sync_host(host_target(&core, &first));
+    assert!(form.editing.is_none() && !form.saving);
+}
+
+#[test]
+fn switching_hosts_keeps_a_half_typed_mcp_server() {
+    use editor_aqua::core::{Screen, SettingsPage};
+    use editor_aqua::settings::controller::SettingsController;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let first = add_host(&mut core, "first-forge");
+    let second = add_host(&mut core, "second-forge");
+    let mut settings = SettingsController::default();
+    let open = |core: &mut editor_aqua::core::Core,
+                settings: &mut SettingsController,
+                host: &editor_aqua::core::HostId| {
+        core.navigate(Screen::NewThread {
+            host: host.clone(),
+            project: None,
+        });
+        settings.sync(core);
+        core.navigate(Screen::Settings(SettingsPage::Extensions));
+        settings.sync(core);
+    };
+    open(&mut core, &mut settings, &first);
+    settings.open_mcp(None);
+    settings.mcp_editors[0].borrow_mut().set_text("github");
+    open(&mut core, &mut settings, &second);
+    assert!(settings.extensions.editing.is_none());
+    assert_eq!(settings.mcp_editors[0].borrow().text(), "");
+    open(&mut core, &mut settings, &first);
+    assert!(settings.extensions.editing.is_some());
+    assert_eq!(settings.mcp_editors[0].borrow().text(), "github");
 }
 
 #[test]

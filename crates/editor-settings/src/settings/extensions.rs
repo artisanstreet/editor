@@ -1,6 +1,6 @@
 use artisan_api::{McpMutation, McpServer};
-use editor_core::Problem;
-use std::collections::BTreeMap;
+use editor_core::{HostInstance, Problem};
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerFields {
@@ -94,14 +94,45 @@ impl McpEditing {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ParkedForm {
+    instance: HostInstance,
+    editing: Option<McpEditing>,
+    fields: ServerFields,
+    saving: bool,
+    error: Option<Problem>,
+    generation: u64,
+}
+
+impl ParkedForm {
+    fn is_idle(&self) -> bool {
+        self.editing.is_none() && !self.saving && self.error.is_none()
+    }
+}
+
+fn settle(
+    editing: &mut Option<McpEditing>,
+    error: &mut Option<Problem>,
+    request: &MutationRequest,
+    result: Result<(), Problem>,
+) {
+    match result {
+        Ok(()) if request.close_form => *editing = None,
+        Ok(()) => {}
+        Err(problem) => *error = Some(problem),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionsForm {
     pub(crate) host: Option<String>,
+    instance: Option<HostInstance>,
     pub editing: Option<McpEditing>,
     pub fields: ServerFields,
     pub saving: bool,
     pub(crate) error: Option<Problem>,
     generation: u64,
+    parked: HashMap<String, ParkedForm>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,15 +144,48 @@ pub struct MutationRequest {
 }
 
 impl ExtensionsForm {
-    pub fn sync_host(&mut self, host: Option<String>) {
-        if self.host == host {
-            return;
+    pub fn sync_host(&mut self, host: Option<(String, HostInstance)>) -> bool {
+        let (name, instance) = host.unzip();
+        if self.host == name && self.instance == instance {
+            return false;
         }
-        self.host = host;
+        self.park();
+        self.host = name;
+        self.instance = instance;
         self.generation += 1;
-        self.saving = false;
-        self.editing = None;
-        self.error = None;
+        if let Some(parked) = self
+            .host
+            .as_ref()
+            .and_then(|host| self.parked.remove(host))
+            .filter(|parked| Some(parked.instance) == self.instance)
+        {
+            self.editing = parked.editing;
+            self.fields = parked.fields;
+            self.saving = parked.saving;
+            self.error = parked.error;
+            self.generation = parked.generation;
+        }
+        true
+    }
+
+    fn park(&mut self) {
+        let editing = self.editing.take();
+        let fields = std::mem::take(&mut self.fields);
+        let saving = std::mem::replace(&mut self.saving, false);
+        let error = self.error.take();
+        if let (Some(host), Some(instance)) = (self.host.take(), self.instance.take()) {
+            let parked = ParkedForm {
+                instance,
+                editing,
+                fields,
+                saving,
+                error,
+                generation: self.generation,
+            };
+            if !parked.is_idle() {
+                self.parked.insert(host, parked);
+            }
+        }
     }
 
     pub fn open(&mut self, previous: Option<McpServer>) {
@@ -178,14 +242,21 @@ impl ExtensionsForm {
     }
 
     pub fn complete(&mut self, request: &MutationRequest, result: Result<(), Problem>) {
-        if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
+        if self.host.as_ref() == Some(&request.host) {
+            if self.generation == request.generation {
+                self.saving = false;
+                settle(&mut self.editing, &mut self.error, request, result);
+            }
             return;
         }
-        self.saving = false;
-        match result {
-            Ok(()) if request.close_form => self.editing = None,
-            Ok(()) => {}
-            Err(problem) => self.error = Some(problem),
+        if let Some(parked) = self.parked.get_mut(&request.host)
+            && parked.generation == request.generation
+        {
+            parked.saving = false;
+            settle(&mut parked.editing, &mut parked.error, request, result);
+            if parked.is_idle() {
+                self.parked.remove(&request.host);
+            }
         }
     }
 }

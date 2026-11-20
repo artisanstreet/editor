@@ -184,7 +184,6 @@ impl SettingsController {
             self.active_instance = instance;
             self.park_prompt();
             self.engines.sync_host(None);
-            self.extensions.sync_host(None);
             self.archive.sync(None);
             self.prompt.sync_host(None);
             self.prompt_editor.borrow_mut().set_text("");
@@ -195,8 +194,10 @@ impl SettingsController {
             self.park_prompt();
         }
         self.engines.sync_host(host_name.clone());
-        self.extensions.sync_host(host_name.clone());
-        self.lock_mcp_fields();
+        self.sync_mcp_form(
+            core.active_host()
+                .map(|host| (host.id.0.clone(), host.instance())),
+        );
         let page = match core.screen() {
             Screen::Settings(page) => *page,
             Screen::Home
@@ -420,8 +421,21 @@ impl SettingsController {
         ));
     }
 
+    fn sync_mcp_form(&mut self, host: Option<(String, HostInstance)>) {
+        self.read_mcp_fields();
+        if self.extensions.sync_host(host) {
+            self.show_mcp_fields();
+        }
+        self.lock_mcp_fields();
+    }
+
     pub fn open_mcp(&mut self, previous: Option<artisan_api::McpServer>) {
         self.extensions.open(previous);
+        self.show_mcp_fields();
+        self.lock_mcp_fields();
+    }
+
+    fn show_mcp_fields(&self) {
         let fields = &self.extensions.fields;
         for (editor, text) in self.mcp_editors.iter().zip([
             &fields.name,
@@ -433,7 +447,6 @@ impl SettingsController {
         ]) {
             editor.borrow_mut().set_text(text);
         }
-        self.lock_mcp_fields();
     }
 
     fn lock_mcp_fields(&self) {
@@ -448,6 +461,20 @@ impl SettingsController {
     }
 
     pub fn save_mcp(&mut self, core: &Core) {
+        self.read_mcp_fields();
+        if !self.active_form_host(core) {
+            return;
+        }
+        if let Some(request) = self.extensions.save() {
+            self.mutate_mcp(core, request);
+        }
+        self.lock_mcp_fields();
+    }
+
+    fn read_mcp_fields(&mut self) {
+        if self.extensions.saving || self.extensions.editing.is_none() {
+            return;
+        }
         let fields = &mut self.extensions.fields;
         for (field, editor) in [
             &mut fields.name,
@@ -462,13 +489,6 @@ impl SettingsController {
         {
             editor.borrow().text().clone_into(field);
         }
-        if !self.active_form_host(core) {
-            return;
-        }
-        if let Some(request) = self.extensions.save() {
-            self.mutate_mcp(core, request);
-        }
-        self.lock_mcp_fields();
     }
 
     pub(crate) fn remove_mcp(&mut self, core: &Core, previous: artisan_api::McpServer) {
