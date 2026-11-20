@@ -359,3 +359,44 @@ async fn one_pass_removes_every_idle_family_and_keeps_a_busy_chain_whole() {
     assert!(store.thread(&busy_head).await.unwrap().is_some());
     assert!(store.thread(&busy_tail).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn a_family_that_fails_to_go_is_kept_whole_and_the_other_idle_families_still_go() {
+    let (dir, store, project) = open().await;
+    let mut idle = HashSet::new();
+    for _ in 0..3 {
+        idle.insert(add_thread(&store, &project, None).await);
+    }
+    let held_parent = add_thread(&store, &project, None).await;
+    let held_child = add_thread(&store, &project, Some(&held_parent)).await;
+    let kept = store
+        .upsert_item(message(&held_parent, Status::Done, Vec::new()))
+        .await
+        .unwrap()
+        .id;
+    drop(store);
+    let raw = rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database beside the store");
+    raw.execute_batch(include_str!("retention/hold_thread.sql"))
+        .expect("make one thread's removal fail");
+    raw.execute(include_str!("retention/held.sql"), [held_child.as_str()])
+        .expect("hold the child thread");
+    drop(raw);
+    let store = Store::open(dir.path()).expect("reopen the store");
+
+    let removed: HashSet<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 2)
+        .await
+        .expect("one family's failure doesn't stop retention")
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, idle);
+    assert!(store.thread(&held_parent).await.unwrap().is_some());
+    assert!(store.thread(&held_child).await.unwrap().is_some());
+    assert!(
+        store.item(&kept).await.unwrap().is_some(),
+        "the family's items are kept with it"
+    );
+}

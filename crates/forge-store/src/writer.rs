@@ -398,6 +398,32 @@ impl Tx<'_> {
         self.clock.now()
     }
 
+    pub(crate) fn attempt<T>(
+        &mut self,
+        step: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<Result<T>> {
+        self.sql
+            .execute_batch(include_str!("sql/writer/attempt.sql"))
+            .at("writer/attempt.sql")?;
+        let (seq, events) = (self.seq, self.events.len());
+        match step(self) {
+            Ok(done) => {
+                self.sql
+                    .execute_batch(include_str!("sql/writer/keep_attempt.sql"))
+                    .at("writer/keep_attempt.sql")?;
+                Ok(Ok(done))
+            }
+            Err(failed) => {
+                self.sql
+                    .execute_batch(include_str!("sql/writer/undo_attempt.sql"))
+                    .at("writer/undo_attempt.sql")?;
+                self.seq = seq;
+                self.events.truncate(events);
+                Ok(Err(failed))
+            }
+        }
+    }
+
     pub(crate) const fn next_seq(&mut self) -> Seq {
         self.seq += 1;
         self.seq

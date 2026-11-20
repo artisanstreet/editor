@@ -75,13 +75,32 @@ fn remove_batch(
 ) -> Result<Vec<Thread>> {
     let mut removed = Vec::new();
     for family in batch {
-        if !still_removable(tx, cutoff, seq, live, &family)? {
-            continue;
+        match tx.attempt(|tx| remove_family(tx, cutoff, seq, live, &family))? {
+            Ok(threads) => removed.extend(threads),
+            Err(error) => tracing::warn!(
+                family = ?family,
+                error = %diagnostics::chain(&error),
+                "kept a thread family that couldn't be removed; the next pass tries it again"
+            ),
         }
-        for id in family {
-            if let Some(thread) = tx.remove_thread(&id)? {
-                removed.push(thread);
-            }
+    }
+    Ok(removed)
+}
+
+fn remove_family(
+    tx: &mut Tx<'_>,
+    cutoff: Timestamp,
+    seq: Seq,
+    live: &HashSet<ThreadId>,
+    family: &[ThreadId],
+) -> Result<Vec<Thread>> {
+    let mut removed = Vec::new();
+    if !still_removable(tx, cutoff, seq, live, family)? {
+        return Ok(removed);
+    }
+    for id in family {
+        if let Some(thread) = tx.remove_thread(id)? {
+            removed.push(thread);
         }
     }
     Ok(removed)
