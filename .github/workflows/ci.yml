@@ -60,6 +60,10 @@ jobs:
         run: python3 tests/release.py
       - name: Benchmark gate tests
         run: python3 tests/benches.py
+      - name: Repository rule tests
+        run: python3 tests/rules.py
+      - name: Repository rules
+        run: python3 src/rules.py
       - name: Present a WSL interop registration to the dev launcher
         shell: bash
         run: |
