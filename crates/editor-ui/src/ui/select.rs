@@ -36,7 +36,21 @@ pub struct SelectState<V> {
     keyed: bool,
     query: String,
     typed_at: Instant,
-    scroll: f32,
+    scroll: MenuScroll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MenuScroll {
+    Shown(f32),
+    Reveal(f32),
+}
+
+impl MenuScroll {
+    const fn offset(self) -> f32 {
+        match self {
+            Self::Shown(offset) | Self::Reveal(offset) => offset,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +82,7 @@ impl<V: Clone + Eq> SelectState<V> {
             keyed: false,
             query: String::new(),
             typed_at: now,
-            scroll: 0.0,
+            scroll: MenuScroll::Shown(0.0),
         }
     }
 
@@ -239,10 +253,11 @@ impl<V: Clone + Eq> SelectState<V> {
         )]
         let top = OPTION_HEIGHT * index as f32;
         let bottom = top + OPTION_HEIGHT;
-        if top < self.scroll {
-            self.scroll = top;
-        } else if bottom > self.scroll + viewport {
-            self.scroll = bottom - viewport;
+        let shown = self.scroll.offset();
+        if top < shown {
+            self.scroll = MenuScroll::Reveal(top);
+        } else if bottom > shown + viewport {
+            self.scroll = MenuScroll::Reveal(bottom - viewport);
         }
     }
 
@@ -589,9 +604,11 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
     fn build(self) -> Element {
         use aqua_ui::element::Scroll;
         let theme = self.theme;
-        let (keyed, highlighted, offset) = {
-            let state = self.state.borrow();
-            (state.keyed, state.highlighted.clone(), state.scroll)
+        let (keyed, highlighted, scroll) = {
+            let mut state = self.state.borrow_mut();
+            let scroll = state.scroll;
+            state.scroll = MenuScroll::Shown(scroll.offset());
+            (state.keyed, state.highlighted.clone(), scroll)
         };
         let count = self.entries.len();
         let check = IconSize::Md;
@@ -651,10 +668,32 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .layout("column")
             .width(Length::Pct(100.0))
             .height(menu_height(&theme, count))
-            .offset(aqua_core::Point::new(0.0, offset))
+            .offset(aqua_core::Point::new(0.0, scroll.offset()))
+            .preserve_offset(matches!(scroll, MenuScroll::Shown(_)))
             .child(rows.build())
             .build();
-        MENU.build(&theme, vec![scroll])
+        let shown = Rc::clone(&self.state);
+        let reader = aqua_ui::element::Canvas::new()
+            .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+            .on_prepaint(move |tree, node| {
+                let offset = tree
+                    .get(node)
+                    .and_then(|probe| probe.parent)
+                    .and_then(|surface| tree.get(surface))
+                    .and_then(|surface| {
+                        surface
+                            .children
+                            .iter()
+                            .find_map(|child| tree.scroll_offset(*child))
+                    });
+                let mut state = shown.borrow_mut();
+                if let (Some(offset), MenuScroll::Shown(_)) = (offset, state.scroll) {
+                    state.scroll = MenuScroll::Shown(offset.y);
+                }
+            })
+            .build()
+            .exclude_from_hit_testing();
+        MENU.build(&theme, vec![scroll, reader])
             .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
     }

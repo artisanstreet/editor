@@ -124,3 +124,69 @@ fn the_keyboard_highlighted_option_is_the_triggers_active_descendant() {
         .expect("the trigger is a combo box");
     assert_eq!(combo.active_descendant, Some(option.node));
 }
+
+fn menu_scroll(app: &aqua::UiApp) -> (aqua_core::NodeId, f64) {
+    app.tree()
+        .emit_semantics()
+        .into_iter()
+        .find_map(|node| node.scroll.map(|scroll| (node.node, scroll.y)))
+        .expect("the option list is a scroll region")
+}
+
+fn assistive_scroll(
+    app: &mut aqua::UiApp,
+    action: aqua_protocol::A11yAction,
+    data: aqua_protocol::A11yActionData,
+) {
+    let (node, _) = menu_scroll(app);
+    app.drive(aqua::RuntimeInput::Access(
+        aqua_protocol::A11yActionRequest { node, action, data },
+    ));
+}
+
+#[test]
+fn a_screen_reader_scroll_of_the_menu_survives_a_rebuild() {
+    use aqua_protocol::{A11yAction, A11yActionData, A11yScroll};
+    let state = Rc::new(RefCell::new(SelectState::new(Instant::now())));
+    let mut app = mounted(menu(&state));
+    assistive_scroll(
+        &mut app,
+        A11yAction::Scroll(A11yScroll::Down),
+        A11yActionData::None,
+    );
+    let (_, paged) = menu_scroll(&app);
+    assert!(paged > 0.0, "a page down moves the option list");
+    app.refresh(vec![menu(&state)]).unwrap();
+    app.build_frame().unwrap();
+    assert!(
+        (menu_scroll(&app).1 - paged).abs() < 0.5,
+        "the page down stays after a rebuild"
+    );
+    assistive_scroll(
+        &mut app,
+        A11yAction::SetScrollOffset,
+        A11yActionData::ScrollOffset { x: 0.0, y: 64.0 },
+    );
+    app.build_frame().unwrap();
+    app.refresh(vec![menu(&state)]).unwrap();
+    app.build_frame().unwrap();
+    assert!(
+        (menu_scroll(&app).1 - 64.0).abs() < 0.5,
+        "the set offset stays after a rebuild"
+    );
+    arrow_down(&state, 1);
+    app.refresh(vec![menu(&state)]).unwrap();
+    app.build_frame().unwrap();
+    let list = bounds(
+        &app.tree()
+            .emit_semantics()
+            .into_iter()
+            .find(|node| node.role == Role::ListBox)
+            .expect("the menu is a list box"),
+    );
+    let option = bounds(&node(&app, Role::Option, "Option 1"));
+    assert!(
+        option.y >= list.y && option.y + option.h <= list.y + list.h,
+        "arrowing to Option 1 scrolls it back into view from where the screen reader left the list: {option:?} in {list:?}"
+    );
+}
