@@ -31,6 +31,8 @@ mod live_snapshot;
 mod mcp_auth_tests;
 #[path = "../run/mcp_reach.rs"]
 mod mcp_reach_tests;
+#[path = "../park/unreadable.rs"]
+mod park_unreadable;
 #[path = "../resources/beneath.rs"]
 mod resource_beneath;
 #[path = "../resources/paths.rs"]
