@@ -101,9 +101,51 @@ pub enum GatewayRefusal {
 }
 
 #[derive(Debug)]
+enum Activity {
+    Idle,
+    Live {
+        passes: std::collections::BTreeSet<u64>,
+        ended: CancellationToken,
+    },
+}
+
+impl Activity {
+    fn admit(&mut self, pass: u64) {
+        match self {
+            Self::Idle => {
+                *self = Self::Live {
+                    passes: std::collections::BTreeSet::from([pass]),
+                    ended: CancellationToken::new(),
+                };
+            }
+            Self::Live { passes, .. } => {
+                passes.insert(pass);
+            }
+        }
+    }
+
+    fn release(&mut self, pass: u64) {
+        if let Self::Live { passes, ended } = self {
+            passes.remove(&pass);
+            if passes.is_empty() {
+                ended.cancel();
+                *self = Self::Idle;
+            }
+        }
+    }
+
+    fn end(&self) {
+        match self {
+            Self::Idle => {}
+            Self::Live { ended, .. } => ended.cancel(),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Credential {
     token: String,
-    live: std::collections::BTreeMap<u64, CancellationToken>,
+    activity: Activity,
 }
 
 #[derive(Debug, Default)]
@@ -120,7 +162,6 @@ pub(crate) struct Gateway {
 pub(crate) struct GatewayPass {
     hub: Hub,
     held: Option<(ThreadId, u64)>,
-    ended: CancellationToken,
     servers: Vec<(String, String)>,
 }
 
@@ -136,9 +177,8 @@ impl Drop for GatewayPass {
         if let Some((thread, pass)) = &self.held
             && let Some(credential) = self.hub.gateway_lock().credentials.get_mut(thread)
         {
-            credential.live.remove(pass);
+            credential.activity.release(*pass);
         }
-        self.ended.cancel();
     }
 }
 
@@ -152,24 +192,20 @@ impl Hub {
     pub fn gateway_caller(&self, token: &str) -> Result<GatewayCaller, GatewayRefusal> {
         let gateway = self.gateway_lock();
         let thread = gateway.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
-        let ended = gateway
-            .credentials
-            .get(thread)
-            .unwrap_or_else(|| {
-                unreachable!(
-                    "invariant: thread {thread} holds a gateway address it has no credential for"
-                )
-            })
-            .live
-            .values()
-            .next_back()
-            .ok_or_else(|| GatewayRefusal::Idle {
+        let credential = gateway.credentials.get(thread).unwrap_or_else(|| {
+            unreachable!(
+                "invariant: thread {thread} holds a gateway address it has no credential for"
+            )
+        });
+        match &credential.activity {
+            Activity::Idle => Err(GatewayRefusal::Idle {
                 thread: thread.clone(),
-            })?;
-        Ok(GatewayCaller {
-            thread: thread.clone(),
-            ended: ended.clone(),
-        })
+            }),
+            Activity::Live { ended, .. } => Ok(GatewayCaller {
+                thread: thread.clone(),
+                ended: ended.clone(),
+            }),
+        }
     }
 
     #[must_use]
@@ -181,9 +217,7 @@ impl Hub {
         let mut gateway = self.gateway_lock();
         if let Some(credential) = gateway.credentials.remove(thread) {
             gateway.holders.remove(&credential.token);
-            for ended in credential.live.values() {
-                ended.cancel();
-            }
+            credential.activity.end();
         }
     }
 
@@ -195,17 +229,15 @@ impl Hub {
             let gateway = self.gateway_lock();
             (gateway.base.clone(), gateway.computer)
         };
-        let ended = CancellationToken::new();
         let Some(base) = base else {
             return Ok(GatewayPass {
                 hub: self.clone(),
                 held: None,
-                ended,
                 servers: Vec::new(),
             });
         };
         let computer = computer && self.computer_use_on(thread).await?;
-        let (token, pass) = self.admit_pass(thread, &ended)?;
+        let (token, pass) = self.admit_pass(thread)?;
         let mut servers = vec![(
             forge_engines::ARTISAN_MCP.to_owned(),
             format!("{base}{}/{}", forge_engines::ARTISAN_MCP, token.expose()),
@@ -219,7 +251,6 @@ impl Hub {
         Ok(GatewayPass {
             hub: self.clone(),
             held: Some((thread.clone(), pass)),
-            ended,
             servers,
         })
     }
@@ -242,11 +273,7 @@ impl Hub {
         }
     }
 
-    fn admit_pass(
-        &self,
-        thread: &ThreadId,
-        ended: &CancellationToken,
-    ) -> Result<(Secret, u64), GatewayError> {
+    fn admit_pass(&self, thread: &ThreadId) -> Result<(Secret, u64), GatewayError> {
         let mut gateway = self.gateway_lock();
         let gateway = &mut *gateway;
         let credential = match gateway.credentials.entry(thread.clone()) {
@@ -261,13 +288,13 @@ impl Hub {
                 gateway.holders.insert(token.clone(), thread.clone());
                 free.insert(Credential {
                     token,
-                    live: std::collections::BTreeMap::new(),
+                    activity: Activity::Idle,
                 })
             }
         };
         let pass = gateway.next_pass;
         gateway.next_pass += 1;
-        credential.live.insert(pass, ended.clone());
+        credential.activity.admit(pass);
         Ok((Secret::from(credential.token.as_str()), pass))
     }
 
