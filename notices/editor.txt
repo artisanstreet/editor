@@ -4686,6 +4686,7 @@ Used by:
 - fnv 1.0.7 <https://github.com/servo/rust-fnv>
 - form_urlencoded 1.2.2 <https://github.com/servo/rust-url>
 - glob 0.3.4 <https://github.com/rust-lang/glob>
+- hashbrown 0.15.5 <https://github.com/rust-lang/hashbrown>
 - hashbrown 0.17.1 <https://github.com/rust-lang/hashbrown>
 - heck 0.5.0 <https://github.com/withoutboats/heck>
 - heic-rs 0.1.4 <https://github.com/tbraun96/heic-rs>
@@ -7423,6 +7424,7 @@ Used by:
 - accesskit 0.25.2 <https://github.com/AccessKit/accesskit>
 - accesskit_consumer 0.39.2 <https://github.com/AccessKit/accesskit>
 - accesskit_windows 0.35.2 <https://github.com/AccessKit/accesskit>
+- allocator-api2 0.2.21 <https://github.com/zakarumych/allocator-api2>
 - arboard 3.7.0 <https://github.com/1Password/arboard>
 - atomig-macro 0.4.0 <https://github.com/LukasKalbertodt/atomig/>
 - color 0.3.3 <https://github.com/linebender/color>
@@ -9727,6 +9729,7 @@ MIT License (MIT)
 Used by:
 - libm 0.2.16 <https://github.com/rust-lang/compiler-builtins>
 - libwebp-sys 0.9.6 <https://github.com/NoXF/libwebp-sys>
+- whatlang 0.18.0 <https://github.com/greyblake/whatlang-rs>
 
 MIT License
 
@@ -11394,6 +11397,7 @@ the following restrictions:
 zlib License (Zlib)
 
 Used by:
+- foldhash 0.1.5 <https://github.com/orlp/foldhash>
 - foldhash 0.2.0 <https://github.com/orlp/foldhash>
 
 Copyright (c) 2024 Orson Peters

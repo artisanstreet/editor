@@ -166,3 +166,26 @@ fn colour_swatches_keep_their_value_in_the_accessible_text() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn each_answer_paragraph_tells_assistive_tech_its_language() {
+    let app = answer(
+        "# Wie der Parser die einzelnen Wörter zerlegt und prüft\n\nDer Parser zerlegt den Text in einzelne Wörter und baut daraus einen Baum, den der Übersetzer anschließend prüft.\n\nThe parser splits the text into separate words and builds a tree that the compiler checks afterwards.\n\nOK",
+        |_| {},
+    );
+    let language = |start: &str| {
+        semantics(&app)
+            .into_iter()
+            .find(|node| node.label.starts_with(start))
+            .unwrap_or_else(|| panic!("{start:?} is in the answer"))
+            .language
+    };
+    assert_eq!(language("Wie der Parser").as_deref(), Some("de"));
+    assert_eq!(language("Der Parser").as_deref(), Some("de"));
+    assert_eq!(language("The parser").as_deref(), Some("en"));
+    assert_eq!(
+        language("OK"),
+        None,
+        "too little text to tell keeps the window's language"
+    );
+}

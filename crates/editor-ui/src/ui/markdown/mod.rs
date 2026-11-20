@@ -18,6 +18,7 @@ use thiserror::Error;
 
 mod diagram;
 mod fence;
+mod language;
 mod list;
 pub mod literal;
 mod projected;

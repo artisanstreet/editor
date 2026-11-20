@@ -608,6 +608,9 @@ pub(crate) fn interactive_leaf(
     if let Some(level) = heading {
         element = element.role(aqua_core::Role::Heading(level));
     }
+    if let Some(language) = super::language::detected(&source.text) {
+        element = element.aria_language(language);
+    }
     if !source.copies.is_empty() {
         element = element.aria_label(accessible_text(&source));
     }
@@ -701,7 +704,7 @@ pub fn prose_leaf(
     };
     let text: Arc<str> = flat.source.into();
     let span = styled_span(&text, style.clone(), color);
-    let element = ui::Text::new(text.to_string())
+    let mut element = ui::Text::new(text.to_string())
         .text_style(style)
         .gpui_source_color(color.to_reference_text_color())
         .spans(vec![span])
@@ -714,6 +717,9 @@ pub fn prose_leaf(
             },
         )
         .build();
+    if let Some(language) = super::language::detected(&text) {
+        element = element.aria_language(language);
+    }
     Ok(ProseLeaf {
         element,
         source: SelectionSource {

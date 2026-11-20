@@ -38,6 +38,7 @@ tempfile.workspace = true
 tokio-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 pulldown-cmark.workspace = true
+whatlang.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
 mermaid-rs-renderer.workspace = true
