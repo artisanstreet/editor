@@ -69,3 +69,30 @@ fn the_last_store_dropped_on_the_writer_thread_does_not_wait_for_the_recall_buil
         .recv_timeout(test_support::wait::LIVENESS)
         .expect("dropping the last store inside the builder's batch on the writer thread finishes");
 }
+
+#[test]
+fn a_start_with_no_database_upgrade_never_asks_systemd_for_more_time() {
+    let dir = tempfile::tempdir().expect("create the data folder");
+    drop(Store::open(dir.path()).expect("the first start creates the database"));
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&beats);
+    let lock = DataLock::acquire(dir.path()).expect("hold the data folder");
+
+    let store = Store::open_restoring_in(
+        &lock,
+        Environment {
+            progress: crate::Progress::every(Duration::MAX).with_heartbeat(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+            ..Environment::system()
+        },
+    )
+    .expect("the next start opens the current database");
+
+    drop(store);
+    assert_eq!(
+        beats.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "only a start that backs up or upgrades the database extends systemd's start timeout"
+    );
+}

@@ -264,8 +264,7 @@ fn a_rollback_cut_short_after_restoring_is_still_reported_by_the_next_forge() {
     );
 }
 
-#[test]
-fn a_long_backup_keeps_telling_the_log_and_systemd_that_forge_is_working() {
+fn backing_up(pace: &Progress) -> usize {
     let dir = tempfile::tempdir().expect("data dir");
     let database = dir.path().join("forge.sqlite3");
     let previous = MIGRATIONS.len() - 1;
@@ -276,14 +275,27 @@ fn a_long_backup_keeps_telling_the_log_and_systemd_that_forge_is_working() {
         remember(&settings, &format!("setting {key}"));
     }
     settings.commit().expect("commit the settings");
+    before_migrating(&mut conn, previous, pace).expect("back up before upgrading");
+    previous
+}
+
+fn counting(every: Duration) -> (Progress, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let beats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counting = std::sync::Arc::clone(&beats);
-    let pace = Progress::every(Duration::ZERO).with_heartbeat(move || {
-        counting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let counted = std::sync::Arc::clone(&beats);
+    let pace = Progress::every(every).with_heartbeat(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
+    (pace, beats)
+}
+
+#[test]
+fn a_long_backup_keeps_telling_the_log_and_systemd_that_forge_is_working() {
+    let (only_starts, started) = counting(Duration::MAX);
+    backing_up(&only_starts);
+    let (every_check, beaten) = counting(Duration::ZERO);
 
     let (logged, _capturing) = test_support::logs::capture();
-    before_migrating(&mut conn, previous, &pace).expect("back up before upgrading");
+    let previous = backing_up(&every_check);
 
     assert!(
         logged
@@ -292,8 +304,10 @@ fn a_long_backup_keeps_telling_the_log_and_systemd_that_forge_is_working() {
         "{}",
         logged.text()
     );
+    let started = started.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(started > 0, "a backup asks for more time when it starts");
     assert!(
-        beats.load(std::sync::atomic::Ordering::SeqCst) > 1,
-        "the heartbeat fires while the backup runs, not only when it starts"
+        beaten.load(std::sync::atomic::Ordering::SeqCst) > started,
+        "the heartbeat also fires while the backup runs, not only when its steps start"
     );
 }

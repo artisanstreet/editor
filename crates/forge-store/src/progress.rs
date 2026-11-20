@@ -13,6 +13,18 @@ pub(crate) enum Step {
     RecallIndex,
 }
 
+impl Step {
+    const fn upgrades(self) -> bool {
+        match self {
+            Self::Backup { .. }
+            | Self::SetAside { .. }
+            | Self::ListImages
+            | Self::Migration { .. } => true,
+            Self::RecallIndex => false,
+        }
+    }
+}
+
 impl std::fmt::Display for Step {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -58,7 +70,9 @@ impl std::fmt::Debug for Progress {
 }
 
 pub(crate) fn watch(conn: &mut Connection, step: Step, pace: &Progress) -> rusqlite::Result<()> {
-    (pace.heartbeat)();
+    if step.upgrades() {
+        (pace.heartbeat)();
+    }
     let started = Instant::now();
     let mut reported = started;
     let every = pace.every;
