@@ -3,10 +3,12 @@ use crate::sys::{self, BoundedRunError};
 use crate::ui::{self, AskError};
 use artisan_paths::App;
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const LIST_DEADLINE: Duration = Duration::from_secs(20);
 const PROBE_DEADLINE: Duration = Duration::from_secs(60);
+const PROBES_AT_ONCE: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DistrosError {
@@ -134,13 +136,48 @@ fn status_in(distro: &str) -> Result<crate::status::Report, StatusInError> {
     })
 }
 
+fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    at_once: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..at_once.min(items.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    let claim = || {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        items.get(index).map(|item| (index, item))
+                    };
+                    while let Some((index, item)) = claim() {
+                        done.push((index, run(item)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        let mut done: Vec<(usize, R)> = workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect();
+        done.sort_by_key(|(index, _)| *index);
+        done.into_iter().map(|(_, result)| result).collect()
+    })
+}
+
 pub(crate) fn probe_all() -> Result<Vec<Probe>, DistrosError> {
-    Ok(distros()?
+    let distros = distros()?;
+    let reports = in_parallel(&distros, PROBES_AT_ONCE, |distro| status_in(distro));
+    Ok(distros
         .into_iter()
-        .map(|distro| {
-            let report = status_in(&distro);
-            Probe { distro, report }
-        })
+        .zip(reports)
+        .map(|(distro, report)| Probe { distro, report })
         .collect())
 }
 
@@ -224,3 +261,7 @@ pub(crate) fn forward(distro: &str) -> Result<std::process::ExitCode, ForwardErr
         })?;
     Ok(exit_code(status))
 }
+
+#[cfg(test)]
+#[path = "../tests/wsl/unit.rs"]
+mod tests;
