@@ -19,6 +19,18 @@ struct Journal {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub(crate) enum FreeAsideError {
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("no free name to move {} aside among {ASIDE_SLOTS}", path.display())]
+    Full { path: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum ReplaceError {
     #[error("read {}", path.display())]
     Read {
@@ -28,8 +40,8 @@ pub(crate) enum ReplaceError {
     },
     #[error("{} is not a Unicode file name", path.display())]
     NotUnicode { path: PathBuf },
-    #[error("no free name to move {} aside among {ASIDE_SLOTS}", path.display())]
-    NoAside { path: PathBuf },
+    #[error(transparent)]
+    NoAside(#[from] FreeAsideError),
     #[error(transparent)]
     Journal(#[from] JournalError),
     #[error("move {} aside", path.display())]
@@ -87,6 +99,14 @@ pub(crate) enum RestoreError {
         path: PathBuf,
         #[source]
         source: RemoveError,
+    },
+    #[error(transparent)]
+    NoAside(#[from] FreeAsideError),
+    #[error("move {} out of the way of the previous version", path.display())]
+    Displace {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
     },
     #[error("put {} back as {}", aside.display(), target.display())]
     PutBack {
@@ -254,25 +274,25 @@ pub(super) fn interrupted(dir: &Path) -> Result<bool, RecoverError> {
         .map_err(|source| RecoverError::Inspect { path, source })
 }
 
-fn occupied(path: &Path) -> Result<bool, ReplaceError> {
+fn occupied(path: &Path) -> Result<bool, FreeAsideError> {
     match path.symlink_metadata() {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(ReplaceError::Read {
+        Err(source) => Err(FreeAsideError::Inspect {
             path: path.to_owned(),
             source,
         }),
     }
 }
 
-fn free_aside(dir: &Path, name: &str) -> Result<String, ReplaceError> {
+fn free_aside(dir: &Path, name: &str) -> Result<String, FreeAsideError> {
     for slot in 0..ASIDE_SLOTS {
         let aside = format!(".old-{slot}-{name}");
         if !occupied(&dir.join(&aside))? {
             return Ok(aside);
         }
     }
-    Err(ReplaceError::NoAside {
+    Err(FreeAsideError::Full {
         path: dir.join(name),
     })
 }
@@ -328,13 +348,9 @@ fn set_aside(
 fn restore(dir: &Path, journal: &Journal) -> Vec<RestoreError> {
     let mut failures = Vec::new();
     for entry in journal.entries.iter().rev() {
-        let target = dir.join(&entry.name);
         let restored = match &entry.aside {
-            Some(aside) => put_back(&dir.join(aside), &target),
-            None => sys::remove(&target).map_err(|source| RestoreError::Remove {
-                path: target.clone(),
-                source,
-            }),
+            Some(aside) => put_back(dir, &entry.name, aside),
+            None => clear(dir, &entry.name),
         };
         if let Err(failure) = restored {
             failures.push(failure);
@@ -348,10 +364,37 @@ fn restore(dir: &Path, journal: &Journal) -> Vec<RestoreError> {
     failures
 }
 
-fn put_back(aside: &Path, target: &Path) -> Result<(), RestoreError> {
+fn clear(dir: &Path, name: &str) -> Result<(), RestoreError> {
+    let target = dir.join(name);
+    if cfg!(windows) {
+        return displace(dir, name);
+    }
+    sys::remove(&target).map_err(|source| RestoreError::Remove {
+        path: target,
+        source,
+    })
+}
+
+fn displace(dir: &Path, name: &str) -> Result<(), RestoreError> {
+    let target = dir.join(name);
+    if !occupied(&target)? {
+        return Ok(());
+    }
+    let out_of_the_way = dir.join(free_aside(dir, name)?);
+    std::fs::rename(&target, &out_of_the_way).map_err(|source| RestoreError::Displace {
+        path: target,
+        source,
+    })?;
+    discard(&out_of_the_way);
+    Ok(())
+}
+
+fn put_back(dir: &Path, name: &str, aside: &str) -> Result<(), RestoreError> {
+    let target = dir.join(name);
+    let aside = dir.join(aside);
     let inspect = |source| RestoreError::PutBack {
-        aside: aside.to_owned(),
-        target: target.to_owned(),
+        aside: aside.clone(),
+        target: target.clone(),
         source,
     };
     let kept = match aside.symlink_metadata() {
@@ -364,23 +407,19 @@ fn put_back(aside: &Path, target: &Path) -> Result<(), RestoreError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(source) => return Err(inspect(source)),
     };
-    if current.is_some_and(|current| same_file(&kept, &current)) {
-        return sys::remove(aside).map_err(|source| RestoreError::Remove {
-            path: aside.to_owned(),
+    if current
+        .as_ref()
+        .is_some_and(|current| same_file(&kept, current))
+    {
+        return sys::remove(&aside).map_err(|source| RestoreError::Remove {
+            path: aside.clone(),
             source,
         });
     }
-    if cfg!(windows) {
-        sys::remove(target).map_err(|source| RestoreError::Remove {
-            path: target.to_owned(),
-            source,
-        })?;
+    if cfg!(windows) && current.is_some() {
+        displace(dir, name)?;
     }
-    std::fs::rename(aside, target).map_err(|source| RestoreError::PutBack {
-        aside: aside.to_owned(),
-        target: target.to_owned(),
-        source,
-    })
+    std::fs::rename(&aside, &target).map_err(inspect)
 }
 
 #[cfg(unix)]

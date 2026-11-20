@@ -130,7 +130,10 @@ fn files_that_cannot_be_put_back_are_named_with_their_cause_and_tried_again_late
             assert_eq!(aside, &dir.join(".old-0-forge"));
             assert_eq!(target, &dir.join("forge"));
         }
-        other @ (RestoreError::Remove { .. } | RestoreError::Journal(_)) => {
+        other @ (RestoreError::Remove { .. }
+        | RestoreError::NoAside(_)
+        | RestoreError::Displace { .. }
+        | RestoreError::Journal(_)) => {
             panic!("expected the forge to fail to go back, got {other:?}")
         }
     }
@@ -150,4 +153,34 @@ fn files_that_cannot_be_put_back_are_named_with_their_cause_and_tried_again_late
         std::fs::read_to_string(dir.join("forge")).unwrap(),
         "old forge"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_running_program_is_moved_out_of_the_way_when_the_previous_one_is_put_back() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("ae");
+    let incoming = dir.join(".incoming-test");
+    std::fs::create_dir_all(&incoming).unwrap();
+    std::fs::write(dir.join("ae.exe"), "old ae").unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    std::fs::copy(system.join("findstr.exe"), incoming.join("ae.exe")).unwrap();
+    let replaced = replace(&dir, &incoming).unwrap();
+    let mut running = std::process::Command::new(dir.join("ae.exe"))
+        .arg("never typed")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let undone = replaced.undo();
+
+    drop(running.stdin.take());
+    running.wait().unwrap();
+    undone.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("ae.exe")).unwrap(),
+        "old ae"
+    );
+    assert_eq!(names(&dir), [".incoming-test", ".old-1-ae.exe", "ae.exe"]);
 }
