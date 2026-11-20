@@ -21,11 +21,11 @@ use forge_store::admin::StorageVersion;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
 const SCHEMA_PROBE_DEADLINE: Duration = Duration::from_secs(30);
+const DATA_RELEASE_DEADLINE: Duration = Duration::from_secs(120);
 const INSTALL_LOCK: &str = ".install.lock";
 const ORIGIN_FILE: &str = "release-feed";
 
@@ -313,7 +313,7 @@ pub(crate) enum RestoreDatabaseError {
     #[error("stop the Forge that failed to start")]
     Stop(#[source] StopError),
     #[error("take Forge's data folder to restore its database")]
-    Lock(#[source] forge_store::LockDataError),
+    Lock(#[source] forge_store::WaitForDataError),
     #[error("put back the schema {schema} database the previous Forge used in {}", data.display())]
     RollBack {
         data: PathBuf,
@@ -1757,9 +1757,11 @@ fn restore_database(
 ) -> Result<(), RestoreDatabaseError> {
     service::stop().map_err(RestoreDatabaseError::Stop)?;
     let data = paths::data(App::Forge)?;
-    let lock = forge_store::DataLock::acquire_waiting(&data, || {
-        progress.message("Waiting for the Forge that didn't start to let go of its data");
-    })
+    let lock = forge_store::DataLock::acquire_waiting(
+        &data,
+        &forge_store::Patience::system(DATA_RELEASE_DEADLINE),
+        || progress.message("Waiting for the Forge that didn't start to let go of its data"),
+    )
     .map_err(RestoreDatabaseError::Lock)?;
     match database {
         StoredBefore::Schema(schema) => {

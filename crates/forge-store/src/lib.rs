@@ -51,7 +51,9 @@ pub use collection::{AnswerRefused, MAX_COLLECTION_BYTES};
 pub use content::{
     ContentError, Damage, MAX_FIELD_BYTES, MAX_FIELD_ENTRIES, MAX_ITEM_BYTES, MAX_SOURCE_BYTES,
 };
-pub use data_lock::{DataLock, LockDataError};
+pub use data_lock::{
+    DataLock, LockDataError, Patience, PatienceClock, SystemClock, WaitForDataError,
+};
 pub use environment::{Connections, Environment};
 pub use error::StorageError;
 pub use feed::Subscription;
