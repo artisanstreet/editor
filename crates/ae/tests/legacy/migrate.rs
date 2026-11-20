@@ -54,12 +54,14 @@ impl Machine {
     }
 
     fn run(&self, done: &[App], moves: &[DataMove]) -> Result<Vec<String>, MigrateError> {
-        Work {
+        let work = Work {
             old: &self.old,
             done,
             moves,
-        }
-        .run()
+        };
+        let notes = work.move_data()?;
+        work.retire()?;
+        Ok(notes)
     }
 }
 

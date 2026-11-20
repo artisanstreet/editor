@@ -164,6 +164,57 @@ mod tests {
         assert!(sandbox.listening(), "the previous Forge serves again");
     }
 
+    #[test]
+    fn the_earlier_install_is_removed_only_once_the_new_one_is_in_place() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let earlier = sandbox.root.path().join("data/artisan/bin/ae");
+        script(&earlier, "#!/bin/sh\necho the earlier ae\n");
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        script(&stage.join(App::Forge.binary_name()), BROKEN_FORGE);
+        let install = || {
+            sandbox.ae(&[
+                "install",
+                "--editor",
+                "none",
+                "--forge",
+                "here",
+                "--yes",
+                "--from",
+                &sandbox.root.path().join("stage").to_string_lossy(),
+            ])
+        };
+
+        let failed = install();
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&failed.stdout),
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert!(!failed.status.success(), "the install fails: {said}");
+        assert!(
+            earlier.is_file(),
+            "a failed install leaves the earlier one runnable: {said}"
+        );
+
+        test_support::executable::install(&forge_binary(), &stage.join(App::Forge.binary_name()));
+        let installed = install();
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&installed.stdout),
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        assert!(installed.status.success(), "the install succeeds: {said}");
+        assert!(
+            !earlier.exists(),
+            "the earlier install goes once the new one runs: {said}"
+        );
+    }
+
     const RELEASED_SCHEMA: usize = 26;
     const RELEASED_DATABASE: &[u8] =
         include_bytes!("../../forge-store/tests/fixtures/released/schema-26.sqlite3.gz");

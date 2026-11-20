@@ -93,7 +93,13 @@ pub(crate) enum MigrateError {
     },
 }
 
-pub(crate) fn migrate(selected: &[App]) -> Result<(), MigrateError> {
+#[must_use = "the earlier programs stay until the new install is in place and they are retired"]
+pub(crate) struct Earlier {
+    old: Old,
+    done: Vec<App>,
+}
+
+pub(crate) fn migrate(selected: &[App]) -> Result<Earlier, MigrateError> {
     let mut done = Vec::new();
     for app in App::ALL {
         if selected.contains(&app) || install::installed(app)?.is_present() {
@@ -107,22 +113,42 @@ pub(crate) fn migrate(selected: &[App]) -> Result<(), MigrateError> {
         done: &done,
         moves: &data_moves,
     };
-    if !work.pending()? {
-        return Ok(());
-    }
-    let progress = ui::Progress::spinner("Moving the earlier install into Artisan Street");
-    match work.run() {
-        Ok(notes) if notes.is_empty() => progress.done("Removed the earlier install"),
-        Ok(notes) => progress.done(format!(
-            "Moved {} and removed the earlier install",
-            notes.join(" and ")
-        )),
-        Err(error) => {
-            progress.fail(diagnostics::chain(&error));
-            return Err(error);
+    if work.pending()? {
+        let progress = ui::Progress::spinner("Moving the earlier install into Artisan Street");
+        match work.move_data() {
+            Ok(notes) if notes.is_empty() => progress.done("Stopped the earlier install"),
+            Ok(notes) => progress.done(format!("Moved {}", notes.join(" and "))),
+            Err(error) => {
+                progress.fail(diagnostics::chain(&error));
+                return Err(error);
+            }
         }
     }
-    Ok(())
+    Ok(Earlier { old, done })
+}
+
+impl Earlier {
+    pub(crate) fn retire(self) -> Result<(), MigrateError> {
+        let work = Work {
+            old: &self.old,
+            done: &self.done,
+            moves: &[],
+        };
+        if !work.programs_left()? {
+            return Ok(());
+        }
+        let progress = ui::Progress::spinner("Removing the earlier install");
+        match work.retire() {
+            Ok(()) => {
+                progress.done("Removed the earlier install");
+                Ok(())
+            }
+            Err(error) => {
+                progress.fail(diagnostics::chain(&error));
+                Err(error)
+            }
+        }
+    }
 }
 
 struct Owned {
@@ -659,12 +685,19 @@ impl Work<'_> {
                 return Ok(true);
             }
         }
+        if self.programs_left()? {
+            return Ok(true);
+        }
+        Ok(self.done.contains(&App::Forge) && self.old_unit()?.is_some())
+    }
+
+    fn programs_left(&self) -> Result<bool, MigrateError> {
         for program in self.removable(&self.old.programs) {
             if exists(&program.path)? {
                 return Ok(true);
             }
         }
-        Ok(self.done.contains(&App::Forge) && self.old_unit()?.is_some())
+        Ok(false)
     }
 
     fn removable<'b>(&self, owned: &'b [Owned]) -> impl Iterator<Item = &'b Owned> {
@@ -672,7 +705,7 @@ impl Work<'_> {
         owned.iter().filter(move |owned| owned.removable(done))
     }
 
-    fn run(&self) -> Result<Vec<String>, MigrateError> {
+    fn move_data(&self) -> Result<Vec<String>, MigrateError> {
         if self.done.contains(&App::Forge) {
             self.stop_old_forge()?;
         }
@@ -697,6 +730,10 @@ impl Work<'_> {
                 Outcome::Nothing | Outcome::Kept => {}
             }
         }
+        Ok(moved)
+    }
+
+    fn retire(&self) -> Result<(), MigrateError> {
         for program in self.removable(&self.old.programs) {
             remove(&program.path)?;
         }
@@ -709,7 +746,7 @@ impl Work<'_> {
         for dir in &self.old.parents {
             remove_if_empty(dir)?;
         }
-        Ok(moved)
+        Ok(())
     }
 
     fn old_unit(&self) -> Result<Option<&Path>, MigrateError> {

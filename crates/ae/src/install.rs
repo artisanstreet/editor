@@ -187,6 +187,8 @@ pub(crate) enum ApplyError {
     Migrate(#[from] MigrateError),
     #[error(transparent)]
     Here(#[from] InstallHereError),
+    #[error("remove the earlier install after installing over it")]
+    Retire(#[source] MigrateError),
     #[error(transparent)]
     Wsl(#[from] InstallInWslError),
     #[error(transparent)]
@@ -1319,8 +1321,9 @@ fn apply(
 ) -> Result<(), ApplyError> {
     let _installing = install_lock()?;
     let here = plan.here();
-    legacy::migrate(&here)?;
+    let earlier = legacy::migrate(&here)?;
     install_here(release, origin, &here, replaceable)?;
+    earlier.retire().map_err(ApplyError::Retire)?;
     for distro in &plan.distros {
         install_in_wsl(release, source, origin, distro, yes)?;
     }
