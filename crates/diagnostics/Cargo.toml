@@ -6,6 +6,10 @@ publish = false
 version.workspace = true
 description = "Crash reports, rotating log files and the tracing subscriber shared by ae, Forge and the Editor."
 
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 artisan-paths.workspace = true
 backtrace.workspace = true

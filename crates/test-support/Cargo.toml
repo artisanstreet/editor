@@ -6,6 +6,10 @@ version.workspace = true
 description = "Shared test helpers: bounded waits, a paused clock, stub servers, SSE reading, engine transcripts and Editor fixtures."
 publish = false
 
+[lib]
+test = false
+doctest = false
+
 [features]
 tokio = ["dep:tokio"]
 sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:serde_json"]
@@ -61,6 +65,7 @@ windows = { workspace = true, optional = true, features = ["Win32_Foundation", "
 name = "record"
 path = "src/bin/record.rs"
 required-features = ["transcript"]
+test = false
 
 [dev-dependencies]
 futures.workspace = true
