@@ -4135,8 +4135,7 @@ async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn turned_off_side_queries_ask_nothing() {
+async fn side_queries_asked_with(setting: serde_json::Value) -> Vec<String> {
     let (fixture, asked) = asking(
         Arc::new(|_, io| {
             Box::pin(async move {
@@ -4151,7 +4150,7 @@ async fn turned_off_side_queries_ask_nothing() {
         fixture
             .hub
             .store()
-            .set_setting(key.to_owned(), serde_json::json!(false))
+            .set_setting(key.to_owned(), setting.clone())
             .await
             .unwrap();
     }
@@ -4162,9 +4161,26 @@ async fn turned_off_side_queries_ask_nothing() {
         .unwrap();
     fixture.settled().await;
     fixture.quiescent().await;
+    asked.lock().unwrap().clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turned_off_side_queries_ask_nothing() {
     assert!(
-        asked.lock().unwrap().is_empty(),
+        side_queries_asked_with(serde_json::json!(false))
+            .await
+            .is_empty(),
         "turned-off side queries ask nothing once the turn's work is done"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn side_queries_set_to_something_other_than_on_or_off_ask_nothing() {
+    assert!(
+        side_queries_asked_with(serde_json::json!("no"))
+            .await
+            .is_empty(),
+        "a side query whose setting is neither true nor false stays off"
     );
 }
 

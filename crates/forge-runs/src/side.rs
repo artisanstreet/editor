@@ -659,7 +659,12 @@ impl Hub {
 
     pub(crate) async fn enabled(&self, key: &str) -> bool {
         match self.store().setting(key).await {
-            Ok(value) => value.and_then(|value| value.as_bool()).unwrap_or(true),
+            Ok(None) => true,
+            Ok(Some(serde_json::Value::Bool(on))) => on,
+            Ok(Some(value)) => {
+                tracing::warn!(key, %value, "the setting is neither true nor false, so it stays off");
+                false
+            }
             Err(error) => {
                 tracing::warn!(key, "reading a setting: {}", diagnostics::chain(&error));
                 false
