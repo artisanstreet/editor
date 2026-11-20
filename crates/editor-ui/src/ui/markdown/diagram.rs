@@ -37,6 +37,18 @@ const FALLBACK_FAMILIES: [&str; 10] = [
     "DejaVu Sans",
 ];
 
+#[derive(Debug, thiserror::Error)]
+enum LayoutError {
+    #[error("parse the diagram")]
+    Parse(#[source] mermaid_rs_renderer::ParseError),
+    #[error("the diagram has {items} parts; at most {MAX_GRAPH_ITEMS} are drawn")]
+    TooLarge { items: usize },
+    #[error("outline the diagram's text")]
+    Outline(#[source] usvg::Error),
+    #[error("the diagram renderer panicked")]
+    Panicked(#[source] diagnostics::crash::CaughtPanic),
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DiagramCache {
     entries: VecDeque<(String, Option<Arc<DiagramSvg>>)>,
@@ -81,7 +93,26 @@ fn render(source: &str) -> Option<DiagramSvg> {
     }
     let themes =
         [ThemeMode::Dark, ThemeMode::Light].map(|mode| diagram_theme(ArtisanTheme::for_mode(mode)));
-    let ([dark, light], width, height, summary) = layout_svg(source, &themes)?;
+    let ([dark, light], width, height, summary) = match layout_svg(source, &themes) {
+        Ok(laid_out) => laid_out,
+        Err(error) => {
+            match &error {
+                LayoutError::Panicked(_) => tracing::error!(
+                    bytes = source.len(),
+                    error = %diagnostics::chain(&error),
+                    "the diagram shows as its source"
+                ),
+                LayoutError::Parse(_) | LayoutError::TooLarge { .. } | LayoutError::Outline(_) => {
+                    tracing::debug!(
+                        bytes = source.len(),
+                        error = %diagnostics::chain(&error),
+                        "the diagram shows as its source"
+                    );
+                }
+            }
+            return None;
+        }
+    };
     (dark.len().max(light.len()) <= MAX_SVG_BYTES
         && width.is_finite()
         && height.is_finite()
@@ -98,20 +129,22 @@ fn render(source: &str) -> Option<DiagramSvg> {
         })
 }
 
-fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f32, String)> {
-    let laid_out = diagnostics::crash::catch(AssertUnwindSafe(|| {
-        let parsed = parse_mermaid_strict(source).ok()?;
-        if parsed.graph.nodes.len()
+fn layout_svg(
+    source: &str,
+    themes: &[Theme; 2],
+) -> Result<([String; 2], f32, f32, String), LayoutError> {
+    diagnostics::crash::catch(AssertUnwindSafe(|| {
+        let parsed = parse_mermaid_strict(source).map_err(LayoutError::Parse)?;
+        let items = parsed.graph.nodes.len()
             + parsed.graph.edges.len()
             + parsed.graph.subgraphs.len()
             + parsed.graph.gantt_tasks.len()
             + parsed.graph.pie_slices.len()
             + parsed.graph.sequence_participants.len()
             + parsed.graph.sequence_frames.len()
-            + parsed.graph.sequence_notes.len()
-            > MAX_GRAPH_ITEMS
-        {
-            return None;
+            + parsed.graph.sequence_notes.len();
+        if items > MAX_GRAPH_ITEMS {
+            return Err(LayoutError::TooLarge { items });
         }
         let config = LayoutConfig {
             fast_text_metrics: true,
@@ -123,19 +156,9 @@ fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f3
             outline_text(&render_svg(&layout, &themes[0], &config))?,
             outline_text(&render_svg(&layout, &themes[1], &config))?,
         ];
-        Some((svgs, size.width, size.height, summary(&parsed.graph)))
-    }));
-    match laid_out {
-        Ok(svg) => svg,
-        Err(panic) => {
-            tracing::error!(
-                bytes = source.len(),
-                %panic,
-                "the diagram renderer panicked; the diagram shows as its source"
-            );
-            None
-        }
-    }
+        Ok((svgs, size.width, size.height, summary(&parsed.graph)))
+    }))
+    .map_err(LayoutError::Panicked)?
 }
 
 fn summary(graph: &Graph) -> String {
@@ -271,9 +294,9 @@ fn diagram_options() -> usvg::Options<'static> {
     }
 }
 
-fn outline_text(source: &str) -> Option<String> {
-    let tree = usvg::Tree::from_str(source, &diagram_options()).ok()?;
-    Some(tree.to_string(&usvg::WriteOptions::default()))
+fn outline_text(source: &str) -> Result<String, LayoutError> {
+    let tree = usvg::Tree::from_str(source, &diagram_options()).map_err(LayoutError::Outline)?;
+    Ok(tree.to_string(&usvg::WriteOptions::default()))
 }
 
 fn diagram_theme(theme: &ArtisanTheme) -> Theme {
