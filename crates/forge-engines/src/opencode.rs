@@ -663,7 +663,7 @@ const fn agent_name(permissions: Permissions) -> &'static str {
 fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     match permissions {
         Permissions::Auto => {
-            let mut external = serde_json::Map::from_iter([("*".to_owned(), json!("ask"))]);
+            let mut external = serde_json::Map::from_iter([("*".to_owned(), json!("deny"))]);
             for dir in readable {
                 let pattern = format!("{}/*", dir.to_string_lossy().replace('\\', "/"));
                 external.insert(pattern, json!("allow"));

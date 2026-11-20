@@ -219,7 +219,7 @@ fn the_chosen_variant_is_the_model_variant() {
 }
 
 #[test]
-fn each_permission_level_is_an_agent_opencode_knows() {
+fn each_permission_level_is_an_agent_opencode_knows_and_auto_stays_in_its_worktree() {
     let home = tempfile::tempdir().unwrap();
     let blobs = home.path().join("data/blobs");
     let dir = super::write_agents(home.path(), std::slice::from_ref(&blobs)).unwrap();
@@ -231,9 +231,21 @@ fn each_permission_level_is_an_agent_opencode_knows() {
     assert_eq!(
         auto["external_directory"],
         serde_json::json!({
-            "*": "ask",
+            "*": "deny",
             format!("{}/*", blobs.to_string_lossy().replace('\\', "/")): "allow",
-        })
+        }),
+        "Auto touches nothing outside its worktree but the folders Forge lets it read"
+    );
+    let order: Vec<&str> = auto["external_directory"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        order.first(),
+        Some(&"*"),
+        "OpenCode lets the last matching rule win, so the deny must come before the allowed folders"
     );
     let full = rules(artisan_api::Permissions::Full);
     assert_eq!(full["external_directory"], "allow");

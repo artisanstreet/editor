@@ -28,7 +28,7 @@ A root chosen with `ae install --location` is remembered in a `location` file in
 
 ## Permission modes
 
-Forge doesn't confine engines itself; in Auto each engine's own harness does. Claude runs in its auto permission mode, and Codex runs in its `workspace-write` sandbox with its reviewer deciding what else may run. Full access runs every engine without limits.
+Forge doesn't confine engines itself; in Auto each engine's own harness does. Claude runs in its auto permission mode, Codex runs in its `workspace-write` sandbox with its reviewer deciding what else may run, and OpenCode may not read or write anything outside its worktree except the folders Forge hands it, and asks before every shell command. Full access runs every engine without limits.
 
 Where Forge runs in a delegated cgroup, every Auto run gets its own cgroup, and when the run ends Forge kills everything in it, including processes detached with `setsid`. Processes a Full-access run detaches, such as a dev server, outlive the run. Agents, new threads and messages started through Artisan's tools never get more access than the stricter of the thread's mode and the mode its running engine was launched in.
 
