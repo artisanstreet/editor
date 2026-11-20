@@ -1,5 +1,5 @@
 use super::status;
-use crate::conversation::adapter::RowModel;
+use crate::conversation::adapter::{RowLayout, RowModel};
 use crate::conversation::disclosure::RowDisclosure;
 use crate::conversation::fold::{Row, RowKey};
 use crate::conversation::presentation::{
@@ -242,40 +242,41 @@ impl std::fmt::Debug for RowFactory {
     }
 }
 
-#[derive(Debug)]
-pub struct RowFingerprint<'a> {
-    pub model: &'a RowModel,
-    pub disclosure: &'a RowDisclosure,
+#[derive(Clone, Copy, Debug)]
+pub struct RowFingerprint {
+    pub disclosure: RowDisclosure,
     pub held: bool,
     pub body_version: Option<u64>,
     pub style_epoch: u64,
 }
 
-impl RowFingerprint<'_> {
-    pub fn value(&self) -> u64 {
+impl RowFingerprint {
+    pub fn value(&self, layout: &RowLayout<'_>, index: usize) -> Option<u64> {
         use std::hash::{Hash, Hasher};
+        let (row, version) = layout.rows.get(index)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.model.row.hash(&mut hasher);
-        self.model.version.hash(&mut hasher);
-        self.model.gap.to_bits().hash(&mut hasher);
-        self.model.end.to_bits().hash(&mut hasher);
-        let mut ui: Vec<_> = self.model.ui.iter().collect();
-        ui.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-        for (id, state) in ui {
-            id.hash(&mut hasher);
+        row.hash(&mut hasher);
+        version.hash(&mut hasher);
+        layout.gap(index).to_bits().hash(&mut hasher);
+        layout.end(index).to_bits().hash(&mut hasher);
+        for state in layout.states(row) {
             state.hash(&mut hasher);
         }
-        let mut answers: Vec<_> = self.model.answers.iter().collect();
-        answers.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-        for (id, state) in answers {
-            id.hash(&mut hasher);
-            state.hash(&mut hasher);
-        }
-        format!("{:?}", self.disclosure).hash(&mut hasher);
+        let RowDisclosure {
+            clip,
+            fraction,
+            hidden,
+            gap,
+        } = self.disclosure;
+        clip.map(|clip| (clip.height.to_bits(), clip.opacity.to_bits()))
+            .hash(&mut hasher);
+        fraction.map(f32::to_bits).hash(&mut hasher);
+        hidden.hash(&mut hasher);
+        gap.map(f32::to_bits).hash(&mut hasher);
         self.held.hash(&mut hasher);
         self.body_version.hash(&mut hasher);
         self.style_epoch.hash(&mut hasher);
-        hasher.finish()
+        Some(hasher.finish())
     }
 }
 

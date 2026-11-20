@@ -21,9 +21,10 @@ impl RowFactory {
         let RowSource::Snapshots { snapshots, rows } = &self.rows else {
             return None;
         };
-        let model = snapshots.model(index)?;
-        let row = rows.get(index)?;
-        let body_version = match model.row.semantic() {
+        let layout = snapshots.layout();
+        let (row, _) = layout.rows.get(index)?;
+        let snapshot = rows.get(index)?;
+        let body_version = match row.semantic() {
             Row::Text { id, slot, .. } => {
                 let key = BodyKey {
                     item: id.clone(),
@@ -36,12 +37,9 @@ impl RowFactory {
                 }
             }
             Row::Work { .. } | Row::WorkHeader(_)
-                if model
-                    .run
-                    .as_ref()
-                    .is_some_and(crate::conversation::fold::RunSummary::live) =>
+                if row.run().is_some_and(|run| snapshots.run_is_live(run)) =>
             {
-                u64::try_from(self.work.timestamp / 1_000).ok()
+                Some((self.work.timestamp / 1_000).cast_unsigned())
             }
             Row::Projected { .. }
             | Row::Work { .. }
@@ -57,16 +55,13 @@ impl RowFactory {
             | Row::AgentResult(_)
             | Row::AgentStatus(..) => None,
         };
-        Some(
-            RowFingerprint {
-                model: &model,
-                disclosure: &row.disclosure,
-                held: row.held,
-                body_version,
-                style_epoch: self.style_epoch,
-            }
-            .value(),
-        )
+        RowFingerprint {
+            disclosure: snapshot.disclosure,
+            held: snapshot.held,
+            body_version,
+            style_epoch: self.style_epoch,
+        }
+        .value(&layout, index)
     }
 
     pub fn revision(&self, index: usize, key: &RowKey) -> Option<u64> {

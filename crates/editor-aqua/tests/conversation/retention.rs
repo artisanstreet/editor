@@ -1,8 +1,8 @@
 use artisan_api::{Item, ItemId, ItemKind, Status, ThreadId, ToolKind};
-use editor_aqua::conversation::adapter::RowModel;
+use editor_aqua::conversation::adapter::{RowLayout, RowModel};
 use editor_aqua::conversation::disclosure::RowDisclosure;
-use editor_aqua::conversation::fold::Row;
-use editor_aqua::conversation::thread::{AnswerState, ItemUi};
+use editor_aqua::conversation::fold::{Row, Turns};
+use editor_aqua::conversation::thread::{ItemUi, ThreadView};
 use editor_aqua::conversation::view::factory::{RowFingerprint, row_settles_statically};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,83 +51,129 @@ fn model(status: Status) -> RowModel {
     }
 }
 
+fn view_with(status: Status) -> ThreadView {
+    let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+    view.apply_item((*item("tool", status)).clone(), None);
+    view
+}
+
+fn entry(version: u64) -> (Row, u64) {
+    (
+        Row::WorkEntry {
+            id: ItemId("tool".into()),
+            run: None,
+        },
+        version,
+    )
+}
+
 fn fingerprint(
-    model: &RowModel,
-    disclosure: &RowDisclosure,
+    layout: &RowLayout<'_>,
+    disclosure: RowDisclosure,
     held: bool,
     body: Option<u64>,
     epoch: u64,
 ) -> u64 {
     RowFingerprint {
-        model,
         disclosure,
         held,
         body_version: body,
         style_epoch: epoch,
     }
-    .value()
+    .value(layout, layout.rows.len() - 1)
+    .expect("the last row has a revision")
 }
 
 #[test]
-fn fingerprint_is_stable_for_equal_inputs_and_tracks_every_input() {
-    let base = model(Status::Done);
+fn a_row_revision_is_stable_for_equal_inputs_and_tracks_every_input() {
+    let view = view_with(Status::Done);
+    let turns = Turns::default();
+    let rows = [(Row::Gap, 1), entry(3)];
+    let layout = RowLayout {
+        view: &view,
+        turns: &turns,
+        rows: &rows,
+        agent: false,
+        composer_height: None,
+    };
     let disclosure = RowDisclosure::default();
-    let reference = fingerprint(&base, &disclosure, false, Some(1), 0);
+    let reference = fingerprint(&layout, disclosure, false, Some(1), 0);
+    let same_view = view_with(Status::Done);
     assert_eq!(
         reference,
-        fingerprint(&model(Status::Done), &disclosure, false, Some(1), 0)
+        fingerprint(
+            &RowLayout {
+                view: &same_view,
+                ..layout
+            },
+            disclosure,
+            false,
+            Some(1),
+            0
+        )
     );
-
-    let mut versioned = model(Status::Done);
-    versioned.version = 4;
-    let mut spaced = model(Status::Done);
-    spaced.gap = 12.0;
-    let mut ended = model(Status::Done);
-    ended.end = 40.0;
-    let mut sending = model(Status::Done);
-    sending
-        .answers
-        .insert(ItemId("tool".into()), AnswerState::Sending);
+    let versioned = [(Row::Gap, 1), entry(4)];
+    let first = [entry(3)];
+    let mut opened = view_with(Status::Done);
+    opened.ui.insert(
+        ItemId("tool".into()),
+        ItemUi {
+            expanded: Some(true),
+            ..Default::default()
+        },
+    );
     let hidden = RowDisclosure {
         hidden: true,
         ..Default::default()
     };
     let changed = [
-        fingerprint(&versioned, &disclosure, false, Some(1), 0),
-        fingerprint(&spaced, &disclosure, false, Some(1), 0),
-        fingerprint(&ended, &disclosure, false, Some(1), 0),
-        fingerprint(&sending, &disclosure, false, Some(1), 0),
-        fingerprint(&base, &hidden, false, Some(1), 0),
-        fingerprint(&base, &disclosure, true, Some(1), 0),
-        fingerprint(&base, &disclosure, false, Some(2), 0),
-        fingerprint(&base, &disclosure, false, None, 0),
-        fingerprint(&base, &disclosure, false, Some(1), 1),
+        fingerprint(
+            &RowLayout {
+                rows: &versioned,
+                ..layout
+            },
+            disclosure,
+            false,
+            Some(1),
+            0,
+        ),
+        fingerprint(
+            &RowLayout {
+                rows: &first,
+                ..layout
+            },
+            disclosure,
+            false,
+            Some(1),
+            0,
+        ),
+        fingerprint(
+            &RowLayout {
+                composer_height: Some(300.0),
+                ..layout
+            },
+            disclosure,
+            false,
+            Some(1),
+            0,
+        ),
+        fingerprint(
+            &RowLayout {
+                view: &opened,
+                ..layout
+            },
+            disclosure,
+            false,
+            Some(1),
+            0,
+        ),
+        fingerprint(&layout, hidden, false, Some(1), 0),
+        fingerprint(&layout, disclosure, true, Some(1), 0),
+        fingerprint(&layout, disclosure, false, Some(2), 0),
+        fingerprint(&layout, disclosure, false, None, 0),
+        fingerprint(&layout, disclosure, false, Some(1), 1),
     ];
     assert!(changed.iter().all(|value| *value != reference));
-}
-
-#[test]
-fn fingerprint_ignores_ui_map_iteration_order() {
-    let build = |names: &[&str]| {
-        let mut model = model(Status::Done);
-        for name in names {
-            model.ui.insert(
-                ItemId((*name).into()),
-                ItemUi {
-                    expanded: Some(true),
-                    ..Default::default()
-                },
-            );
-        }
-        model
-    };
-    let disclosure = RowDisclosure::default();
-    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
-    let reversed: Vec<_> = names.iter().rev().copied().collect();
-    assert_eq!(
-        fingerprint(&build(&names), &disclosure, false, None, 0),
-        fingerprint(&build(&reversed), &disclosure, false, None, 0)
-    );
 }
 
 #[test]

@@ -2,8 +2,11 @@ use artisan_api::{
     Continuation, EngineId, Item, ItemId, ItemKind, Output, Phase, Run, RunId, RunOutcome,
     RunState, RunStatus, Status, ThreadId, ToolKind, Usage,
 };
+use editor_conversation::adapter::RowLayout;
+use editor_conversation::disclosure::RowDisclosure;
 use editor_conversation::fold::{expanded, fold};
 use editor_conversation::thread::ThreadView;
+use editor_conversation::view::factory::RowFingerprint;
 
 const TURNS: u64 = 150;
 const RUNS_PER_TURN: u64 = 5;
@@ -154,5 +157,30 @@ fn space_every_row_of_continued_turns(bencher: divan::Bencher<'_, '_>) {
         (0..rows.len())
             .map(|index| editor_conversation::fold::gap(&view, &folded.turns, &rows, index))
             .sum::<f32>()
+    });
+}
+
+#[divan::bench(sample_count = 20)]
+fn revise_every_row_of_continued_turns(bencher: divan::Bencher<'_, '_>) {
+    let view = continued_turns();
+    let folded = fold(&view, None, None);
+    let rows = expanded(&view, folded.rows, &folded.runs);
+    let layout = RowLayout {
+        view: &view,
+        turns: &folded.turns,
+        rows: &rows,
+        agent: false,
+        composer_height: None,
+    };
+    let fingerprint = RowFingerprint {
+        disclosure: RowDisclosure::default(),
+        held: false,
+        body_version: None,
+        style_epoch: 0,
+    };
+    bencher.bench_local(|| {
+        (0..rows.len())
+            .filter_map(|index| fingerprint.value(&layout, index))
+            .fold(0, u64::wrapping_add)
     });
 }

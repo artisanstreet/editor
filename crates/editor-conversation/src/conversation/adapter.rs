@@ -208,49 +208,64 @@ impl RowSnapshots {
         self.rows.get(index).map(|(row, _)| row.key())
     }
 
+    pub(crate) fn layout(&self) -> RowLayout<'_> {
+        RowLayout {
+            view: &self.view,
+            turns: &self.turns,
+            rows: &self.rows,
+            agent: self.agent,
+            composer_height: self.composer_height,
+        }
+    }
+
+    pub(crate) fn run_is_live(&self, run: &RunId) -> bool {
+        self.runs.get(run).is_some_and(RunSummary::live)
+    }
+
     pub fn model(&self, index: usize) -> Option<RowModel> {
-        row_model_from(
-            &self.view,
-            &self.rows,
-            &self.runs,
-            &self.turns,
-            self.agent,
-            self.composer_height,
-            index,
-        )
+        row_model_from(&self.layout(), &self.runs, index)
     }
 }
 
-pub fn row_model(
-    conversation: &Conversation,
-    index: usize,
-    composer_height: Option<f32>,
-) -> Option<RowModel> {
-    let view = conversation.view.as_ref()?;
-    row_model_from(
-        view,
-        &conversation.rows,
-        &conversation.runs,
-        &conversation.turns,
-        conversation.agent.is_some(),
-        composer_height,
-        index,
-    )
+#[derive(Clone, Copy, Debug)]
+pub struct RowLayout<'a> {
+    pub view: &'a super::thread::ThreadView,
+    pub turns: &'a fold::Turns,
+    pub rows: &'a [(Row, u64)],
+    pub agent: bool,
+    pub composer_height: Option<f32>,
 }
 
-fn row_model_from(
-    view: &super::thread::ThreadView,
-    rows: &[(Row, u64)],
-    runs: &BTreeMap<RunId, RunSummary>,
-    turns: &fold::Turns,
-    agent: bool,
-    composer_height: Option<f32>,
-    index: usize,
-) -> Option<RowModel> {
-    let (row, version) = rows.get(index)?;
-    let ids: Vec<ItemId> = match row {
-        Row::Work { .. } | Row::WorkHeader(_) => Vec::new(),
-        Row::Chain { ids, .. } => ids.as_slice().to_vec(),
+impl RowLayout<'_> {
+    pub(crate) fn gap(&self, index: usize) -> f32 {
+        fold::gap(self.view, self.turns, self.rows, index)
+    }
+
+    pub(crate) fn end(&self, index: usize) -> f32 {
+        if index + 1 == self.rows.len() {
+            if self.agent {
+                24.0
+            } else {
+                self.composer_height
+                    .map_or(24.0, |height| 192.0_f32.max(height + 16.0 + 24.0))
+            }
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn states<'b>(
+        &'b self,
+        row: &'b Row,
+    ) -> impl Iterator<Item = (&'b ItemId, Option<&'b ItemUi>, Option<&'b AnswerState>)> {
+        row_ids(row).map(|id| (id, self.view.ui.get(id), self.view.answers.get(id)))
+    }
+}
+
+fn row_ids(row: &Row) -> impl Iterator<Item = &ItemId> {
+    let (chain, anchor) = match row {
+        Row::Work { .. } | Row::WorkHeader(_) => (None, None),
+        Row::Chain { ids, .. } => (Some(ids.as_slice()), None),
         other @ (Row::Projected { .. }
         | Row::EarlierWork { .. }
         | Row::WorkEntry { .. }
@@ -261,20 +276,46 @@ fn row_model_from(
         | Row::Gap
         | Row::Status(_)
         | Row::AgentResult(_)
-        | Row::AgentStatus(..)) => other.anchor().cloned().into_iter().collect(),
+        | Row::AgentStatus(..)) => (None, other.anchor()),
     };
-    let items: HashMap<ItemId, Arc<Item>> = ids
-        .iter()
+    chain.into_iter().flatten().chain(anchor)
+}
+
+pub fn row_model(
+    conversation: &Conversation,
+    index: usize,
+    composer_height: Option<f32>,
+) -> Option<RowModel> {
+    let layout = RowLayout {
+        view: conversation.view.as_ref()?,
+        turns: &conversation.turns,
+        rows: &conversation.rows,
+        agent: conversation.agent.is_some(),
+        composer_height,
+    };
+    row_model_from(&layout, &conversation.runs, index)
+}
+
+fn row_model_from(
+    layout: &RowLayout<'_>,
+    runs: &BTreeMap<RunId, RunSummary>,
+    index: usize,
+) -> Option<RowModel> {
+    let view = layout.view;
+    let (row, version) = layout.rows.get(index)?;
+    let items: HashMap<ItemId, Arc<Item>> = row_ids(row)
         .filter_map(|id| Some((id.clone(), view.shared_item(id)?)))
         .collect();
-    let ui = ids
-        .iter()
-        .filter_map(|id| Some((id.clone(), view.ui.get(id)?.clone())))
-        .collect();
-    let answers = ids
-        .iter()
-        .filter_map(|id| Some((id.clone(), view.answers.get(id)?.clone())))
-        .collect();
+    let mut ui = HashMap::new();
+    let mut answers = HashMap::new();
+    for (id, item_ui, answer) in layout.states(row) {
+        if let Some(item_ui) = item_ui {
+            ui.insert(id.clone(), item_ui.clone());
+        }
+        if let Some(answer) = answer {
+            answers.insert(id.clone(), answer.clone());
+        }
+    }
     let run = row.run().and_then(|run| runs.get(run)).cloned();
     let author = row
         .anchor()
@@ -282,16 +323,6 @@ fn row_model_from(
         .and_then(|item| item.run_id.as_ref())
         .and_then(|run| view.runs.get(run))
         .map(|run| run.engine);
-    let gap = fold::gap(view, turns, rows, index);
-    let end = if index + 1 == rows.len() {
-        if agent {
-            24.0
-        } else {
-            composer_height.map_or(24.0, |height| 192.0_f32.max(height + 16.0 + 24.0))
-        }
-    } else {
-        0.0
-    };
     let live = view
         .live
         .iter()
@@ -314,8 +345,8 @@ fn row_model_from(
         answers,
         run,
         author,
-        gap,
-        end,
+        gap: layout.gap(index),
+        end: layout.end(index),
     })
 }
 
