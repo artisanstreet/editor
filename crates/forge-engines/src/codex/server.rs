@@ -312,6 +312,7 @@ impl Server {
             unclaimed_order: VecDeque::new(),
             unclaimed_bytes: 0,
             outbox: Vec::new(),
+            reading: Reading::Codex,
         };
         tokio::spawn(actor.run());
         Ok(server)
@@ -511,6 +512,13 @@ struct Actor {
     unclaimed_order: VecDeque<String>,
     unclaimed_bytes: usize,
     outbox: Vec<Value>,
+    reading: Reading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Codex,
+    PausedFor(u64),
 }
 
 #[derive(Deserialize)]
@@ -558,6 +566,8 @@ impl Actor {
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let ended = loop {
             let behind = self.behind();
+            self.pace(behind.as_ref().map(|(run, _)| *run));
+            let behind = behind.map(|(_, backlog)| backlog);
             tokio::select! {
                 () = until_drained(behind.as_deref()), if behind.is_some() => {}
                 line = self.process.next_line(), if behind.is_none() => match line {
@@ -597,11 +607,26 @@ impl Actor {
         self.end(&ended).await;
     }
 
-    fn behind(&self) -> Option<Arc<Backlog>> {
+    fn behind(&self) -> Option<(u64, Arc<Backlog>)> {
         self.runs
-            .values()
-            .find(|attached| attached.backlog.full())
-            .map(|attached| Arc::clone(&attached.backlog))
+            .iter()
+            .find(|(_, attached)| attached.backlog.full())
+            .map(|(run, attached)| (*run, Arc::clone(&attached.backlog)))
+    }
+
+    fn pace(&mut self, behind: Option<u64>) {
+        let reading = behind.map_or(Reading::Codex, Reading::PausedFor);
+        if reading == self.reading {
+            return;
+        }
+        match reading {
+            Reading::PausedFor(run) => tracing::debug!(
+                run,
+                "Forge stopped reading Codex until run {run} catches up on its unread output"
+            ),
+            Reading::Codex => tracing::debug!("Forge reads Codex again"),
+        }
+        self.reading = reading;
     }
 
     fn write(&self, message: Value) {

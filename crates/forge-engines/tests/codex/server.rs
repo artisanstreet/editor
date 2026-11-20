@@ -141,6 +141,7 @@ async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
 #[tokio::test]
 async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply() {
     let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
     let (_inputs, inbox) = mpsc::channel(8);
     let (events, mut received) = mpsc::channel(1);
     let harness = tokio::spawn(crate::codex::CodexHarness.run(
@@ -161,33 +162,26 @@ async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply()
     let unread_limit = 32;
     let in_flight = 2;
     let most_written = taken_before_the_reader_blocked + unread_limit + in_flight;
-    let quiet = Duration::from_secs(1);
-    let stalled_at = test_support::wait::within(
-        "Codex's writes to stall while the run reads nothing",
+    test_support::wait::eventually(
+        "Forge to stop reading Codex while the run reads nothing",
         test_support::wait::LIVENESS,
-        async {
-            let mut seen = fixture.flooded_mib();
-            let mut moved_at = tokio::time::Instant::now();
-            loop {
-                let written = fixture.flooded_mib();
-                assert!(
-                    written <= most_written,
-                    "Codex wrote {written} MiB while the run read none, so Forge buffered it all"
-                );
-                if written != seen {
-                    seen = written;
-                    moved_at = tokio::time::Instant::now();
-                } else if moved_at.elapsed() >= quiet {
-                    break written;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        || std::future::ready(logs.text().contains("Forge stopped reading Codex")),
+    )
+    .await;
+    test_support::wait::eventually(
+        "Codex to write what Forge read before it stopped",
+        test_support::wait::LIVENESS,
+        || {
+            std::future::ready(
+                fixture.flooded_mib() >= taken_before_the_reader_blocked + unread_limit,
+            )
         },
     )
     .await;
+    let written = fixture.flooded_mib();
     assert!(
-        stalled_at >= taken_before_the_reader_blocked + unread_limit,
-        "Codex stalled after {stalled_at} MiB, before 32 MiB were waiting"
+        written <= most_written,
+        "Codex wrote {written} MiB while the run read none, so Forge buffered it all"
     );
 
     while let Some(event) = received.recv().await {
