@@ -227,7 +227,7 @@ impl RowFactory {
             Row::Text {
                 id, slot, block, ..
             } if matches!(slot, Slot::Prose | Slot::Text(_))
-                && stored_text_settled(row, id, *slot) =>
+                && shows_stored_text(row, id, *slot) =>
             {
                 self.stored_text_row(cx, out, id, *slot, *block)
             }
@@ -1057,9 +1057,14 @@ fn has_stored_text(row: &RealizedRow, id: &ItemId, slot: Slot) -> bool {
     item_text_is_stored(row, id, slot)
 }
 
-fn stored_text_settled(row: &RealizedRow, id: &ItemId, slot: Slot) -> bool {
+fn shows_stored_text(row: &RealizedRow, id: &ItemId, slot: Slot) -> bool {
+    let streaming = || {
+        row.model.live.contains_key(&artisan_api::LiveTarget::Text {
+            item_id: id.clone(),
+        })
+    };
     row.model.items.get(id).is_some_and(|item| {
-        (slot != Slot::Prose || item.status != Status::Running)
+        (slot != Slot::Prose || item.status != Status::Running || !streaming())
             && matches!(slot.text(item), Some(TextContent::Stored(_)))
     })
 }
