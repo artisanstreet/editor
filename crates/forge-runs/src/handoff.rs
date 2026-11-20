@@ -420,6 +420,18 @@ async fn summarize(
         });
     thread.config.engine = engine;
     thread.config.model = model;
+    let branch = if native_branch_allowed {
+        crate::launch::Branch::Anywhere
+    } else {
+        crate::launch::Branch::OffClaudeAi
+    };
+    let launch = crate::launch::LaunchSession::native(hub, engine, source.session.as_ref(), branch)
+        .await
+        .map_err(|source| ContextError::Prepare {
+            thread: thread.id.clone(),
+            engine,
+            source: source.into(),
+        })?;
     let lease = hub.engines().lease(engine);
     let crate::run::Prepared {
         mut turn,
@@ -427,14 +439,7 @@ async fn summarize(
     } = crate::run::prepare(
         hub,
         &thread,
-        source
-            .session
-            .as_ref()
-            .and_then(|run| run.session_id.clone())
-            .filter(|id| !id.is_empty())
-            .filter(|id| {
-                native_branch_allowed || !id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)
-            }),
+        &launch,
         UserInput {
             text: compaction_prompt(),
             ..UserInput::default()
@@ -447,32 +452,6 @@ async fn summarize(
         engine,
         source,
     })?;
-    if engine == EngineId::Claude {
-        let transport = source
-            .session
-            .as_ref()
-            .and_then(|run| run.session_id.as_deref())
-            .filter(|session| !session.is_empty())
-            .map(|session| {
-                if session.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX) {
-                    forge_engines::CLAUDE_AI_TRANSPORT
-                } else {
-                    "claude-code"
-                }
-            })
-            .or_else(|| {
-                thread
-                    .config
-                    .options
-                    .get("transport")
-                    .and_then(serde_json::Value::as_str)
-            });
-        if let Some(transport) = transport {
-            turn.config
-                .options
-                .insert("transport".to_owned(), serde_json::json!(transport));
-        }
-    }
     let harness = (hub.inner.harness_for)(engine);
     let mut last: Option<AttemptFailure> = None;
     let window = hub

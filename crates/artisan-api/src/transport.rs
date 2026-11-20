@@ -14,18 +14,6 @@ pub fn transport_of(value: Option<&serde_json::Value>) -> &'static str {
     }
 }
 
-#[must_use]
-pub fn transport_of_session(session: Option<&str>) -> Option<&'static str> {
-    let session = session?;
-    if session.starts_with(CLAUDE_AI_SESSION_PREFIX) {
-        Some(CLAUDE_AI)
-    } else if session.is_empty() {
-        None
-    } else {
-        Some(CLAUDE_CODE)
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClaudeAiSession {
     pub cookies: Vec<(String, String)>,

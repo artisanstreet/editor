@@ -8,6 +8,7 @@ mod extensions;
 pub mod failure;
 mod gateway;
 mod handoff;
+mod launch;
 mod mcp_auth;
 mod mcp_reach;
 mod operation;
@@ -805,15 +806,21 @@ impl Hub {
         engine: EngineId,
     ) -> Result<(), ClearGoalError> {
         let thread_id = &thread.id;
-        let session = self
-            .store()
-            .latest_run(thread_id)
-            .await?
-            .filter(|run| run.engine == engine)
-            .and_then(|run| run.session_id)
-            .ok_or_else(|| {
-                ClearGoalError::refused(thread_id, ClearGoalRefusal::NoSession { engine })
-            })?;
+        let prepare_failed = |source: PrepareError| ClearGoalError::Prepare {
+            thread: thread_id.clone(),
+            engine,
+            source: Box::new(source),
+        };
+        let latest = self.store().latest_run(thread_id).await?;
+        let launch = launch::LaunchSession::current(self, engine, latest.as_ref())
+            .await
+            .map_err(|source| prepare_failed(source.into()))?;
+        if launch.resume().is_none() {
+            return Err(ClearGoalError::refused(
+                thread_id,
+                ClearGoalRefusal::NoSession { engine },
+            ));
+        }
         let lease = self.engines().lease(engine);
         let run::Prepared {
             turn,
@@ -821,16 +828,12 @@ impl Hub {
         } = run::prepare(
             self,
             thread,
-            Some(session),
+            &launch,
             forge_engines::UserInput::default(),
             lease.as_ref().map(|lease| lease.path().to_path_buf()),
         )
         .await
-        .map_err(|source| ClearGoalError::Prepare {
-            thread: thread_id.clone(),
-            engine,
-            source: Box::new(source),
-        })?;
+        .map_err(prepare_failed)?;
         (self.inner.harness_for)(engine)
             .clear_goal(turn)
             .await

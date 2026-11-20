@@ -1,4 +1,5 @@
 use crate::Hub;
+use crate::launch::LaunchSession;
 use crate::turns::{AfterStop, Phase};
 use artisan_api::{
     Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
@@ -304,7 +305,7 @@ pub(crate) async fn drive(
         mut run,
         previous,
         carry_on,
-        transport,
+        launch,
         first_run,
     } = match Box::pin(start(hub, &thread, unstarted.clone())).await {
         Ok(started) => started,
@@ -312,8 +313,7 @@ pub(crate) async fn drive(
     };
     hub.agent_attention(thread_id).await;
 
-    let claude_ai_home =
-        (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
+    let claude_ai_home = launch.on_claude_ai().then(|| hub.engines().home(engine));
     let claude_ai_before = claude_ai_home
         .as_deref()
         .map(forge_engines::claudeai::Session::state);
@@ -329,7 +329,7 @@ pub(crate) async fn drive(
             pending: &pending,
             carry_on,
             previous,
-            transport,
+            launch,
         },
         Control {
             inbox,
@@ -385,7 +385,7 @@ struct Started {
     run: Run,
     previous: Option<Run>,
     carry_on: Option<String>,
-    transport: Option<ClaudeTransport>,
+    launch: LaunchSession,
     first_run: bool,
 }
 
@@ -401,17 +401,21 @@ async fn start(
         Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
         None => None,
     };
-    let (transport, session_id) =
-        launch_choice(hub, &thread.id, run.engine, previous.as_ref()).await?;
-    let carried = session_id.as_ref().and(previous.as_ref());
+    let launch = LaunchSession::current(hub, run.engine, previous.as_ref())
+        .await
+        .map_err(|source| DriveError::Transport {
+            thread: thread.id.clone(),
+            source,
+        })?;
+    let carried = launch.resume().and(previous.as_ref());
     run.usage = carried_usage(carried, &thread.config);
-    run.session_id = session_id;
+    run.session_id = launch.resume().map(|session| session.as_str().to_owned());
     let run = store.begin_run(run).await?;
     Ok(Started {
         run,
         previous,
         carry_on,
-        transport,
+        launch,
         first_run,
     })
 }
@@ -498,7 +502,7 @@ struct Delivery<'a> {
     pending: &'a [artisan_api::Item],
     carry_on: Option<String>,
     previous: Option<Run>,
-    transport: Option<ClaudeTransport>,
+    launch: LaunchSession,
 }
 
 async fn continue_prompt(
@@ -616,7 +620,7 @@ async fn execute(
         pending,
         carry_on,
         previous,
-        transport,
+        launch,
     }: Delivery<'_>,
     Control {
         mut inbox,
@@ -626,7 +630,7 @@ async fn execute(
     items: &mut Work,
 ) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
-    let handoff = if run.session_id.is_none() {
+    let handoff = if launch.resume().is_none() {
         let pending_ids = pending.iter().map(|item| item.id.clone()).collect();
         let switch = previous
             .as_ref()
@@ -682,16 +686,15 @@ async fn execute(
         }
         let initial_ids: Vec<_> = pending.iter().map(|item| item.id.clone()).collect();
         let initial_ack = input.id.clone();
-        let prepared = prepare_on(
+        let prepared = prepare(
             hub,
             thread,
-            run.session_id.clone(),
+            &launch,
             input,
             items
                 .binary
                 .as_ref()
                 .map(|lease| lease.path().to_path_buf()),
-            transport,
         )
         .await?;
         Ok::<_, ExecuteError>((prepared, initial_ids, initial_ack))
@@ -1041,17 +1044,6 @@ pub(crate) struct Prepared {
     pub(crate) gateway: crate::gateway::GatewayPass,
 }
 
-pub(crate) async fn prepare(
-    hub: &Hub,
-    thread: &artisan_api::Thread,
-    session_id: Option<String>,
-    input: UserInput,
-    binary: Option<PathBuf>,
-) -> Result<Prepared, PrepareError> {
-    let transport = claude_transport(hub, thread.config.engine).await?;
-    prepare_on(hub, thread, session_id, input, binary, transport).await
-}
-
 async fn git_common(
     hub: &Hub,
     thread: &artisan_api::Thread,
@@ -1072,13 +1064,12 @@ async fn git_common(
         })
 }
 
-async fn prepare_on(
+pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
-    session_id: Option<String>,
+    session: &LaunchSession,
     input: UserInput,
     binary: Option<PathBuf>,
-    transport: Option<ClaudeTransport>,
 ) -> Result<Prepared, PrepareError> {
     let engine = thread.config.engine;
     let engines = hub.engines();
@@ -1129,7 +1120,7 @@ async fn prepare_on(
     launch.tool_caches = Some(hub.sandbox_tool_caches(&thread.project_id));
     launch.git_common = git_common(hub, thread, &cwd).await?;
     let mut config = thread.config.clone();
-    match transport.and_then(ClaudeTransport::option) {
+    match session.transport_option() {
         Some(option) => {
             config.options.insert(
                 "transport".to_owned(),
@@ -1167,90 +1158,13 @@ async fn prepare_on(
             home: engines.home(engine),
             cwd,
             config,
-            session_id,
+            session_id: session.resume().map(|session| session.as_str().to_owned()),
             input,
             launch,
             trace_dir: Some(forge_engines::trace::folder(hub.data_dir())),
         },
         gateway,
     })
-}
-
-async fn launch_choice(
-    hub: &Hub,
-    thread_id: &ThreadId,
-    engine: EngineId,
-    previous: Option<&Run>,
-) -> Result<(Option<ClaudeTransport>, Option<String>), DriveError> {
-    let transport =
-        claude_transport(hub, engine)
-            .await
-            .map_err(|source| DriveError::Transport {
-                thread: thread_id.clone(),
-                source,
-            })?;
-    Ok((transport, carried_session(previous, engine, transport)))
-}
-
-fn carried_session(
-    previous: Option<&Run>,
-    engine: EngineId,
-    transport: Option<ClaudeTransport>,
-) -> Option<String> {
-    previous
-        .filter(|run| run.engine == engine)
-        .and_then(|run| run.session_id.clone())
-        .filter(|session| !session.is_empty())
-        .filter(|session| {
-            transport.is_none_or(|transport| {
-                artisan_api::transport_of_session(Some(session)) == Some(transport.speaks())
-            })
-        })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaudeTransport {
-    Code,
-    Chat,
-    ChatSignedOut,
-}
-
-impl ClaudeTransport {
-    const fn speaks(self) -> &'static str {
-        match self {
-            Self::Chat => artisan_api::CLAUDE_AI,
-            Self::Code | Self::ChatSignedOut => artisan_api::CLAUDE_CODE,
-        }
-    }
-
-    const fn option(self) -> Option<&'static str> {
-        match self {
-            Self::Code => None,
-            Self::Chat => Some(forge_engines::CLAUDE_AI_TRANSPORT),
-            Self::ChatSignedOut => Some(forge_engines::CLAUDE_AI_UNAVAILABLE),
-        }
-    }
-}
-
-async fn claude_transport(
-    hub: &Hub,
-    engine: EngineId,
-) -> Result<Option<ClaudeTransport>, forge_store::ReadSettingError> {
-    if engine != EngineId::Claude {
-        return Ok(None);
-    }
-    let setting = hub.store().setting(artisan_api::TRANSPORT_KEY).await?;
-    if artisan_api::transport_of(setting.as_ref()) != artisan_api::CLAUDE_AI {
-        return Ok(Some(ClaudeTransport::Code));
-    }
-    let home = hub.engines().home(engine);
-    Ok(Some(
-        if forge_engines::claudeai::Session::path(&home).is_file() {
-            ClaudeTransport::Chat
-        } else {
-            ClaudeTransport::ChatSignedOut
-        },
-    ))
 }
 
 const RECENT_KEYS: usize = 1024;

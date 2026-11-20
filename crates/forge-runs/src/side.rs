@@ -326,6 +326,14 @@ impl Hub {
             }
         }
         let engine = thread.config.engine;
+        let prepare_failed = |source| NameThreadError::Prepare {
+            thread: thread.id.clone(),
+            engine,
+            source,
+        };
+        let launch = crate::launch::LaunchSession::fresh(self, engine)
+            .await
+            .map_err(|source| prepare_failed(source.into()))?;
         let lease = self.engines().lease(engine);
         let crate::run::Prepared {
             turn,
@@ -333,7 +341,7 @@ impl Hub {
         } = crate::run::prepare(
             self,
             thread,
-            None,
+            &launch,
             UserInput {
                 id: ItemId::default(),
                 text,
@@ -342,11 +350,7 @@ impl Hub {
             lease.as_ref().map(|lease| lease.path().to_path_buf()),
         )
         .await
-        .map_err(|source| NameThreadError::Prepare {
-            thread: thread.id.clone(),
-            engine,
-            source,
-        })?;
+        .map_err(prepare_failed)?;
         let reply = (self.inner.harness_for)(engine)
             .side_query(turn, self.inner.shutdown.child_token())
             .await
@@ -393,19 +397,30 @@ impl Hub {
             return Ok(());
         };
         let engine = thread.config.engine;
-        let Some(session) = self
+        let prepare_failed = |source| SyncTitleError::Prepare {
+            thread: thread.id.clone(),
+            engine,
+            source,
+        };
+        let latest = self
             .store()
             .latest_run(&thread.id)
             .await
             .map_err(|source| SyncTitleError::LatestRun {
                 thread: thread.id.clone(),
                 source,
-            })?
-            .filter(|run| run.engine == engine)
-            .and_then(|run| run.session_id)
-        else {
+            })?;
+        let launch = crate::launch::LaunchSession::native(
+            self,
+            engine,
+            latest.as_ref(),
+            crate::launch::Branch::Anywhere,
+        )
+        .await
+        .map_err(|source| prepare_failed(source.into()))?;
+        if launch.resume().is_none() {
             return Ok(());
-        };
+        }
         let lease = self.engines().lease(engine);
         let crate::run::Prepared {
             turn,
@@ -413,16 +428,12 @@ impl Hub {
         } = crate::run::prepare(
             self,
             thread,
-            Some(session),
+            &launch,
             UserInput::default(),
             lease.as_ref().map(|lease| lease.path().to_path_buf()),
         )
         .await
-        .map_err(|source| SyncTitleError::Prepare {
-            thread: thread.id.clone(),
-            engine,
-            source,
-        })?;
+        .map_err(prepare_failed)?;
         (self.inner.harness_for)(engine)
             .set_title(turn, title)
             .await
@@ -536,18 +547,29 @@ impl Hub {
                 thread: thread_id.clone(),
             })?;
         let engine = thread.config.engine;
-        let Some(session) = store
+        let prepare_failed = |source| AskError::Prepare {
+            thread: thread_id.clone(),
+            engine,
+            source,
+        };
+        let latest = store
             .latest_run(thread_id)
             .await
             .map_err(|source| AskError::LatestRun {
                 thread: thread_id.clone(),
                 source,
-            })?
-            .filter(|run| run.engine == engine)
-            .and_then(|run| run.session_id)
-        else {
+            })?;
+        let launch = crate::launch::LaunchSession::native(
+            self,
+            engine,
+            latest.as_ref(),
+            crate::launch::Branch::Anywhere,
+        )
+        .await
+        .map_err(|source| prepare_failed(source.into()))?;
+        if launch.resume().is_none() {
             return Ok(None);
-        };
+        }
         let lease = self.engines().lease(engine);
         let crate::run::Prepared {
             turn,
@@ -555,7 +577,7 @@ impl Hub {
         } = crate::run::prepare(
             self,
             &thread,
-            Some(session),
+            &launch,
             UserInput {
                 id: ItemId::default(),
                 text: prompt(parts),
@@ -564,11 +586,7 @@ impl Hub {
             lease.as_ref().map(|lease| lease.path().to_path_buf()),
         )
         .await
-        .map_err(|source| AskError::Prepare {
-            thread: thread_id.clone(),
-            engine,
-            source,
-        })?;
+        .map_err(prepare_failed)?;
         let reply = (self.inner.harness_for)(engine)
             .side_query(turn, cancel)
             .await

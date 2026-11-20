@@ -83,7 +83,7 @@ pub use thread::{
 };
 pub use transport::{
     CLAUDE_AI, CLAUDE_AI_SESSION_PREFIX, CLAUDE_CODE, ClaudeAiSession, ClaudeAiState,
-    TRANSPORT_KEY, transport_of, transport_of_session,
+    TRANSPORT_KEY, transport_of,
 };
 pub use tunnel::{
     BYTES_ENVELOPE_KEY, BodyDecodeError, METHOD_SUBSCRIBE, METHOD_UNSUBSCRIBE,

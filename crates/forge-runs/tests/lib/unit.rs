@@ -23,6 +23,8 @@ mod engine_failures;
 mod extensions_tests;
 #[path = "../gateway/calls.rs"]
 mod gateway_calls;
+#[path = "../launch/session.rs"]
+mod launch_session;
 #[path = "../live/snapshot.rs"]
 mod live_snapshot;
 #[path = "../run/mcp_auth.rs"]
