@@ -303,7 +303,7 @@ impl Server {
             commands: receiver,
             runs: HashMap::new(),
             owners: HashMap::new(),
-            agents: HashMap::new(),
+            agents: AgentPaths::default(),
             pending: HashMap::new(),
             releasing: HashMap::new(),
             next_id: 1,
@@ -495,6 +495,37 @@ struct AgentPath {
     path: String,
 }
 
+#[derive(Default)]
+struct AgentPaths(HashMap<String, AgentPath>);
+
+impl AgentPaths {
+    fn parent_path<'a>(&'a self, sender: &str, sender_is_root: bool) -> Option<&'a str> {
+        self.0
+            .get(sender)
+            .map(|agent| agent.path.as_str())
+            .or_else(|| sender_is_root.then_some("/root"))
+    }
+
+    fn adopt(&mut self, sender: &str, child: &str, path: &str) {
+        let root = self
+            .0
+            .get(sender)
+            .map_or_else(|| sender.to_owned(), |agent| agent.root.clone());
+        self.0.insert(
+            child.to_owned(),
+            AgentPath {
+                root,
+                path: path.to_owned(),
+            },
+        );
+    }
+
+    fn forget(&mut self, thread: &str) {
+        self.0
+            .retain(|child, agent| child != thread && agent.root != thread);
+    }
+}
+
 struct Actor {
     server: Arc<Server>,
     process: EngineProcess,
@@ -503,7 +534,7 @@ struct Actor {
     commands: mpsc::UnboundedReceiver<Command>,
     runs: HashMap<u64, AttachedRun>,
     owners: HashMap<String, u64>,
-    agents: HashMap<String, AgentPath>,
+    agents: AgentPaths,
     pending: HashMap<u64, (u64, Value)>,
     releasing: HashMap<u64, Release>,
     next_id: u64,
@@ -739,8 +770,7 @@ impl Actor {
     fn closed(&mut self, thread: &str) {
         self.server.loaded().remove(thread);
         self.idle.remove(thread);
-        self.agents
-            .retain(|child, agent| child != thread && agent.root != thread);
+        self.agents.forget(thread);
         let ids: Vec<_> = self
             .releasing
             .iter()
@@ -877,11 +907,7 @@ impl Actor {
             return None;
         }
         let sender_is_root = self.server.loaded().contains_key(sender);
-        let parent_path = self
-            .agents
-            .get(sender)
-            .map(|agent| agent.path.as_str())
-            .or_else(|| sender_is_root.then_some("/root"));
+        let parent_path = self.agents.parent_path(sender, sender_is_root);
         let owns = match item.kind {
             Some(SubAgentActivityKind::Started) => true,
             Some(SubAgentActivityKind::Interacted) => parent_path.is_some_and(|parent| {
@@ -898,17 +924,7 @@ impl Actor {
         if !owns {
             return None;
         }
-        let root = self
-            .agents
-            .get(sender)
-            .map_or_else(|| sender.to_owned(), |agent| agent.root.clone());
-        self.agents.insert(
-            child.clone(),
-            AgentPath {
-                root,
-                path: path.clone(),
-            },
-        );
+        self.agents.adopt(sender, child, path);
         Some(child.clone())
     }
 
@@ -985,3 +1001,7 @@ async fn until_drained(behind: Option<&Backlog>) {
         backlog.until_drained().await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/codex/server/agent_paths.rs"]
+mod agent_paths_tests;
