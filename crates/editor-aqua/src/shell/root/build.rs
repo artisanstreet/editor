@@ -249,7 +249,7 @@ impl RootViews {
                 let content = state
                     .content(preview, &theme, viewport.height, &emit)
                     .map_err(BuildError::ResourcePreview)?;
-                self.resource_content = Some((content, preview.path.clone()));
+                self.resource_content = Some((content, preview.path().to_owned()));
             }
         } else {
             self.close_resource(ui);

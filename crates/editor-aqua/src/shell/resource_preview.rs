@@ -143,14 +143,29 @@ type PreviewSource = (
     artisan_api::ThreadId,
 );
 
+#[derive(Clone)]
+struct Origin {
+    host: crate::core::HostId,
+    instance: crate::core::HostInstance,
+    thread: artisan_api::ThreadId,
+}
+
+enum PreviewState {
+    Loading {
+        origin: Origin,
+        _request: tokio_util::task::AbortOnDropHandle<()>,
+    },
+    Settled {
+        origin: Option<Origin>,
+        content: Result<PreviewText, PreviewError>,
+    },
+}
+
 pub struct ResourcePreview {
-    pub(crate) path: String,
+    path: String,
     target_line: usize,
-    content: Option<Result<PreviewText, PreviewError>>,
+    state: PreviewState,
     delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
-    request: Option<tokio_util::task::AbortOnDropHandle<()>>,
-    source: Option<(crate::core::HostId, crate::core::HostInstance)>,
-    thread: Option<artisan_api::ThreadId>,
 }
 
 impl std::fmt::Debug for ResourcePreview {
@@ -162,41 +177,51 @@ impl std::fmt::Debug for ResourcePreview {
 impl ResourcePreview {
     #[must_use]
     pub const fn content(&self) -> Option<&Result<PreviewText, PreviewError>> {
-        self.content.as_ref()
+        match &self.state {
+            PreviewState::Loading { .. } => None,
+            PreviewState::Settled { content, .. } => Some(content),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
     }
 
     pub fn new(path: String, line: Option<u32>, source: Option<PreviewSource>) -> Self {
         let target_line = line.unwrap_or(1).saturating_sub(1) as usize;
-        let mut preview = Self {
+        let delivery = crate::core::delivery::Delivery::new(NonZeroUsize::MIN);
+        let state = Self::start(&path, target_line, &delivery, source);
+        Self {
             path,
             target_line,
-            content: None,
-            delivery: crate::core::delivery::Delivery::new(NonZeroUsize::MIN),
-            request: None,
-            source: None,
-            thread: None,
-        };
-        preview.start(source);
-        preview
+            state,
+            delivery,
+        }
     }
 
-    fn start(&mut self, source: Option<PreviewSource>) {
-        self.source = source
-            .as_ref()
-            .map(|(host, instance, _, _)| (host.clone(), *instance));
-        self.thread = source.as_ref().map(|(_, _, _, thread)| thread.clone());
-        let Some((_, _, client, thread)) = source else {
-            self.request = None;
-            self.content = Some(Err(PreviewError::Unpaired {
-                path: self.path.clone(),
-            }));
-            return;
+    fn start(
+        path: &str,
+        target_line: usize,
+        delivery: &crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
+        source: Option<PreviewSource>,
+    ) -> PreviewState {
+        let Some((host, instance, client, thread)) = source else {
+            return PreviewState::Settled {
+                origin: None,
+                content: Err(PreviewError::Unpaired {
+                    path: path.to_owned(),
+                }),
+            };
         };
-        self.content = None;
-        let fetch_path = self.path.clone();
-        let target_line = self.target_line;
-        let sender = self.delivery.sender();
-        self.request = Some(tokio_util::task::AbortOnDropHandle::new(
+        let origin = Origin {
+            host,
+            instance,
+            thread: thread.clone(),
+        };
+        let fetch_path = path.to_owned();
+        let sender = delivery.sender();
+        let request = tokio_util::task::AbortOnDropHandle::new(
             crate::core::runtime::runtime().spawn(async move {
                 let result = match client.resource(&thread, &fetch_path, false, None).await {
                     Ok(bytes) => String::from_utf8(bytes)
@@ -214,27 +239,35 @@ impl ResourcePreview {
                     tracing::debug!("the source preview closed before its file was read");
                 }
             }),
-        ));
+        );
+        PreviewState::Loading {
+            origin,
+            _request: request,
+        }
     }
 
     pub(crate) fn retry(&mut self, core: &crate::core::Core) -> bool {
-        if !self
-            .content
-            .as_ref()
-            .is_some_and(|content| content.as_ref().is_err_and(PreviewError::retryable))
-        {
+        let PreviewState::Settled {
+            origin,
+            content: Err(error),
+        } = &self.state
+        else {
+            return false;
+        };
+        if !error.retryable() {
             return false;
         }
-        let source = self
-            .source
-            .as_ref()
-            .map(|(host, _)| host)
-            .zip(self.thread.clone())
-            .and_then(|(host, thread)| {
-                core.host(host)
-                    .map(|data| (host.clone(), data.instance(), data.client.clone(), thread))
-            });
-        self.start(source);
+        let source = origin.as_ref().and_then(|origin| {
+            core.host(&origin.host).map(|data| {
+                (
+                    origin.host.clone(),
+                    data.instance(),
+                    data.client.clone(),
+                    origin.thread.clone(),
+                )
+            })
+        });
+        self.state = Self::start(&self.path, self.target_line, &self.delivery, source);
         true
     }
 
@@ -243,28 +276,29 @@ impl ResourcePreview {
     }
 
     pub fn drain(&mut self, core: &crate::core::Core) -> bool {
-        let gone = self
-            .source
-            .as_ref()
-            .filter(|(host, instance)| core.host_if_instance(host, *instance).is_none())
-            .map(|(host, _)| host.clone());
         let delivered = self.delivery.drain().into_iter().next();
-        match (gone, delivered) {
-            (Some(host), _) if self.content.is_none() => {
-                self.request = None;
-                self.content = Some(Err(PreviewError::HostGone {
-                    path: self.path.clone(),
-                    host,
-                }));
-                true
-            }
-            (Some(_), _) | (None, None) => false,
-            (None, Some(result)) => {
-                self.request = None;
-                self.content = Some(result);
-                true
-            }
-        }
+        let PreviewState::Loading { origin, .. } = &self.state else {
+            return false;
+        };
+        let origin = origin.clone();
+        let content = if core
+            .host_if_instance(&origin.host, origin.instance)
+            .is_none()
+        {
+            Err(PreviewError::HostGone {
+                path: self.path.clone(),
+                host: origin.host.clone(),
+            })
+        } else if let Some(result) = delivered {
+            result
+        } else {
+            return false;
+        };
+        self.state = PreviewState::Settled {
+            origin: Some(origin),
+            content,
+        };
+        true
     }
 }
 pub mod view;

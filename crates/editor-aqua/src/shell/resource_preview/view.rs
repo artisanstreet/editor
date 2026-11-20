@@ -74,7 +74,7 @@ impl ViewState {
         preview: &ResourcePreview,
         app: &mut aqua::UiApp,
     ) -> Result<bool, SelectionSourceError> {
-        let Some(Ok(content)) = &preview.content else {
+        let Some(Ok(content)) = preview.content() else {
             return Ok(false);
         };
         let Some(window) = content.window() else {
@@ -157,7 +157,7 @@ impl ViewState {
             })
             .build(),
         );
-        match &preview.content {
+        match preview.content() {
             None => body = body.child(body_text(theme, "Reading source…")),
             Some(Err(error)) if error.retryable() => {
                 let retry = Rc::clone(emit);

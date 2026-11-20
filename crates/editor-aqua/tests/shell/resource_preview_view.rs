@@ -1,5 +1,5 @@
 use super::*;
-use crate::shell::resource_preview::PreviewText;
+use crate::shell::resource_preview::{PreviewState, PreviewText};
 use crate::ui::dialog::Dialog;
 
 fn ignore() -> Rc<dyn Fn(Action)> {
@@ -75,8 +75,11 @@ fn multibyte_lines_are_previewed_whole() {
 fn an_empty_file_says_it_is_empty_instead_of_an_inverted_range() {
     use aqua_text::{SharedFonts, SharedRuns};
     let mut preview = ResourcePreview::new("src/empty.rs".into(), Some(3), None);
-    preview.content = Some(Ok(PreviewText::new(String::new(), 2)));
-    let Some(Ok(content)) = &preview.content else {
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new(String::new(), 2)),
+    };
+    let Some(Ok(content)) = preview.content() else {
         unreachable!("the preview was just given its content")
     };
     assert_eq!(content.note(), "This file is empty.");
@@ -116,7 +119,10 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     use aqua_text::{SharedFonts, SharedRuns};
     use std::cell::RefCell;
     let mut preview = ResourcePreview::new("src/file.rs".into(), Some(2), None);
-    preview.content = Some(Ok(PreviewText::new("first\nsecond\n".into(), 1)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("first\nsecond\n".into(), 1)),
+    };
     let mut state = ViewState::new(7, SelectionDocumentId(23), SelectionSourceId(24));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     assert!(state.prepare(&preview, &mut app).unwrap());
@@ -189,7 +195,10 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     use aqua_ui::element::Box as UiBox;
 
     let mut preview = ResourcePreview::new("src/file.rs".into(), None, None);
-    preview.content = Some(Ok(PreviewText::new("line\n".into(), 0)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("line\n".into(), 0)),
+    };
     let mut state = ViewState::new(4, SelectionDocumentId(9), SelectionSourceId(10));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
@@ -229,7 +238,10 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
     };
 
     let mut preview = ResourcePreview::new("src/file.rs".into(), Some(51), None);
-    preview.content = Some(Ok(PreviewText::new("line\n".repeat(100), 50)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("line\n".repeat(100), 50)),
+    };
     let mut state = ViewState::new(8, SelectionDocumentId(31), SelectionSourceId(32));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     state.prepare(&preview, &mut app).unwrap();
@@ -278,11 +290,11 @@ fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection()
         )
     };
     let mut preview = ResourcePreview::new("src/lib.rs".into(), Some(12), Some(source(&core)));
-    assert!(preview.content.is_none());
+    assert!(preview.content().is_none());
     core.remove_host(&config.id).unwrap();
     assert!(preview.drain(&core));
     assert!(matches!(
-        preview.content,
+        preview.content(),
         Some(Err(PreviewError::HostGone { .. }))
     ));
 
@@ -306,7 +318,7 @@ fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection()
     connect(&mut core, &config);
     assert!(preview.retry(&core));
     assert!(
-        preview.content.is_none(),
+        preview.content().is_none(),
         "the preview reads the file again"
     );
     assert_eq!(preview.target_line, 11);
