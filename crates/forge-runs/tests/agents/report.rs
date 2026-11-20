@@ -155,3 +155,120 @@ async fn a_finished_background_agent_reports_to_its_parent_in_a_managed_generati
     );
     fixture.hub.shutdown();
 }
+
+async fn reports_from(fixture: &Fixture, agent: &ItemId) -> usize {
+    fixture
+        .items()
+        .await
+        .iter()
+        .filter(|item| {
+            matches!(&item.kind, ItemKind::UserMessage { from_agent: Some(from), .. } if from == agent)
+        })
+        .count()
+}
+
+async fn reported(fixture: &Fixture, agent: &ItemId, count: usize) {
+    test_support::wait::eventually(
+        "the parent to hear of its agent",
+        test_support::wait::LIVENESS,
+        || async { reports_from(fixture, agent).await == count },
+    )
+    .await;
+}
+
+async fn agent_reaches(fixture: &Fixture, agent: &ItemId, status: Status) {
+    test_support::wait::eventually(
+        "the agent row to reach its status",
+        test_support::wait::LIVENESS,
+        || async {
+            fixture
+                .hub
+                .store()
+                .item(agent)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == status
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_agent_that_is_woken_works_again_and_reports_again() {
+    let release = Arc::new(Notify::new());
+    let fixture = fixture_in_generation(Arc::new({
+        let release = Arc::clone(&release);
+        move |turn, io| {
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                match turn.input.text.as_str() {
+                    "review it" => io.emit(reply("verdict", "looks fine")).await,
+                    "Your reviewers finished." => {
+                        release.notified().await;
+                        io.emit(reply("final", "all reviewed")).await;
+                    }
+                    _ => {}
+                }
+                Outcome::done()
+            })
+        }
+    }))
+    .await;
+    let store = fixture.hub.store();
+    let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
+    let (agent, child) = background_agent(&fixture, &parent).await;
+    fixture.hub.resume_pending();
+    reported(&fixture, &agent, 1).await;
+    agent_reaches(&fixture, &agent, Status::Done).await;
+    fixture
+        .hub
+        .send_message(&child, message("Your reviewers finished."))
+        .await
+        .unwrap();
+    agent_reaches(&fixture, &agent, Status::Running).await;
+    release.notify_one();
+    reported(&fixture, &agent, 2).await;
+    agent_reaches(&fixture, &agent, Status::Done).await;
+    fixture.hub.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_cancelled_before_it_runs_settles_without_reporting_again() {
+    let fixture = fixture_in_generation(Arc::new(|turn, io| {
+        Box::pin(async move {
+            if turn.input.text == "review it" {
+                io.emit(reply("verdict", "looks fine")).await;
+            }
+            Outcome::done()
+        })
+    }))
+    .await;
+    let store = fixture.hub.store();
+    let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
+    let (agent, child) = background_agent(&fixture, &parent).await;
+    fixture.hub.resume_pending();
+    reported(&fixture, &agent, 1).await;
+    agent_reaches(&fixture, &agent, Status::Done).await;
+    fixture.quiescent().await;
+    fixture
+        .hub
+        .generation()
+        .unwrap()
+        .set_phase(runtime::Phase::Standby);
+    let info = fixture
+        .hub
+        .message_agent(&fixture.thread_id, agent.as_str(), "One more thing.".into())
+        .await
+        .unwrap();
+    assert_eq!(info.state, AgentState::Working);
+    fixture.hub.cancel(&child).await.unwrap();
+    agent_reaches(&fixture, &agent, Status::Done).await;
+    assert_eq!(
+        reports_from(&fixture, &agent).await,
+        1,
+        "the parent hears the agent's old result only once"
+    );
+    fixture.hub.shutdown();
+}

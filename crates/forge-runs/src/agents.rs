@@ -1058,12 +1058,6 @@ impl Hub {
         Ok(tree)
     }
 
-    pub(crate) async fn agent_run_ended(&self, thread: &ThreadId) {
-        if let Err(error) = self.settle_agent(thread).await {
-            tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
-        }
-    }
-
     pub(crate) async fn agent_attention(&self, thread: &ThreadId) {
         if let Err(error) = self.settle_agent(thread).await {
             tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
@@ -1091,6 +1085,10 @@ impl Hub {
             }
         );
         let (info, update) = self.agent_view(&item, thread).await?;
+        let ran_since_last_shown = store
+            .latest_run(thread)
+            .await?
+            .is_some_and(|run| run.seq > item.seq);
         let waited = self
             .waiters_lock()
             .get(agent)
@@ -1100,6 +1098,7 @@ impl Hub {
             && !item.status.is_terminal()
             && info.state.is_settled()
             && info.state != AgentState::Cancelled
+            && ran_since_last_shown
             && !self.stopping(&parent).await?;
         if !reports {
             if let Some(update) = update {

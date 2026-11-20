@@ -872,7 +872,7 @@ impl Hub {
             }
         }
         for thread in idle {
-            self.agent_run_ended(&thread).await;
+            self.agent_attention(&thread).await;
         }
         for (thread, member) in elsewhere {
             if let Err(source) = runtime::request(
@@ -907,7 +907,7 @@ impl Hub {
                     });
                 }
             }
-            Stopping::Idle => self.agent_run_ended(thread_id).await,
+            Stopping::Idle => self.agent_attention(thread_id).await,
         }
         CancelError::check(thread_id, 1, failures)
     }
@@ -1140,7 +1140,7 @@ impl Hub {
             }
         }
         for thread in ended {
-            self.agent_run_ended(&thread).await;
+            self.agent_attention(&thread).await;
         }
         self.resume_pending();
         settled
@@ -1289,7 +1289,7 @@ impl Hub {
                 hub.resume_pending();
             }
             if !hub.inner.shutdown.is_cancelled() {
-                hub.agent_run_ended(&thread_id).await;
+                hub.agent_attention(&thread_id).await;
             }
             if status == Some(artisan_api::RunStatus::Done)
                 && !hub.inner.shutdown.is_cancelled()

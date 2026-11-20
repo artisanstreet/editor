@@ -310,6 +310,7 @@ pub(crate) async fn drive(
         Ok(started) => started,
         Err(error) => return Box::pin(fail_unstarted(hub, unstarted, &pending, &error)).await,
     };
+    hub.agent_attention(thread_id).await;
 
     let claude_ai_home =
         (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
