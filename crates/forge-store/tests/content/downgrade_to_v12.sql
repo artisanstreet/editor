@@ -1,3 +1,4 @@
+DROP TABLE resource_capture;
 DROP TRIGGER item_content_owner_delete;
 DROP TRIGGER outline_revision_insert;
 DROP TRIGGER outline_revision_update;

@@ -81,7 +81,7 @@ pub use recall::{
     RetryPace, SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
-    CollectSnapshotsError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
+    CollectSnapshotsError, KeptAtViewError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,
     keep as keep_resource_snapshot,
 };
 pub use retained::RetainedError;

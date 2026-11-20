@@ -80,9 +80,14 @@ async fn an_image_a_reply_shows_outlives_its_file_and_later_versions() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_first_seen_when_viewed_is_kept_from_then_on() {
-    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+async fn reply_naming_a_missing_plot(fixture: &Fixture) -> (artisan_api::Thread, ItemId, Written) {
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("plot"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let item = fixture.by_native("reply").await.id;
     let thread = fixture
         .hub
         .store()
@@ -90,12 +95,10 @@ async fn a_file_first_seen_when_viewed_is_kept_from_then_on() {
         .await
         .unwrap()
         .unwrap();
-    let file = fixture.dir.path().join("plot.png");
     let written = Written {
         path: "plot.png".to_owned(),
         from_home: false,
     };
-    let item = ItemId::new();
     assert!(matches!(
         fixture
             .hub
@@ -103,6 +106,54 @@ async fn a_file_first_seen_when_viewed_is_kept_from_then_on() {
             .await,
         Err(ResourceError::Missing)
     ));
+    (thread, item, written)
+}
+
+fn shows_missing_plot() -> Script {
+    Arc::new(|_, io| {
+        Box::pin(async move {
+            io.emit(reply("reply", "![plot](plot.png)")).await;
+            Outcome::done()
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_a_reply_named_before_it_existed_is_shown_as_it_is_now() {
+    let fixture = fixture(shows_missing_plot()).await;
+    let (thread, item, written) = reply_naming_a_missing_plot(&fixture).await;
+    let file = fixture.dir.path().join("plot.png");
+    for version in [&b"next turn's plot"[..], b"the plot after that"] {
+        std::fs::write(&file, version).unwrap();
+        assert_eq!(
+            fixture
+                .hub
+                .read_resource(&thread, Some(&item), &written)
+                .await
+                .unwrap(),
+            version,
+            "a later version of the file was pinned to the earlier reply"
+        );
+    }
+    std::fs::remove_file(&file).unwrap();
+    assert!(matches!(
+        fixture
+            .hub
+            .read_resource(&thread, Some(&item), &written)
+            .await,
+        Err(ResourceError::Missing)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_from_before_files_were_kept_at_publish_keeps_them_from_first_view() {
+    let fixture = fixture(shows_missing_plot()).await;
+    let (thread, item, written) = reply_naming_a_missing_plot(&fixture).await;
+    rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3"))
+        .unwrap()
+        .execute_batch(include_str!("before_capture.sql"))
+        .unwrap();
+    let file = fixture.dir.path().join("plot.png");
     std::fs::write(&file, b"plot").unwrap();
     assert_eq!(
         fixture

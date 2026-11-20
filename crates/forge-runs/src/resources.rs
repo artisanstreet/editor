@@ -68,6 +68,8 @@ pub enum ResourceError {
     },
     #[error("find the folder resources are read from")]
     Folder(#[source] ThreadFolderError),
+    #[error("find out whether the reply keeps its files when first viewed")]
+    KeptAtView(#[source] forge_store::KeptAtViewError),
     #[error("run the resource read task of thread {thread}")]
     Task {
         thread: ThreadId,
@@ -601,6 +603,14 @@ impl Hub {
                 written.from_home,
             )
         });
+        let keep_at_view = match item {
+            Some(item) => self
+                .store()
+                .resource_kept_at_view(&thread.id, item)
+                .await
+                .map_err(ResourceError::KeptAtView)?,
+            None => false,
+        };
         let folder = self
             .thread_folder(thread)
             .await
@@ -612,7 +622,7 @@ impl Hub {
                 return read_kept(kept);
             }
             let bytes = hub.resource_access(&folder).read(&live?)?;
-            if let Some(target) = &snapshot {
+            if let Some(target) = snapshot.as_deref().filter(|_| keep_at_view) {
                 keep(target, &bytes);
             }
             Ok(bytes)

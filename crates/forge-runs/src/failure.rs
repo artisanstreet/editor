@@ -648,7 +648,9 @@ impl ResourceError {
                 }
                 | RootError::Resolve { .. } => Failure::Internal,
             },
-            Self::Read { .. } | Self::Open { .. } | Self::Task { .. } => Failure::Internal,
+            Self::Read { .. } | Self::Open { .. } | Self::Task { .. } | Self::KeptAtView(_) => {
+                Failure::Internal
+            }
         }
     }
 }

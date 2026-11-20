@@ -2,6 +2,7 @@ use crate::Store;
 use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ThreadId};
+use rusqlite::OptionalExtension as _;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -33,6 +34,12 @@ fn io(step: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> Resourc
 operation_error!(
     CollectSnapshotsError(ResourceFailure),
     "collect resource snapshots"
+);
+operation_error!(
+    KeptAtViewError(StorageError),
+    "check whether item {item} of thread {thread} keeps its files when first viewed",
+    thread: ThreadId,
+    item: ItemId,
 );
 
 fn file_safe(id: &str) -> bool {
@@ -114,6 +121,30 @@ impl Store {
         from_home: bool,
     ) -> Option<PathBuf> {
         snapshot_path(&self.inner.resource_dir, thread, item, written, from_home)
+    }
+
+    pub async fn resource_kept_at_view(
+        &self,
+        thread: &ThreadId,
+        item: &ItemId,
+    ) -> Result<bool, KeptAtViewError> {
+        let (thread_id, item_id) = (thread.clone(), item.clone());
+        self.read(move |conn| {
+            conn.prepare_cached(include_str!("sql/resources/kept_at_view.sql"))
+                .at("resources/kept_at_view.sql")?
+                .query_row([item_id.as_str(), thread_id.as_str()], |row| {
+                    row.get::<_, bool>(0)
+                })
+                .optional()
+                .map(|kept| kept == Some(true))
+                .at("resources/kept_at_view.sql")
+        })
+        .await
+        .map_err(|cause| KeptAtViewError {
+            thread: thread.clone(),
+            item: item.clone(),
+            cause: Box::new(cause),
+        })
     }
 
     pub async fn gc_resource_snapshots(&self) -> Result<usize, CollectSnapshotsError> {
