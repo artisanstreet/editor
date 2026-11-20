@@ -860,9 +860,18 @@ impl Tx<'_> {
     }
 
     pub(crate) fn continue_after_restart(&self, run: &Run) -> Result<bool> {
-        let enabled = read::setting(self, CONTINUE_AFTER_RESTART_KEY)?
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+        let enabled = match read::setting(self, CONTINUE_AFTER_RESTART_KEY)? {
+            None => true,
+            Some(serde_json::Value::Bool(enabled)) => enabled,
+            Some(other) => {
+                tracing::warn!(
+                    key = CONTINUE_AFTER_RESTART_KEY,
+                    value = %other,
+                    "the setting isn't on or off, so runs carry on after a restart as by default"
+                );
+                true
+            }
+        };
         if !enabled || !self.may_carry_on(run)? {
             return Ok(false);
         }
