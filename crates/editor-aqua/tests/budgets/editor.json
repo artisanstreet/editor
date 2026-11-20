@@ -29,23 +29,35 @@
   },
   "stream_window_rebuilds": {
     "limit": 2,
-    "reason": "stored updates to a streaming reply refresh only the transcript section; measured 0, and the margin covers one late host-wide change landing mid-stream"
+    "reason": "live deltas past the 16 KiB inline limit, with the reply persisted as stored content every sixth delta, refresh only the transcript section; measured 0, and the margin covers one late host-wide change landing mid-stream"
   },
   "stream_section_refreshes_per_frame": {
     "limit": 1,
-    "reason": "a frame refreshes the transcript at most once"
+    "reason": "a frame refreshes the transcript at most once while a reply streams"
   },
   "stream_access_nodes_published_per_frame": {
-    "limit": 80,
-    "reason": "a streamed chunk republishes only the changed reply's nodes to a screen reader; measured 62"
+    "limit": 800,
+    "reason": "each delta adds a row and the transcript follows the tail by it, so every realized node moves and is republished with its new bounds; measured 630 to 705"
+  },
+  "finish_window_rebuilds": {
+    "limit": 1,
+    "reason": "a reply that finishes as stored content refreshes only the transcript section; measured 0, and the margin covers one late host-wide change"
+  },
+  "finish_section_refreshes_per_frame": {
+    "limit": 2,
+    "reason": "swapping the live text for the stored text refreshes the transcript when the stored rows publish and once more when their measured heights invalidate them in the same frame; measured 2"
+  },
+  "finish_access_nodes_published_per_frame": {
+    "limit": 1500,
+    "reason": "swapping the live text for the stored text redraws the realized window once; measured 1299"
   },
   "scroll_window_rebuilds": {
     "limit": 3,
     "reason": "older pages that arrive while scrolling refresh only the transcript section; measured 1 (views_frame), and the margin covers a late host-wide change"
   },
   "scroll_section_refreshes_per_frame": {
-    "limit": 1,
-    "reason": "a frame refreshes the transcript at most once"
+    "limit": 2,
+    "reason": "a frame refreshes the transcript once for the scroll and at most once more when newly realized rows invalidate themselves after measuring; measured 2"
   },
   "scroll_access_nodes_examined_per_frame": {
     "limit": 1500,

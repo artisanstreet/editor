@@ -24,6 +24,8 @@ impl RootViews {
         self.connection.dispatch(&mut shell.core);
         let invalidated = self.conversation_invalidated.replace(false);
         let mut changed = self.noted.note(Cause::ConversationInvalidated, invalidated);
+        let rows_invalidated = self.rows_invalidated.replace(false);
+        self.noted.note(Cause::RowsInvalidated, rows_invalidated);
         if self.navigation_invalidated.replace(false) {
             let navigated = self.refresh_navigation(shell, ui, ctx, window);
             changed |= self.noted.note(Cause::Navigation, navigated);
@@ -34,11 +36,11 @@ impl RootViews {
                 .stored
                 .borrow_mut()
                 .drain_publish(&mut workspace.conversation, &shell.core);
-            changed |= self.noted.note(Cause::StoredRows, published);
+            self.noted.note(Cause::StoredRows, published);
         }
         self.stored.borrow_mut().drain_cleanup(ui);
         let sourced = self.drain_row_sources(shell, ctx, window);
-        changed |= self.noted.note(Cause::RowSources, sourced);
+        self.noted.note(Cause::RowSources, sourced);
         self.source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
         for (export, result) in self.source_dialogs.drain() {

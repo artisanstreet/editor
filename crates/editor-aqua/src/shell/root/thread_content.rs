@@ -189,7 +189,7 @@ impl RootViews {
             thread: scope.thread.clone(),
         })?;
         let (on_link, on_color) = self.conversation_callbacks(scope.clone());
-        let invalidated = Rc::clone(&self.conversation_invalidated);
+        let invalidated = Rc::clone(&self.rows_invalidated);
         let row_token = Rc::clone(
             self.row_token
                 .get_or_insert_with(|| Rc::new(Cell::new(true))),

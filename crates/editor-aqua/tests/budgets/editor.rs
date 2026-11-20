@@ -3,7 +3,7 @@ use aqua::{Application, Aqua, AquaConfig};
 use aqua_a11y_uia::A11yBridge;
 use aqua_core::{InputEvent, Point, ScrollDelta};
 use aqua_protocol::AccessTreeUpdate;
-use artisan_api::ThreadId;
+use artisan_api::{LiveTarget, ThreadId};
 use editor_aqua::core::diagnostics::rebuild_stats::take_tally;
 use editor_aqua::core::{EditorFiles, HostId, Screen, hosts, runtime::runtime};
 use editor_aqua::qualification::fixture::{Fixture, ForgeServer};
@@ -249,7 +249,20 @@ impl Editor {
         self.app.qualification_observation()
     }
 
-    pub(crate) fn settle(&mut self, what: &str, ready: impl Fn(&Observation) -> bool) -> Span {
+    pub(crate) fn live_bytes(&self, thread: &ThreadId, target: &LiveTarget) -> Option<usize> {
+        self.app
+            .shell
+            .core
+            .host(&self.host)?
+            .live_snapshot(thread, target)
+            .map(|live| live.text.len_bytes())
+    }
+
+    pub(crate) fn settle(
+        &mut self,
+        what: &str,
+        ready: impl Fn(&Self, &Observation) -> bool,
+    ) -> Span {
         let limit = Instant::now() + SETTLE_LIMIT;
         let mut span = Span::default();
         let mut quiet = 0;
@@ -267,7 +280,10 @@ impl Editor {
                         host.repository_checked(project) && host.project_icon_checked(project)
                     })
             }) && self.app.shell.core.pending_work() == 0;
-            let done = caught_up && observed.as_ref().is_some_and(&ready);
+            let done = caught_up
+                && observed
+                    .as_ref()
+                    .is_some_and(|observed| ready(self, observed));
             if done && still && !forge_moved {
                 quiet += 1;
             } else {
@@ -316,7 +332,7 @@ impl Editor {
                     },
                 },
             );
-            span.extend(self.settle("a wheel notch", |_| true));
+            span.extend(self.settle("a wheel notch", |_, _| true));
         }
         span
     }

@@ -76,6 +76,7 @@ pub enum Cause {
     ConnectionAnimation,
     ImagePreview,
     ConversationInvalidated,
+    RowsInvalidated,
     RowSources,
     StoredRows,
     Disclosure,
@@ -147,6 +148,7 @@ impl Cause {
             Self::ConnectionAnimation => "connection_anim",
             Self::ImagePreview => "conv_image_preview",
             Self::ConversationInvalidated => "conv_invalidated",
+            Self::RowsInvalidated => "conv_rows_invalidated",
             Self::RowSources => "conv_row_sources",
             Self::StoredRows => "conv_stored",
             Self::Disclosure => "disclosure",
@@ -204,8 +206,6 @@ impl Cause {
             | Self::ConnectionAnimation
             | Self::ImagePreview
             | Self::ConversationInvalidated
-            | Self::RowSources
-            | Self::StoredRows
             | Self::Dispatch
             | Self::ConversationInput
             | Self::PaletteInput
@@ -231,6 +231,9 @@ impl Cause {
             | Self::LiveText
             | Self::ThreadItems
             | Self::ConversationState
+            | Self::RowsInvalidated
+            | Self::RowSources
+            | Self::StoredRows
             | Self::Viewport => Refresh::Transcript,
             Self::SidebarAnimation | Self::SidebarResize => Refresh::SidebarFrame,
         }

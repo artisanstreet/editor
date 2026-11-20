@@ -740,10 +740,9 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(tm_pre);
         let mut causes = Invalidation::default();
         let tm_workspace = Tm::new("drain.workspace");
-        let mut domain_changed = causes.note(Cause::Sections, sections_changed);
-        if sections_changed {
-            causes.extend(self.views.take_invalidation());
-        }
+        let noted = self.views.take_invalidation();
+        let mut domain_changed = causes.note(Cause::Sections, sections_changed) | !noted.is_empty();
+        causes.extend(noted);
         domain_changed |= causes.note(Cause::Titlebar, self.shell.titlebar.take_changed());
         domain_changed |= causes.note(
             Cause::ViewEvents,
@@ -1006,10 +1005,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             .is_some_and(|deadline| ctx.now() >= deadline);
         let mut causes = Invalidation::default();
         let noted = self.views.take_invalidation();
-        let mut refresh = causes.note(Cause::ViewsFrame, views_changed);
-        if views_changed {
-            causes.extend(noted);
-        }
+        let mut refresh = causes.note(Cause::ViewsFrame, views_changed) | !noted.is_empty();
+        causes.extend(noted);
         refresh |= causes.note(Cause::PopupAnimating, popup_animating);
         refresh |= causes.note(Cause::UsageClock, usage_elapsed);
         if usage_elapsed {

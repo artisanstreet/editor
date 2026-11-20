@@ -149,6 +149,7 @@ pub struct RootViews {
     row_motion: Rc<RefCell<crate::conversation::view::motion::RowMotion>>,
     markdown_engine: Rc<RefCell<Option<crate::ui::markdown::MarkdownEngine>>>,
     conversation_invalidated: Rc<Cell<bool>>,
+    rows_invalidated: Rc<Cell<bool>>,
     navigation_invalidated: Rc<Cell<bool>>,
     row_token: Option<Rc<Cell<bool>>>,
     row_settled: Rc<RefCell<HashMap<crate::conversation::fold::RowKey, u64>>>,

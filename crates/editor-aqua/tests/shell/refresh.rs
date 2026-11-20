@@ -105,3 +105,33 @@ fn sidebar_frame_animation_updates_the_chrome_and_combines_with_transcript_chang
         Refresh::FrameSections
     );
 }
+
+#[test]
+fn stored_reply_traffic_refreshes_only_the_transcript() {
+    for causes in [
+        vec![Cause::StoredRows],
+        vec![Cause::RowSources],
+        vec![Cause::RowsInvalidated],
+        vec![
+            Cause::ViewsFrame,
+            Cause::StoredRows,
+            Cause::RowSources,
+            Cause::RowsInvalidated,
+            Cause::ThreadItems,
+        ],
+    ] {
+        assert_eq!(refresh(&causes), Refresh::Transcript, "{causes:?}");
+    }
+    assert_eq!(
+        refresh(&[Cause::StoredRows, Cause::SidebarTick]),
+        Refresh::Sections
+    );
+}
+
+#[test]
+fn shell_wide_conversation_invalidation_still_rebuilds_the_workspace() {
+    assert_eq!(
+        refresh(&[Cause::RowsInvalidated, Cause::ConversationInvalidated]),
+        Refresh::Workspace
+    );
+}
