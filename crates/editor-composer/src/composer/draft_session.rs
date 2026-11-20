@@ -340,8 +340,37 @@ enum State {
 pub struct DraftSession {
     scope: String,
     epoch: u64,
+    handed_back: Option<u64>,
     unrecovered: Option<Unrecovered>,
     state: State,
+}
+
+fn fold_back(sent: &DraftBody, typed: DraftBody) -> DraftBody {
+    if typed == *sent {
+        return typed;
+    }
+    let DraftBody {
+        text,
+        images,
+        files,
+        config,
+        project,
+        follow_ups: mut parked,
+    } = typed;
+    if !text.trim().is_empty() || !images.is_empty() || !files.is_empty() {
+        parked.push(DraftBody {
+            text,
+            images,
+            files,
+            config,
+            project,
+            follow_ups: Vec::new(),
+        });
+    }
+    DraftBody {
+        follow_ups: parked,
+        ..sent.clone()
+    }
 }
 
 impl Draft {
@@ -395,25 +424,35 @@ impl Draft {
         }
     }
 
-    fn release_submission(&mut self) {
-        if let Send::Outgoing(outgoing) = &mut self.send {
-            outgoing.stage = Stage::Released;
+    fn hand_back(&mut self) -> bool {
+        let Send::Outgoing(outgoing) = &mut self.send else {
+            return false;
+        };
+        if outgoing.stage == Stage::Released {
+            return false;
         }
+        outgoing.stage = Stage::Released;
+        if self.body != outgoing.sent {
+            self.body = fold_back(&outgoing.sent, std::mem::take(&mut self.body));
+            self.edits.edit();
+        }
+        true
     }
 
-    fn fail(&mut self, scope: &str, failure: DraftFailure) {
+    fn fail(&mut self, scope: &str, failure: DraftFailure) -> bool {
         tracing::warn!(
             %scope,
             error = %diagnostics::chain(&failure),
             "draft operation failed; handing the queued message back"
         );
-        self.release_submission();
+        let handed_back = self.hand_back();
         self.halt = match std::mem::replace(&mut self.halt, Halt::Clear) {
             Halt::Conflict { .. } => Halt::Conflict {
                 failed: Some(failure),
             },
             Halt::Clear | Halt::Failed(_) => Halt::Failed(failure),
         };
+        handed_back
     }
 
     fn halt_on_conflict(&mut self, scope: &str) {
@@ -581,6 +620,7 @@ impl DraftSession {
         Self {
             scope,
             epoch: 0,
+            handed_back: None,
             unrecovered: None,
             state: State::Open(Box::new(Draft {
                 body: DraftBody::default(),
@@ -609,6 +649,11 @@ impl DraftSession {
 
     fn replaced(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    fn handed_back(&mut self) {
+        self.replaced();
+        self.handed_back = Some(self.epoch);
     }
 
     const fn draft(&self) -> Option<&Draft> {
@@ -681,7 +726,7 @@ impl DraftSession {
         self.draft().is_none_or(|draft| {
             matches!(draft.request, Request::Idle)
                 && !draft.edits.unsaved()
-                && draft.in_flight().is_none()
+                && draft.outgoing().is_none()
                 && draft.adopting.is_empty()
                 && draft.lost.is_empty()
         })
@@ -706,7 +751,10 @@ impl DraftSession {
     }
 
     pub(crate) fn keepable(&self) -> bool {
-        self.pending() || self.draft().is_some_and(|draft| !draft.lost.is_empty())
+        self.pending()
+            || self
+                .draft()
+                .is_some_and(|draft| !draft.lost.is_empty() || draft.released())
     }
 
     pub(crate) fn settled_with_forge(&self) -> bool {
@@ -779,10 +827,9 @@ impl DraftSession {
         }
     }
 
-    pub(crate) fn unsent(&self) -> Option<&DraftBody> {
+    pub(crate) fn parked_beside_failed_send(&self) -> bool {
         self.draft()
-            .and_then(Draft::in_flight)
-            .map(|outgoing| &outgoing.sent)
+            .is_some_and(|draft| draft.released() && !draft.body.follow_ups.is_empty())
     }
 
     pub(crate) fn lost(&self) -> &[LostImage] {
@@ -899,10 +946,17 @@ impl DraftSession {
         let State::Open(draft) = &mut self.state else {
             return false;
         };
+        let stale = seen != self.epoch;
+        let over_hand_back = stale && self.handed_back == Some(self.epoch);
+        let body = match draft.outgoing().filter(|_| over_hand_back) {
+            Some(failed) => fold_back(&failed.sent, body),
+            None => body,
+        };
         if draft.body == body {
             return false;
         }
-        let unseen = seen != self.epoch
+        let unseen = stale
+            && !over_hand_back
             && draft
                 .snapshot()
                 .is_some_and(|snapshot| !snapshot.body.is_empty() && !snapshot.body.matches(&body));
@@ -1056,7 +1110,9 @@ impl DraftSession {
                     scope: self.scope.clone(),
                     source,
                 };
-                draft.fail(&self.scope, failure);
+                if draft.fail(&self.scope, failure) {
+                    self.handed_back();
+                }
             }
         }
     }
@@ -1099,7 +1155,9 @@ impl DraftSession {
                     scope: self.scope.clone(),
                     source,
                 };
-                draft.fail(&self.scope, failure);
+                if draft.fail(&self.scope, failure) {
+                    self.handed_back();
+                }
             }
         }
     }
@@ -1164,7 +1222,9 @@ impl DraftSession {
                     scope: self.scope.clone(),
                     source,
                 };
-                draft.fail(&self.scope, failure);
+                if draft.fail(&self.scope, failure) {
+                    self.handed_back();
+                }
             }
         }
         if replaced {

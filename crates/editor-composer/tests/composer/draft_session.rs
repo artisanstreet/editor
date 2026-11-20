@@ -486,6 +486,114 @@ fn a_failed_load_hands_the_queued_message_back_with_its_identity() {
     assert_eq!(post(&mut state).message.id, ItemId::from("message"));
 }
 
+fn sent_and_typed_over(sent: &str, typed_meanwhile: &str) -> (DraftSession, Submission) {
+    let mut state = submitted(sent);
+    write(&mut state);
+    saved(&mut state, 2, &typed(sent));
+    let first = post(&mut state);
+    type_in(&mut state, typed(typed_meanwhile));
+    (state, first)
+}
+
+fn handed_back(sent: &str, parked: &[&str]) -> DraftBody {
+    DraftBody {
+        follow_ups: parked.iter().map(|text| typed(text)).collect(),
+        ..typed(sent)
+    }
+}
+
+#[test]
+fn a_send_that_fails_while_no_composer_shows_it_comes_back_with_the_later_text_beside_it() {
+    let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
+    let shown = state.epoch();
+    state.posted(Err(not_sent(&first)), thread());
+    assert_ne!(
+        state.epoch(),
+        shown,
+        "a composer opened before or after the failure shows the message again"
+    );
+    assert_eq!(
+        state.shown(),
+        Some(&handed_back("send this", &["typed meanwhile"])),
+        "the failed message is back, with the later text parked beside it"
+    );
+    state.submit(submission("second-attempt", "send this"));
+    write(&mut state);
+    saved(
+        &mut state,
+        3,
+        &handed_back("send this", &["typed meanwhile"]),
+    );
+    assert_eq!(
+        post(&mut state).message.id,
+        first.message.id,
+        "trying again sends the same message, so Forge takes it only once"
+    );
+    state.posted(Ok(()), thread());
+    assert_eq!(
+        state.body(),
+        &typed("typed meanwhile"),
+        "the parked text becomes the draft once the message is in"
+    );
+}
+
+#[test]
+fn typing_into_a_composer_that_has_not_shown_the_failed_send_yet_keeps_the_message() {
+    let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
+    let shown_before_failing = state.epoch();
+    state.posted(Err(not_sent(&first)), thread());
+    state.queue(typed("typed meanwhile, and more"), shown_before_failing);
+    assert_eq!(
+        state.shown(),
+        Some(&handed_back("send this", &["typed meanwhile, and more"])),
+        "the message stays in the draft, with the newest text parked beside it"
+    );
+    assert!(!state.conflict(), "nothing changed on another client");
+}
+
+#[test]
+fn a_send_that_failed_before_closing_comes_back_on_reopening_with_its_identity() {
+    let (mut closing, first) = sent_and_typed_over("send this", "typed meanwhile");
+    closing.posted(Err(not_sent(&first)), thread());
+    let mut state = reopened(closing.kept());
+    assert_eq!(
+        state.shown(),
+        Some(&handed_back("send this", &["typed meanwhile"])),
+        "both the failed message and the later text show before Forge answers"
+    );
+    assert!(
+        state.send_failed(),
+        "the composer still says the send failed"
+    );
+    load(&mut state, 2, &typed("send this"));
+    state.submit(submission("after-reopening", "send this"));
+    write(&mut state);
+    saved(
+        &mut state,
+        3,
+        &handed_back("send this", &["typed meanwhile"]),
+    );
+    assert_eq!(post(&mut state).message.id, first.message.id);
+}
+
+#[test]
+fn a_draft_holding_only_a_failed_send_is_kept_open_and_kept_on_this_device() {
+    let mut state = submitted("send this");
+    write(&mut state);
+    saved(&mut state, 2, &typed("send this"));
+    let first = post(&mut state);
+    state.posted(Err(not_sent(&first)), thread());
+    state.retry();
+    assert!(
+        !state.evictable(),
+        "closing other drafts never drops the failed message's identity"
+    );
+    assert!(
+        state.keepable(),
+        "closing the Editor keeps the failed message's identity on this device"
+    );
+}
+
 #[test]
 fn a_second_send_waits_for_the_first() {
     let mut state = submitted("first");

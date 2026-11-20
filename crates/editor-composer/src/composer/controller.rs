@@ -76,13 +76,6 @@ impl ComposerTarget {
     }
 }
 
-#[derive(Debug)]
-enum Outbox {
-    Idle,
-    InFlight(Box<DraftBody>),
-    Restored,
-}
-
 #[derive(Clone, Debug)]
 pub struct DraftFile {
     pub key: u64,
@@ -128,7 +121,6 @@ pub struct Composer {
     placeholder_was_visible: bool,
     pub file_shake: Option<(u64, std::time::Instant)>,
     pub(crate) cleared: Option<std::time::Instant>,
-    outbox: Outbox,
     parked: Vec<DraftBody>,
     pub notice: Option<String>,
     pub session: Option<DraftLease>,
@@ -150,7 +142,6 @@ impl std::fmt::Debug for Composer {
             .field("target", &self.target)
             .field("host_instance", &self.host_instance)
             .field("target_generation", &self.target_generation)
-            .field("outbox", &self.outbox)
             .field("session", &self.session)
             .finish_non_exhaustive()
     }
@@ -191,7 +182,6 @@ impl Composer {
             placeholder_was_visible: false,
             file_shake: None,
             cleared: None,
-            outbox: Outbox::Idle,
             parked: Vec::new(),
             notice,
             session,
@@ -224,7 +214,6 @@ impl Composer {
             session.flush();
         }
         self.parked.clear();
-        self.outbox = Outbox::Idle;
         self.questionnaire = QuestionnairePanel::default();
         self.strip = super::goal_strip::StripState::default();
         self.mentions = Mentions::default();
@@ -741,13 +730,12 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (epoch, shown, failed, unreadable, unsent, lost) = session.read(|state| {
+        let (epoch, shown, parked, unreadable, lost) = session.read(|state| {
             (
                 state.epoch(),
                 state.shown().cloned(),
-                state.send_failed(),
+                state.parked_beside_failed_send(),
                 state.unreadable().map(ToString::to_string),
-                state.unsent().cloned(),
                 state.lost().to_vec(),
             )
         });
@@ -756,14 +744,9 @@ impl Composer {
             self.shown_epoch = epoch;
             self.reset_input();
         }
-        match (unsent, &self.outbox) {
-            (Some(sent), Outbox::Idle) => self.outbox = Outbox::InFlight(Box::new(sent)),
-            (Some(_), Outbox::InFlight(_) | Outbox::Restored)
-            | (None, Outbox::Idle | Outbox::InFlight(_) | Outbox::Restored) => {}
-        }
         for event in &events {
             match event {
-                SessionEvent::Accepted { .. } => self.outbox = Outbox::Idle,
+                SessionEvent::Accepted { .. } | SessionEvent::Changed => {}
                 SessionEvent::ImageAdopted(hash) => {
                     if self.restore_revision != Some(self.edit_revision)
                         && let Some(attachments) = &mut self.attachments
@@ -772,13 +755,7 @@ impl Composer {
                         attachments.restore(hash.clone());
                     }
                 }
-                SessionEvent::Changed => {}
             }
-        }
-        if failed
-            && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored)
-        {
-            self.restore_sent(*sent);
         }
         self.editor
             .borrow_mut()
@@ -789,6 +766,11 @@ impl Composer {
             self.restore_revision = None;
             if let Some(error) = unreadable {
                 self.notice = Some(format!("Couldn't read this draft: {error}"));
+            } else if parked {
+                self.notice = Some(
+                    "What you typed while sending is kept and comes back once this message is sent."
+                        .into(),
+                );
             }
             self.restore_body(body);
         }
@@ -832,7 +814,6 @@ impl Composer {
     }
 
     fn reset_input(&mut self) {
-        self.outbox = Outbox::Idle;
         self.parked.clear();
         self.editor.borrow_mut().set_text("");
         if let Some(attachments) = &mut self.attachments {
@@ -841,12 +822,6 @@ impl Composer {
         self.lost_chips.clear();
         self.files.clear();
         self.restore_revision = Some(self.edit_revision);
-    }
-
-    fn input_empty(&self) -> bool {
-        self.editor.borrow().text().trim().is_empty()
-            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-            && self.files.is_empty()
     }
 
     fn clear_input(&mut self) {
@@ -884,26 +859,6 @@ impl Composer {
                 }
             })
             .collect();
-    }
-
-    fn restore_sent(&mut self, sent: DraftBody) {
-        let mut parked = std::mem::take(&mut self.parked);
-        if !self.input_empty() {
-            parked.push(DraftBody {
-                follow_ups: Vec::new(),
-                ..self.draft_body()
-            });
-            self.notice = Some(
-                "What you typed while sending is kept and comes back once this message is sent."
-                    .into(),
-            );
-        }
-        self.clear_input();
-        self.restore_body(DraftBody {
-            follow_ups: parked,
-            ..sent
-        });
-        self.edited();
     }
 
     pub fn project(&self, host: &HostData) -> Option<ProjectId> {
@@ -1020,6 +975,7 @@ impl Composer {
             return false;
         };
         if self.host_instance != Some(host.instance())
+            || session.read(DraftSession::epoch) != self.shown_epoch
             || self.questionnaire.writing_answer()
             || matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
         {
@@ -1082,7 +1038,6 @@ impl Composer {
                 thread,
             });
         }
-        self.outbox = Outbox::InFlight(Box::new(self.draft_body()));
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
         true

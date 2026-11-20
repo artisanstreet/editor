@@ -1935,6 +1935,260 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
     });
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "the composer is UI-thread state, driven here on the test's one thread"
+)]
+async fn send_and_type_over(
+    core: &Core,
+    composer: &mut editor_aqua::composer::controller::Composer,
+    host: &HostId,
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (TlsStream<TcpStream>, Value) {
+    use editor_aqua::composer::draft_session::DraftSession;
+
+    answer_empty_draft(listener, acceptor, 0).await;
+    wait_for_session(composer.session.as_ref().unwrap(), DraftSession::is_loaded).await;
+    composer.sync(core);
+    composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
+    composer.editor.borrow_mut().set_text("send me");
+    composer.edited();
+    assert!(composer.send(core.host(host).unwrap()));
+    composer.editor.borrow_mut().set_text("typed meanwhile");
+    composer.edited();
+    let (mut socket, route, body) = composer_request(listener, acceptor).await;
+    assert!(route.starts_with("PUT /drafts/"), "{route}");
+    respond(
+        &mut socket,
+        json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+    )
+    .await;
+    drop(socket);
+    let (posting, route, body) = composer_request(listener, acceptor).await;
+    assert_eq!(route, "POST /threads HTTP/1.1");
+    (posting, body["id"].clone())
+}
+
+async fn refuse(mut socket: TlsStream<TcpStream>) {
+    respond_status(
+        &mut socket,
+        "500 Internal Server Error",
+        json!({"error": {"code": "internal", "message": "send rejected"}}),
+    )
+    .await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "the composer is UI-thread state, driven here on the test's one thread"
+)]
+async fn resent_thread(
+    core: &Core,
+    composer: &mut editor_aqua::composer::controller::Composer,
+    host: &HostId,
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+    follow_up: &str,
+) -> Value {
+    assert_eq!(
+        composer.editor.borrow().text(),
+        "send me",
+        "the message that failed is back in the composer"
+    );
+    assert_eq!(
+        composer.session.as_ref().unwrap().read(|state| state
+            .body()
+            .follow_ups
+            .iter()
+            .map(|body| body.text.clone())
+            .collect::<Vec<_>>()),
+        [follow_up],
+        "what was typed after sending is kept beside it"
+    );
+    assert!(composer.send(core.host(host).unwrap()));
+    loop {
+        let (mut socket, route, body) = composer_request(listener, acceptor).await;
+        if route.starts_with("PUT /drafts/") {
+            respond(
+                &mut socket,
+                json!({"saved": true, "current": {"revision": 2, "body": body["body"]}}),
+            )
+            .await;
+            continue;
+        }
+        if route.starts_with("GET /drafts/") {
+            respond(&mut socket, json!({"revision": 1, "body": null})).await;
+            continue;
+        }
+        assert_eq!(route, "POST /threads HTTP/1.1");
+        return body["id"].clone();
+    }
+}
+
+#[test]
+fn a_send_that_fails_while_another_thread_is_open_comes_back_and_resends_as_the_same_message() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+
+    let (directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "detached");
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let mut sessions = DraftSessions::default();
+        let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        let (posting, thread) =
+            send_and_type_over(&core, &mut composer, &host, &listener, &acceptor).await;
+        let sending = DraftHandle::clone(composer.session.as_ref().unwrap());
+
+        composer.set_target(
+            &core,
+            &mut sessions,
+            ComposerTarget::NewThread {
+                host: host.clone(),
+                project: Some(artisan_api::ProjectId::from("elsewhere")),
+            },
+        );
+        refuse(posting).await;
+        wait_for_session(&sending, DraftSession::send_failed).await;
+        composer.set_target(&core, &mut sessions, target);
+        composer.sync(&core);
+
+        assert_eq!(
+            resent_thread(
+                &core,
+                &mut composer,
+                &host,
+                &listener,
+                &acceptor,
+                "typed meanwhile"
+            )
+            .await,
+            thread,
+            "trying again is the same message, so Forge doesn't take it twice"
+        );
+        drop(directory);
+    });
+}
+
+#[test]
+fn a_send_that_fails_before_the_reopened_composer_first_shows_comes_back_with_its_identity() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_send_that_fails_before_the_reopened_composer_first_shows_comes_back_with_its_identity",
+    ) {
+        return;
+    }
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "unshown");
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let (sent, thread) =
+            close_while_sending(&core, &spool, &target, &listener, &acceptor).await;
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(&mut socket, json!({"revision": 1, "body": sent})).await;
+        drop(socket);
+        let (posting, route, body) = composer_request(&listener, &acceptor).await;
+        assert_eq!(route, "POST /threads HTTP/1.1");
+        assert_eq!(body["id"], thread, "the unanswered send is finished");
+        refuse(posting).await;
+        wait_for_session(
+            composer.session.as_ref().unwrap(),
+            DraftSession::send_failed,
+        )
+        .await;
+        composer.sync(&core);
+        assert_eq!(
+            resent_thread(
+                &core,
+                &mut composer,
+                &host,
+                &listener,
+                &acceptor,
+                "typed after sending"
+            )
+            .await,
+            thread,
+            "trying again is the same message"
+        );
+    });
+}
+
+#[test]
+fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_identity() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_identity",
+    ) {
+        return;
+    }
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "released");
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        let (posting, thread) =
+            send_and_type_over(&core, &mut composer, &host, &listener, &acceptor).await;
+        let sending = DraftHandle::clone(composer.session.as_ref().unwrap());
+        drop(composer);
+        refuse(posting).await;
+        wait_for_session(&sending, DraftSession::send_failed).await;
+        drop(sending);
+        drop(sessions);
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 1,
+                timed_out: 0,
+                kept_locally: 1,
+            }
+        );
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let mut composer = Composer::new(&core, &mut sessions, target);
+        composer.sync(&core);
+        assert_eq!(
+            resent_thread(
+                &core,
+                &mut composer,
+                &host,
+                &listener,
+                &acceptor,
+                "typed meanwhile"
+            )
+            .await,
+            thread,
+            "trying again after reopening is the same message"
+        );
+    });
+}
+
 #[test]
 fn the_notice_about_an_unreadable_kept_draft_shows_once() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
