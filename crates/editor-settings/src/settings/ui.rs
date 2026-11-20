@@ -4,10 +4,11 @@ use aqua_ui::{
     style::{Length, Style},
 };
 
+use editor_core::Problem;
 use editor_ui::{
     kit::{
-        Button, ButtonTone, Divider, Row, RowItem, Space, Spaced, Surface, TextRole, Tone,
-        surface::tint,
+        Button, ButtonTone, Divider, ProblemNotice, Row, RowItem, Space, Spaced, Surface, TextRole,
+        Tone, surface::tint,
     },
     theme::ArtisanTheme,
 };
@@ -199,8 +200,12 @@ pub(crate) fn note(theme: &ArtisanTheme, value: &str) -> Element {
     block(text(theme, TextRole::Label, Ink::Muted, value))
 }
 
-pub(crate) fn error_text(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
-    text(theme, TextRole::Caption, Ink::Danger, value)
+pub(crate) fn problem(
+    theme: &ArtisanTheme,
+    key: impl Into<aqua_ui::element::Key>,
+    problem: &Problem,
+) -> ProblemNotice {
+    ProblemNotice::new(key, *theme, problem)
 }
 
 pub(crate) fn callout(theme: &ArtisanTheme, tone: Tone, value: impl Into<String>) -> Element {

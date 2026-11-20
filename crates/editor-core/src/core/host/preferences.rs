@@ -20,7 +20,7 @@ enum Writer {
     Writing {
         _task: AbortOnDropHandle<()>,
     },
-    Failed(String),
+    Failed(crate::core::Problem),
 }
 
 #[derive(Default)]
@@ -64,7 +64,7 @@ impl HostData {
             },
         );
     }
-    pub fn preference_failure(&self) -> Option<&str> {
+    pub const fn preference_failure(&self) -> Option<&crate::core::Problem> {
         match &self.preferences.writer {
             Writer::Failed(error) => Some(error),
             Writer::Idle | Writer::Writing { .. } => None,
@@ -122,9 +122,9 @@ impl HostData {
         }
         if let Err(error) = result {
             tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {}", ::diagnostics::chain(&error));
-            self.preferences.writer = Writer::Failed(format!(
-                "Couldn't save the model choice: {}",
-                ::diagnostics::chain(&error)
+            self.preferences.writer = Writer::Failed(crate::core::Problem::calling_forge(
+                "Couldn't save the model choice.",
+                &error,
             ));
             return true;
         }

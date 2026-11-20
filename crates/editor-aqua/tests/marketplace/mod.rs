@@ -639,8 +639,14 @@ fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
     assert!(
         texts
             .iter()
-            .any(|text| text.starts_with("Couldn't search skills.sh")),
+            .any(|text| text.starts_with("Couldn't search skills.sh.")),
         "{texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains("did not answer") || text.contains("/marketplace/search")),
+        "the cause stays in the details, off the page: {texts:?}"
     );
     test_support::editor::ui::click(&mut app, "marketplace-search-retry");
     let retry = actions.borrow_mut().pop().unwrap();

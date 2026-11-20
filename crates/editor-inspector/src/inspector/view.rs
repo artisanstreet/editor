@@ -528,16 +528,15 @@ pub(crate) fn inspector_view(
         );
     if let Some(error) = &inspector.error {
         let retry = Rc::clone(action);
-        root = root
-            .child(static_row(vec![fit(
-                TextRole::Label.text(&theme, error.clone())
-            )]))
-            .child(
-                Button::text("inspector-retry", theme, ButtonTone::Neutral, "Try again")
-                    .within(LIST)
-                    .on_activate(move |_| retry(InspectorAction::Retry))
-                    .build(),
-            );
+        root = root.child(
+            editor_ui::kit::ProblemNotice::new("inspector-problem", theme, error)
+                .action(
+                    Button::text("inspector-retry", theme, ButtonTone::Neutral, "Try again")
+                        .on_activate(move |_| retry(InspectorAction::Retry))
+                        .build(),
+                )
+                .build(),
+        );
     }
     let row_action = Rc::clone(action);
     let list = List::new()

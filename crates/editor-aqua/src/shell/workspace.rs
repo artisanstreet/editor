@@ -194,7 +194,6 @@ pub struct Workspace {
     pub(crate) resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
     resource_preview_generation: u64,
     pub(crate) side_panel: SidePanel,
-    pub(crate) failure: Option<String>,
     notifications: Notifications,
     repository: crate::shell::repository::RepositoryContext,
     start_pending: bool,
@@ -231,7 +230,7 @@ impl Workspace {
 
     pub fn new(
         core: &Core,
-        failure: Option<String>,
+        failure: Option<crate::core::Problem>,
         selections: crate::shell::selection::SelectionScope,
     ) -> (Self, NotificationEffects) {
         let marketplace_actions = Rc::new(RefCell::new(VecDeque::new()));
@@ -302,12 +301,12 @@ impl Workspace {
             resource_preview: None,
             resource_preview_generation: 0,
             side_panel: SidePanel::Overview,
-            failure,
             notifications: Notifications::default(),
             repository: crate::shell::repository::RepositoryContext::default(),
             start_pending: true,
             repository_pending: true,
         };
+        workspace.sidebar.error = failure;
         let effects = workspace.follow_hosts(core);
         (workspace, effects)
     }

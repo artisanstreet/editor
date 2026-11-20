@@ -20,7 +20,7 @@ pub fn questionnaire(
     panel: &super::super::questionnaire::QuestionnairePanel,
     question: Option<&artisan_api::Question>,
     stored_options: Option<Element>,
-    load_error: Option<&str>,
+    load_error: Option<&editor_core::Problem>,
     source_view: Option<Element>,
     dispatch: &Dispatch,
 ) -> Option<Element> {
@@ -77,31 +77,7 @@ pub fn questionnaire(
             dispatch,
         )
     } else {
-        let mut loading = UiBox::new()
-            .layout("column")
-            .spaced(Space::S8)
-            .child(header)
-            .child(
-                TextRole::Label
-                    .text(theme, load_error.unwrap_or("Loading question…").to_owned())
-                    .wrap(true)
-                    .build(),
-            );
-        if load_error.is_some() {
-            let action = Rc::clone(dispatch);
-            loading = loading.child(
-                Button::text(
-                    "question-page-retry",
-                    *theme,
-                    ButtonTone::Neutral,
-                    "Try again",
-                )
-                .within(surface)
-                .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
-                .build(),
-            );
-        }
-        loading.build()
+        question_loading(theme, header, load_error, dispatch)
     };
     Some(
         Scroll::new()
@@ -315,27 +291,60 @@ fn question_card(
         );
     } else if let Some(error) = &panel.error {
         let action = Rc::clone(dispatch);
-        card = card
-            .child(
-                TextRole::Label
-                    .text(theme, error.clone())
-                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                    .wrap(true)
+        card = card.child(
+            editor_ui::kit::ProblemNotice::new("composer-question-problem", *theme, error)
+                .action(
+                    Button::text(
+                        "composer-question-retry",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Send the answer again",
+                    )
+                    .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
                     .build(),
-            )
-            .child(
-                Button::text(
-                    "composer-question-retry",
-                    *theme,
-                    ButtonTone::Neutral,
-                    "Send the answer again",
                 )
-                .within(surface)
-                .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
                 .build(),
-            );
+        );
     }
     card.build()
+}
+
+fn question_loading(
+    theme: &ArtisanTheme,
+    header: Element,
+    load_error: Option<&editor_core::Problem>,
+    dispatch: &Dispatch,
+) -> Element {
+    let loading = UiBox::new()
+        .layout("column")
+        .spaced(Space::S8)
+        .child(header);
+    match load_error {
+        Some(problem) => {
+            let action = Rc::clone(dispatch);
+            loading.child(
+                editor_ui::kit::ProblemNotice::new("question-page-problem", *theme, problem)
+                    .action(
+                        Button::text(
+                            "question-page-retry",
+                            *theme,
+                            ButtonTone::Neutral,
+                            "Try again",
+                        )
+                        .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
+                        .build(),
+                    )
+                    .build(),
+            )
+        }
+        None => loading.child(
+            TextRole::Label
+                .text(theme, "Loading question…")
+                .wrap(true)
+                .build(),
+        ),
+    }
+    .build()
 }
 
 fn other_questionnaires(

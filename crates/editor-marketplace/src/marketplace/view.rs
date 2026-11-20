@@ -16,11 +16,12 @@ use super::{
     entries,
     presentation::{self, Item, Kind},
 };
-use editor_core::{Core, Screen, SettingsPage};
+use editor_core::{Core, Problem, Screen, SettingsPage};
 use editor_ui::{
     kit::{
         Button, ButtonSize, ButtonTone, Finish, IconButton, IconButtonSize, IconSize, Label, Link,
-        LinkTone, Row, RowItem, Space, Spaced, Surface, TextRole, Tooltip, surface::band::Band,
+        LinkTone, ProblemNotice, Row, RowItem, Space, Spaced, Surface, TextRole, Tooltip,
+        surface::band::Band,
     },
     page,
     status_chip::{ChipTone, tone_color},
@@ -83,8 +84,7 @@ enum Notices {
     NoHost,
     Host {
         attention: Option<String>,
-        errors: Vec<String>,
-        retry: bool,
+        errors: Vec<(Problem, bool)>,
         loading: Option<LoadingMark>,
     },
 }
@@ -102,17 +102,25 @@ impl Notices {
                 .as_deref()
                 .and_then(presentation::prompt_attention),
             errors: [
-                host.catalog_load().error.clone(),
-                host.prompt_load().error.clone(),
+                host.catalog_load()
+                    .error
+                    .clone()
+                    .map(|problem| (problem, true)),
+                host.prompt_load()
+                    .error
+                    .clone()
+                    .map(|problem| (problem, true)),
                 host.mcp_servers().err().map(|error| {
-                    format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error))
+                    (
+                        Problem::caused_by("Couldn't read the MCP servers.", error),
+                        false,
+                    )
                 }),
-                page.notice.clone(),
+                page.notice.clone().map(|problem| (problem, false)),
             ]
             .into_iter()
             .flatten()
             .collect(),
-            retry: host.catalog_load().error.is_some() || host.prompt_load().error.is_some(),
             loading: controller
                 .loading_started()
                 .filter(|_| loading)
@@ -214,12 +222,16 @@ pub fn build(
         .build()
 }
 
-fn search_failed(theme: &ArtisanTheme, error: &str, emit: &Rc<dyn Fn(ViewAction)>) -> Element {
+fn search_failed(
+    theme: &ArtisanTheme,
+    problem: &Problem,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
     let retry = Rc::clone(emit);
     UiBox::new()
         .padded(CARD_PADDING)
         .child(
-            page::notice(theme, error.to_owned())
+            ProblemNotice::new("marketplace-search-error", *theme, problem)
                 .action(
                     Button::text(
                         "marketplace-search-retry",
@@ -463,7 +475,6 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: &Rc<dyn Fn(ViewActi
     let Notices::Host {
         attention,
         errors,
-        retry,
         loading,
     } = state
     else {
@@ -477,42 +488,49 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: &Rc<dyn Fn(ViewActi
     if let Some(attention) = attention {
         let emit = Rc::clone(emit);
         body.push(
-            page::notice(theme, attention.clone())
-                .action(
-                    Button::text(
-                        "marketplace-prompt-choose",
-                        *theme,
-                        ButtonTone::Quiet,
-                        "Open",
-                    )
-                    .on_activate(move |_| {
-                        emit(ViewAction::Navigate(Screen::Settings(
-                            SettingsPage::GlobalPrompt,
-                        )));
-                    })
-                    .build(),
-                )
-                .build(),
-        );
-    }
-    body.extend(
-        errors
-            .iter()
-            .map(|error| page::notice(theme, error.clone()).build()),
-    );
-    if *retry {
-        let emit = Rc::clone(emit);
-        body.push(
-            Button::text(
-                "marketplace-retry",
+            ProblemNotice::new(
+                "marketplace-prompt-attention",
                 *theme,
-                ButtonTone::Neutral,
-                "Try again",
+                &Problem::new(attention.clone()),
             )
-            .on_activate(move |_| emit(ViewAction::Retry))
+            .action(
+                Button::text(
+                    "marketplace-prompt-choose",
+                    *theme,
+                    ButtonTone::Quiet,
+                    "Open",
+                )
+                .on_activate(move |_| {
+                    emit(ViewAction::Navigate(Screen::Settings(
+                        SettingsPage::GlobalPrompt,
+                    )));
+                })
+                .build(),
+            )
             .build(),
         );
     }
+    let first_retry = errors.iter().position(|(_, retryable)| *retryable);
+    body.extend(errors.iter().enumerate().map(|(index, (problem, _))| {
+        let notice = ProblemNotice::new(format!("marketplace-error-{index}"), *theme, problem);
+        if first_retry == Some(index) {
+            let emit = Rc::clone(emit);
+            notice
+                .action(
+                    Button::text(
+                        "marketplace-retry",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .on_activate(move |_| emit(ViewAction::Retry))
+                    .build(),
+                )
+                .build()
+        } else {
+            notice.build()
+        }
+    }));
     if let Some(mark) = loading {
         body.push(centered(wordmark(theme, mark.started, mark.reduced_motion)));
     }

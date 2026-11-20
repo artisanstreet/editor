@@ -17,6 +17,21 @@ fn workspace() -> aqua::UiApp {
     )
 }
 
+fn assert_explained(ui: &aqua::UiApp, failure: &ActionFailureDialog, cause: &str) {
+    let texts = painted_texts(ui);
+    assert!(
+        texts.iter().all(|text| !text.contains(cause)),
+        "the cause stays out of the headline: {texts:?}"
+    );
+    assert_eq!(
+        failure
+            .failure()
+            .and_then(|failure| failure.problem().detail()),
+        Some(cause),
+        "the cause is the notice's detail"
+    );
+}
+
 fn assert_on_screen(ui: &aqua::UiApp, wanted: &[&str]) {
     let texts = painted_texts(ui);
     for wanted in wanted {
@@ -41,10 +56,12 @@ fn a_link_the_browser_cannot_open_offers_its_url_to_copy() {
         &ui,
         &[
             "Couldn't open the link",
-            "The browser didn't start: no browser is registered.",
+            "The browser didn't start.",
+            "Details",
             URL,
         ],
     );
+    assert_explained(&ui, &failure, "no browser is registered");
     click(&mut ui, COPY);
     assert_eq!(failure.drain(&mut ui), Some(Effect::CopyUrl(URL.into())));
     ui.build_frame().unwrap();
@@ -78,9 +95,11 @@ fn a_copy_the_clipboard_refuses_is_explained_and_replaces_an_earlier_notice() {
         &ui,
         &[
             "Couldn't copy to the clipboard",
-            "The code wasn't copied: the clipboard is locked by another app.",
+            "The code wasn't copied.",
+            "Details",
         ],
     );
+    assert_explained(&ui, &failure, "the clipboard is locked by another app");
     let texts = painted_texts(&ui);
     assert!(
         !texts

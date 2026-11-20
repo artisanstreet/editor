@@ -11,6 +11,7 @@ use aqua_a11y_uia::A11yBridge;
 use aqua_a11y_uia::accesskit::{Action, ActionData, ActionRequest, Role, TreeId};
 use aqua_core::{
     InputEvent, Key, KeyEvent, Modifiers, Point, PointerButton, PointerEvent, PointerKind,
+    ScrollDelta,
 };
 use aqua_protocol::LogicalSize;
 use artisan_api::{
@@ -67,6 +68,7 @@ pub struct Editor {
     published: Rc<RefCell<Published>>,
     engine: ReplayingEngine,
     forges: Vec<ForgeServer>,
+    stopped: Vec<crate::net::ClosingListener>,
     directory: TempDir,
 }
 
@@ -388,6 +390,7 @@ impl Editor {
             published,
             engine: served.engine,
             forges: served.forges,
+            stopped: Vec::new(),
             directory,
         };
         editor.wait_for_engine_checks(hosts);
@@ -420,9 +423,12 @@ impl Editor {
 
     pub fn stop_forge(&mut self) {
         let forge = self.forges.remove(0);
+        let address = forge.address();
         editor_aqua::core::runtime::runtime()
             .block_on(forge.shutdown())
             .expect("stop the scenario's Forge");
+        self.stopped
+            .push(crate::net::ClosingListener::bind_at(address));
     }
 
     fn pump(&mut self) {
@@ -556,6 +562,32 @@ impl Editor {
             InputEvent::PointerMove(pointer(at, 0)),
             InputEvent::PointerDown(pointer(at, 1), PointerButton::Primary),
             InputEvent::PointerUp(pointer(at, 0), PointerButton::Primary),
+        ]);
+    }
+
+    #[track_caller]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "window coordinates fit in f32, which is what pointer input carries"
+    )]
+    pub fn wheel(&mut self, role: Role, showing: &str, lines: f32) {
+        let target = self
+            .inspect(|view| view.find_showing(role, showing))
+            .flatten()
+            .unwrap_or_else(|| panic!("no {role:?} shows {showing:?} to scroll"));
+        let bounds = target
+            .bounds
+            .unwrap_or_else(|| panic!("the {role:?} showing {showing:?} has no bounds to scroll"));
+        let at = Point::new(
+            f64::midpoint(bounds.x0, bounds.x1) as f32,
+            f64::midpoint(bounds.y0, bounds.y1) as f32,
+        );
+        self.dispatch(&[
+            InputEvent::PointerMove(pointer(at, 0)),
+            InputEvent::Scroll {
+                at,
+                delta: ScrollDelta { x: 0.0, y: lines },
+            },
         ]);
     }
 

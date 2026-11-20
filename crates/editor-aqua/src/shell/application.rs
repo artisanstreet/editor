@@ -478,9 +478,12 @@ impl<V: SectionViews> ShellApplication<V> {
         let element = match built {
             Ok(element) => window_root(element),
             Err(error) => {
-                let chain = ::diagnostics::chain(&error);
-                tracing::error!(error = %chain, "could not build Editor view");
-                self.show_failure(&chain, ctx, id, reason);
+                let problem = crate::core::Problem::caused_by(
+                    "Something went wrong drawing this view.",
+                    &error,
+                );
+                tracing::error!(error = ?problem.detail(), "could not build Editor view");
+                self.show_failure(&problem, ctx, id, reason);
                 self.shell.bind(ctx, id);
                 return;
             }
@@ -560,7 +563,15 @@ impl<V: SectionViews> ShellApplication<V> {
             }
             Err(error) => {
                 tracing::error!(%error, "could not mount Editor view");
-                self.show_failure(&error.to_string(), ctx, id, reason);
+                self.show_failure(
+                    &crate::core::Problem::caused_by(
+                        "Something went wrong drawing this view.",
+                        &error,
+                    ),
+                    ctx,
+                    id,
+                    reason,
+                );
             }
         }
         self.shell.bind(ctx, id);
@@ -619,12 +630,12 @@ impl<V: SectionViews> ShellApplication<V> {
 
     fn show_failure(
         &mut self,
-        message: &str,
+        problem: &crate::core::Problem,
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
         reason: FrameReason,
     ) {
-        let card = failure_card(message, &self.shell.preferences.theme());
+        let card = failure_card(problem, &self.shell.preferences.theme());
         let shown = if self.mounted {
             self.ui.ui_mut().refresh(vec![card])
         } else {
@@ -1361,28 +1372,13 @@ fn fit_launch_to_display(ctx: &mut AppCtx<'_>, id: AquaWindowId) {
     }
 }
 
-fn failure_card(message: &str, theme: &crate::ui::theme::ArtisanTheme) -> Element {
-    use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, pane::sheet};
+fn failure_card(problem: &crate::core::Problem, theme: &crate::ui::theme::ArtisanTheme) -> Element {
+    use crate::ui::kit::pane::sheet;
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     const WIDTH: f32 = 480.0;
-    let body = UiBox::new()
-        .layout("column")
-        .spaced(Space::S8)
-        .child(
-            TextRole::Title
-                .text(theme, "Something went wrong drawing this view")
-                .build(),
-        )
-        .child(
-            TextRole::Caption
-                .text(theme, message.to_owned())
-                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                .build(),
-        )
-        .build();
-    let card = Surface::Callout(Tone::Danger)
-        .build(theme, vec![body])
+    let card = crate::ui::kit::ProblemNotice::new("view-failure-problem", *theme, problem)
+        .build()
         .style(Style::new().width(Length::Px(WIDTH)));
     window_root(
         UiBox::new()

@@ -46,7 +46,10 @@ impl RootViews {
             page_exhausted: view.is_some_and(|view| view.viewport.exhausted),
             page_oldest: view.and_then(|view| view.viewport.oldest),
             page_gap: view.and_then(|view| view.viewport.gap),
-            load_error: conversation.load_error.clone(),
+            load_error: conversation
+                .load_error
+                .as_ref()
+                .map(|failure| failure.problem().headline().to_owned()),
             landing: conversation.landing.is_some(),
             work_in_flight: conversation.work_in_flight(),
             row_count: conversation.rows.len(),

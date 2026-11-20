@@ -43,11 +43,11 @@ fn terminal_fetch_completion_is_discarded_after_removal_and_replacement() {
     test_support::editor::core::connect(&mut core, &config);
     let mut current = pending_dialog(&core, &config);
     assert!(current.drain(&core));
-    assert!(
-        current
-            .error()
-            .is_some_and(|error| error.starts_with("Couldn't load shell output:"))
-    );
+    assert!(current.error().is_some_and(|error| {
+        error
+            .headline()
+            .starts_with("Couldn't load the shell output.")
+    }));
 
     let mut removed = pending_dialog(&core, &config);
     let old = core.host(&config.id).unwrap().instance();

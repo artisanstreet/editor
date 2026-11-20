@@ -167,13 +167,13 @@ fn guidance(theme: &ArtisanTheme, text: String, action: Option<Element>) -> Elem
 
 fn actionable_notice(
     theme: &ArtisanTheme,
-    text: impl Into<String>,
+    problem: &crate::core::Problem,
     id: &'static str,
     label: &'static str,
     action: ViewAction,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    page::notice(theme, text)
+    crate::ui::kit::ProblemNotice::new(format!("{id}-problem"), *theme, problem)
         .action(button(id, theme, label, action, emit))
         .build()
 }
@@ -185,10 +185,10 @@ pub fn states(
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Vec<Element> {
     let mut states = Vec::new();
-    if let TextSearchStatus::Failed(cause) = sidebar.text_search_status() {
+    if let TextSearchStatus::Failed(problem) = sidebar.text_search_status() {
         states.push(actionable_notice(
             theme,
-            format!("Couldn't search messages: {cause}"),
+            problem,
             "sidebar-search-retry",
             "Try again",
             ViewAction::Search,
@@ -199,7 +199,7 @@ pub fn states(
     if let Some(message) = host.and_then(|host| host.rollback_notice().message()) {
         states.push(actionable_notice(
             theme,
-            message,
+            &message,
             "sidebar-rollback-dismiss",
             "Dismiss",
             ViewAction::DismissRollbackNotice,
@@ -219,7 +219,7 @@ pub fn states(
     if host.is_some_and(crate::core::HostData::project_icons_failed) {
         states.push(actionable_notice(
             theme,
-            "Some project icons didn't load.",
+            &crate::core::Problem::new("Some project icons didn't load."),
             "sidebar-metadata-retry",
             "Try again",
             ViewAction::RetryProjectIcons,
@@ -229,7 +229,7 @@ pub fn states(
     if let Some(error) = &sidebar.error {
         states.push(actionable_notice(
             theme,
-            error.clone(),
+            error,
             "sidebar-error-dismiss",
             "Dismiss",
             ViewAction::DismissError,

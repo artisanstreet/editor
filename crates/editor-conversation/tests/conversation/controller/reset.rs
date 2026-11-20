@@ -206,7 +206,9 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
         Completion::Agent {
             origin: previous.clone(),
             context: BTreeMap::new(),
-            error: Some("stale ancestry failure".into()),
+            error: Some(LoadFailure::Ancestry {
+                problem: Problem::new("stale ancestry failure"),
+            }),
             effects: Vec::new(),
         },
     );

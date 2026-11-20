@@ -1,4 +1,5 @@
 use artisan_api::{McpMutation, McpServer};
+use editor_core::Problem;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
@@ -99,7 +100,7 @@ pub struct ExtensionsForm {
     pub editing: Option<McpEditing>,
     pub fields: ServerFields,
     pub saving: bool,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<Problem>,
     generation: u64,
 }
 
@@ -150,7 +151,7 @@ impl ExtensionsForm {
         match self.fields.parse(previous.as_ref()) {
             Ok(server) => self.begin(McpMutation::Upsert { previous, server }, true),
             Err(error) => {
-                self.error = Some(error);
+                self.error = Some(Problem::new(error));
                 None
             }
         }
@@ -176,7 +177,7 @@ impl ExtensionsForm {
         })
     }
 
-    pub fn complete(&mut self, request: &MutationRequest, result: Result<(), String>) {
+    pub fn complete(&mut self, request: &MutationRequest, result: Result<(), Problem>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }
@@ -184,7 +185,7 @@ impl ExtensionsForm {
         match result {
             Ok(()) if request.close_form => self.editing = None,
             Ok(()) => {}
-            Err(error) => self.error = Some(format!("Couldn't save MCP servers: {error}")),
+            Err(problem) => self.error = Some(problem),
         }
     }
 }

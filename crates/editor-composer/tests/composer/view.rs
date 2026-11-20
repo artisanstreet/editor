@@ -114,7 +114,7 @@ fn a_question_that_failed_to_load_can_still_be_dismissed_or_switched() {
             &panel,
             None,
             None,
-            Some("Couldn't load the question."),
+            Some(&editor_core::Problem::new("Couldn't load the question.")),
             None,
             &dispatch,
         )
@@ -229,7 +229,7 @@ fn a_composer_notice_explains_itself_and_can_be_dismissed() {
         draft_error(
             &ArtisanTheme::resolved(),
             ComposerFailure::Notice {
-                message: "A message can contain at most 8 images.",
+                message: &editor_core::Problem::new("A message can contain at most 8 images."),
             },
             &dispatch,
         )

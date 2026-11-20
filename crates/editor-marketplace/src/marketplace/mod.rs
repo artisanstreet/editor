@@ -3,7 +3,7 @@ pub mod presentation;
 pub mod view;
 
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
-use editor_core::{ForgeClient, HostId, Screen, SettingsPage, client::CallError};
+use editor_core::{ForgeClient, HostId, Problem, Screen, SettingsPage, client::CallError};
 use presentation::{Item, ItemKey, Kind};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ pub enum Remote {
     Idle,
     Searching,
     Found(Vec<Listing>),
-    Failed(String),
+    Failed(Problem),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub enum Entry {
     Notices,
     Found(String),
     Group(String),
-    SearchFailed(String),
+    SearchFailed(Problem),
     Empty(String),
     Item {
         item: Item,
@@ -95,7 +95,7 @@ pub struct Marketplace {
     pub items: Vec<Item>,
     pub listings: Remote,
     pub pending: Option<Operation>,
-    pub notice: Option<String>,
+    pub notice: Option<Problem>,
     shown: bool,
     search_serial: u64,
     search_due: Option<Instant>,
@@ -191,10 +191,9 @@ impl Marketplace {
         }
         self.listings = match result {
             Ok(listings) => Remote::Found(listings),
-            Err(error) => Remote::Failed(format!(
-                "Couldn't search skills.sh: {}",
-                diagnostics::chain(&error)
-            )),
+            Err(error) => {
+                Remote::Failed(Problem::calling_forge("Couldn't search skills.sh.", &error))
+            }
         };
     }
 
@@ -337,9 +336,9 @@ impl Marketplace {
                     } => "install",
                     Operation::Skill { action, .. } => action.as_str(),
                 };
-                self.notice = Some(format!(
-                    "Couldn't {verb} the skill: {}",
-                    diagnostics::chain(&error)
+                self.notice = Some(Problem::caused_by(
+                    format!("Couldn't {verb} the skill."),
+                    &error,
                 ));
                 false
             }

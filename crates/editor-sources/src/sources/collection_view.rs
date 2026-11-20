@@ -220,25 +220,27 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
     }
     if let Some(error) = browser_state(browser) {
         let action = Rc::clone(action);
-        body = body
-            .child(TextRole::Label.text(theme, error).build())
-            .child(
-                button(
-                    "collection-retry",
-                    theme,
-                    ButtonTone::Neutral,
-                    "Try again",
-                    move || action(CollectionAction::Retry),
+        body = body.child(
+            editor_ui::kit::ProblemNotice::new("collection-problem", *theme, &error)
+                .action(
+                    editor_ui::kit::Button::text(
+                        "collection-retry",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .on_activate(move |_| action(CollectionAction::Retry))
+                    .build(),
                 )
                 .build(),
-            );
+        );
     }
     code_card(theme, body.build())
 }
 
 fn browser_state<T: serde::de::DeserializeOwned + Send + 'static>(
     browser: &Rc<RefCell<CollectionBrowser<T>>>,
-) -> Option<String> {
+) -> Option<editor_core::Problem> {
     match browser.borrow().window().state() {
         RangeState::Failed(error) => Some(error.clone()),
         RangeState::Loading | RangeState::Ready(_) => None,

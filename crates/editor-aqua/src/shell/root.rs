@@ -54,6 +54,7 @@ enum ConversationAction {
     ),
     RetryControls(crate::conversation::presentation::PresentationScope),
     RetryThread(crate::conversation::presentation::PresentationScope),
+    RetryLoad(crate::conversation::presentation::PresentationScope),
     Blob(
         crate::conversation::presentation::PresentationScope,
         artisan_api::ItemId,
@@ -145,7 +146,6 @@ pub struct RootViews {
     resource_dialog: Option<crate::ui::dialog::DialogHost>,
     resource_content: Option<(Element, String)>,
     resource_events: Rc<RefCell<VecDeque<crate::shell::resource_preview::view::Action>>>,
-    failure_dismissed: Rc<Cell<bool>>,
     rows: Option<Rc<crate::conversation::view::factory::RowFactory>>,
     row_actions: Rc<RefCell<VecDeque<crate::conversation::adapter::ScopedAction>>>,
     observations: crate::conversation::view::transcript::TranscriptObservations,

@@ -5,7 +5,7 @@ use super::thread::{self, AnswerState, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use editor_core::{
-    Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, client::CallError,
+    Core, CoreEvent, HostEvent, HostId, HostInstance, Problem, Screen, client::CallError,
     delivery::Delivery, runtime::runtime,
 };
 use std::cell::RefCell;
@@ -31,6 +31,42 @@ fn completion_is_current<I: Copy + Eq>(
     let (host, instance, generation) = captured;
     matches!(open, Some((open_host, open_instance, open_generation)) if host == open_host && instance == open_instance && generation == open_generation)
         && current.as_ref() == Some(&instance)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadFailure {
+    Page { fetch: Fetch, problem: Problem },
+    Work { first: Seq, problem: Problem },
+    Agent { agent: ItemId, problem: Problem },
+    Ancestry { problem: Problem },
+}
+
+impl LoadFailure {
+    #[must_use]
+    pub const fn problem(&self) -> &Problem {
+        match self {
+            Self::Page { problem, .. }
+            | Self::Work { problem, .. }
+            | Self::Agent { problem, .. }
+            | Self::Ancestry { problem } => problem,
+        }
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        match self {
+            Self::Page { .. } | Self::Work { .. } | Self::Agent { .. } => true,
+            Self::Ancestry { .. } => false,
+        }
+    }
+
+    const fn page_headline(fetch: Fetch) -> &'static str {
+        match fetch {
+            Fetch::Older { .. } => "Couldn't load earlier messages.",
+            Fetch::Newer { .. } => "Couldn't load newer messages.",
+            Fetch::Tail | Fetch::Refresh | Fetch::At { .. } => "Couldn't load this thread.",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +127,7 @@ enum Completion {
     Agent {
         origin: Origin,
         context: BTreeMap<ItemId, Arc<Item>>,
-        error: Option<String>,
+        error: Option<LoadFailure>,
         effects: Vec<Effect>,
     },
     Answer {
@@ -138,7 +174,7 @@ pub struct Conversation {
     mounted_rows: HashSet<RowKey>,
     mounted_for: Option<(u64, usize, usize)>,
     pub row_heights: HashMap<RowKey, f32>,
-    pub load_error: Option<String>,
+    pub load_error: Option<LoadFailure>,
     pub landing: Option<Landing>,
     landed_at: Option<Instant>,
     away: bool,
@@ -1058,6 +1094,27 @@ impl Conversation {
         })));
     }
 
+    pub fn retry_load(&mut self, core: &Core) {
+        let Some(failure) = self.load_error.take() else {
+            return;
+        };
+        match failure {
+            LoadFailure::Page { fetch, .. } => {
+                let effects = match &mut self.view {
+                    Some(view) => view.retry_page(fetch),
+                    None => return,
+                };
+                self.perform(core, effects);
+            }
+            LoadFailure::Work { first, .. } => self.load_work(core, first),
+            LoadFailure::Agent { agent, .. } => {
+                self.agent = None;
+                self.open_agent(core, Some(agent));
+            }
+            failure @ LoadFailure::Ancestry { .. } => self.load_error = Some(failure),
+        }
+    }
+
     pub(crate) fn work_reading(&self) -> Option<Seq> {
         self.work_reading
     }
@@ -1123,12 +1180,16 @@ impl Conversation {
                 let sender = self.delivery.sender();
                 self.agent_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
                     let mut context = BTreeMap::new();
-                    let mut next = Some(agent);
+                    let mut next = Some(agent.clone());
                     let mut error = None;
                     for _ in 0..16 {
                         let Some(id) = next.take() else { break };
                         if context.contains_key(&id) {
-                            error = Some("Agent ancestry contains a cycle".to_owned());
+                            error = Some(LoadFailure::Ancestry {
+                                problem: Problem::new(
+                                    "This agent's ancestry loops back on itself, so it can't be shown.",
+                                ),
+                            });
                             break;
                         }
                         match client.item(&id).await {
@@ -1140,20 +1201,26 @@ impl Conversation {
                                 context.insert(id, Arc::new(item));
                             }
                             Ok(_) => {
-                                error = Some("Agent does not belong to this thread".to_owned());
+                                error = Some(LoadFailure::Ancestry {
+                                    problem: Problem::new("This agent doesn't belong to this thread."),
+                                });
                                 break;
                             }
                             Err(err) => {
-                                error = Some(format!(
-                                    "Couldn't load agent: {}",
-                                    ::diagnostics::chain(&err)
-                                ));
+                                error = Some(LoadFailure::Agent {
+                                    agent: agent.clone(),
+                                    problem: Problem::calling_forge("Couldn't load this agent.", &err),
+                                });
                                 break;
                             }
                         }
                     }
                     if next.is_some() {
-                        error = Some("Agent ancestry exceeds 16 levels".to_owned());
+                        error = Some(LoadFailure::Ancestry {
+                            problem: Problem::new(
+                                "This agent is nested more than 16 levels deep, too deep to show.",
+                            ),
+                        });
                     }
                     sender
                         .offer(Completion::Agent {
@@ -1534,10 +1601,13 @@ impl Conversation {
                                 error = %diagnostics::chain(&error),
                                 "couldn't load a transcript page"
                             );
-                            self.load_error = Some(format!(
-                                "Couldn't load this thread. {}",
-                                error.fault().sentence()
-                            ));
+                            self.load_error = Some(LoadFailure::Page {
+                                fetch,
+                                problem: Problem::calling_forge(
+                                    LoadFailure::page_headline(fetch),
+                                    &error,
+                                ),
+                            });
                             view.page_failed()
                         }
                     };
@@ -1571,10 +1641,15 @@ impl Conversation {
                             }
                         }
                         Err(error) => {
-                            self.load_error = Some(format!(
-                                "Couldn't load this work: {}",
-                                diagnostics::chain(&error)
-                            ));
+                            tracing::warn!(
+                                thread = %view.thread,
+                                error = %diagnostics::chain(&error),
+                                "couldn't load a run's work"
+                            );
+                            self.load_error = Some(LoadFailure::Work {
+                                first,
+                                problem: Problem::calling_forge("Couldn't load this work.", &error),
+                            });
                         }
                     }
                 }
@@ -1781,3 +1856,7 @@ mod answer_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/memory.rs"]
 mod memory_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/load_failure.rs"]
+mod load_failure_tests;

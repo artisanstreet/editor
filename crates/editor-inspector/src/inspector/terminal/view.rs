@@ -184,14 +184,15 @@ pub(crate) fn terminal_view(
     let mut content = UiBox::new().layout("column").width(Length::Pct(100.0));
     if let Some(error) = state.error() {
         let retry = Rc::clone(action);
-        content = content
-            .child(TextRole::Label.text(theme, error.to_owned()).build())
-            .child(
-                Button::text("terminal-retry", *theme, ButtonTone::Neutral, "Try again")
-                    .within(WELL)
-                    .on_activate(move |_| retry(TerminalAction::Retry))
-                    .build(),
-            );
+        content = content.child(
+            editor_ui::kit::ProblemNotice::new("terminal-problem", *theme, error)
+                .action(
+                    Button::text("terminal-retry", *theme, ButtonTone::Neutral, "Try again")
+                        .on_activate(move |_| retry(TerminalAction::Retry))
+                        .build(),
+                )
+                .build(),
+        );
     } else if state.loading() && job.data.is_none() {
         content = content.child(TextRole::Label.text(theme, "Loading shell output…").build());
     }

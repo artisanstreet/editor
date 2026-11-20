@@ -87,7 +87,7 @@ fn open_draft(
     core: &Core,
     sessions: &mut DraftSessions,
     target: &ComposerTarget,
-) -> (Option<DraftLease>, Option<String>) {
+) -> (Option<DraftLease>, Option<editor_core::Problem>) {
     let Some(host) = core.host(target.host()) else {
         return (None, None);
     };
@@ -100,7 +100,7 @@ fn open_draft(
         Ok(lease) => (Some(lease), None),
         Err(full) => {
             tracing::warn!(host = %full.host, scope = %full.scope, "draft capacity reached; composer disabled");
-            (None, Some(full.to_string()))
+            (None, Some(editor_core::Problem::new(full.to_string())))
         }
     }
 }
@@ -122,7 +122,7 @@ pub struct Composer {
     pub file_shake: Option<(u64, std::time::Instant)>,
     pub(crate) cleared: Option<std::time::Instant>,
     parked: Vec<DraftBody>,
-    pub notice: Option<String>,
+    pub notice: Option<editor_core::Problem>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
     target_generation: u64,
@@ -405,26 +405,16 @@ impl Composer {
             {
                 continue;
             }
-            let failed = match completion.action {
-                TurnAction::Stop => {
-                    self.cancelling = false;
-                    "Couldn't stop the run"
-                }
-                TurnAction::Continue => {
-                    self.continuing = false;
-                    "Couldn't continue"
-                }
-                TurnAction::ClearGoal => "Couldn't clear the goal",
-                TurnAction::Unpark => "Couldn't cancel the pickup",
-                TurnAction::Permissions => "Couldn't change access",
-            };
-            if let Some(error) = completion
-                .error
-                .as_ref()
-                .and_then(|error| turn_failure(completion.action, error))
+            match completion.action {
+                TurnAction::Stop => self.cancelling = false,
+                TurnAction::Continue => self.continuing = false,
+                TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
+            }
+            if let Some(error) = &completion.error
+                && let Some(problem) = turn_problem(completion.action, error)
             {
-                tracing::warn!(thread = %completion.thread, action = ?completion.action, %error, "turn action failed");
-                self.notice = Some(format!("{failed}: {error}"));
+                tracing::warn!(thread = %completion.thread, action = ?completion.action, error = %diagnostics::chain(error), "turn action failed");
+                self.notice = Some(problem);
             }
         }
         before != (self.cancelling, self.continuing, self.notice.clone())
@@ -591,7 +581,10 @@ impl Composer {
                 let path = match DraftPath::try_from(path) {
                     Ok(path) => path,
                     Err(error) => {
-                        self.notice = Some(error.to_string());
+                        self.notice = Some(editor_core::Problem::caused_by(
+                            "This path can't be linked.",
+                            &error,
+                        ));
                         continue;
                     }
                 };
@@ -600,7 +593,9 @@ impl Composer {
                     continue;
                 }
                 if self.files.len() >= 32 {
-                    self.notice = Some("A message can link at most 32 files.".into());
+                    self.notice = Some(editor_core::Problem::new(
+                        "A message can link at most 32 files.",
+                    ));
                     return;
                 }
                 let key = self.next_file_key;
@@ -769,17 +764,19 @@ impl Composer {
         {
             self.restore_revision = None;
             if let Some(error) = unreadable {
-                self.notice = Some(format!("Couldn't read this draft: {error}"));
+                self.notice = Some(editor_core::Problem::detailed(
+                    "Couldn't read this draft.",
+                    error,
+                ));
             } else if parked {
-                self.notice = Some(
-                    "What you typed while sending is kept and comes back once this message is sent."
-                        .into(),
-                );
+                self.notice = Some(editor_core::Problem::new(
+                    "What you typed while sending is kept and comes back once this message is sent.",
+                ));
             }
             self.restore_body(body);
         }
         if let Some(unrecovered) = unrecovered {
-            self.notice = Some(match unrecovered {
+            self.notice = Some(editor_core::Problem::new(match unrecovered {
                 Unrecovered::SetAside(path) => format!(
                     "A draft kept on this device couldn't be read. It was moved to {}.",
                     path.display()
@@ -788,7 +785,7 @@ impl Composer {
                     "A draft kept on this device couldn't be read. It stays at {}, and this draft isn't kept on this device until it's moved.",
                     path.display()
                 ),
-            });
+            }));
         }
         self.show_lost(lost);
         events
@@ -1173,36 +1170,26 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     Some(config)
 }
 
-fn turn_failure(action: TurnAction, error: &editor_core::client::CallError) -> Option<String> {
+fn turn_problem(
+    action: TurnAction,
+    error: &editor_core::client::CallError,
+) -> Option<editor_core::Problem> {
     use artisan_api::{Failure, RunFailure};
-    match (action, error.refused()) {
+    let headline = match (action, error.refused()) {
         (
             TurnAction::Continue,
             Some(Failure::Run(
                 RunFailure::AlreadyWorking { .. } | RunFailure::NothingToContinue { .. },
             )),
         )
-        | (TurnAction::ClearGoal, Some(Failure::Run(RunFailure::NoGoal { .. }))) => None,
-        (
-            _,
-            Some(
-                failure @ (Failure::Thread(_)
-                | Failure::Run(_)
-                | Failure::Draft(_)
-                | Failure::Setting(_)
-                | Failure::Project(_)
-                | Failure::Mcp(_)
-                | Failure::Agent(_)
-                | Failure::Auth(_)
-                | Failure::Resource(_)
-                | Failure::Extension(_)
-                | Failure::Engine(_)),
-            ),
-        ) => Some(failure.to_string()),
-        (_, Some(Failure::Internal | Failure::Legacy { .. }) | None) => {
-            Some(diagnostics::chain(error))
-        }
-    }
+        | (TurnAction::ClearGoal, Some(Failure::Run(RunFailure::NoGoal { .. }))) => return None,
+        (TurnAction::Stop, _) => "Couldn't stop the run.",
+        (TurnAction::Continue, _) => "Couldn't continue.",
+        (TurnAction::ClearGoal, _) => "Couldn't clear the goal.",
+        (TurnAction::Unpark, _) => "Couldn't cancel the pickup.",
+        (TurnAction::Permissions, _) => "Couldn't change access.",
+    };
+    Some(editor_core::Problem::calling_forge(headline, error))
 }
 
 #[cfg(test)]

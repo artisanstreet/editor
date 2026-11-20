@@ -309,12 +309,12 @@ impl ComposerOwner {
             .or_else(|| {
                 controller
                     .notice
-                    .as_deref()
+                    .as_ref()
                     .or_else(|| {
                         controller
                             .attachments
                             .as_ref()
-                            .and_then(|attachments| attachments.notice.as_deref())
+                            .and_then(|attachments| attachments.notice.as_ref())
                     })
                     .map(|message| {
                         draft_error(theme, ComposerFailure::Notice { message }, &self.dispatch)

@@ -125,7 +125,7 @@ impl MarkdownPresenter {
         let ordinary = |ordinal: usize,
                         fence: &super::super::fence::Fence,
                         sources: &[SelectionSource],
-                        note: Option<&str>| {
+                        note: Option<&editor_core::Problem>| {
             code_card(
                 fence,
                 &format!("{id}-code-{ordinal}"),

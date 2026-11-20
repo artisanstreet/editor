@@ -22,7 +22,10 @@ impl NativeState {
             completed_frame,
             page_loaded: view.is_some_and(|view| view.viewport.loaded()),
             page_in_flight: view.is_some_and(|view| view.viewport.in_flight),
-            load_error: conversation.load_error.clone(),
+            load_error: conversation
+                .load_error
+                .as_ref()
+                .map(|failure| failure.problem().headline().to_owned()),
             row_count: conversation.rows.len(),
             measured_row_count: conversation.row_heights.len(),
             landing: conversation.landing.is_some(),

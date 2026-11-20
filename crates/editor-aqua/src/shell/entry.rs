@@ -6,7 +6,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 pub struct Entry {
     workspace: Option<(String, Workspace)>,
-    failure: Option<String>,
+    failure: Option<crate::core::Problem>,
     landed: bool,
     controller: crate::settings::controller::SettingsController,
     actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
@@ -27,7 +27,7 @@ impl Entry {
     }
 
     pub fn new(
-        failure: Option<String>,
+        failure: Option<crate::core::Problem>,
         selections: crate::shell::selection::SelectionAllocator,
     ) -> Self {
         Self {

@@ -192,7 +192,7 @@ impl RowFactory {
                 .width(aqua_ui::style::Length::Pct(100.0))
                 .layout("column")
                 .child(element)
-                .child(editor_ui::page::notice(&self.theme, notice).build())
+                .child(editor_ui::page::note(&self.theme, notice).build())
                 .build()
         } else {
             element

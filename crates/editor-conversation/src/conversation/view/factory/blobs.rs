@@ -117,20 +117,7 @@ impl RowFactory {
                         }
                     })
                     .build();
-                let message = if attachment.is_some() {
-                    "Couldn't load".to_owned()
-                } else {
-                    format!("Couldn't load the image: {error}")
-                };
-                let role = match attachment {
-                    Some(_) => TextRole::Caption,
-                    None => TextRole::Label,
-                };
-                let text = role
-                    .text(&self.theme, message)
-                    .gpui_source_color(self.theme.colors.text_muted.to_reference_text_color())
-                    .build();
-                let mut column = UiBox::new()
+                let column = UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
                     .height(Length::Pct(100.0))
@@ -139,10 +126,35 @@ impl RowFactory {
                             .align(aqua_ui::AlignItems::CENTER)
                             .justify(aqua_ui::JustifyContent::CENTER),
                     );
-                if attachment.is_some() {
-                    column = column.padded(Space::S8);
+                match attachment {
+                    Some(_) => column
+                        .padded(Space::S8)
+                        .child(
+                            TextRole::Caption
+                                .text(&self.theme, "Couldn't load".to_owned())
+                                .gpui_source_color(
+                                    self.theme.colors.text_muted.to_reference_text_color(),
+                                )
+                                .build(),
+                        )
+                        .child(retry)
+                        .build(),
+                    None => column
+                        .padded(Space::S16)
+                        .child(
+                            editor_ui::kit::ProblemNotice::new(
+                                format!("image-problem-{hash}"),
+                                self.theme,
+                                &editor_core::Problem::detailed(
+                                    "Couldn't load this image.",
+                                    error.to_string(),
+                                ),
+                            )
+                            .action(retry)
+                            .build(),
+                        )
+                        .build(),
                 }
-                column.child(text).child(retry).build()
             }
             _ if attachment.is_none() => MediaFrame::placeholder(&self.theme),
             _ => UiBox::new()

@@ -86,9 +86,9 @@ impl Shell {
                 .iter()
                 .map(|failure| ::diagnostics::chain(failure))
                 .collect();
-            format!(
-                "Couldn't read this device's Artisan files: {}. They are kept as they are until they can be read.",
-                causes.join("; ")
+            crate::core::Problem::detailed(
+                "Couldn't read this device's Artisan files. They are kept as they are until they can be read.",
+                causes.join("; "),
             )
         });
         Self::from_core(core, images, failure, running_build())
@@ -102,7 +102,7 @@ impl Shell {
     fn from_core(
         mut core: Core,
         images: ImageAssets,
-        failure: Option<String>,
+        failure: Option<crate::core::Problem>,
         build: BuildInfo,
     ) -> (Self, ShellUpdates) {
         core.set_image_assets(images.clone());

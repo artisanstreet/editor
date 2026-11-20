@@ -263,7 +263,7 @@ pub enum McpSignInPhase {
     Starting,
     Waiting,
     Finishing,
-    Failed(String),
+    Failed(crate::core::Problem),
 }
 
 #[derive(Clone, Debug)]
@@ -358,6 +358,22 @@ async fn begin(
     Ok((listener, started))
 }
 
+async fn fail(
+    sender: &crate::core::delivery::DeliverySender<Message>,
+    key: (HostId, String),
+    id: u64,
+    problem: crate::core::Problem,
+) {
+    sender
+        .offer(Message::Phase {
+            key: key.clone(),
+            id,
+            phase: McpSignInPhase::Failed(problem),
+        })
+        .await;
+    sender.offer(Message::Cleanup { key, id }).await;
+}
+
 async fn sign_in(
     task_key: (HostId, String),
     id: u64,
@@ -370,15 +386,12 @@ async fn sign_in(
     let (listener, started) = match begin(&client, &task_key).await {
         Ok(value) => value,
         Err(error) => {
-            sender
-                .offer(Message::Phase {
-                    key: task_key.clone(),
-                    id,
-                    phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
-                })
-                .await;
+            let problem = crate::core::Problem::caused_by(
+                "Couldn't start signing in to this MCP server.",
+                &error,
+            );
             reply(answer, &task_key, Err(error));
-            sender.offer(Message::Cleanup { key: task_key, id }).await;
+            fail(&sender, task_key, id, problem).await;
             return;
         }
     };
@@ -415,14 +428,11 @@ async fn sign_in(
         }
         Err(error) => {
             cancel_started(&client, &task_key, &state).await;
-            sender
-                .offer(Message::Phase {
-                    key: task_key.clone(),
-                    id,
-                    phase: McpSignInPhase::Failed(error.to_string()),
-                })
-                .await;
-            sender.offer(Message::Cleanup { key: task_key, id }).await;
+            let problem = crate::core::Problem::caused_by(
+                "The sign-in didn't come back from your browser.",
+                &error,
+            );
+            fail(&sender, task_key, id, problem).await;
             return;
         }
     };
@@ -453,7 +463,10 @@ async fn sign_in(
         Err(error) => Message::Phase {
             key: task_key.clone(),
             id,
-            phase: McpSignInPhase::Failed(::diagnostics::chain(&error)),
+            phase: McpSignInPhase::Failed(crate::core::Problem::caused_by(
+                "Couldn't finish signing in to this MCP server.",
+                &error,
+            )),
         },
     };
     sender.offer(message).await;

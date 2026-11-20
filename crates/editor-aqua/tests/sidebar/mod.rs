@@ -237,9 +237,9 @@ fn picker_retries_same_identity_until_successful_browse() {
     }));
     let first = picker.begin_create().unwrap();
     assert!(!picker.begin_browse());
-    picker.finish_create(Some("connection lost".into()));
+    picker.finish_create(Some(editor_aqua::core::Problem::new("connection lost")));
     assert_eq!(picker.begin_create().unwrap(), first);
-    picker.finish_create(Some("connection lost".into()));
+    picker.finish_create(Some(editor_aqua::core::Problem::new("connection lost")));
     assert!(picker.begin_browse());
     picker.finish_browse(Ok(DirListing {
         path: "/other".into(),
@@ -455,7 +455,7 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
             generation: 2,
         },
     ));
-    sidebar.error = Some("new host error".into());
+    sidebar.error = Some(editor_aqua::core::Problem::new("new host error"));
     let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
     replaced_rename.fail(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -468,7 +468,13 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     late_create.respond(&old_project);
     delivered.wait("the removed host's project creation");
     sidebar.drain(&mut core, 0);
-    assert_eq!(sidebar.error.as_deref(), Some("new host error"));
+    assert_eq!(
+        sidebar
+            .error
+            .as_ref()
+            .map(editor_aqua::core::Problem::headline),
+        Some("new host error")
+    );
     assert_eq!(sidebar.rename.as_ref(), Some(&new_rename));
     assert!(sidebar.picker.is_some());
     assert_eq!(

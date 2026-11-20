@@ -10,7 +10,7 @@ pub enum RollbackNotice {
     Dismissing(DatabaseRollback, AbortOnDropHandle<()>),
     Failed {
         rollback: DatabaseRollback,
-        error: String,
+        error: crate::core::client::CallError,
     },
 }
 
@@ -20,13 +20,14 @@ impl RollbackNotice {
     }
 
     #[must_use]
-    pub fn message(&self) -> Option<String> {
+    pub fn message(&self) -> Option<crate::core::Problem> {
         match self {
             Self::Hidden | Self::Dismissing(..) => None,
-            Self::Shown(rollback) => Some(text(rollback)),
-            Self::Failed { rollback, error } => {
-                Some(format!("{} Couldn't dismiss this: {error}", text(rollback)))
-            }
+            Self::Shown(rollback) => Some(crate::core::Problem::new(text(rollback))),
+            Self::Failed { rollback, error } => Some(crate::core::Problem::caused_by(
+                format!("{} Couldn't dismiss this notice.", text(rollback)),
+                error,
+            )),
         }
     }
 }
@@ -75,8 +76,10 @@ impl HostData {
         self.rollback_notice = match (std::mem::take(&mut self.rollback_notice), result) {
             (RollbackNotice::Dismissing(..), Ok(())) => RollbackNotice::Hidden,
             (RollbackNotice::Dismissing(rollback, _), Err(error)) => {
-                let error = ::diagnostics::chain(&error);
-                tracing::warn!(error, "dismiss the database rollback notice");
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "dismiss the database rollback notice"
+                );
                 RollbackNotice::Failed { rollback, error }
             }
             (current, _) => current,

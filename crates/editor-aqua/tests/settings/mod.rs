@@ -88,9 +88,18 @@ fn prompt_save_preserves_newer_draft_and_rejects_old_host() {
     assert_eq!(form.status("first second"), "Unsaved changes");
     let request = form.save("first second").unwrap();
     form.sync_host(Some("b".into()));
-    form.error = Some("host b".into());
-    form.complete(&request, Err("old failure".into()), "");
-    assert_eq!(form.error.as_deref(), Some("host b"));
+    form.error = Some(editor_aqua::core::Problem::new("host b"));
+    form.complete(
+        &request,
+        Err(editor_aqua::core::Problem::new("old failure")),
+        "",
+    );
+    assert_eq!(
+        form.error
+            .as_ref()
+            .map(editor_aqua::core::Problem::headline),
+        Some("host b")
+    );
 }
 
 #[test]
@@ -198,7 +207,9 @@ fn engine_login_code_requires_text_and_clears_only_on_submission() {
     assert!(form.login_code(EngineId::Claude).is_none());
     assert_eq!(editor.borrow().text(), "   ");
     assert_eq!(
-        form.errors.get(&EngineId::Claude).map(String::as_str),
+        form.errors
+            .get(&EngineId::Claude)
+            .map(editor_aqua::core::Problem::headline),
         Some("Paste the code the sign-in page showed you first.")
     );
     editor.borrow_mut().set_text("  code-value  ");
@@ -856,8 +867,14 @@ fn a_failed_forge_setting_names_the_setting_and_its_cause_and_tries_again() {
     let texts = test_support::editor::ui::painted_texts(&app);
     assert!(
         texts.iter().any(|text| text
-            == "Couldn't save “Suggest the next message” on Desk: PUT /settings/suggestions: Forge refused the call: Forge answered 503 Service Unavailable: the host did not answer"),
+            == "Couldn't save “Suggest the next message” on Desk. Forge ran into a problem."),
         "{texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains("/settings/suggestions") || text.contains("503")),
+        "the request and status stay in the details, off the page: {texts:?}"
     );
     test_support::editor::ui::click(&mut app, "settings-retry-suggestions");
     let retry = actions.borrow_mut().pop().unwrap();

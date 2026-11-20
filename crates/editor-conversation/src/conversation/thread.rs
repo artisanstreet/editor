@@ -398,6 +398,10 @@ impl ThreadView {
         self.handle(&Input::LoadFailed)
     }
 
+    pub(crate) fn retry_page(&mut self, fetch: Fetch) -> Vec<Effect> {
+        self.handle(&Input::Retry(fetch))
+    }
+
     pub(crate) fn jump(&mut self, jump: Jump) -> Vec<Effect> {
         let mut effects = self.handle(&Input::Jump(jump));
         if let Jump::To(position) = jump {

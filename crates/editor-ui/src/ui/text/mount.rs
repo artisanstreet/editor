@@ -576,11 +576,14 @@ impl EditorController {
             ));
         if show_notice {
             root = root.child(
-                Text::new("Text is limited to 64 KiB. Attach a file for larger content.")
-                    .font_size(12.0)
-                    .color(theme.colors.destructive_text.to_paint())
-                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                    .build(),
+                crate::ui::kit::ProblemNotice::new(
+                    "prompt-limit-problem",
+                    *theme,
+                    &editor_core::Problem::new(
+                        "Text is limited to 64 KiB. Attach a file for larger content.",
+                    ),
+                )
+                .build(),
             );
         }
         root.build()

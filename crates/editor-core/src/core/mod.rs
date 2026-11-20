@@ -12,6 +12,7 @@ pub mod host;
 pub mod hosts;
 pub mod mcp_sign_in;
 pub mod media_http;
+pub mod problem;
 pub mod range_window;
 pub mod resident;
 pub mod runtime;
@@ -40,6 +41,7 @@ pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,
 };
 pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
+pub use problem::Problem;
 pub use range_window::{CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow};
 pub(crate) use resident::CollectionBytes;
 pub use resident::ResidentBytes;

@@ -134,6 +134,19 @@ pub enum DraftFailure {
     },
 }
 
+impl DraftFailure {
+    fn problem(&self) -> editor_core::Problem {
+        let headline = format!("{self}.");
+        match self {
+            Self::Load { source, .. } | Self::Save { source, .. } => {
+                editor_core::Problem::calling_forge(&headline, source)
+            }
+            Self::Send { source, .. } => editor_core::Problem::caused_by(headline, source),
+            Self::Upload { source, .. } => editor_core::Problem::caused_by(headline, source),
+        }
+    }
+}
+
 const CONFLICT: &str = "This draft changed on another client. Choose which version to keep.";
 const REMOVED: &str = "This Forge pairing was removed.";
 
@@ -720,19 +733,19 @@ impl DraftSession {
         self.draft().is_none_or(Draft::halted)
     }
 
-    pub fn error(&self) -> Option<String> {
+    pub fn error(&self) -> Option<editor_core::Problem> {
         match &self.state {
-            State::Removed => Some(REMOVED.to_owned()),
+            State::Removed => Some(editor_core::Problem::new(REMOVED)),
             State::Open(draft) => match &draft.halt {
                 Halt::Clear => draft
                     .adopting
                     .iter()
                     .find_map(|adoption| match &adoption.upload {
-                        Upload::Waiting(failure) => Some(diagnostics::chain(failure)),
+                        Upload::Waiting(failure) => Some(failure.problem()),
                         Upload::Queued | Upload::Running => None,
                     }),
-                Halt::Failed(failure) => Some(diagnostics::chain(failure)),
-                Halt::Conflict { .. } => Some(CONFLICT.to_owned()),
+                Halt::Failed(failure) => Some(failure.problem()),
+                Halt::Conflict { .. } => Some(editor_core::Problem::new(CONFLICT)),
             },
         }
     }

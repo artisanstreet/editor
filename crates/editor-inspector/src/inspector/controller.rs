@@ -11,7 +11,7 @@ pub struct Inspector {
     instance: Option<HostInstance>,
     pub(crate) summary: Arc<InspectorSummary>,
     pub(crate) entries: Vec<Entry>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<editor_core::Problem>,
     pub(crate) source: Option<ContentText>,
     pub(crate) plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
 }

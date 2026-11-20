@@ -221,19 +221,23 @@ impl PaletteView {
                 ),
             };
             content = content.child(
-                crate::ui::page::notice(theme, text)
-                    .action(
-                        Button::text(
-                            "command-palette-search-action",
-                            *theme,
-                            ButtonTone::Neutral,
-                            label,
-                        )
-                        .size(ButtonSize::Sm)
-                        .on_activate(move |_| callback(action.clone()))
-                        .build(),
+                crate::ui::kit::ProblemNotice::new(
+                    "command-palette-search-problem",
+                    *theme,
+                    &crate::core::Problem::new(text),
+                )
+                .action(
+                    Button::text(
+                        "command-palette-search-action",
+                        *theme,
+                        ButtonTone::Neutral,
+                        label,
                     )
+                    .size(ButtonSize::Sm)
+                    .on_activate(move |_| callback(action.clone()))
                     .build(),
+                )
+                .build(),
             );
         }
         if palette.searching() {

@@ -126,21 +126,19 @@ impl ModelBlock {
 }
 
 #[expect(
-    clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "the model services bundle its assets, capability, glyph, effect, hover and invalidation; one wiring of every model callback"
+    reason = "the model services bundle its assets, capability, effect, hover and invalidation; one wiring of every model callback"
 )]
 pub(crate) fn services(
     id: &str,
     theme: &crate::ui::theme::ArtisanTheme,
     assets: crate::ui::media::model::load::ModelAssets,
     capability: Rc<dyn Fn() -> Option<crate::ui::media::model::load::RendererCapability>>,
-    glyph: &crate::ui::rich::narrative::callout::GlyphFactory,
     effect: Rc<dyn Fn(crate::ui::media::preview::Effect)>,
     hovered: Rc<std::cell::Cell<bool>>,
     invalidate: Rc<dyn Fn()>,
 ) -> ModelServices {
-    use crate::ui::kit::{Button, ButtonTone, IconSize, Media, Space, Spaced, Surface};
+    use crate::ui::kit::{Button, ButtonTone, Media, Space, Spaced, Surface};
     use aqua_core::GpuiBackground;
     use aqua_ui::{
         element::{Element, ui},
@@ -189,9 +187,9 @@ pub(crate) fn services(
             })
         },
     );
-    let placeholder_glyph = Rc::clone(glyph);
-    let placeholder = Rc::new(move |message: &str, failed: bool| {
-        let mut content = ui::Box::new()
+    let placeholder_id = id.to_owned();
+    let placeholder = Rc::new(move |problem: Option<&editor_core::Problem>| {
+        let content = ui::Box::new()
             .layout("column")
             .spaced(Space::S4)
             .padded(Space::S12)
@@ -205,24 +203,28 @@ pub(crate) fn services(
                         theme.colors.surface.to_reference_paint(),
                     )),
             );
-        if failed {
-            content = content.child(placeholder_glyph(
-                editor_assets::AssetId::TABLER_FILE_OFF,
-                IconSize::Lg.px(),
-                theme.colors.text_muted.to_reference_paint(),
-            ));
-        }
-        let style = TextRole::Label.style(&theme);
-        content
-            .child(
-                ui::Text::new(message.to_owned())
-                    .text_style(style)
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                    .wrap(false)
-                    .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+        match problem {
+            Some(problem) => content
+                .child(
+                    crate::ui::kit::ProblemNotice::new(
+                        format!("{placeholder_id}-problem"),
+                        theme,
+                        problem,
+                    )
                     .build(),
-            )
-            .build()
+                )
+                .build(),
+            None => content
+                .child(
+                    ui::Text::new("Loading model…".to_owned())
+                        .text_style(TextRole::Label.style(&theme))
+                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                        .wrap(false)
+                        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                        .build(),
+                )
+                .build(),
+        }
     });
     let toolbar_id = id.to_owned();
     let toolbar = Rc::new(

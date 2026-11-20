@@ -707,7 +707,7 @@ impl InspectorOwner {
 struct ViewState {
     open: Option<(editor_core::HostId, artisan_api::ThreadId)>,
     summary: usize,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
     source: Option<editor_sources::ContentViewState>,
     plan_identity: Option<u64>,
     plan: Option<editor_sources::CollectionViewState>,
@@ -715,7 +715,7 @@ struct ViewState {
     terminal_generation: u64,
     terminal_following: bool,
     terminal_loading: bool,
-    terminal_error: Option<String>,
+    terminal_error: Option<editor_core::Problem>,
     command: Option<editor_sources::ContentViewState>,
     output: Option<editor_sources::ContentViewState>,
     hovered: bool,
@@ -756,7 +756,7 @@ impl InspectorOwner {
             terminal_generation: terminal.generation(),
             terminal_following: terminal.following,
             terminal_loading: terminal.loading(),
-            terminal_error: terminal.error().map(str::to_owned),
+            terminal_error: terminal.error().cloned(),
             command: terminal
                 .job
                 .as_ref()

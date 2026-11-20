@@ -24,7 +24,7 @@ impl RangePage for ContentRange {
     type Source = ContentRef;
     const KEPT: usize = 3;
     const SPAN: u64 = 1;
-    const FAILURE: &'static str = "Couldn't load source text";
+    const FAILURE: &'static str = "Couldn't load the source text.";
     fn length(source: &ContentRef) -> u64 {
         source.bytes
     }
@@ -55,7 +55,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
     type Source = CollectionRef;
     const KEPT: usize = 8;
     const SPAN: u64 = artisan_api::COLLECTION_RANGE_ENTRIES as u64;
-    const FAILURE: &'static str = "Couldn't load collection records";
+    const FAILURE: &'static str = "Couldn't load the collection records.";
     fn length(source: &CollectionRef) -> u64 {
         source.count
     }
@@ -86,7 +86,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
 pub enum RangeState<R> {
     Loading,
     Ready(Arc<R>),
-    Failed(String),
+    Failed(crate::core::Problem),
 }
 
 #[derive(Debug)]
@@ -176,7 +176,9 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.client = None;
         self.read = None;
         self.generation = self.generation.wrapping_add(1);
-        self.state = RangeState::Failed("This Forge is no longer connected.".into());
+        self.state = RangeState::Failed(crate::core::Problem::new(
+            "This Forge is no longer connected.",
+        ));
     }
 
     fn load(&mut self, offset: u64) {
@@ -184,7 +186,9 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.read = None;
         self.generation = self.generation.wrapping_add(1);
         let Some(client) = &self.client else {
-            self.state = RangeState::Failed("This Forge is no longer connected.".into());
+            self.state = RangeState::Failed(crate::core::Problem::new(
+                "This Forge is no longer connected.",
+            ));
             return;
         };
         let future = R::fetch(client, &self.source, offset);
@@ -217,7 +221,7 @@ impl<R: RangePage + Send> RangeWindow<R> {
                     RangeState::Ready(page)
                 }
                 Err(error) => {
-                    RangeState::Failed(format!("{}: {}", R::FAILURE, ::diagnostics::chain(&error)))
+                    RangeState::Failed(crate::core::Problem::caused_by(R::FAILURE, &error))
                 }
             };
             changed = true;

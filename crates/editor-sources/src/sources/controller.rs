@@ -25,7 +25,7 @@ pub struct CopiedSource {
     text: String,
     host: HostId,
     instance: HostInstance,
-    failure: std::rc::Weak<std::cell::RefCell<Option<String>>>,
+    failure: std::rc::Weak<std::cell::RefCell<Option<editor_core::Problem>>>,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
@@ -55,9 +55,9 @@ impl CopiedSource {
                 );
                 match self.failure.upgrade() {
                     Some(failure) => {
-                        *failure.borrow_mut() = Some(format!(
-                            "Couldn't copy source to the clipboard: {}",
-                            diagnostics::chain(&error)
+                        *failure.borrow_mut() = Some(editor_core::Problem::caused_by(
+                            "Couldn't put the source on the clipboard.",
+                            &error,
                         ));
                         Copied::Failed
                     }
@@ -71,7 +71,7 @@ impl CopiedSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowViewState {
     Loading,
-    Failed(String),
+    Failed(editor_core::Problem),
     Ready(usize),
 }
 
@@ -91,7 +91,7 @@ pub struct ContentViewState {
     source: ContentRef,
     window: WindowViewState,
     busy: bool,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,8 +109,8 @@ pub struct ContentText {
     window: ContentWindow,
     pub(crate) rows: Vec<Range<usize>>,
     page: Option<Arc<ContentRange>>,
-    error: Option<String>,
-    clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    error: Option<editor_core::Problem>,
+    clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<editor_core::Problem>>>,
     client: ForgeClient,
     host: HostId,
     instance: HostInstance,
@@ -168,11 +168,11 @@ impl ContentText {
         }
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub const fn error(&self) -> Option<&editor_core::Problem> {
+        self.error.as_ref()
     }
 
-    pub fn shown_error(&self) -> Option<String> {
+    pub fn shown_error(&self) -> Option<editor_core::Problem> {
         self.error
             .clone()
             .or_else(|| self.clipboard_failure.borrow().clone())
@@ -304,7 +304,12 @@ impl ContentText {
         match result {
             Ok(Some(path)) => self.export(core, path),
             Ok(None) => {}
-            Err(error) => self.error = Some(format!("Couldn't export source: {error}")),
+            Err(error) => {
+                self.error = Some(editor_core::Problem::detailed(
+                    "Couldn't choose where to export the source.",
+                    error,
+                ));
+            }
         }
     }
 
@@ -345,18 +350,18 @@ impl ContentText {
                             });
                         }
                         Err(error) => {
-                            self.error = Some(format!(
-                                "Couldn't copy source: {}",
-                                diagnostics::chain(&error)
+                            self.error = Some(editor_core::Problem::caused_by(
+                                "Couldn't copy the source.",
+                                &error,
                             ));
                         }
                     }
                 }
                 Completion::Export(key, result) if self.action.finish(core, &key) => {
                     if let Err(error) = result {
-                        self.error = Some(format!(
-                            "Couldn't export source: {}",
-                            diagnostics::chain(&error)
+                        self.error = Some(editor_core::Problem::caused_by(
+                            "Couldn't export the source.",
+                            &error,
                         ));
                     }
                 }

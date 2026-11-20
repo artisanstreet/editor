@@ -54,7 +54,7 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     let mut app = test_support::editor::ui::mounted(900.0, 700.0, status);
     let texts = test_support::editor::ui::painted_texts(&app);
     for expected in [
-        "Last attempt: Forge's event stream closed",
+        "Last attempt: Forge closed its event stream.",
         "Try again now",
         "Forges",
     ] {

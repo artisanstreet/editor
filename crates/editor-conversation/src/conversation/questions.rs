@@ -163,7 +163,7 @@ impl QuestionPages {
         }
     }
 
-    pub fn question_error(&self) -> Option<&str> {
+    pub fn question_error(&self) -> Option<&editor_core::Problem> {
         match self.questions.as_ref()?.browser.window().state() {
             RangeState::Failed(error) => Some(error),
             RangeState::Loading | RangeState::Ready(_) => None,

@@ -162,7 +162,7 @@ impl ViewState {
             Some(Err(error)) if error.retryable() => {
                 let retry = Rc::clone(emit);
                 body = body.child(
-                    crate::ui::page::notice(theme, failure(error))
+                    crate::ui::kit::ProblemNotice::new("resource-problem", *theme, &failure(error))
                         .action(
                             Button::text(
                                 "resource-retry",
@@ -176,7 +176,12 @@ impl ViewState {
                         .build(),
                 );
             }
-            Some(Err(error)) => body = body.child(body_text(theme, &failure(error))),
+            Some(Err(error)) => {
+                body = body.child(
+                    crate::ui::kit::ProblemNotice::new("resource-problem", *theme, &failure(error))
+                        .build(),
+                );
+            }
             Some(Ok(content)) => {
                 let full = Arc::clone(content.full());
                 let copy_file = Rc::clone(emit);
@@ -215,22 +220,18 @@ impl ViewState {
     }
 }
 
-fn failure(error: &PreviewError) -> String {
-    match error {
+fn failure(error: &PreviewError) -> crate::core::Problem {
+    let headline = match error {
         PreviewError::Unpaired { .. } => {
-            "This reference has no available paired Forge. You can copy its path.".to_owned()
+            "This reference has no available paired Forge. You can copy its path."
         }
-        PreviewError::Read { source, .. } => {
-            format!(
-                "Couldn't read this resource: {}",
-                ::diagnostics::chain(source)
-            )
-        }
-        PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.".to_owned(),
+        PreviewError::Read { .. } => "Couldn't read this resource.",
+        PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.",
         PreviewError::HostGone { .. } => {
-            "The Forge holding this resource disconnected. Try again once it is back.".to_owned()
+            "The Forge holding this resource disconnected. Try again once it is back."
         }
-    }
+    };
+    crate::core::Problem::caused_by(headline, error)
 }
 
 fn body_text(theme: &ArtisanTheme, text: &str) -> Element {

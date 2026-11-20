@@ -317,13 +317,13 @@ fn opening_a_thread_its_forge_cannot_send_says_why() {
         std::thread::yield_now();
     };
     let ThreadUnavailable::Failed(error) = &unavailable else {
-        panic!("the lookup failed rather than finding the thread deleted: {unavailable}");
+        panic!("the lookup failed rather than finding the thread deleted: {unavailable:?}");
     };
     assert!(
         error.to_string().contains("unknown-thread"),
         "the logged error names the thread: {error}"
     );
-    let shown = unavailable.to_string();
+    let shown = unavailable.problem().headline().to_owned();
     assert!(
         shown.starts_with("Couldn't load this thread. ") && !shown.contains("unknown-thread"),
         "the message says why in words, without the error chain: {shown}"

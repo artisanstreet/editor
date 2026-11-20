@@ -1,7 +1,7 @@
 use super::model::{Choice, Choices, Discovery, Job, Location, Machine, Setup, State};
 use crate::frame::sign_in::card::{body, framed, header, wordmark};
 use crate::ui::chrome::card::{hex, key_face};
-use crate::ui::kit::surface::{self, Tone, tint};
+use crate::ui::kit::surface;
 use crate::ui::kit::{
     Button, ButtonTone, Density, IconSize, Radius, Row, RowItem, Space, Spaced, Surface, TextRole,
 };
@@ -36,7 +36,12 @@ pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
         State::Choosing(choices) => choosing(theme, props, choices),
         State::Installing { job, line } => vec![working(theme, props, job, line)],
         State::Cancelling { .. } => vec![stopping(theme, props)],
-        State::Failed { job, error } => failed(theme, props, job, &::diagnostics::chain(error)),
+        State::Failed { job, error } => failed(
+            theme,
+            props,
+            job,
+            &crate::core::Problem::caused_by("Setup couldn't finish.", error),
+        ),
         State::Done { .. } => {
             vec![wrapped(
                 TextRole::Label.text(theme, "Opening Artisan Editor…"),
@@ -202,33 +207,25 @@ fn discovery(theme: &ArtisanTheme, props: &Props<'_>, discovery: &Discovery) -> 
         Discovery::Failed(reason) => {
             let retry = Rc::clone(&props.emit);
             Some(
-                UiBox::new()
-                    .layout("row")
-                    .spaced(Space::S12)
-                    .style(Style::new().align(AlignItems::CENTER))
-                    .child(
-                        UiBox::new()
-                            .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-                            .child(colored(
-                                TextRole::Caption.text(
-                                    theme,
-                                    format!("Couldn't list WSL distributions: {reason}"),
-                                ),
-                                tint(theme, Tone::Danger),
-                            ))
-                            .build(),
+                crate::ui::kit::ProblemNotice::new(
+                    "artisan-setup-distros-problem",
+                    *theme,
+                    &crate::core::Problem::detailed(
+                        "Couldn't list WSL distributions.",
+                        reason.clone(),
+                    ),
+                )
+                .action(
+                    Button::text(
+                        "artisan-setup-find-distros",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Look again",
                     )
-                    .child(
-                        Button::text(
-                            "artisan-setup-find-distros",
-                            *theme,
-                            ButtonTone::Neutral,
-                            "Look again",
-                        )
-                        .on_activate(move |_| retry(Choice::FindDistros))
-                        .build(),
-                    )
+                    .on_activate(move |_| retry(Choice::FindDistros))
                     .build(),
+                )
+                .build(),
             )
         }
     }
@@ -376,25 +373,25 @@ fn progress(theme: &ArtisanTheme, props: &Props<'_>, title: &str, detail: &str) 
         .build()
 }
 
-fn failed(theme: &ArtisanTheme, props: &Props<'_>, job: &Job, message: &str) -> Vec<Element> {
+fn failed(
+    theme: &ArtisanTheme,
+    props: &Props<'_>,
+    job: &Job,
+    problem: &crate::core::Problem,
+) -> Vec<Element> {
     let retry = Rc::clone(&props.emit);
     let back = Rc::clone(&props.emit);
+    let mut notice = crate::ui::kit::ProblemNotice::new("artisan-setup-problem", *theme, problem);
+    if matches!(job, Job::Fresh(_)) {
+        notice = notice.action(
+            Button::text("artisan-setup-back", *theme, ButtonTone::Neutral, "Back")
+                .on_activate(move |_| back(Choice::Back))
+                .build(),
+        );
+    }
     vec![
-        wrapped(TextRole::LabelStrong.text(theme, "Setup couldn't finish")),
-        colored(
-            TextRole::Label.text(theme, message.to_owned()),
-            tint(theme, Tone::Danger),
-        ),
-        UiBox::new()
-            .layout("row")
-            .spaced(Space::S8)
-            .style(Style::new().justify(JustifyContent::END))
-            .children(matches!(job, Job::Fresh(_)).then(|| {
-                Button::text("artisan-setup-back", *theme, ButtonTone::Neutral, "Back")
-                    .on_activate(move |_| back(Choice::Back))
-                    .build()
-            }))
-            .child(
+        notice
+            .action(
                 Button::text(
                     "artisan-setup-retry",
                     *theme,

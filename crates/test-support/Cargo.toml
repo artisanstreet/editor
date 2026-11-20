@@ -23,7 +23,7 @@ shell = ["editor", "dep:editor-aqua"]
 transcript = ["dep:serde", "dep:serde_json", "dep:thiserror"]
 logs = ["dep:tracing", "dep:tracing-subscriber"]
 replay = ["transcript", "items", "dep:forge-engines"]
-scenario = ["shell", "replay", "editor-aqua/qualification", "dep:accesskit_consumer", "dep:aqua-a11y-uia", "dep:aqua-protocol", "dep:aqua-runtime", "dep:forge-runs", "dep:windows"]
+scenario = ["shell", "replay", "net", "editor-aqua/qualification", "dep:accesskit_consumer", "dep:aqua-a11y-uia", "dep:aqua-protocol", "dep:aqua-runtime", "dep:forge-runs", "dep:windows"]
 
 [dependencies]
 accesskit_consumer = { workspace = true, optional = true }

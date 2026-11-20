@@ -1,5 +1,5 @@
 use super::{
-    kit::{Space, Spaced, Surface, TextRole, Tone, surface::tint},
+    kit::{Space, Spaced, TextRole},
     theme::{ArtisanTheme, Oklch},
 };
 use aqua_core::{Insets, Role};
@@ -31,34 +31,6 @@ impl PageBlock {
     }
     pub fn build(self) -> Element {
         self.content
-    }
-}
-#[derive(Debug)]
-pub struct Notice {
-    theme: ArtisanTheme,
-    children: Vec<Element>,
-    selector: Option<String>,
-}
-impl Notice {
-    const SURFACE: Surface = Surface::Callout(Tone::Danger);
-    #[must_use]
-    pub fn action(mut self, action: Element) -> Self {
-        self.children.push(action);
-        self
-    }
-    pub fn build(self) -> Element {
-        let body = UiBox::new()
-            .layout("column")
-            .spaced(Space::S8)
-            .children(self.children)
-            .build();
-        let content = Self::SURFACE
-            .build(&self.theme, vec![body])
-            .style(lead(Space::S24));
-        match self.selector {
-            Some(selector) => content.debug_selector(selector),
-            None => content,
-        }
     }
 }
 pub fn preview_lines(text: &str) -> Vec<String> {
@@ -141,22 +113,6 @@ fn message(theme: &ArtisanTheme, text: impl Into<String>, color: Oklch) -> PageB
 pub fn note(theme: &ArtisanTheme, text: impl Into<String>) -> PageBlock {
     message(theme, text, theme.colors.text_muted)
 }
-pub fn error_text(theme: &ArtisanTheme, text: impl Into<String>) -> PageBlock {
-    message(theme, text, theme.colors.destructive_text)
-}
-pub fn notice(theme: &ArtisanTheme, text: impl Into<String>) -> Notice {
-    Notice {
-        theme: *theme,
-        children: vec![label(
-            theme,
-            text,
-            TextRole::Label,
-            tint(theme, Tone::Danger),
-        )],
-        selector: None,
-    }
-}
-
 #[cfg(test)]
 #[path = "../../tests/ui/page.rs"]
 mod tests;

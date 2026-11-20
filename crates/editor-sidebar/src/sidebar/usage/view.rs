@@ -333,6 +333,36 @@ fn bands(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
         .build()
 }
 
+fn refresh_problem(
+    theme: &ArtisanTheme,
+    host: &editor_core::HostData,
+    error: &editor_core::Problem,
+    refreshing: bool,
+    emit: &Rc<dyn Fn(Action)>,
+) -> Element {
+    let callback = Rc::clone(emit);
+    let id = host.id.clone();
+    let instance = host.instance();
+    editor_ui::kit::ProblemNotice::new(format!("usage-problem-{}", host.id.0), *theme, error)
+        .action(
+            Button::text(
+                format!("usage-retry-{}", host.id.0),
+                *theme,
+                ButtonTone::Neutral,
+                "Try again",
+            )
+            .disabled(refreshing)
+            .on_activate(move |_| {
+                callback(Action::Refresh {
+                    host: id.clone(),
+                    instance,
+                });
+            })
+            .build(),
+        )
+        .build()
+}
+
 pub fn build(
     controller: &UsagePage,
     core: &Core,
@@ -411,7 +441,7 @@ pub fn build(
             .with_key(format!("usage-host-{}", host.id.0)),
         );
         if let Some(error) = controller.error(&host.id, host.instance()) {
-            content = content.child(page::error_text(theme, error).build());
+            content = content.child(refresh_problem(theme, host, error, refreshing, emit));
         }
     }
     if count == 0 {

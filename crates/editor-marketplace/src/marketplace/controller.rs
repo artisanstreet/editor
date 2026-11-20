@@ -5,8 +5,8 @@ use artisan_api::{CatalogSkill, Listing, McpServer};
 
 use editor_core::delivery::OwnedDelivery;
 use editor_core::{
-    CompletionKey, CompletionSlot, Core, CoreEvent, HostEvent, HostId, HostInstance, Screen,
-    runtime,
+    CompletionKey, CompletionSlot, Core, CoreEvent, HostEvent, HostId, HostInstance, Problem,
+    Screen, runtime,
 };
 use editor_ui::text::mount::{EditorController, EditorEvent};
 use editor_ui::text::{Editor, ListKey as EditorListKey, Mode};
@@ -36,7 +36,7 @@ enum Completion {
 enum CatalogState {
     Idle,
     Loading,
-    Failed(String),
+    Failed(Problem),
 }
 
 impl CatalogState {
@@ -60,11 +60,11 @@ pub(crate) struct ViewSnapshot {
     entries: Vec<super::Entry>,
     items: Vec<super::presentation::Item>,
     pending: Option<Operation>,
-    notice: Option<String>,
+    notice: Option<Problem>,
     found_open: bool,
     prompt_hovered: bool,
     catalog: CatalogState,
-    prompt_error: Option<String>,
+    prompt_error: Option<Problem>,
     prompt_attention: Option<String>,
 }
 

@@ -5,7 +5,7 @@ use crate::conversation::presentation::{BodyKey, ScopedCodeAction};
 use crate::conversation::stored::{StoredLeafServices, StoredLeafTarget};
 use crate::conversation::view::reveal::MountedReveal;
 use aqua_ui::collection::BatchedCollectionRow;
-use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
+use editor_ui::kit::{Button, ButtonTone, TextRole};
 use editor_ui::markdown::presenter::SelectionPlace;
 use editor_ui::markdown::stored::PagePreparation;
 use editor_ui::markdown::visual::{BodyContext, BodyTone};
@@ -270,20 +270,13 @@ impl RowFactory {
             }
         })
         .build();
-        let text = TextRole::Label
-            .text(
-                &self.theme,
-                format!("Couldn't load this part of the message: {cause}"),
-            )
-            .gpui_source_color(self.theme.colors.text_muted.to_reference_text_color())
-            .build();
-        aqua_ui::element::Box::new()
-            .layout("column")
-            .width(aqua_ui::style::Length::Pct(100.0))
-            .spaced(Space::S8)
-            .child(text)
-            .child(retry)
-            .build()
+        editor_ui::kit::ProblemNotice::new(
+            format!("stored-page-problem-{}-{}-{offset}", key.item, key.slot),
+            self.theme,
+            &editor_core::Problem::detailed("Couldn't load this part of the message.", cause),
+        )
+        .action(retry)
+        .build()
     }
 
     #[expect(

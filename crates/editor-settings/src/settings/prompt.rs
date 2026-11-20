@@ -1,4 +1,5 @@
 use artisan_api::{GlobalPrompt, SavePrompt};
+use editor_core::Problem;
 
 #[derive(Clone, Debug, Default)]
 pub struct PromptForm {
@@ -8,7 +9,7 @@ pub struct PromptForm {
     base_version: u64,
     pub(crate) newer: bool,
     pub(crate) pending: bool,
-    pub error: Option<String>,
+    pub error: Option<Problem>,
     generation: u64,
     edit_revision: u64,
 }
@@ -95,7 +96,7 @@ impl PromptForm {
     pub fn complete(
         &mut self,
         request: &PromptRequest,
-        result: Result<(u64, Option<GlobalPrompt>), String>,
+        result: Result<(u64, Option<GlobalPrompt>), Problem>,
         text: &str,
     ) -> Option<String> {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
@@ -120,8 +121,8 @@ impl PromptForm {
                 self.loaded = true;
                 None
             }
-            Err(error) => {
-                self.error = Some(format!("Couldn't save the global prompt: {error}"));
+            Err(problem) => {
+                self.error = Some(problem);
                 None
             }
         }

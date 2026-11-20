@@ -9,7 +9,7 @@ use editor_assets::AssetId;
 use editor_ui::{
     kit::{
         Button, ButtonTone, Finish, IconButton, IconButtonSize, IconSize, Inset, Key, KeyFace,
-        KeySize, Lead, Space, Spaced, Surface, TextRole, Trigger, TriggerSize,
+        KeySize, Lead, Space, Spaced, TextRole, Trigger, TriggerSize,
     },
     theme::ArtisanTheme,
 };
@@ -383,9 +383,16 @@ pub(crate) fn composer_card(theme: &ArtisanTheme, nested: bool, parts: CardParts
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ComposerFailure<'a> {
-    Draft { error: &'a str, conflict: bool },
-    ModelChoice { error: &'a str },
-    Notice { message: &'a str },
+    Draft {
+        error: &'a editor_core::Problem,
+        conflict: bool,
+    },
+    ModelChoice {
+        error: &'a editor_core::Problem,
+    },
+    Notice {
+        message: &'a editor_core::Problem,
+    },
 }
 
 pub(crate) fn draft_error(
@@ -393,66 +400,67 @@ pub(crate) fn draft_error(
     failure: ComposerFailure<'_>,
     dispatch: &Dispatch,
 ) -> Element {
-    let surface = Surface::Composer;
     let choice = |key: &'static str, label: &'static str, action: ComposerAction| {
         let dispatch = Rc::clone(dispatch);
         Button::text(key, *theme, ButtonTone::Neutral, label)
-            .within(surface)
             .on_activate(move |_| dispatch(action.clone()))
             .build()
     };
-    let (error, actions) = match failure {
+    let (problem, actions) = match failure {
         ComposerFailure::Draft {
             error,
             conflict: true,
         } => (
             error,
-            UiBox::new()
-                .spaced(Space::S8)
-                .child(choice(
+            vec![
+                choice(
                     "draft-keep-local",
                     "Keep my draft",
                     ComposerAction::KeepDraft,
-                ))
-                .child(choice(
+                ),
+                choice(
                     "draft-use-remote",
                     "Load other draft",
                     ComposerAction::LoadOtherDraft,
-                ))
-                .build(),
+                ),
+            ],
         ),
         ComposerFailure::Draft {
             error,
             conflict: false,
         } => (
             error,
-            choice("draft-retry", "Try again", ComposerAction::RetryDraft),
+            vec![choice(
+                "draft-retry",
+                "Try again",
+                ComposerAction::RetryDraft,
+            )],
         ),
         ComposerFailure::ModelChoice { error } => (
             error,
-            choice(
+            vec![choice(
                 "model-choice-retry",
                 "Try again",
                 ComposerAction::RetryModelChoice,
-            ),
+            )],
         ),
         ComposerFailure::Notice { message } => (
             message,
-            choice("notice-dismiss", "Dismiss", ComposerAction::DismissNotice),
+            vec![choice(
+                "notice-dismiss",
+                "Dismiss",
+                ComposerAction::DismissNotice,
+            )],
         ),
     };
+    let notice = actions.into_iter().fold(
+        editor_ui::kit::ProblemNotice::new("composer-problem", *theme, problem),
+        editor_ui::kit::ProblemNotice::action,
+    );
     UiBox::new()
         .layout("column")
         .padded(Space::S8)
-        .spaced(Space::S8)
-        .child(
-            TextRole::Label
-                .text(theme, error.to_owned())
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .wrap(true)
-                .build(),
-        )
-        .child(actions)
+        .child(notice.build())
         .build()
 }
 
@@ -692,7 +700,7 @@ type QuestionMark = (
     usize,
     Vec<String>,
     Option<artisan_api::ItemId>,
-    Option<String>,
+    Option<editor_core::Problem>,
     Option<String>,
 );
 
@@ -708,7 +716,7 @@ type AttachmentMark = (
 type AttachmentsMark = (
     Vec<AttachmentMark>,
     Option<(u64, std::time::Instant)>,
-    Option<String>,
+    Option<editor_core::Problem>,
 );
 
 #[derive(PartialEq)]
@@ -722,8 +730,8 @@ struct ComposerRest {
     attachments: Option<AttachmentsMark>,
     files: Vec<(u64, std::path::PathBuf, bool)>,
     file_shake: Option<(u64, std::time::Instant)>,
-    notice: Option<String>,
-    session: Option<(bool, bool, Option<String>, bool)>,
+    notice: Option<editor_core::Problem>,
+    session: Option<(bool, bool, Option<editor_core::Problem>, bool)>,
     cancelling: bool,
     continuing: bool,
 }
@@ -950,6 +958,23 @@ impl ComposerOwner {
     }
 }
 
+fn attachment_problem(image: &super::attachment::Attachment) -> Option<editor_core::Problem> {
+    image
+        .state
+        .failure()
+        .map(|reason| {
+            editor_core::Problem::detailed(format!("Couldn't attach {}.", image.name), reason)
+        })
+        .or_else(|| {
+            image.preview_error.as_ref().map(|reason| {
+                editor_core::Problem::detailed(
+                    format!("Couldn't show a preview of {}.", image.name),
+                    reason.clone(),
+                )
+            })
+        })
+}
+
 pub fn attachments(
     theme: &ArtisanTheme,
     controller: &super::controller::Composer,
@@ -995,13 +1020,7 @@ pub fn attachments(
                 image.state,
                 super::attachment::State::Encoding | super::attachment::State::Uploading
             ))
-            .error(
-                image
-                    .state
-                    .failure()
-                    .or(image.preview_error.as_deref())
-                    .map(str::to_owned),
-            )
+            .error(attachment_problem(image))
             .shaking(
                 images
                     .shake

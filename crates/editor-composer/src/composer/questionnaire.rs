@@ -14,7 +14,7 @@ struct AnswerDraft {
     recorded: BTreeMap<usize, QuestionAnswer>,
     ticked: Vec<String>,
     text: String,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
 }
 
 #[derive(Debug, Default)]
@@ -27,7 +27,7 @@ pub struct QuestionnairePanel {
     pub ticked: Vec<String>,
     aside: Option<String>,
     pub sending: Option<ItemId>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<editor_core::Problem>,
     drafts: HashMap<ItemId, AnswerDraft>,
     payloads: HashMap<ItemId, Vec<Option<QuestionAnswer>>>,
 }
@@ -288,9 +288,11 @@ impl QuestionnairePanel {
                 self.load(text);
             }
             Some(error) => {
-                let error = diagnostics::chain(&error);
-                tracing::warn!(%item, %error, "sending a questionnaire answer failed");
-                self.error = Some(format!("Couldn't send your answer: {error}"));
+                tracing::warn!(%item, error = %diagnostics::chain(&error), "sending a questionnaire answer failed");
+                self.error = Some(editor_core::Problem::calling_forge(
+                    "Couldn't send your answer.",
+                    &error,
+                ));
             }
         }
         self.sync_mode(text);

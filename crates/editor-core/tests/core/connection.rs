@@ -98,7 +98,7 @@ impl Follower {
         }
     }
 
-    async fn offline(&mut self) -> (u32, String) {
+    async fn offline(&mut self) -> (u32, editor_core::Problem) {
         loop {
             if let ConnectionStatus::Offline {
                 attempt, reason, ..
@@ -135,8 +135,10 @@ fn a_stream_that_stops_sending_heartbeats_goes_offline() {
         while follower.status().await != ConnectionStatus::Live {}
         let (_, reason) = test_support::clock::paused(follower.offline()).await;
         assert!(
-            reason.contains("heartbeat"),
-            "the reason names the silence: {reason}"
+            reason
+                .detail()
+                .is_some_and(|detail| detail.contains("heartbeat")),
+            "the reason names the silence: {reason:?}"
         );
     });
 }
@@ -171,8 +173,10 @@ fn a_refusal_whose_body_never_arrives_still_goes_offline() {
         .await;
         let (_, reason) = follower.offline().await;
         assert!(
-            reason.contains("did not open"),
-            "the reason names the opening deadline: {reason}"
+            reason
+                .detail()
+                .is_some_and(|detail| detail.contains("did not open")),
+            "the reason names the opening deadline: {reason:?}"
         );
     });
 }

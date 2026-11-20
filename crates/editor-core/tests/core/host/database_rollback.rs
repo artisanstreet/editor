@@ -90,7 +90,7 @@ fn forge(dismissal: StatusCode) -> Forge {
 }
 
 impl Forge {
-    fn notice(&mut self) -> Option<String> {
+    fn notice(&mut self) -> Option<editor_core::Problem> {
         self.core.drain_with(|_, _| {});
         self.core
             .host(&self.host)
@@ -99,7 +99,7 @@ impl Forge {
             .message()
     }
 
-    fn shown(&mut self) -> String {
+    fn shown(&mut self) -> editor_core::Problem {
         let mut shown = None;
         wait_until("the rollback notice shows", SETTLED_WITHIN, || {
             shown = self.notice();
@@ -120,8 +120,11 @@ impl Forge {
 fn the_sidebar_says_forge_went_back_and_where_the_newer_data_is_until_dismissed() {
     let mut forge = forge(StatusCode::NO_CONTENT);
     let shown = forge.shown();
-    assert!(shown.contains(SET_ASIDE), "{shown}");
-    assert!(shown.contains("schema 31 instead of 32"), "{shown}");
+    assert!(shown.headline().contains(SET_ASIDE), "{shown}");
+    assert!(
+        shown.headline().contains("schema 31 instead of 32"),
+        "{shown}"
+    );
 
     forge.dismiss();
     assert_eq!(
@@ -148,6 +151,17 @@ fn a_dismissal_forge_refuses_brings_the_notice_back_with_the_reason() {
         returned.is_some()
     });
     let returned = returned.expect("the notice returned");
-    assert!(returned.contains(SET_ASIDE), "{returned}");
-    assert!(returned.contains("Couldn't dismiss this"), "{returned}");
+    assert!(returned.headline().contains(SET_ASIDE), "{returned}");
+    assert!(
+        returned
+            .headline()
+            .contains("Couldn't dismiss this notice."),
+        "{returned}"
+    );
+    assert!(
+        returned
+            .detail()
+            .is_some_and(|detail| detail.contains("Forge answered 500")),
+        "{returned:?}"
+    );
 }

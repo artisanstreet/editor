@@ -37,7 +37,7 @@ static NEXT_WAITER: AtomicU64 = AtomicU64::new(1);
 static RASTER_WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
 pub(crate) type FrameFactory = Rc<dyn Fn(Element, f32, f32, &str, Option<bool>) -> Element>;
-pub(crate) type PlaceholderFactory = Rc<dyn Fn(&str, bool) -> Element>;
+pub(crate) type PlaceholderFactory = Rc<dyn Fn(Option<&editor_core::Problem>) -> Element>;
 pub(crate) type ToolbarFactory =
     Rc<dyn Fn(Shading, bool, &str, Rc<dyn Fn(Shading)>, Rc<dyn Fn()>) -> Element>;
 pub(crate) type CopyFactory = Rc<dyn Fn(aqua_core::Point, &str)>;
@@ -601,8 +601,10 @@ impl ModelBlock {
             )
         });
         match loaded {
-            None => Loaded::Placeholder((services.placeholder)("Loading model…", false)),
-            Some(Err(reason)) => Loaded::Placeholder((services.placeholder)(&reason, true)),
+            None => Loaded::Placeholder((services.placeholder)(None)),
+            Some(Err(reason)) => Loaded::Placeholder((services.placeholder)(Some(
+                &editor_core::Problem::detailed("Couldn't show this 3D model.", reason),
+            ))),
             Some(Ok(model)) => Loaded::Ready(model),
         }
     }

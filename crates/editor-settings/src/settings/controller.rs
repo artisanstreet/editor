@@ -4,7 +4,9 @@ use artisan_api::{EngineCommand, EngineId, GlobalPrompt};
 use serde_json::Value;
 
 use editor_core::delivery::OwnedDelivery;
-use editor_core::{Core, HostId, HostInstance, Screen, SettingsPage, ThreadPageDirection, runtime};
+use editor_core::{
+    Core, HostId, HostInstance, Problem, Screen, SettingsPage, ThreadPageDirection, runtime,
+};
 use editor_ui::text::editor::{Editor, Mode};
 
 use super::archive::{ArchiveForm, ArchiveRequest};
@@ -23,11 +25,11 @@ struct HostCompletion {
 
 enum Completion {
     Setting(SettingRequest, Result<(), SaveSettingError>),
-    Archive(ArchiveRequest, Result<(), String>),
-    Mcp(Box<MutationRequest>, Result<(), String>),
-    Engine(EngineRequest, Result<(), String>),
-    Prompt(PromptRequest, Result<GlobalPrompt, String>),
-    McpSignOut(String, Result<(), String>),
+    Archive(ArchiveRequest, Result<(), Problem>),
+    Mcp(Box<MutationRequest>, Result<(), Problem>),
+    Engine(EngineRequest, Result<(), Problem>),
+    Prompt(PromptRequest, Result<GlobalPrompt, Problem>),
+    McpSignOut(String, Result<(), Problem>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +71,7 @@ pub struct SettingsController {
     pub extensions: ExtensionsForm,
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
-    pub(crate) editor_setting_error: Option<String>,
+    pub(crate) editor_setting_error: Option<Problem>,
     parked_prompts: HashMap<String, (PromptForm, String)>,
     setting_writes: SettingWrites,
     completion: OwnedDelivery<HostCompletion>,
@@ -236,9 +238,9 @@ impl SettingsController {
         match core.set_setting(key, value) {
             Ok(()) => self.editor_setting_error = None,
             Err(error) => {
-                let cause = ::diagnostics::chain(&error);
-                tracing::error!(key, error = %cause, "saving an Editor setting");
-                self.editor_setting_error = Some(format!("Couldn't save {key}: {cause}"));
+                let problem = Problem::caused_by("Couldn't save this setting.", &error);
+                tracing::error!(key, error = ?problem.detail(), "saving an Editor setting");
+                self.editor_setting_error = Some(problem);
             }
         }
     }
@@ -252,9 +254,9 @@ impl SettingsController {
         if matches!(event, editor_core::CoreEvent::SettingsChanged)
             && let editor_core::SettingsSave::Failed(failure) = core.settings_save()
         {
-            let cause = ::diagnostics::chain(&**failure);
-            tracing::error!(error = %cause, "saving an Editor setting");
-            self.editor_setting_error = Some(format!("Couldn't save: {cause}"));
+            let problem = Problem::caused_by("Couldn't save your settings.", &**failure);
+            tracing::error!(error = ?problem.detail(), "saving an Editor setting");
+            self.editor_setting_error = Some(problem);
         }
         if matches!(event, editor_core::CoreEvent::ScreenChanged) {
             self.engines.errors.clear();
@@ -312,7 +314,9 @@ impl SettingsController {
                     .update_thread(&request.thread, &update)
                     .await
                     .map(|_| ())
-                    .map_err(|error| ::diagnostics::chain(&error));
+                    .map_err(|error| {
+                        Problem::calling_forge("Couldn't restore the thread.", &error)
+                    });
                 sender
                     .offer(HostCompletion {
                         host: id,
@@ -493,7 +497,9 @@ impl SettingsController {
                         server: server.clone(),
                     })
                     .await
-                    .map_err(|error| ::diagnostics::chain(&error));
+                    .map_err(|error| {
+                        Problem::calling_forge(&format!("Couldn't sign out of {server}."), &error)
+                    });
                 sender
                     .offer(HostCompletion {
                         host: id,
@@ -546,12 +552,7 @@ impl SettingsController {
                     })
                 }
                 .await
-                .map_err(|error| {
-                    format!(
-                        "Couldn't sign in to claude.ai: {}",
-                        diagnostics::chain(&error)
-                    )
-                });
+                .map_err(|error| Problem::caused_by("Couldn't sign in to claude.ai.", &error));
                 sender
                     .offer(HostCompletion {
                         host: id,
@@ -578,7 +579,9 @@ impl SettingsController {
                     .mutate_mcp(&request.mutation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| ::diagnostics::chain(&error));
+                    .map_err(|error| {
+                        Problem::calling_forge("Couldn't save the MCP servers.", &error)
+                    });
                 sender
                     .offer(HostCompletion {
                         host: id,
@@ -629,10 +632,9 @@ impl SettingsController {
                     .await
                     .map(|_| ())
                     .map_err(|error| {
-                        format!(
-                            "Couldn't {verb} {}: {}",
-                            engine.display_name(),
-                            ::diagnostics::chain(&error)
+                        Problem::calling_forge(
+                            &format!("Couldn't {verb} {}.", engine.display_name()),
+                            &error,
                         )
                     });
                 sender
@@ -677,7 +679,9 @@ impl SettingsController {
                     Some(resolution) => client.resolve_global_prompt(&resolution).await,
                     None => client.save_global_prompt(&request.save).await,
                 }
-                .map_err(|error| ::diagnostics::chain(&error));
+                .map_err(|error| {
+                    Problem::calling_forge("Couldn't save the global prompt.", &error)
+                });
                 sender
                     .offer(HostCompletion {
                         host: id,
@@ -747,10 +751,10 @@ impl SettingsController {
                 }
                 Completion::McpSignOut(server, result) => {
                     if self.extensions.host.as_deref() == Some(completion.host.0.as_str())
-                        && let Err(error) = result
+                        && let Err(problem) = result
                     {
-                        self.extensions.error =
-                            Some(format!("Couldn't sign out of {server}: {error}"));
+                        tracing::warn!(%server, error = ?problem.detail(), "signing out of an MCP server");
+                        self.extensions.error = Some(problem);
                     }
                 }
                 Completion::Engine(request, result) => {

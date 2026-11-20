@@ -11,7 +11,7 @@ use super::{
     ui::{self, Ink},
     view::ViewAction,
 };
-use editor_core::{Core, HostData, McpSignIn, McpSignInPhase};
+use editor_core::{Core, HostData, McpSignIn, McpSignInPhase, Problem};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
     text::{
@@ -41,7 +41,7 @@ fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<St
             McpSignInPhase::Starting => "Opening the sign-in…".into(),
             McpSignInPhase::Waiting => "Waiting for the browser…".into(),
             McpSignInPhase::Finishing => "Signing in…".into(),
-            McpSignInPhase::Failed(reason) => format!("Couldn't sign in: {reason}"),
+            McpSignInPhase::Failed(_) => "Sign-in failed".into(),
         });
     }
     match status? {
@@ -224,6 +224,19 @@ fn form(
     ui::block(body.child(actions.build()).build())
 }
 
+fn sign_in_failure(
+    theme: &ArtisanTheme,
+    server: &str,
+    sign_in: Option<&McpSignIn>,
+) -> Option<Element> {
+    match sign_in?.phase() {
+        McpSignInPhase::Failed(problem) => Some(ui::block(
+            ui::problem(theme, format!("mcp-sign-in-error-{server}"), problem).build(),
+        )),
+        McpSignInPhase::Starting | McpSignInPhase::Waiting | McpSignInPhase::Finishing => None,
+    }
+}
+
 pub(crate) fn section(
     controller: &SettingsController,
     core: &Core,
@@ -231,23 +244,26 @@ pub(crate) fn section(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let servers: Result<Vec<McpServer>, String> = host
+    let servers: Result<Vec<McpServer>, Problem> = host
         .mcp_servers()
         .map(<[McpServer]>::to_vec)
-        .map_err(|error| format!("Couldn't read MCP servers: {}", ::diagnostics::chain(error)));
+        .map_err(|error| Problem::caused_by("Couldn't read the MCP servers.", error));
     let auth = host.settings.mcp_auth();
     let mut rows = Vec::new();
-    if let Err(error) = &servers {
-        rows.push(ui::block(ui::error_text(theme, error)));
+    if let Err(problem) = &servers {
+        rows.push(ui::block(
+            ui::problem(theme, "mcp-servers-error", problem).build(),
+        ));
     }
     if let Err(error) = auth {
-        rows.push(ui::block(ui::error_text(
-            theme,
-            format!(
-                "Couldn't read MCP sign-in states: {}",
-                ::diagnostics::chain(error)
-            ),
-        )));
+        rows.push(ui::block(
+            ui::problem(
+                theme,
+                "mcp-auth-error",
+                &Problem::caused_by("Couldn't read which MCP servers are signed in.", error),
+            )
+            .build(),
+        ));
     }
     for server in servers.unwrap_or_default() {
         let target = server.url.clone().unwrap_or_else(|| {
@@ -287,7 +303,9 @@ pub(crate) fn section(
             ViewAction::McpRemove(server.clone()),
             Rc::clone(&emit),
         ));
+        let failure = sign_in_failure(theme, &server.name, sign_in);
         rows.push(ui::row(theme, server.name, summary, Some(actions.build())));
+        rows.extend(failure);
     }
     if rows.is_empty() && controller.extensions.editing.is_none() {
         rows.push(ui::row(
@@ -301,8 +319,8 @@ pub(crate) fn section(
         rows.push(form(controller, theme, Rc::clone(&emit)));
     }
     let mut body = ui::stack(Space::S8).child(ui::card(theme, rows));
-    if let Some(error) = &controller.extensions.error {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = &controller.extensions.error {
+        body = body.child(ui::problem(theme, "mcp-error", problem).build());
     }
     if controller.extensions.editing.is_none() {
         body = body.child(

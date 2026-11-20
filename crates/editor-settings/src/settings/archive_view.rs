@@ -270,8 +270,8 @@ pub(crate) fn archived(
         ui::card(&theme, vec![header, list])
     };
     let mut body = ui::stack(Space::S8).child(card);
-    if let Some(error) = page.error() {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = page.error() {
+        body = body.child(ui::problem(theme, "archived-page-error", problem).build());
     }
     if !page.at_latest() || page.error().is_some() {
         let send = Rc::clone(emit);
@@ -299,8 +299,8 @@ pub(crate) fn archived(
             move || send(ViewAction::ArchiveOlder),
         ));
     }
-    if let Some(error) = &controller.archive.error {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = &controller.archive.error {
+        body = body.child(ui::problem(theme, "archived-restore-error", problem).build());
     }
     ui::section(
         theme,

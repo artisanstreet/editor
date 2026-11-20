@@ -468,12 +468,12 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         ));
         current.add_paths(vec![non_unicode]);
         assert_eq!(current.files.len(), 1);
-        assert!(
-            current
-                .notice
-                .as_deref()
-                .is_some_and(|notice| notice.contains("is not a Unicode path"))
-        );
+        assert!(current.notice.as_ref().is_some_and(|notice| {
+            notice.headline() == "This path can't be linked."
+                && notice
+                    .detail()
+                    .is_some_and(|detail| detail.contains("is not a Unicode path"))
+        }));
         current.save();
     }
 }

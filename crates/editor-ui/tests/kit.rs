@@ -10,6 +10,8 @@ mod hit_area;
 mod hover;
 #[path = "ui/kit/control/icon_button.rs"]
 mod icon_button;
+#[path = "ui/kit/problem.rs"]
+mod problem;
 #[path = "ui/kit/tokens/radius.rs"]
 mod radius;
 #[path = "ui/kit/row.rs"]

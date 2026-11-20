@@ -16,7 +16,6 @@ impl MarkdownPresenter {
             envelope,
             id,
             theme,
-            glyph,
             invalidate,
             ..
         } = call;
@@ -46,7 +45,6 @@ impl MarkdownPresenter {
             theme,
             media.model_assets.clone(),
             Rc::clone(&media.model_capability),
-            glyph,
             Rc::clone(&media.effect),
             hovered,
             Rc::clone(invalidate),

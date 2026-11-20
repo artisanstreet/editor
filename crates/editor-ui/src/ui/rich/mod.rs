@@ -81,7 +81,7 @@ fn prepare_kind(kind: &str, value: &serde_json::Value) -> Option<Result<Prepared
 pub(crate) enum RichFence {
     Pending { kind: String },
     Ready(Box<Envelope>),
-    Invalid { note: String },
+    Invalid { note: editor_core::Problem },
 }
 
 #[derive(Debug)]
@@ -96,7 +96,7 @@ impl RichFence {
     pub(crate) fn resident_bytes(&self) -> usize {
         match self {
             Self::Pending { kind } => kind.capacity(),
-            Self::Invalid { note } => note.capacity(),
+            Self::Invalid { note } => editor_core::ResidentBytes::resident_bytes(note),
             Self::Ready(envelope) => {
                 envelope.block.resident_bytes()
                     + envelope.title.as_ref().map_or(0, String::capacity)
@@ -130,7 +130,10 @@ pub(crate) fn prepare(language: Option<&str>, source: &str, closed: bool) -> Opt
     Some(match parsed {
         Ok(prepared) => RichFence::Ready(Box::new(prepared)),
         Err(error) => RichFence::Invalid {
-            note: format!("Couldn't draw artisan-{kind}: {error}"),
+            note: editor_core::Problem::detailed(
+                format!("Couldn't draw this artisan-{kind} block."),
+                error,
+            ),
         },
     })
 }

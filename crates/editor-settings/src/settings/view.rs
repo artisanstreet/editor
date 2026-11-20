@@ -13,7 +13,9 @@ use super::{
     preferences::SettingKey,
     ui::{self, Ink},
 };
-use editor_core::{ConnectionStatus, Core, HostData, Screen, SettingsPage, SettingsSection};
+use editor_core::{
+    ConnectionStatus, Core, HostData, Problem, Screen, SettingsPage, SettingsSection,
+};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole, Tone},
     select::{Select, SelectEntry, SelectMenu},
@@ -488,37 +490,32 @@ fn host_setting_failures(
         let retry = Rc::clone(emit);
         let dismiss = Rc::clone(emit);
         let retried = target.clone();
-        stack = stack
-            .child(ui::callout(
-                theme,
-                Tone::Danger,
-                format!(
-                    "Couldn't save “{}” on {}: {}",
-                    setting_label(target.key),
-                    host.name,
-                    failure.cause.reason()
-                ),
-            ))
-            .child(
-                ui::actions()
-                    .child(ui::button(
-                        theme,
-                        format!("settings-dismiss-{}", target.key),
-                        "Dismiss",
-                        ButtonTone::Quiet,
-                        false,
-                        move || dismiss(ViewAction::DismissHostSetting(target.clone())),
-                    ))
-                    .child(ui::button(
-                        theme,
-                        format!("settings-retry-{}", retried.key),
-                        "Try again",
-                        ButtonTone::Neutral,
-                        false,
-                        move || retry(ViewAction::RetryHostSetting(retried.clone())),
-                    ))
-                    .build(),
-            );
+        let problem = failure.cause.problem(&format!(
+            "Couldn't save “{}” on {}.",
+            setting_label(target.key),
+            host.name,
+        ));
+        let key = target.key;
+        stack = stack.child(
+            ui::problem(theme, format!("settings-error-{key}"), &problem)
+                .action(ui::button(
+                    theme,
+                    format!("settings-retry-{key}"),
+                    "Try again",
+                    ButtonTone::Neutral,
+                    false,
+                    move || retry(ViewAction::RetryHostSetting(retried.clone())),
+                ))
+                .action(ui::button(
+                    theme,
+                    format!("settings-dismiss-{key}"),
+                    "Dismiss",
+                    ButtonTone::Quiet,
+                    false,
+                    move || dismiss(ViewAction::DismissHostSetting(target.clone())),
+                ))
+                .build(),
+        );
     }
     Some(stack.build())
 }
@@ -529,21 +526,20 @@ fn device_settings_error(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    let message = match (
+    let problem = match (
         core.settings().unreadable(),
         &controller.editor_setting_error,
     ) {
-        (Some(error), _) => format!(
-            "Couldn't read settings.json: {}. The file is kept as it is and changes here are not saved until it can be read. Fix or remove the file, then reload.",
-            ::diagnostics::chain(error)
+        (Some(error), _) => Problem::caused_by(
+            "Couldn't read settings.json. The file is kept as it is and changes here are not saved until it can be read. Fix or remove the file, then reload.",
+            error,
         ),
-        (None, Some(error)) => error.clone(),
+        (None, Some(problem)) => problem.clone(),
         (None, None) => return None,
     };
     Some(
-        ui::stack(Space::S8)
-            .child(ui::callout(theme, Tone::Danger, message))
-            .child(ui::button(
+        ui::problem(theme, "settings-device-error", &problem)
+            .action(ui::button(
                 theme,
                 "settings-reload",
                 "Reload settings",
@@ -608,7 +604,7 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
                     ("Connecting…".to_owned(), Ink::Muted)
                 }
                 ConnectionStatus::Offline { reason, .. } => {
-                    (format!("Offline: {reason}"), Ink::Danger)
+                    (format!("Offline. {}", reason.headline()), Ink::Danger)
                 }
             };
             let detail = host
@@ -884,11 +880,11 @@ fn prompt(
                 .build()
                 .with_key("global-prompt-scroll"),
         );
-    if let Some(error) = form.error.as_deref().or_else(|| {
+    if let Some(problem) = form.error.as_ref().or_else(|| {
         core.active_host()
-            .and_then(|host| host.prompt_load().error.as_deref())
+            .and_then(|host| host.prompt_load().error.as_ref())
     }) {
-        page = page.child(ui::callout(theme, Tone::Danger, error));
+        page = page.child(ui::problem(theme, "settings-global-prompt-error", problem).build());
     }
     page = page.child(ui::callout(
         theme,
@@ -1043,11 +1039,18 @@ fn prompt_reconciliation(
             }
             artisan_api::PromptEngineStatus::Failed => {
                 if let Some(reason) = &engine.reason {
-                    controls = controls.child(ui::callout(
-                        theme,
-                        Tone::Danger,
-                        format!("{}: {reason}", engine.engine.display_name()),
-                    ));
+                    let name = engine.engine.display_name();
+                    controls = controls.child(
+                        ui::problem(
+                            theme,
+                            format!("settings-global-prompt-engine-error-{name}"),
+                            &Problem::detailed(
+                                format!("Couldn't apply the global prompt to {name}."),
+                                reason.clone(),
+                            ),
+                        )
+                        .build(),
+                    );
                 }
             }
             artisan_api::PromptEngineStatus::Synced
@@ -1365,27 +1368,27 @@ fn section_page(
 struct ViewSnapshot {
     screen: Screen,
     account: editor_core::AccountPhase,
-    account_error: Option<String>,
+    account_error: Option<Problem>,
     local_forge: editor_core::LocalForge,
     device_settings: Vec<Option<serde_json::Value>>,
-    device_settings_error: (bool, Option<String>),
+    device_settings_error: (bool, Option<Problem>),
     host_settings: Vec<Option<serde_json::Value>>,
     setting_failures: Vec<(SettingKey, super::preferences::SettingFailure)>,
     host_instance: Option<editor_core::HostInstance>,
-    archive_loading: Option<(bool, bool, bool, Option<String>)>,
+    archive_loading: Option<(bool, bool, bool, Option<Problem>)>,
     archive_restoring: std::collections::HashSet<artisan_api::ThreadId>,
-    archive_error: Option<String>,
+    archive_error: Option<Problem>,
     engine_busy: std::collections::BTreeSet<artisan_api::EngineId>,
     engine_cancelling: std::collections::BTreeSet<artisan_api::EngineId>,
-    engine_errors: std::collections::HashMap<artisan_api::EngineId, String>,
+    engine_errors: std::collections::HashMap<artisan_api::EngineId, Problem>,
     engine_versions: std::collections::HashSet<artisan_api::EngineId>,
     engine_codes: std::collections::HashMap<artisan_api::EngineId, String>,
     mcp_editing: Option<super::extensions::McpEditing>,
     mcp_saving: bool,
     mcp_sign_ins: Vec<(String, editor_core::McpSignInPhase, Option<String>)>,
-    mcp_error: Option<String>,
+    mcp_error: Option<Problem>,
     mcp_fields: Vec<String>,
-    prompt: (bool, bool, bool, bool, Option<String>),
+    prompt: (bool, bool, bool, bool, Option<Problem>),
     forge_code: String,
     second_factor: String,
     menus: (bool, bool, bool),
@@ -1415,7 +1418,7 @@ impl ViewSnapshot {
         Self {
             screen: core.screen().clone(),
             account: core.account().phase().clone(),
-            account_error: core.account().last_error().map(str::to_owned),
+            account_error: core.account().last_error().cloned(),
             local_forge: core.account().local_forge(),
             device_settings: vec![
                 Some(serde_json::json!(preferences.theme.is_dark())),
@@ -1463,7 +1466,7 @@ impl ViewSnapshot {
                     page.is_loading(),
                     page.at_latest(),
                     page.has_older(),
-                    page.error().map(str::to_owned),
+                    page.error().cloned(),
                 )
             }),
             archive_restoring: controller.archive.restoring.clone(),

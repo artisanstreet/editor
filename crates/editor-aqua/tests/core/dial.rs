@@ -201,11 +201,9 @@ fn a_pairing_that_cannot_be_saved_is_not_left_connected_and_can_be_retried() {
     std::fs::set_permissions(&files.dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     let id = HostId(MACHINE.into());
     let deadline = Instant::now() + Duration::from_secs(20);
-    while core
-        .account()
-        .last_error()
-        .is_none_or(|error| !error.contains("save the pairing"))
-    {
+    while core.account().last_error().is_none_or(|error| {
+        error.headline() != "Couldn't save the pairing with this machine's Forge."
+    }) {
         assert!(
             Instant::now() < deadline,
             "the pairing never reported that it could not be saved"

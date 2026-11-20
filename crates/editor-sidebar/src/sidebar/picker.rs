@@ -6,7 +6,7 @@ pub struct FolderPicker {
     pub(crate) hidden: bool,
     pub(crate) loading: bool,
     pub creating: bool,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<editor_core::Problem>,
     request: Option<CreateProject>,
 }
 
@@ -35,14 +35,14 @@ impl FolderPicker {
         self.error = None;
         true
     }
-    pub fn finish_browse(&mut self, result: Result<DirListing, String>) {
+    pub fn finish_browse(&mut self, result: Result<DirListing, editor_core::Problem>) {
         self.loading = false;
         match result {
             Ok(listing) => {
                 self.listing = Some(listing);
                 self.request = None;
             }
-            Err(error) => self.error = Some(format!("Couldn't open this folder: {error}")),
+            Err(error) => self.error = Some(error),
         }
     }
     pub fn begin_create(&mut self) -> Option<CreateProject> {
@@ -62,8 +62,8 @@ impl FolderPicker {
         self.error = None;
         Some(request)
     }
-    pub fn finish_create(&mut self, error: Option<String>) {
+    pub fn finish_create(&mut self, error: Option<editor_core::Problem>) {
         self.creating = false;
-        self.error = error.map(|error| format!("Couldn't add this folder: {error}"));
+        self.error = error;
     }
 }

@@ -144,6 +144,14 @@ impl<'a> View<'a> {
             .find(|part| part.contains(text))
     }
 
+    #[must_use]
+    pub fn find_showing(self, role: Role, text: &str) -> Option<Found> {
+        self.nodes()
+            .iter()
+            .find(|node| node.role() == role && rendered(node).contains(text))
+            .map(found)
+    }
+
     fn nodes(self) -> Vec<NodeRef<'a>> {
         let mut seen = Vec::new();
         visit(self.state.root(), &mut seen);

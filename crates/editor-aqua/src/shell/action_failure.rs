@@ -1,5 +1,6 @@
+use crate::core::Problem;
 use crate::ui::dialog::{Dialog, DialogHost};
-use crate::ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
+use crate::ui::kit::{Button, ButtonTone, ProblemNotice, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
 use aqua::UiApp;
 use aqua_ui::element::{Box as UiBox, Element};
@@ -38,10 +39,20 @@ impl CopySubject {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionFailure {
-    Link { url: String, cause: String },
-    Copy { subject: CopySubject, cause: String },
-    Search { cause: String },
-    Notices { cause: String },
+    Link {
+        url: String,
+        problem: Problem,
+    },
+    Copy {
+        subject: CopySubject,
+        problem: Problem,
+    },
+    Search {
+        problem: Problem,
+    },
+    Notices {
+        problem: Problem,
+    },
 }
 
 impl ActionFailure {
@@ -54,15 +65,13 @@ impl ActionFailure {
         }
     }
 
-    fn explanation(&self) -> String {
+    #[must_use]
+    pub const fn problem(&self) -> &Problem {
         match self {
-            Self::Link { cause, .. } | Self::Search { cause } => {
-                format!("The browser didn't start: {cause}.")
-            }
-            Self::Copy { subject, cause } => {
-                format!("The {} wasn't copied: {cause}.", subject.noun())
-            }
-            Self::Notices { cause } => format!("The notices file didn't open: {cause}."),
+            Self::Link { problem, .. }
+            | Self::Copy { problem, .. }
+            | Self::Search { problem }
+            | Self::Notices { problem } => problem,
         }
     }
 }
@@ -100,27 +109,34 @@ impl std::fmt::Debug for ActionFailureDialog {
 
 impl ActionFailureDialog {
     pub fn link(&mut self, url: String, error: &dyn std::error::Error) {
-        let cause = ::diagnostics::chain(error);
-        tracing::warn!(error = %cause, "could not open URL");
-        self.failure = Some(ActionFailure::Link { url, cause });
+        let problem = Problem::caused_by("The browser didn't start.", error);
+        tracing::warn!(error = problem.detail(), "could not open URL");
+        self.failure = Some(ActionFailure::Link { url, problem });
     }
 
     pub fn copy(&mut self, subject: CopySubject, error: &dyn std::error::Error) {
-        let cause = ::diagnostics::chain(error);
-        tracing::warn!(error = %cause, what = subject.noun(), "could not copy to the clipboard");
-        self.failure = Some(ActionFailure::Copy { subject, cause });
+        let problem = Problem::caused_by(format!("The {} wasn't copied.", subject.noun()), error);
+        tracing::warn!(
+            error = problem.detail(),
+            what = subject.noun(),
+            "could not copy to the clipboard"
+        );
+        self.failure = Some(ActionFailure::Copy { subject, problem });
     }
 
     pub(crate) fn search(&mut self, error: &dyn std::error::Error) {
-        let cause = ::diagnostics::chain(error);
-        tracing::warn!(error = %cause, "could not search in the browser");
-        self.failure = Some(ActionFailure::Search { cause });
+        let problem = Problem::caused_by("The browser didn't start.", error);
+        tracing::warn!(error = problem.detail(), "could not search in the browser");
+        self.failure = Some(ActionFailure::Search { problem });
     }
 
     pub(crate) fn notices(&mut self, error: &dyn std::error::Error) {
-        let cause = ::diagnostics::chain(error);
-        tracing::warn!(error = %cause, "could not open the third-party notices");
-        self.failure = Some(ActionFailure::Notices { cause });
+        let problem = Problem::caused_by("The notices file didn't open.", error);
+        tracing::warn!(
+            error = problem.detail(),
+            "could not open the third-party notices"
+        );
+        self.failure = Some(ActionFailure::Notices { problem });
     }
 
     #[must_use]
@@ -203,12 +219,10 @@ fn content(
     failure: &ActionFailure,
     events: Rc<RefCell<VecDeque<Event>>>,
 ) -> Element {
-    let column = UiBox::new().layout("column").spaced(Space::S8).child(
-        TextRole::Label
-            .text(theme, failure.explanation())
-            .wrap(true)
-            .build(),
-    );
+    let column = UiBox::new()
+        .layout("column")
+        .spaced(Space::S8)
+        .child(ProblemNotice::new("action-failure-problem", *theme, failure.problem()).build());
     match failure {
         ActionFailure::Link { url, .. } => column
             .child(TextRole::Code.text(theme, url.clone()).wrap(true).build())

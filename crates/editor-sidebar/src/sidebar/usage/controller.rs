@@ -20,7 +20,7 @@ struct Completion {
 pub struct UsagePage {
     shown: bool,
     refreshing: HashSet<(HostId, HostInstance, EngineId)>,
-    errors: HashMap<(HostId, HostInstance), String>,
+    errors: HashMap<(HostId, HostInstance), editor_core::Problem>,
     completions: Delivery<Completion>,
 }
 
@@ -114,10 +114,12 @@ impl UsagePage {
             if let Err(error) = completion.result {
                 self.errors.insert(
                     (completion.host, completion.instance),
-                    format!(
-                        "Couldn't refresh {}: {}",
-                        completion.engine.display_name(),
-                        diagnostics::chain(&error)
+                    editor_core::Problem::calling_forge(
+                        &format!(
+                            "Couldn't refresh {}'s usage.",
+                            completion.engine.display_name()
+                        ),
+                        &error,
                     ),
                 );
             }
@@ -129,9 +131,11 @@ impl UsagePage {
             .iter()
             .any(|(id, current, _)| id == host && *current == instance)
     }
-    pub(crate) fn error(&self, host: &HostId, instance: HostInstance) -> Option<&str> {
-        self.errors
-            .get(&(host.clone(), instance))
-            .map(String::as_str)
+    pub(crate) fn error(
+        &self,
+        host: &HostId,
+        instance: HostInstance,
+    ) -> Option<&editor_core::Problem> {
+        self.errors.get(&(host.clone(), instance))
     }
 }

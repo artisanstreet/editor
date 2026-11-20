@@ -676,11 +676,14 @@ fn a_failed_upload_restarts_only_once_its_failure_is_cleared() {
         !state.halted(),
         "an image from an earlier visit never holds up the draft's own saves"
     );
+    let error = state.error().expect("the failed upload is shown");
     assert_eq!(
-        state.error().as_deref(),
-        Some(
-            "Couldn't upload an image pasted before leaving this draft: the draft closed before the image finished uploading"
-        )
+        error.headline(),
+        "Couldn't upload an image pasted before leaving this draft."
+    );
+    assert_eq!(
+        error.detail(),
+        Some("the draft closed before the image finished uploading")
     );
     assert!(
         state.next_uploads().is_empty(),

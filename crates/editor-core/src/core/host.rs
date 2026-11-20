@@ -157,7 +157,7 @@ impl std::ops::Add for Attention {
 pub struct ThreadSummary {
     pub value: Option<Arc<artisan_api::InspectorSummary>>,
     pub loading: bool,
-    pub error: Option<String>,
+    pub error: Option<crate::core::Problem>,
 }
 
 #[derive(Debug, Default)]
@@ -183,7 +183,7 @@ struct RepositoryEntry {
 #[derive(Debug, Default)]
 pub struct ProjectionLoad {
     pub loading: bool,
-    pub error: Option<String>,
+    pub error: Option<crate::core::Problem>,
 }
 
 #[derive(Debug, Default)]
@@ -1220,13 +1220,14 @@ impl HostData {
                 return;
             }
             Ok(value) if value.revision < state.minimum_revision => {
-                state.view.error = Some(
-                    "Forge returned thread details older than its latest update. Retry to refresh."
-                        .into(),
-                );
+                state.view.error = Some(crate::core::Problem::new(
+                    "Forge returned thread details older than its latest update. Try again to refresh them.",
+                ));
             }
             Ok(value) if summary_bytes(&value) > 16 * 1024 * 1024 => {
-                state.view.error = Some("Thread details exceed the 16 MiB display limit.".into());
+                state.view.error = Some(crate::core::Problem::new(
+                    "These thread details are larger than 16 MiB, too large to show.",
+                ));
             }
             Ok(value) => {
                 if state
@@ -1241,9 +1242,9 @@ impl HostData {
                 }
             }
             Err(error) => {
-                state.view.error = Some(format!(
-                    "Couldn't load thread details: {}",
-                    ::diagnostics::chain(&error)
+                state.view.error = Some(crate::core::Problem::calling_forge(
+                    "Couldn't load thread details.",
+                    &error,
                 ));
             }
         }
@@ -1267,16 +1268,17 @@ impl HostData {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
                 if prompt.version < expected {
-                    self.prompt_load.view.error =
-                        Some("Forge returned an older prompt version. Retry to refresh.".into());
+                    self.prompt_load.view.error = Some(crate::core::Problem::new(
+                        "Forge returned an older version of the prompt. Try again to refresh it.",
+                    ));
                 } else {
                     self.global_prompt = Some(Arc::new(prompt));
                 }
             }
             Err(error) => {
-                self.prompt_load.view.error = Some(format!(
-                    "Couldn't read the global prompt: {}",
-                    ::diagnostics::chain(&error)
+                self.prompt_load.view.error = Some(crate::core::Problem::calling_forge(
+                    "Couldn't read the global prompt.",
+                    &error,
                 ));
             }
         }
@@ -1295,9 +1297,9 @@ impl HostData {
         match result {
             Ok(catalog) => self.skill_catalog = Some(Arc::from(catalog)),
             Err(error) => {
-                self.catalog_load.view.error = Some(format!(
-                    "Couldn't list skills: {}",
-                    ::diagnostics::chain(&error)
+                self.catalog_load.view.error = Some(crate::core::Problem::calling_forge(
+                    "Couldn't list skills.",
+                    &error,
                 ));
             }
         }

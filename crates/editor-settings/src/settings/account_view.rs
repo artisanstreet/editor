@@ -115,10 +115,13 @@ fn sign_in(
                 );
             if let AccountPhase::Error { message } = core.account().phase() {
                 body = body.child(
-                    ui::stack(Space::S8)
-                        .child(ui::error_text(theme, message.clone()))
-                        .child(ui::actions().child(start()).build())
-                        .build(),
+                    ui::problem(
+                        theme,
+                        "sign-in-error",
+                        &editor_core::Problem::new(message.clone()),
+                    )
+                    .action(start())
+                    .build(),
                 );
             }
         }
@@ -334,7 +337,7 @@ pub fn forges(
             .build(),
     );
     if let Some(error) = account.last_error() {
-        rows = rows.child(ui::error_text(theme, error));
+        rows = rows.child(ui::problem(theme, "account-error", error).build());
     }
     rows.build()
 }

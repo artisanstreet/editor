@@ -328,33 +328,11 @@ pub(crate) fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Sty
         .with(&corners.style(radius))
 }
 
-pub(crate) fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .absolute_at(Some(0.0), Some(Space::S8.px()), Some(0.0), None)
-                .justify(JustifyContent::CENTER),
-        )
-        .child(
-            TextRole::Label
-                .text(theme, text)
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
-        )
-        .build()
-}
-
-pub(crate) fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> Element {
-    let color = if error {
-        theme.colors.destructive_text
-    } else {
-        theme.colors.text_muted
-    };
+pub(crate) fn conversation_notice(theme: &ArtisanTheme, text: String) -> Element {
     centered_body(
         TextRole::Label
             .text(theme, text)
-            .gpui_source_color(color.to_reference_text_color())
+            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
             .build(),
     )
 }

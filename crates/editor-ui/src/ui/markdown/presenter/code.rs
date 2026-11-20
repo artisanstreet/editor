@@ -2,7 +2,7 @@ use super::super::visual::BodyContext;
 use super::{
     CodeServices, MarkdownPresenter, PresenterError, ReferenceServices, RichCall, enveloped,
 };
-use crate::ui::kit::{Space, Spaced, TextRole};
+use crate::ui::kit::{Space, Spaced};
 use crate::ui::rich::{self};
 use crate::ui::theme::ArtisanTheme;
 use aqua_text::document::SelectionSource;
@@ -18,7 +18,7 @@ pub(super) fn code_card(
     document: aqua_text::document::SelectionDocumentId,
     sources: &[SelectionSource],
     code: Option<&CodeServices>,
-    note: Option<&str>,
+    note: Option<&editor_core::Problem>,
 ) -> Result<Element, PresenterError> {
     let theme = body.theme;
     let services = code.ok_or(PresenterError::Unavailable("code copy services"))?;
@@ -36,12 +36,9 @@ pub(super) fn code_card(
             .width(Length::Pct(100.0))
             .spaced(Space::S6)
             .child(card)
-            .child(rich::narrative::callout::text(
-                theme,
-                note,
-                TextRole::Label,
-                theme.colors.text_muted,
-            ))
+            .child(
+                crate::ui::kit::ProblemNotice::new(format!("{id}-problem"), *theme, note).build(),
+            )
             .build()
     } else {
         card

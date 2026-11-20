@@ -217,7 +217,7 @@ enum Completion {
 pub struct Attachments {
     pub items: Vec<Attachment>,
     pub(crate) shake: Option<(u64, Instant)>,
-    pub(crate) notice: Option<String>,
+    pub(crate) notice: Option<editor_core::Problem>,
     next: u64,
     client: ForgeClient,
     delivery: Delivery<Completion>,
@@ -248,11 +248,13 @@ impl Attachments {
     }
     pub fn add(&mut self, source: Source, name: String) -> bool {
         if self.items.len() >= 8 {
-            self.notice = Some("A message can contain at most 8 images.".into());
+            self.notice = Some(editor_core::Problem::new(
+                "A message can contain at most 8 images.",
+            ));
             return false;
         }
         if matches!(&source, Source::Bytes(bytes) if bytes.len() > super::encode::MAX_INPUT_BYTES) {
-            self.notice = Some("Images must be at most 32 MiB.".into());
+            self.notice = Some(editor_core::Problem::new("Images must be at most 32 MiB."));
             return false;
         }
         let source = Arc::new(source);
@@ -302,7 +304,9 @@ impl Attachments {
     }
     pub(crate) fn restore(&mut self, hash: BlobHash) {
         if self.items.len() >= 8 {
-            self.notice = Some("This draft exceeds the 8 image limit.".into());
+            self.notice = Some(editor_core::Problem::new(
+                "This draft has more than 8 images, the most a message can contain.",
+            ));
             return;
         }
         let key = self.next;

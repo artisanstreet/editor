@@ -61,8 +61,13 @@ fn pending_page_rejects_removed_and_recreated_host() {
     assert!(
         conversation
             .load_error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("Couldn't load this thread. "))
+            .as_ref()
+            .is_some_and(|failure| failure
+                .problem()
+                .headline()
+                .starts_with("Couldn't load this thread. ")),
+        "{:?}",
+        conversation.load_error
     );
 
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());

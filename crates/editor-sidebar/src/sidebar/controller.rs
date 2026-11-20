@@ -47,6 +47,18 @@ pub enum ThreadActionError {
     },
 }
 
+impl ThreadActionError {
+    fn problem(&self) -> editor_core::Problem {
+        let (headline, source) = match self {
+            Self::Settle { source, .. } => ("Couldn't mark this thread as read.", source),
+            Self::MarkUnread { source, .. } => ("Couldn't mark this thread as unread.", source),
+            Self::Archive { source, .. } => ("Couldn't archive this thread.", source),
+            Self::Rename { source, .. } => ("Couldn't rename this thread.", source),
+        };
+        editor_core::Problem::caused_by(format!("{headline} {}", source.fault().sentence()), self)
+    }
+}
+
 enum Completion {
     Action {
         key: CompletionKey,
@@ -80,14 +92,17 @@ enum TextResults {
     Idle,
     Searching(String),
     Found(TextHits),
-    Failed { query: String, cause: String },
+    Failed {
+        query: String,
+        cause: editor_core::Problem,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSearchStatus<'a> {
     Idle,
     Searching,
-    Failed(&'a str),
+    Failed(&'a editor_core::Problem),
 }
 
 pub struct Sidebar {
@@ -107,7 +122,7 @@ pub struct Sidebar {
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
     >,
     thread_viewports: PaneViewports,
-    pub error: Option<String>,
+    pub error: Option<editor_core::Problem>,
     pub(crate) menu: Option<ThreadMenu>,
     pub(crate) menu_generation: u64,
     pub rename: Option<ThreadId>,
@@ -377,6 +392,37 @@ impl Sidebar {
             .retain(|id, _| working.contains(id));
     }
 
+    fn finish_text_search(
+        &mut self,
+        core: &Core,
+        now: Timestamp,
+        host: &HostId,
+        query: String,
+        result: Result<Vec<artisan_api::TextHit>, CallError>,
+    ) {
+        match result {
+            Ok(hits) => {
+                self.text_results = TextResults::Found(TextHits {
+                    query,
+                    rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
+                });
+                self.sync(core, now);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %host,
+                    query_chars = query.chars().count(),
+                    error = %diagnostics::chain(&error),
+                    "couldn't search message text"
+                );
+                self.text_results = TextResults::Failed {
+                    query,
+                    cause: editor_core::Problem::calling_forge("Couldn't search messages.", &error),
+                };
+            }
+        }
+    }
+
     pub fn drain(&mut self, core: &mut Core, now: Timestamp) -> bool {
         let before = super::view::visible_state(self, core);
         self.sync(core, now);
@@ -389,10 +435,9 @@ impl Sidebar {
                     result: Err(error),
                 } if self.actions.accepts(core, &key) => {
                     accepted = true;
-                    let error = diagnostics::chain(&error);
                     let host = key.host();
-                    tracing::error!(%host, "couldn't {error}");
-                    self.error = Some(format!("Couldn't {error}"));
+                    tracing::error!(%host, error = %diagnostics::chain(&error), "a thread action failed");
+                    self.error = Some(error.problem());
                 }
                 Completion::Browse {
                     host,
@@ -407,32 +452,19 @@ impl Sidebar {
                     self.browse_task = None;
                     if let Some(picker) = &mut self.picker {
                         accepted = true;
-                        picker.finish_browse(result.map_err(|error| diagnostics::chain(&error)));
+                        picker.finish_browse(result.map_err(|error| {
+                            editor_core::Problem::calling_forge(
+                                "Couldn't open this folder.",
+                                &error,
+                            )
+                        }));
                     }
                 }
                 Completion::Search { key, query, result }
                     if self.text_search.finish(core, &key) =>
                 {
-                    let host = key.host();
                     accepted = true;
-                    match result {
-                        Ok(hits) => {
-                            self.text_results = TextResults::Found(TextHits {
-                                query,
-                                rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
-                            });
-                            self.sync(core, now);
-                        }
-                        Err(error) => {
-                            let cause = diagnostics::chain(&error);
-                            tracing::warn!(
-                                %host,
-                                query_chars = query.chars().count(),
-                                "couldn't search message text: {cause}"
-                            );
-                            self.text_results = TextResults::Failed { query, cause };
-                        }
-                    }
+                    self.finish_text_search(core, now, key.host(), query, result);
                 }
                 Completion::Create {
                     host,
@@ -461,7 +493,12 @@ impl Sidebar {
                                     });
                                 }
                             }
-                            Err(error) => picker.finish_create(Some(diagnostics::chain(&error))),
+                            Err(error) => {
+                                picker.finish_create(Some(editor_core::Problem::calling_forge(
+                                    "Couldn't add this folder.",
+                                    &error,
+                                )));
+                            }
                         }
                     }
                 }

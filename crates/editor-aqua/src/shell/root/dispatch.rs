@@ -70,7 +70,8 @@ impl RootViews {
                 | ConversationAction::Media(scope, _, _, _)
                 | ConversationAction::Blob(scope, _, _, _)
                 | ConversationAction::RetryControls(scope)
-                | ConversationAction::RetryThread(scope) => scope,
+                | ConversationAction::RetryThread(scope)
+                | ConversationAction::RetryLoad(scope) => scope,
             };
             if !shell
                 .entry
@@ -150,6 +151,7 @@ impl RootViews {
                 | ConversationAction::Copy(..)
                 | ConversationAction::RetryControls(_)
                 | ConversationAction::RetryThread(_)
+                | ConversationAction::RetryLoad(_)
                 | ConversationAction::Blob(..)) => action,
             };
             match action {
@@ -161,6 +163,12 @@ impl RootViews {
                     if let Some(host) = shell.core.host_mut_if_instance(&scope.host, scope.instance)
                     {
                         host.load_thread_summary(&scope.thread, true);
+                        changed = true;
+                    }
+                }
+                ConversationAction::RetryLoad(_) => {
+                    if let Some(workspace) = shell.entry.workspace_mut() {
+                        workspace.conversation.retry_load(&shell.core);
                         changed = true;
                     }
                 }

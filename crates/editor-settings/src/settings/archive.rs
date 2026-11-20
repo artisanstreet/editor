@@ -2,13 +2,13 @@ use std::collections::HashSet;
 
 use artisan_api::ThreadId;
 
-use editor_core::HostData;
+use editor_core::{HostData, Problem};
 
 #[derive(Debug, Default)]
 pub struct ArchiveForm {
     pub(crate) host: Option<String>,
     pub(crate) restoring: HashSet<ThreadId>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<Problem>,
     pub(crate) ids: Vec<ThreadId>,
     generation: u64,
     dirty: bool,
@@ -64,13 +64,13 @@ impl ArchiveForm {
         })
     }
 
-    pub(crate) fn complete(&mut self, request: &ArchiveRequest, result: Result<(), String>) {
+    pub(crate) fn complete(&mut self, request: &ArchiveRequest, result: Result<(), Problem>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }
         self.restoring.remove(&request.thread);
-        if let Err(error) = result {
-            self.error = Some(format!("Couldn't unarchive the thread: {error}"));
+        if let Err(problem) = result {
+            self.error = Some(problem);
         }
     }
 }

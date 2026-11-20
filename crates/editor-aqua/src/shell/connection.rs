@@ -155,7 +155,7 @@ pub struct ConnectionPresenter {
     phase: Option<(bool, Instant)>,
     mark: WordmarkLoader,
     commands: Commands,
-    last_failure: Option<String>,
+    last_failure: Option<crate::core::Problem>,
 }
 
 fn command_button(
@@ -415,18 +415,16 @@ impl ConnectionPresenter {
                 )
                 .child(Text::new(format!("{first} {detail}")).spans(spans).build());
             if let Some(error) = host.wsl.as_ref().and_then(|wsl| wsl.error.as_ref()) {
-                line = line.child(label(
-                    theme,
-                    &format!("Couldn't start it: {error}"),
-                    theme.colors.destructive_text,
-                ));
+                line = line.child(
+                    crate::ui::kit::ProblemNotice::new("wsl-start-problem", *theme, error).build(),
+                );
             }
             if host.wsl.is_none()
                 && let Some(reason) = &self.last_failure
             {
                 line = line.child(label(
                     theme,
-                    &format!("Last attempt: {reason}"),
+                    &format!("Last attempt: {}", reason.headline()),
                     theme.colors.text_muted,
                 ));
             }

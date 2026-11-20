@@ -173,7 +173,7 @@ fn a_failed_message_search_says_so_and_retries() {
     assert!(
         texts
             .iter()
-            .any(|text| text.starts_with("Couldn't search messages: ")),
+            .any(|text| text == "Couldn't search messages. Forge ran into a problem."),
         "the failure is not shown as an empty result: {texts:?}"
     );
     assert!(

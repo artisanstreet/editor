@@ -28,7 +28,7 @@ enum PageLoad {
         _task: AbortOnDropHandle<()>,
     },
     Ready,
-    Failed(String),
+    Failed(crate::core::Problem),
 }
 
 #[derive(Debug, Default)]
@@ -131,7 +131,7 @@ impl ThreadPage {
         }
     }
     #[must_use]
-    pub fn error(&self) -> Option<&str> {
+    pub const fn error(&self) -> Option<&crate::core::Problem> {
         match &self.load {
             PageLoad::Failed(error) => Some(error),
             PageLoad::Unloaded | PageLoad::Loading { .. } | PageLoad::Ready => None,
@@ -146,18 +146,21 @@ pub enum ThreadUnavailable {
     Deleted,
 }
 
-impl std::fmt::Display for ThreadUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl ThreadUnavailable {
+    #[must_use]
+    pub fn problem(&self) -> crate::core::Problem {
         match self {
-            Self::Failed(error) => write!(
-                f,
-                "Couldn't load this thread. {}",
-                error.source.fault().sentence()
+            Self::Failed(error) => crate::core::Problem::caused_by(
+                format!(
+                    "Couldn't load this thread. {}",
+                    error.source.fault().sentence()
+                ),
+                &**error,
             ),
-            Self::Missing => f.write_str("This thread isn't on this Forge."),
-            Self::Deleted => {
-                f.write_str("This thread was deleted after a long time without activity.")
-            }
+            Self::Missing => crate::core::Problem::new("This thread isn't on this Forge."),
+            Self::Deleted => crate::core::Problem::new(
+                "This thread was deleted after a long time without activity.",
+            ),
         }
     }
 }
@@ -355,9 +358,9 @@ impl HostData {
         };
         match result {
             Err(error) => {
-                page.load = PageLoad::Failed(format!(
-                    "Couldn't load threads: {}",
-                    ::diagnostics::chain(&error)
+                page.load = PageLoad::Failed(crate::core::Problem::calling_forge(
+                    "Couldn't load threads.",
+                    &error,
                 ));
             }
             Ok(result) => {
@@ -553,7 +556,9 @@ impl HostData {
             if let PageLoad::Loading { changed, .. } = &mut page.load {
                 changed.insert(id.clone());
                 if changed.len() > CHANGES {
-                    page.load = PageLoad::Failed("The thread list changed while loading.".into());
+                    page.load = PageLoad::Failed(crate::core::Problem::new(
+                        "The thread list changed while it loaded. Try again.",
+                    ));
                 }
             }
         }

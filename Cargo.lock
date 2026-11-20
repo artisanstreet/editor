@@ -1739,6 +1739,7 @@ dependencies = [
  "editor-core",
  "editor-sources",
  "editor-ui",
+ "reqwest",
  "ropey",
  "serde",
  "serde_json",

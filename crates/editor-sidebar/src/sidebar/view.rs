@@ -116,7 +116,7 @@ pub enum ViewAction {
     },
 }
 
-type PageMark = (Option<String>, bool, bool);
+type PageMark = (Option<editor_core::Problem>, bool, bool);
 
 type EntryRenderer = Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>;
 
@@ -124,7 +124,7 @@ type EntryRenderer = Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>;
 enum SearchMark {
     Idle,
     Searching,
-    Failed(String),
+    Failed(editor_core::Problem),
 }
 
 fn visible_load_state(sidebar: &Sidebar, core: &Core) -> (Option<PageMark>, SearchMark) {
@@ -134,7 +134,7 @@ fn visible_load_state(sidebar: &Sidebar, core: &Core) -> (Option<PageMark>, Sear
         .map(|host| {
             let page = host.thread_page(false);
             (
-                page.error().map(str::to_owned),
+                page.error().cloned(),
                 page.is_loaded(),
                 host.project_icons_failed(),
             )
@@ -142,7 +142,7 @@ fn visible_load_state(sidebar: &Sidebar, core: &Core) -> (Option<PageMark>, Sear
     let search = match sidebar.text_search_status() {
         super::controller::TextSearchStatus::Idle => SearchMark::Idle,
         super::controller::TextSearchStatus::Searching => SearchMark::Searching,
-        super::controller::TextSearchStatus::Failed(cause) => SearchMark::Failed(cause.to_owned()),
+        super::controller::TextSearchStatus::Failed(cause) => SearchMark::Failed(cause.clone()),
     };
     (page, search)
 }
@@ -440,9 +440,11 @@ fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
         }
         ViewAction::SetDarkMode(dark) => {
             if let Err(error) = core.set_setting("dark_mode", dark.into()) {
-                let cause = ::diagnostics::chain(&error);
-                tracing::error!(error = %cause, "saving the theme");
-                sidebar.error = Some(format!("Couldn't save the theme: {cause}"));
+                tracing::error!(error = %::diagnostics::chain(&error), "saving the theme");
+                sidebar.error = Some(editor_core::Problem::caused_by(
+                    "Couldn't save the theme.",
+                    &error,
+                ));
             }
         }
         ViewAction::ThreadViewport { .. }
@@ -738,10 +740,7 @@ pub(crate) fn project_picker_dialog(
         .child(Surface::Inset.build(&theme, vec![list]));
     if let Some(error) = &picker.error {
         content = content.child(
-            TextRole::Label
-                .text(&theme, error.clone())
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
+            editor_ui::kit::ProblemNotice::new("sidebar-folder-problem", theme, error).build(),
         );
     }
     let can_add = !busy && picker.listing.is_some();
@@ -1165,7 +1164,16 @@ pub fn build(
             if host.is_live()
                 && let Some(error) = host.thread_page(false).error()
             {
-                column = column.child(error_text(theme, error.to_owned()));
+                column = column.child(problem_with_action(
+                    theme,
+                    ("sidebar-threads-problem", error),
+                    (
+                        "sidebar-threads-retry",
+                        "Try again",
+                        ViewAction::RetryThreads,
+                    ),
+                    emit,
+                ));
             }
             if host.project_icons_failed() {
                 let retry = Rc::clone(emit);
@@ -1182,23 +1190,12 @@ pub fn build(
             }
         }
         if let Some(error) = &sidebar.error {
-            let dismiss = Rc::clone(emit);
-            column = column.child(
-                UiBox::new()
-                    .layout("column")
-                    .child(error_text(theme, error.clone()))
-                    .child(
-                        Button::text(
-                            "sidebar-error-dismiss",
-                            *theme,
-                            ButtonTone::Quiet,
-                            "Dismiss",
-                        )
-                        .on_activate(move |_| dismiss(ViewAction::DismissError))
-                        .build(),
-                    )
-                    .build(),
-            );
+            column = column.child(problem_with_action(
+                theme,
+                ("sidebar-problem", error),
+                ("sidebar-error-dismiss", "Dismiss", ViewAction::DismissError),
+                emit,
+            ));
         }
     }
     UiBox::new()
@@ -1210,9 +1207,18 @@ pub fn build(
         .with_key(ROOT_KEY)
 }
 
-fn error_text(theme: &ArtisanTheme, error: String) -> Element {
-    TextRole::Caption
-        .text(theme, error)
-        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+fn problem_with_action(
+    theme: &ArtisanTheme,
+    (key, problem): (&'static str, &editor_core::Problem),
+    (button, label, action): (&'static str, &'static str, ViewAction),
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let emit = Rc::clone(emit);
+    editor_ui::kit::ProblemNotice::new(key, *theme, problem)
+        .action(
+            Button::text(button, *theme, ButtonTone::Neutral, label)
+                .on_activate(move |_| emit(action.clone()))
+                .build(),
+        )
         .build()
 }

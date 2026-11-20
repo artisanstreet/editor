@@ -40,6 +40,7 @@ pub enum Input {
         more: bool,
     },
     LoadFailed,
+    Retry(Fetch),
     EvictedOlder {
         oldest: Seq,
     },
@@ -262,6 +263,11 @@ impl Viewport {
             Input::LoadFailed => {
                 self.in_flight = false;
                 self.requested = None;
+            }
+            Input::Retry(fetch) => {
+                if !self.in_flight {
+                    self.fetch(*fetch, effects);
+                }
             }
             Input::EvictedOlder { oldest } => {
                 self.oldest = Some(*oldest);

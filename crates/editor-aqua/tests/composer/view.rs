@@ -163,8 +163,10 @@ fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
         },
         std::rc::Rc::new(|_| {}),
     );
-    owner.controller.borrow_mut().notice =
-        Some("Couldn't stop the run: the host did not answer".into());
+    owner.controller.borrow_mut().notice = Some(editor_aqua::core::Problem::detailed(
+        "Couldn't stop the run.",
+        "the host did not answer",
+    ));
     let said = |owner: &ComposerOwner, core: &Core| {
         let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
         app.set_viewport(700.0, 500.0, 1.0);
@@ -174,10 +176,10 @@ fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
         test_support::editor::ui::painted_texts(&app)
     };
     let shown = said(&owner, &core);
+    assert!(shown.iter().any(|text| text == "Couldn't stop the run."));
     assert!(
-        shown
-            .iter()
-            .any(|text| text == "Couldn't stop the run: the host did not answer")
+        shown.iter().all(|text| !text.contains("did not answer")),
+        "the cause is a detail, not painted: {shown:?}"
     );
     assert!(shown.iter().any(|text| text == "Dismiss"));
     owner.dispatch_with_change(&mut core, ComposerAction::DismissNotice, None);

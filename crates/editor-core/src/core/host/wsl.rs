@@ -15,7 +15,7 @@ pub struct WslStatus {
     pub distro: String,
     pub running: bool,
     pub starting: bool,
-    pub error: Option<String>,
+    pub error: Option<crate::core::Problem>,
 }
 
 impl HostData {
@@ -169,7 +169,9 @@ impl HostData {
         let failure = result.err();
         if let Some(wsl) = &mut self.wsl {
             wsl.starting = false;
-            wsl.error = failure.as_ref().map(|error| ::diagnostics::chain(error));
+            wsl.error = failure.as_ref().map(|error| {
+                crate::core::Problem::caused_by("Couldn't start Forge in WSL.", error)
+            });
         }
         if let Some(error) = &failure {
             tracing::warn!(

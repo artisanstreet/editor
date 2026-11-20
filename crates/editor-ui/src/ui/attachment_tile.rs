@@ -28,7 +28,7 @@ pub struct AttachmentTile {
     label: String,
     image: Option<aqua::ImageHandle>,
     glyph: Option<AssetId>,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
     reveal_elapsed: Option<Duration>,
     preparing: bool,
     shake_elapsed: Option<Duration>,
@@ -85,7 +85,7 @@ impl AttachmentTile {
         self
     }
     #[must_use]
-    pub fn error(mut self, error: Option<String>) -> Self {
+    pub fn error(mut self, error: Option<editor_core::Problem>) -> Self {
         self.error = error;
         self
     }
@@ -136,11 +136,9 @@ impl AttachmentTile {
             UiBox::new()
                 .padded(Space::S6)
                 .child(
-                    caption(
-                        format!("{} failed: {error}", self.label),
-                        theme.colors.destructive_text,
-                    )
-                    .build(),
+                    caption(error.headline().to_owned(), theme.colors.destructive_text)
+                        .wrap(true)
+                        .build(),
                 )
                 .build()
         } else if let Some(image) = self.image.clone() {

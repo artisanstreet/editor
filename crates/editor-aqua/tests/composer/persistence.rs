@@ -1643,7 +1643,7 @@ fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
         assert!(
             lease
                 .read(editor_aqua::composer::draft_session::DraftSession::error)
-                .is_some_and(|error| error.contains("another client")),
+                .is_some_and(|error| error.headline().contains("another client")),
             "the choice between the two drafts is still offered"
         );
     });
@@ -2265,8 +2265,8 @@ fn the_notice_about_an_unreadable_kept_draft_shows_once() {
         assert!(
             composer
                 .notice
-                .as_deref()
-                .is_some_and(|notice| notice.contains("couldn't be read")),
+                .as_ref()
+                .is_some_and(|notice| notice.headline().contains("couldn't be read")),
             "{:?}",
             composer.notice
         );

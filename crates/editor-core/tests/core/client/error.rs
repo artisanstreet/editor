@@ -99,8 +99,15 @@ fn a_thread_forge_does_not_know_reads_as_a_sentence_without_the_error_chain() {
         thread: ThreadId("missing".into()),
         source: refused(reqwest::StatusCode::NOT_FOUND, ErrorCode::NotFound),
     }));
+    let problem = unavailable.problem();
     assert_eq!(
-        unavailable.to_string(),
+        problem.headline(),
         "Couldn't load this thread. Forge didn't recognise it."
+    );
+    assert!(
+        problem
+            .detail()
+            .is_some_and(|detail| detail.contains("load thread missing")),
+        "the technical chain stays available as the detail: {problem:?}"
     );
 }

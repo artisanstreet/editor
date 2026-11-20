@@ -1,6 +1,6 @@
 ---
 source: crates/editor-aqua/tests/scenario/states.rs
-expression: "editor.settle(\"the failure to show\", |view|\n{ view.shows(\"Couldn't\") && view.find(Role::Button, \"Try again\").is_some() })"
+expression: settled
 ---
 Group "Artisan Editor"
   Button "Hide sidebar"
@@ -28,9 +28,10 @@ Group "Artisan Editor"
   ComboBox "No model" [collapsed]
     Label "No model"
   Group [focused]
-    Label "Couldn't save the draft: PUT /drafts/thread:thread-a: reach Forge: [connection refused]"
+    Label "Couldn't save the draft. Forge couldn't be reached."
     Button "Try again"
       Label "Try again"
+    Label "Details"
   ScrollView
     TextInput "Message" value="Say hello"
   Button "Send message"

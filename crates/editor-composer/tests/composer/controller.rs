@@ -1,4 +1,4 @@
-use super::{TurnAction, markdown_link, turn_failure};
+use super::{TurnAction, markdown_link, turn_problem};
 use artisan_api::{ApiError, ErrorCode, Failure, RunFailure, ThreadFailure, ThreadId};
 use editor_core::client::{CallError, CallFailure, ResponseError};
 
@@ -50,13 +50,13 @@ fn continuing_a_turn_that_already_finished_or_resumed_is_not_an_error() {
         }),
     ] {
         assert_eq!(
-            turn_failure(TurnAction::Continue, &typed(failure.clone())),
+            turn_problem(TurnAction::Continue, &typed(failure.clone())),
             None,
             "{failure:?}"
         );
     }
     assert_eq!(
-        turn_failure(
+        turn_problem(
             TurnAction::ClearGoal,
             &typed(Failure::Run(RunFailure::NoGoal { thread }))
         ),
@@ -65,31 +65,49 @@ fn continuing_a_turn_that_already_finished_or_resumed_is_not_an_error() {
 }
 
 #[test]
-fn a_typed_refusal_is_shown_in_forge_words_and_a_legacy_one_as_the_call_failure() {
+fn a_refused_turn_action_says_what_failed_and_keeps_forges_words_as_the_detail() {
     let missing = typed(Failure::Thread(ThreadFailure::NotFound {
         thread: ThreadId("t1".into()),
     }));
+    let shown = turn_problem(TurnAction::Stop, &missing).expect("a failed stop is shown");
     assert_eq!(
-        turn_failure(TurnAction::Stop, &missing).as_deref(),
-        Some("Thread t1 doesn't exist on this Forge.")
+        shown.headline(),
+        "Couldn't stop the run. Forge didn't recognise it."
+    );
+    assert!(
+        shown
+            .detail()
+            .is_some_and(|detail| detail.contains("Thread t1 doesn't exist on this Forge.")),
+        "{shown:?}"
     );
     let busy = typed(Failure::Run(RunFailure::AlreadyWorking {
         thread: ThreadId("t1".into()),
     }));
+    let shown = turn_problem(TurnAction::ClearGoal, &busy).expect("a refused clear is shown");
     assert_eq!(
-        turn_failure(TurnAction::ClearGoal, &busy).as_deref(),
-        Some("Thread t1 is already working.")
+        shown.headline(),
+        "Couldn't clear the goal. Forge ran into a problem."
+    );
+    assert!(
+        shown
+            .detail()
+            .is_some_and(|detail| detail.contains("Thread t1 is already working.")),
+        "{shown:?}"
     );
     let legacy = refused(ApiError::legacy(
         ErrorCode::Conflict,
         "The thread has no stopped turn to continue.".to_owned(),
     ));
-    let shown = turn_failure(TurnAction::Continue, &legacy);
+    let shown = turn_problem(TurnAction::Continue, &legacy).expect("a legacy refusal is shown");
+    assert!(
+        !shown.headline().contains("POST /threads"),
+        "the call path never reaches the headline: {shown:?}"
+    );
     assert_eq!(
-        shown.as_deref(),
+        shown.detail(),
         Some(
             "POST /threads/t1/continue: Forge refused the call: Forge answered 409 Conflict: The thread has no stopped turn to continue."
         ),
-        "a legacy refusal shows the whole cause chain"
+        "a legacy refusal keeps the whole cause chain as the detail"
     );
 }

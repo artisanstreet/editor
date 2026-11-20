@@ -347,9 +347,12 @@ fn a_thread_forge_says_is_missing_shows_as_missing_without_a_retry() {
     let unavailable = opened(serde_json::to_value(&refusal).expect("encode"));
     assert!(
         matches!(unavailable, editor_core::ThreadUnavailable::Missing),
-        "{unavailable}"
+        "{unavailable:?}"
     );
-    assert_eq!(unavailable.to_string(), "This thread isn't on this Forge.");
+    assert_eq!(
+        unavailable.problem().headline(),
+        "This thread isn't on this Forge."
+    );
 }
 
 #[test]
@@ -359,7 +362,7 @@ fn an_older_forge_refusing_a_thread_shows_the_generic_failure() {
         "message": "thread gone-thread not found",
     }));
     let editor_core::ThreadUnavailable::Failed(error) = &unavailable else {
-        panic!("a legacy refusal is not read as a typed missing thread: {unavailable}");
+        panic!("a legacy refusal is not read as a typed missing thread: {unavailable:?}");
     };
     assert_eq!(
         error.source.refused(),
@@ -368,7 +371,7 @@ fn an_older_forge_refusing_a_thread_shows_the_generic_failure() {
         })
     );
     assert_eq!(
-        unavailable.to_string(),
+        unavailable.problem().headline(),
         "Couldn't load this thread. Forge didn't recognise it."
     );
 }

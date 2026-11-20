@@ -169,7 +169,7 @@ struct StoredProjectedLeaf {
     sources: Arc<[SelectionSource]>,
     fence: Option<super::fence::Fence>,
     rich: Option<RetainedRich>,
-    fallback_note: Option<String>,
+    fallback_note: Option<editor_core::Problem>,
 }
 
 type CopyButton = dyn Fn(&str, &str) -> Element;

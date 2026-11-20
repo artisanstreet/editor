@@ -12,7 +12,7 @@ struct Completion(CompletionKey, Result<Item, CallError>);
 
 pub struct TerminalDialog {
     pub(crate) job: Option<Job>,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
     pub(crate) following: bool,
     generation: u64,
     fetch: CompletionSlot,
@@ -127,8 +127,8 @@ impl TerminalDialog {
         self.error = None;
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub const fn error(&self) -> Option<&editor_core::Problem> {
+        self.error.as_ref()
     }
 
     pub const fn loading(&self) -> bool {
@@ -184,9 +184,9 @@ impl TerminalDialog {
                     self.sync(core);
                 }
                 Err(error) => {
-                    self.error = Some(format!(
-                        "Couldn't load shell output: {}",
-                        diagnostics::chain(&error)
+                    self.error = Some(editor_core::Problem::calling_forge(
+                        "Couldn't load the shell output.",
+                        &error,
                     ));
                 }
             }
@@ -261,7 +261,9 @@ impl TerminalDialog {
             ..
         } = &item.kind
         else {
-            self.error = Some("This item is not a shell command.".into());
+            self.error = Some(editor_core::Problem::new(
+                "This item isn't a shell command.",
+            ));
             return;
         };
         let Some(host) = core.host_if_instance(&job.host, job.instance) else {

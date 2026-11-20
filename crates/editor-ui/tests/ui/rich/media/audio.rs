@@ -64,7 +64,7 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         app
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    let failed = "Couldn't load tracks/intro.ogg: Forge did not answer";
+    let failed = "Couldn't load intro.ogg.";
     let mut app = loop {
         assets.drain();
         let app = mount(render());
@@ -78,6 +78,13 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         std::thread::yield_now();
     };
     assert!(said(&app).iter().any(|text| text == "Try again"));
+    assert!(
+        !said(&app)
+            .iter()
+            .any(|text| text.contains("did not answer") || text.contains("tracks/")),
+        "the cause and the source path are details, not painted text: {:?}",
+        said(&app)
+    );
     reachable.store(true, Ordering::SeqCst);
     assert!(app.focus_key("audio-track-0-retry"));
     let enter = KeyEvent {
@@ -91,10 +98,12 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
     loop {
         assets.drain();
         let app = mount(render());
-        if said(&app)
-            .iter()
-            .any(|text| text == "Couldn't load tracks/intro.ogg: the file does not exist")
-        {
+        let missing = app.tree().emit_semantics().iter().any(|node| {
+            node.description
+                .as_deref()
+                .is_some_and(|detail| detail.contains("the file does not exist"))
+        });
+        if missing && said(&app).iter().any(|text| text == failed) {
             break;
         }
         assert!(

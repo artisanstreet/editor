@@ -173,7 +173,7 @@ impl MarkdownPresenter {
         let ordinary = |row: usize,
                         fence: &super::super::fence::Fence,
                         sources: &[SelectionSource],
-                        note: Option<&str>| {
+                        note: Option<&editor_core::Problem>| {
             code_card(
                 fence,
                 &format!("{id}-code-{row}"),
@@ -199,7 +199,7 @@ impl MarkdownPresenter {
                 last: slot.last,
             },
             entry.fence.as_ref(),
-            entry.fallback_note.as_deref(),
+            entry.fallback_note.as_ref(),
             LeafRender {
                 body,
                 place: SelectionPlace {

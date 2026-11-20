@@ -447,69 +447,91 @@ impl AudioBlock {
             let wake = crate::ui::media::wake_on(&state.0.borrow().wake);
             let name = track.shown_name();
             let result = match assets.request(fetcher, &track.src, &row_id, waiter, wake) {
-                None => Err(("Loading…".to_owned(), false)),
-                Some(Err(AudioLoadError::Remote)) => {
-                    Err(("Only local audio files play here".to_owned(), false))
-                }
-                Some(Err(error)) => Err((
-                    format!("Couldn't load {}: {error}", track.src.trim()),
-                    matches!(error, AudioLoadError::Load(MediaLoadError::Fetch(_))),
-                )),
+                None => Err(Unplayable::Loading),
+                Some(Err(AudioLoadError::Remote)) => Err(Unplayable::Failed {
+                    problem: editor_core::Problem::new("Only local audio files play here."),
+                    retryable: false,
+                }),
+                Some(Err(error)) => Err(Unplayable::Failed {
+                    retryable: matches!(error, AudioLoadError::Load(MediaLoadError::Fetch(_))),
+                    problem: editor_core::Problem::caused_by(
+                        format!("Couldn't load {name}."),
+                        &error,
+                    ),
+                }),
                 Some(Ok(bytes)) => track_path(&track.src, fetcher, &row_id)
                     .map(|path| (path, bytes))
-                    .ok_or_else(|| (format!("Couldn't load {}", track.src.trim()), false)),
+                    .ok_or_else(|| Unplayable::Failed {
+                        problem: editor_core::Problem::detailed(
+                            format!("Couldn't load {name}."),
+                            format!("{} has no local path to play from", track.src.trim()),
+                        ),
+                        retryable: false,
+                    }),
             };
             let (path, bytes) = match result {
                 Ok(playable) => playable,
-                Err((message, retryable)) => {
-                    let retry = retryable.then(|| {
-                        let assets = assets.clone();
-                        let fetcher = fetcher.cloned();
-                        let source = track.src.clone();
-                        let part = row_id.clone();
-                        let invalidate = Rc::clone(invalidate);
-                        Button::text(
-                            format!("{row_id}-retry"),
-                            theme,
-                            ButtonTone::Neutral,
-                            "Try again",
-                        )
-                        .size(ButtonSize::Sm)
-                        .on_activate(move |_| {
-                            assets.forget(fetcher.as_ref(), &source, &part);
-                            invalidate();
-                        })
-                        .build()
-                    });
+                Err(unplayable) => {
                     state.tick(&row_id, false);
-                    root = root.child(
-                        row()
-                            .child(glyph(
-                                AssetId::TABLER_PLAYER_PLAY_FILLED,
-                                14.0,
-                                theme.colors.text_muted.to_reference_paint(),
-                            ))
-                            .child(
-                                ui::Box::new()
-                                    .style(Style::new().flex_shrink(0.0))
-                                    .child(crate::ui::rich::narrative::callout::text(
-                                        &theme,
-                                        &name,
-                                        TextRole::Label,
-                                        theme.colors.text,
-                                    ))
+                    let track_row = row()
+                        .child(glyph(
+                            AssetId::TABLER_PLAYER_PLAY_FILLED,
+                            14.0,
+                            theme.colors.text_muted.to_reference_paint(),
+                        ))
+                        .child(
+                            ui::Box::new()
+                                .style(Style::new().flex_shrink(0.0))
+                                .child(crate::ui::rich::narrative::callout::text(
+                                    &theme,
+                                    &name,
+                                    TextRole::Label,
+                                    theme.colors.text,
+                                ))
+                                .build(),
+                        );
+                    root = match unplayable {
+                        Unplayable::Loading => root.child(
+                            track_row
+                                .child(text(
+                                    &theme,
+                                    "Loading…",
+                                    TextRole::Label,
+                                    theme.colors.text_muted,
+                                    false,
+                                ))
+                                .build(),
+                        ),
+                        Unplayable::Failed { problem, retryable } => {
+                            let mut notice = crate::ui::kit::ProblemNotice::new(
+                                format!("{row_id}-problem"),
+                                theme,
+                                &problem,
+                            );
+                            if retryable {
+                                let assets = assets.clone();
+                                let fetcher = fetcher.cloned();
+                                let source = track.src.clone();
+                                let part = row_id.clone();
+                                let invalidate = Rc::clone(invalidate);
+                                notice = notice.action(
+                                    Button::text(
+                                        format!("{row_id}-retry"),
+                                        theme,
+                                        ButtonTone::Neutral,
+                                        "Try again",
+                                    )
+                                    .size(ButtonSize::Sm)
+                                    .on_activate(move |_| {
+                                        assets.forget(fetcher.as_ref(), &source, &part);
+                                        invalidate();
+                                    })
                                     .build(),
-                            )
-                            .child(text(
-                                &theme,
-                                &message,
-                                TextRole::Label,
-                                theme.colors.text_muted,
-                                false,
-                            ))
-                            .children(retry)
-                            .build(),
-                    );
+                                );
+                            }
+                            root.child(track_row.build()).child(notice.build())
+                        }
+                    };
                     root = root.children(transcript);
                     continue;
                 }
@@ -776,6 +798,14 @@ fn progress_line(
             });
     }
     element
+}
+
+enum Unplayable {
+    Loading,
+    Failed {
+        problem: editor_core::Problem,
+        retryable: bool,
+    },
 }
 
 #[cfg(test)]

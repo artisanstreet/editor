@@ -37,16 +37,19 @@ pub(crate) fn stack() -> UiBox {
 }
 
 fn retry_button(theme: &ArtisanTheme, action: Rc<dyn Fn(ContentAction)>) -> Element {
-    button(
-        "source-retry",
-        theme,
-        ButtonTone::Neutral,
-        "Try again",
-        move || {
-            action(ContentAction::Retry);
-        },
-    )
-    .build()
+    Button::text("source-retry", *theme, ButtonTone::Neutral, "Try again")
+        .on_activate(move |_| action(ContentAction::Retry))
+        .build()
+}
+
+fn failed(
+    theme: &ArtisanTheme,
+    error: &editor_core::Problem,
+    action: &Rc<dyn Fn(ContentAction)>,
+) -> Element {
+    editor_ui::kit::ProblemNotice::new("source-problem", *theme, error)
+        .action(retry_button(theme, Rc::clone(action)))
+        .build()
 }
 
 pub(crate) fn button(
@@ -106,11 +109,7 @@ pub fn content_view(
         RangeState::Loading => {
             body = body.child(TextRole::Label.text(theme, "Loading source…").build());
         }
-        RangeState::Failed(error) => {
-            body = body
-                .child(TextRole::Label.text(theme, error.clone()).build())
-                .child(retry_button(theme, Rc::clone(action)));
-        }
+        RangeState::Failed(error) => body = body.child(failed(theme, error, action)),
         RangeState::Ready(page) => {
             let start = page.start;
             let end = page.end;
@@ -194,7 +193,9 @@ pub fn content_view(
             .build(),
     );
     if let Some(error) = view.shown_error() {
-        body = body.child(TextRole::Label.text(theme, error).build());
+        body = body.child(
+            editor_ui::kit::ProblemNotice::new("source-action-problem", *theme, &error).build(),
+        );
     }
     ContentView {
         element: code_card(theme, body.build()),

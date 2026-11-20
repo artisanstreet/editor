@@ -24,7 +24,7 @@ type OrdinaryFence<'a> = dyn Fn(
         usize,
         &super::fence::Fence,
         &[SelectionSource],
-        Option<&str>,
+        Option<&editor_core::Problem>,
     ) -> Result<Element, PresenterError>
     + 'a;
 
@@ -68,7 +68,7 @@ struct Leaf {
     table_continues: bool,
     rich_without_source: bool,
     fence: Option<super::fence::Fence>,
-    fallback_note: Option<String>,
+    fallback_note: Option<editor_core::Problem>,
     rich_index: Option<usize>,
 }
 
@@ -77,7 +77,7 @@ struct LeafView<'a> {
     content: &'a IndexedLeafContent,
     table_continues: bool,
     fence: Option<&'a super::fence::Fence>,
-    fallback_note: Option<&'a str>,
+    fallback_note: Option<&'a editor_core::Problem>,
     rich_index: Option<usize>,
 }
 
@@ -88,7 +88,7 @@ impl Leaf {
             content: &self.content,
             table_continues: self.table_continues,
             fence: self.fence.as_ref(),
-            fallback_note: self.fallback_note.as_deref(),
+            fallback_note: self.fallback_note.as_ref(),
             rich_index: self.rich_index,
         }
     }
@@ -843,7 +843,7 @@ pub(super) fn render_stored_leaf(
     row: usize,
     slots: LeafSlots<'_>,
     fence: Option<&super::fence::Fence>,
-    fallback_note: Option<&str>,
+    fallback_note: Option<&editor_core::Problem>,
     render: LeafRender<'_>,
 ) -> Result<(Element, ProjectedGeometry), PresenterError> {
     let target = LeafView {

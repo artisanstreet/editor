@@ -36,7 +36,7 @@ pub enum ConnectionStatus {
     Live,
     Offline {
         attempt: u32,
-        reason: String,
+        reason: crate::core::Problem,
         fault: Option<ForgeFault>,
     },
 }
@@ -201,8 +201,19 @@ pub async fn run(
                 continue;
             }
             Ok(End::Dropped) => return,
-            Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
-            Err(error) => (::diagnostics::chain(&error), error.fault()),
+            Ok(End::Closed) => (
+                crate::core::Problem::new("Forge closed its event stream."),
+                None,
+            ),
+            Err(error) => (
+                crate::core::Problem::caused_by(
+                    error
+                        .fault()
+                        .map_or("Lost the connection to Forge.", ForgeFault::sentence),
+                    &error,
+                ),
+                error.fault(),
+            ),
         };
         let failures_before = if cursor
             .live_since

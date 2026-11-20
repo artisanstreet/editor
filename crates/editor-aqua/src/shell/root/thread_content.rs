@@ -355,7 +355,12 @@ impl RootViews {
         let mut controls = Vec::new();
         controls.extend(jump);
         if let Some(unavailable) = &unavailable {
-            let mut notice = crate::ui::page::notice(theme, unavailable.to_string());
+            let mut notice = crate::ui::kit::ProblemNotice::new(
+                "thread-problem",
+                *theme,
+                &unavailable.problem(),
+            )
+            .over(theme.colors.background);
             if matches!(unavailable, crate::core::ThreadUnavailable::Failed(_)) {
                 let actions = Rc::clone(&self.conversation_actions);
                 let scope = scope.clone();
@@ -398,13 +403,40 @@ impl RootViews {
             })
             .build();
             controls.push(
-                crate::ui::page::notice(
-                    theme,
-                    format!("Couldn't refresh questions and goals: {error}"),
-                )
-                .action(retry)
-                .build(),
+                crate::ui::kit::ProblemNotice::new("thread-controls-problem", *theme, error)
+                    .over(theme.colors.background)
+                    .action(retry)
+                    .build(),
             );
+        }
+        if let Some(failure) = workspace
+            .conversation
+            .load_error
+            .as_ref()
+            .filter(|_| unavailable.is_none())
+        {
+            let mut notice =
+                crate::ui::kit::ProblemNotice::new("transcript-problem", *theme, failure.problem())
+                    .over(theme.colors.background);
+            if failure.retryable() {
+                let actions = Rc::clone(&self.conversation_actions);
+                let scope = scope.clone();
+                notice = notice.action(
+                    crate::ui::kit::Button::text(
+                        "retry-transcript",
+                        *theme,
+                        crate::ui::kit::ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .on_activate(move |_| {
+                        actions
+                            .borrow_mut()
+                            .push_back(ConversationAction::RetryLoad(scope.clone()));
+                    })
+                    .build(),
+                );
+            }
+            controls.push(notice.build());
         }
         let above_composer = if controls.is_empty() {
             None
@@ -439,9 +471,9 @@ impl RootViews {
                 window.in_flight || window.oldest.is_none() && !window.exhausted
             });
             let body = match &workspace.conversation.load_error {
-                Some(error) => {
+                Some(_) => {
                     self.thread_loading.reset();
-                    view::conversation_notice(theme, error.clone(), true)
+                    view::centered_body(aqua_ui::element::Box::new().build())
                 }
                 None if loading => view::centered_body(self.thread_loading.build(
                     theme,
@@ -455,7 +487,7 @@ impl RootViews {
                 }
                 None => {
                     self.thread_loading.reset();
-                    view::conversation_notice(theme, "No messages yet.".to_owned(), false)
+                    view::conversation_notice(theme, "No messages yet.".to_owned())
                 }
             };
             view::conversation_body(workspace, core, theme, width, body, Vec::new(), parts)?
@@ -481,9 +513,6 @@ impl RootViews {
                         crate::ui::scroll_edge::Edge::Bottom,
                     )),
             ];
-            if let Some(error) = &workspace.conversation.load_error {
-                overlays.push(view::conversation_load_error(theme, error.clone()));
-            }
             let drawer = self.transcript_viewport.and_then(|viewport| {
                 self.navigation.build(
                     &workspace.conversation,

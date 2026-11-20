@@ -355,6 +355,7 @@ mod reply {
         let address = server.address();
         let forge = reply.directory.path().join("forge");
         runtime().block_on(server.shutdown()).unwrap();
+        let stopped = test_support::net::ClosingListener::bind_at(address);
         let actions: Rc<RefCell<VecDeque<ScopedAction>>> = Rc::default();
         let retry_key = format!("retry-stored-page-{}-{}-0", reply.item.id, Slot::Prose);
         let mut app = loop {
@@ -362,12 +363,13 @@ mod reply {
             let app = mounted(600.0, 400.0, reply.realize(&actions));
             if painted_texts(&app)
                 .iter()
-                .any(|text| text.starts_with("Couldn't load this part of the message: "))
+                .any(|text| text == "Couldn't load this part of the message.")
             {
                 break app;
             }
             reply.wait("the unreachable page fails");
         };
+        drop(stopped);
         let restarted = runtime()
             .block_on(ForgeServer::start(forge, address))
             .unwrap();

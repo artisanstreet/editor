@@ -201,7 +201,7 @@ pub struct Account {
     session: Option<SessionToken>,
     onboarding: Option<OnboardingRecord>,
     binding: Option<AeBinding>,
-    last_error: Option<String>,
+    last_error: Option<crate::core::Problem>,
     delivery: Delivery<Message>,
     sign_in: Option<AbortOnDropHandle<()>>,
     sync: Option<AbortOnDropHandle<()>>,
@@ -250,12 +250,16 @@ impl Account {
         );
         let session = stored.session_token.map(SessionToken::new);
         let phase = match (unreadable, &session, stored.profile) {
-            (Some(error), _, _) => AccountPhase::Error {
-                message: format!(
-                    "Couldn't read the saved sign-in: {}",
-                    ::diagnostics::chain(&error)
-                ),
-            },
+            (Some(error), _, _) => {
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "couldn't read the saved sign-in"
+                );
+                AccountPhase::Error {
+                    message: "Couldn't read the sign-in saved on this device. Sign in again."
+                        .to_owned(),
+                }
+            }
             (None, Some(_), Some(profile)) => AccountPhase::Authenticated {
                 profile,
                 verified: false,
@@ -323,8 +327,8 @@ impl Account {
     pub(crate) fn entry_gate(&self) -> EntryGate {
         access::entry_gate(&self.phase)
     }
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+    pub const fn last_error(&self) -> Option<&crate::core::Problem> {
+        self.last_error.as_ref()
     }
     pub fn local_forge(&self) -> LocalForge {
         match (&self.binding, self.profile()) {
@@ -371,14 +375,17 @@ impl Account {
             Ok(record) => self.onboarding = record,
             Err(error) => {
                 self.onboarding = None;
-                self.last_error = Some(::diagnostics::chain(&error));
+                self.last_error = Some(crate::core::Problem::caused_by(
+                    "Couldn't read your account's setup progress.",
+                    &error,
+                ));
             }
         }
     }
-    pub(crate) fn report(&mut self, error: &dyn std::error::Error) {
-        let text = ::diagnostics::chain(error);
-        tracing::warn!(error = %text, "account step failed");
-        self.last_error = Some(text);
+    pub(crate) fn report(&mut self, headline: &str, error: &dyn std::error::Error) {
+        let problem = crate::core::Problem::caused_by(headline, error);
+        tracing::warn!(error = ?problem.detail(), "account step failed");
+        self.last_error = Some(problem);
         self.changed();
     }
     fn clear_session(&mut self) {
@@ -394,7 +401,10 @@ impl Account {
         self.forge_generation += 1;
         self.request_generation += 1;
         if let Err(error) = self.persist() {
-            self.last_error = Some(::diagnostics::chain(&error));
+            self.last_error = Some(crate::core::Problem::caused_by(
+                "Couldn't save your sign-in on this device.",
+                &error,
+            ));
         }
         self.changed();
     }
@@ -863,7 +873,10 @@ impl Account {
                 self.session = Some(token);
                 self.phase = AccountPhase::Restoring;
                 if let Err(error) = self.persist() {
-                    self.last_error = Some(::diagnostics::chain(&error));
+                    self.last_error = Some(crate::core::Problem::caused_by(
+                        "Couldn't save your sign-in on this device.",
+                        &error,
+                    ));
                 }
                 self.changed();
                 self.refresh();
@@ -900,7 +913,10 @@ impl Account {
                     self.load_onboarding();
                 }
                 if let Err(error) = self.persist() {
-                    self.last_error = Some(::diagnostics::chain(&error));
+                    self.last_error = Some(crate::core::Problem::caused_by(
+                        "Couldn't save your sign-in on this device.",
+                        &error,
+                    ));
                 }
                 if self.binding.is_none() && self.forge.is_none() {
                     self.refresh_local_forge();
@@ -928,7 +944,7 @@ impl Account {
                     self.refresh();
                 }
             }
-            Err(error) => self.report(&error),
+            Err(error) => self.report("Couldn't connect this Forge to your account.", &error),
         }
     }
     fn request_finished(&mut self, result: Result<(), NetworkError>, remove: bool) {
@@ -937,11 +953,14 @@ impl Account {
             Ok(()) if remove => self.refresh(),
             Ok(()) => self.clear_session(),
             Err(error) if is_session_invalid(&error) => self.clear_session(),
-            Err(source) => self.report(&if remove {
-                AccountRequestError::RemoveForge(source)
-            } else {
-                AccountRequestError::SignOutEverywhere(source)
-            }),
+            Err(source) if remove => self.report(
+                "Couldn't remove this Forge from your account.",
+                &AccountRequestError::RemoveForge(source),
+            ),
+            Err(source) => self.report(
+                "Couldn't sign out everywhere.",
+                &AccountRequestError::SignOutEverywhere(source),
+            ),
         }
     }
 }

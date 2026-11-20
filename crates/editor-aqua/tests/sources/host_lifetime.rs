@@ -59,7 +59,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     assert!(
         current
             .error()
-            .is_some_and(|error| error.starts_with("Couldn't copy source:"))
+            .is_some_and(|error| error.headline() == "Couldn't copy the source.")
     );
 
     let mut removed = pending_copy(&core, &config, &forge);
@@ -68,7 +68,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     assert!(removed.drain(&core).is_none());
     assert!(removed.error().is_none());
     assert!(
-        matches!(removed.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
+        matches!(removed.window().state(), RangeState::Failed(error) if error.headline() == "This Forge is no longer connected.")
     );
 
     connect(&mut core, &config);
@@ -78,7 +78,7 @@ fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_sour
     assert!(replaced.drain(&core).is_none());
     assert!(replaced.error().is_none());
     assert!(
-        matches!(replaced.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
+        matches!(replaced.window().state(), RangeState::Failed(error) if error.headline() == "This Forge is no longer connected.")
     );
 
     let mut switched = pending_copy(&core, &config, &forge);
@@ -166,7 +166,13 @@ fn picker_failures_only_apply_to_the_current_source_and_host() {
     );
     let first = view.begin_export(&core).unwrap();
     view.finish_export_result(&core, first, Err("picker failed".into()));
-    assert_eq!(view.error(), Some("Couldn't export source: picker failed"));
+    assert_eq!(
+        view.error(),
+        Some(&editor_aqua::core::Problem::detailed(
+            "Couldn't choose where to export the source.",
+            "picker failed",
+        ))
+    );
     let old = view.begin_export(&core).unwrap();
     view.set_source(ContentRef::from_text("second"));
     let current = view.begin_export(&core).unwrap();
@@ -302,9 +308,14 @@ fn a_clipboard_that_refuses_the_copy_shows_the_failure_in_the_source() {
     assert!(
         test_support::editor::ui::painted_texts(&app)
             .iter()
-            .any(|text| text
-                == "Couldn't copy source to the clipboard: the clipboard is locked by another app"),
+            .any(|text| text == "Couldn't put the source on the clipboard."),
         "the source view tells the user the copy failed"
+    );
+    assert!(
+        test_support::editor::ui::painted_texts(&app)
+            .iter()
+            .all(|text| !text.contains("locked by another app")),
+        "the clipboard's reason is a detail, not painted"
     );
     view.copy(&core);
     let copied = test_support::wait::wait_for("the second copy", Duration::from_secs(15), || {

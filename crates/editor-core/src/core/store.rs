@@ -700,7 +700,8 @@ impl Core {
             Ok(opened) => opened,
             Err(error) => {
                 self.dials.insert(opened.id, Dial::Failed);
-                self.account.report(&error);
+                self.account
+                    .report("Couldn't connect to this Forge.", &error);
                 return;
             }
         };
@@ -724,7 +725,10 @@ impl Core {
                         "couldn't save the pairing with this machine's Forge"
                     );
                     self.dials.insert(opened.id, Dial::Failed);
-                    self.account.report(&error);
+                    self.account.report(
+                        "Couldn't save the pairing with this machine's Forge.",
+                        &error,
+                    );
                     return;
                 }
             }

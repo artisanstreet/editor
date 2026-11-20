@@ -142,15 +142,6 @@ impl RootViews {
             | self.noted.note(Cause::PaletteInput, palette)
             | self.noted.note(Cause::ConversationInput, conversation)
             | self.noted.note(Cause::SidebarInput, sidebar);
-        let failure_changed = if self.failure_dismissed.replace(false) {
-            shell
-                .entry
-                .workspace_mut()
-                .is_some_and(|workspace| workspace.failure.take().is_some())
-        } else {
-            false
-        };
-        let palette_changed = palette_changed | failure_changed;
         if let Some(dialog) = &self.settings {
             dialog.sync(ui);
         }

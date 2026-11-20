@@ -125,9 +125,12 @@ fn a_failure_shows_its_reason_and_offers_another_try() {
         })
         .collect();
     assert!(
-        said.iter()
-            .any(|line| line == "Forge didn't start: the port is in use"),
-        "the reason is on screen: {said:?}"
+        said.iter().any(|line| line == "Setup couldn't finish."),
+        "the failure is on screen: {said:?}"
+    );
+    assert!(
+        said.iter().all(|line| !line.contains("the port is in use")),
+        "the reason is a detail, not painted: {said:?}"
     );
     click(&mut app, "artisan-setup-retry");
     assert_eq!(*heard.borrow(), [Choice::Started]);
@@ -230,7 +233,12 @@ fn wsl_discovery_shows_that_it_is_looking_and_why_it_failed() {
     assert!(
         texts(&app)
             .iter()
-            .any(|text| text == "Couldn't list WSL distributions: wsl.exe timed out")
+            .any(|text| text == "Couldn't list WSL distributions.")
+    );
+    assert!(
+        texts(&app)
+            .iter()
+            .all(|text| !text.contains("wsl.exe timed out"))
     );
     click(&mut app, "artisan-setup-find-distros");
     assert_eq!(*heard.borrow(), [Choice::FindDistros]);

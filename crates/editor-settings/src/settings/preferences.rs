@@ -28,9 +28,9 @@ pub enum SaveSettingError {
 }
 
 impl SaveSettingError {
-    pub(crate) fn reason(&self) -> String {
+    pub(crate) fn problem(&self, headline: &str) -> editor_core::Problem {
         match self {
-            Self::Send { source, .. } => ::diagnostics::chain(source),
+            Self::Send { source, .. } => editor_core::Problem::calling_forge(headline, source),
         }
     }
 }

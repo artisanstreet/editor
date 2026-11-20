@@ -1,4 +1,5 @@
 use artisan_api::EngineId;
+use editor_core::Problem;
 use editor_ui::text::{Editor, Mode};
 use std::{
     cell::RefCell,
@@ -12,7 +13,7 @@ pub struct EnginesForm {
     pub login_codes: HashMap<EngineId, Rc<RefCell<Editor>>>,
     pub busy: BTreeSet<EngineId>,
     pub cancelling: BTreeSet<EngineId>,
-    pub errors: HashMap<EngineId, String>,
+    pub errors: HashMap<EngineId, Problem>,
     pub(crate) choosing_version: HashSet<EngineId>,
     generation: u64,
 }
@@ -74,7 +75,7 @@ impl EnginesForm {
         })
     }
 
-    pub(crate) fn complete(&mut self, request: &EngineRequest, error: Option<String>) {
+    pub(crate) fn complete(&mut self, request: &EngineRequest, error: Option<Problem>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }
@@ -102,7 +103,7 @@ impl EnginesForm {
         if trimmed.is_empty() {
             self.errors.insert(
                 engine,
-                "Paste the code the sign-in page showed you first.".to_owned(),
+                Problem::new("Paste the code the sign-in page showed you first."),
             );
             return None;
         }

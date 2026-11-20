@@ -8,7 +8,7 @@ use aqua_ui::element::{Box as UiBox, Element};
 use artisan_api::{
     ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
 };
-use editor_core::{HostData, SettingsPage, SettingsSection};
+use editor_core::{HostData, Problem, SettingsPage, SettingsSection};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
     switch::Switch,
@@ -35,6 +35,14 @@ fn button(
 }
 fn band(theme: &ArtisanTheme, value: String) -> Element {
     ui::block(ui::text(theme, TextRole::Label, Ink::Plain, value))
+}
+fn failure(theme: &ArtisanTheme, key: String, headline: String, detail: &str) -> Element {
+    let problem = if detail.trim().is_empty() {
+        Problem::new(headline)
+    } else {
+        Problem::detailed(headline, detail)
+    };
+    ui::block(ui::problem(theme, key, &problem).build())
 }
 fn refresh(
     theme: &ArtisanTheme,
@@ -85,10 +93,7 @@ fn installation_copy(status: &EngineStatus) -> String {
         InstallState::Installed { version, .. } => {
             format!("{label} {version} is installed and managed by this Forge.")
         }
-        InstallState::Failed { message } if message.is_empty() => {
-            format!("{label} could not be installed.")
-        }
-        InstallState::Failed { message } => message.clone(),
+        InstallState::Failed { .. } => format!("{label} couldn't be installed."),
     }
 }
 #[expect(
@@ -103,7 +108,18 @@ fn installation(
 ) -> Element {
     let engine = status.engine;
     let busy = controller.engines.busy.contains(&engine);
-    let mut blocks = vec![band(theme, installation_copy(status))];
+    let mut blocks = vec![match &status.install {
+        InstallState::Failed { message } => failure(
+            theme,
+            format!("settings-engine-install-error-{engine}"),
+            installation_copy(status),
+            message,
+        ),
+        InstallState::Absent
+        | InstallState::Downloading { .. }
+        | InstallState::Verifying { .. }
+        | InstallState::Installed { .. } => band(theme, installation_copy(status)),
+    }];
     match &status.install {
         InstallState::Absent | InstallState::Failed { .. } => {
             let control = button(
@@ -265,7 +281,7 @@ fn account_copy(status: &EngineStatus) -> String {
         SignInState::SignedOut => "No account is signed in.".into(),
         SignInState::LoggingIn { .. } => "Signing in…".into(),
         SignInState::Unknown => "Sign-in status unknown.".into(),
-        SignInState::Failed { message } => format!("Account status unavailable: {message}."),
+        SignInState::Failed { .. } => "Couldn't read the account status.".into(),
     }
 }
 fn sign_in_copy(engine: EngineId) -> String {
@@ -288,7 +304,18 @@ fn account(
 ) -> Element {
     let engine = status.engine;
     let busy = controller.engines.busy.contains(&engine);
-    let mut blocks = vec![band(theme, account_copy(status))];
+    let mut blocks = vec![match &status.sign_in {
+        SignInState::Failed { message } => failure(
+            theme,
+            format!("settings-engine-account-error-{engine}"),
+            account_copy(status),
+            message,
+        ),
+        SignInState::SignedIn { .. }
+        | SignInState::SignedOut
+        | SignInState::LoggingIn { .. }
+        | SignInState::Unknown => band(theme, account_copy(status)),
+    }];
     match &status.sign_in {
         SignInState::SignedOut | SignInState::Failed { .. }
             if matches!(status.install, InstallState::Installed { .. }) =>
@@ -451,7 +478,7 @@ fn claude(
         ClaudeAiState::SignedOut => ("Not signed in. Signing in opens claude.ai in a browser window; it closes by itself once you're in.".to_owned(), false),
         ClaudeAiState::SignedIn { account } => (account.as_ref().map_or_else(|| "Signed in.".into(), |account| format!("Signed in as {account}.")), true),
         ClaudeAiState::NeedsRenewal { .. } => (if claude_ai_browser::can_renew(&host.id.0) { "claude.ai asked for a browser check. Artisan is renewing the session in the background." } else { "claude.ai asked for a browser check. Sign in again on this device, or wait for the device that signed in to renew it." }.to_owned(), false),
-        ClaudeAiState::Expired { reason } => (format!("The session stopped working: {reason}"), false),
+        ClaudeAiState::Expired { .. } => ("Sign in again to keep using claude.ai mode.".to_owned(), false),
     };
     if busy {
         description = "Waiting for you to sign in to claude.ai in the browser window…".into();
@@ -496,7 +523,20 @@ fn claude(
                     Some(switch),
                 ),
                 ui::row(theme, "claude.ai session", description, Some(control)),
-            ],
+            ]
+            .into_iter()
+            .chain(match &state {
+                ClaudeAiState::Expired { reason } => Some(failure(
+                    theme,
+                    "settings-claude-ai-expired".to_owned(),
+                    "The claude.ai session stopped working.".to_owned(),
+                    reason,
+                )),
+                ClaudeAiState::SignedOut
+                | ClaudeAiState::SignedIn { .. }
+                | ClaudeAiState::NeedsRenewal { .. } => None,
+            })
+            .collect(),
         ),
     )
 }
@@ -540,8 +580,8 @@ pub(crate) fn page(
     if engine == EngineId::Claude && selected.shows(SettingsSection::ClaudeAi) {
         content = content.child(claude(controller, host, status, theme, emit));
     }
-    if let Some(error) = controller.engines.errors.get(&engine) {
-        content = content.child(ui::error_text(theme, error));
+    if let Some(problem) = controller.engines.errors.get(&engine) {
+        content = content.child(ui::problem(theme, "engine-error", problem).build());
     }
     content.build()
 }
