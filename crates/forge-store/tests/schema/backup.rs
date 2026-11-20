@@ -176,6 +176,51 @@ fn an_upgrade_interrupted_after_any_committed_migration_still_goes_back_to_where
 }
 
 #[test]
+fn a_backup_cut_short_is_made_again_instead_of_trusting_an_older_one() {
+    let dir = tempfile::tempdir().expect("data dir");
+    let database = dir.path().join("forge.sqlite3");
+    let previous = MIGRATIONS.len() - 1;
+    {
+        let mut conn = open(&database);
+        migrate_to(&mut conn, previous, &upgrade()).expect("previous Forge creates its database");
+        remember(&conn, "written before an earlier backup");
+    }
+    std::fs::copy(&database, retained::backup(&database, previous))
+        .expect("keep the backup an earlier, rolled-back upgrade made");
+    remember(&open(&database), "written since that backup");
+    let cut_short = retained::partial(&retained::backup(&database, previous));
+    std::fs::write(&cut_short, b"SQLite format 3\0 the copy stops here")
+        .expect("leave the copy an interrupted backup was writing");
+
+    let (logged, _capturing) = test_support::logs::capture();
+    {
+        let mut conn = open(&database);
+        migrate_to(&mut conn, MIGRATIONS.len(), &upgrade())
+            .expect("the next start backs up again and upgrades");
+    }
+
+    assert!(
+        logged.text().contains(&format!(
+            "an earlier backup of schema {previous} was cut short"
+        )),
+        "{}",
+        logged.text()
+    );
+    assert!(!cut_short.exists(), "the cut-short copy is gone");
+    match back_to(&database, previous).expect("the previous Forge goes back") {
+        Rollback::Restored { restored, .. } => assert_eq!(restored, previous),
+        Rollback::Current => panic!("nothing was restored"),
+    }
+    assert_eq!(
+        keys(&database),
+        [
+            "written before an earlier backup",
+            "written since that backup"
+        ]
+    );
+}
+
+#[test]
 fn an_older_release_two_upgrades_back_still_gets_its_database() {
     let dir = tempfile::tempdir().expect("data dir");
     let database = dir.path().join("forge.sqlite3");

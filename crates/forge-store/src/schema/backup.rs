@@ -181,10 +181,11 @@ fn copy_into(conn: &Connection, target: &str) -> rusqlite::Result<()> {
         .map(drop)
 }
 
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
+fn remove_if_present(path: &Path) -> std::io::Result<bool> {
     match std::fs::remove_file(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        other => other,
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -287,7 +288,13 @@ fn back_up(
     let target = unicode(&partial).ok_or_else(|| BackupError::NotUnicode {
         database: database.to_owned(),
     })?;
-    remove_if_present(&partial).map_err(stored)?;
+    if remove_if_present(&partial).map_err(stored)? {
+        tracing::info!(
+            version,
+            partial = %partial.display(),
+            "an earlier backup of schema {version} was cut short and can't be trusted; backing up again from the start"
+        );
+    }
     let before = measure()?;
     if before.available < before.needed {
         return Err(BackupError::NoSpace {
@@ -426,7 +433,9 @@ pub(crate) fn roll_back(
         database: database.to_owned(),
     })?;
     ["-wal", "-shm"].into_iter().try_for_each(|suffix| {
-        remove_if_present(Path::new(&format!("{name}{suffix}"))).map_err(restore)
+        remove_if_present(Path::new(&format!("{name}{suffix}")))
+            .map(drop)
+            .map_err(restore)
     })?;
     std::fs::rename(&backup.path, database).map_err(restore)?;
     let settle = |source| RollbackError::Settle {
