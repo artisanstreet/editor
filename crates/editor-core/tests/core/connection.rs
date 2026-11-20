@@ -1,14 +1,14 @@
 use artisan_api::{Envelope, Event};
 use axum::body::Body;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Response;
 use editor_core::connection::{self, ConnectionStatus, Deadlines, SessionError, Update};
-use futures::StreamExt as _;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use test_support::editor::forge::TlsServer;
+use test_support::http::{StreamEnd, event_stream};
 use test_support::wait::within;
 
 async fn state() -> axum::Json<serde_json::Value> {
@@ -34,27 +34,15 @@ fn hello() -> String {
             forge_version: "test".into(),
         },
     };
-    format!(
-        "data: {}\n\n",
-        serde_json::to_string(&envelope).expect("encode Hello")
-    )
-}
-
-fn event_stream(body: Body) -> Response {
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .body(body)
-        .expect("build the event stream response")
+    serde_json::to_string(&envelope).expect("encode Hello")
 }
 
 async fn hello_then_silence() -> Response {
-    event_stream(Body::from_stream(
-        futures::stream::iter([Ok::<_, Infallible>(hello())]).chain(futures::stream::pending()),
-    ))
+    event_stream([hello()], StreamEnd::Hang)
 }
 
 async fn hello_then_close() -> Response {
-    event_stream(Body::from(hello()))
+    event_stream([hello()], StreamEnd::Close)
 }
 
 async fn refusal_that_never_finishes() -> Response {
@@ -145,8 +133,7 @@ fn a_stream_that_stops_sending_heartbeats_goes_offline() {
         )
         .await;
         while follower.status().await != ConnectionStatus::Live {}
-        tokio::time::pause();
-        let (_, reason) = follower.offline().await;
+        let (_, reason) = test_support::clock::paused(follower.offline()).await;
         assert!(
             reason.contains("heartbeat"),
             "the reason names the silence: {reason}"

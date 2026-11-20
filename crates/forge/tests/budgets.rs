@@ -25,11 +25,9 @@ async fn idle(wakeups: &AtomicU64, stop: tokio::sync::oneshot::Sender<()>) -> u6
     for _ in 0..STARTUP_YIELDS {
         tokio::task::yield_now().await;
     }
-    tokio::time::pause();
     let before = wakeups.load(Ordering::Relaxed);
-    tokio::time::sleep(IDLE_FOR).await;
+    test_support::clock::paused(tokio::time::sleep(IDLE_FOR)).await;
     let woke = wakeups.load(Ordering::Relaxed) - before;
-    tokio::time::resume();
     stop.send(()).expect("the gateway is still serving");
     woke
 }

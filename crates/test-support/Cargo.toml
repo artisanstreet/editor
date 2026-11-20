@@ -13,7 +13,7 @@ doctest = false
 [features]
 tokio = ["dep:tokio"]
 sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:serde_json"]
-http = ["tokio", "dep:axum", "dep:serde_json"]
+http = ["tokio", "dep:axum", "dep:serde_json", "dep:futures"]
 net = ["dep:socket2"]
 items = ["dep:artisan-api"]
 clock = ["dep:artisan-api", "dep:editor-core"]

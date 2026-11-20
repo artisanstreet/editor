@@ -43,3 +43,29 @@ impl Drop for StubServer {
         self.task.abort();
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamEnd {
+    Close,
+    Hang,
+}
+
+pub fn event_stream(
+    data: impl IntoIterator<Item = String>,
+    end: StreamEnd,
+) -> axum::response::Response {
+    use futures::StreamExt as _;
+    let frames: Vec<Result<String, std::convert::Infallible>> = data
+        .into_iter()
+        .map(|data| Ok(format!("data: {data}\n\n")))
+        .collect();
+    let frames = futures::stream::iter(frames);
+    let body = match end {
+        StreamEnd::Close => axum::body::Body::from_stream(frames),
+        StreamEnd::Hang => axum::body::Body::from_stream(frames.chain(futures::stream::pending())),
+    };
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .expect("invariant: a fixed event stream response is well formed")
+}

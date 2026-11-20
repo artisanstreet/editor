@@ -9,13 +9,14 @@ use test_support::editor::forge::{StubForge, TlsServer, empty_state};
 use test_support::editor::shell::{Motion, ThreadShell};
 
 fn forge_whose_stream_always_closes() -> TlsServer {
-    use axum::http::header::CONTENT_TYPE;
     use axum::routing::get;
     let router = axum::Router::new()
         .route("/state", get(|| async { axum::Json(empty_state()) }))
         .route(
             "/events",
-            get(|| async { ([(CONTENT_TYPE, "text/event-stream")], "") }),
+            get(|| async {
+                test_support::http::event_stream([], test_support::http::StreamEnd::Close)
+            }),
         );
     editor_aqua::core::runtime::runtime().block_on(TlsServer::serve(router))
 }

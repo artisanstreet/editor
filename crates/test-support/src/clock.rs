@@ -1,3 +1,23 @@
+#[cfg(feature = "tokio")]
+pub use paused::paused;
+
+#[cfg(feature = "tokio")]
+mod paused {
+    pub async fn paused<F: Future>(work: F) -> F::Output {
+        let _resume = Resume;
+        tokio::time::pause();
+        work.await
+    }
+
+    struct Resume;
+
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            tokio::time::resume();
+        }
+    }
+}
+
 #[cfg(feature = "clock")]
 pub use manual::ManualClock;
 

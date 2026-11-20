@@ -4,11 +4,10 @@ use axum::http::header;
 use axum::response::Response;
 use axum::routing::get;
 use editor_core::connection::{self, ConnectionStatus, Deadlines, Update};
-use futures::StreamExt as _;
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use test_support::editor::forge::TlsServer;
+use test_support::http::{StreamEnd, event_stream};
 use test_support::wait::within;
 
 const THREAD: &str = "01a1f000-0000-7000-8000-000000000002";
@@ -27,16 +26,7 @@ fn json(body: &'static str) -> Response {
 }
 
 async fn events() -> Response {
-    let frames = EVENTS
-        .lines()
-        .map(|line| Ok::<_, Infallible>(format!("data: {line}\n\n")))
-        .collect::<Vec<_>>();
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .body(Body::from_stream(
-            futures::stream::iter(frames).chain(futures::stream::pending()),
-        ))
-        .expect("build the recorded event stream")
+    event_stream(EVENTS.lines().map(str::to_owned), StreamEnd::Hang)
 }
 
 async fn released_forge() -> TlsServer {

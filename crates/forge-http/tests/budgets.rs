@@ -48,11 +48,9 @@ fn an_idle_forge_sleeps_instead_of_polling() {
         for _ in 0..STARTUP_YIELDS {
             tokio::task::yield_now().await;
         }
-        tokio::time::pause();
         let before = wakeups.load(Ordering::Relaxed);
-        tokio::time::sleep(IDLE_FOR).await;
+        test_support::clock::paused(tokio::time::sleep(IDLE_FOR)).await;
         let woke = wakeups.load(Ordering::Relaxed) - before;
-        tokio::time::resume();
         stop.send(()).expect("Forge is still serving");
         serving.await.expect("Forge stops cleanly");
         woke

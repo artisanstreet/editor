@@ -53,7 +53,6 @@ struct ForgeBeforeState {
 }
 
 fn forge_before_its_state() -> ForgeBeforeState {
-    use axum::http::header::CONTENT_TYPE;
     use axum::routing::get;
     use editor_aqua::core::{HostConfig, HostId, HostKind, Screen};
     let (release, released) = tokio::sync::watch::channel(false);
@@ -71,12 +70,7 @@ fn forge_before_its_state() -> ForgeBeforeState {
         .route(
             "/events",
             get(|| async {
-                (
-                    [(CONTENT_TYPE, "text/event-stream")],
-                    axum::body::Body::from_stream(futures::stream::pending::<
-                        Result<axum::body::Bytes, std::convert::Infallible>,
-                    >()),
-                )
+                test_support::http::event_stream([], test_support::http::StreamEnd::Hang)
             }),
         );
     let server = editor_aqua::core::runtime::runtime().block_on(TlsServer::serve(router));
