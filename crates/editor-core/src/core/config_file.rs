@@ -1,3 +1,7 @@
+#[cfg(windows)]
+#[expect(unsafe_code, reason = "MoveFileExW is a Win32 call")]
+mod write_through;
+
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -189,23 +193,49 @@ fn publish<T: Serialize>(
             path: path_buf(),
             source,
         })?;
-    let persisted = match replacement {
-        Replacement::Overwrite => temporary.persist(path),
-        Replacement::CreateOnly => temporary.persist_noclobber(path),
-    };
-    match persisted {
-        Ok(_) => {}
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+    match put_in_place(temporary, path, replacement) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(WriteConfigError::AlreadyExists { path: path_buf() });
         }
-        Err(error) => {
+        Err(source) => {
             return Err(WriteConfigError::Replace {
                 path: path_buf(),
-                source: error.error,
+                source,
             });
         }
     }
     sync_directory(parent, path)
+}
+
+#[cfg(not(windows))]
+fn put_in_place(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    replacement: Replacement,
+) -> std::io::Result<()> {
+    match replacement {
+        Replacement::Overwrite => temporary.persist(path),
+        Replacement::CreateOnly => temporary.persist_noclobber(path),
+    }
+    .map(drop)
+    .map_err(|failed| failed.error)
+}
+
+#[cfg(windows)]
+fn put_in_place(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    replacement: Replacement,
+) -> std::io::Result<()> {
+    let mut written = temporary.into_temp_path();
+    write_through::rename(
+        &written,
+        path,
+        matches!(replacement, Replacement::Overwrite),
+    )?;
+    written.disable_cleanup(true);
+    Ok(())
 }
 
 #[cfg(unix)]

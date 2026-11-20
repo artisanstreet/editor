@@ -31,6 +31,9 @@ diagnostics.workspace = true
 thiserror.workspace = true
 getrandom.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 axum.workspace = true
 divan.workspace = true
