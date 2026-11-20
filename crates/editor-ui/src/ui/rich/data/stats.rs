@@ -235,16 +235,12 @@ impl Stats {
                         color: spark_color.to_reference_paint(),
                         dash: false,
                     }];
+                    let spark_scene = scene::Scene::of_shapes(shapes, scene::Clip::Overflow);
                     let spark = ui::Canvas::new()
                         .width(64.0)
                         .height(20.0)
                         .style(Style::new().flex_shrink(0.0))
-                        .on_paint(move |bounds| {
-                            let mut items = scene::source_scene(bounds, &shapes);
-                            items.pop();
-                            items.remove(0);
-                            items
-                        })
+                        .on_paint(move |bounds| spark_scene.paint(bounds))
                         .build();
                     row = row.child(spark);
                 }

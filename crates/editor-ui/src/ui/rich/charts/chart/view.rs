@@ -178,7 +178,7 @@ fn axis_title(label: Option<&str>, unit: Option<&str>) -> Option<String> {
     }
 }
 fn canvas(shapes: Rc<[Shape]>, probe: Probe) -> Element {
-    let cache = scene::SceneCache::default();
+    let scene = scene::Scene::of_shapes(shapes, scene::Clip::Bounds);
     ui::Canvas::new()
         .style(
             Style::new()
@@ -188,7 +188,7 @@ fn canvas(shapes: Rc<[Shape]>, probe: Probe) -> Element {
         )
         .on_paint(move |bounds| {
             probe.set(Some(bounds));
-            scene::cached_scene(bounds, &shapes, &cache)
+            scene.paint(bounds)
         })
         .build()
 }

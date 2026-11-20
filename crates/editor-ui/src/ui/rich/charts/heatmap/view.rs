@@ -489,7 +489,7 @@ fn row_canvas(
             dash: false,
         });
     }
-    let shapes: Rc<[Shape]> = shapes.into();
+    let scene = scene::Scene::of_shapes(shapes, scene::Clip::Bounds);
     ui::Canvas::new()
         .style(
             Style::new()
@@ -499,7 +499,7 @@ fn row_canvas(
         )
         .on_paint(move |bounds| {
             probe.set(Some(bounds));
-            scene::source_scene(bounds, &shapes)
+            scene.paint(bounds)
         })
         .build()
 }

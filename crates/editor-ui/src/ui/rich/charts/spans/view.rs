@@ -200,8 +200,8 @@ fn row_shapes(
     }
     shapes
 }
-fn row_paint(
-    bounds: Rect,
+fn row_items(
+    size: (f32, f32),
     theme: &ArtisanTheme,
     layout: &Layout,
     domain: Domain,
@@ -209,7 +209,21 @@ fn row_paint(
     row: usize,
     hover: Option<usize>,
 ) -> Vec<DisplayItem> {
-    let mut items = scene::source_scene(bounds, &row_shapes(theme, layout, domain, ticks, row));
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = vec![DisplayItem::PushClip {
+        bounds,
+        radius: 0.0,
+    }];
+    items.extend(scene::shape_items(
+        size,
+        &row_shapes(theme, layout, domain, ticks, row),
+    ));
+    items.push(DisplayItem::PopClip);
     for index in &layout.row_spans[row] {
         let span = &layout.spans[*index];
         let x0 = domain.fraction(span.start);
@@ -351,6 +365,10 @@ pub(crate) fn view(
             let draw_probe = Rc::clone(&row_probe);
             let draw_model = Arc::clone(&model);
             let draw_ticks = row_ticks.clone();
+            let row_scene = scene::Scene::drawn(
+                move |size| row_items(size, &theme, &draw_model, domain, &draw_ticks, row, hover),
+                scene::Clip::Overflow,
+            );
             let canvas = ui::Canvas::new()
                 .style(
                     Style::new()
@@ -360,7 +378,7 @@ pub(crate) fn view(
                 )
                 .on_paint(move |bounds| {
                     draw_probe.set(Some(bounds));
-                    row_paint(bounds, &theme, &draw_model, domain, &draw_ticks, row, hover)
+                    row_scene.paint(bounds)
                 })
                 .build();
             let mut content = ui::Box::new()

@@ -200,7 +200,8 @@ impl Concentration {
         let (hover, probe) = states.ensure(id);
         let cutoff = self.highlight();
         let held = Self::share_of_total(&curve, cutoff);
-        let shape_list: Rc<[Shape]> = shapes(theme, &curve, cutoff, hover).into();
+        let plot =
+            scene::Scene::of_shapes(shapes(theme, &curve, cutoff, hover), scene::Clip::Bounds);
         let paint_probe = Rc::clone(&probe);
         let canvas = ui::Canvas::new()
             .style(
@@ -211,7 +212,7 @@ impl Concentration {
             )
             .on_paint(move |bounds| {
                 paint_probe.set(Some(bounds));
-                scene::source_scene(bounds, &shape_list)
+                plot.paint(bounds)
             })
             .build();
         let marker = plot_label(

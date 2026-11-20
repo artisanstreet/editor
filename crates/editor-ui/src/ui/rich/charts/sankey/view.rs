@@ -1,7 +1,7 @@
 use super::{Graph, Layout, layout};
 use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of_count, index_of, percent};
-use crate::ui::rich::charts::scene::Probe;
+use crate::ui::rich::charts::scene::{self, Probe};
 use crate::ui::rich::kit::format_number;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::geometry::CornerRadii;
@@ -221,17 +221,20 @@ fn hit(laid: &Layout, width: f32, x: f32, y: f32) -> Option<Hover> {
     found.map(Hover::Link)
 }
 
-fn paint(
-    bounds: Rect,
+fn local_items(
+    size: (f32, f32),
     graph: &Graph,
     laid: &Layout,
     nodes: &[GpuiHsla],
     links: &[GpuiHsla],
 ) -> Vec<DisplayItem> {
-    let mut items = vec![DisplayItem::PushClip {
-        bounds,
-        radius: 0.0,
-    }];
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = Vec::with_capacity(graph.links.len() + laid.nodes.len());
     for (index, link) in graph.links.iter().enumerate() {
         let (x0, x1) = band_span(laid, (link.from, link.to), bounds.w);
         let middle = f32::midpoint(x0, x1);
@@ -255,7 +258,7 @@ fn paint(
             transformed_window_logical_bounds: bounds,
             path: Arc::new(GpuiPath {
                 commands_local: commands,
-                origin_window_logical: Point::new(bounds.x, bounds.y),
+                origin_window_logical: Point::new(0.0, 0.0),
                 element_transform: Transform2D::IDENTITY,
                 style: GpuiPathStyle::Fill {
                     rule: FillRule::EvenOdd,
@@ -270,8 +273,8 @@ fn paint(
         }
         items.push(DisplayItem::GpuiBackground {
             bounds: Rect {
-                x: bounds.x + node_x(laid, node.rank, bounds.w),
-                y: bounds.y + node.y0,
+                x: node_x(laid, node.rank, bounds.w),
+                y: node.y0,
                 w: NODE_WIDTH,
                 h: node.y1 - node.y0,
             },
@@ -279,7 +282,6 @@ fn paint(
             background: GpuiBackground::Solid(nodes[index]),
         });
     }
-    items.push(DisplayItem::PopClip);
     items
 }
 
@@ -354,6 +356,10 @@ pub(crate) fn view(
     let draw_graph = Arc::clone(graph);
     let draw_layout = Rc::clone(&laid);
     let draw_probe = Rc::clone(&probe);
+    let plot = scene::Scene::drawn(
+        move |size| local_items(size, &draw_graph, &draw_layout, &nodes, &links),
+        scene::Clip::Bounds,
+    );
     let canvas = ui::Canvas::new()
         .style(
             Style::new()
@@ -363,7 +369,7 @@ pub(crate) fn view(
         )
         .on_paint(move |bounds| {
             draw_probe.set(Some(bounds));
-            paint(bounds, &draw_graph, &draw_layout, &nodes, &links)
+            plot.paint(bounds)
         })
         .build();
     let mut content = ui::Box::new()

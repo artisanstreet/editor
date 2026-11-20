@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -59,115 +59,141 @@ fn at(bounds: Rect, (x, y): (f32, f32)) -> Point {
     Point::new(bounds.w.mul_add(x, bounds.x), bounds.h.mul_add(y, bounds.y))
 }
 
-#[derive(Clone)]
-struct LocalPath {
-    commands: Vec<PathCommand>,
-    min: Point,
-    max: Point,
+fn local_path(
+    size: (f32, f32),
+    points: &[(f32, f32)],
+    close: bool,
+    style: GpuiPathStyle,
+    color: GpuiHsla,
+    outset: f32,
+) -> DisplayItem {
+    let local = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut commands = Vec::with_capacity(points.len() + usize::from(close));
+    let mut min = Point::new(f32::INFINITY, f32::INFINITY);
+    let mut max = Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (index, point) in points.iter().enumerate() {
+        let point = at(local, *point);
+        min = Point::new(min.x.min(point.x), min.y.min(point.y));
+        max = Point::new(max.x.max(point.x), max.y.max(point.y));
+        commands.push(if index == 0 {
+            PathCommand::Move(point)
+        } else {
+            PathCommand::Line(point)
+        });
+    }
+    if close {
+        commands.push(PathCommand::Close);
+    }
+    DisplayItem::GpuiPath {
+        transformed_window_logical_bounds: Rect::from_edges(
+            min.x - outset,
+            min.y - outset,
+            max.x + outset,
+            max.y + outset,
+        ),
+        path: Arc::new(GpuiPath {
+            commands_local: commands,
+            origin_window_logical: Point::new(0.0, 0.0),
+            element_transform: Transform2D::IDENTITY,
+            style,
+            background: GpuiBackground::Solid(color),
+        }),
+    }
 }
 
-impl LocalPath {
-    fn new(size: (f32, f32), points: &[(f32, f32)], close: bool) -> Self {
-        let local = Rect {
-            x: 0.0,
-            y: 0.0,
-            w: size.0,
-            h: size.1,
-        };
-        let mut commands = Vec::with_capacity(points.len() + usize::from(close));
-        let mut min = Point::new(f32::INFINITY, f32::INFINITY);
-        let mut max = Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for (index, point) in points.iter().enumerate() {
-            let point = at(local, *point);
-            min = Point::new(min.x.min(point.x), min.y.min(point.y));
-            max = Point::new(max.x.max(point.x), max.y.max(point.y));
-            commands.push(if index == 0 {
-                PathCommand::Move(point)
-            } else {
-                PathCommand::Line(point)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clip {
+    Bounds,
+    Overflow,
+}
+
+struct Local {
+    size: (u32, u32),
+    items: Vec<DisplayItem>,
+}
+
+pub struct Scene {
+    draw: Box<dyn Fn((f32, f32)) -> Vec<DisplayItem>>,
+    clip: Clip,
+    local: RefCell<Option<Local>>,
+}
+
+impl std::fmt::Debug for Scene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scene")
+            .field("clip", &self.clip)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Scene {
+    pub fn of_shapes(shapes: impl Into<Rc<[Shape]>>, clip: Clip) -> Self {
+        let shapes = shapes.into();
+        Self::drawn(move |size| shape_items(size, &shapes), clip)
+    }
+
+    pub(crate) fn drawn(
+        draw: impl Fn((f32, f32)) -> Vec<DisplayItem> + 'static,
+        clip: Clip,
+    ) -> Self {
+        Self {
+            draw: Box::new(draw),
+            clip,
+            local: RefCell::new(None),
+        }
+    }
+
+    pub fn paint(&self, bounds: Rect) -> Vec<DisplayItem> {
+        let size = (bounds.w.to_bits(), bounds.h.to_bits());
+        let mut local = self.local.borrow_mut();
+        if local.as_ref().is_none_or(|drawn| drawn.size != size) {
+            *local = Some(Local {
+                size,
+                items: (self.draw)((bounds.w, bounds.h)),
             });
         }
-        if close {
-            commands.push(PathCommand::Close);
+        let items = &local
+            .as_ref()
+            .expect("invariant: the local scene was just drawn")
+            .items;
+        let clipped = self.clip == Clip::Bounds;
+        let mut painted = Vec::with_capacity(items.len() + 4);
+        if clipped {
+            painted.push(DisplayItem::PushClip {
+                bounds,
+                radius: 0.0,
+            });
         }
-        Self { commands, min, max }
-    }
-
-    fn item(
-        &self,
-        bounds: Rect,
-        style: GpuiPathStyle,
-        color: GpuiHsla,
-        outset: f32,
-    ) -> DisplayItem {
-        DisplayItem::GpuiPath {
-            transformed_window_logical_bounds: Rect::from_edges(
-                bounds.x + self.min.x - outset,
-                bounds.y + self.min.y - outset,
-                bounds.x + self.max.x + outset,
-                bounds.y + self.max.y + outset,
-            ),
-            path: Arc::new(GpuiPath {
-                commands_local: self.commands.clone(),
-                origin_window_logical: Point::new(bounds.x, bounds.y),
-                element_transform: Transform2D::IDENTITY,
-                style,
-                background: GpuiBackground::Solid(color),
-            }),
+        painted.push(DisplayItem::PushTransform(Transform2D::translate(
+            bounds.x, bounds.y,
+        )));
+        painted.extend(items.iter().cloned());
+        painted.push(DisplayItem::PopTransform);
+        if clipped {
+            painted.push(DisplayItem::PopClip);
         }
+        painted
     }
-}
-
-type CachedPaths = ((u32, u32), Vec<Option<LocalPath>>);
-
-#[derive(Default)]
-pub struct SceneCache {
-    paths: std::cell::RefCell<Option<CachedPaths>>,
-}
-
-impl std::fmt::Debug for SceneCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SceneCache").finish_non_exhaustive()
-    }
-}
-
-impl SceneCache {
-    fn path<R>(
-        &self,
-        size: (f32, f32),
-        shape: usize,
-        points: &[(f32, f32)],
-        close: bool,
-        use_path: impl FnOnce(&LocalPath) -> R,
-    ) -> R {
-        let key = (size.0.to_bits(), size.1.to_bits());
-        let mut paths = self.paths.borrow_mut();
-        if paths.as_ref().is_none_or(|(cached, _)| *cached != key) {
-            *paths = Some((key, Vec::new()));
-        }
-        let (_, entries) = paths.as_mut().expect("invariant: the cache was just sized");
-        if entries.len() <= shape {
-            entries.resize(shape + 1, None);
-        }
-        use_path(entries[shape].get_or_insert_with(|| LocalPath::new(size, points, close)))
-    }
-}
-
-pub fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
-    cached_scene(bounds, shapes, &SceneCache::default())
 }
 
 #[expect(
     clippy::too_many_lines,
-    reason = "one match converting every chart shape kind into cached display items"
+    reason = "one match converting every chart shape kind into local display items"
 )]
-pub fn cached_scene(bounds: Rect, shapes: &[Shape], cache: &SceneCache) -> Vec<DisplayItem> {
-    let size = (bounds.w, bounds.h);
-    let mut items = vec![DisplayItem::PushClip {
-        bounds,
-        radius: 0.0,
-    }];
-    for (index, shape) in shapes.iter().enumerate() {
+pub(crate) fn shape_items(size: (f32, f32), shapes: &[Shape]) -> Vec<DisplayItem> {
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = Vec::with_capacity(shapes.len());
+    for shape in shapes {
         match shape {
             Shape::Line {
                 points,
@@ -182,21 +208,26 @@ pub fn cached_scene(bounds: Rect, shapes: &[Shape], cache: &SceneCache) -> Vec<D
                     dash: if *dash { vec![4.0, 3.0] } else { Vec::new() },
                     dash_offset: 0.0,
                 };
-                items.push(cache.path(size, index, points, false, |path| {
-                    path.item(bounds, style, *color, width.abs() * 2.0)
-                }));
+                items.push(local_path(
+                    size,
+                    points,
+                    false,
+                    style,
+                    *color,
+                    width.abs() * 2.0,
+                ));
             }
             Shape::Area { points, color } if points.len() >= 3 => {
-                items.push(cache.path(size, index, points, true, |path| {
-                    path.item(
-                        bounds,
-                        GpuiPathStyle::Fill {
-                            rule: FillRule::EvenOdd,
-                        },
-                        *color,
-                        0.0,
-                    )
-                }));
+                items.push(local_path(
+                    size,
+                    points,
+                    true,
+                    GpuiPathStyle::Fill {
+                        rule: FillRule::EvenOdd,
+                    },
+                    *color,
+                    0.0,
+                ));
             }
             Shape::Rect {
                 x0,
@@ -262,6 +293,5 @@ pub fn cached_scene(bounds: Rect, shapes: &[Shape], cache: &SceneCache) -> Vec<D
             Shape::Line { .. } | Shape::Area { .. } => {}
         }
     }
-    items.push(DisplayItem::PopClip);
     items
 }

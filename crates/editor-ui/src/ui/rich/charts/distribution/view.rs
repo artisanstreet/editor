@@ -225,7 +225,7 @@ fn box_shapes(summary: &Summary, domain: Domain, color: GpuiHsla, fill: GpuiHsla
     shapes
 }
 fn canvas(shapes: Vec<Shape>, probe: Probe) -> Element {
-    let shapes: Rc<[Shape]> = shapes.into();
+    let scene = scene::Scene::of_shapes(shapes, scene::Clip::Bounds);
     ui::Canvas::new()
         .style(
             Style::new()
@@ -235,7 +235,7 @@ fn canvas(shapes: Vec<Shape>, probe: Probe) -> Element {
         )
         .on_paint(move |bounds| {
             probe.set(Some(bounds));
-            scene::source_scene(bounds, &shapes)
+            scene.paint(bounds)
         })
         .build()
 }

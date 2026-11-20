@@ -1,6 +1,6 @@
 use aqua_core::{GpuiHsla, Rect};
 use divan::Bencher;
-use editor_ui::rich::charts::scene::{SceneCache, Shape, cached_scene, source_scene};
+use editor_ui::rich::charts::scene::{Clip, Scene, Shape};
 
 const SERIES: usize = 6;
 const POINTS: usize = 2_000;
@@ -56,16 +56,17 @@ fn moving(frame: &mut f32) -> Rect {
 }
 
 #[divan::bench(sample_count = 50)]
-fn repaint_while_scrolling_uncached(bencher: Bencher<'_, '_>) {
-    let shapes = shapes();
+fn first_paint(bencher: Bencher<'_, '_>) {
+    let shapes: std::rc::Rc<[Shape]> = shapes().into();
     let mut frame = 0.0;
-    bencher.bench_local(|| source_scene(moving(&mut frame), &shapes));
+    bencher.bench_local(|| {
+        Scene::of_shapes(std::rc::Rc::clone(&shapes), Clip::Bounds).paint(moving(&mut frame))
+    });
 }
 
 #[divan::bench(sample_count = 50)]
-fn repaint_while_scrolling_cached(bencher: Bencher<'_, '_>) {
-    let shapes = shapes();
-    let cache = SceneCache::default();
+fn repaint_while_scrolling(bencher: Bencher<'_, '_>) {
+    let scene = Scene::of_shapes(shapes(), Clip::Bounds);
     let mut frame = 0.0;
-    bencher.bench_local(|| cached_scene(moving(&mut frame), &shapes, &cache));
+    bencher.bench_local(|| scene.paint(moving(&mut frame)));
 }
