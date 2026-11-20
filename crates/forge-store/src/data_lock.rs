@@ -33,19 +33,9 @@ pub struct DataLock {
 impl DataLock {
     pub fn acquire(dir: &Path) -> Result<Self, LockDataError> {
         use fs2::FileExt as _;
-        let path = dir.join(LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| LockDataError::Open {
-                path: path.clone(),
-                source,
-            })?;
+        let (path, file) = open(dir)?;
         file.try_lock_exclusive().map_err(|source| {
-            if source.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+            if contended(&source) {
                 LockDataError::Held {
                     dir: dir.to_owned(),
                     source,
@@ -60,8 +50,45 @@ impl DataLock {
         })
     }
 
+    pub fn acquire_waiting(dir: &Path, waiting: impl FnOnce()) -> Result<Self, LockDataError> {
+        use fs2::FileExt as _;
+        let (path, file) = open(dir)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(held) if contended(&held) => {
+                waiting();
+                file.lock_exclusive()
+                    .map_err(|source| LockDataError::Lock { path, source })?;
+            }
+            Err(source) => return Err(LockDataError::Lock { path, source }),
+        }
+        Ok(Self {
+            _file: file,
+            dir: dir.to_owned(),
+        })
+    }
+
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+}
+
+fn open(dir: &Path) -> Result<(PathBuf, std::fs::File), LockDataError> {
+    let path = dir.join(LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| LockDataError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    Ok((path, file))
+}
+
+fn contended(error: &std::io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }

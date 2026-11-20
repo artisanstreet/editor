@@ -1694,7 +1694,10 @@ fn restore_database(
 ) -> Result<(), RestoreDatabaseError> {
     service::stop().map_err(RestoreDatabaseError::Stop)?;
     let data = paths::data(App::Forge)?;
-    let lock = forge_store::DataLock::acquire(&data).map_err(RestoreDatabaseError::Lock)?;
+    let lock = forge_store::DataLock::acquire_waiting(&data, || {
+        progress.message("Waiting for the Forge that didn't start to let go of its data");
+    })
+    .map_err(RestoreDatabaseError::Lock)?;
     match database {
         StoredBefore::Schema(schema) => {
             match forge_store::admin::roll_back_for(&lock, schema).map_err(|source| {
