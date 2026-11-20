@@ -105,3 +105,78 @@ fn non_latin_mermaid_labels_draw_real_glyphs_from_system_fallbacks() {
         .collect();
     assert!(missing.is_empty(), "drawn as .notdef: {missing:?}");
 }
+
+const LEAK_DATA: &str = "EDITOR_UI_DIAGRAM_LEAK_DATA";
+const SENTINEL: &str = "PRIVATESENTINEL";
+
+fn leaking_sources() -> [String; 3] {
+    [
+        format!("sequenceDiagram\nparticipant A\n{SENTINEL}->>A: hello"),
+        format!("flowchart LR\nA --> B\nsubgraph {SENTINEL}\nB --> C"),
+        format!("%%{{init: {{\"theme\": \"{SENTINEL}\" }}%%\nflowchart LR\nA --> B"),
+    ]
+}
+
+#[expect(
+    clippy::panic,
+    reason = "the child crashes on purpose to write its recent log"
+)]
+fn render_and_crash(data: &std::path::Path) -> ! {
+    let log = std::fs::File::create(data.join("editor.log")).unwrap();
+    let recent = diagnostics::subscribe("debug", std::sync::Mutex::new(log)).unwrap();
+    diagnostics::CrashReporter {
+        app: artisan_paths::App::Editor,
+        version: "9.9.9 (test)",
+        data: data.to_owned(),
+        recent,
+    }
+    .install();
+    for source in leaking_sources() {
+        assert!(render(&source).is_none(), "{source}");
+    }
+    panic!("invariant: the test ends here")
+}
+
+#[test]
+fn a_diagram_that_fails_logs_none_of_its_source() {
+    if let Some(data) = std::env::var_os(LEAK_DATA) {
+        render_and_crash(std::path::Path::new(&data));
+    }
+    let test = format!(
+        "{}::a_diagram_that_fails_logs_none_of_its_source",
+        module_path!().split_once("::").unwrap().1
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(LEAK_DATA, directory.path())
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the child must crash");
+    let log = std::fs::read_to_string(directory.path().join("editor.log")).unwrap();
+    assert_eq!(
+        log.matches("the diagram shows as its source").count(),
+        leaking_sources().len(),
+        "each failure is logged: {log}"
+    );
+    assert!(
+        !log.contains(SENTINEL),
+        "the log holds diagram source: {log}"
+    );
+    let reports: Vec<_> = std::fs::read_dir(diagnostics::CrashReporter::folder(directory.path()))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].contains("the diagram shows as its source"),
+        "the crash report carries the recent log: {}",
+        reports[0]
+    );
+    assert!(
+        !reports[0].contains(SENTINEL),
+        "the crash report holds diagram source: {}",
+        reports[0]
+    );
+}

@@ -65,6 +65,7 @@ tracing.workspace = true
 windows-registry = "0.6"
 
 [dev-dependencies]
+artisan-paths.workspace = true
 divan.workspace = true
 editor-ui = { path = ".", features = ["test-support"] }
 test-support = { workspace = true, features = ["editor-core"] }

@@ -40,13 +40,66 @@ const FALLBACK_FAMILIES: [&str; 10] = [
 #[derive(Debug, thiserror::Error)]
 enum LayoutError {
     #[error("parse the diagram")]
-    Parse(#[source] mermaid_rs_renderer::ParseError),
+    Parse(#[source] ParseFailure),
     #[error("the diagram has {items} parts; at most {MAX_GRAPH_ITEMS} are drawn")]
     TooLarge { items: usize },
     #[error("outline the diagram's text")]
-    Outline(#[source] usvg::Error),
-    #[error("the diagram renderer panicked")]
-    Panicked(#[source] diagnostics::crash::CaughtPanic),
+    Outline(#[source] OutlineFailure),
+    #[error("the diagram renderer panicked at {location}")]
+    Panicked { location: String },
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+enum ParseFailure {
+    #[error("a participant used on line {line} is never declared")]
+    UnknownParticipant { line: u32 },
+    #[error("a block opened on line {opened_at} is never closed")]
+    UnclosedBlock { opened_at: u32 },
+    #[error("unexpected text at {line}:{col}")]
+    UnexpectedToken { line: u32, col: u32 },
+    #[error("an invalid directive at {line}:{col}")]
+    InvalidDirective { line: u32, col: u32 },
+    #[error("a kind of parse failure this Editor doesn't know")]
+    Unclassified,
+}
+
+impl From<&mermaid_rs_renderer::ParseError> for ParseFailure {
+    fn from(error: &mermaid_rs_renderer::ParseError) -> Self {
+        use mermaid_rs_renderer::ParseError;
+        match *error {
+            ParseError::UnknownParticipant { line, .. } => Self::UnknownParticipant { line },
+            ParseError::UnclosedSubgraph { opened_at } => Self::UnclosedBlock { opened_at },
+            ParseError::UnexpectedToken { line, col, .. } => Self::UnexpectedToken { line, col },
+            ParseError::InvalidDirective { line, col, .. } => Self::InvalidDirective { line, col },
+            _ => Self::Unclassified,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+enum OutlineFailure {
+    #[error("the outlined SVG is not UTF-8")]
+    NotUtf8,
+    #[error("the outlined SVG is compressed")]
+    Compressed,
+    #[error("the outlined SVG has too many elements")]
+    TooManyElements,
+    #[error("the outlined SVG has no valid size")]
+    InvalidSize,
+    #[error("the outlined SVG doesn't parse")]
+    Unparsable,
+}
+
+impl From<&usvg::Error> for OutlineFailure {
+    fn from(error: &usvg::Error) -> Self {
+        match error {
+            usvg::Error::NotAnUtf8Str => Self::NotUtf8,
+            usvg::Error::SvgzFeatureNotEnabled | usvg::Error::MalformedGZip => Self::Compressed,
+            usvg::Error::ElementsLimitReached => Self::TooManyElements,
+            usvg::Error::InvalidSize => Self::InvalidSize,
+            usvg::Error::ParsingFailed(_) => Self::Unparsable,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -97,7 +150,7 @@ fn render(source: &str) -> Option<DiagramSvg> {
         Ok(laid_out) => laid_out,
         Err(error) => {
             match &error {
-                LayoutError::Panicked(_) => tracing::error!(
+                LayoutError::Panicked { .. } => tracing::error!(
                     bytes = source.len(),
                     error = %diagnostics::chain(&error),
                     "the diagram shows as its source"
@@ -134,7 +187,8 @@ fn layout_svg(
     themes: &[Theme; 2],
 ) -> Result<([String; 2], f32, f32, String), LayoutError> {
     diagnostics::crash::catch(AssertUnwindSafe(|| {
-        let parsed = parse_mermaid_strict(source).map_err(LayoutError::Parse)?;
+        let parsed = parse_mermaid_strict(source)
+            .map_err(|error| LayoutError::Parse(ParseFailure::from(&error)))?;
         let items = parsed.graph.nodes.len()
             + parsed.graph.edges.len()
             + parsed.graph.subgraphs.len()
@@ -158,7 +212,9 @@ fn layout_svg(
         ];
         Ok((svgs, size.width, size.height, summary(&parsed.graph)))
     }))
-    .map_err(LayoutError::Panicked)?
+    .map_err(|caught| LayoutError::Panicked {
+        location: caught.location,
+    })?
 }
 
 fn summary(graph: &Graph) -> String {
@@ -295,7 +351,8 @@ fn diagram_options() -> usvg::Options<'static> {
 }
 
 fn outline_text(source: &str) -> Result<String, LayoutError> {
-    let tree = usvg::Tree::from_str(source, &diagram_options()).map_err(LayoutError::Outline)?;
+    let tree = usvg::Tree::from_str(source, &diagram_options())
+        .map_err(|error| LayoutError::Outline(OutlineFailure::from(&error)))?;
     Ok(tree.to_string(&usvg::WriteOptions::default()))
 }
 
