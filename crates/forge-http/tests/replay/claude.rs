@@ -14,6 +14,11 @@ async fn a_claude_reply_reaches_the_client_and_a_resumed_stream_shows_the_same_t
         "assistant: Hello from the replay. (Done)",
     ]);
     assert_eq!(screen.transcript(&thread), shown);
+    let off_clock = screen.off_the_replay_clock();
+    assert!(
+        off_clock.is_empty(),
+        "Forge stamps the replayed turn with the replay's clock, not {off_clock:?}"
+    );
     let seqs: Vec<_> = screen
         .envelopes()
         .iter()

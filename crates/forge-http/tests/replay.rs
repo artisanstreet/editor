@@ -1,5 +1,5 @@
 use crate::tests::{Device, paired};
-use crate::{ServeConfig, start};
+use crate::{ServeConfig, start_in};
 use artisan_api::{
     Answer, CreateProject, CreateThread, EngineConfig, EngineId, Envelope, Event, Item, ItemId,
     ItemKind, Permissions, ProjectId, Run, RunId, RunStatus, SendMessage, Seq, State, TextContent,
@@ -8,6 +8,8 @@ use artisan_api::{
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use test_support::replay::ReplayingEngine;
 
@@ -17,6 +19,14 @@ mod claude;
 mod codex;
 #[path = "replay/opencode.rs"]
 mod opencode;
+
+const REPLAY_EPOCH: artisan_api::Timestamp = 1_767_225_600_000;
+const REPLAY_SPAN: artisan_api::Timestamp = 3_600_000;
+
+fn replay_clock() -> artisan_api::WallClock {
+    let ticks = Arc::new(AtomicI64::new(REPLAY_EPOCH));
+    artisan_api::WallClock::new(move || ticks.fetch_add(1, Ordering::SeqCst))
+}
 
 const SIDE_QUERIES: [&str; 3] = [
     forge_runs::SUGGESTIONS_KEY,
@@ -36,10 +46,16 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
     let dir = tempfile::tempdir().expect("create the Forge folder");
     let data = dir.path().join("forge");
     let engine_files = ReplayingEngine::install(&data, "replay_engine", engine, fixture);
-    let server = start(ServeConfig {
-        data_dir: data,
-        listen: "127.0.0.1:0".parse().expect("a loopback address"),
-    })
+    let server = start_in(
+        ServeConfig {
+            data_dir: data,
+            listen: "127.0.0.1:0".parse().expect("a loopback address"),
+        },
+        forge_store::Environment {
+            clock: replay_clock(),
+            ..forge_store::Environment::system()
+        },
+    )
     .await
     .expect("Forge starts");
     let address = server.local_addr().expect("Forge listens");
@@ -286,6 +302,22 @@ impl Screen {
 
     fn envelopes(&self) -> &[Envelope] {
         &self.envelopes
+    }
+
+    fn off_the_replay_clock(&self) -> Vec<artisan_api::Timestamp> {
+        let items = self
+            .items
+            .values()
+            .flat_map(|item| [item.created_at, item.updated_at]);
+        let runs = self
+            .runs
+            .values()
+            .flat_map(|run| [Some(run.started_at), run.ended_at()])
+            .flatten();
+        items
+            .chain(runs)
+            .filter(|at| !(REPLAY_EPOCH..REPLAY_EPOCH + REPLAY_SPAN).contains(at))
+            .collect()
     }
 }
 
