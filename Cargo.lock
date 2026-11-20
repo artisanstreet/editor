@@ -1796,7 +1796,6 @@ dependencies = [
  "aqua-text",
  "aqua-ui",
  "artisan-api",
- "diagnostics",
  "editor-assets",
  "editor-conversation",
  "editor-core",
@@ -1804,7 +1803,6 @@ dependencies = [
  "editor-ui",
  "palette",
  "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]
@@ -1816,7 +1814,6 @@ dependencies = [
  "aqua-text",
  "aqua-ui",
  "artisan-api",
- "diagnostics",
  "editor-assets",
  "editor-core",
  "editor-ui",

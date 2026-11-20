@@ -22,8 +22,6 @@ artisan-api = { workspace = true, features = ["tls"] }
 editor-assets.workspace = true
 palette.workspace = true
 thiserror.workspace = true
-diagnostics.workspace = true
-tracing.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true
 editor-sources.workspace = true
