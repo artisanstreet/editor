@@ -122,14 +122,73 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
         b"{ not json",
         "keeping a newer draft leaves the unreadable one untouched"
     );
-    let set_aside_images = std::fs::read_dir(directory.path().join("drafts"))
+    let set_aside_images = std::fs::read_dir(set_aside.parent().unwrap())
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.contains(".image.unreadable-1"))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| std::fs::read(path).unwrap() == b"image")
         .count();
     assert_eq!(set_aside_images, 1, "its image is kept beside it");
     assert_eq!(
         spool.take(&host, "new").unwrap().unwrap().draft,
         kept("a newer draft")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_kept_draft_that_cannot_be_moved_aside_is_reported_where_it_still_is() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    let scope = "s".repeat(239);
+    spool
+        .keep(&host, &scope, kept("an older draft"), &[])
+        .unwrap();
+    let record = directory
+        .path()
+        .join("drafts")
+        .join(format!("forge-{scope}.json"));
+    std::fs::write(&record, b"{ not json").unwrap();
+
+    let Err(TakeSpooledDraftError::Left { path, .. }) = spool.take(&host, &scope) else {
+        panic!("expected the unreadable draft to stay where it is");
+    };
+    assert_eq!(path, record, "the notice names the record's real place");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"{ not json",
+        "the unreadable draft is still there for the user"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_kept_draft_is_moved_aside_with_images_whose_names_are_long() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    let scope = "s".repeat(174);
+    spool
+        .keep(
+            &host,
+            &scope,
+            kept("an older draft"),
+            &[std::sync::Arc::from(&b"image"[..])],
+        )
+        .unwrap();
+    let record = directory
+        .path()
+        .join("drafts")
+        .join(format!("forge-{scope}.json"));
+    std::fs::write(&record, b"{ not json").unwrap();
+
+    let Err(TakeSpooledDraftError::SetAside { set_aside, .. }) = spool.take(&host, &scope) else {
+        panic!("expected the unreadable draft to be moved aside");
+    };
+    assert_eq!(
+        std::fs::read(&set_aside).unwrap(),
+        b"{ not json",
+        "the notice names where the unreadable draft went"
+    );
+    assert!(!record.exists(), "nothing is left at the old place");
 }

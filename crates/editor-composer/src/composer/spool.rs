@@ -71,15 +71,31 @@ pub enum TakeSpooledImageError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetAsideError {
-    #[error("link {from} to {to}")]
-    Link {
+    #[error("create the folder {path} to move the unreadable draft into")]
+    CreateFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("list the pasted images in {path}")]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move {from} to {to}")]
+    Move {
         from: PathBuf,
         to: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error(transparent)]
-    Remove(#[from] ForgetSpooledDraftError),
+    #[error("flush the folder {path} to disk")]
+    Sync {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +108,12 @@ pub enum ForgetSpooledDraftError {
     },
     #[error("list the pasted images in {path}")]
     List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("flush the folder {path} to disk")]
+    Sync {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -159,12 +181,7 @@ impl DraftSpool {
         draft: KeptDraft,
         images: &[std::sync::Arc<[u8]>],
     ) -> Result<(), KeepSpooledDraftError> {
-        std::fs::create_dir_all(&self.dir).map_err(|source| {
-            KeepSpooledDraftError::CreateDirectory {
-                path: self.dir.clone(),
-                source,
-            }
-        })?;
+        self.create_folder()?;
         let stem = stem(host, scope);
         let digests = images
             .iter()
@@ -251,49 +268,73 @@ impl DraftSpool {
     pub(crate) fn forget(&self, host: &HostId, scope: &str) -> Result<(), ForgetSpooledDraftError> {
         let stem = stem(host, scope);
         remove(&self.dir.join(format!("{stem}.json")))?;
-        self.remove_images(&stem, &HashSet::new())
+        self.remove_images(&stem, &HashSet::new())?;
+        sync_folder(&self.dir).map_err(|source| ForgetSpooledDraftError::Sync {
+            path: self.dir.clone(),
+            source,
+        })
+    }
+
+    fn create_folder(&self) -> Result<(), KeepSpooledDraftError> {
+        if self.dir.is_dir() {
+            return Ok(());
+        }
+        let failed = |source| KeepSpooledDraftError::CreateDirectory {
+            path: self.dir.clone(),
+            source,
+        };
+        std::fs::create_dir_all(&self.dir).map_err(failed)?;
+        self.dir
+            .parent()
+            .map_or(Ok(()), sync_folder)
+            .map_err(failed)
     }
 
     fn set_aside(&self, stem: &str, record: &Path) -> Result<PathBuf, SetAsideError> {
-        let (set_aside, number) = (1_u64..)
+        let folder = (1_u64..)
             .map(|number| {
-                let to = self.dir.join(format!("{stem}.unreadable-{number}.json"));
-                match std::fs::hard_link(record, &to) {
-                    Ok(()) => Ok(Some((to, number))),
+                let folder = self.dir.join(format!("{stem}.unreadable-{number}"));
+                match std::fs::create_dir(&folder) {
+                    Ok(()) => Ok(Some(folder)),
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-                    Err(source) => Err(SetAsideError::Link {
-                        from: record.to_owned(),
-                        to,
+                    Err(source) => Err(SetAsideError::CreateFolder {
+                        path: folder,
                         source,
                     }),
                 }
             })
             .find_map(Result::transpose)
             .expect("invariant: some set-aside number is free")?;
-        remove(record)?;
-        let listed = |source| ForgetSpooledDraftError::List {
+        let listed = |source| SetAsideError::List {
             path: self.dir.clone(),
             source,
         };
-        let prefix = format!("{stem}.");
         for entry in std::fs::read_dir(&self.dir).map_err(listed)? {
             let path = entry.map_err(listed)?.path();
-            let ours = path
-                .extension()
-                .is_some_and(|extension| extension == "image")
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix));
-            if ours {
-                let mut to = path.clone().into_os_string();
-                to.push(format!(".unreadable-{number}"));
-                std::fs::hard_link(&path, &to).map_err(|source| SetAsideError::Link {
-                    from: path.clone(),
-                    to: to.into(),
+            if let Some(name) = path.file_name().filter(|_| is_image_of(&path, stem)) {
+                move_into(&path, &folder.join(name))?;
+            }
+        }
+        let set_aside = folder.join(
+            record
+                .file_name()
+                .expect("invariant: a kept draft's record path names a file"),
+        );
+        sync_folder(&folder).map_err(|source| SetAsideError::Sync {
+            path: folder.clone(),
+            source,
+        })?;
+        move_into(record, &set_aside)?;
+        for synced in [&folder, &self.dir] {
+            if let Err(source) = sync_folder(synced) {
+                let error = SetAsideError::Sync {
+                    path: synced.clone(),
                     source,
-                })?;
-                remove(&path)?;
+                };
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "moved an unreadable draft aside, but the move may not survive a power cut"
+                );
             }
         }
         Ok(set_aside)
@@ -329,17 +370,9 @@ impl DraftSpool {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(source) => return Err(listed(source)),
         };
-        let prefix = format!("{stem}.");
         for entry in entries {
             let path = entry.map_err(listed)?.path();
-            let ours = path
-                .extension()
-                .is_some_and(|extension| extension == "image")
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix));
-            if ours && !kept.contains(&path) {
+            if is_image_of(&path, stem) && !kept.contains(&path) {
                 remove(&path)?;
             }
         }
@@ -349,6 +382,38 @@ impl DraftSpool {
     fn image_path(&self, stem: &str, digest: &ImageDigest) -> PathBuf {
         self.dir.join(format!("{stem}.{}.image", digest.0))
     }
+}
+
+fn is_image_of(path: &Path, stem: &str) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "image")
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(stem))
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+fn move_into(from: &Path, to: &Path) -> Result<(), SetAsideError> {
+    std::fs::rename(from, to).map_err(|source| SetAsideError::Move {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn sync_folder(folder: &Path) -> std::io::Result<()> {
+    std::fs::File::open(folder).and_then(|folder| folder.sync_all())
+}
+
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Windows journals folder changes itself and std can't flush a folder there, so this matches the Unix flush's signature"
+)]
+fn sync_folder(_folder: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn remove(path: &Path) -> Result<(), ForgetSpooledDraftError> {
