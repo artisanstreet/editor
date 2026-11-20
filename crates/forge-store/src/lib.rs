@@ -26,6 +26,7 @@ mod source_index;
 mod sources;
 mod text_search;
 mod threads;
+mod work_spans;
 mod writer;
 
 use crate::error::AtStep as _;

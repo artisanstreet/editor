@@ -560,6 +560,7 @@ impl Tx<'_> {
             | ItemKind::Error { .. } => None,
         };
         let outline = read::outline_entry(self, &item)?;
+        let place_before = crate::work_spans::stored(self, &item.id)?;
         self.sql
             .prepare_cached(include_str!("sql/items/save.sql"))
             .at("items/save.sql")?
@@ -578,6 +579,13 @@ impl Tx<'_> {
                 outline,
             ])
             .at("items/save.sql")?;
+        crate::work_spans::moved(
+            self,
+            &item.thread_id,
+            item.position,
+            &place_before,
+            &crate::work_spans::Place::of(&item),
+        )?;
         crate::content::own(self, &item)?;
         crate::recall::index(self, &item)?;
         self.emit(item.seq, Event::Item { item: item.clone() });

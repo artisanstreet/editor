@@ -1,0 +1,6 @@
+{
+  "transcript_rows_steps_across_hidden_work": {
+    "limit": 400,
+    "reason": "a transcript page reads its visible rows through the partial transcript-rows index and its collapsed work from the writer-kept work_spans table, so 2,000 hidden tool calls between two messages cost the same as two; measured 110 SQLite VM steps on a warm reader, where visiting every hidden row took about 23,000"
+  }
+}

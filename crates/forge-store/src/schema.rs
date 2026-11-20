@@ -168,6 +168,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[],
     &[sql!("migrations/v31.sql")],
     &[sql!("migrations/v32.sql")],
+    &[sql!("migrations/v33.sql"), Step::Rust(backfill_work_spans)],
 ];
 
 pub(crate) const fn version() -> usize {
@@ -228,6 +229,10 @@ fn body(item: &str, text: &str) -> Result<serde_json::Value> {
         item: item.to_owned(),
         source,
     })
+}
+
+fn backfill_work_spans(conn: &Connection) -> Result<()> {
+    Ok(crate::work_spans::backfill(conn)?)
 }
 
 fn backfill_work(conn: &Connection) -> Result<()> {
@@ -674,3 +679,7 @@ mod failure_tests;
 #[cfg(test)]
 #[path = "../tests/schema/diff_totals_migration.rs"]
 mod diff_totals_migration_tests;
+
+#[cfg(test)]
+#[path = "../tests/schema/work_spans_migration.rs"]
+mod work_spans_migration_tests;

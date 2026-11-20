@@ -545,57 +545,6 @@ fn page_runs(conn: &Connection, items: &[Item], work: &[WorkSpan]) -> Result<Vec
     )
 }
 
-fn work_spans(
-    conn: &Connection,
-    thread_id: &ThreadId,
-    after: i64,
-    before: i64,
-    rows: &[Seq],
-) -> Result<Vec<WorkSpan>> {
-    let mut statement = conn
-        .prepare_cached(include_str!("sql/transcript/work_spans.sql"))
-        .at("transcript/work_spans.sql")?;
-    let mut work = statement
-        .query(params![thread_id.as_str(), after, before])
-        .at("transcript/work_spans.sql")?;
-    let mut spans: Vec<WorkSpan> = Vec::new();
-    let mut rows = rows.iter().peekable();
-    while let Some(row) = work.next().at("transcript/work_spans.sql")? {
-        let position: Seq = row.get(0).at("transcript/work_spans.sql")?;
-        let run_id = row
-            .get::<_, Option<String>>(1)
-            .at("transcript/work_spans.sql")?
-            .map(RunId::from);
-        let worked = matches!(
-            row.get_ref(2)
-                .at("transcript/work_spans.sql")?
-                .as_str_or_null()
-                .map_err(rusqlite::Error::from)
-                .at("transcript/work_spans.sql")?,
-            Some("tool" | "agent" | "plan")
-        );
-        let mut broken = false;
-        while rows.next_if(|row| **row < position).is_some() {
-            broken = true;
-        }
-        match spans.last_mut() {
-            Some(span) if !broken && span.run_id == run_id => {
-                span.last = position;
-                span.count += 1;
-                span.worked |= worked;
-            }
-            _ => spans.push(WorkSpan {
-                run_id,
-                first: position,
-                last: position,
-                count: 1,
-                worked,
-            }),
-        }
-    }
-    Ok(spans)
-}
-
 pub(crate) fn transcript_page(
     conn: &Connection,
     thread_id: &ThreadId,
@@ -638,8 +587,7 @@ pub(crate) fn transcript_page(
     } else {
         (far(items.first()).unwrap_or(after), before)
     };
-    let positions: Vec<Seq> = items.iter().map(|item| item.position).collect();
-    let mut work = work_spans(conn, thread_id, from, to, &positions)?;
+    let mut work = crate::work_spans::between(conn, thread_id, from, to)?;
     let runs = page_runs(conn, &items, &work)?;
     budget.items = DEFAULT_PAGE;
     for run in runs.iter().filter(|run| run.status().is_live()) {
