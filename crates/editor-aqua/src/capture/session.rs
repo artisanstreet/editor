@@ -365,6 +365,7 @@ impl Session {
             Step::Key(keystroke) => self.key(keystroke)?,
             Step::Settle(timeout) => self.settle(*timeout)?,
             Step::Capture(path) => self.capture(path)?,
+            Step::StopForge => self.scenario.shutdown(),
             Step::Quit => return Ok(false),
         }
         Ok(true)

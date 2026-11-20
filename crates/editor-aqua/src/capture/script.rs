@@ -50,6 +50,7 @@ pub enum Step {
     Key(Keystroke),
     Settle(Duration),
     Capture(PathBuf),
+    StopForge,
     Quit,
 }
 
@@ -110,6 +111,7 @@ fn parse_step(line: &str) -> Result<Step, StepError> {
             _ => return arguments("an optional <timeout milliseconds>"),
         },
         "capture" if !rest.trim().is_empty() => Step::Capture(PathBuf::from(rest.trim())),
+        "stop-forge" => Step::StopForge,
         "quit" => Step::Quit,
         _ => return Err(StepError::Unknown),
     })
