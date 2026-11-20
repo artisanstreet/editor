@@ -58,9 +58,6 @@ pub type RunGroupError = std::convert::Infallible;
 #[cfg(not(target_os = "linux"))]
 pub type EndRunError = std::convert::Infallible;
 
-#[cfg(not(target_os = "linux"))]
-pub type LeftoverError = std::convert::Infallible;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Containment {
     OwnCgroup,
@@ -121,15 +118,6 @@ impl EngineTree {
 #[cfg(target_os = "linux")]
 pub fn leftover_runs_alive() -> Result<bool, LeftoverError> {
     linux::leftovers_alive()
-}
-
-#[cfg(not(target_os = "linux"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the same signature as Linux, where reading a leftover run's cgroup can fail"
-)]
-pub const fn leftover_runs_alive() -> Result<bool, LeftoverError> {
-    Ok(false)
 }
 
 #[cfg(unix)]

@@ -567,3 +567,21 @@ kind = "function"
 level = "expect"
 target = "cfg(windows)"
 reason = "only the Unix ae and engine-manager tests install executables from other crates"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "forge_engines"
+item = "claudeai::session::FILE_LOCK"
+kind = "static"
+level = "expect"
+target = "cfg(windows)"
+reason = "a Unix-only transport test holds the session file lock to stand in for a slow disk"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "forge_engines"
+item = "opencode::write_agents"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "the Linux sandbox guard test writes OpenCode's execution policy folder to check an Auto run can't reach it"
