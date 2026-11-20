@@ -818,22 +818,22 @@
       "modified": false
     }
   ],
-  "original_integration_inputs": [
+  "integration_inputs": [
     {
       "path": "Cargo.toml",
-      "sha256": "f2afdae56e58f63df7651c43f0709bbf7edf7b2954f7fe21cbef1fbad4af3181"
+      "wires": "onig_sys = { path = \"vendor/highlighting/onig_sys\" }"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "93e4307b281496ba03ecc5d3fe6c63055995a3fc301ed933cc5d09be98906a51"
+      "wires": "name = \"onig_sys\""
     },
     {
       "path": "nix/workspace.nix",
-      "sha256": "11c9045924aeb92f2913963539663fb6a2c98c85e0ea149f3260206a893984f5"
+      "wires": "\"vendor/highlighting\""
     },
     {
-      "path": "nix/release.nix",
-      "sha256": "280c0cc843112e447ebbe9fb2921345a86afe5a0ec9abb3a43736797bdcc579a"
+      "path": "crates/editor-aqua/build.rs",
+      "wires": "\"vendor/highlighting/NOTICE.txt\""
     }
   ],
   "followup_changes": [

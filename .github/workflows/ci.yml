@@ -75,6 +75,8 @@ jobs:
         run: |
           python3 tests/nix/dev.py 2>&1 | tee dev.log
           if grep -q 'skipped' dev.log; then echo 'dev launcher tests were skipped' >&2; exit 1; fi
+      - name: Vendored highlighting provenance tests
+        run: python3 tests/vendor/highlighting/verify.py
       - name: Vendored highlighting provenance
         run: python3 vendor/highlighting/verify.py
       - name: Vendored Mermaid provenance

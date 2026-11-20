@@ -22,9 +22,10 @@ full internal suite; the standalone `validation` package exercises the changed
 module and bundled grammars without pretending that suite is available.
 
 `PROVENANCE.json` records upstream archive SHA-256 values, package VCS revisions,
-licenses, and the upstream/current checksum of every retained package file.
+licenses, the upstream/current checksum of every retained package file, and the
+repository files that wire the packages in; `verify.py` checks both.
 `NOTICE.txt` contains the upstream notices, including the bundled C engine's
-notice. Release archives include it as `HIGHLIGHTING-NOTICES.txt`.
+notice. The Editor embeds it in its third-party notices.
 
 Run from the repository root:
 
