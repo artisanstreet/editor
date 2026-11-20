@@ -152,6 +152,7 @@ async fn a_threads_gateway_address_acts_only_while_one_of_its_runs_is_live() {
         .await
         .unwrap();
     fixture.settled().await;
+    fixture.quiescent().await;
     let (token, first) = during.lock().unwrap()[0].clone();
     let first = first.expect("the address acts for its thread while the run is live");
     assert_eq!(first.thread, fixture.thread_id);
