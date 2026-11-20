@@ -92,7 +92,9 @@ pub mod validator;
 
 // Re-export commonly used types at crate root for ergonomic library usage
 pub use config::{Config, LayoutConfig, RenderConfig};
-pub use error::ParseError;
+pub use error::{
+    LoadConfigError, ParseError, ParseMermaidError, WriteLayoutDumpError, WriteOutputSvgError,
+};
 pub use ir::{
     DiagramKind, Direction, Edge, EdgeArrowhead, EdgeDecoration, EdgeStyle, Graph, Node, NodeLink,
     NodeShape, SequenceActivation, SequenceActivationKind, SequenceBox, StateNote,
@@ -187,7 +189,7 @@ impl RenderOptions {
 /// # Errors
 ///
 /// Returns an error if the diagram syntax is invalid.
-pub fn render(input: &str) -> anyhow::Result<String> {
+pub fn render(input: &str) -> Result<String, ParseError> {
     render_with_options(input, RenderOptions::default())
 }
 
@@ -204,7 +206,7 @@ pub fn render(input: &str) -> anyhow::Result<String> {
 ///
 /// let svg = render_with_options("flowchart LR; A-->B", opts).unwrap();
 /// ```
-pub fn render_with_options(input: &str, options: RenderOptions) -> anyhow::Result<String> {
+pub fn render_with_options(input: &str, options: RenderOptions) -> Result<String, ParseError> {
     let parsed = parse_mermaid_strict(input)?;
     let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
     let svg = render_svg(&layout, &options.theme, &options.layout);
@@ -214,7 +216,7 @@ pub fn render_with_options(input: &str, options: RenderOptions) -> anyhow::Resul
 /// Measure the SVG dimensions Mermaid would render with the given options.
 ///
 /// This runs parse and layout, but does not allocate or serialize the full SVG.
-pub fn measure(input: &str, options: RenderOptions) -> anyhow::Result<SvgDimensions> {
+pub fn measure(input: &str, options: RenderOptions) -> Result<SvgDimensions, ParseError> {
     measure_with_dimensions(input, options, None)
 }
 
@@ -228,7 +230,7 @@ pub fn measure_with_dimensions(
     input: &str,
     options: RenderOptions,
     dimensions: Option<(f32, f32)>,
-) -> anyhow::Result<SvgDimensions> {
+) -> Result<SvgDimensions, ParseError> {
     let parsed = parse_mermaid_strict(input)?;
     let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
     Ok(measure_svg_dimensions(&layout, &options.layout, dimensions))
@@ -329,7 +331,10 @@ impl RenderDetailedResult {
 /// println!("  Layout: {}us", result.layout_us);
 /// println!("  Render: {}us", result.render_us);
 /// ```
-pub fn render_with_timing(input: &str, options: RenderOptions) -> anyhow::Result<RenderResult> {
+pub fn render_with_timing(
+    input: &str,
+    options: RenderOptions,
+) -> Result<RenderResult, ParseMermaidError> {
     let detailed = render_with_detailed_timing(input, options)?;
     Ok(RenderResult {
         svg: detailed.svg,
@@ -346,7 +351,7 @@ pub fn render_with_timing(input: &str, options: RenderOptions) -> anyhow::Result
 pub fn render_with_detailed_timing(
     input: &str,
     options: RenderOptions,
-) -> anyhow::Result<RenderDetailedResult> {
+) -> Result<RenderDetailedResult, ParseMermaidError> {
     use std::time::Instant;
 
     let t0 = Instant::now();

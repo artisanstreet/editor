@@ -1,4 +1,5 @@
 use crate::config::LayoutConfig;
+use crate::error::WriteOutputSvgError;
 use crate::layout::label_placement::{
     edge_endpoint_label_position, edge_label_padding, endpoint_label_padding,
 };
@@ -8,7 +9,6 @@ use crate::layout::{
 };
 use crate::text_metrics;
 use crate::theme::{Theme, adjust_color, parse_color_to_hsl};
-use anyhow::Result;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -5797,10 +5797,13 @@ fn render_er_node(
     svg
 }
 
-pub fn write_output_svg(svg: &str, output: Option<&Path>) -> Result<()> {
+pub fn write_output_svg(svg: &str, output: Option<&Path>) -> Result<(), WriteOutputSvgError> {
     match output {
         Some(path) => {
-            std::fs::write(path, svg)?;
+            std::fs::write(path, svg).map_err(|source| WriteOutputSvgError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
         }
         None => {
             print!("{}", svg);

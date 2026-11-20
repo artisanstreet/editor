@@ -20,7 +20,7 @@
   "changes": [
     {
       "file": "Cargo.toml",
-      "reason": "Rewritten manifest: library target only, no cli/png features, no fontdb, ttf-parser, resvg, usvg or clap dependencies."
+      "reason": "Rewritten manifest: library target only, no cli/png features, no anyhow, fontdb, ttf-parser, resvg, usvg or clap dependencies."
     },
     {
       "file": "src/text_metrics.rs",
@@ -28,15 +28,27 @@
     },
     {
       "file": "src/lib.rs",
-      "reason": "cli module, run and write_output_png re-exports and their feature documentation removed."
+      "reason": "cli module, run and write_output_png re-exports and their feature documentation removed; render, measure and timing entry points return typed errors instead of anyhow."
     },
     {
       "file": "src/render.rs",
-      "reason": "PNG output (write_output_png, resvg colour and font helpers and their tests) removed."
+      "reason": "PNG output (write_output_png, resvg colour and font helpers and their tests) removed; write_output_svg returns WriteOutputSvgError instead of anyhow."
     },
     {
       "file": "src/parser.rs",
-      "reason": "Dead parse_xy_series_line removed."
+      "reason": "Dead parse_xy_series_line removed; parse_mermaid returns ParseMermaidError instead of anyhow."
+    },
+    {
+      "file": "src/error.rs",
+      "reason": "anyhow bridge and its test removed; ParseMermaidError, LoadConfigError, WriteLayoutDumpError and WriteOutputSvgError added."
+    },
+    {
+      "file": "src/config.rs",
+      "reason": "load_config and load_config_with_theme return LoadConfigError instead of anyhow."
+    },
+    {
+      "file": "src/layout_dump.rs",
+      "reason": "write_layout_dump returns WriteLayoutDumpError instead of anyhow."
     }
   ],
   "omitted_upstream_files": [
@@ -207,7 +219,7 @@
     {
       "path": "Cargo.toml",
       "upstream_sha256": "bb6608279e265d7e7cca1b34bd04a3cae00e565dbce9f58f5aa42db691398098",
-      "sha256": "84c76ecac6075399dca37ed479f74fe6aab521cbc4874ff7679c339bf2215202",
+      "sha256": "de83130136ce0315760cdd7750a28989451ac156e90528924271ecfc4e4953f3",
       "modified": true
     },
     {
@@ -219,8 +231,8 @@
     {
       "path": "src/config.rs",
       "upstream_sha256": "6a96d686f0482607b094dee08200df384a539773d1e826028f40b8418a03a8db",
-      "sha256": "6a96d686f0482607b094dee08200df384a539773d1e826028f40b8418a03a8db",
-      "modified": false
+      "sha256": "1d3c36efba9747c44b77c2bc08b0302fa25d4c8f215422174e834c0f4df70194",
+      "modified": true
     },
     {
       "path": "src/edge_geometry.rs",
@@ -231,8 +243,8 @@
     {
       "path": "src/error.rs",
       "upstream_sha256": "c11ee889b0736e26d3b83cd5a686c10d2b96c3221b1f64e70e1b4c39cf92164a",
-      "sha256": "c11ee889b0736e26d3b83cd5a686c10d2b96c3221b1f64e70e1b4c39cf92164a",
-      "modified": false
+      "sha256": "1e353bc880396726fa5ac91812e92dfb49771a112d45686ad9c7f561a0d29373",
+      "modified": true
     },
     {
       "path": "src/ir.rs",
@@ -489,25 +501,25 @@
     {
       "path": "src/layout_dump.rs",
       "upstream_sha256": "f5c879b68c7132e229d2db8d29657b9766cc0dbd0779f73a06747a32ac8dc628",
-      "sha256": "f5c879b68c7132e229d2db8d29657b9766cc0dbd0779f73a06747a32ac8dc628",
-      "modified": false
+      "sha256": "0dee2d45a05eedf8c80f669d633bf1435b9165e789b6962d7409788067f3cb95",
+      "modified": true
     },
     {
       "path": "src/lib.rs",
       "upstream_sha256": "9a1c36a3b8c2f4288370b6fe7d6757289c44a2e86e2c36c14a342e28887b4981",
-      "sha256": "affc1d11b163aa1d2a6912cf04efed72cc44780e6b91a0963c532ef65c3e531a",
+      "sha256": "756bb635a9ded452fc738331b7a0803f99c639acabca0bb0438474debf726a7d",
       "modified": true
     },
     {
       "path": "src/parser.rs",
       "upstream_sha256": "043aa5df6e944be02e50d879a2c4c384fae4dd9a06ad540b5e8c8b55d6972dd1",
-      "sha256": "e9ad3731b49123ebbfbab4c9b0631e1fb83764026beea9a5b2d6d0d21d80a36b",
+      "sha256": "72ec809e476da4fb3976d92c22febb310a7690ad913bd60de58c69f22cd14f47",
       "modified": true
     },
     {
       "path": "src/render.rs",
       "upstream_sha256": "026efceab06b86752789ea2b5c37ecac569b8cd020f97c776f444bec0a2166b4",
-      "sha256": "e6b736addfc526f484dd4bc8d0e23c4c1192b73820aa5197c4087733c8f0b667",
+      "sha256": "4ca17dd6ab6df2a3d2da2c56498602c1c06a24d3034f00e2bb0dc94db2034ece",
       "modified": true
     },
     {

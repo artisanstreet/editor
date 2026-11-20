@@ -31,6 +31,6 @@ allow = [
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
-deny = [{ crate = "anyhow", wrappers = ["mermaid-rs-renderer"] }]
+deny = [{ crate = "anyhow" }]
 skip = []
 skip-tree = []
