@@ -111,7 +111,7 @@ pub enum ResolvePrompt {
     RestoreEngine { engine: EngineId },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServer {
     pub name: String,
     #[serde(default)]
@@ -126,6 +126,32 @@ pub struct McpServer {
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sse: bool,
+}
+
+fn origin(url: &str) -> String {
+    let (scheme, rest) = url
+        .split_once("://")
+        .map_or(("", url), |(scheme, rest)| (scheme, rest));
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if scheme.is_empty() {
+        host.to_owned()
+    } else {
+        format!("{scheme}://{host}")
+    }
+}
+
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args.len())
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("url", &self.url.as_deref().map(origin))
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("sse", &self.sse)
+            .finish()
+    }
 }
 
 pub const MCP_AUTH_KEY: &str = "mcp_auth";
@@ -230,3 +256,7 @@ impl SkillAction {
 #[cfg(test)]
 #[path = "../tests/extensions/engine_command.rs"]
 mod engine_command_tests;
+
+#[cfg(test)]
+#[path = "../tests/extensions/mcp_server.rs"]
+mod mcp_server_tests;

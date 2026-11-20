@@ -40,3 +40,29 @@ fn a_logged_redeem_request_never_shows_the_code_or_verifier() {
     assert!(!logged.contains("auth-code-7f3a"), "{logged}");
     assert!(!logged.contains("pkce-verifier-9c1d"), "{logged}");
 }
+
+#[test]
+fn logged_sign_in_requests_show_none_of_their_secrets() {
+    let logged = format!(
+        "{:?} {:?} {:?}",
+        MagicRequestResponse {
+            request_id: "logreq_1".to_owned(),
+            request_secret: "request-secret".to_owned(),
+            expires_at: "t".to_owned(),
+        },
+        MagicStatusRequest {
+            request_id: "logreq_1".to_owned(),
+            request_secret: "request-secret".to_owned(),
+        },
+        MagicFinalizeRequest {
+            request_id: "logreq_1".to_owned(),
+            request_secret: "request-secret".to_owned(),
+            totp_code: Some("totp-secret".to_owned()),
+            recovery_code: Some("recovery-secret".to_owned()),
+        },
+    );
+    for secret in ["request-secret", "totp-secret", "recovery-secret"] {
+        assert!(!logged.contains(secret), "{secret} in {logged}");
+    }
+    assert!(logged.contains("logreq_1"), "{logged}");
+}
