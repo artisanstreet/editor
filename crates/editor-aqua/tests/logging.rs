@@ -59,3 +59,30 @@ fn an_unusable_log_folder_falls_back_to_a_temporary_log_that_names_the_cause() {
     );
     assert!(log.contains("the Editor could not launch"), "{log}");
 }
+
+#[test]
+fn a_launch_without_a_data_folder_says_why_in_the_temporary_log() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_editor-aqua"))
+        .env_remove("ARTISAN_EDITOR_DATA")
+        .env_remove("RUST_LOG")
+        .env("XDG_DATA_HOME", "relative/data")
+        .env("LOCALAPPDATA", "relative/data")
+        .env("TMPDIR", root.path())
+        .env("TMP", root.path())
+        .env("TEMP", root.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the launch must fail");
+    let fallback = root
+        .path()
+        .join("artisan-editor")
+        .join("logs")
+        .join("editor.log");
+    let log = std::fs::read_to_string(&fallback).unwrap();
+    assert!(
+        log.contains("the Editor could not launch error=find the Editor's data folder"),
+        "{log}"
+    );
+    assert!(log.contains("relative/data"), "{log}");
+}

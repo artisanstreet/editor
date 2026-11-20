@@ -7,6 +7,15 @@ pub enum LaunchError {
     DataDir(#[source] DataDirError),
     #[error("start logging")]
     Logging(#[source] diagnostics::SubscribeError),
+    #[error(
+        "start logging, and the temporary log failed too: {}",
+        diagnostics::chain(record)
+    )]
+    Unlogged {
+        #[source]
+        source: diagnostics::SubscribeError,
+        record: crate::logging::RecordError,
+    },
     #[error("check whether this program installs or updates the Editor")]
     Setup(#[source] crate::setup::BeginError),
     #[cfg(feature = "qualification")]
@@ -129,6 +138,10 @@ fn prepare_qualification() -> Option<Result<(), LaunchError>> {
 pub fn launch() -> Result<(), LaunchError> {
     #[cfg(windows)]
     aqua::native::startup_mark("main_enter");
+    let qualifying = std::env::args().any(|argument| argument == "--qualify-editor");
+    if !qualifying {
+        start_logging()?;
+    }
     #[cfg(windows)]
     match aqua::prelude::handle_launch() {
         aqua::prelude::Launch::Handled => return Ok(()),
@@ -137,27 +150,48 @@ pub fn launch() -> Result<(), LaunchError> {
         }
         aqua::prelude::Launch::Ordinary => {}
     }
-    let qualifying = std::env::args().any(|argument| argument == "--qualify-editor");
-    if !qualifying {
-        let data = EditorFiles::default_location()
-            .map_err(LaunchError::DataDir)?
-            .dir;
-        diagnostics::CrashReporter {
-            app: artisan_paths::App::Editor,
-            version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
-            recent: crate::logging::init(&data).map_err(LaunchError::Logging)?,
-            data,
-        }
-        .install();
-    }
     let launched = run(qualifying);
     if let Err(error) = &launched {
-        tracing::error!(
-            error = %::diagnostics::chain(error),
-            "the Editor could not launch"
-        );
+        logged(error);
     }
     launched
+}
+
+fn logged(error: &LaunchError) {
+    tracing::error!(
+        error = %::diagnostics::chain(error),
+        "the Editor could not launch"
+    );
+}
+
+fn start_logging() -> Result<(), LaunchError> {
+    let files = EditorFiles::default_location();
+    let recent = match crate::logging::init(files.as_ref().ok().map(|files| files.dir.as_path())) {
+        Ok(recent) => recent,
+        Err(source) => {
+            return Err(match crate::logging::record_in_fallback(&source) {
+                Ok(()) => LaunchError::Logging(source),
+                Err(record) => LaunchError::Unlogged { source, record },
+            });
+        }
+    };
+    match files {
+        Ok(files) => {
+            diagnostics::CrashReporter {
+                app: artisan_paths::App::Editor,
+                version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
+                recent,
+                data: files.dir,
+            }
+            .install();
+            Ok(())
+        }
+        Err(source) => {
+            let error = LaunchError::DataDir(source);
+            logged(&error);
+            Err(error)
+        }
+    }
 }
 
 #[expect(

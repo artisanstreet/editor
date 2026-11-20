@@ -19,3 +19,4 @@ pub use editor_ui as ui;
 
 mod launch;
 pub use launch::{LaunchError, launch};
+pub use logging::RecordError;
