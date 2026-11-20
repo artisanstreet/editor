@@ -9,9 +9,10 @@ impl RootViews {
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
+        now: std::time::Instant,
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.navigation");
-        let frame = self.navigation.sync(ui, std::time::Instant::now());
+        let frame = self.navigation.sync(ui, now);
         if frame.changed || frame.animating {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
@@ -20,6 +21,7 @@ impl RootViews {
 
     pub(super) fn apply_navigation(&mut self, shell: &mut Shell, reduced: bool) -> bool {
         use crate::frame::sidebar::Command;
+        let now = shell.core.clock().now();
         let mut outlined = false;
         let Some(workspace) = shell.entry.workspace_mut() else {
             return outlined;
@@ -32,7 +34,7 @@ impl RootViews {
                 Command::Project(project) => workspace.sidebar.new_thread(core, Some(project)),
                 Command::Agent(agent) => workspace.conversation.open_agent(core, agent),
                 Command::Outline => {
-                    self.navigation.toggle(std::time::Instant::now(), reduced);
+                    self.navigation.toggle(now, reduced);
                     outlined = true;
                 }
                 Command::OpenUrl(url) => {
@@ -68,7 +70,7 @@ impl RootViews {
                 }
             }
         }
-        if !self.sidebar.refresh_due(std::time::Instant::now()) {
+        if !self.sidebar.refresh_due(now) {
             return outlined;
         }
         let open_project = workspace.sidebar.open.as_ref().and_then(|thread| {

@@ -172,7 +172,7 @@ impl RootViews {
                     scope.instance,
                     image,
                     opener_key,
-                    std::time::Instant::now(),
+                    shell.core.clock().now(),
                 );
                 self.dispose_color_menu(ui);
                 self.image_preview = Some(ImagePreview {

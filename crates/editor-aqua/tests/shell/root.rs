@@ -614,7 +614,10 @@ fn a_wheel_notch_on_the_transcript_glides_by_the_frame_clock() {
         delta: ScrollDelta { x: 0.0, y: 16.0 },
     };
     let frame = aqua::Instant::from_nanos(5_000_000_000);
-    assert_eq!(root.pre_input(&mut resources.ui, &notch, frame), Some(true));
+    assert_eq!(
+        root.pre_input(&shell, &mut resources.ui, &notch, frame),
+        Some(true)
+    );
     assert!(root.glide_active());
     root.advance_glides(&mut shell, &mut resources.ui, frame);
     assert!(

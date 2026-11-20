@@ -94,7 +94,7 @@ impl RootViews {
                     }
                 }
                 crate::sidebar::controller::SidebarEffect::Reveal(hit) => {
-                    self.reveal = Some(reveal::Reveal::new(hit));
+                    self.reveal = Some(reveal::Reveal::new(hit, shell.core.clock().now()));
                     ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
                 }
             }
@@ -159,12 +159,17 @@ impl RootViews {
         changed
     }
 
-    pub(super) fn schedule_sidebar(&self, ctx: &mut AppCtx<'_>, window: AquaWindowId) {
+    pub(super) fn schedule_sidebar(
+        &self,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+        now: std::time::Instant,
+    ) {
         if self.sidebar.animating() {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         if let Some(deadline) = self.sidebar.deadline() {
-            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            let wait = deadline.saturating_duration_since(now);
             ctx.request_animation_deadline(window, ctx.now() + wait);
         }
     }

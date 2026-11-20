@@ -242,7 +242,7 @@ fn measured_composer(
         parts.attachments,
         parts.mention_overlay,
         parts.thread_error,
-        std::time::Instant::now(),
+        core.clock().now(),
     );
     let measure = aqua_ui::element::Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))

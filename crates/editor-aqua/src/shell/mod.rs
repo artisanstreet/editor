@@ -23,6 +23,7 @@ pub mod repository;
 pub mod root;
 pub mod selection;
 pub mod source;
+pub(crate) mod stopwatch;
 pub mod thread_navigation;
 pub mod titlebar;
 pub mod view;

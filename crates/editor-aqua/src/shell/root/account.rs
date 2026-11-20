@@ -36,7 +36,7 @@ impl RootViews {
             email_feedback: height(EMAIL_FEEDBACK),
             code_feedback: height(CODE_FEEDBACK),
         };
-        let measured = sign_in.measure(sizes, std::time::Instant::now(), reduced);
+        let measured = sign_in.measure(sizes, shell.core.clock().now(), reduced);
         let dirty = measured || painted != sign_in.art().is_some();
         if dirty || sign_in.animating() {
             self.sign_in_dirty |= dirty;
@@ -87,7 +87,7 @@ impl RootViews {
         } else {
             None
         };
-        self.avatar.want(url, std::time::Instant::now());
+        self.avatar.want(url, shell.core.clock().now());
         self.account_snapshot(shell)
     }
 
@@ -144,7 +144,7 @@ impl RootViews {
                     account: &account,
                     menu: &menu,
                     width,
-                    now: std::time::Instant::now(),
+                    now: shell.core.clock().now(),
                     emit: Rc::new(move |event| emit(crate::frame::sidebar::Event::Account(event))),
                 },
             )

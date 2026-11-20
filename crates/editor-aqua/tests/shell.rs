@@ -40,6 +40,8 @@ mod scale;
 mod scroll_edge;
 #[path = "shell/settings_scroll.rs"]
 mod settings_scroll;
+#[path = "shell/stopwatch.rs"]
+mod stopwatch;
 #[expect(
     clippy::disallowed_methods,
     reason = "test fixture driving the raw aqua text and element APIs, not view code"

@@ -67,7 +67,13 @@ pub trait SectionViews {
     ) -> bool {
         false
     }
-    fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent, _now: Instant) -> Option<bool> {
+    fn pre_input(
+        &mut self,
+        _shell: &Shell,
+        _ui: &mut UiApp,
+        _input: &InputEvent,
+        _now: Instant,
+    ) -> Option<bool> {
         None
     }
     fn open_composer_images(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
@@ -262,7 +268,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 tracing::warn!(%error, "could not advance composer popup");
             }
             owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
-            owner.advance_primary(self.ui.ui_mut(), std::time::Instant::now());
+            owner.advance_primary(self.ui.ui_mut(), self.shell.core.clock().now());
             if owner.needs_animation(self.ui.ui()) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
@@ -271,7 +277,7 @@ impl<V: SectionViews> ShellApplication<V> {
             self.ui.ui().host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let frame = editor_ui::kit::hover::live::advance(
             self.ui.ui_mut(),
-            std::time::Instant::now(),
+            self.shell.core.clock().now(),
             reduced,
         );
         if frame.changed || frame.animating {
@@ -425,7 +431,7 @@ impl<V: SectionViews> ShellApplication<V> {
     ) {
         let _tm = Tm::new("rebuild");
         let _rebuild_span = crate::core::diagnostics::rebuild_stats::span("rb_total");
-        self.shell.live.flushed(std::time::Instant::now());
+        self.shell.live.flushed(self.shell.core.clock().now());
         let mut reasons = invalidation.labels();
         reasons.extend(crate::core::diagnostics::rebuild_stats::take_notes());
         crate::core::diagnostics::rebuild_stats::record_rebuild(&reasons);
@@ -534,7 +540,8 @@ impl<V: SectionViews> ShellApplication<V> {
                     .and_then(|workspace| workspace.sidebar.next_tick())
                 {
                     let delay = std::time::Duration::from_millis(
-                        u64::try_from(at.saturating_sub(artisan_api::now())).unwrap_or(0),
+                        u64::try_from(at.saturating_sub(self.shell.core.clock().timestamp()))
+                            .unwrap_or(0),
                     );
                     ctx.request_animation_deadline(id, ctx.now() + delay);
                 }
@@ -576,7 +583,7 @@ impl<V: SectionViews> ShellApplication<V> {
             return false;
         }
         crate::core::diagnostics::rebuild_stats::record_event("transcript_subtree");
-        self.shell.live.flushed(std::time::Instant::now());
+        self.shell.live.flushed(self.shell.core.clock().now());
         self.views
             .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
         if self.ui.ui().tree().invalidation_epoch() != epoch {
@@ -599,7 +606,7 @@ impl<V: SectionViews> ShellApplication<V> {
             Refresh::Sections | Refresh::FrameSections => {
                 let refreshed = self.refresh_sections(ctx, id, refresh);
                 if refreshed {
-                    self.shell.live.flushed(std::time::Instant::now());
+                    self.shell.live.flushed(self.shell.core.clock().now());
                     self.views
                         .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
                     self.shell.bind(ctx, id);
@@ -779,7 +786,7 @@ impl<V: SectionViews> ShellApplication<V> {
             self.views
                 .open_composer_images(&mut self.shell, self.ui.ui_mut()),
         );
-        if let Some(wait) = self.shell.live.remaining(std::time::Instant::now()) {
+        if let Some(wait) = self.shell.live.remaining(self.shell.core.clock().now()) {
             ctx.request_animation_deadline(id, ctx.now() + wait);
         }
         aqua_core::checkpoint::reach();
@@ -796,7 +803,7 @@ impl<V: SectionViews> ShellApplication<V> {
             if workspace.sync_composer_tooltip(
                 self.ui.ui_mut(),
                 &self.shell.preferences.theme(),
-                std::time::Instant::now(),
+                self.shell.core.clock().now(),
             ) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
@@ -805,7 +812,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 .as_ref()
                 .and_then(editor_composer::view::ComposerOwner::tooltip_deadline)
             {
-                let delay = deadline.saturating_duration_since(std::time::Instant::now());
+                let delay = deadline.saturating_duration_since(self.shell.core.clock().now());
                 ctx.request_animation_deadline(id, ctx.now() + delay);
             }
         }
@@ -901,7 +908,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if self
             .shell
             .live
-            .remaining(std::time::Instant::now())
+            .remaining(self.shell.core.clock().now())
             .is_some_and(|wait| wait.is_zero())
         {
             self.drain(ctx, id, false);
@@ -964,7 +971,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     viewport,
                     crate::shell::wheel::kept_offset(self.ui.ui(), crate::ui::scroll::MODEL_MENU).y,
                     &images,
-                    std::time::Instant::now(),
+                    self.shell.core.clock().now(),
                 ) {
                     Ok(content) => {
                         if let Err(error) = owner.refresh_popup_content(
@@ -1008,8 +1015,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 Some(ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL);
         }
         if let Some(workspace) = self.shell.entry.workspace_mut() {
-            if workspace.sync_composer_tooltip(self.ui.ui_mut(), &theme, std::time::Instant::now())
-            {
+            if workspace.sync_composer_tooltip(
+                self.ui.ui_mut(),
+                &theme,
+                self.shell.core.clock().now(),
+            ) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
             refresh |= causes.note(
@@ -1027,7 +1037,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             refresh |= causes.note(Cause::InspectorTick, workspace.inspector.tick(ctx.now()));
             let reduced = self.ui.ui().host().motion().reduced_motion()
                 == aqua_ui::motion::ReducedMotion::Reduce;
-            let now = std::time::Instant::now();
+            let now = self.shell.core.clock().now();
             let sidebar_moving = workspace.sidebar.advance_motion(now, reduced)
                 | workspace.settings_sidebar.advance_motion(now, reduced);
             if sidebar_moving {
@@ -1037,9 +1047,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             if workspace
                 .sidebar
                 .next_tick()
-                .is_some_and(|at| at <= artisan_api::now())
+                .is_some_and(|at| at <= self.shell.core.clock().timestamp())
             {
-                workspace.sidebar.sync(&self.shell.core, artisan_api::now());
+                workspace
+                    .sidebar
+                    .sync(&self.shell.core, self.shell.core.clock().timestamp());
                 refresh = causes.note(Cause::SidebarTick, true);
             }
             refresh |= causes.note(
@@ -1173,7 +1185,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             let _tm = Tm::new("input.route");
             let pre = {
                 let _tm = Tm::new("input.pre");
-                self.views.pre_input(self.ui.ui_mut(), event, ctx.now())
+                self.views
+                    .pre_input(&self.shell, self.ui.ui_mut(), event, ctx.now())
             };
             if let Some(consumed) = pre {
                 glided = matches!(event, InputEvent::Scroll { .. });
@@ -1256,15 +1269,15 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if self
             .shell
             .live
-            .remaining(std::time::Instant::now())
+            .remaining(self.shell.core.clock().now())
             .is_some_and(|wait| wait.is_zero())
         {
             let _queued = self.shell.core.wake_mailbox().sender().send(());
         }
         crate::core::diagnostics::open_timing::externals_begin();
-        let started = std::time::Instant::now();
+        let started = crate::shell::stopwatch::Stopwatch::start();
         self.ui.externals(frame);
-        crate::core::diagnostics::open_timing::scene(started.elapsed());
+        crate::core::diagnostics::open_timing::scene(started.measured());
     }
     fn build_scene(&mut self, window: &ObservedWindowState, now: Instant) -> Option<Instant> {
         let _tm = Tm::new("scene");
@@ -1397,7 +1410,7 @@ fn window_root(element: Element) -> Element {
 
 pub(crate) struct Tm {
     name: &'static str,
-    started: std::time::Instant,
+    started: crate::shell::stopwatch::Stopwatch,
     heap: aqua::profile::alloc::HeapCounts,
     _span: crate::core::diagnostics::rebuild_stats::Span,
 }
@@ -1423,7 +1436,7 @@ impl Tm {
         crate::core::diagnostics::rebuild_stats::record_event(name);
         Self {
             name,
-            started: std::time::Instant::now(),
+            started: crate::shell::stopwatch::Stopwatch::start(),
             heap: aqua::profile::alloc::snapshot(),
             _span: crate::core::diagnostics::rebuild_stats::span(name),
         }
@@ -1431,7 +1444,7 @@ impl Tm {
 }
 impl Drop for Tm {
     fn drop(&mut self) {
-        let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        let ms = self.started.measured().as_secs_f64() * 1000.0;
         if aqua::profile::enabled() {
             let heap = aqua::profile::alloc::snapshot().since(self.heap);
             if ms > 0.25 || heap.allocs > 8 {

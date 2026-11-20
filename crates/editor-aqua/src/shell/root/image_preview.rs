@@ -55,7 +55,7 @@ impl RootViews {
             instance,
             image,
             opener_key,
-            std::time::Instant::now(),
+            shell.core.clock().now(),
         );
         self.dispose_color_menu(ui);
         self.image_preview = Some(ImagePreview {
@@ -127,7 +127,7 @@ impl RootViews {
             return true;
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         let events = std::mem::take(&mut *self.preview_actions.borrow_mut());
         let mut changed = false;
         for (generation, action) in events {

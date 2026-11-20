@@ -266,7 +266,8 @@ impl Shell {
         let thread_on_screen = matches!(self.core.screen(), Screen::Thread { .. });
         let entry = &mut self.entry;
         let live = &mut self.live;
-        let now = std::time::Instant::now();
+        let clock = self.core.clock().clone();
+        let now = clock.now();
         let mut exhausted = true;
         let mut live_events = super::live_batch::LiveBatch::default();
         let mut apply_event = |core: &mut Core, event: CoreEvent| {
@@ -298,7 +299,7 @@ impl Shell {
                 exhausted = false;
                 break;
             }
-            if pending && now.elapsed() >= DRAIN_BUDGET {
+            if pending && clock.now().saturating_duration_since(now) >= DRAIN_BUDGET {
                 break;
             }
         }

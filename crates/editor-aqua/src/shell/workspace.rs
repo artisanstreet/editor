@@ -134,6 +134,7 @@ impl SidePanel {
     reason = "independent dirty and pending flags for separate subsystems, each cleared on its own"
 )]
 pub struct Workspace {
+    clock: crate::core::Clock,
     pub(crate) selections: crate::shell::selection::SelectionScope,
     pub(crate) inspector: crate::inspector::InspectorOwner,
     pub(crate) conversation_selection: crate::conversation::presentation::SelectionOwners,
@@ -242,6 +243,7 @@ impl Workspace {
             crate::conversation::presentation::MarkdownOwners::new(selections.conversation),
         ));
         let mut workspace = Self {
+            clock: core.clock().clone(),
             selections,
             inspector,
             conversation_selection,
@@ -469,8 +471,8 @@ impl Workspace {
         if self.repository_pending {
             self.repository_pending = false;
             self.repository.sync(core);
-            self.sidebar.sync(core, artisan_api::now());
-            self.settings_sidebar.sync(core, artisan_api::now());
+            self.sidebar.sync(core, self.clock.timestamp());
+            self.settings_sidebar.sync(core, self.clock.timestamp());
             self.conversation.sync_screen(core);
             self.sync_composer(core, ui);
             self.marketplace.sync(core);
@@ -498,8 +500,8 @@ impl Workspace {
                 .on_core_event(core, &self.conversation, ui, event);
             return;
         }
-        self.sidebar.sync(core, artisan_api::now());
-        self.settings_sidebar.sync(core, artisan_api::now());
+        self.sidebar.sync(core, self.clock.timestamp());
+        self.settings_sidebar.sync(core, self.clock.timestamp());
         if matches!(
             event,
             CoreEvent::SettingsChanged | CoreEvent::HostsChanged | CoreEvent::ScreenChanged
@@ -630,7 +632,7 @@ impl Workspace {
                 CodeAction::Copy(CopyEffect::Clipboard(request)) => {
                     match ctx.clipboard().set_text(request.text().to_owned()) {
                         Ok(()) => {
-                            let deadline = request.copied(std::time::Instant::now());
+                            let deadline = request.copied(self.clock.now());
                             self.request_code_frame(ctx, window);
                             self.wake_code_at(ctx, window, deadline);
                         }
@@ -668,7 +670,7 @@ impl Workspace {
         window: aqua::prelude::AquaWindowId,
         deadline: std::time::Instant,
     ) {
-        let delay = deadline.saturating_duration_since(std::time::Instant::now());
+        let delay = deadline.saturating_duration_since(self.clock.now());
         let at = ctx.now() + delay;
         self.code_deadline = Some(self.code_deadline.map_or(at, |previous| previous.min(at)));
         ctx.request_animation_deadline(window, at);
@@ -739,7 +741,7 @@ impl Workspace {
                         viewport,
                         crate::shell::wheel::kept_offset(ui, crate::ui::scroll::MODEL_MENU).y,
                         assets,
-                        std::time::Instant::now(),
+                        self.clock.now(),
                     ) {
                         Ok(content) => Some(content),
                         Err(error) => {
@@ -787,7 +789,7 @@ impl Workspace {
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let frame = editor_ui::kit::hover::live::advance(ui, std::time::Instant::now(), reduced);
+        let frame = editor_ui::kit::hover::live::advance(ui, self.clock.now(), reduced);
         frame.changed || frame.animating
     }
 
@@ -1347,7 +1349,7 @@ impl Workspace {
         let attachments = crate::composer::view::attachments(
             theme,
             &composer,
-            std::time::Instant::now(),
+            self.clock.now(),
             reduced_motion,
             &emit,
         );
@@ -1488,7 +1490,7 @@ impl Workspace {
             &self.usage,
             core,
             theme,
-            artisan_api::now(),
+            self.clock.timestamp(),
             &self.usage_emit(),
         )
     }
@@ -1665,7 +1667,7 @@ impl Workspace {
         let tm_4 = crate::shell::application::Tm::new("dd.qpages2");
         self.sync_question_pages(core);
         drop(tm_4);
-        let now = artisan_api::now();
+        let now = self.clock.timestamp();
         let tm_5 = crate::shell::application::Tm::new("dd.sidebar");
         let sidebar = self.sidebar.drain(core, now);
         drop(tm_5);

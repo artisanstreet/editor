@@ -98,17 +98,20 @@ fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
     use editor_aqua::core::HostId;
     use editor_aqua::shell::connection::{ConnectionPresenter, Owner};
     use editor_aqua::ui::theme::ArtisanTheme;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let theme = ArtisanTheme::resolved();
     let waiting = Owner::Thread(HostId("gone".into()), ThreadId::from("waiting"));
     let mut presenter = ConnectionPresenter::default();
-    let opened = Instant::now();
+    let manual = test_support::clock::ManualClock::starting_at(1_700_000_000_000);
+    let clock = manual.clock();
+    let opened = clock.now();
     let reveal = opened + Duration::from_millis(500);
-    for rebuilt in [0, 100, 300] {
-        let now = opened + Duration::from_millis(rebuilt);
+    for (rebuilt, step) in [(0, 0), (100, 100), (300, 200)] {
+        manual.advance(Duration::from_millis(step));
+        let now = clock.now();
         presenter.hold(Some(waiting.clone()));
-        let _mark = presenter.waiting(&theme, now, false);
+        let _mark = presenter.waiting(&theme, &clock, false);
         assert_eq!(
             presenter.deadline(now, false),
             Some(reveal),
@@ -117,12 +120,13 @@ fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
     }
     presenter.hold(None);
     assert_eq!(presenter.deadline(opened, false), None);
-    let later = opened + Duration::from_secs(1);
+    manual.advance(Duration::from_millis(700));
+    let later = clock.now();
     presenter.hold(Some(Owner::Thread(
         HostId("gone".into()),
         ThreadId::from("another"),
     )));
-    let _mark = presenter.waiting(&theme, later, false);
+    let _mark = presenter.waiting(&theme, &clock, false);
     assert_eq!(
         presenter.deadline(later, false),
         Some(later + Duration::from_millis(500))

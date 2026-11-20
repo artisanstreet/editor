@@ -46,7 +46,7 @@ pub(crate) fn body(
     sidebar: Sidebar,
     overlay: Element,
     content: Vec<Element>,
-    seam: Rc<std::cell::RefCell<crate::frame::seam::motion::Motion>>,
+    seam: crate::frame::seam::Seam,
     reduced: bool,
 ) -> Element {
     let sheet = UiBox::new()

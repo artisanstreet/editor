@@ -108,7 +108,7 @@ impl RootViews {
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not animate the account menu"),
         }
-        self.schedule_sidebar(ctx, window);
+        self.schedule_sidebar(ctx, window, now);
         changed
     }
 }

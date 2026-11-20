@@ -25,7 +25,7 @@ impl RootViews {
         )]
         frame: u64,
     ) -> bool {
-        let lap_start = std::time::Instant::now();
+        let lap_start = crate::shell::stopwatch::Stopwatch::start();
         let early_reveals = {
             let _tm = crate::shell::application::Tm::new("fc.reveals");
             match (&self.rows, shell.entry.workspace_mut()) {
@@ -57,7 +57,7 @@ impl RootViews {
             self.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
-        let glide = self.composer_glide.sync(ui, std::time::Instant::now());
+        let glide = self.composer_glide.sync(ui, shell.core.clock().now());
         if glide.moving {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
@@ -67,14 +67,14 @@ impl RootViews {
         if Self::sync_transcript_reveal(shell, ui) {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
-        let (moving, gone) = self.latest.sync(ui, std::time::Instant::now());
+        let (moving, gone) = self.latest.sync(ui, shell.core.clock().now());
         if moving {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         if gone {
             self.conversation_invalidated.set(true);
         }
-        if self.sync_navigation(ui, ctx, window) {
+        if self.sync_navigation(ui, ctx, window, shell.core.clock().now()) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_wake");
             self.navigation_invalidated.set(true);
         }
@@ -86,7 +86,7 @@ impl RootViews {
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         aqua_core::checkpoint::reach();
         self.sync_edges(shell, ui, ctx, window);
         let wheel = self.sync_wheel(shell, ui, ctx, window);
@@ -215,7 +215,7 @@ impl RootViews {
                     painted: painted_count,
                     visible: visible_count,
                     candidates: candidates.len(),
-                    elapsed: lap_start.elapsed(),
+                    elapsed: lap_start.measured(),
                 },
             );
             drop(tm_capture);
@@ -307,13 +307,13 @@ impl RootViews {
             rows.publish_projections(&mut workspace.conversation, &shell.core),
         );
         let after_layout = rows.after_layout(ui);
+        let rebuilt_at = shell.core.clock().now();
         let motion_due = after_layout.rebuild
-            && self
-                .motion_rebuilt
-                .get()
-                .is_none_or(|at| at.elapsed() >= MOTION_REBUILD_INTERVAL);
+            && self.motion_rebuilt.get().is_none_or(|at| {
+                rebuilt_at.saturating_duration_since(at) >= MOTION_REBUILD_INTERVAL
+            });
         if motion_due {
-            self.motion_rebuilt.set(Some(std::time::Instant::now()));
+            self.motion_rebuilt.set(Some(rebuilt_at));
         }
         if after_layout.rebuild {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -322,7 +322,7 @@ impl RootViews {
         changed |= self.noted.note(Cause::AfterLayout, motion_due);
         let disclosure = workspace.conversation.advance_disclosure_frame(
             &shell.core,
-            std::time::Instant::now(),
+            shell.core.clock().now(),
             reduced,
         );
         changed |= self.noted.note(

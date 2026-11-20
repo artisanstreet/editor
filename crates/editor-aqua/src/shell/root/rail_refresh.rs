@@ -6,7 +6,6 @@ use crate::shell::thread_navigation::{self, Refresh};
 use aqua::prelude::{AquaWindowId, FrameReason};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::collection_runtime::CollectionViewport;
-use std::time::Instant;
 
 pub(super) struct Rail<'a> {
     pub(super) navigation: &'a mut thread_navigation::ThreadNavigation,
@@ -26,7 +25,7 @@ impl Rail<'_> {
     ) -> bool {
         match self
             .navigation
-            .refresh(ui, conversation, core, viewport, Instant::now())
+            .refresh(ui, conversation, core, viewport, core.clock().now())
         {
             Ok(Refresh::InPlace) => {
                 ctx.request_frame(window, FrameReason::ANIMATION);

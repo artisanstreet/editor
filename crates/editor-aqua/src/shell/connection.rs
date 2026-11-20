@@ -34,11 +34,12 @@ impl WordmarkLoader {
     pub(crate) fn build(
         &mut self,
         theme: &ArtisanTheme,
-        now: Instant,
+        clock: &crate::core::Clock,
         reduced_motion: bool,
         key: &'static str,
     ) -> Element {
-        let mounted = *self.mounted.get_or_insert(now);
+        let mounted = *self.mounted.get_or_insert_with(|| clock.now());
+        let clock = clock.clone();
         let started = mounted + MARK_DELAY;
         let height = 48.0 * 2.2515;
         let width = height * (136.675 / 225.15);
@@ -61,7 +62,7 @@ impl WordmarkLoader {
                 if reduced_motion {
                     return vec![vector(foreground.to_reference_paint())];
                 }
-                let elapsed = Instant::now().checked_duration_since(started);
+                let elapsed = clock.now().checked_duration_since(started);
                 let Some(elapsed) = elapsed else {
                     return Vec::new();
                 };
@@ -194,9 +195,14 @@ impl ConnectionPresenter {
         }
     }
 
-    pub fn waiting(&mut self, theme: &ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
+    pub fn waiting(
+        &mut self,
+        theme: &ArtisanTheme,
+        clock: &crate::core::Clock,
+        reduced_motion: bool,
+    ) -> Element {
         self.mark
-            .build(theme, now, reduced_motion, "forge-connecting")
+            .build(theme, clock, reduced_motion, "forge-connecting")
     }
 
     pub fn dispatch(&self, core: &mut Core) {
@@ -232,9 +238,10 @@ impl ConnectionPresenter {
         &mut self,
         host: &HostData,
         theme: &ArtisanTheme,
-        now: Instant,
+        clock: &crate::core::Clock,
         reduced_motion: bool,
     ) -> Option<Element> {
+        let now = clock.now();
         let identity = (host.id.clone(), host.instance());
         if self.host.as_ref() != Some(&identity) {
             self.phase = None;
@@ -311,7 +318,7 @@ impl ConnectionPresenter {
         };
         let mark = self
             .mark
-            .build(theme, now, reduced_motion, "forge-connecting");
+            .build(theme, clock, reduced_motion, "forge-connecting");
         let mut section = UiBox::new()
             .layout("column")
             .spaced(Space::S32)

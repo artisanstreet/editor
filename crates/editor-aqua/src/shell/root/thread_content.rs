@@ -457,7 +457,7 @@ impl RootViews {
                 }
                 None if loading => view::centered_body(self.thread_loading.build(
                     theme,
-                    now,
+                    core.clock(),
                     reduced_motion,
                     "conversation-loading",
                 )),
@@ -519,7 +519,7 @@ impl RootViews {
                         ))
                         .child(view::centered_body(self.thread_landing.build(
                             theme,
-                            now,
+                            core.clock(),
                             reduced_motion,
                             "conversation-landing",
                         )))

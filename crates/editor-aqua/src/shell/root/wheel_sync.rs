@@ -38,7 +38,7 @@ impl RootViews {
             ui,
             &mut self.smooth_scroll,
             &directive,
-            std::time::Instant::now(),
+            conversation.clock().now(),
             0.0,
         )
         .is_some()

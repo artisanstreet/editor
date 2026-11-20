@@ -38,13 +38,13 @@ pub(super) struct Reveal {
 }
 
 impl Reveal {
-    pub(super) fn new(hit: HitRow) -> Self {
+    pub(super) fn new(hit: HitRow, now: Instant) -> Self {
         let needle = fold(&hit.needle);
         Self {
             hit,
             needle,
             stage: Stage::Opening,
-            until: Instant::now() + PATIENCE,
+            until: now + PATIENCE,
         }
     }
 }
@@ -163,7 +163,7 @@ impl RootViews {
         let Some(reveal) = self.reveal.as_mut() else {
             return Progress::Idle;
         };
-        let now = Instant::now();
+        let now = shell.core.clock().now();
         if now >= reveal.until {
             tracing::info!(
                 thread = %reveal.hit.thread,

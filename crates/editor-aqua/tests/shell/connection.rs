@@ -3,7 +3,7 @@ use editor_aqua::shell::application::SectionViews as _;
 use editor_aqua::shell::connection::ConnectionPresenter;
 use editor_aqua::shell::root::RootViews;
 use editor_aqua::ui::theme::ArtisanTheme;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use test_support::editor::core::{connect, test_core};
 use test_support::editor::forge::{StubForge, TlsServer, empty_state};
 use test_support::editor::shell::{Motion, ThreadShell};
@@ -42,11 +42,13 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     });
     let theme = ArtisanTheme::resolved();
     let mut presenter = ConnectionPresenter::default();
-    let start = Instant::now();
+    let manual = test_support::clock::ManualClock::starting_at(1_700_000_000_000);
+    let clock = manual.clock();
     let host = core.host(&config.id).unwrap();
-    assert!(presenter.build(host, &theme, start, true).is_some());
+    assert!(presenter.build(host, &theme, &clock, true).is_some());
+    manual.advance(Duration::from_secs(6));
     let status = presenter
-        .build(host, &theme, start + Duration::from_secs(6), true)
+        .build(host, &theme, &clock, true)
         .expect("an offline Forge has a status");
     let mut app = test_support::editor::ui::mounted(900.0, 700.0, status);
     let texts = test_support::editor::ui::painted_texts(&app);

@@ -163,7 +163,7 @@ impl Entry {
                 model::page_of(&view),
                 model::locked(&view),
                 slots,
-                std::time::Instant::now(),
+                core.clock().now(),
                 reduced,
             )
     }
@@ -245,7 +245,7 @@ impl Entry {
                 code: code_field,
                 busy: model::locked(&view),
                 width: card::WIDTH,
-                now: std::time::Instant::now(),
+                now: core.clock().now(),
                 emit,
             },
         );

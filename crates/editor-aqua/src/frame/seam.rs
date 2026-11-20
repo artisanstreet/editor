@@ -14,6 +14,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub(crate) struct Seam {
+    pub(crate) motion: Rc<RefCell<motion::Motion>>,
+    pub(crate) clock: crate::core::Clock,
+}
+
 pub(crate) const ACTIVE: &str = "artisan-active-thread-tab";
 pub(crate) const SHEET: &str = "artisan-thread-sheet";
 
@@ -21,11 +26,8 @@ pub(crate) const SHEET: &str = "artisan-thread-sheet";
     clippy::too_many_lines,
     reason = "one canvas whose prepaint measures, targets and paints the seam in a single pass"
 )]
-pub(crate) fn surface(
-    theme: &ArtisanTheme,
-    motion: Rc<RefCell<motion::Motion>>,
-    reduced: bool,
-) -> Element {
+pub(crate) fn surface(theme: &ArtisanTheme, seam: Seam, reduced: bool) -> Element {
+    let Seam { motion, clock } = seam;
     let theme = *theme;
     let geometry = Rc::new(Cell::new(None));
     let measured = Rc::clone(&geometry);
@@ -73,9 +75,7 @@ pub(crate) fn surface(
                     .translate(-bounds.x, -bounds.y),
                 )
             });
-            targeting
-                .borrow_mut()
-                .target(local, tab, std::time::Instant::now(), true);
+            targeting.borrow_mut().target(local, tab, clock.now(), true);
             measured.set(Some(sheet));
         })
         .on_paint(move |bounds| {

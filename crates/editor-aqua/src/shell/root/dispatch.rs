@@ -117,7 +117,7 @@ impl RootViews {
                                 scope.instance,
                                 workspace.images.as_ref().clone(),
                                 request,
-                                std::time::Instant::now(),
+                                shell.core.clock().now(),
                             ) {
                                 self.dispose_color_menu(ui);
                                 self.image_preview = Some(ImagePreview {

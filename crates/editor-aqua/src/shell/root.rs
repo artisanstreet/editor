@@ -249,7 +249,7 @@ impl SectionViews for RootViews {
             return false;
         };
         let width = (crate::measure::narrow(window.inner_size.width)
-            - self.sidebar.width(std::time::Instant::now())
+            - self.sidebar.width(shell.core.clock().now())
             - crate::frame::view::SHEET_PADDING)
             .max(0.0);
         let element = match self.thread_content(
@@ -307,7 +307,7 @@ impl SectionViews for RootViews {
             return false;
         }
         let theme = shell.preferences.theme();
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         let reduced = Self::reduced(ui);
         let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
             .unwrap_or_else(|| (crate::measure::narrow(window.inner_size.height) - 260.0).max(0.0));
@@ -424,10 +424,10 @@ impl SectionViews for RootViews {
     ) -> bool {
         let changed = self
             .sidebar
-            .take_events(std::time::Instant::now(), Self::reduced(ui));
+            .take_events(shell.core.clock().now(), Self::reduced(ui));
         self.apply_account_effects(shell, ctx, window, Self::reduced(ui));
-        let pictured = self.avatar.drain(shell.images(), std::time::Instant::now());
-        self.schedule_sidebar(ctx, window);
+        let pictured = self.avatar.drain(shell.images(), shell.core.clock().now());
+        self.schedule_sidebar(ctx, window, shell.core.clock().now());
         changed | pictured
     }
 
@@ -447,11 +447,12 @@ impl SectionViews for RootViews {
 
     fn pre_input(
         &mut self,
+        shell: &Shell,
         ui: &mut UiApp,
         input: &InputEvent,
         now: aqua::Instant,
     ) -> Option<bool> {
-        self.intercept_input(ui, input, now)
+        self.intercept_input(shell, ui, input, now)
     }
     fn build(
         &mut self,

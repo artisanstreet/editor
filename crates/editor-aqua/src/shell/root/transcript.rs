@@ -82,7 +82,7 @@ impl RootViews {
         }
         let maximum = (content.h - rect.h).max(0.0);
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
+        let now = conversation.clock().now();
         let mut changed = false;
         if let Some(action) = &self.scroll_request {
             use crate::conversation::adapter::ScrollResolution;
@@ -149,7 +149,7 @@ impl RootViews {
         use crate::ui::scroll_edge::EdgeSurface;
         let _tm = crate::shell::application::Tm::new("v.edges");
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         let theme = shell.preferences.theme();
         let Some(workspace) = shell.entry.workspace() else {
             return;

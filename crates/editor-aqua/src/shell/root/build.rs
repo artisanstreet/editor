@@ -119,7 +119,11 @@ impl RootViews {
                             )));
                     }
                     connection_held = true;
-                    view::centered_conversation(self.connection.waiting(&theme, now, reduced))
+                    view::centered_conversation(self.connection.waiting(
+                        &theme,
+                        shell.core.clock(),
+                        reduced,
+                    ))
                 }
             }
             Screen::NewThread { host, .. } => {
@@ -132,7 +136,10 @@ impl RootViews {
                     .core
                     .host(host)
                     .ok_or_else(|| BuildError::HostGone { host: host.clone() })?;
-                if let Some(status) = self.connection.build(host, &theme, now, reduced) {
+                if let Some(status) =
+                    self.connection
+                        .build(host, &theme, shell.core.clock(), reduced)
+                {
                     view::centered_conversation(status)
                 } else {
                     let (questionnaires, attachments) =
@@ -302,7 +309,7 @@ impl RootViews {
         workspace
             .inspector
             .follow(&shell.core, &workspace.conversation, ui);
-        let outline = self.navigation.chevron(std::time::Instant::now());
+        let outline = self.navigation.chevron(shell.core.clock().now());
         let navigation = workspace
             .sidebar
             .host
@@ -428,7 +435,10 @@ impl RootViews {
                     .children(overview)
                     .build(),
             ],
-            Rc::clone(&self.seam),
+            crate::frame::seam::Seam {
+                motion: Rc::clone(&self.seam),
+                clock: shell.core.clock().clone(),
+            },
             reduced,
         );
         Ok(view::workspace(
@@ -511,7 +521,7 @@ impl RootViews {
         }
         let navigation_changed = {
             let _tm = crate::shell::application::Tm::new("input.views.navigation");
-            self.sync_navigation(ui, ctx, window)
+            self.sync_navigation(ui, ctx, window, shell.core.clock().now())
         };
         if navigation_changed {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_fc");

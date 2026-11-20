@@ -7,6 +7,7 @@ use aqua::{AppCtx, UiApp};
 impl RootViews {
     pub(super) fn intercept_input(
         &mut self,
+        shell: &Shell,
         ui: &mut UiApp,
         input: &InputEvent,
         now: aqua::Instant,
@@ -15,7 +16,7 @@ impl RootViews {
             && self.navigation.dismiss(
                 ui,
                 pointer.position,
-                std::time::Instant::now(),
+                shell.core.clock().now(),
                 Self::reduced(ui),
             )
         {
@@ -95,7 +96,7 @@ impl RootViews {
         consumed: bool,
     ) -> bool {
         self.sync_context(shell, ui, ctx, window);
-        if self.sync_navigation(ui, ctx, window) {
+        if self.sync_navigation(ui, ctx, window, shell.core.clock().now()) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_input");
             self.navigation_invalidated.set(true);
         }
@@ -181,7 +182,7 @@ impl RootViews {
             && event.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
             && self
                 .navigation
-                .close(std::time::Instant::now(), Self::reduced(ui))
+                .close(shell.core.clock().now(), Self::reduced(ui))
         {
             self.navigation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -238,7 +239,7 @@ impl RootViews {
             let now = shell.core.clock().now();
             self.tick_work_clock(shell, ctx, window, now);
         }
-        if self.sync_navigation(ui, ctx, window) {
+        if self.sync_navigation(ui, ctx, window, shell.core.clock().now()) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_a");
             self.navigation_invalidated.set(true);
         }
