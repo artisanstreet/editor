@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex, Once, PoisonError};
 use tracing::subscriber::{Interest, Subscriber};
 use tracing::{Event, Metadata, span};
+use tracing_subscriber::layer::SubscriberExt as _;
 
 #[derive(Clone, Debug, Default)]
 pub struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -73,7 +74,8 @@ pub fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_writer(captured.clone())
-        .finish();
+        .finish()
+        .with(tracing_error::ErrorLayer::default());
     let guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
     (captured, guard)

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument as _;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartGatewayError {
@@ -93,7 +94,20 @@ async fn serve<T: ToolSet + Clone + 'static>(
         }
     };
     let reply = match admitted {
-        Ok(caller) => forge_mcp::server::handle(&served.set, &caller, body).await,
+        Ok(caller) => {
+            let span = tracing::info_span!(
+                "gateway",
+                server = served.set.name(),
+                thread = %caller.thread,
+                run = tracing::field::Empty
+            );
+            if let Some(run) = served.hub.live_run(&caller.thread) {
+                span.record("run", tracing::field::display(run));
+            }
+            forge_mcp::server::handle(&served.set, &caller, body)
+                .instrument(span)
+                .await
+        }
         Err(refusal) => forge_mcp::server::refuse(&refusal, &body),
     };
     reply.map_or_else(

@@ -628,26 +628,29 @@ pub(crate) struct VersionError {
 }
 
 pub(crate) struct Failure {
-    failure: artisan_api::Failure,
+    wire: artisan_api::Failure,
     error: Box<RouteError>,
+    spans: diagnostics::Spans,
 }
 
 impl Failure {
     fn new(error: RouteError) -> Self {
         Self {
-            failure: error.wire(),
+            wire: error.wire(),
             error: Box::new(error),
+            spans: diagnostics::Spans::capture(),
         }
     }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        let message = forge_runs::failure::message(&*self.error, &self.failure);
-        let mut response = refusal(ApiError::new(self.failure, message));
-        response
-            .extensions_mut()
-            .insert(Refusal(Arc::from(self.error)));
+        let message = forge_runs::failure::message(&*self.error, &self.wire);
+        let mut response = refusal(ApiError::new(self.wire, message));
+        response.extensions_mut().insert(Refusal {
+            error: Arc::from(self.error),
+            spans: self.spans,
+        });
         response
     }
 }
@@ -657,7 +660,10 @@ fn refusal(error: ApiError) -> Response {
 }
 
 #[derive(Clone)]
-struct Refusal(Arc<RouteError>);
+struct Refusal {
+    error: Arc<RouteError>,
+    spans: diagnostics::Spans,
+}
 
 async fn log_internal(request: Request, next: Next) -> Response {
     let span = tracing::info_span!(
@@ -667,11 +673,11 @@ async fn log_internal(request: Request, next: Next) -> Response {
     );
     async move {
         let response = next.run(request).await;
-        if let Some(Refusal(failure)) = response.extensions().get::<Refusal>() {
+        if let Some(Refusal { error, spans }) = response.extensions().get::<Refusal>() {
             if response.status().is_server_error() {
-                tracing::error!(error = diagnostics::chain(&**failure), "request failed");
+                tracing::error!(error = diagnostics::chain(&**error), %spans, "request failed");
             } else {
-                tracing::info!(error = diagnostics::chain(&**failure), "request refused");
+                tracing::info!(error = diagnostics::chain(&**error), "request refused");
             }
         }
         response

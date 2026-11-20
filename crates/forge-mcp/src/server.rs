@@ -392,7 +392,8 @@ fn failed<E: ToolError>(server: &str, caller: &ThreadId, tool: &str, error: &E) 
         }
         Failure::Broken => {
             let chain = diagnostics::chain(error);
-            tracing::error!(thread = %caller, server, tool, "MCP tool failed: {chain}");
+            let spans = diagnostics::Spans::capture();
+            tracing::error!(thread = %caller, server, tool, %spans, "MCP tool failed: {chain}");
             let text = format!("Forge couldn't do that: {chain}");
             let details = json!({"code":"tool_failed","message":text,"retryable":false});
             (text, details)

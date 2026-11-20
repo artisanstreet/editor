@@ -2,11 +2,13 @@ pub mod crash;
 pub mod frames;
 pub mod log_file;
 pub mod recent;
+pub mod spans;
 pub mod subscriber;
 
 pub use crash::CrashReporter;
 pub use log_file::{Destination, Limit, OpenLogError};
 pub use recent::RecentLines;
+pub use spans::Spans;
 pub use subscriber::{SubscribeError, subscribe};
 
 pub fn chain(error: &dyn std::error::Error) -> String {

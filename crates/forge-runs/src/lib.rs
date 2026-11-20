@@ -968,6 +968,11 @@ impl Hub {
                 .is_some_and(|generation| generation.owner(thread_id).is_some())
     }
 
+    #[must_use]
+    pub fn live_run(&self, thread_id: &ThreadId) -> Option<RunId> {
+        self.lock().get(thread_id).map(|run| run.id.clone())
+    }
+
     fn owned_thread_ids(&self) -> Vec<ThreadId> {
         let ids: std::collections::BTreeSet<_> = self.lock().held().cloned().collect();
         ids.into_iter().collect()
@@ -1191,7 +1196,8 @@ impl Hub {
                     None
                 }
                 Err(error) => {
-                    tracing::error!(thread = %thread_id, run = %run_id, "run failed: {}", diagnostics::chain(&error));
+                    let spans = diagnostics::Spans::capture();
+                    tracing::error!(thread = %thread_id, run = %run_id, %spans, "run failed: {}", diagnostics::chain(&error));
                     let ended = if error.retry_later() {
                         turns::Ended::Deferred
                     } else {

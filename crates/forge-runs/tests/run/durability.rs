@@ -276,3 +276,28 @@ async fn a_continue_with_nothing_stopped_keeps_a_failing_threads_wait() {
     );
     disk.clear();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_run_that_fails_logs_the_thread_and_run_it_failed_in() {
+    let (captured, _logging) = test_support::logs::capture();
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let disk = DiskFull::arming(&fixture, "runs");
+    disk.strike();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("build it"))
+        .await
+        .unwrap();
+    deferred_wait(&fixture).await;
+    disk.clear();
+
+    let logs = captured.text();
+    let failed = logs
+        .lines()
+        .find(|line| line.contains("run failed"))
+        .unwrap_or_else(|| panic!("no run failure was logged: {logs}"));
+    assert!(
+        failed.contains(&format!("spans=run{{thread={} run=", fixture.thread_id)),
+        "the failure names the run's span: {failed}"
+    );
+}
