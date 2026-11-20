@@ -68,6 +68,7 @@ fn a_launch_without_a_data_folder_says_why_in_the_temporary_log() {
         .env_remove("RUST_LOG")
         .env("XDG_DATA_HOME", "relative/data")
         .env("LOCALAPPDATA", "relative/data")
+        .env("HOME", "relative/data")
         .env("TMPDIR", root.path())
         .env("TMP", root.path())
         .env("TEMP", root.path())
