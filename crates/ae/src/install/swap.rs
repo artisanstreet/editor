@@ -1,4 +1,6 @@
 use crate::sys::{self, RemoveError};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -49,9 +51,10 @@ struct Entry {
     aside: Option<Name>,
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct Journal {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Journal<S> {
     entries: Vec<Entry>,
+    before: S,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,8 +154,6 @@ pub(crate) enum RestoreError {
         #[source]
         source: io::Error,
     },
-    #[error(transparent)]
-    Journal(#[from] JournalError),
 }
 
 #[derive(Debug)]
@@ -208,20 +209,14 @@ pub(crate) enum RecoverError {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Recovered {
-    Nothing,
-    PutBack,
-}
-
 #[derive(Debug)]
 #[must_use]
-pub(super) struct Replaced {
+pub(super) struct Replaced<S> {
     dir: PathBuf,
-    journal: Journal,
+    journal: Journal<S>,
 }
 
-impl Replaced {
+impl<S> Replaced<S> {
     pub(super) fn keep(self) -> Result<(), JournalError> {
         forget(&self.dir)?;
         for entry in self.journal.entries {
@@ -232,23 +227,129 @@ impl Replaced {
         Ok(())
     }
 
-    pub(super) fn undo(self) -> Result<(), RestoreFailures> {
+    pub(super) fn undo(self) -> Result<Undone<S>, RestoreFailures> {
         match RestoreFailures::of(restore(&self.dir, &self.journal)) {
             Some(failures) => Err(failures),
-            None => Ok(()),
+            None => Ok(Undone {
+                dir: self.dir,
+                journal: self.journal,
+            }),
         }
     }
 }
 
-pub(super) fn replace(dir: &Path, incoming: &Path) -> Result<Replaced, ReplaceError> {
-    replace_with(dir, incoming, |from, to| std::fs::rename(from, to))
+#[derive(Debug)]
+pub(super) enum Unreplaced<S> {
+    Undone {
+        failed: Box<ReplaceError>,
+        undone: Undone<S>,
+    },
+    Broken {
+        failed: Box<ReplaceError>,
+        restore: Box<RestoreFailures>,
+    },
 }
 
-pub(super) fn replace_with(
+#[derive(Debug)]
+#[must_use]
+pub(super) struct Pending<S> {
+    dir: PathBuf,
+    journal: Journal<S>,
+}
+
+impl<S> Pending<S> {
+    pub(super) const fn before(&self) -> &S {
+        &self.journal.before
+    }
+
+    pub(super) fn put_back(self) -> Result<Undone<S>, RecoverError> {
+        match RestoreFailures::of(restore(&self.dir, &self.journal)) {
+            Some(source) => Err(RecoverError::Restore {
+                dir: self.dir,
+                source: Box::new(source),
+            }),
+            None => Ok(Undone {
+                dir: self.dir,
+                journal: self.journal,
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(super) struct Undone<S> {
+    dir: PathBuf,
+    journal: Journal<S>,
+}
+
+impl<S> Undone<S> {
+    pub(super) const fn before(&self) -> &S {
+        &self.journal.before
+    }
+
+    pub(super) fn put_back_previous(&self, name: &str) -> bool {
+        self.journal
+            .entries
+            .iter()
+            .any(|entry| entry.name.0 == name && entry.aside.is_some())
+    }
+
+    pub(super) fn forget(self) -> Result<(), JournalError> {
+        forget(&self.dir)
+    }
+}
+
+pub(super) fn journal(dir: &Path) -> PathBuf {
+    dir.join(JOURNAL)
+}
+
+pub(super) fn leftover(name: &OsStr) -> bool {
+    name == JOURNAL_DRAFT || name.to_string_lossy().starts_with(".old-")
+}
+
+pub(super) fn replace<S: Serialize>(
     dir: &Path,
     incoming: &Path,
+    before: S,
+) -> Result<Replaced<S>, Unreplaced<S>> {
+    replace_with(dir, incoming, before, |from, to| std::fs::rename(from, to))
+}
+
+pub(super) fn replace_with<S: Serialize>(
+    dir: &Path,
+    incoming: &Path,
+    before: S,
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
-) -> Result<Replaced, ReplaceError> {
+) -> Result<Replaced<S>, Unreplaced<S>> {
+    let mut replaced = Replaced {
+        dir: dir.to_owned(),
+        journal: Journal {
+            entries: Vec::new(),
+            before,
+        },
+    };
+    let swapped = incoming_names(incoming).and_then(|names| {
+        names
+            .iter()
+            .try_for_each(|name| swap_in(&mut replaced, &incoming.join(&name.0), name, &rename))
+    });
+    match swapped {
+        Ok(()) => Ok(replaced),
+        Err(failed) => Err(match replaced.undo() {
+            Ok(undone) => Unreplaced::Undone {
+                failed: Box::new(failed),
+                undone,
+            },
+            Err(restore) => Unreplaced::Broken {
+                failed: Box::new(failed),
+                restore: Box::new(restore),
+            },
+        }),
+    }
+}
+
+fn incoming_names(incoming: &Path) -> Result<Vec<Name>, ReplaceError> {
     let read = |source| ReplaceError::Read {
         path: incoming.to_owned(),
         source,
@@ -264,53 +365,27 @@ pub(super) fn replace_with(
         names.push(Name(name));
     }
     names.sort_by(|one, other| one.0.cmp(&other.0));
-    let mut replaced = Replaced {
-        dir: dir.to_owned(),
-        journal: Journal::default(),
-    };
-    for name in &names {
-        if let Err(error) = swap_in(&mut replaced, &incoming.join(&name.0), name, &rename) {
-            return Err(match replaced.undo() {
-                Ok(()) => error,
-                Err(restore) => ReplaceError::Restore {
-                    failed: Box::new(error),
-                    restore: Box::new(restore),
-                },
-            });
-        }
-    }
-    Ok(replaced)
+    Ok(names)
 }
 
-pub(super) fn journal(dir: &Path) -> PathBuf {
-    dir.join(JOURNAL)
-}
-
-pub(super) fn leftover(name: &OsStr) -> bool {
-    name == JOURNAL_DRAFT || name.to_string_lossy().starts_with(".old-")
-}
-
-pub(super) fn recover(dir: &Path) -> Result<Recovered, RecoverError> {
+pub(super) fn pending<S: DeserializeOwned>(dir: &Path) -> Result<Option<Pending<S>>, RecoverError> {
     let path = journal(dir);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Recovered::Nothing),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(JournalError::Read { path, source }.into()),
     };
-    let journal: Journal =
+    let journal =
         serde_json::from_str(&text).map_err(|source| JournalError::Unreadable { path, source })?;
     discard(&dir.join(JOURNAL_DRAFT));
-    match RestoreFailures::of(restore(dir, &journal)) {
-        Some(source) => Err(RecoverError::Restore {
-            dir: dir.to_owned(),
-            source: Box::new(source),
-        }),
-        None => Ok(Recovered::PutBack),
-    }
+    Ok(Some(Pending {
+        dir: dir.to_owned(),
+        journal,
+    }))
 }
 
 pub(super) fn interrupted(dir: &Path) -> Result<bool, RecoverError> {
-    let path = dir.join(JOURNAL);
+    let path = journal(dir);
     path.try_exists()
         .map_err(|source| RecoverError::Inspect { path, source })
 }
@@ -336,8 +411,8 @@ fn free_aside(dir: &Path, name: &Name) -> Result<Name, FreeAsideError> {
     Err(FreeAsideError::Full { path: name.of(dir) })
 }
 
-fn swap_in(
-    replaced: &mut Replaced,
+fn swap_in<S: Serialize>(
+    replaced: &mut Replaced<S>,
     new: &Path,
     name: &Name,
     rename: &impl Fn(&Path, &Path) -> io::Result<()>,
@@ -384,23 +459,19 @@ fn set_aside(
     rename(target, aside)
 }
 
-fn restore(dir: &Path, journal: &Journal) -> Vec<RestoreError> {
-    let mut failures = Vec::new();
-    for entry in journal.entries.iter().rev() {
-        let restored = match &entry.aside {
-            Some(aside) => put_back(dir, &entry.name, aside),
-            None => clear(dir, &entry.name),
-        };
-        if let Err(failure) = restored {
-            failures.push(failure);
-        }
-    }
-    if failures.is_empty()
-        && let Err(failure) = forget(dir)
-    {
-        failures.push(failure.into());
-    }
-    failures
+fn restore<S>(dir: &Path, journal: &Journal<S>) -> Vec<RestoreError> {
+    journal
+        .entries
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            match &entry.aside {
+                Some(aside) => put_back(dir, &entry.name, aside),
+                None => clear(dir, &entry.name),
+            }
+            .err()
+        })
+        .collect()
 }
 
 fn clear(dir: &Path, name: &Name) -> Result<(), RestoreError> {
@@ -472,8 +543,8 @@ const fn same_file(_one: &std::fs::Metadata, _other: &std::fs::Metadata) -> bool
     false
 }
 
-fn record(dir: &Path, journal: &Journal) -> Result<(), JournalError> {
-    let path = dir.join(JOURNAL);
+fn record<S: Serialize>(dir: &Path, journal: &Journal<S>) -> Result<(), JournalError> {
+    let path = self::journal(dir);
     let draft = dir.join(JOURNAL_DRAFT);
     let failed = |source| JournalError::Write {
         path: path.clone(),
@@ -489,7 +560,7 @@ fn record(dir: &Path, journal: &Journal) -> Result<(), JournalError> {
 }
 
 fn forget(dir: &Path) -> Result<(), JournalError> {
-    let path = dir.join(JOURNAL);
+    let path = journal(dir);
     sys::remove(&path).map_err(|source| JournalError::Remove {
         path: path.clone(),
         source,

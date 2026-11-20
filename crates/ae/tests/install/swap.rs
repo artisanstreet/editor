@@ -24,11 +24,33 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+fn cut_short_before_the_helper(dir: &Path, incoming: &Path, before: &str) {
+    let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        replace_with(dir, incoming, before.to_owned(), |from, to| {
+            assert!(
+                !(from.starts_with(incoming) && to.ends_with("helper")),
+                "the installer dies before the helper is placed"
+            );
+            std::fs::rename(from, to)
+        })
+    }));
+    assert!(died.is_err(), "the replacement was cut short");
+    assert_eq!(
+        read(&dir.join("forge")),
+        "new forge",
+        "the cut-short install had already placed the new forge"
+    );
+}
+
 #[test]
 fn a_replacement_that_fails_halfway_puts_every_old_file_back() {
     let (_root, dir, incoming) = installed_dir();
 
-    let replaced = replace_with(&dir, &incoming, |from, to| {
+    let replaced = replace_with(&dir, &incoming, (), |from, to| {
         if from.starts_with(&incoming) && to.ends_with("helper") {
             Err(io::Error::other("antivirus holds the file"))
         } else {
@@ -36,18 +58,13 @@ fn a_replacement_that_fails_halfway_puts_every_old_file_back() {
         }
     });
 
-    assert!(
-        matches!(replaced, Err(ReplaceError::Place { .. })),
-        "{replaced:?}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "old forge"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("helper")).unwrap(),
-        "old helper"
-    );
+    let Err(Unreplaced::Undone { failed, undone }) = replaced else {
+        panic!("expected the old files to be put back, got {replaced:?}");
+    };
+    assert!(matches!(*failed, ReplaceError::Place { .. }), "{failed:?}");
+    assert_eq!(read(&dir.join("forge")), "old forge");
+    assert_eq!(read(&dir.join("helper")), "old helper");
+    undone.forget().unwrap();
     assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
 }
 
@@ -55,81 +72,77 @@ fn a_replacement_that_fails_halfway_puts_every_old_file_back() {
 fn a_replacement_puts_every_new_file_in_place_and_drops_the_old_ones() {
     let (_root, dir, incoming) = installed_dir();
 
-    replace(&dir, &incoming).unwrap().keep().unwrap();
+    replace(&dir, &incoming, ()).unwrap().keep().unwrap();
 
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "new forge"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("helper")).unwrap(),
-        "new helper"
-    );
+    assert_eq!(read(&dir.join("forge")), "new forge");
+    assert_eq!(read(&dir.join("helper")), "new helper");
     assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
 }
 
 #[test]
-fn an_install_cut_short_between_renames_is_put_back_by_the_next_one() {
+fn an_install_cut_short_between_renames_is_put_back_with_what_it_recorded_about_before() {
     let (_root, dir, incoming) = installed_dir();
+    cut_short_before_the_helper(&dir, &incoming, "schema 26");
 
-    let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        replace_with(&dir, &incoming, |from, to| {
-            assert!(
-                !(from.starts_with(&incoming) && to.ends_with("helper")),
-                "the installer dies before the helper is placed"
-            );
-            std::fs::rename(from, to)
-        })
-    }));
+    let left = pending::<String>(&dir)
+        .unwrap()
+        .expect("the cut-short install left a record");
+    assert_eq!(left.before(), "schema 26");
+    let undone = left.put_back().unwrap();
 
-    assert!(died.is_err(), "the replacement was cut short");
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "new forge",
-        "the cut-short install had already placed the new forge"
-    );
-    assert_eq!(recover(&dir).unwrap(), Recovered::PutBack);
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "old forge"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("helper")).unwrap(),
-        "old helper"
-    );
+    assert_eq!(read(&dir.join("forge")), "old forge");
+    assert_eq!(read(&dir.join("helper")), "old helper");
+    assert!(undone.put_back_previous("forge"));
+    undone.forget().unwrap();
     assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
-    assert_eq!(recover(&dir).unwrap(), Recovered::Nothing);
+    assert!(pending::<String>(&dir).unwrap().is_none());
+}
+
+#[test]
+fn files_put_back_without_settling_are_put_back_again_by_the_next_install() {
+    let (_root, dir, incoming) = installed_dir();
+    cut_short_before_the_helper(&dir, &incoming, "schema 26");
+    let unsettled = pending::<String>(&dir)
+        .unwrap()
+        .unwrap()
+        .put_back()
+        .unwrap();
+    drop(unsettled);
+
+    let again = pending::<String>(&dir)
+        .unwrap()
+        .expect("the record stays until what came before is restored too");
+    assert_eq!(again.before(), "schema 26");
+    again.put_back().unwrap().forget().unwrap();
+
+    assert_eq!(read(&dir.join("forge")), "old forge");
+    assert_eq!(read(&dir.join("helper")), "old helper");
+    assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
 }
 
 #[test]
 fn a_kept_install_leaves_nothing_for_the_next_one_to_put_back() {
     let (_root, dir, incoming) = installed_dir();
 
-    replace(&dir, &incoming).unwrap().keep().unwrap();
+    replace(&dir, &incoming, ()).unwrap().keep().unwrap();
 
-    assert_eq!(recover(&dir).unwrap(), Recovered::Nothing);
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "new forge"
-    );
+    assert!(pending::<()>(&dir).unwrap().is_none());
+    assert_eq!(read(&dir.join("forge")), "new forge");
 }
 
 #[test]
 fn a_record_cut_off_while_being_written_is_cleared_with_the_install_it_belonged_to() {
     let (_root, dir, incoming) = installed_dir();
-    let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        replace_with(&dir, &incoming, |from, to| {
-            assert!(
-                !(from.starts_with(&incoming) && to.ends_with("helper")),
-                "the installer dies before the helper is placed"
-            );
-            std::fs::rename(from, to)
-        })
-    }));
-    assert!(died.is_err(), "the replacement was cut short");
+    cut_short_before_the_helper(&dir, &incoming, "schema 26");
     std::fs::write(dir.join(JOURNAL_DRAFT), "{\"entries\":[").unwrap();
 
-    assert_eq!(recover(&dir).unwrap(), Recovered::PutBack);
+    pending::<String>(&dir)
+        .unwrap()
+        .unwrap()
+        .put_back()
+        .unwrap()
+        .forget()
+        .unwrap();
 
     assert_eq!(names(&dir), [".incoming-test", "forge", "helper"]);
 }
@@ -147,11 +160,11 @@ fn a_record_naming_files_outside_the_install_folder_is_refused_and_touches_nothi
     ] {
         std::fs::write(
             dir.join(JOURNAL),
-            format!(r#"{{"entries":[{{"name":"{name}","aside":{aside}}}]}}"#),
+            format!(r#"{{"entries":[{{"name":"{name}","aside":{aside}}}],"before":null}}"#),
         )
         .unwrap();
 
-        let refused = recover(&dir);
+        let refused = pending::<()>(&dir);
 
         assert!(
             matches!(
@@ -160,7 +173,7 @@ fn a_record_naming_files_outside_the_install_folder_is_refused_and_touches_nothi
             ),
             "{refused:?}"
         );
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me");
+        assert_eq!(read(&outside), "keep me");
     }
 }
 
@@ -168,7 +181,7 @@ fn a_record_naming_files_outside_the_install_folder_is_refused_and_touches_nothi
 #[test]
 fn files_that_cannot_be_put_back_are_named_with_their_cause_and_tried_again_later() {
     let (_root, dir, incoming) = installed_dir();
-    let replaced = replace(&dir, &incoming).unwrap();
+    let replaced = replace(&dir, &incoming, ()).unwrap();
     std::fs::remove_file(dir.join("forge")).unwrap();
     std::fs::create_dir(dir.join("forge")).unwrap();
     std::fs::write(dir.join("forge").join("held"), "in the way").unwrap();
@@ -182,27 +195,30 @@ fn files_that_cannot_be_put_back_are_named_with_their_cause_and_tried_again_late
         }
         other @ (RestoreError::Remove { .. }
         | RestoreError::NoAside(_)
-        | RestoreError::Displace { .. }
-        | RestoreError::Journal(_)) => {
+        | RestoreError::Displace { .. }) => {
             panic!("expected the forge to fail to go back, got {other:?}")
         }
     }
     assert!(failures.rest.is_empty(), "{failures:?}");
     assert_eq!(
-        std::fs::read_to_string(dir.join("helper")).unwrap(),
+        read(&dir.join("helper")),
         "old helper",
         "every other file still goes back"
     );
+    let retried = pending::<()>(&dir).unwrap().unwrap().put_back();
     assert!(
-        matches!(recover(&dir), Err(RecoverError::Restore { .. })),
+        matches!(retried, Err(RecoverError::Restore { .. })),
         "the record stays, so the next install tries again"
     );
     std::fs::remove_dir_all(dir.join("forge")).unwrap();
-    assert_eq!(recover(&dir).unwrap(), Recovered::PutBack);
-    assert_eq!(
-        std::fs::read_to_string(dir.join("forge")).unwrap(),
-        "old forge"
-    );
+    pending::<()>(&dir)
+        .unwrap()
+        .unwrap()
+        .put_back()
+        .unwrap()
+        .forget()
+        .unwrap();
+    assert_eq!(read(&dir.join("forge")), "old forge");
 }
 
 #[cfg(windows)]
@@ -215,7 +231,7 @@ fn a_running_program_is_moved_out_of_the_way_when_the_previous_one_is_put_back()
     std::fs::write(dir.join("ae.exe"), "old ae").unwrap();
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
     std::fs::copy(system.join("findstr.exe"), incoming.join("ae.exe")).unwrap();
-    let replaced = replace(&dir, &incoming).unwrap();
+    let replaced = replace(&dir, &incoming, ()).unwrap();
     let mut running = std::process::Command::new(dir.join("ae.exe"))
         .arg("never typed")
         .stdin(std::process::Stdio::piped())
@@ -227,10 +243,7 @@ fn a_running_program_is_moved_out_of_the_way_when_the_previous_one_is_put_back()
 
     drop(running.stdin.take());
     running.wait().unwrap();
-    undone.unwrap();
-    assert_eq!(
-        std::fs::read_to_string(dir.join("ae.exe")).unwrap(),
-        "old ae"
-    );
+    undone.unwrap().forget().unwrap();
+    assert_eq!(read(&dir.join("ae.exe")), "old ae");
     assert_eq!(names(&dir), [".incoming-test", ".old-1-ae.exe", "ae.exe"]);
 }

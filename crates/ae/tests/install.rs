@@ -395,7 +395,7 @@ mod tests {
             .expect("the cut-short install had moved Forge aside");
         std::fs::write(
             forge.join(".install-journal"),
-            r#"{"entries":[{"name":"forge","aside":".old-0-forge"}]}"#,
+            r#"{"entries":[{"name":"forge","aside":".old-0-forge"}],"before":{"Forge":{"database":"Nothing"}}}"#,
         )
         .expect("the cut-short install had recorded the move");
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
@@ -455,6 +455,78 @@ mod tests {
                 .join("no release here")
                 .to_string_lossy(),
         ])
+    }
+
+    #[test]
+    fn a_first_update_cut_short_after_the_new_forge_upgraded_the_database_is_rolled_back_by_the_next_ae()
+     {
+        use std::io::Read as _;
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        let data = forge.join("data");
+        let database = data.join("forge.sqlite3");
+        let mut released = Vec::new();
+        flate2::read::GzDecoder::new(RELEASED_DATABASE)
+            .read_to_end(&mut released)
+            .expect("unpack the released database");
+        std::fs::write(&database, released).expect("give the released Forge its database");
+        std::fs::write(
+            forge.join(".install-journal"),
+            format!(
+                r#"{{"entries":[{{"name":"forge","aside":".old-0-forge"}}],"before":{{"Forge":{{"database":{{"Schema":{RELEASED_SCHEMA}}}}}}}}}"#
+            ),
+        )
+        .expect("the cut-short install had recorded the released database");
+        std::fs::rename(&sandbox.installed, forge.join(".old-0-forge"))
+            .expect("the cut-short install had moved the released Forge aside");
+        test_support::executable::install(&forge_binary(), &sandbox.installed);
+        let started = sandbox.ae(&["forge", "start"]);
+        assert!(
+            started.status.success(),
+            "the new Forge starts: {}",
+            said(&started)
+        );
+        assert_eq!(
+            schema_of(&database),
+            forge_store::Store::schema_version(),
+            "the new Forge upgraded the database before the install was cut short"
+        );
+
+        let recovered = install_from_nowhere(&sandbox);
+
+        let said = said(&recovered);
+        assert!(
+            !recovered.status.success(),
+            "there is nothing to install from: {said}"
+        );
+        assert!(
+            said.contains("Put back the Forge files an interrupted install left half replaced"),
+            "{said}"
+        );
+        assert_eq!(
+            std::fs::read(&sandbox.installed).expect("read the installed Forge"),
+            std::fs::read(released_forge()).expect("read the released Forge"),
+            "the released Forge binary is back: {said}"
+        );
+        assert_eq!(
+            schema_of(&database),
+            RELEASED_SCHEMA,
+            "the released Forge has its own database again: {said}"
+        );
+        assert!(
+            data.join(format!(
+                "forge.sqlite3.rolled-back-from-{}-0",
+                forge_store::Store::schema_version()
+            ))
+            .is_file(),
+            "the upgraded database is kept beside it: {said}"
+        );
+        assert!(!forge.join(".install-journal").exists(), "{said}");
+        assert!(
+            sandbox.listening(),
+            "the released Forge serves again: {said}"
+        );
     }
 
     #[test]

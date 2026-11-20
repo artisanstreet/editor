@@ -12,7 +12,7 @@ use crate::service::{AddressError, AutostartError, StartError, StopError};
 use crate::sys::{self, RemoveError, RunError, SpawnError};
 use crate::ui::{self, AskError};
 use crate::{service, wsl};
-use swap::{JournalError, ReplaceError, RestoreFailures, replace};
+use swap::{JournalError, ReplaceError, RestoreFailures, Undone, Unreplaced, replace};
 
 mod swap;
 use artisan_paths::{App, ChooseRootError, EnvPathError, RootError};
@@ -299,16 +299,35 @@ pub(crate) enum RecoverError {
         app: App,
         journal: PathBuf,
         #[source]
-        source: Box<swap::RecoverError>,
+        source: Box<RecoverFailure>,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RecoverFailure {
+    #[error(transparent)]
+    Files(#[from] swap::RecoverError),
+    #[error("stop the Forge the interrupted install started")]
+    PrepareStop(#[source] AutostartError),
+    #[error("stop the Forge the interrupted install started")]
+    Stop(#[source] StopError),
+    #[error("the previous Forge's files are back, but its database couldn't be put back")]
+    Database(#[source] Box<RestoreDatabaseError>),
+    #[error("the previous files are back, but the record of the interrupted install stays")]
+    Settle(#[source] JournalError),
 }
 
 #[derive(Debug)]
 pub(crate) enum PutBack {
-    Restored,
-    Restarted,
     NotRestored(Box<RestoreFailures>),
     DatabaseNotRestored(Box<RestoreDatabaseError>),
+    Settled(Settled),
+}
+
+#[derive(Debug)]
+pub(crate) enum Settled {
+    Restored,
+    Restarted,
     NotRestarted(Box<StartError>),
 }
 
@@ -338,8 +357,6 @@ pub(crate) enum RestoreDatabaseError {
 impl std::fmt::Display for PutBack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Restored => f.write_str("the previous version is back in place"),
-            Self::Restarted => f.write_str("the previous Forge is back in place and running"),
             Self::NotRestored(failures) => write!(
                 f,
                 "putting the previous version back also failed: {}",
@@ -350,6 +367,16 @@ impl std::fmt::Display for PutBack {
                 "the previous Forge is back in place but its database couldn't be put back, so it wasn't started: {}",
                 diagnostics::chain(error)
             ),
+            Self::Settled(settled) => settled.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Display for Settled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Restored => f.write_str("the previous version is back in place"),
+            Self::Restarted => f.write_str("the previous Forge is back in place and running"),
             Self::NotRestarted(error) => write!(
                 f,
                 "the previous Forge is back in place but didn't start: {}",
@@ -368,12 +395,6 @@ pub(crate) enum UpgradeOnlineError {
     Running(#[source] service::RunningError),
     #[error("check whether Forge hands over to a new version")]
     Gateway(#[source] forge_http::upgrade::GatewayRecordError),
-    #[error("read the storage version of Forge's database in {}", data.display())]
-    Schema {
-        data: PathBuf,
-        #[source]
-        source: forge_store::admin::StorageVersionError,
-    },
     #[error("run {} --schema-version", forge.display())]
     Probe {
         forge: PathBuf,
@@ -1029,7 +1050,7 @@ fn recover_interrupted() -> Result<(), RecoverError> {
         if swap::interrupted(&dir).map_err(|source| RecoverError::Interrupted {
             app,
             journal: swap::journal(&dir),
-            source: Box::new(source),
+            source: Box::new(source.into()),
         })? {
             interrupted.push((app, dir));
         }
@@ -1039,19 +1060,50 @@ fn recover_interrupted() -> Result<(), RecoverError> {
     }
     let _installing = install_lock()?;
     for (app, dir) in interrupted {
-        match swap::recover(&dir).map_err(|source| RecoverError::Interrupted {
+        recover_app(app, &dir).map_err(|source| RecoverError::Interrupted {
             app,
             journal: swap::journal(&dir),
             source: Box::new(source),
-        })? {
-            swap::Recovered::Nothing => {}
-            swap::Recovered::PutBack => ui::info(format!(
-                "Put back the {} files an interrupted install left half replaced",
-                app.display_name()
-            )),
-        }
+        })?;
     }
     Ok(())
+}
+
+fn recover_app(app: App, dir: &Path) -> Result<(), RecoverFailure> {
+    let Some(pending) = swap::pending::<Before>(dir)? else {
+        return Ok(());
+    };
+    let progress = ui::Progress::spinner(format!(
+        "Finishing an interrupted install of {}",
+        app.display_name()
+    ));
+    let recovered = recover_pending(pending, &progress);
+    match &recovered {
+        Ok(settled) => progress.done(format!(
+            "Put back the {} files an interrupted install left half replaced; {settled}",
+            app.display_name()
+        )),
+        Err(error) => progress.fail(diagnostics::chain(error)),
+    }
+    recovered.map(drop)
+}
+
+fn recover_pending(
+    pending: swap::Pending<Before>,
+    progress: &ui::Progress,
+) -> Result<Settled, RecoverFailure> {
+    match pending.before() {
+        Before::Forge { .. } => {
+            progress.message("Stopping the Forge the interrupted install started");
+            service::prepare_bootstrap_stop().map_err(RecoverFailure::PrepareStop)?;
+            service::stop().map_err(RecoverFailure::Stop)?;
+        }
+        Before::Files => {}
+    }
+    let undone = pending.put_back()?;
+    let (settled, forgotten) = settle(undone, progress).map_err(RecoverFailure::Database)?;
+    forgotten.map_err(RecoverFailure::Settle)?;
+    Ok(settled)
 }
 
 fn staging_in(dir: &Path, prefix: &str) -> Result<tempfile::TempDir, StagingError> {
@@ -1523,6 +1575,7 @@ fn incoming_schema(forge: &Path) -> Result<StorageVersion, UpgradeOnlineError> {
 #[cfg(unix)]
 fn upgrade_forge_online(
     incoming: &Path,
+    database: Option<StorageVersion>,
     progress: &ui::Progress,
 ) -> Result<bool, UpgradeOnlineError> {
     let data = paths::data(App::Forge)?;
@@ -1533,12 +1586,6 @@ fn upgrade_forge_online(
     if !hands_over {
         return Ok(false);
     }
-    let database = forge_store::admin::storage_version(&data).map_err(|source| {
-        UpgradeOnlineError::Schema {
-            data: data.clone(),
-            source,
-        }
-    })?;
     let forge = incoming.join(App::Forge.binary_name());
     match forge_upgrade(hands_over, database, incoming_schema(&forge)?) {
         ForgeUpgrade::Online => {
@@ -1622,8 +1669,25 @@ fn put_in_place(
     progress: &ui::Progress,
 ) -> Result<String, InstallAppError> {
     let binary = paths::binary(app)?;
+    let database = match app {
+        App::Forge => {
+            let data = paths::data(App::Forge)?;
+            Some(
+                forge_store::admin::storage_version(&data).map_err(|source| {
+                    InstallAppError::DatabaseVersion {
+                        data: data.clone(),
+                        source,
+                    }
+                })?,
+            )
+        }
+        App::Editor | App::Ae => None,
+    };
     #[cfg(unix)]
-    let upgraded = app == App::Forge && upgrade_forge_online(incoming, progress)?;
+    let upgraded = match database {
+        Some(database) => upgrade_forge_online(incoming, database, progress)?,
+        None => false,
+    };
     #[cfg(not(unix))]
     let upgraded = false;
     write_beside(incoming, "LICENSE.md", LICENSE)?;
@@ -1635,21 +1699,14 @@ fn put_in_place(
     }
     write_beside(incoming, ORIGIN_FILE, &origin.record())?;
     write_beside(incoming, "version", &format!("{version}\n"))?;
-    let stopped = match app {
+    let before = database.map_or(Before::Files, |database| Before::Forge {
+        database: StoredBefore::of(database),
+    });
+    match app {
         App::Forge if !upgraded => {
-            let data = paths::data(App::Forge)?;
-            let database = forge_store::admin::storage_version(&data).map_err(|source| {
-                InstallAppError::DatabaseVersion {
-                    data: data.clone(),
-                    source,
-                }
-            })?;
             progress.message("Stopping Forge");
             service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
             service::stop()?;
-            Stopped::Forge {
-                database: StoredBefore::of(database),
-            }
         }
         App::Editor => {
             if platform::close_processes(std::slice::from_ref(&binary))
@@ -1658,23 +1715,16 @@ fn put_in_place(
             {
                 progress.message("Closed the running Editor");
             }
-            Stopped::Nothing
         }
-        App::Forge | App::Ae => Stopped::Nothing,
-    };
-    let replaced = match replace(dir, incoming) {
+        App::Forge | App::Ae => {}
+    }
+    let replaced = match replace(dir, incoming, before) {
         Ok(replaced) => replaced,
-        Err(failed) => {
-            let previous = match failed {
-                ReplaceError::Restore { .. } => Previous::Broken,
-                ReplaceError::Read { .. }
-                | ReplaceError::NotUnicode { .. }
-                | ReplaceError::NoAside { .. }
-                | ReplaceError::Journal(_)
-                | ReplaceError::Aside { .. }
-                | ReplaceError::Place { .. } => Previous::InPlace,
-            };
-            return Err(put_back(stopped, failed.into(), previous, progress));
+        Err(Unreplaced::Undone { failed, undone }) => {
+            return Err(put_back((*failed).into(), undone, progress));
+        }
+        Err(Unreplaced::Broken { failed, restore }) => {
+            return Err(ReplaceError::Restore { failed, restore }.into());
         }
     };
     match finish(app, version, upgraded, replaceable, progress) {
@@ -1692,7 +1742,7 @@ fn put_in_place(
         Err(failed) => {
             progress.message("Putting the previous version back");
             match replaced.undo() {
-                Ok(()) => Err(put_back(stopped, failed, Previous::InPlace, progress)),
+                Ok(undone) => Err(put_back(failed, undone, progress)),
                 Err(failures) => Err(InstallAppError::PutBack {
                     failed: Box::new(failed),
                     outcome: PutBack::NotRestored(Box::new(failures)),
@@ -1702,13 +1752,13 @@ fn put_in_place(
     }
 }
 
-#[derive(Clone, Copy)]
-enum Stopped {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum Before {
+    Files,
     Forge { database: StoredBefore },
-    Nothing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum StoredBefore {
     Nothing,
     Schema(usize),
@@ -1723,38 +1773,50 @@ impl StoredBefore {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Previous {
-    InPlace,
-    Broken,
-}
-
 fn put_back(
-    stopped: Stopped,
     failed: InstallAppError,
-    previous: Previous,
+    undone: Undone<Before>,
     progress: &ui::Progress,
 ) -> InstallAppError {
-    let outcome = match (previous, stopped) {
-        (Previous::Broken, _) => return failed,
-        (Previous::InPlace, Stopped::Nothing) => PutBack::Restored,
-        (Previous::InPlace, Stopped::Forge { database }) => {
-            match restore_database(database, progress) {
-                Ok(()) => {
-                    progress.message("Starting the previous Forge again");
-                    match service::start() {
-                        Ok(_) => PutBack::Restarted,
-                        Err(error) => PutBack::NotRestarted(Box::new(error)),
-                    }
-                }
-                Err(error) => PutBack::DatabaseNotRestored(Box::new(error)),
-            }
-        }
-    };
-    InstallAppError::PutBack {
-        failed: Box::new(failed),
-        outcome,
+    let failed = Box::new(failed);
+    match settle(undone, progress) {
+        Err(kept) => InstallAppError::PutBack {
+            failed,
+            outcome: PutBack::DatabaseNotRestored(kept),
+        },
+        Ok((settled, Ok(()))) => InstallAppError::PutBack {
+            failed,
+            outcome: PutBack::Settled(settled),
+        },
+        Ok((settled, Err(settle))) => InstallAppError::Unsettled {
+            failed: Box::new(InstallAppError::PutBack {
+                failed,
+                outcome: PutBack::Settled(settled),
+            }),
+            settle,
+        },
     }
+}
+
+fn settle(
+    undone: Undone<Before>,
+    progress: &ui::Progress,
+) -> Result<(Settled, Result<(), JournalError>), Box<RestoreDatabaseError>> {
+    let settled = match *undone.before() {
+        Before::Files => Settled::Restored,
+        Before::Forge { database } => match restore_database(database, progress) {
+            Err(error) => return Err(Box::new(error)),
+            Ok(()) if undone.put_back_previous(&App::Forge.binary_name()) => {
+                progress.message("Starting the previous Forge again");
+                match service::start() {
+                    Ok(_) => Settled::Restarted,
+                    Err(error) => Settled::NotRestarted(Box::new(error)),
+                }
+            }
+            Ok(()) => Settled::Restored,
+        },
+    };
+    Ok((settled, undone.forget()))
 }
 
 fn restore_database(
