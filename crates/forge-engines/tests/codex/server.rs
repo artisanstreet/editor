@@ -183,11 +183,22 @@ async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply()
         written <= most_written,
         "Codex wrote {written} MiB while the run read none, so Forge buffered it all"
     );
+    assert!(
+        !logs.text().contains("Forge reads Codex again"),
+        "Forge read Codex again although the run had read nothing more"
+    );
 
+    let mib = 1024 * 1024;
     while let Some(event) = received.recv().await {
         if let EngineEvent::Live { text, .. } = &event {
             streamed += text.len();
         }
+        let written = fixture.flooded_mib();
+        let read = streamed / mib;
+        assert!(
+            written <= most_written + read,
+            "Codex wrote {written} MiB while the run had read {read} MiB, so Forge buffered past its limit"
+        );
     }
     let outcome = harness.await.unwrap();
     assert_eq!(
@@ -195,7 +206,7 @@ async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply()
         artisan_api::RunStatus::Done,
         "{outcome:?}"
     );
-    assert_eq!(streamed, 48 * 1024 * 1024, "every delta reaches the run");
+    assert_eq!(streamed, 48 * mib, "every delta reaches the run");
 }
 
 #[tokio::test]
