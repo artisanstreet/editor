@@ -1,16 +1,52 @@
 use crate::sys::{self, RemoveError};
 use std::ffi::OsStr;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub(super) const ASIDE_SLOTS: usize = 100;
 const JOURNAL: &str = ".install-journal";
 const JOURNAL_DRAFT: &str = ".install-journal.draft";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+struct Name(String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0:?} isn't the name of a file in the install folder")]
+struct NotAName(String);
+
+impl TryFrom<String> for Name {
+    type Error = NotAName;
+
+    fn try_from(name: String) -> Result<Self, NotAName> {
+        let mut components = Path::new(&name).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(only)), None) if only == OsStr::new(&name) => Ok(Self(name)),
+            _ => Err(NotAName(name)),
+        }
+    }
+}
+
+impl From<Name> for String {
+    fn from(name: Name) -> Self {
+        name.0
+    }
+}
+
+impl Name {
+    fn aside(&self, slot: usize) -> Self {
+        Self(format!(".old-{slot}-{}", self.0))
+    }
+
+    fn of(&self, dir: &Path) -> PathBuf {
+        dir.join(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Entry {
-    name: String,
-    aside: Option<String>,
+    name: Name,
+    aside: Option<Name>,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -190,7 +226,7 @@ impl Replaced {
         forget(&self.dir)?;
         for entry in self.journal.entries {
             if let Some(aside) = entry.aside {
-                discard(&self.dir.join(aside));
+                discard(&aside.of(&self.dir));
             }
         }
         Ok(())
@@ -225,15 +261,15 @@ pub(super) fn replace_with(
             .and_then(OsStr::to_str)
             .ok_or_else(|| ReplaceError::NotUnicode { path: path.clone() })?
             .to_owned();
-        names.push(name);
+        names.push(Name(name));
     }
-    names.sort();
+    names.sort_by(|one, other| one.0.cmp(&other.0));
     let mut replaced = Replaced {
         dir: dir.to_owned(),
         journal: Journal::default(),
     };
     for name in &names {
-        if let Err(error) = swap_in(&mut replaced, &incoming.join(name), name, &rename) {
+        if let Err(error) = swap_in(&mut replaced, &incoming.join(&name.0), name, &rename) {
             return Err(match replaced.undo() {
                 Ok(()) => error,
                 Err(restore) => ReplaceError::Restore {
@@ -250,6 +286,10 @@ pub(super) fn journal(dir: &Path) -> PathBuf {
     dir.join(JOURNAL)
 }
 
+pub(super) fn leftover(name: &OsStr) -> bool {
+    name == JOURNAL_DRAFT || name.to_string_lossy().starts_with(".old-")
+}
+
 pub(super) fn recover(dir: &Path) -> Result<Recovered, RecoverError> {
     let path = journal(dir);
     let text = match std::fs::read_to_string(&path) {
@@ -259,6 +299,7 @@ pub(super) fn recover(dir: &Path) -> Result<Recovered, RecoverError> {
     };
     let journal: Journal =
         serde_json::from_str(&text).map_err(|source| JournalError::Unreadable { path, source })?;
+    discard(&dir.join(JOURNAL_DRAFT));
     match RestoreFailures::of(restore(dir, &journal)) {
         Some(source) => Err(RecoverError::Restore {
             dir: dir.to_owned(),
@@ -285,38 +326,36 @@ fn occupied(path: &Path) -> Result<bool, FreeAsideError> {
     }
 }
 
-fn free_aside(dir: &Path, name: &str) -> Result<String, FreeAsideError> {
+fn free_aside(dir: &Path, name: &Name) -> Result<Name, FreeAsideError> {
     for slot in 0..ASIDE_SLOTS {
-        let aside = format!(".old-{slot}-{name}");
-        if !occupied(&dir.join(&aside))? {
+        let aside = name.aside(slot);
+        if !occupied(&aside.of(dir))? {
             return Ok(aside);
         }
     }
-    Err(FreeAsideError::Full {
-        path: dir.join(name),
-    })
+    Err(FreeAsideError::Full { path: name.of(dir) })
 }
 
 fn swap_in(
     replaced: &mut Replaced,
     new: &Path,
-    name: &str,
+    name: &Name,
     rename: &impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), ReplaceError> {
     let dir = replaced.dir.clone();
-    let target = dir.join(name);
+    let target = name.of(&dir);
     let aside = if occupied(&target)? {
         Some(free_aside(&dir, name)?)
     } else {
         None
     };
     replaced.journal.entries.push(Entry {
-        name: name.to_owned(),
+        name: name.clone(),
         aside: aside.clone(),
     });
     record(&dir, &replaced.journal)?;
     if let Some(aside) = &aside {
-        set_aside(&target, &dir.join(aside), rename).map_err(|source| ReplaceError::Aside {
+        set_aside(&target, &aside.of(&dir), rename).map_err(|source| ReplaceError::Aside {
             path: target.clone(),
             source,
         })?;
@@ -364,8 +403,8 @@ fn restore(dir: &Path, journal: &Journal) -> Vec<RestoreError> {
     failures
 }
 
-fn clear(dir: &Path, name: &str) -> Result<(), RestoreError> {
-    let target = dir.join(name);
+fn clear(dir: &Path, name: &Name) -> Result<(), RestoreError> {
+    let target = name.of(dir);
     if cfg!(windows) {
         return displace(dir, name);
     }
@@ -375,12 +414,12 @@ fn clear(dir: &Path, name: &str) -> Result<(), RestoreError> {
     })
 }
 
-fn displace(dir: &Path, name: &str) -> Result<(), RestoreError> {
-    let target = dir.join(name);
+fn displace(dir: &Path, name: &Name) -> Result<(), RestoreError> {
+    let target = name.of(dir);
     if !occupied(&target)? {
         return Ok(());
     }
-    let out_of_the_way = dir.join(free_aside(dir, name)?);
+    let out_of_the_way = free_aside(dir, name)?.of(dir);
     std::fs::rename(&target, &out_of_the_way).map_err(|source| RestoreError::Displace {
         path: target,
         source,
@@ -389,9 +428,9 @@ fn displace(dir: &Path, name: &str) -> Result<(), RestoreError> {
     Ok(())
 }
 
-fn put_back(dir: &Path, name: &str, aside: &str) -> Result<(), RestoreError> {
-    let target = dir.join(name);
-    let aside = dir.join(aside);
+fn put_back(dir: &Path, name: &Name, aside: &Name) -> Result<(), RestoreError> {
+    let target = name.of(dir);
+    let aside = aside.of(dir);
     let inspect = |source| RestoreError::PutBack {
         aside: aside.clone(),
         target: target.clone(),

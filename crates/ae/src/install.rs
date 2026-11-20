@@ -1853,8 +1853,7 @@ fn clear_leftovers(dir: &Path) -> Result<(), InstallAppError> {
     for entry in std::fs::read_dir(dir).map_err(read)? {
         let entry = entry.map_err(read)?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".old-") || name.starts_with(".incoming-") {
+        if swap::leftover(&name) || name.to_string_lossy().starts_with(".incoming-") {
             swap::discard(&entry.path());
         }
     }
