@@ -73,14 +73,7 @@ impl HostSwitch {
     }
 
     fn declared(self) -> bool {
-        artisan_api::setting_decl(self.key())
-            .and_then(|decl| decl.default_value().as_bool())
-            .unwrap_or_else(|| {
-                unreachable!(
-                    "invariant: host switch {} is a declared boolean setting",
-                    self.key()
-                )
-            })
+        artisan_api::switch_decl(self.key()).switch(None).on()
     }
 }
 

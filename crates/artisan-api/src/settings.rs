@@ -64,7 +64,41 @@ pub struct SettingDecl {
     pub needs_approval: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Switch {
+    Stored(bool),
+    Unset(bool),
+    Damaged(bool),
+}
+
+impl Switch {
+    #[must_use]
+    pub const fn on(self) -> bool {
+        match self {
+            Self::Stored(on) | Self::Unset(on) | Self::Damaged(on) => on,
+        }
+    }
+}
+
 impl SettingDecl {
+    #[must_use]
+    pub fn switch(&self, stored: Option<&Value>) -> Switch {
+        match stored {
+            Some(Value::Bool(on)) => Switch::Stored(*on),
+            None => Switch::Unset(self.declared_switch()),
+            Some(_) => Switch::Damaged(self.declared_switch()),
+        }
+    }
+
+    fn declared_switch(&self) -> bool {
+        self.default_value().as_bool().unwrap_or_else(|| {
+            unreachable!(
+                "invariant: setting {} is read as a switch, so it declares an on or off default",
+                self.key
+            )
+        })
+    }
+
     #[must_use]
     pub fn default_value(&self) -> Value {
         serde_json::from_str(self.default).unwrap_or_else(|error| {
@@ -302,6 +336,13 @@ pub const SETTINGS: &[SettingDecl] = &[
         needs_approval: false,
     },
 ];
+
+#[must_use]
+pub fn switch_decl(key: &str) -> &'static SettingDecl {
+    setting_decl(key)
+        .filter(|decl| matches!(decl.kind, SettingKind::Bool))
+        .unwrap_or_else(|| unreachable!("invariant: {key} is a declared on or off setting"))
+}
 
 #[must_use]
 pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {

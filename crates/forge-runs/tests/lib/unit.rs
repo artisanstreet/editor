@@ -4175,12 +4175,17 @@ async fn turned_off_side_queries_ask_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn side_queries_set_to_something_other_than_on_or_off_ask_nothing() {
+async fn side_queries_set_to_something_other_than_on_or_off_follow_their_default_like_the_editor_shows()
+ {
+    let damaged = side_queries_asked_with(serde_json::json!("no")).await;
     assert!(
-        side_queries_asked_with(serde_json::json!("no"))
-            .await
-            .is_empty(),
-        "a side query whose setting is neither true nor false stays off"
+        !damaged.is_empty(),
+        "a side query whose setting is neither on nor off follows its default, which is on"
+    );
+    assert_eq!(
+        damaged,
+        side_queries_asked_with(serde_json::json!(true)).await,
+        "a damaged setting asks exactly what the switched-on setting asks"
     );
 }
 

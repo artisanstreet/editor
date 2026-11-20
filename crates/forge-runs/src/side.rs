@@ -658,13 +658,19 @@ impl Hub {
     }
 
     pub(crate) async fn enabled(&self, key: &str) -> bool {
+        let decl = artisan_api::switch_decl(key);
         match self.store().setting(key).await {
-            Ok(None) => true,
-            Ok(Some(serde_json::Value::Bool(on))) => on,
-            Ok(Some(value)) => {
-                tracing::warn!(key, %value, "the setting is neither true nor false, so it stays off");
-                false
-            }
+            Ok(stored) => match decl.switch(stored.as_ref()) {
+                artisan_api::Switch::Damaged(on) => {
+                    tracing::warn!(
+                        key,
+                        on,
+                        "the setting is neither on nor off, so it follows its default"
+                    );
+                    on
+                }
+                artisan_api::Switch::Stored(on) | artisan_api::Switch::Unset(on) => on,
+            },
             Err(error) => {
                 tracing::warn!(key, "reading a setting: {}", diagnostics::chain(&error));
                 false
