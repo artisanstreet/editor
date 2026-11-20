@@ -227,7 +227,7 @@ pub enum ResponseError {
     },
     #[error("the answer from {url} is over {limit} bytes")]
     TooLarge { url: Box<Url>, limit: usize },
-    #[error("{url} answered HTTP {status}{}", oauth_reason(*.body))]
+    #[error("{url} answered HTTP {status}{}", oauth_reason(.body))]
     Status {
         url: Box<Url>,
         status: u16,
@@ -241,13 +241,13 @@ pub enum ResponseError {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorBody {
     OAuth(OAuthCode),
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OAuthCode {
     InvalidRequest,
     InvalidClient,
@@ -264,7 +264,24 @@ pub enum OAuthCode {
     AccessDenied,
     ServerError,
     TemporarilyUnavailable,
-    Unrecognized,
+    Unrecognized(OtherCode),
+    Unshowable,
+}
+
+const MAX_OTHER_CODE: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherCode(String);
+
+impl OtherCode {
+    fn of(code: &str) -> Option<Self> {
+        let showable = !code.is_empty()
+            && code.len() <= MAX_OTHER_CODE
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'));
+        showable.then(|| Self(code.to_owned()))
+    }
 }
 
 impl OAuthCode {
@@ -285,11 +302,11 @@ impl OAuthCode {
             "access_denied" => Self::AccessDenied,
             "server_error" => Self::ServerError,
             "temporarily_unavailable" => Self::TemporarilyUnavailable,
-            _ => Self::Unrecognized,
+            other => OtherCode::of(other).map_or(Self::Unshowable, Self::Unrecognized),
         }
     }
 
-    const fn code(self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Self::InvalidRequest => "invalid_request",
             Self::InvalidClient => "invalid_client",
@@ -306,12 +323,13 @@ impl OAuthCode {
             Self::AccessDenied => "access_denied",
             Self::ServerError => "server_error",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::Unrecognized => "an OAuth error code Artisan doesn't know",
+            Self::Unrecognized(OtherCode(code)) => code,
+            Self::Unshowable => "an OAuth error code Artisan can't show",
         }
     }
 }
 
-fn oauth_reason(body: ErrorBody) -> String {
+fn oauth_reason(body: &ErrorBody) -> String {
     match body {
         ErrorBody::OAuth(code) => format!(" ({})", code.code()),
         ErrorBody::Other => String::new(),
@@ -882,7 +900,7 @@ pub enum Revocation {
 }
 
 impl Revocation {
-    const fn of(code: OAuthCode) -> Option<Self> {
+    const fn of(code: &OAuthCode) -> Option<Self> {
         match code {
             OAuthCode::InvalidGrant => Some(Self::InvalidGrant),
             OAuthCode::InvalidClient => Some(Self::InvalidClient),
@@ -899,7 +917,8 @@ impl Revocation {
             | OAuthCode::AccessDenied
             | OAuthCode::ServerError
             | OAuthCode::TemporarilyUnavailable
-            | OAuthCode::Unrecognized => None,
+            | OAuthCode::Unrecognized(_)
+            | OAuthCode::Unshowable => None,
         }
     }
 }
@@ -1040,7 +1059,7 @@ async fn tokens(
             status: 400 | 401,
             body: ErrorBody::OAuth(code),
             ..
-        } => Revocation::of(*code).map_or_else(
+        } => Revocation::of(code).map_or_else(
             || TokenError::Request {
                 server: server.to_owned(),
                 issuer: issuer(),

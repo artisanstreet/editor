@@ -103,7 +103,7 @@ pub async fn wait_for_code(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     InvalidRequest,
     UnauthorizedClient,
@@ -112,7 +112,24 @@ pub enum Refusal {
     InvalidScope,
     ServerError,
     TemporarilyUnavailable,
-    Unrecognized,
+    Unrecognized(OtherCode),
+    Unshowable,
+}
+
+const MAX_OTHER_CODE: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherCode(String);
+
+impl OtherCode {
+    fn of(code: &str) -> Option<Self> {
+        let showable = !code.is_empty()
+            && code.len() <= MAX_OTHER_CODE
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'));
+        showable.then(|| Self(code.to_owned()))
+    }
 }
 
 impl Refusal {
@@ -125,11 +142,11 @@ impl Refusal {
             "invalid_scope" => Self::InvalidScope,
             "server_error" => Self::ServerError,
             "temporarily_unavailable" => Self::TemporarilyUnavailable,
-            _ => Self::Unrecognized,
+            other => OtherCode::of(other).map_or(Self::Unshowable, Self::Unrecognized),
         }
     }
 
-    const fn code(self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Self::InvalidRequest => "invalid_request",
             Self::UnauthorizedClient => "unauthorized_client",
@@ -138,7 +155,8 @@ impl Refusal {
             Self::InvalidScope => "invalid_scope",
             Self::ServerError => "server_error",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::Unrecognized => "an OAuth error code Artisan doesn't know",
+            Self::Unrecognized(OtherCode(code)) => code,
+            Self::Unshowable => "an OAuth error code Artisan can't show",
         }
     }
 }

@@ -130,6 +130,44 @@ async fn a_denied_sign_in_shows_the_oauth_code_and_never_the_providers_descripti
     );
 }
 
+async fn refused_with(error: &str) -> (String, String) {
+    let (listener, port) = listening().await;
+    let waiting = tokio::spawn(wait_for_code(
+        listener,
+        STATE.to_owned(),
+        CancellationToken::new(),
+    ));
+    let response = answer(
+        port,
+        &format!("GET /callback?state={ENCODED_STATE}&error={error} HTTP/1.1\r\n\r\n"),
+    )
+    .await;
+    let ended = within("the refusal", LIMIT, waiting)
+        .await
+        .expect("the wait runs to the end");
+    let Err(denied @ CallbackError::Denied { .. }) = ended else {
+        panic!("a refusal ended as {ended:?}");
+    };
+    (response, denied.to_string())
+}
+
+#[tokio::test]
+async fn a_refusal_with_a_code_artisan_doesnt_know_still_shows_the_code() {
+    let (page, told) = refused_with("login_required").await;
+    assert!(page.contains("login_required"), "{page:?}");
+    assert_eq!(told, "The sign-in was refused (login_required).");
+}
+
+#[tokio::test]
+async fn a_refusal_code_that_isnt_a_plain_word_is_never_repeated() {
+    let (page, told) = refused_with("%3Cimg%20src%3Dx%3E").await;
+    assert!(!page.contains("img"), "{page:?}");
+    assert_eq!(
+        told,
+        "The sign-in was refused (an OAuth error code Artisan can't show)."
+    );
+}
+
 #[tokio::test]
 async fn cancelling_stops_waiting_for_the_browser() {
     let (listener, port) = listening().await;

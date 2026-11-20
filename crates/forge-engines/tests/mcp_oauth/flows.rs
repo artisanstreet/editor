@@ -418,6 +418,33 @@ async fn a_refused_grant_is_a_revocation() {
     );
 }
 
+async fn refused_with(code: &'static str) -> String {
+    let (base, _stub) = token_stub(move || {
+        (
+            Code::BAD_REQUEST,
+            Json(serde_json::json!({ "error": code, "error_description": "token sk-secret" })),
+        )
+            .into_response()
+    })
+    .await;
+    let answer = refreshed(&base).await;
+    let Err(failure @ TokenError::Request { .. }) = answer else {
+        panic!("an unknown refusal gave {answer:?}");
+    };
+    diagnostics::chain(&failure)
+}
+
+#[tokio::test]
+async fn an_unknown_oauth_code_is_shown_but_never_the_providers_description() {
+    let told = refused_with("login_required").await;
+    assert!(told.contains("(login_required)"), "{told}");
+    assert!(!told.contains("sk-secret"), "{told}");
+
+    let told = refused_with("<script>alert(1)</script>").await;
+    assert!(!told.contains("script"), "{told}");
+    assert!(told.contains("can't show"), "{told}");
+}
+
 async fn token_answer(body: Value) -> Result<Tokens, TokenError> {
     let (base, _stub) = token_stub(move || Json(body.clone()).into_response()).await;
     refreshed(&base).await
