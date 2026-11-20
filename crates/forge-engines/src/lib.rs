@@ -38,14 +38,15 @@ pub use commands::{MissingPrompt, normalize_command};
 pub use compaction::{COMPACTION_NUDGE, compaction_prompt, is_compaction_summary};
 pub(crate) use customise::materialize;
 pub use customise::{
-    ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill,
-    apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill, normalize_prompt,
-    prompt_digest, read_prompt_file, reconcile_skills, skill_catalog, with_gateway_mcp,
+    ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PlacedSkill, PromptApplied, PromptFile,
+    adopt_skill, apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill,
+    normalize_prompt, place_skill, prompt_digest, read_prompt_file, reconcile_skills,
+    skill_catalog, undo_skill, with_gateway_mcp,
 };
 pub use customise::{
     AdoptSkillError, ApplyPromptError, DiscardSkillError, FindSkillError, ImportError,
     InstallSkillError, LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
-    RecoverSkillError,
+    RecoverSkillError, UndoSkillError,
 };
 pub use engines::host_entry;
 pub use harness::{

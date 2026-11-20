@@ -1398,6 +1398,91 @@ pub fn install_skill(
     from: &Path,
     replace: bool,
 ) -> Result<String, InstallSkillError> {
+    place_skill(homes, c, from, replace).map(|placed| placed.name)
+}
+
+#[derive(Debug)]
+#[must_use = "a placed skill is kept or undone"]
+pub struct PlacedSkill {
+    skills_dir: PathBuf,
+    name: String,
+    backup: Option<String>,
+}
+
+impl PlacedSkill {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UndoSkillError {
+    #[error("recording the undo of {name}")]
+    Record {
+        name: String,
+        #[source]
+        source: artisan_paths::private::PrivateFileError,
+    },
+    #[error("setting aside the new {name}")]
+    SetAside {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("restoring the old {name} from {}", backup.display())]
+    Restore {
+        name: String,
+        backup: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub fn undo_skill(placed: PlacedSkill) -> Result<(), UndoSkillError> {
+    let PlacedSkill {
+        skills_dir,
+        name,
+        backup,
+    } = placed;
+    let _replacing = replacing();
+    let record = replacement_record(&skills_dir, &name);
+    if let Some(backup) = &backup {
+        artisan_paths::private::write_file(&record, backup.as_bytes()).map_err(|source| {
+            UndoSkillError::Record {
+                name: name.clone(),
+                source,
+            }
+        })?;
+    }
+    let skill = skills_dir.join(&name);
+    let aside = skills_dir.join(format!(
+        "{INSTALL_STAGING}undo-{name}-{}",
+        artisan_api::now()
+    ));
+    fs::rename(&skill, &aside).map_err(|source| UndoSkillError::SetAside {
+        name: name.clone(),
+        source,
+    })?;
+    if let Some(backup) = backup {
+        let backup = backups_root(&skills_dir).join(backup);
+        move_folder(&backup, &skill).map_err(|source| UndoSkillError::Restore {
+            name: name.clone(),
+            backup,
+            source,
+        })?;
+        forget_replacement(&record);
+    }
+    discard_leftover(&aside);
+    Ok(())
+}
+
+pub fn place_skill(
+    homes: &[(EngineId, Option<PathBuf>)],
+    c: &Customisation,
+    from: &Path,
+    replace: bool,
+) -> Result<PlacedSkill, InstallSkillError> {
     let from = from
         .canonicalize()
         .map_err(|source| InstallSkillError::Unreadable {
@@ -1444,7 +1529,7 @@ pub fn install_skill(
     let backup_name = format!("{name}-{stamp}");
     let backup = backups_root(&c.skills_dir).join(&backup_name);
     let record = replacement_record(&c.skills_dir, &name);
-    let result = (|| -> Result<(), InstallSkillError> {
+    let result = (|| -> Result<bool, InstallSkillError> {
         copy_dir(&from, &staging).map_err(|source| InstallSkillError::Copy {
             path: from.clone(),
             source,
@@ -1482,12 +1567,16 @@ pub fn install_skill(
         if replaced {
             forget_replacement(&record);
         }
-        Ok(())
+        Ok(replaced)
     })();
     if result.is_err() {
         discard_leftover(&staging);
     }
-    result.map(|()| name)
+    result.map(|replaced| PlacedSkill {
+        skills_dir: c.skills_dir.clone(),
+        name,
+        backup: replaced.then_some(backup_name),
+    })
 }
 
 const REPLACING: &str = ".replacing-";

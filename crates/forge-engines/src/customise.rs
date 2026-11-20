@@ -15,8 +15,9 @@ pub use prompt::{
     prompt_digest, read_prompt_file,
 };
 pub use skills::{
-    AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, ReadSkillsError,
-    RecoverSkillError, adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog,
+    AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, PlacedSkill,
+    ReadSkillsError, RecoverSkillError, UndoSkillError, adopt_skill, discard_skill, enabled_skills,
+    install_skill, place_skill, skill_catalog, undo_skill,
 };
 
 const COPY_MARKER: &str = ".artisan-skill";

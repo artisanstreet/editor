@@ -1,4 +1,4 @@
-use super::tests::{MACHINE, SECRET, mcp_servers, stub_server, test_client, test_hub};
+use super::tests::{MACHINE, SECRET, mcp_servers, stub_server, sync_record, test_client, test_hub};
 use super::*;
 
 fn statuses(stub: &tests::Stub) -> Vec<serde_json::Value> {
@@ -59,7 +59,7 @@ async fn a_bundle_with_one_invalid_mcp_server_changes_nothing() {
         "the valid server before it is not placed on its own"
     );
     assert_eq!(hub.store().setting("global_prompt").await.unwrap(), None);
-    assert!(!sync_state_path(dir.path()).exists());
+    assert_eq!(sync_record(hub.store()).await, None);
     assert_eq!(statuses(&stub), [serde_json::json!("failed")]);
 }
 

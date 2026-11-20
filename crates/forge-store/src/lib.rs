@@ -91,10 +91,11 @@ pub use schema::{
     BackupError, FinishUpgradeError, MigrationFailure, QuestionPart, RollbackError, SchemaError,
 };
 pub use settings::{
-    BumpRevisionError, McpSecret, MutateMcpError, PromptVersionError, ReadDraftError,
-    ReadSecretError, ReadSettingError, SavePromptError, SetDefaultModelError, SetDraftError,
-    SetMcpSecretError, SetModelConfigError, SetModelGroupError, SetSecretError, SetSettingError,
-    SetSkillEnabledError, SettingFailure,
+    ApplyConfigBundleError, BumpRevisionError, BundleCommit, CONFIG_SYNC_KEY, ConfigBundle,
+    McpSecret, MutateMcpError, PromptEdit, PromptVersionError, ReadDraftError, ReadSecretError,
+    ReadSettingError, SavePromptError, SetDefaultModelError, SetDraftError, SetMcpSecretError,
+    SetModelConfigError, SetModelGroupError, SetSecretError, SetSettingError, SetSkillEnabledError,
+    SettingFailure,
 };
 pub use source_index::{MAX_INDEX_BYTES, SourceIndexError};
 pub use sources::{

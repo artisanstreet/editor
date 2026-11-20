@@ -31,9 +31,10 @@ pub use coordination::DeliverMessageError;
 pub use error::{ErrorClass, Refused};
 pub use extensions::{
     AdoptSkillError, CustomisationError, DiscardSkillError, EnabledSkillsError, Extensions,
-    GlobalPromptError, HomesLockError, InstallSkillError, MarketplaceInstallError,
-    MarketplaceSearchError, ReconcileSkillsError, ResolveGlobalPromptError, SaveGlobalPromptError,
-    SetSkillEnabledError, SkillCatalogError,
+    GlobalPromptError, HomesLockError, InstallSkillError, KeepSkillsError, MarketplaceInstallError,
+    MarketplaceSearchError, PlaceSkillsError, PlacedSkills, ReconcileSkillsError,
+    ResolveGlobalPromptError, SaveGlobalPromptError, SetSkillEnabledError, SkillCatalogError,
+    UndoSkillsError,
 };
 pub use gateway::COMPUTER_USE_KEY;
 pub use gateway::{CallEditorError, GatewayCaller, GatewayRefusal};

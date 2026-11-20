@@ -11,6 +11,12 @@ pub enum SettingFailure {
     Customizations(#[source] artisan_api::ModelCustomizationsError),
     #[error("the revision is exhausted")]
     RevisionExhausted,
+    #[error("the global prompt's version {version} doesn't fit the store")]
+    PromptVersion {
+        version: u64,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
     #[error("MCP entry {server} changed; reload before saving")]
     McpChanged { server: String },
     #[error("MCP server needs a name")]
@@ -37,7 +43,33 @@ operation_error!(SetDefaultModelError(SettingFailure), "make {model} the default
 operation_error!(SetModelConfigError(SettingFailure), "remember the config of {engine} model {model}", engine: EngineId, model: String);
 operation_error!(SetModelGroupError(WriteFailure), "remember {engine} model group {group}", engine: EngineId, group: String);
 operation_error!(SetSkillEnabledError(WriteFailure), "turn skill {skill} on or off", skill: String);
-operation_error!(SavePromptError(WriteFailure), "save the global prompt over version {base}", base: u64);
+operation_error!(SavePromptError(SettingFailure), "save the global prompt over version {base}", base: u64);
+operation_error!(
+    ApplyConfigBundleError(SettingFailure),
+    "apply a config bundle"
+);
+
+pub const CONFIG_SYNC_KEY: &str = "config_sync";
+
+#[derive(Debug)]
+pub struct PromptEdit {
+    pub base: u64,
+    pub text: String,
+}
+
+#[derive(Debug)]
+pub struct ConfigBundle {
+    pub enable_skills: Vec<String>,
+    pub prompt: Option<PromptEdit>,
+    pub mcp: Vec<artisan_api::McpMutation>,
+    pub record: serde_json::Value,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BundleCommit {
+    Applied,
+    PromptChanged { latest: u64 },
+}
 operation_error!(
     PromptVersionError(StorageError),
     "read the global prompt's version"
@@ -127,7 +159,7 @@ impl Store {
         self.mutate_mcp_together(vec![mutation]).await
     }
 
-    pub async fn mutate_mcp_together(
+    async fn mutate_mcp_together(
         &self,
         mutations: Vec<artisan_api::McpMutation>,
     ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
@@ -260,17 +292,13 @@ impl Store {
     ) -> Result<(), SetSkillEnabledError> {
         let skill = id.clone();
         self.write_acknowledged(move |tx| {
-            let mut disabled: std::collections::BTreeSet<String> =
-                read::setting(tx, "disabled_skills")?
-                    .map(read::from_value)
-                    .transpose()?
-                    .unwrap_or_default();
-            if enabled {
-                disabled.remove(&id);
-            } else {
-                disabled.insert(id);
-            }
-            tx.save_setting("disabled_skills".into(), read::to_value(&disabled)?)
+            turn_skills(tx, |disabled| {
+                if enabled {
+                    disabled.remove(&id);
+                } else {
+                    disabled.insert(id);
+                }
+            })
         })
         .await
         .map_err(|cause| SetSkillEnabledError {
@@ -289,19 +317,61 @@ impl Store {
             if latest != base {
                 return Ok(Err(latest));
             }
-            let version = latest + 1;
-            tx.execute(
-                include_str!("sql/settings/save_prompt_version.sql"),
-                params![i64::try_from(version).unwrap_or(i64::MAX), text, tx.now()],
-            )
-            .at("settings/save_prompt_version.sql")?;
-            tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
-            tx.save_setting("global_prompt_version".into(), serde_json::json!(version))?;
-            Ok(Ok(version))
+            save_prompt(tx, latest, text).map(Ok)
         })
         .await
         .map_err(|cause| SavePromptError {
             base,
+            cause: Box::new(cause),
+        })
+    }
+
+    pub async fn apply_config_bundle(
+        &self,
+        bundle: ConfigBundle,
+    ) -> Result<BundleCommit, ApplyConfigBundleError> {
+        let bytes = bundle.prompt.as_ref().map_or(0, |prompt| prompt.text.len())
+            + crate::encoded::len(&bundle.record)
+            + bundle.mcp.iter().map(crate::encoded::len).sum::<usize>();
+        self.write_acknowledged_carrying(bytes, move |tx| {
+            let ConfigBundle {
+                enable_skills,
+                prompt,
+                mcp,
+                record,
+            } = bundle;
+            if let Some(prompt) = &prompt {
+                let latest = read::prompt_version(tx)?;
+                if latest != prompt.base {
+                    return Ok(BundleCommit::PromptChanged { latest });
+                }
+            }
+            if !enable_skills.is_empty() {
+                turn_skills(tx, |disabled| {
+                    for skill in &enable_skills {
+                        disabled.remove(skill);
+                    }
+                })?;
+            }
+            if let Some(PromptEdit { base, text }) = prompt {
+                save_prompt(tx, base, text)?;
+            }
+            if !mcp.is_empty() {
+                let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
+                    .map(read::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                for mutation in mcp {
+                    apply_mcp_mutation(tx, &mut servers, mutation)?;
+                }
+                servers.sort_by(|a, b| a.name.cmp(&b.name));
+                tx.save_setting("mcp_servers".into(), read::to_value(&servers)?)?;
+            }
+            tx.save_setting(CONFIG_SYNC_KEY.to_owned(), record)?;
+            Ok(BundleCommit::Applied)
+        })
+        .await
+        .map_err(|cause| ApplyConfigBundleError {
             cause: Box::new(cause),
         })
     }
@@ -477,6 +547,38 @@ fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<(), St
         ])
         .at("mcp/forget.sql")?;
     Ok(())
+}
+
+fn turn_skills(
+    tx: &mut crate::writer::Tx<'_>,
+    turn: impl FnOnce(&mut std::collections::BTreeSet<String>),
+) -> Result<(), WriteFailure> {
+    let mut disabled: std::collections::BTreeSet<String> = read::setting(tx, "disabled_skills")?
+        .map(read::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    turn(&mut disabled);
+    tx.save_setting("disabled_skills".into(), read::to_value(&disabled)?)
+}
+
+fn save_prompt(
+    tx: &mut crate::writer::Tx<'_>,
+    base: u64,
+    text: String,
+) -> Result<u64, SettingFailure> {
+    let version = base
+        .checked_add(1)
+        .ok_or(SettingFailure::RevisionExhausted)?;
+    let stored = i64::try_from(version)
+        .map_err(|source| SettingFailure::PromptVersion { version, source })?;
+    tx.execute(
+        include_str!("sql/settings/save_prompt_version.sql"),
+        params![stored, text, tx.now()],
+    )
+    .at("settings/save_prompt_version.sql")?;
+    tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
+    tx.save_setting("global_prompt_version".into(), serde_json::json!(version))?;
+    Ok(version)
 }
 
 fn apply_mcp_mutation(

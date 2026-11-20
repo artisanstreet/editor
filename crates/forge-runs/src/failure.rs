@@ -257,7 +257,9 @@ pub fn setting(failure: &SettingFailure) -> Failure {
         SettingFailure::McpNameTaken { server } => Failure::Mcp(McpFailure::NameTaken {
             server: server.clone(),
         }),
-        SettingFailure::RevisionExhausted => Failure::Internal,
+        SettingFailure::RevisionExhausted | SettingFailure::PromptVersion { .. } => {
+            Failure::Internal
+        }
     }
 }
 
@@ -281,6 +283,7 @@ pub fn draft(scope: &str, failure: &SettingFailure) -> Failure {
         )
         | SettingFailure::Customizations(_)
         | SettingFailure::RevisionExhausted
+        | SettingFailure::PromptVersion { .. }
         | SettingFailure::McpChanged { .. }
         | SettingFailure::McpUnnamed
         | SettingFailure::McpTargetMissing { .. }
@@ -859,7 +862,7 @@ impl SaveGlobalPromptError {
                     current: *current,
                 })
             }
-            Self::Save { source, .. } => write(&source.cause),
+            Self::Save { source, .. } => setting(&source.cause),
             Self::Reconcile(source) => source.wire(),
         }
     }
@@ -883,7 +886,7 @@ impl ResolveGlobalPromptError {
                 base: *version,
                 current: *current,
             }),
-            Self::Save { source, .. } => write(&source.cause),
+            Self::Save { source, .. } => setting(&source.cause),
             Self::Bump(source) => setting(&source.cause),
             Self::Current(source) | Self::Reconcile(source) => source.wire(),
         }

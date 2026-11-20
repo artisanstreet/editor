@@ -113,7 +113,9 @@ pub const fn setting(failure: &SettingFailure) -> ErrorClass {
         | SettingFailure::McpNameTaken { .. }
         | SettingFailure::McpUnnamed
         | SettingFailure::Customizations(_) => ErrorClass::Conflict,
-        SettingFailure::RevisionExhausted => ErrorClass::Internal,
+        SettingFailure::RevisionExhausted | SettingFailure::PromptVersion { .. } => {
+            ErrorClass::Internal
+        }
     }
 }
 

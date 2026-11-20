@@ -226,7 +226,7 @@ async fn config_sync_rejects_tampered_manifest_bytes() {
     let hub = test_hub(dir.path());
     let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
     result.unwrap_err();
-    assert!(!sync_state_path(dir.path()).exists());
+    assert_eq!(sync_record(hub.store()).await, None);
     assert_eq!(stub.reports.lock().unwrap().len(), 1);
     assert_eq!(
         stub.reports.lock().unwrap()[0]["status"],
@@ -309,7 +309,7 @@ async fn a_skill_that_cannot_install_changes_nothing_else() {
         catalog.iter().all(|entry| entry.id != "local.brokenskill"),
         "no partial install may remain"
     );
-    assert!(!sync_state_path(dir.path()).exists());
+    assert_eq!(sync_record(hub.store()).await, None);
     let reports = stub.reports.lock().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["status"], serde_json::json!("failed"));
@@ -343,6 +343,57 @@ async fn unknown_skill_without_bundle_fails_named() {
         reports[0]["detail"]
     );
     drop(reports);
+}
+
+pub(super) async fn sync_record(store: &forge_store::Store) -> Option<serde_json::Value> {
+    store.setting(forge_store::CONFIG_SYNC_KEY).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_bundle_whose_mcp_servers_cannot_be_saved_leaves_its_skills_and_prompt_unapplied() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = test_hub(dir.path());
+    let local = tempfile::tempdir().unwrap();
+    std::fs::write(local.path().join("SKILL.md"), skill_md("keptskill")).unwrap();
+    std::fs::write(local.path().join("notes.md"), b"the user's own notes").unwrap();
+    hub.extensions()
+        .install_skill(local.path().to_path_buf(), false)
+        .await
+        .unwrap();
+    let oversized = "a".repeat(9 * 1024 * 1024);
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "format": "ast-editor-config/1",
+        "mcp_servers": [{"name": "s", "command": "srv", "args": [oversized]}],
+        "skills": [
+            bundled_skill("keptskill", vec![("notes.md", b"the account's notes")]),
+            bundled_skill("newskill", Vec::new()),
+        ],
+        "global_prompt": "synced prompt",
+    }))
+    .unwrap();
+    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+
+    let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
+
+    let error = diagnostics::chain(&result.unwrap_err());
+    assert!(
+        error.contains("saving setting mcp_servers would make the settings"),
+        "{error}"
+    );
+    assert_eq!(hub.store().setting("global_prompt").await.unwrap(), None);
+    assert!(mcp_servers(hub.store()).await.is_empty());
+    let catalog = hub.extensions().skill_catalog().await.unwrap();
+    assert!(
+        catalog.iter().all(|entry| entry.id != "local.newskill"),
+        "the bundle's new skill was taken back"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("extensions/skills/keptskill/notes.md")).unwrap(),
+        b"the user's own notes",
+        "the skill the bundle replaced is back"
+    );
+    assert_eq!(sync_record(hub.store()).await, None);
+    assert_eq!(stub.report_statuses(), [serde_json::json!("failed")]);
 }
 
 pub(super) async fn mcp_servers(store: &forge_store::Store) -> Vec<artisan_api::McpServer> {

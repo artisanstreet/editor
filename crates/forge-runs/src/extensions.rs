@@ -278,6 +278,89 @@ impl InstallSkillError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum PlaceSkillsError {
+    #[error("read which skills are turned off to place the skills")]
+    Customisation(#[source] SkillCustomisationError),
+    #[error("place the skills into the engine homes")]
+    Homes(#[source] HomesError),
+    #[error("Couldn't place the skill in {}", from.display())]
+    Place {
+        from: PathBuf,
+        #[source]
+        source: Box<forge_engines::InstallSkillError>,
+    },
+    #[error("Couldn't place the skill in {} ({placing}), nor take back the skills placed before it", from.display())]
+    Stranded {
+        from: PathBuf,
+        placing: Box<forge_engines::InstallSkillError>,
+        #[source]
+        source: Box<forge_engines::UndoSkillError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UndoSkillsError {
+    #[error("take the placed skills back out of the engine homes")]
+    Homes(#[source] HomesError),
+    #[error("take a placed skill back")]
+    Undo(#[source] forge_engines::UndoSkillError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeepSkillsError {
+    #[error("put the placed skills into the engines")]
+    Reconcile(#[source] ReconcileSkillsError),
+    #[error("announce the placed skills")]
+    Bump(#[source] BumpRevisionError),
+}
+
+#[derive(Debug)]
+#[must_use = "placed skills are kept or undone"]
+pub struct PlacedSkills {
+    extensions: Extensions,
+    placed: Vec<forge_engines::PlacedSkill>,
+}
+
+impl PlacedSkills {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.placed.iter().map(forge_engines::PlacedSkill::name)
+    }
+
+    pub async fn undo(self) -> Result<(), UndoSkillsError> {
+        let Self { extensions, placed } = self;
+        extensions
+            .on_homes(move || undo_placed(placed))
+            .await
+            .map_err(UndoSkillsError::Homes)?
+            .map_err(UndoSkillsError::Undo)
+    }
+
+    pub async fn keep(self) -> Result<(), KeepSkillsError> {
+        self.extensions
+            .reconcile_skills()
+            .await
+            .map_err(KeepSkillsError::Reconcile)?;
+        if !self.placed.is_empty() {
+            self.extensions
+                .store()
+                .bump_revision("skills_revision".into())
+                .await
+                .map_err(KeepSkillsError::Bump)?;
+        }
+        Ok(())
+    }
+}
+
+fn undo_placed(
+    placed: Vec<forge_engines::PlacedSkill>,
+) -> Result<(), forge_engines::UndoSkillError> {
+    placed
+        .into_iter()
+        .rev()
+        .try_for_each(forge_engines::undo_skill)
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum MarketplaceSearchError {
     #[error("Couldn't search skills.sh for {query:?}")]
     Search {
@@ -378,7 +461,7 @@ impl SaveGlobalPromptError {
     pub fn class(&self) -> ErrorClass {
         match self {
             Self::TooLong { .. } | Self::Stale { .. } => ErrorClass::Conflict,
-            Self::Save { source, .. } => error::write(&source.cause),
+            Self::Save { source, .. } => error::setting(&source.cause),
             Self::Reconcile(source) => source.class(),
         }
     }
@@ -788,6 +871,46 @@ impl Extensions {
                 source,
             })?;
         Ok(name)
+    }
+
+    pub async fn place_skills(
+        &self,
+        folders: Vec<PathBuf>,
+    ) -> Result<PlacedSkills, PlaceSkillsError> {
+        let customisation = self
+            .skill_customisation()
+            .await
+            .map_err(PlaceSkillsError::Customisation)?;
+        let homes = self.engine_homes();
+        let placed = self
+            .on_homes(move || {
+                let mut placed = Vec::with_capacity(folders.len());
+                for from in folders {
+                    match forge_engines::place_skill(&homes, &customisation, &from, true) {
+                        Ok(skill) => placed.push(skill),
+                        Err(placing) => {
+                            return Err(match undo_placed(placed) {
+                                Ok(()) => PlaceSkillsError::Place {
+                                    from,
+                                    source: Box::new(placing),
+                                },
+                                Err(source) => PlaceSkillsError::Stranded {
+                                    from,
+                                    placing: Box::new(placing),
+                                    source: Box::new(source),
+                                },
+                            });
+                        }
+                    }
+                }
+                Ok(placed)
+            })
+            .await
+            .map_err(PlaceSkillsError::Homes)??;
+        Ok(PlacedSkills {
+            extensions: self.clone(),
+            placed,
+        })
     }
 
     pub async fn reconcile_skills(&self) -> Result<(), ReconcileSkillsError> {
