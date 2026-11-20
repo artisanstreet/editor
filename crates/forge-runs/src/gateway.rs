@@ -88,6 +88,19 @@ impl Drop for CallGuard {
 pub struct GatewayCaller {
     pub thread: ThreadId,
     pub ended: CancellationToken,
+    pub run_stopped: Option<CancellationToken>,
+}
+
+impl GatewayCaller {
+    pub async fn finished(&self) {
+        match &self.run_stopped {
+            Some(stopped) => tokio::select! {
+                () = self.ended.cancelled() => {}
+                () = stopped.cancelled() => {}
+            },
+            None => self.ended.cancelled().await,
+        }
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -190,22 +203,29 @@ impl Hub {
     }
 
     pub fn gateway_caller(&self, token: &str) -> Result<GatewayCaller, GatewayRefusal> {
-        let gateway = self.gateway_lock();
-        let thread = gateway.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
-        let credential = gateway.credentials.get(thread).unwrap_or_else(|| {
-            unreachable!(
-                "invariant: thread {thread} holds a gateway address it has no credential for"
-            )
-        });
-        match &credential.activity {
-            Activity::Idle => Err(GatewayRefusal::Idle {
-                thread: thread.clone(),
-            }),
-            Activity::Live { ended, .. } => Ok(GatewayCaller {
-                thread: thread.clone(),
-                ended: ended.clone(),
-            }),
-        }
+        let (thread, ended) = {
+            let gateway = self.gateway_lock();
+            let thread = gateway.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
+            let credential = gateway.credentials.get(thread).unwrap_or_else(|| {
+                unreachable!(
+                    "invariant: thread {thread} holds a gateway address it has no credential for"
+                )
+            });
+            match &credential.activity {
+                Activity::Idle => {
+                    return Err(GatewayRefusal::Idle {
+                        thread: thread.clone(),
+                    });
+                }
+                Activity::Live { ended, .. } => (thread.clone(), ended.clone()),
+            }
+        };
+        let run_stopped = self.run_cancellation(&thread);
+        Ok(GatewayCaller {
+            thread,
+            ended,
+            run_stopped,
+        })
     }
 
     #[must_use]

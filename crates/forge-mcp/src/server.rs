@@ -309,7 +309,7 @@ async fn one<T: ToolSet>(set: &T, caller: &GatewayCaller, message: &Value) -> Op
     };
     let result = tokio::select! {
         biased;
-        () = caller.ended.cancelled() => Err((ENDED_CODE, ENDED.to_owned())),
+        () = caller.finished() => Err((ENDED_CODE, ENDED.to_owned())),
         result = dispatch(set, &caller.thread, &method, &params) => result,
     };
     Some(match result {

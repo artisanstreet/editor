@@ -226,6 +226,91 @@ async fn a_side_query_ending_during_a_run_does_not_end_the_runs_artisan_calls() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_runs_artisan_call_ends_although_a_title_query_keeps_the_thread_active() {
+    let hub_slot: Arc<std::sync::OnceLock<Hub>> = Arc::new(std::sync::OnceLock::new());
+    let admitted: Arc<std::sync::OnceLock<GatewayCaller>> = Arc::new(std::sync::OnceLock::new());
+    let title_open = Arc::new(Notify::new());
+    let run_started = Arc::new(Notify::new());
+    let artisan_called = Arc::new(Notify::new());
+    let fixture = fixture(Arc::new({
+        let hub_slot = Arc::clone(&hub_slot);
+        let admitted = Arc::clone(&admitted);
+        let title_open = Arc::clone(&title_open);
+        let run_started = Arc::clone(&run_started);
+        let artisan_called = Arc::clone(&artisan_called);
+        move |turn, io| {
+            let url = turn
+                .launch
+                .gateway_mcp
+                .first()
+                .map(|(_, url)| url.clone())
+                .expect("the run gets the gateway");
+            let token = url.rsplit('/').next().expect("a token").to_owned();
+            let hub = hub_slot
+                .get()
+                .expect("the hub is set before the run")
+                .clone();
+            let admitted = Arc::clone(&admitted);
+            let title_open = Arc::clone(&title_open);
+            let run_started = Arc::clone(&run_started);
+            let artisan_called = Arc::clone(&artisan_called);
+            Box::pin(async move {
+                run_started.notify_one();
+                title_open.notified().await;
+                let caller = hub
+                    .gateway_caller(&token)
+                    .expect("the address acts while the run is live");
+                admitted.set(caller).expect("one run");
+                artisan_called.notify_one();
+                io.cancel.cancelled().await;
+                Outcome::cancelled()
+            })
+        }
+    }))
+    .await;
+    fixture
+        .hub
+        .set_gateway("http://127.0.0.1:9/mcp/".to_owned(), false);
+    hub_slot.set(fixture.hub.clone()).expect("set once");
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("wait for the agents"))
+        .await
+        .unwrap();
+    let liveness = test_support::wait::LIVENESS;
+    test_support::wait::within("the run to start", liveness, run_started.notified()).await;
+    let title = fixture
+        .hub
+        .gateway_pass(&fixture.thread_id)
+        .await
+        .expect("a title query of the same thread gets the gateway");
+    title_open.notify_one();
+    test_support::wait::within(
+        "the run to call Artisan",
+        liveness,
+        artisan_called.notified(),
+    )
+    .await;
+    let call = admitted.get().expect("the run called Artisan").clone();
+
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+
+    test_support::wait::within(
+        "the stopped run's Artisan call to end",
+        liveness,
+        call.finished(),
+    )
+    .await;
+    assert!(
+        !call.ended.is_cancelled(),
+        "the title query still keeps the thread's gateway address active"
+    );
+    drop(title);
+    fixture.settled().await;
+    fixture.hub.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_computer_use_setting_that_is_neither_on_nor_off_fails_the_turn_and_says_why() {
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ran = Arc::clone(&started);

@@ -22,6 +22,7 @@ async fn replies(messages: Value) -> Option<Value> {
         &GatewayCaller {
             thread: ThreadId::new(),
             ended: CancellationToken::new(),
+            run_stopped: None,
         },
         messages,
     )
@@ -154,42 +155,52 @@ fn tool_call(id: u64, name: &str) -> Value {
 
 #[tokio::test]
 async fn a_batch_admitted_before_its_run_ended_does_nothing_once_the_run_ends() {
-    let set = Gated::default();
-    let caller = GatewayCaller {
-        thread: ThreadId::new(),
-        ended: CancellationToken::new(),
-    };
-    let handled = tokio::spawn({
-        let (set, caller) = (set.clone(), caller.clone());
-        async move {
-            server::handle(
-                &set,
-                &caller,
-                json!([
-                    tool_call(1, "wait_for_agents"),
-                    tool_call(2, "create_thread")
-                ]),
-            )
-            .await
+    for stopping_the_run in [false, true] {
+        let set = Gated::default();
+        let caller = GatewayCaller {
+            thread: ThreadId::new(),
+            ended: CancellationToken::new(),
+            run_stopped: Some(CancellationToken::new()),
+        };
+        let handled = tokio::spawn({
+            let (set, caller) = (set.clone(), caller.clone());
+            async move {
+                server::handle(
+                    &set,
+                    &caller,
+                    json!([
+                        tool_call(1, "wait_for_agents"),
+                        tool_call(2, "create_thread")
+                    ]),
+                )
+                .await
+            }
+        });
+        set.waiting.notified().await;
+
+        match (stopping_the_run, &caller.run_stopped) {
+            (true, Some(stopped)) => stopped.cancel(),
+            (false, _) | (true, None) => caller.ended.cancel(),
         }
-    });
-    set.waiting.notified().await;
+        set.run_ended.notify_one();
+        let reply = tokio::time::timeout(Duration::from_secs(10), handled)
+            .await
+            .expect("the batch kept running after its run ended")
+            .unwrap()
+            .unwrap();
 
-    caller.ended.cancel();
-    set.run_ended.notify_one();
-    let reply = tokio::time::timeout(Duration::from_secs(10), handled)
-        .await
-        .expect("the batch kept running after its run ended")
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(
-        set.created.load(Ordering::SeqCst),
-        0,
-        "a call after the run ended still acted for its thread"
-    );
-    let ended = |id: u64| json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":"This MCP address is no longer valid: the run it was issued to has ended."}});
-    assert_eq!(reply, json!([ended(1), ended(2)]));
+        assert_eq!(
+            set.created.load(Ordering::SeqCst),
+            0,
+            "a call after the run ended still acted for its thread (stopped: {stopping_the_run})"
+        );
+        let ended = |id: u64| json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":"This MCP address is no longer valid: the run it was issued to has ended."}});
+        assert_eq!(
+            reply,
+            json!([ended(1), ended(2)]),
+            "stopped: {stopping_the_run}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -198,6 +209,7 @@ async fn a_batch_runs_every_call_while_its_run_lasts() {
     let caller = GatewayCaller {
         thread: ThreadId::new(),
         ended: CancellationToken::new(),
+        run_stopped: None,
     };
 
     let reply = server::handle(

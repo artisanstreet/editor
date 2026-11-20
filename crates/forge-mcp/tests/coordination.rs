@@ -64,7 +64,7 @@ impl Fixture {
     }
 
     async fn call(&self, who: usize, name: &str, args: Value) -> Value {
-        server::handle(&self.mcp,&forge_runs::GatewayCaller { thread: self.threads[who].clone(), ended: tokio_util::sync::CancellationToken::new() },json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).await.unwrap()["result"].clone()
+        server::handle(&self.mcp,&forge_runs::GatewayCaller { thread: self.threads[who].clone(), ended: tokio_util::sync::CancellationToken::new(), run_stopped: None },json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).await.unwrap()["result"].clone()
     }
 
     async fn claim(&self, who: usize, path: &str) -> Value {
