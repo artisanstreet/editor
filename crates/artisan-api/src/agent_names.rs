@@ -111,7 +111,7 @@ impl HeldAgentNames {
     }
 
     #[must_use]
-    pub(crate) fn holds(&self, name: &str) -> bool {
+    fn holds(&self, name: &str) -> bool {
         self.0.contains(&name.to_lowercase())
     }
 
@@ -124,7 +124,7 @@ impl HeldAgentNames {
     }
 
     #[must_use]
-    pub(crate) fn choose(&self, seed: &str) -> String {
+    fn choose(&self, seed: &str) -> String {
         let pick = seed_hash(seed);
         let mut generation = 1u32;
         loop {
