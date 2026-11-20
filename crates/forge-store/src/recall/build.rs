@@ -173,23 +173,44 @@ pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
         };
         match super::index(conn, &item) {
             Ok(()) => items += 1,
-            Err(ContentError::Storage(
-                source @ (StorageError::Open { .. }
-                | StorageError::WriterStopped
-                | StorageError::WriteDropped(_)
-                | StorageError::Announce(_)
-                | StorageError::AuthorizationDropped(_)
-                | StorageError::ReadSlot(_)
-                | StorageError::Task(_)
-                | StorageError::Sql { .. }
-                | StorageError::Encode { .. }),
-            )) => {
+            Err(ContentError::Storage(StorageError::Decode { kind, source })) => {
+                tracing::warn!(
+                    item = %item.id,
+                    kind,
+                    error = %diagnostics::chain(&source),
+                    "left an item whose stored data doesn't read out of recall"
+                );
+                skipped += 1;
+            }
+            Err(ContentError::Storage(source)) => {
                 return Err(BuildIndexError::Index {
                     item: item.id,
                     source,
                 });
             }
-            Err(damage) => {
+            Err(
+                damage @ (ContentError::TextTooLarge { .. }
+                | ContentError::FieldTooLong { .. }
+                | ContentError::TooManyEntries { .. }
+                | ContentError::MetadataTooLarge { .. }
+                | ContentError::DataTooLarge { .. }
+                | ContentError::InvalidIdentity { .. }
+                | ContentError::UnknownReference { .. }
+                | ContentError::Missing { .. }
+                | ContentError::RangeLimit { .. }
+                | ContentError::OffsetPastEnd { .. }
+                | ContentError::Damaged { .. }
+                | ContentError::RecordTooLarge { .. }
+                | ContentError::RecordIdentity
+                | ContentError::CollectionTooLarge { .. }
+                | ContentError::SelfDependency { .. }
+                | ContentError::MissingDependency { .. }
+                | ContentError::CollectionLimit { .. }
+                | ContentError::RecordOffsetPastEnd { .. }
+                | ContentError::AnswerDisplayTooLarge
+                | ContentError::SavedAnswerCount { .. }
+                | ContentError::Refused(_)),
+            ) => {
                 tracing::warn!(
                     item = %item.id,
                     error = %diagnostics::chain(&damage),
