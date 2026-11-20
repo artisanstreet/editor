@@ -46,8 +46,8 @@ fn read(stubbed: &mut StubbedHost, id: &str) {
     stubbed.host_mut().acknowledge_read(thread_id, 5);
 }
 
-fn acknowledgement(stubbed: &StubbedHost, id: &str) -> HeldRequest {
-    stubbed.forge.take("PATCH", &format!("/threads/{id}"))
+fn acknowledgement(stubbed: &mut StubbedHost, id: &str) -> HeldRequest {
+    stubbed.take("PATCH", &format!("/threads/{id}"))
 }
 
 fn delete(stubbed: &mut StubbedHost, id: &str) {
@@ -64,30 +64,31 @@ fn delete(stubbed: &mut StubbedHost, id: &str) {
 fn a_thread_forge_no_longer_has_does_not_block_other_read_acknowledgements() {
     let mut forge = forge();
     read(&mut forge, "gone");
-    acknowledgement(&forge, "gone").fail(StatusCode::NOT_FOUND, "not_found", "no such thread");
+    let gone = acknowledgement(&mut forge, "gone");
     read(&mut forge, "kept");
-    acknowledgement(&forge, "kept").respond(read_thread("kept"));
+    gone.fail(StatusCode::NOT_FOUND, "not_found", "no such thread");
+    acknowledgement(&mut forge, "kept").respond(read_thread("kept"));
 }
 
 #[test]
 fn deleting_a_thread_cancels_its_waiting_read_acknowledgement() {
     let mut forge = forge();
     read(&mut forge, "held");
-    let _held = acknowledgement(&forge, "held");
+    let _held = acknowledgement(&mut forge, "held");
     delete(&mut forge, "held");
     read(&mut forge, "kept");
-    acknowledgement(&forge, "kept").respond(read_thread("kept"));
+    acknowledgement(&mut forge, "kept").respond(read_thread("kept"));
 }
 
 #[test]
 fn a_read_acknowledgement_answered_after_a_delete_keeps_the_thread_deleted() {
     let mut forge = forge();
     read(&mut forge, "held");
-    let held = acknowledgement(&forge, "held");
+    let held = acknowledgement(&mut forge, "held");
     delete(&mut forge, "held");
     held.respond(read_thread("held"));
     read(&mut forge, "kept");
-    acknowledgement(&forge, "kept").respond(read_thread("kept"));
+    acknowledgement(&mut forge, "kept").respond(read_thread("kept"));
     forge.settle("the later acknowledgement settles", |core, host| {
         core.host(host)
             .and_then(|data| data.threads.get(&ThreadId("kept".into())))
