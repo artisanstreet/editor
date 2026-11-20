@@ -725,9 +725,21 @@ impl Conversation {
             );
         };
         let (offset, limit) = reply.tail_query();
-        let read = core
+        let Some(read) = core
             .source_provider(host, instance)
-            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit));
+            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit))
+        else {
+            let (_, thread) = self
+                .open
+                .as_ref()
+                .expect("invariant: a conversation showing a thread view has that thread open");
+            self.reply_tail = Some(super::announce::ReplyTail::settle(
+                thread,
+                reply,
+                super::announce::TailRead::Unavailable,
+            ));
+            return;
+        };
         let origin = Origin {
             host: host.clone(),
             instance,
@@ -736,10 +748,7 @@ impl Conversation {
         let sender = self.delivery.sender();
         let reading = reply.clone();
         let task = AbortOnDropHandle::new(runtime().spawn(async move {
-            let read = match read {
-                Some(read) => super::announce::TailRead::Fetched(read.await),
-                None => super::announce::TailRead::Unavailable,
-            };
+            let read = super::announce::TailRead::Fetched(read.await);
             sender
                 .offer(Completion::ReplyTail {
                     origin,
