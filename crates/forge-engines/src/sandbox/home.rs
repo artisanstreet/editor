@@ -278,6 +278,11 @@ impl Home {
         })
     }
 
+    fn create(path: &Path) -> io::Result<Self> {
+        fs::create_dir_all(path)?;
+        Self::open(path)
+    }
+
     pub(super) fn open_existing(path: &Path) -> io::Result<Option<Self>> {
         match Self::open(path) {
             Ok(home) => Ok(Some(home)),
@@ -287,6 +292,13 @@ impl Home {
     }
 
     pub(super) fn reach(&self, relative: &Path, create: Create<'_>) -> io::Result<Option<Folder>> {
+        Ok(match self.walk(relative, create)? {
+            Reach::Reached(folder) => Some(folder),
+            Reach::Missing | Reach::Blocked(_) => None,
+        })
+    }
+
+    fn walk(&self, relative: &Path, create: Create<'_>) -> io::Result<Reach> {
         let mut folder = Folder(self.folder.0.try_clone()?);
         let mut reached = PathBuf::new();
         for component in relative.components() {
@@ -299,12 +311,12 @@ impl Home {
             reached.push(name);
             folder = match (folder.found(name)?, create) {
                 (Found::Folder, _) => folder.open(name)?,
-                (
-                    Found::Missing | Found::Link(_) | Found::File { .. } | Found::Other,
-                    Create::No,
-                )
-                | (Found::Link(_) | Found::File { .. } | Found::Other, Create::Missing) => {
-                    return Ok(None);
+                (Found::Missing | Found::File { .. } | Found::Other, Create::No)
+                | (Found::File { .. } | Found::Other, Create::Missing) => {
+                    return Ok(Reach::Missing);
+                }
+                (Found::Link(_), Create::No | Create::Missing) => {
+                    return Ok(Reach::Blocked(Linked(self.path.join(&reached))));
                 }
                 (Found::Missing, Create::Missing | Create::Replacing(_)) => {
                     folder.make_folder(name)?
@@ -314,7 +326,7 @@ impl Home {
                     Create::Replacing(planted),
                 ) => {
                     if !planted(&reached) {
-                        return Ok(None);
+                        return Ok(Reach::Blocked(Linked(self.path.join(&reached))));
                     }
                     tracing::warn!(path = %self.path.join(&reached).display(), "replacing what a sandboxed run put where Forge keeps an engine's files");
                     folder.remove(name)?;
@@ -322,7 +334,85 @@ impl Home {
                 }
             };
         }
-        Ok(Some(folder))
+        Ok(Reach::Reached(folder))
+    }
+
+    pub(super) fn reach_replacing(
+        &self,
+        relative: &Path,
+        planted: &dyn Fn(&Path) -> bool,
+    ) -> io::Result<Result<Folder, Linked>> {
+        match self.walk(relative, Create::Replacing(planted))? {
+            Reach::Reached(folder) => Ok(Ok(folder)),
+            Reach::Blocked(linked) => Ok(Err(linked)),
+            Reach::Missing => unreachable!(
+                "invariant: reaching {} while replacing makes every missing folder",
+                relative.display()
+            ),
+        }
+    }
+
+    pub(super) fn place(
+        &self,
+        relative: &Path,
+        planted: &dyn Fn(&Path) -> bool,
+    ) -> io::Result<Result<Placing, Linked>> {
+        let (parent, name) = split(relative)?;
+        let folder = match self.reach_replacing(parent, planted)? {
+            Ok(folder) => folder,
+            Err(linked) => return Ok(Err(linked)),
+        };
+        let found = folder.found(name)?;
+        if matches!(found, Found::Link(_)) && !planted(relative) {
+            return Ok(Err(Linked(self.path.join(relative))));
+        }
+        Ok(Ok(Placing {
+            folder,
+            name: name.to_os_string(),
+            found,
+        }))
+    }
+
+    pub(super) fn read_unlinked(
+        &self,
+        relative: &Path,
+    ) -> io::Result<Result<Option<Vec<u8>>, Linked>> {
+        let (parent, name) = split(relative)?;
+        let folder = match self.walk(parent, Create::No)? {
+            Reach::Reached(folder) => folder,
+            Reach::Missing => return Ok(Ok(None)),
+            Reach::Blocked(linked) => return Ok(Err(linked)),
+        };
+        match folder.found(name)? {
+            Found::File { length, .. } => folder.read(name, length).map(|bytes| Ok(Some(bytes))),
+            Found::Link(_) => Ok(Err(Linked(self.path.join(relative)))),
+            Found::Missing | Found::Folder | Found::Other => Ok(Ok(None)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct Linked(pub(super) PathBuf);
+
+enum Reach {
+    Reached(Folder),
+    Missing,
+    Blocked(Linked),
+}
+
+#[derive(Debug)]
+pub(super) struct Placing {
+    pub(super) folder: Folder,
+    pub(super) name: OsString,
+    pub(super) found: Found,
+}
+
+impl Placing {
+    pub(super) fn put_file(&self, bytes: &[u8], mode: u32) -> io::Result<()> {
+        if matches!(self.found, Found::Folder) {
+            self.folder.remove(&self.name)?;
+        }
+        self.folder.put_file(&self.name, bytes, mode)
     }
 }
 
@@ -344,14 +434,9 @@ fn split(relative: &Path) -> io::Result<(&Path, &OsStr)> {
     Ok((relative.parent().unwrap_or_else(|| Path::new("")), name))
 }
 
-fn home_folder(home: &Path) -> io::Result<Home> {
-    fs::create_dir_all(home)?;
-    Home::open(home)
-}
-
 pub(crate) fn write(home: &Path, relative: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let (parent, name) = split(relative)?;
-    let opened = home_folder(home)?;
+    let opened = Home::create(home)?;
     let folder = opened
         .reach(parent, Create::Replacing(&forge_owned))?
         .expect("invariant: Forge replaces anything in the way of its own files");
@@ -398,12 +483,12 @@ pub(crate) fn remove(home: &Path, relative: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn make_folder(home: &Path, relative: &Path) -> io::Result<()> {
-    let opened = home_folder(home)?;
+    let opened = Home::create(home)?;
     opened.reach(relative, Create::Missing).map(drop)
 }
 
 pub(crate) fn make_own_folder(root: &Path, relative: &Path) -> io::Result<()> {
-    let opened = home_folder(root)?;
+    let opened = Home::create(root)?;
     opened
         .reach(relative, Create::Replacing(&forge_owned))
         .map(drop)

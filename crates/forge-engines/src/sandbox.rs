@@ -61,6 +61,9 @@ pub(crate) mod guard {
             #[source]
             source: std::io::Error,
         },
+        #[cfg(unix)]
+        #[error("{} is or lies beneath a link of the user's, so Forge won't write {engine}'s configuration through it", path.display())]
+        ThroughLink { engine: EngineId, path: PathBuf },
     }
 
     #[derive(Debug)]
@@ -90,6 +93,38 @@ pub(crate) mod guard {
         Ok(())
     }
 
+    #[cfg(unix)]
+    const fn nothing_planted(_reached: &Path) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn users_link(engine: EngineId) -> impl Fn(super::home::Linked) -> GuardError {
+        move |super::home::Linked(path)| GuardError::ThroughLink { engine, path }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn write(
+        engine: EngineId,
+        home: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<(), GuardError> {
+        let writing = |source| GuardError::Write {
+            engine,
+            path: home.join(relative),
+            source,
+        };
+        let placing = std::fs::create_dir_all(home)
+            .and_then(|()| super::home::Home::open(home))
+            .and_then(|opened| opened.place(relative, &nothing_planted))
+            .map_err(writing)?
+            .map_err(users_link(engine))?;
+        placing.put_file(bytes, mode).map_err(writing)
+    }
+
+    #[cfg(windows)]
     pub(crate) fn write(
         engine: EngineId,
         home: &Path,
@@ -111,21 +146,41 @@ pub(crate) mod guard {
         base: Option<Vec<u8>>,
     }
 
+    #[cfg(unix)]
+    fn base(engine: EngineId, home: &Path, relative: &Path) -> Result<Option<Vec<u8>>, GuardError> {
+        let reading = |source| GuardError::Read {
+            engine,
+            path: home.join(relative),
+            source,
+        };
+        match super::home::Home::open_existing(home).map_err(reading)? {
+            Some(opened) => opened
+                .read_unlinked(relative)
+                .map_err(reading)?
+                .map_err(users_link(engine)),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(windows)]
+    fn base(engine: EngineId, home: &Path, relative: &Path) -> Result<Option<Vec<u8>>, GuardError> {
+        super::home::read(home, relative).map_err(|source| GuardError::Read {
+            engine,
+            path: home.join(relative),
+            source,
+        })
+    }
+
     pub(crate) fn edit(
         engine: EngineId,
         home: &Path,
         relative: &Path,
     ) -> Result<Editing, GuardError> {
-        let base = super::home::read(home, relative).map_err(|source| GuardError::Read {
-            engine,
-            path: home.join(relative),
-            source,
-        })?;
         Ok(Editing {
             engine,
             home: home.to_path_buf(),
             relative: relative.to_path_buf(),
-            base,
+            base: base(engine, home, relative)?,
         })
     }
 

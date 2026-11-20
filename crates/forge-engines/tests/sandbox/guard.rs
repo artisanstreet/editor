@@ -754,32 +754,64 @@ fn a_record_that_could_not_be_saved_leaves_the_trusted_copy_usable() {
 }
 
 #[test]
-fn a_full_access_launch_keeps_an_engine_folder_the_user_linked() {
+fn a_config_file_the_user_linked_before_an_auto_run_is_never_replaced() {
     let (base, home) = engine_home();
-    let users = base.path().join("dotfiles-claude");
-    std::fs::create_dir_all(&users).unwrap();
-    std::fs::write(users.join("settings.json"), r#"{"theme":"mine"}"#).unwrap();
-    std::fs::remove_dir_all(home.join(".claude")).unwrap();
-    std::os::unix::fs::symlink(&users, home.join(".claude")).unwrap();
-    let customisation = crate::Customisation {
-        prompt: Some("Be brief.".to_owned()),
-        ..crate::Customisation::default()
-    };
+    let dotfile = base.path().join("dotfiles-config.toml");
+    std::fs::write(&dotfile, "model = \"mine\"\n").unwrap();
+    std::os::unix::fs::symlink(&dotfile, home.join(".codex/config.toml")).unwrap();
+    let exposure = super::expose(EngineId::Codex, &home).unwrap();
 
-    let launched = crate::materialize(EngineId::Claude, &home, &customisation);
+    let written = super::write(
+        EngineId::Codex,
+        &home,
+        Path::new(".codex/config.toml"),
+        b"model = \"forge\"\n",
+        0o600,
+    );
+    drop(exposure);
 
-    assert_eq!(
-        std::fs::read_link(home.join(".claude")).ok().as_deref(),
-        Some(users.as_path()),
-        "Forge replaced the user's own .claude link with an empty folder"
-    );
-    assert_eq!(
-        std::fs::read_dir(&users).unwrap().count(),
-        1,
-        "Forge wrote into the folder the user's link points to"
-    );
     assert!(
-        launched.is_err(),
-        "a launch that can't write its prompt says so"
+        matches!(written, Err(super::GuardError::ThroughLink { .. })),
+        "{written:?}"
     );
+    assert_eq!(
+        std::fs::read_link(home.join(".codex/config.toml"))
+            .ok()
+            .as_deref(),
+        Some(dotfile.as_path()),
+        "Forge replaced the config link the user made"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&dotfile).unwrap(),
+        "model = \"mine\"\n"
+    );
+}
+
+#[test]
+fn a_config_link_planted_during_an_auto_run_is_replaced_without_writing_its_target() {
+    let (base, home) = engine_home();
+    let config = home.join(".codex/config.toml");
+    std::fs::write(&config, "model = \"gpt\"\n").unwrap();
+    let elsewhere = base.path().join("elsewhere.toml");
+    std::fs::write(&elsewhere, "untouched").unwrap();
+    let exposure = super::expose(EngineId::Codex, &home).unwrap();
+    std::fs::remove_file(&config).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &config).unwrap();
+
+    let written = super::write(
+        EngineId::Codex,
+        &home,
+        Path::new(".codex/config.toml"),
+        b"model = \"forge\"\n",
+        0o600,
+    );
+    drop(exposure);
+
+    written.unwrap();
+    assert!(std::fs::symlink_metadata(&config).unwrap().is_file());
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "model = \"forge\"\n"
+    );
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
 }

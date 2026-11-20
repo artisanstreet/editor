@@ -1,4 +1,4 @@
-use super::home::{Create, Folder, Found, Home, MAX_DEPTH};
+use super::home::{Create, Folder, Found, Home, Linked, MAX_DEPTH};
 use artisan_api::EngineId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -79,7 +79,7 @@ pub enum GuardError {
     },
     #[error("{engine}'s configuration folder {} is a link, so Forge can't guard what's beneath it", path.display())]
     LinkedFolder { engine: EngineId, path: PathBuf },
-    #[error("{} lies beneath a link Forge didn't make, so Forge won't write {engine}'s configuration through it", path.display())]
+    #[error("{} is or lies beneath a link Forge didn't make, so Forge won't write {engine}'s configuration through it", path.display())]
     ThroughLink { engine: EngineId, path: PathBuf },
     #[error("{engine}'s configuration {} is nested over {MAX_DEPTH} folders deep", path.display())]
     TooDeep { engine: EngineId, path: PathBuf },
@@ -797,12 +797,9 @@ impl Held {
     ) -> Result<Folder, GuardError> {
         let planted = planted_by_a_run(self.manifest.as_ref());
         self.opened
-            .reach(parent, Create::Replacing(&planted))
+            .reach_replacing(parent, &planted)
             .map_err(failed)?
-            .ok_or_else(|| GuardError::ThroughLink {
-                engine,
-                path: self.opened.path.join(parent),
-            })
+            .map_err(|Linked(path)| GuardError::ThroughLink { engine, path })
     }
 }
 
@@ -914,14 +911,10 @@ fn live_file(
         path: opened.path.join(relative),
         source,
     };
-    let (parent, name) = split(relative);
-    let Some(folder) = opened.reach(parent, Create::No).map_err(reading)? else {
-        return Ok(None);
-    };
-    match folder.found(name).map_err(reading)? {
-        Found::File { length, .. } => folder.read(name, length).map(Some).map_err(reading),
-        Found::Missing | Found::Folder | Found::Link(_) | Found::Other => Ok(None),
-    }
+    opened
+        .read_unlinked(relative)
+        .map_err(reading)?
+        .map_err(|Linked(path)| GuardError::ThroughLink { engine, path })
 }
 
 impl Editing {
@@ -966,26 +959,26 @@ fn put(
         path: home.join(relative),
         source,
     };
-    let (parent, name) = split(relative);
-    let folder = held.reach_guarded(engine, parent, writing)?;
+    let planted = planted_by_a_run(held.manifest.as_ref());
+    let placing = held
+        .opened
+        .place(relative, &planted)
+        .map_err(writing)?
+        .map_err(|Linked(path)| GuardError::ThroughLink { engine, path })?;
     let wanted = digest(bytes);
-    let current = folder.found(name).map_err(writing)?;
-    let unchanged = match current {
+    let unchanged = match placing.found {
         Found::File {
             length,
             mode: found_mode,
         } => {
             length == bytes.len() as u64
                 && found_mode == mode
-                && holds(&folder, name, length, &wanted).map_err(writing)?
+                && holds(&placing.folder, &placing.name, length, &wanted).map_err(writing)?
         }
         Found::Missing | Found::Folder | Found::Link(_) | Found::Other => false,
     };
     if !unchanged {
-        if matches!(current, Found::Folder) {
-            folder.remove(name).map_err(writing)?;
-        }
-        folder.put_file(name, bytes, mode).map_err(writing)?;
+        placing.put_file(bytes, mode).map_err(writing)?;
     }
     record_change(engine, home, held, |manifest, copies| {
         keep_copy(copies, bytes).map_err(|source| GuardError::Snapshot {
