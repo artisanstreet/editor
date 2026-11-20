@@ -394,6 +394,8 @@ jobs:
             experimental-features = nix-command flakes
       - name: Build the packages the NixOS module installs
         run: nix build --no-link --print-build-logs .#ae .#forge
+      - name: Build the Windows packages
+        run: nix build --no-link --print-build-logs .#ae-windows .#forge-windows .#artisan-editor-windows
   highlighting:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
