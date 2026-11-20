@@ -25,6 +25,12 @@ pub(crate) enum AddressError {
         #[source]
         source: forge_http::ConfiguredListenError,
     },
+    #[cfg(unix)]
+    #[error("read which port the running Forge's gateway bound")]
+    Gateway(#[source] forge_http::upgrade::GatewayRecordError),
+    #[cfg(unix)]
+    #[error(transparent)]
+    Running(#[from] Box<RunningError>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -237,7 +243,26 @@ fn data() -> Result<PathBuf, LocateError> {
 
 pub(crate) fn address() -> Result<SocketAddr, AddressError> {
     let data = data()?;
-    forge_http::configured_listen(&data).map_err(|source| AddressError::Read { data, source })
+    let configured = forge_http::configured_listen(&data)
+        .map_err(|source| AddressError::Read { data, source })?;
+    #[cfg(unix)]
+    if configured.port() == 0 {
+        return bound_address(configured);
+    }
+    Ok(configured)
+}
+
+#[cfg(unix)]
+fn bound_address(configured: SocketAddr) -> Result<SocketAddr, AddressError> {
+    let Some(gateway) = forge_http::upgrade::gateway(&data()?).map_err(AddressError::Gateway)?
+    else {
+        return Ok(configured);
+    };
+    Ok(if running_pid().map_err(Box::new)? == Some(gateway.pid) {
+        gateway.address
+    } else {
+        configured
+    })
 }
 
 pub(crate) fn log_file() -> Result<PathBuf, LocateError> {
@@ -492,7 +517,7 @@ fn start_unlocked(readiness: Readiness) -> Result<Option<u32>, StartError> {
         return Err(StartError::NotInstalled);
     }
     let address = address()?;
-    if listening(address) {
+    if address.port() != 0 && listening(address) {
         return Err(StartError::Occupied { address });
     }
     let data = data()?;
