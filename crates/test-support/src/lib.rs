@@ -1,7 +1,6 @@
 pub mod executable;
 pub mod float;
 pub mod poll;
-#[cfg(unix)]
 pub mod sandbox;
 pub mod wait;
 

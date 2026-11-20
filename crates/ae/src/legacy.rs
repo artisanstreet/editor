@@ -1027,3 +1027,7 @@ fn copy_link(from: &Path, to: &Path, kind: std::fs::FileType) -> io::Result<()> 
 #[cfg(test)]
 #[path = "../tests/legacy/migrate.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/legacy/windows.rs"]
+mod windows_tests;
