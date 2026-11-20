@@ -273,8 +273,8 @@ fn an_engine_whose_watcher_cannot_start_does_not_run() {
     let service = engines.parent().expect("the service cgroup").to_path_buf();
     let delegated = std::fs::read_to_string(service.join("cgroup.controllers")).unwrap_or_default();
     if !delegated.split_whitespace().any(|name| name == "pids") {
-        test_support::sandbox_missing(format_args!(
-            "the pids controller isn't delegated to this unit"
+        test_support::skipped(format_args!(
+            "the pids controller isn't delegated to this unit, so a fork can't be made to fail"
         ));
         return;
     }

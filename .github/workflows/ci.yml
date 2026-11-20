@@ -123,6 +123,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          abi="$(python3 -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))')"
+          echo "Sandbox tests ran on kernel $(uname -r) with Landlock ABI $abi; LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unlisted)" | tee -a "$GITHUB_STEP_SUMMARY"
           nix develop .#cargo-linux --command cargo test --locked -p forge-isolation -p forge-engines --no-run --message-format=json \
             | jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test) | [.target.name, .executable, (.manifest_path | rtrimstr("/Cargo.toml"))] | @tsv' \
             > "$RUNNER_TEMP/sandbox-tests.tsv"
