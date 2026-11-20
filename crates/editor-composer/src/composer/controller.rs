@@ -607,11 +607,7 @@ impl Composer {
     }
 
     pub(crate) fn remove_image(&mut self, key: u64) {
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|session| session.read(DraftSession::sending))
-        {
+        if !self.accepts_attachments() {
             return;
         }
         if let Some(index) = self.lost_chips.iter().position(|(chip, _)| *chip == key) {
@@ -638,11 +634,7 @@ impl Composer {
     }
 
     pub(crate) fn add_image(&mut self, source: Source, name: String) {
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|session| session.read(DraftSession::sending))
-        {
+        if !self.accepts_attachments() {
             return;
         }
         if self
@@ -741,20 +733,9 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (epoch, shown, parked, unreadable, lost) = session.read(|state| {
-            (
-                state.epoch(),
-                state.shown().cloned(),
-                state.parked_beside_failed_send(),
-                state.unreadable().map(ToString::to_string),
-                state.lost().to_vec(),
-            )
-        });
+        let lost = session.read(|state| state.lost().to_vec());
         let unrecovered = session.take_unrecovered();
-        if epoch != self.shown_epoch {
-            self.shown_epoch = epoch;
-            self.reset_input();
-        }
+        self.reconcile();
         for event in &events {
             match event {
                 SessionEvent::Accepted { .. } | SessionEvent::Changed => {}
@@ -771,6 +752,38 @@ impl Composer {
         self.editor
             .borrow_mut()
             .set_disabled(self.questionnaire.sending.is_some());
+        if let Some(unrecovered) = unrecovered {
+            self.notice = Some(editor_core::Problem::new(match unrecovered {
+                Unrecovered::SetAside(path) => format!(
+                    "A draft kept on this device couldn't be read. It was moved to {}.",
+                    path.display()
+                ),
+                Unrecovered::Left(path) => format!(
+                    "A draft kept on this device couldn't be read. It stays at {}, and this draft isn't kept on this device until it's moved.",
+                    path.display()
+                ),
+            }));
+        }
+        self.show_lost(lost);
+        events
+    }
+
+    fn reconcile(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let (epoch, shown, parked, unreadable) = session.read(|state| {
+            (
+                state.epoch(),
+                state.shown().cloned(),
+                state.parked_beside_failed_send(),
+                state.unreadable().map(ToString::to_string),
+            )
+        });
+        if epoch != self.shown_epoch {
+            self.shown_epoch = epoch;
+            self.reset_input();
+        }
         if self.restore_revision == Some(self.edit_revision)
             && let Some(body) = shown
         {
@@ -787,20 +800,23 @@ impl Composer {
             }
             self.restore_body(body);
         }
-        if let Some(unrecovered) = unrecovered {
-            self.notice = Some(editor_core::Problem::new(match unrecovered {
-                Unrecovered::SetAside(path) => format!(
-                    "A draft kept on this device couldn't be read. It was moved to {}.",
-                    path.display()
-                ),
-                Unrecovered::Left(path) => format!(
-                    "A draft kept on this device couldn't be read. It stays at {}, and this draft isn't kept on this device until it's moved.",
-                    path.display()
-                ),
-            }));
+    }
+
+    fn accepts_attachments(&mut self) -> bool {
+        let Some((sending, epoch)) = self
+            .session
+            .as_ref()
+            .map(|session| session.read(|state| (state.sending(), state.epoch())))
+        else {
+            return false;
+        };
+        if sending {
+            return false;
         }
-        self.show_lost(lost);
-        events
+        if epoch != self.shown_epoch {
+            self.reconcile();
+        }
+        true
     }
 
     fn show_lost(&mut self, lost: Vec<super::draft_session::LostImage>) {
