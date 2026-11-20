@@ -45,7 +45,7 @@ pub struct Progress {
 
 impl Progress {
     #[must_use]
-    pub fn every(every: Duration) -> Self {
+    pub(crate) fn every(every: Duration) -> Self {
         Self {
             every,
             heartbeat: Arc::new(|| {}),

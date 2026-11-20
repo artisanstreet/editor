@@ -69,7 +69,7 @@ impl DataLock {
     }
 
     #[must_use]
-    pub fn dir(&self) -> &Path {
+    pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
 }
