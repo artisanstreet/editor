@@ -5,6 +5,7 @@ use forge_isolation::linux::{
     start_time, total_memory, unified_membership,
 };
 use std::path::Path;
+use std::process::Command;
 
 const GIB: u64 = 1 << 30;
 
@@ -174,4 +175,126 @@ fn a_process_start_time_survives_a_name_with_spaces_and_parentheses() {
     let stat = "4182 (forge (worker) 2) S 1 4182 4182 0 -1 4194560 2385 0 0 0 9 4 0 0 20 0 7 0 998877 1234 5";
     assert_eq!(start_time(stat), Some(998_877));
     assert_eq!(start_time("4182 (forge) S 1"), None);
+}
+
+const MEMBER: &str = "FORGE_ISOLATION_STAND_IN_FOR_A_BACKEND";
+const MEMBER_TEST: &str = "a_backend_started_after_another_died_ends_the_run_cgroups_it_left";
+
+fn founding_forge() -> bool {
+    let in_forge_subgroup = std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|membership| {
+        unified_membership(&membership).is_some_and(|own| own.ends_with("/forge"))
+    });
+    let started_by_systemd =
+        std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|pid| pid == std::process::id().to_string());
+    if in_forge_subgroup && started_by_systemd {
+        return true;
+    }
+    test_support::sandbox_missing(format_args!(
+        "run this test as the main process of a systemd unit with Delegate=yes and DelegateSubgroup=forge"
+    ));
+    false
+}
+
+fn engines_folder() -> std::path::PathBuf {
+    let membership = std::fs::read_to_string("/proc/self/cgroup").expect("this process's cgroup");
+    let own = unified_membership(&membership).expect("a unified cgroup");
+    Path::new("/sys/fs/cgroup")
+        .join(own.trim_start_matches('/'))
+        .with_file_name("engines")
+}
+
+fn left_by_a_dead_forge(engines: &Path) -> (std::path::PathBuf, std::process::Child) {
+    let mut gone = Command::new("true").spawn().expect("a short-lived process");
+    gone.wait().expect("it exits");
+    let leftover = engines.join(format!("run-{}-1-0", gone.id()));
+    std::fs::create_dir(&leftover).expect("a run cgroup the dead Forge left");
+    let escaped = Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("a process that escaped its run");
+    std::fs::write(leftover.join("cgroup.procs"), escaped.id().to_string())
+        .expect("the escaped process sits in the leftover cgroup");
+    (leftover, escaped)
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "the stand-in backend tells the test what isolation it applied"
+)]
+fn stand_in_for_a_backend() {
+    println!("{:?}", forge_isolation::protect_forge());
+}
+
+#[test]
+fn a_backend_started_after_another_died_ends_the_run_cgroups_it_left() {
+    if std::env::var_os(MEMBER).is_some() {
+        stand_in_for_a_backend();
+        return;
+    }
+    if !founding_forge() {
+        return;
+    }
+    let founded = forge_isolation::protect_forge();
+    assert!(
+        matches!(founded.first(), Some(forge_isolation::Outcome::Applied(_))),
+        "{founded:?}"
+    );
+    let (leftover, mut escaped) = left_by_a_dead_forge(&engines_folder());
+
+    let backend = Command::new(std::env::current_exe().expect("the test binary"))
+        .args([MEMBER_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(MEMBER, "1")
+        .output()
+        .expect("the stand-in backend runs");
+    let applied = String::from_utf8_lossy(&backend.stdout).into_owned();
+
+    let status = test_support::wait::wait_for(
+        "the escaped process to be killed",
+        test_support::wait::LIVENESS,
+        || {
+            escaped
+                .try_wait()
+                .expect("the escaped process can be polled")
+        },
+    );
+    assert!(
+        !status.success() && !leftover.exists(),
+        "a backend left a dead backend's run cgroup populated: {applied}"
+    );
+}
+
+#[test]
+fn an_engine_whose_watcher_cannot_start_does_not_run() {
+    if !founding_forge() {
+        return;
+    }
+    forge_isolation::protect_forge();
+    let engines = engines_folder();
+    let service = engines.parent().expect("the service cgroup").to_path_buf();
+    let delegated = std::fs::read_to_string(service.join("cgroup.controllers")).unwrap_or_default();
+    if !delegated.split_whitespace().any(|name| name == "pids") {
+        test_support::sandbox_missing(format_args!(
+            "the pids controller isn't delegated to this unit"
+        ));
+        return;
+    }
+    std::fs::write(service.join("cgroup.subtree_control"), "+pids").expect("enable pids");
+    let marker = tempfile::tempdir().expect("a folder for the engine's mark");
+    let ran = marker.path().join("ran");
+    std::fs::write(engines.join("pids.max"), "2").expect("room for the engine and one fork");
+
+    let tree = forge_isolation::EngineTree::new(forge_isolation::Containment::OwnCgroup)
+        .expect("an engine tree");
+    let mut engine = Command::new("/bin/sh");
+    engine.args(["-c", "touch \"$1\"", "sh"]).arg(&ran);
+    forge_isolation::contain(&mut engine, None, &tree).expect("the engine is contained");
+    let spawned = engine.spawn();
+    std::fs::write(engines.join("pids.max"), "max").expect("lift the limit");
+    let spawned = spawned.map(|mut child| child.wait().expect("the engine exits"));
+    tree.end().expect("the engine's tree ends");
+
+    assert!(
+        spawned.is_err() && !ran.exists(),
+        "an engine ran without the watcher that kills it when Forge dies: {spawned:?}"
+    );
 }

@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const HIERARCHY: &str = "/sys/fs/cgroup";
@@ -21,7 +21,6 @@ const EVENTS_BYTES: usize = 256;
 
 static ENGINES_FOLDER: OnceLock<PathBuf> = OnceLock::new();
 static RUNS: AtomicU64 = AtomicU64::new(0);
-static LEFTOVERS_ALIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
@@ -216,17 +215,31 @@ pub fn start_time(stat: &str) -> Option<u64> {
         .ok()
 }
 
-fn start_of(process: u32) -> Result<Option<u64>, String> {
+#[derive(Debug, thiserror::Error)]
+pub enum StartTimeError {
+    #[error("read /proc/{process}/stat")]
+    Read {
+        process: u32,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("/proc/{process}/stat names no start time")]
+    Unnamed { process: u32 },
+    #[error("/proc lists no process {process}")]
+    Unlisted { process: u32 },
+}
+
+fn start_of(process: u32) -> Result<Option<u64>, StartTimeError> {
     match std::fs::read_to_string(format!("/proc/{process}/stat")) {
         Ok(stat) => start_time(&stat)
             .map(Some)
-            .ok_or_else(|| format!("/proc/{process}/stat names no start time")),
+            .ok_or(StartTimeError::Unnamed { process }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("read /proc/{process}/stat: {error}")),
+        Err(source) => Err(StartTimeError::Read { process, source }),
     }
 }
 
-fn abandoned(owner: RunOwner) -> Result<bool, String> {
+fn abandoned(owner: RunOwner) -> Result<bool, StartTimeError> {
     let alive = start_of(owner.process)?;
     Ok(match (alive, owner.started) {
         (None, _) => true,
@@ -235,44 +248,161 @@ fn abandoned(owner: RunOwner) -> Result<bool, String> {
     })
 }
 
-fn sweep_leftover_runs(engines: &Path) -> Result<usize, String> {
-    let entries = std::fs::read_dir(engines)
-        .map_err(|error| format!("list {}: {error}", engines.display()))?;
-    let mut swept = 0;
+#[derive(Debug, thiserror::Error)]
+pub enum LeftoverError {
+    #[error("list the engine run cgroups in {}", path.display())]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("tell whether the Forge that made engine run cgroup {} has exited", path.display())]
+    Owner {
+        path: PathBuf,
+        #[source]
+        source: StartTimeError,
+    },
+    #[error("read whether engine run cgroup {} still has processes", path.display())]
+    Events {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} names no populated state", path.display())]
+    NoState { path: PathBuf },
+    #[error("name engine run cgroup {}", path.display())]
+    Name {
+        path: PathBuf,
+        #[source]
+        source: RunGroupError,
+    },
+    #[error("end engine run cgroup {} an earlier Forge left", path.display())]
+    End {
+        path: PathBuf,
+        #[source]
+        source: EndRunError,
+    },
+}
+
+#[derive(Debug, Default)]
+struct Leftovers {
+    abandoned: Vec<PathBuf>,
+    failures: Vec<LeftoverError>,
+}
+
+fn leftovers(engines: &Path) -> Leftovers {
+    let mut found = Leftovers::default();
+    let entries = match std::fs::read_dir(engines) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return found,
+        Err(source) => {
+            found.failures.push(LeftoverError::List {
+                path: engines.to_path_buf(),
+                source,
+            });
+            return found;
+        }
+    };
     for entry in entries {
-        let entry = entry.map_err(|error| format!("list {}: {error}", engines.display()))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                found.failures.push(LeftoverError::List {
+                    path: engines.to_path_buf(),
+                    source,
+                });
+                continue;
+            }
+        };
         let Some(owner) = entry.file_name().to_str().and_then(run_owner) else {
             continue;
         };
-        if !abandoned(owner)? {
-            continue;
+        match abandoned(owner) {
+            Ok(true) => found.abandoned.push(entry.path()),
+            Ok(false) => {}
+            Err(source) => found.failures.push(LeftoverError::Owner {
+                path: entry.path(),
+                source,
+            }),
         }
-        let group = RunGroup::at(entry.path()).map_err(|error| error.to_string())?;
-        if let Err(failure) = group.end() {
-            LEFTOVERS_ALIVE.store(true, Ordering::SeqCst);
-            return Err(format!(
-                "{}; engine configuration stays guarded until Forge exits",
-                diagnostics_chain(&failure)
-            ));
-        }
-        swept += 1;
     }
-    Ok(swept)
+    found
 }
 
-fn diagnostics_chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut cause = error.source();
-    while let Some(error) = cause {
-        text.push_str(": ");
-        text.push_str(&error.to_string());
-        cause = error.source();
-    }
-    text
+#[derive(Debug, Default)]
+struct Sweep {
+    ended: usize,
+    failures: Vec<LeftoverError>,
 }
 
-pub fn leftovers_alive() -> bool {
-    LEFTOVERS_ALIVE.load(Ordering::SeqCst)
+fn sweep_leftover_runs(engines: &Path) -> Sweep {
+    let Leftovers {
+        abandoned,
+        failures,
+    } = leftovers(engines);
+    let mut sweep = Sweep { ended: 0, failures };
+    for path in abandoned {
+        let ended = RunGroup::at(path.clone())
+            .map_err(|source| LeftoverError::Name {
+                path: path.clone(),
+                source,
+            })
+            .and_then(|group| {
+                group
+                    .end()
+                    .map_err(|source| LeftoverError::End { path, source })
+            });
+        match ended {
+            Ok(()) => sweep.ended += 1,
+            Err(failure) => sweep.failures.push(failure),
+        }
+    }
+    sweep
+}
+
+fn has_processes(group: &Path) -> Result<bool, LeftoverError> {
+    let path = group.join("cgroup.events");
+    let events = match std::fs::read_to_string(&path) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(LeftoverError::Events { path, source }),
+    };
+    populated(&events).ok_or(LeftoverError::NoState { path })
+}
+
+pub(crate) fn leftovers_alive() -> Result<bool, LeftoverError> {
+    let Some(engines) = ENGINES_FOLDER.get() else {
+        return Ok(false);
+    };
+    let Leftovers {
+        abandoned,
+        failures,
+    } = leftovers(engines);
+    let mut unknown = failures.into_iter().next();
+    for group in abandoned {
+        match has_processes(&group) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(failure) => unknown = unknown.or(Some(failure)),
+        }
+    }
+    unknown.map_or(Ok(false), Err)
+}
+
+fn swept(sweep: Sweep) -> impl Iterator<Item = Outcome> {
+    const SWEEP: &str = "run cgroups left by an earlier Forge are killed and removed";
+    let ended = Outcome::Applied(format!(
+        "{} run cgroups left by an earlier Forge were killed and removed",
+        sweep.ended
+    ));
+    let failed = sweep.failures.into_iter().map(|failure| Outcome::Skipped {
+        measure: SWEEP.to_owned(),
+        reason: format!(
+            "{}; engine configuration stays guarded while such a cgroup has processes",
+            diagnostics::chain(&failure)
+        ),
+    });
+    std::iter::once(ended).chain(failed)
 }
 
 pub fn protect_forge() -> Vec<Outcome> {
@@ -285,9 +415,9 @@ pub fn protect_forge() -> Vec<Outcome> {
             ),
         }]
     };
-    let layout = match locate() {
-        Ok((layout, Standing::Founder)) => layout,
-        Ok((layout, Standing::Member)) => return vec![Outcome::of(SEPARATION, remember(&layout))],
+    let (layout, founder) = match locate() {
+        Ok((layout, Standing::Founder)) => (layout, true),
+        Ok((layout, Standing::Member)) => (layout, false),
         Ok((_, Standing::Outsider)) => {
             return unavailable(
                 "Forge wasn't started by systemd in a delegated `forge` subgroup".to_owned(),
@@ -295,12 +425,24 @@ pub fn protect_forge() -> Vec<Outcome> {
         }
         Err(reason) => return unavailable(reason),
     };
-    let entered = found(&layout).and_then(|()| remember(&layout));
+    let entered = if founder {
+        found(&layout).and_then(|()| remember(&layout))
+    } else {
+        remember(&layout)
+    };
     if let Err(reason) = entered {
         return unavailable(reason);
     }
-    let swept = sweep_leftover_runs(&layout.engines);
-    let memory = enable(&layout, Controller::Memory);
+    let mut outcomes = vec![Outcome::Applied(SEPARATION.to_owned())];
+    outcomes.extend(swept(sweep_leftover_runs(&layout.engines)));
+    if founder {
+        outcomes.extend(share(&layout));
+    }
+    outcomes
+}
+
+fn share(layout: &Layout) -> [Outcome; 4] {
+    let memory = enable(layout, Controller::Memory);
     let ceiling = std::fs::read_to_string("/proc/meminfo")
         .map_err(|error| format!("read /proc/meminfo: {error}"))
         .and_then(|meminfo| total_memory(&meminfo))
@@ -310,26 +452,16 @@ pub fn protect_forge() -> Vec<Outcome> {
         .and(ceiling)
         .and_then(|bytes| set(&layout.engines, "memory.high", &bytes.to_string()).map(|()| bytes));
     let unswappable = memory.and_then(|()| set(&layout.forge, "memory.swap.max", "0"));
-    let cpu = enable(&layout, Controller::Cpu)
+    let cpu = enable(layout, Controller::Cpu)
         .and_then(|()| set(&layout.forge, "cpu.weight", FORGE_WEIGHT));
-    let io = enable(&layout, Controller::Io).and_then(|()| {
+    let io = enable(layout, Controller::Io).and_then(|()| {
         set(
             &layout.forge,
             "io.weight",
             &format!("default {FORGE_WEIGHT}"),
         )
     });
-    vec![
-        Outcome::Applied(SEPARATION.to_owned()),
-        match swept {
-            Ok(count) => Outcome::Applied(format!(
-                "{count} run cgroups left by an earlier Forge were killed and removed"
-            )),
-            Err(reason) => Outcome::Skipped {
-                measure: "run cgroups left by an earlier Forge are killed and removed".to_owned(),
-                reason,
-            },
-        },
+    [
         match capped {
             Ok(bytes) => Outcome::Applied(format!(
                 "engines reclaim their own memory above {} MiB",
@@ -418,8 +550,12 @@ pub enum RunGroupError {
         #[source]
         source: std::io::Error,
     },
-    #[error("tell which Forge owns the engine run cgroups in {}: {reason}", path.display())]
-    Owner { path: PathBuf, reason: String },
+    #[error("tell which Forge owns the engine run cgroups in {}", path.display())]
+    Owner {
+        path: PathBuf,
+        #[source]
+        source: StartTimeError,
+    },
     #[error("name the cgroup {} for an engine run", path.display())]
     Name {
         path: PathBuf,
@@ -475,10 +611,10 @@ impl RunGroup {
         let run = RUNS.fetch_add(1, Ordering::Relaxed);
         let process = std::process::id();
         let own_start = start_of(process)
-            .and_then(|started| started.ok_or_else(|| format!("/proc/{process} is gone")))
-            .map_err(|reason| RunGroupError::Owner {
+            .and_then(|started| started.ok_or(StartTimeError::Unlisted { process }))
+            .map_err(|source| RunGroupError::Owner {
                 path: engines.to_path_buf(),
-                reason,
+                source,
             })?;
         let folder = engines.join(format!("{RUN_PREFIX}{process}-{own_start}-{run}"));
         let created = match std::fs::create_dir(&folder) {
@@ -520,7 +656,11 @@ impl RunGroup {
 
     pub(crate) fn end(&self) -> Result<(), EndRunError> {
         let kill = self.folder.join("cgroup.kill");
-        std::fs::write(&kill, b"1").map_err(|source| EndRunError::Kill { path: kill, source })?;
+        match std::fs::write(&kill, b"1") {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => return Err(EndRunError::Kill { path: kill, source }),
+        }
         self.wait_empty(EMPTY_WITHIN)?;
         match std::fs::remove_dir(&self.folder) {
             Ok(()) => Ok(()),
@@ -538,7 +678,11 @@ impl RunGroup {
             path: path.clone(),
             source,
         };
-        let events = std::fs::File::open(&path).map_err(watching)?;
+        let events = match std::fs::File::open(&path) {
+            Ok(events) => events,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => return Err(watching(source)),
+        };
         let deadline = Instant::now() + within;
         loop {
             let mut buffer = [0_u8; EVENTS_BYTES];

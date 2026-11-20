@@ -613,6 +613,27 @@ async fn opencodes_execution_policy_folder_is_out_of_an_auto_runs_reach() {
     );
 }
 
+fn engines_cgroup() -> PathBuf {
+    let membership = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+    let own = forge_isolation::linux::unified_membership(&membership).unwrap();
+    Path::new("/sys/fs/cgroup")
+        .join(own.trim_start_matches('/'))
+        .with_file_name("engines")
+}
+
+fn left_by_an_earlier_forge() -> (PathBuf, std::process::Child) {
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    let leftover = engines_cgroup().join(format!("run-{}-1-0", gone.id()));
+    std::fs::create_dir(&leftover).unwrap();
+    let escaped = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .unwrap();
+    std::fs::write(leftover.join("cgroup.procs"), escaped.id().to_string()).unwrap();
+    (leftover, escaped)
+}
+
 #[tokio::test]
 async fn run_cgroups_an_earlier_forge_left_populated_are_killed_at_startup() {
     if !sandboxed() || !founding_forge() {
@@ -626,20 +647,7 @@ async fn run_cgroups_an_earlier_forge_left_populated_are_killed_at_startup() {
         ),
         "{separation:?}"
     );
-    let membership = std::fs::read_to_string("/proc/self/cgroup").unwrap();
-    let own = forge_isolation::linux::unified_membership(&membership).unwrap();
-    let engines = Path::new("/sys/fs/cgroup")
-        .join(own.trim_start_matches('/'))
-        .with_file_name("engines");
-    let mut gone = std::process::Command::new("true").spawn().unwrap();
-    gone.wait().unwrap();
-    let leftover = engines.join(format!("run-{}-1-0", gone.id()));
-    std::fs::create_dir(&leftover).unwrap();
-    let mut escaped = std::process::Command::new("sleep")
-        .arg("600")
-        .spawn()
-        .unwrap();
-    std::fs::write(leftover.join("cgroup.procs"), escaped.id().to_string()).unwrap();
+    let (leftover, mut escaped) = left_by_an_earlier_forge();
 
     let separation = forge_isolation::protect_forge();
 
@@ -654,6 +662,33 @@ async fn run_cgroups_an_earlier_forge_left_populated_are_killed_at_startup() {
     });
     assert!(!status.success());
     assert!(!leftover.exists(), "{separation:?}");
+}
+
+#[test]
+fn configuration_stays_guarded_while_a_run_an_earlier_forge_left_has_processes() {
+    if !sandboxed() || !founding_forge() {
+        return;
+    }
+    forge_isolation::protect_forge();
+    let (_base, home) = engine_home();
+    let settings = home.join(".claude/settings.json");
+    std::fs::write(&settings, r#"{"theme":"dark"}"#).unwrap();
+    let exposure = super::expose(EngineId::Claude, &home).unwrap();
+    let (leftover, mut escaped) = left_by_an_earlier_forge();
+    drop(exposure);
+
+    std::fs::write(&settings, r#"{"hooks":"planted"}"#).unwrap();
+    let restored = super::restore(EngineId::Claude, &home);
+    let kept = std::fs::read_to_string(&settings).unwrap();
+    escaped.kill().unwrap();
+    escaped.wait().unwrap();
+    std::fs::remove_dir(&leftover).unwrap();
+
+    restored.unwrap();
+    assert_eq!(
+        kept, r#"{"theme":"dark"}"#,
+        "a process an earlier Forge's Auto run left alive planted configuration that a later launch kept"
+    );
 }
 
 #[tokio::test]

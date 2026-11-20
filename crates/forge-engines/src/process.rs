@@ -35,6 +35,12 @@ pub enum SpawnError {
         #[source]
         source: forge_isolation::RunGroupError,
     },
+    #[error("contain the process tree of {}", program.display())]
+    Contain {
+        program: PathBuf,
+        #[source]
+        source: forge_isolation::ContainError,
+    },
     #[error("start {}", program.display())]
     Start {
         program: PathBuf,
@@ -371,7 +377,12 @@ pub(crate) fn owned_command(
             program: program.clone(),
             source,
         })?;
-    forge_isolation::contain(command.as_std_mut(), sandbox.ruleset(), &tree);
+    forge_isolation::contain(command.as_std_mut(), sandbox.ruleset(), &tree).map_err(|source| {
+        SpawnError::Contain {
+            program: program.clone(),
+            source,
+        }
+    })?;
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);
     #[cfg(unix)]

@@ -14,12 +14,13 @@ doctest = false
 tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+thiserror.workspace = true
 libc = "=0.2.189"
 rustix = { workspace = true, features = ["event", "fs", "pipe", "process", "std", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+diagnostics.workspace = true
 landlock.workspace = true
-thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -30,6 +31,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+test-support.workspace = true
 
 [lints]
 workspace = true

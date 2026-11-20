@@ -23,19 +23,20 @@ struct Lifeline {
     _held_by_forge: OwnedFd,
 }
 
-static LIFELINE: OnceLock<Option<Lifeline>> = OnceLock::new();
+static LIFELINE: OnceLock<Lifeline> = OnceLock::new();
 
-fn lifeline() -> Option<RawFd> {
-    LIFELINE
-        .get_or_init(|| match open_lifeline() {
-            Ok(lifeline) => Some(lifeline),
-            Err(error) => {
-                tracing::warn!(%error, "engine trees can outlive Forge: the lifeline pipe can't be opened");
-                None
-            }
-        })
-        .as_ref()
-        .map(|lifeline| lifeline.forge_alive.as_raw_fd())
+#[derive(Debug, thiserror::Error)]
+pub enum ContainError {
+    #[error("open the pipe that ends engine runs when Forge exits")]
+    Lifeline(#[source] std::io::Error),
+}
+
+fn lifeline() -> Result<RawFd, ContainError> {
+    if let Some(lifeline) = LIFELINE.get() {
+        return Ok(lifeline.forge_alive.as_raw_fd());
+    }
+    let opened = open_lifeline().map_err(|errno| ContainError::Lifeline(errno.into()))?;
+    Ok(LIFELINE.get_or_init(|| opened).forge_alive.as_raw_fd())
 }
 
 #[cfg(not(target_vendor = "apple"))]
@@ -92,20 +93,18 @@ pub(crate) fn contain(
     command: &mut std::process::Command,
     sandbox: Option<crate::Ruleset>,
     tree: &crate::EngineTree,
-) {
+) -> Result<(), ContainError> {
     #[cfg(target_os = "linux")]
     let membership = tree.membership();
     let watch = Watch::of(tree);
-    let forge_alive = lifeline();
+    let forge_alive = lifeline()?;
     let enter = move || {
         #[cfg(target_os = "linux")]
         crate::linux::enter(membership.as_deref())?;
         #[cfg(target_os = "macos")]
         crate::macos::yield_disk()?;
         rustix::process::nice(ENGINE_NICENESS)?;
-        if let Some(forge_alive) = forge_alive {
-            lead_group_watched_by(forge_alive, &watch)?;
-        }
+        lead_group_watched_by(forge_alive, &watch)?;
         if let Some(ruleset) = &sandbox {
             ruleset.restrict_self()?;
         }
@@ -114,6 +113,13 @@ pub(crate) fn contain(
     unsafe {
         command.pre_exec(enter);
     }
+    Ok(())
+}
+
+fn last_errno() -> libc::c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
 }
 
 fn lead_group_watched_by(forge_alive: RawFd, watch: &Watch) -> std::io::Result<()> {
@@ -124,50 +130,64 @@ fn lead_group_watched_by(forge_alive: RawFd, watch: &Watch) -> std::io::Result<(
         let group = libc::getpid().unsigned_abs();
         match libc::fork() {
             -1 => Err(std::io::Error::last_os_error()),
-            0 => {
-                start_watchers(forge_alive, watch, group);
-                libc::_exit(0)
-            }
+            0 => libc::_exit(start_watchers(forge_alive, watch, group)),
             intermediate => {
-                libc::waitpid(intermediate, std::ptr::null_mut(), 0);
-                Ok(())
+                let mut status: libc::c_int = 0;
+                loop {
+                    if libc::waitpid(intermediate, &raw mut status, 0) != -1 {
+                        break;
+                    }
+                    let errno = last_errno();
+                    if errno != libc::EINTR {
+                        return Err(std::io::Error::from_raw_os_error(errno));
+                    }
+                }
+                match (libc::WIFEXITED(status), libc::WEXITSTATUS(status)) {
+                    (true, 0) => Ok(()),
+                    (true, errno) => Err(std::io::Error::from_raw_os_error(errno)),
+                    (false, _) => Err(std::io::Error::from_raw_os_error(libc::ECHILD)),
+                }
             }
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, _group: u32) {
+unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, _group: u32) -> libc::c_int {
     unsafe {
-        if libc::fork() == 0 {
-            become_watcher(
+        match libc::fork() {
+            -1 => last_errno(),
+            0 => become_watcher(
                 forge_alive,
                 Output::Discarded,
                 watch.script,
                 watch.argument.as_ptr(),
-            );
+            ),
+            _ => 0,
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, group: u32) {
+unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, group: u32) -> libc::c_int {
     let group = Decimal::of(group);
     unsafe {
         let mut asks: [RawFd; 2] = [0; 2];
         if libc::pipe(asks.as_mut_ptr()) != 0 {
-            if libc::fork() == 0 {
-                become_watcher(
+            return match libc::fork() {
+                -1 => last_errno(),
+                0 => become_watcher(
                     forge_alive,
                     Output::Discarded,
                     watch.script,
                     watch.argument.as_ptr(),
-                );
-            }
-            return;
+                ),
+                _ => 0,
+            };
         }
         let [asked, ask] = asks;
-        if libc::fork() == 0 {
+        let asking = libc::fork();
+        if asking == 0 {
             libc::close(asked);
             become_watcher(
                 forge_alive,
@@ -176,7 +196,11 @@ unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, group: u32) {
                 NO_ARGUMENT.as_ptr(),
             );
         }
-        if libc::fork() == 0 {
+        if asking == -1 {
+            return last_errno();
+        }
+        let sweeping = libc::fork();
+        if sweeping == 0 {
             libc::close(ask);
             libc::setpgid(0, 0);
             become_watcher(
@@ -186,8 +210,12 @@ unsafe fn start_watchers(forge_alive: RawFd, watch: &Watch, group: u32) {
                 group.as_ptr(),
             );
         }
+        if sweeping == -1 {
+            return last_errno();
+        }
         libc::close(asked);
         libc::close(ask);
+        0
     }
 }
 

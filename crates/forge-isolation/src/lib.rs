@@ -50,13 +50,16 @@ pub use sandbox::{
 };
 
 #[cfg(target_os = "linux")]
-pub use linux::{EndRunError, RunGroupError};
+pub use linux::{EndRunError, LeftoverError, RunGroupError};
 
 #[cfg(not(target_os = "linux"))]
 pub type RunGroupError = std::convert::Infallible;
 
 #[cfg(not(target_os = "linux"))]
 pub type EndRunError = std::convert::Infallible;
+
+#[cfg(not(target_os = "linux"))]
+pub type LeftoverError = std::convert::Infallible;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Containment {
@@ -116,28 +119,45 @@ impl EngineTree {
 }
 
 #[cfg(target_os = "linux")]
-#[must_use]
-pub fn leftover_runs_alive() -> bool {
+pub fn leftover_runs_alive() -> Result<bool, LeftoverError> {
     linux::leftovers_alive()
 }
 
 #[cfg(not(target_os = "linux"))]
-#[must_use]
-pub const fn leftover_runs_alive() -> bool {
-    false
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as Linux, where reading a leftover run's cgroup can fail"
+)]
+pub const fn leftover_runs_alive() -> Result<bool, LeftoverError> {
+    Ok(false)
 }
 
 #[cfg(unix)]
-pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>, tree: &EngineTree) {
-    unix::contain(command, sandbox.cloned(), tree);
+pub use unix::ContainError;
+
+#[cfg(not(unix))]
+pub type ContainError = std::convert::Infallible;
+
+#[cfg(unix)]
+pub fn contain(
+    command: &mut std::process::Command,
+    sandbox: Option<&Ruleset>,
+    tree: &EngineTree,
+) -> Result<(), ContainError> {
+    unix::contain(command, sandbox.cloned(), tree)
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as Unix, where opening Forge's lifeline pipe can fail"
+)]
 pub const fn contain(
     _command: &mut std::process::Command,
     _sandbox: Option<&Ruleset>,
     _tree: &EngineTree,
-) {
+) -> Result<(), ContainError> {
+    Ok(())
 }
 
 #[cfg(windows)]

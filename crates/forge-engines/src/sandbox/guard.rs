@@ -306,8 +306,14 @@ fn hold(engine: EngineId, home: &Path, name: &str) -> Result<fs::File, GuardErro
 }
 
 fn still_exposed(engine: EngineId, home: &Path) -> Result<bool, GuardError> {
-    if forge_isolation::leftover_runs_alive() {
-        return Ok(true);
+    match forge_isolation::leftover_runs_alive() {
+        Ok(true) => return Ok(true),
+        Ok(false) => {}
+        Err(failure) => {
+            let error: &dyn std::error::Error = &failure;
+            tracing::warn!(%engine, error, "can't tell whether a run an earlier Forge left still has processes; its engine's configuration stays guarded");
+            return Ok(true);
+        }
     }
     let markers = beside(home, LIVE_MARKERS);
     let locking = |path: &Path| {
