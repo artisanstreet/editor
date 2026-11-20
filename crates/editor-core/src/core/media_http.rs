@@ -1,5 +1,6 @@
 use crate::core::runtime::runtime;
 use futures::future::BoxFuture;
+use std::hash::{Hash as _, Hasher as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{
     sync::{Arc, LazyLock},
@@ -35,49 +36,93 @@ pub struct MediaHttpClient {
     policy: Arc<dyn AddressPolicy>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UrlIdentity {
+    origin: Option<String>,
+    digest: u32,
+}
+
+impl UrlIdentity {
+    #[must_use]
+    pub(crate) fn of(url: &url::Url) -> Self {
+        let origin = url.host_str().map(|host| match url.port() {
+            Some(port) => format!("{}://{host}:{port}", url.scheme()),
+            None => format!("{}://{host}", url.scheme()),
+        });
+        Self {
+            origin,
+            digest: digest(url.as_str()),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn unparsed(text: &str) -> Self {
+        Self {
+            origin: None,
+            digest: digest(text),
+        }
+    }
+}
+
+fn digest(text: &str) -> u32 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let full = hasher.finish();
+    u32::try_from(full >> 32).expect("invariant: the high half of a u64 fits a u32")
+}
+
+impl std::fmt::Display for UrlIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.origin {
+            Some(origin) => write!(f, "{origin} (#{:08x})", self.digest),
+            None => write!(f, "a URL (#{:08x})", self.digest),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RedirectError {
     #[error("{url} redirected without a location")]
-    NoLocation { url: String },
+    NoLocation { url: UrlIdentity },
     #[error("{url} redirected to a location that is not visible ASCII")]
     UnreadableLocation {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: reqwest::header::ToStrError,
     },
     #[error("{url} redirected to an unreadable location")]
     BadLocation {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: url::ParseError,
     },
     #[error("{url} redirected to {to}, which is not on the public internet")]
-    NotPublic { url: String, to: String },
+    NotPublic { url: UrlIdentity, to: UrlIdentity },
     #[error("{url} redirected more than {MAX_REDIRECTS} times")]
-    TooMany { url: String },
+    TooMany { url: UrlIdentity },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaFetchError {
     #[error("{url} is not a URL")]
     Url {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: url::ParseError,
     },
     #[error("{url} is not HTTP or HTTPS")]
-    Scheme { url: String },
+    Scheme { url: UrlIdentity },
     #[error("{url} is not on the public internet")]
-    NotPublic { url: String },
+    NotPublic { url: UrlIdentity },
     #[error("fetch {url}")]
     Fetch {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: reqwest::Error,
     },
     #[error("read {url}")]
     Read {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: crate::core::client::ReadBodyError,
     },
@@ -85,7 +130,7 @@ pub enum MediaFetchError {
     Redirect(#[source] RedirectError),
     #[error("the fetch task for {url} stopped")]
     Task {
-        url: String,
+        url: UrlIdentity,
         #[source]
         source: tokio::task::JoinError,
     },
@@ -157,13 +202,13 @@ impl MediaHttpClient {
     ) -> BoxFuture<'static, Result<MediaResponse, MediaFetchError>> {
         let client = self.http.clone();
         let policy = Arc::clone(&self.policy);
-        let requested = url.to_owned();
-        let parsed = url::Url::parse(url);
+        let parsed = url::Url::parse(url).map_err(|source| MediaFetchError::Url {
+            url: UrlIdentity::unparsed(url),
+            source,
+        });
         Box::pin(async move {
-            let url = parsed.map_err(|source| MediaFetchError::Url {
-                url: requested.clone(),
-                source,
-            })?;
+            let url = parsed?;
+            let requested = UrlIdentity::of(&url);
             if !matches!(url.scheme(), "http" | "https") {
                 return Err(MediaFetchError::Scheme { url: requested });
             }
@@ -175,8 +220,8 @@ impl MediaHttpClient {
                 for _ in 0..=MAX_REDIRECTS {
                     let response = client.get(url.clone()).send().await.map_err(|source| {
                         MediaFetchError::Fetch {
-                            url: url.to_string(),
-                            source,
+                            url: UrlIdentity::of(&url),
+                            source: source.without_url(),
                         }
                     })?;
                     let status = response.status();
@@ -184,8 +229,8 @@ impl MediaHttpClient {
                         let body = crate::core::client::read_body(response, MAX_BODY_BYTES)
                             .await
                             .map_err(|source| MediaFetchError::Read {
-                                url: url.to_string(),
-                                source,
+                                url: UrlIdentity::of(&url),
+                                source: without_url(source),
                             })?;
                         return Ok(MediaResponse { status, body });
                     }
@@ -193,7 +238,7 @@ impl MediaHttpClient {
                         .map_err(MediaFetchError::Redirect)?;
                 }
                 Err(MediaFetchError::Redirect(RedirectError::TooMany {
-                    url: url.to_string(),
+                    url: UrlIdentity::of(&url),
                 }))
             }));
             task.await.map_err(|source| MediaFetchError::Task {
@@ -201,6 +246,15 @@ impl MediaHttpClient {
                 source,
             })?
         })
+    }
+}
+
+fn without_url(error: crate::core::client::ReadBodyError) -> crate::core::client::ReadBodyError {
+    match error {
+        crate::core::client::ReadBodyError::Chunk(source) => {
+            crate::core::client::ReadBodyError::Chunk(source.without_url())
+        }
+        too_large @ crate::core::client::ReadBodyError::TooLarge { .. } => too_large,
     }
 }
 
@@ -216,23 +270,23 @@ fn next_hop(
     let location = headers
         .get(reqwest::header::LOCATION)
         .ok_or_else(|| RedirectError::NoLocation {
-            url: url.to_string(),
+            url: UrlIdentity::of(url),
         })?
         .to_str()
         .map_err(|source| RedirectError::UnreadableLocation {
-            url: url.to_string(),
+            url: UrlIdentity::of(url),
             source,
         })?;
     let next = url
         .join(location)
         .map_err(|source| RedirectError::BadLocation {
-            url: url.to_string(),
+            url: UrlIdentity::of(url),
             source,
         })?;
     if !policy.admits(&next) {
         return Err(RedirectError::NotPublic {
-            url: url.to_string(),
-            to: next.to_string(),
+            url: UrlIdentity::of(url),
+            to: UrlIdentity::of(&next),
         });
     }
     Ok(next)

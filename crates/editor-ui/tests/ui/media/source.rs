@@ -86,3 +86,102 @@ async fn an_image_server_error_keeps_its_status_as_the_cause() {
         "the file could not be read: the web server answered 503"
     );
 }
+
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn captured_log() -> Captured {
+    static LOG: LazyLock<Captured> = LazyLock::new(|| {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+        captured
+    });
+    LOG.clone()
+}
+
+const SENTINEL: &str = "SENTINEL-c0ffee-signed-token";
+
+#[tokio::test]
+async fn a_failed_remote_image_never_writes_its_url_credentials_to_the_log() {
+    let captured = captured_log();
+    let (dropped, _) = serve(String::new).await;
+    let (truncated, _) = serve(|| {
+        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nabc".to_owned()
+    })
+    .await;
+    let (inner, inner_hits) = serve(String::new).await;
+    let (redirecting, _) = serve(move || {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://user:{SENTINEL}@127.0.0.1:{inner}/next?sig={SENTINEL}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    })
+    .await;
+    let http =
+        editor_core::media_http::MediaHttpClient::new(test_support::editor::media::LoopbackStubs(
+            [dropped, truncated, redirecting]
+                .into_iter()
+                .map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                .collect(),
+        ));
+    for port in [dropped, truncated, redirecting] {
+        let source = MediaSource::from(format!(
+            "http://user:{SENTINEL}@127.0.0.1:{port}/{SENTINEL}/pixel.png?sig={SENTINEL}"
+        ));
+        let result = load_image_bytes(&source, None, &http).await;
+        let Err(MediaLoadError::Fetch(failure)) = &result else {
+            panic!("the load on port {port} gave {result:?}");
+        };
+        let chain = ::diagnostics::chain(failure);
+        assert!(
+            !chain.contains(SENTINEL),
+            "the failure names the URL: {chain}"
+        );
+        assert!(
+            chain.contains(&format!("http://127.0.0.1:{port}")),
+            "the failure still names the server: {chain}"
+        );
+        let debug = format!("{result:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "the failure's debug names the URL: {debug}"
+        );
+    }
+    assert_eq!(inner_hits.load(Ordering::SeqCst), 0);
+    let log = String::from_utf8_lossy(&captured.0.lock().expect("log lock")).into_owned();
+    for port in [dropped, truncated, redirecting] {
+        let origin = format!("http://127.0.0.1:{port}");
+        assert!(
+            log.lines()
+                .any(|line| line.contains("fetch image") && line.contains(&origin)),
+            "the failure for {origin} was logged: {log}"
+        );
+    }
+    assert!(!log.contains(SENTINEL), "the log names a URL: {log}");
+}

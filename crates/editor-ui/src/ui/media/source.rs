@@ -427,7 +427,7 @@ pub async fn load_image_bytes(
     let bytes = match &source.parsed() {
         Parsed::Url(url) => {
             let response = http.get(url, true).await.map_err(|error| {
-                tracing::warn!(%url, error = %::diagnostics::chain(&error), "fetch image");
+                tracing::warn!(error = %::diagnostics::chain(&error), "fetch image");
                 MediaLoadError::Fetch(MediaFailure::ServerUnreachable(Arc::new(error)))
             })?;
             match response.status.as_u16() {
