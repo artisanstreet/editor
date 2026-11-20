@@ -10,8 +10,6 @@ mod motion;
 mod parked;
 #[path = "conversation/presentation.rs"]
 mod presentation;
-#[path = "conversation/projection.rs"]
-mod projection;
 #[path = "conversation/questions.rs"]
 mod questions;
 #[path = "conversation/read.rs"]

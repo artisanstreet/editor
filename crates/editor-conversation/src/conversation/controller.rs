@@ -1396,7 +1396,7 @@ impl Conversation {
             HostEvent::Live { thread_id, target } if thread_id == &thread => {
                 let text = host
                     .live_snapshot(&thread, target)
-                    .map(|snapshot| snapshot.text);
+                    .map(|snapshot| thread::LiveText::of(&snapshot));
                 if view.update_live(target, text) {
                     if watched && let artisan_api::LiveTarget::Text { item_id } = target {
                         self.observe_live_prose_arrival(item_id);
@@ -1687,7 +1687,7 @@ fn shape_source<'a>(
     id: &ItemId,
     slot: fold::Slot,
 ) -> Option<super::projection::ShapeSource<'a>> {
-    use super::projection::{ShapeSource, ShapeText};
+    use super::projection::{ShapeRevision, ShapeSource, ShapeText};
     let item = view.item(id)?;
     let seq = match slot {
         fold::Slot::Text(fold::TextSection::User) => {
@@ -1703,6 +1703,7 @@ fn shape_source<'a>(
         | fold::Slot::Answer
         | fold::Slot::Preview => 0,
     };
+    let saved = ShapeRevision::Saved(item.seq);
     match (slot, &item.kind) {
         (fold::Slot::Prose, ItemKind::AssistantMessage { text, .. }) => {
             let live = (item.status == artisan_api::Status::Running)
@@ -1713,14 +1714,19 @@ fn shape_source<'a>(
                 })
                 .flatten();
             match (live, text) {
-                (Some(rope), _) => Some(ShapeSource {
-                    text: ShapeText::Live(rope),
+                (Some(live), _) => Some(ShapeSource {
+                    text: ShapeText::Live(&live.text),
+                    revision: ShapeRevision::Live {
+                        epoch: live.epoch,
+                        bytes: live.text.len_bytes(),
+                    },
                     message: false,
                     seq,
                     running: item.status == artisan_api::Status::Running,
                 }),
                 (None, artisan_api::TextContent::Inline(source)) => Some(ShapeSource {
                     text: ShapeText::Inline(source),
+                    revision: saved,
                     message: false,
                     seq,
                     running: item.status == artisan_api::Status::Running,
@@ -1736,12 +1742,14 @@ fn shape_source<'a>(
             },
         ) => Some(ShapeSource {
             text: ShapeText::Inline(source),
+            revision: saved,
             message: true,
             seq,
             running: false,
         }),
         (fold::Slot::Text(_), _) => slot.inline_text(item).map(|source| ShapeSource {
             text: ShapeText::Inline(source),
+            revision: saved,
             message: false,
             seq,
             running: false,

@@ -329,7 +329,8 @@ fn reply_text(view: &ThreadView, run: &Run) -> ReplyText {
         item_id: item.id.clone(),
     };
     match (view.live.get(&target), &item.kind) {
-        (Some(rope), _) => {
+        (Some(live), _) => {
+            let rope = &live.text;
             let length = rope.len_chars();
             ReplyText::Known(
                 rope.slice(length.saturating_sub(REPLY_TAIL_CHARS)..)

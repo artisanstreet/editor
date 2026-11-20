@@ -17,7 +17,7 @@ pub enum Phase {
 pub(crate) fn turn_phase<S: BuildHasher>(
     run: &Run,
     items: &[&Item],
-    live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
+    live: &HashMap<LiveTarget, super::thread::LiveText, S>,
 ) -> Phase {
     if let RunState::Finished { outcome, .. } = &run.state {
         return Phase::Settled(*outcome);
@@ -82,7 +82,11 @@ pub(crate) fn turn_phase<S: BuildHasher>(
         .get(&LiveTarget::Reasoning {
             run_id: run.id.clone(),
         })
-        .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()));
+        .is_some_and(|live| {
+            live.text
+                .chars()
+                .any(|character| !character.is_whitespace())
+        });
     if reasoning {
         return Phase::Thinking;
     }

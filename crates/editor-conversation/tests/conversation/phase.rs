@@ -4,7 +4,6 @@ use artisan_api::{
     ThreadId, ToolKind, Usage,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn run() -> Run {
     Run {
@@ -70,7 +69,7 @@ fn reply(position: u64) -> Item {
 
 #[test]
 fn a_job_running_behind_the_turn_is_not_read_as_a_wait() {
-    let live: HashMap<LiveTarget, Arc<ropey::Rope>> = HashMap::new();
+    let live: HashMap<LiveTarget, crate::conversation::thread::LiveText> = HashMap::new();
     let job = shell(1, Status::Running, true);
     let answer = reply(2);
     assert_eq!(
@@ -88,7 +87,7 @@ fn a_job_running_behind_the_turn_is_not_read_as_a_wait() {
 
 #[test]
 fn a_stopped_run_reads_as_stopped_even_while_its_command_still_runs() {
-    let live: HashMap<LiveTarget, Arc<ropey::Rope>> = HashMap::new();
+    let live: HashMap<LiveTarget, crate::conversation::thread::LiveText> = HashMap::new();
     let mut stopped = run();
     stopped.state = RunState::Finished {
         outcome: RunOutcome::Cancelled,

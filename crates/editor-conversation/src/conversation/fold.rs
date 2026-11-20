@@ -1483,13 +1483,13 @@ fn version(
                 .get(&LiveTarget::Reasoning {
                     run_id: run.clone(),
                 })
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
             view.live
                 .get(&LiveTarget::Status {
                     run_id: run.clone(),
                 })
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
             Vec::new()
         }
@@ -1525,7 +1525,7 @@ fn version(
         ] {
             view.live
                 .get(&target)
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
         }
         if !matches!(

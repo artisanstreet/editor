@@ -335,7 +335,7 @@ fn row_model_from(
                 row.run() == Some(run_id)
             }
         })
-        .map(|(target, text)| (target.clone(), Arc::clone(text)))
+        .map(|(target, live)| (target.clone(), Arc::clone(&live.text)))
         .collect();
     Some(RowModel {
         row: row.clone(),

@@ -545,12 +545,8 @@ impl HostData {
     pub fn live_targets(
         &self,
         thread: &ThreadId,
-    ) -> impl Iterator<Item = (&LiveTarget, &Arc<Rope>)> {
-        self.live.get(thread).into_iter().flat_map(|targets| {
-            targets
-                .iter()
-                .map(|(target, stream)| (target, &stream.text))
-        })
+    ) -> impl Iterator<Item = (&LiveTarget, &LiveSnapshot)> {
+        self.live.get(thread).into_iter().flatten()
     }
     pub fn stop_optimistically(&mut self, thread: &ThreadId) {
         let Some(run) = self.runs.get_mut(thread) else {

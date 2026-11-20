@@ -53,7 +53,10 @@ fn a_parked_thread_counts_its_streaming_text() {
         artisan_api::LiveTarget::Text {
             item_id: ItemId("current".into()),
         },
-        Arc::new(ropey::Rope::from_str(&streamed)),
+        thread::LiveText {
+            epoch: 1,
+            text: Arc::new(ropey::Rope::from_str(&streamed)),
+        },
     );
     let parked = ParkedThread {
         view,

@@ -27,7 +27,7 @@ impl LiveBinding {
         let snapshot = core
             .host_if_instance(&scope.host, scope.instance)?
             .live_snapshot(&scope.thread, &target)?;
-        if !Arc::ptr_eq(model, &snapshot.text) {
+        if model.epoch != snapshot.epoch || !Arc::ptr_eq(&model.text, &snapshot.text) {
             return None;
         }
         Some(Self {

@@ -16,6 +16,25 @@ const WINDOW_KEEP_BYTES: usize = 6 * 1024 * 1024;
 
 const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[derive(Clone, Debug)]
+pub struct LiveText {
+    pub(crate) epoch: u64,
+    pub(crate) text: Arc<ropey::Rope>,
+}
+
+impl LiveText {
+    pub(crate) fn of(snapshot: &editor_core::LiveSnapshot) -> Self {
+        Self {
+            epoch: snapshot.epoch,
+            text: Arc::clone(&snapshot.text),
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.text, &other.text)
+    }
+}
+
 #[derive(Clone, Debug, Default, Hash)]
 pub struct ItemUi {
     pub expanded: Option<bool>,
@@ -59,7 +78,7 @@ pub struct ThreadView {
     pub(crate) work: Shared<BTreeMap<Seq, WorkSpan>>,
     positions: Shared<HashMap<ItemId, Seq>>,
     resident_bytes: usize,
-    pub(crate) live: Shared<HashMap<LiveTarget, Arc<ropey::Rope>>>,
+    pub(crate) live: Shared<HashMap<LiveTarget, LiveText>>,
     pub viewport: Viewport,
     pub ui: Shared<HashMap<ItemId, ItemUi>>,
     pub(crate) answers: Shared<HashMap<ItemId, AnswerState>>,
@@ -125,7 +144,7 @@ impl ThreadView {
             + self
                 .live
                 .values()
-                .map(|rope| rope.capacity())
+                .map(|live| live.text.capacity())
                 .sum::<usize>()
             + items * size_of::<Item>()
             + self.items.len() * size_of::<(Seq, Arc<Item>)>()
@@ -517,13 +536,9 @@ impl ThreadView {
         true
     }
 
-    pub(crate) fn update_live(
-        &mut self,
-        target: &LiveTarget,
-        text: Option<Arc<ropey::Rope>>,
-    ) -> bool {
+    pub(crate) fn update_live(&mut self, target: &LiveTarget, text: Option<LiveText>) -> bool {
         match (self.live.get(target), &text) {
-            (Some(old), Some(next)) if Arc::ptr_eq(old, next) => return false,
+            (Some(old), Some(next)) if old.same(next) => return false,
             (None, None) => return false,
             _ => {}
         }
@@ -537,17 +552,15 @@ impl ThreadView {
 
     pub(crate) fn set_live<'a>(
         &mut self,
-        targets: impl Iterator<Item = (&'a LiveTarget, &'a Arc<ropey::Rope>)>,
+        targets: impl Iterator<Item = (&'a LiveTarget, &'a editor_core::LiveSnapshot)>,
     ) -> bool {
-        let live: HashMap<LiveTarget, Arc<ropey::Rope>> = targets
-            .map(|(target, text)| (target.clone(), Arc::clone(text)))
+        let live: HashMap<LiveTarget, LiveText> = targets
+            .map(|(target, snapshot)| (target.clone(), LiveText::of(snapshot)))
             .collect();
         if live.len() == self.live.len()
-            && live.iter().all(|(target, text)| {
-                self.live
-                    .get(target)
-                    .is_some_and(|old| Arc::ptr_eq(old, text))
-            })
+            && live
+                .iter()
+                .all(|(target, text)| self.live.get(target).is_some_and(|old| old.same(text)))
         {
             return false;
         }
