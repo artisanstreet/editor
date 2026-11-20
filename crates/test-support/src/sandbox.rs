@@ -16,10 +16,14 @@ pub fn isolate(command: &mut Command, sandbox: &Path) {
 
 pub fn artisan_street(sandbox: &Path) -> PathBuf {
     if cfg!(windows) {
-        sandbox.join("local/Artisan Street")
+        sandbox.join("local").join("Artisan Street")
     } else if cfg!(target_os = "macos") {
-        sandbox.join("home/Library/Application Support/Artisan Street")
+        sandbox
+            .join("home")
+            .join("Library")
+            .join("Application Support")
+            .join("Artisan Street")
     } else {
-        sandbox.join("data/artisan-street")
+        sandbox.join("data").join("artisan-street")
     }
 }
