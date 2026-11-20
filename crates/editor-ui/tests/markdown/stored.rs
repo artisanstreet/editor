@@ -191,18 +191,19 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
 }
 
 fn owner_fixture() -> (
-    tempfile::TempDir,
+    (tempfile::TempDir, test_support::net::SilentListener),
     editor_core::Core,
     editor_core::HostConfig,
     ScopedSourceProvider,
 ) {
     use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
     let directory = tempfile::tempdir().unwrap();
+    let forge = test_support::net::SilentListener::bind();
     let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("stored".into()),
         name: "stored".into(),
-        address: "127.0.0.1:1".into(),
+        address: forge.address().to_string(),
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     };
@@ -216,7 +217,7 @@ fn owner_fixture() -> (
     let provider = core
         .source_provider(&config.id, core.host(&config.id).unwrap().instance())
         .unwrap();
-    (directory, core, config, provider)
+    ((directory, forge), core, config, provider)
 }
 
 fn long_page(
