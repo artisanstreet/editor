@@ -191,7 +191,7 @@ fn symbolized(recorded: &str) -> Vec<(String, Option<u32>)> {
     reason = "an executable without readable DWARF fails the test"
 )]
 fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
-    let loader = addr2line_loader::Loader::new(module).unwrap();
+    let loader = addr2line::Loader::new(module).unwrap();
     let header = header_address(module);
     let mut resolved = Vec::new();
     for offset in offsets {

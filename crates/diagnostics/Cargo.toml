@@ -24,7 +24,7 @@ windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 tempfile.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
-addr2line-loader = { package = "addr2line", version = "=0.27.1", default-features = false, features = ["std", "loader"] }
+addr2line.workspace = true
 object.workspace = true
 
 [target.'cfg(target_env = "msvc")'.dev-dependencies]
