@@ -173,8 +173,8 @@ pub(crate) struct Base {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct UnsentPost {
-    submission: Submission,
-    sent: DraftBody,
+    pub(crate) submission: Submission,
+    pub(crate) sent: DraftBody,
     #[serde(default)]
     released: bool,
 }

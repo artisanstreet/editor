@@ -73,6 +73,83 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
 }
 
 #[test]
+fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device() {
+    use editor_aqua::composer::attachment::Source;
+    use editor_aqua::composer::persistence::DraftSessions;
+    use editor_aqua::composer::spool::DraftSpool;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let identity = Identity::generate("workspace-draft-test").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let config = host_config(&fingerprint);
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
+    core.navigate(Screen::NewThread {
+        host: config.id.clone(),
+        project: None,
+    });
+    let mut ui = ShellResources::new(1.0).unwrap().ui;
+    let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
+    workspace.sync_composer(&core, &mut ui);
+    {
+        let mut composer = workspace
+            .composer()
+            .as_ref()
+            .unwrap()
+            .controller
+            .borrow_mut();
+        composer
+            .editor
+            .borrow_mut()
+            .set_text("typed while Forge was away");
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut image, image::ImageFormat::Png)
+            .unwrap();
+        composer
+            .attachments
+            .as_mut()
+            .unwrap()
+            .add(Source::Bytes(image.into_inner()), "Pasted image".into());
+        composer.edited();
+    }
+
+    core.remove_host(&config.id).unwrap();
+    workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
+
+    let images = std::fs::read_dir(directory.path().join("drafts"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "image")
+        })
+        .count();
+    assert_eq!(
+        images, 1,
+        "the image still uploading is kept with the draft"
+    );
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
+    let mut sessions = DraftSessions::with_spool(DraftSpool::new(directory.path()));
+    let reopened = sessions
+        .open(
+            config.id.clone(),
+            core.host(&config.id).unwrap().instance(),
+            "new:".into(),
+            client,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.read(|state| state.body().text.clone()),
+        "typed while Forge was away"
+    );
+}
+
+#[test]
 fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
     for settings in [false, true] {
         let directory = tempfile::tempdir().unwrap();

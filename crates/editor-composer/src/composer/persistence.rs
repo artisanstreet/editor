@@ -1,8 +1,8 @@
 use super::attachment::{PendingUpload, ReadImageError, upload_image};
 use super::draft_body::DraftBody;
 use super::draft_session::{
-    AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptLostImage, LostKey, Operation,
-    PostMessageError, SAVE_DELAY, Submission, Unrecovered,
+    AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
+    Operation, PostMessageError, SAVE_DELAY, Submission, Unrecovered,
 };
 use super::spool::{DraftSpool, KeepSpooledDraftError, TakeSpooledDraftError};
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
@@ -50,6 +50,22 @@ struct Inner {
 }
 
 pub const MAX_OPEN_DRAFTS: usize = 64;
+
+struct Keeping {
+    scope: String,
+    draft: KeptDraft,
+    images: Vec<(String, AdoptedImage)>,
+}
+
+impl Keeping {
+    fn of(state: &DraftSession) -> Option<Self> {
+        state.keepable().then(|| Self {
+            scope: state.scope().to_owned(),
+            draft: state.kept(),
+            images: state.unacknowledged_images(),
+        })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 enum KeepLocallyError {
@@ -386,7 +402,7 @@ impl DraftSessions {
             if core.host_if_instance(id, *instance).is_some() {
                 return true;
             }
-            session.remove();
+            session.retire();
             false
         });
     }
@@ -413,15 +429,17 @@ impl DraftHandle {
     }
 
     fn keep_locally(&self) -> bool {
-        let (keepable, scope, mut draft, images) = self.read(|state| {
-            (
-                state.keepable(),
-                state.scope().to_owned(),
-                state.kept(),
-                state.unacknowledged_images(),
-            )
-        });
-        let Some(spool) = self.0.spool.as_ref().filter(|_| keepable) else {
+        self.read(Keeping::of)
+            .is_some_and(|keeping| self.keep(keeping))
+    }
+
+    fn keep(&self, keeping: Keeping) -> bool {
+        let Keeping {
+            scope,
+            mut draft,
+            images,
+        } = keeping;
+        let Some(spool) = self.0.spool.as_ref() else {
             return false;
         };
         let images = images
@@ -563,14 +581,19 @@ impl DraftHandle {
         }
     }
 
-    fn remove(&self) {
+    fn retire(&self) {
+        let mut keeping = None;
         self.mutate(|shared| {
             if let Some(timer) = shared.timer.take() {
                 timer.abort();
             }
-            shared.state.remove();
             self.0.cancelled.cancel();
+            keeping = Keeping::of(&shared.state);
+            shared.state.remove();
         });
+        if let Some(keeping) = keeping {
+            self.keep(keeping);
+        }
     }
 
     pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {

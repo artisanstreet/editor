@@ -330,6 +330,9 @@ impl Workspace {
     }
 
     fn follow_hosts(&mut self, core: &Core) -> NotificationEffects {
+        if let Some(composer) = &self.composer {
+            composer.controller.borrow_mut().release_if_host_gone(core);
+        }
         self.draft_sessions.retain_hosts(core);
         let hosts: Vec<_> = core.hosts().map(|(_, host)| host).collect();
         let ids: Vec<_> = hosts.iter().map(|host| host.id.clone()).collect();

@@ -719,10 +719,22 @@ impl Composer {
         session.queue(self.draft_body(), self.shown_epoch, uploading);
     }
 
+    pub fn release_if_host_gone(&mut self, core: &Core) -> bool {
+        if core.host(self.target.host()).map(HostData::instance) == self.host_instance {
+            return false;
+        }
+        self.release();
+        true
+    }
+
+    pub fn release(&mut self) {
+        self.hand_off_attachments();
+        self.session = None;
+        self.editor.borrow_mut().set_disabled(true);
+    }
+
     pub fn sync(&mut self, core: &Core) -> Vec<SessionEvent> {
-        if core.host(self.target.host()).map(HostData::instance) != self.host_instance {
-            self.session = None;
-            self.editor.borrow_mut().set_disabled(true);
+        if self.release_if_host_gone(core) {
             return Vec::new();
         }
         let Some(session) = &mut self.session else {
