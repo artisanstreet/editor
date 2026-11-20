@@ -68,8 +68,23 @@ jobs:
           if grep -qx 'skip=true' "$GITHUB_OUTPUT"; then exit 0; fi
           sha="$(git rev-parse "$RELEASE_REF^{commit}")"
           python3 src/release.py gate --repository "$GITHUB_REPOSITORY" --sha "$sha"
-  unix:
+  advisories:
     needs: select
+    if: needs.select.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Dependency advisories
+        run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --locked check advisories
+  unix:
+    needs: [select, advisories]
     if: needs.select.outputs.skip != 'true'
     strategy:
       fail-fast: false
