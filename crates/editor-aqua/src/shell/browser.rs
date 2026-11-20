@@ -102,13 +102,13 @@ impl Browser {
 
 #[cfg(not(windows))]
 #[must_use]
-pub fn resolve(_preferred: Option<&str>) -> Option<Browser> {
+pub(crate) fn resolve(_preferred: Option<&str>) -> Option<Browser> {
     None
 }
 
 #[cfg(windows)]
 #[must_use]
-pub fn resolve(preferred: Option<&str>) -> Option<Browser> {
+pub(crate) fn resolve(preferred: Option<&str>) -> Option<Browser> {
     native::resolve(preferred)
 }
 

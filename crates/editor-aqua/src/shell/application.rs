@@ -339,8 +339,8 @@ impl<V: SectionViews> ShellApplication<V> {
         }
     }
 
-    #[cfg(feature = "capture")]
-    pub fn tap_render(
+    #[cfg(all(windows, feature = "capture"))]
+    pub(crate) fn tap_render(
         &mut self,
     ) -> std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>> {
         std::rc::Rc::clone(self.render_tap.get_or_insert_with(Default::default))

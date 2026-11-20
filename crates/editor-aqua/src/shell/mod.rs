@@ -63,7 +63,7 @@ pub enum OpenPathError {
 }
 
 #[cfg(windows)]
-pub(crate) fn open_url(url: &str) -> Result<(), OpenUrlError> {
+fn open_url(url: &str) -> Result<(), OpenUrlError> {
     aqua::prelude::OpenTarget::url(url)
         .map_err(OpenUrlError::Target)?
         .execute()
@@ -96,7 +96,7 @@ pub(crate) fn open_path(path: &std::path::Path) -> Result<(), OpenPathError> {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn open_url(url: &str) -> Result<(), OpenUrlError> {
+fn open_url(url: &str) -> Result<(), OpenUrlError> {
     aqua::prelude::OpenTarget::url(url).map_err(OpenUrlError::Target)?;
     Err(OpenUrlError::Unsupported)
 }

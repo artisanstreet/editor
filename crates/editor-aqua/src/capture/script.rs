@@ -36,8 +36,8 @@ pub enum Button {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Keystroke {
-    pub key: Key,
-    pub modifiers: Modifiers,
+    pub(crate) key: Key,
+    pub(crate) modifiers: Modifiers,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,9 +54,9 @@ pub enum Step {
     Quit,
 }
 
-pub const DEFAULT_SETTLE: Duration = Duration::from_secs(20);
+const DEFAULT_SETTLE: Duration = Duration::from_secs(20);
 
-pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
+pub(crate) fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
     text.lines()
         .enumerate()
         .filter(|(_, line)| {
@@ -141,7 +141,7 @@ const MODIFIER_PREFIXES: [(&str, Modifiers); 8] = [
     ("meta-", Modifiers::LOGO),
 ];
 
-pub fn parse_keystroke(text: &str) -> Result<Keystroke, StepError> {
+fn parse_keystroke(text: &str) -> Result<Keystroke, StepError> {
     let mut modifiers = Modifiers::NONE;
     let mut rest = text;
     while let Some((remainder, flag)) = MODIFIER_PREFIXES.iter().find_map(|(prefix, flag)| {
@@ -198,7 +198,7 @@ fn parse_key(name: &str) -> Option<Key> {
     }
 }
 
-pub fn types_text(keystroke: &Keystroke) -> Option<char> {
+pub(crate) fn types_text(keystroke: &Keystroke) -> Option<char> {
     match keystroke.key {
         Key::Char(character)
             if !keystroke.modifiers.contains(Modifiers::CONTROL)

@@ -50,7 +50,8 @@ impl NotificationCenter {
 
 static COLD_LAUNCH: std::sync::OnceLock<NotificationResponse> = std::sync::OnceLock::new();
 
-pub fn record_cold_launch(response: NotificationResponse) {
+#[cfg(windows)]
+pub(crate) fn record_cold_launch(response: NotificationResponse) {
     assert!(
         COLD_LAUNCH.set(response).is_ok(),
         "invariant: the cold launch response is recorded once per process"

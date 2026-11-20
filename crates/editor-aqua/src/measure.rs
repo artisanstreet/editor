@@ -85,7 +85,7 @@ pub(crate) const fn saturate_pixels(value: f64) -> u32 {
     value as u32
 }
 
-#[cfg(feature = "capture")]
+#[cfg(all(windows, feature = "capture"))]
 #[must_use]
 #[expect(
     clippy::cast_possible_truncation,

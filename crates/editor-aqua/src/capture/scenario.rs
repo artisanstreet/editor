@@ -3,7 +3,6 @@ use crate::qualification::fixture::{
     Fixture, ForgeServer, InvalidFixture, PairingError, SeedError, StartForgeError,
 };
 use crate::qualification::sign_in::{JoinForgeError, join_forge};
-use artisan_api::EngineId;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -74,8 +73,9 @@ pub enum Route {
     Usage,
 }
 
+#[cfg(windows)]
 impl Route {
-    pub fn parse(text: &str) -> Result<Self, RouteError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, RouteError> {
         let (head, tail) = text
             .split_once(':')
             .map_or((text, None), |(head, tail)| (head, Some(tail)));
@@ -92,6 +92,7 @@ impl Route {
     }
 }
 
+#[cfg(windows)]
 fn settings_page(name: &str) -> Result<SettingsPage, RouteError> {
     Ok(match name {
         "general" => SettingsPage::General,
@@ -101,8 +102,8 @@ fn settings_page(name: &str) -> Result<SettingsPage, RouteError> {
         "prompt" => SettingsPage::GlobalPrompt,
         "extensions" => SettingsPage::Extensions,
         "account" => SettingsPage::Account,
-        "claude" => SettingsPage::Engine(EngineId::Claude),
-        "codex" => SettingsPage::Engine(EngineId::Codex),
+        "claude" => SettingsPage::Engine(artisan_api::EngineId::Claude),
+        "codex" => SettingsPage::Engine(artisan_api::EngineId::Codex),
         _ => {
             return Err(RouteError::SettingsPage {
                 page: name.to_owned(),

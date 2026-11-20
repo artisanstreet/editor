@@ -26,40 +26,14 @@ all-features = true
 crate = "editor_aqua"
 module = "capture"
 level = "expect"
-reason = "capture tooling only runs on Windows with the capture feature; elsewhere it compiles partially, so its findings are not comparable across targets"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "editor_aqua"
-item = "shell::native_notifications::record_cold_launch"
-kind = "function"
-level = "expect"
 target = "cfg(not(windows))"
-reason = "the Windows build uses this item or compiles a different implementation of it"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "editor_aqua"
-item = "shell::application::ShellApplication::<V>::tap_render"
-kind = "inherent_method"
-level = "expect"
-target = "cfg(not(windows))"
-reason = "the Windows build uses this item or compiles a different implementation of it"
+reason = "capture tooling runs only on Windows; elsewhere its window and readback paths are compiled out, so its items look dead"
 
 [[override]]
 lint = "hawk::unnecessary_public"
 crate = "forge_http"
 item = "upgrade::Upgrade::binary"
 kind = "field"
-level = "expect"
-target = "cfg(not(windows))"
-reason = "the Windows build uses this item or compiles a different implementation of it"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "editor_aqua"
-item = "shell::browser::resolve"
-kind = "function"
 level = "expect"
 target = "cfg(not(windows))"
 reason = "the Windows build uses this item or compiles a different implementation of it"
@@ -90,15 +64,6 @@ kind = "function"
 level = "expect"
 target = "cfg(not(windows))"
 reason = "Linux-only sandbox module, so the Windows run cannot confirm the finding"
-
-[[override]]
-lint = "hawk::unnecessary_restricted_visibility"
-crate = "editor_aqua"
-item = "shell::open_url"
-kind = "function"
-level = "expect"
-target = "cfg(not(windows))"
-reason = "the Windows build uses this item or compiles a different implementation of it"
 
 [[override]]
 lint = "hawk::unnecessary_restricted_visibility"
@@ -265,26 +230,8 @@ reason = "used by Linux-only code or tests (target_os = linux), so the Windows r
 [[override]]
 lint = "hawk::unnecessary_public"
 crate = "editor_aqua"
-item = "shell::browser::resolve"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "editor_aqua"
 item = "qualification::observation::Observation::items"
 kind = "field"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "editor_aqua"
-item = "shell::native_notifications::record_cold_launch"
-kind = "function"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
@@ -312,15 +259,6 @@ lint = "hawk::unnecessary_public"
 crate = "editor_aqua"
 item = "qualification::observation::Observation::page_loaded"
 kind = "field"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "editor_aqua"
-item = "shell::application::ShellApplication::<V>::tap_render"
-kind = "inherent_method"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
@@ -366,15 +304,6 @@ lint = "hawk::unnecessary_public"
 crate = "editor_core"
 item = "core::diagnostics::rebuild_stats::Tally::rebuilds"
 kind = "field"
-level = "expect"
-target = "cfg(windows)"
-reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
-
-[[override]]
-lint = "hawk::unnecessary_restricted_visibility"
-crate = "editor_aqua"
-item = "shell::open_url"
-kind = "function"
 level = "expect"
 target = "cfg(windows)"
 reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"

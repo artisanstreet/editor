@@ -69,14 +69,14 @@ pub enum SessionError {
 
 #[derive(Clone, Debug)]
 pub struct Options {
-    pub fixture: PathBuf,
-    pub route: Route,
-    pub route_name: String,
-    pub logical: (f64, f64),
-    pub scale: f64,
-    pub focused: bool,
-    pub out_dir: PathBuf,
-    pub latency: Option<Duration>,
+    pub(crate) fixture: PathBuf,
+    pub(crate) route: Route,
+    pub(crate) route_name: String,
+    pub(crate) logical: (f64, f64),
+    pub(crate) scale: f64,
+    pub(crate) focused: bool,
+    pub(crate) out_dir: PathBuf,
+    pub(crate) latency: Option<Duration>,
 }
 
 impl std::fmt::Debug for Session {
@@ -113,7 +113,7 @@ fn pointer(at: Point, buttons: u8) -> PointerEvent {
 }
 
 impl Session {
-    pub fn start(options: Options) -> Result<Self, SessionError> {
+    fn start(options: Options) -> Result<Self, SessionError> {
         if options.logical.0 < 480.0 || options.logical.1 < 420.0 {
             return Err(SessionError::Viewport {
                 width: options.logical.0,
@@ -217,7 +217,7 @@ impl Session {
         self.frame()
     }
 
-    pub fn settle(&mut self, timeout: Duration) -> Result<(), SessionError> {
+    fn settle(&mut self, timeout: Duration) -> Result<(), SessionError> {
         let deadline = Instant::now() + timeout;
         let mut previous: Option<Vec<u8>> = None;
         let mut identical = 0;
@@ -340,7 +340,7 @@ impl Session {
         Ok(())
     }
 
-    pub fn perform(&mut self, step: &Step) -> Result<bool, SessionError> {
+    fn perform(&mut self, step: &Step) -> Result<bool, SessionError> {
         match step {
             Step::Wait(duration) => self.wait(*duration)?,
             Step::Move(at) => {
@@ -371,7 +371,7 @@ impl Session {
         Ok(true)
     }
 
-    pub fn run(&mut self, steps: &[Step]) -> Result<(), SessionError> {
+    fn run(&mut self, steps: &[Step]) -> Result<(), SessionError> {
         for (index, step) in steps.iter().enumerate() {
             tracing::info!(step = index + 1, ?step, "script step");
             if !self.perform(step).map_err(|source| SessionError::Step {
@@ -393,16 +393,19 @@ impl Session {
         Ok(())
     }
 
-    pub fn records(&self) -> &[CaptureRecord] {
+    fn records(&self) -> &[CaptureRecord] {
         &self.records
     }
 
-    pub fn finish(mut self) {
+    fn finish(mut self) {
         self.scenario.shutdown();
     }
 }
 
-pub fn run_script(options: Options, script: &str) -> Result<Vec<CaptureRecord>, SessionError> {
+pub(crate) fn run_script(
+    options: Options,
+    script: &str,
+) -> Result<Vec<CaptureRecord>, SessionError> {
     let steps = parse(script).map_err(SessionError::Script)?;
     let mut session = Session::start(options)?;
     let result = session.run(&steps);

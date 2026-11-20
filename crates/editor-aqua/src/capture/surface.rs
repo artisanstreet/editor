@@ -47,8 +47,8 @@ pub struct Surface {
     device: OffscreenBackend,
     lowering: Lowering,
     latest: Option<SurfacePixels>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+    width: u32,
+    height: u32,
     pub(crate) scale: f32,
     pub(crate) adapter: String,
     pub(crate) backend: String,
@@ -67,9 +67,9 @@ impl std::fmt::Debug for Surface {
 }
 
 pub struct Pixels {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
 }
 
 impl std::fmt::Debug for Pixels {
@@ -82,7 +82,7 @@ impl std::fmt::Debug for Pixels {
 }
 
 impl Pixels {
-    pub fn is_opaque(&self) -> bool {
+    pub(crate) fn is_opaque(&self) -> bool {
         self.rgba
             .as_chunks::<4>()
             .0
@@ -90,7 +90,7 @@ impl Pixels {
             .all(|[_, _, _, alpha]| *alpha == 255)
     }
 
-    pub fn save(&self, path: &std::path::Path) -> Result<(), SaveError> {
+    pub(crate) fn save(&self, path: &std::path::Path) -> Result<(), SaveError> {
         let image = image::RgbaImage::from_raw(self.width, self.height, self.rgba.clone())
             .ok_or_else(|| SaveError::Dimensions {
                 path: path.to_owned(),
@@ -113,12 +113,12 @@ impl Pixels {
     }
 }
 
-pub fn physical(logical: f64, scale: f64) -> u32 {
+fn physical(logical: f64, scale: f64) -> u32 {
     crate::measure::saturate_pixels((logical * scale).round().max(1.0))
 }
 
 impl Surface {
-    pub fn new(
+    pub(crate) fn new(
         logical_width: f64,
         logical_height: f64,
         scale: f64,
@@ -144,7 +144,7 @@ impl Surface {
         })
     }
 
-    pub fn register_externals<A: aqua::Application>(
+    pub(crate) fn register_externals<A: aqua::Application>(
         &mut self,
         app: &mut A,
         window: &aqua::prelude::ObservedWindowState,
@@ -164,7 +164,7 @@ impl Surface {
         }
     }
 
-    pub fn draw(
+    pub(crate) fn draw(
         &mut self,
         scene: &aqua::prelude::Scene,
         now: aqua_protocol::Instant,
@@ -198,7 +198,7 @@ impl Surface {
         Ok(())
     }
 
-    pub fn read(&self) -> Result<Pixels, SurfaceError> {
+    pub(crate) fn read(&self) -> Result<Pixels, SurfaceError> {
         let pixels = self.latest.clone().ok_or(SurfaceError::NothingDrawn)?;
         let expected = self.width as usize * self.height as usize * 4;
         if pixels.rgba8.len() != expected {
