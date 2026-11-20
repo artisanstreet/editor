@@ -298,7 +298,7 @@ fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
         ViewAction::NewThread(project) => sidebar.new_thread(core, project),
         ViewAction::Search => {
             sidebar.search_text(core);
-            sidebar.sync(core, artisan_api::now());
+            sidebar.sync(core, core.clock().timestamp());
         }
         ViewAction::OpenHit {
             host,
@@ -430,10 +430,13 @@ fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
         ViewAction::RetryProjectIcons => sidebar.retry_project_icons(core),
         ViewAction::DismissRollbackNotice => sidebar.dismiss_rollback_notice(core),
         ViewAction::RetryThreads => sidebar.retry_threads(core),
-        ViewAction::ClearSearch => sidebar.clear_search(core, artisan_api::now()),
+        ViewAction::ClearSearch => {
+            let now = core.clock().timestamp();
+            sidebar.clear_search(core, now);
+        }
         ViewAction::DismissError => sidebar.error = None,
         ViewAction::RailHover(glyph) => {
-            return sidebar.rail_motion.play(glyph, std::time::Instant::now());
+            return sidebar.rail_motion.play(glyph, core.clock().now());
         }
         ViewAction::SetDarkMode(dark) => {
             if let Err(error) = core.set_setting("dark_mode", dark.into()) {

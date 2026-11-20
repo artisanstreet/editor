@@ -308,7 +308,7 @@ impl Sidebar {
             | Screen::Usage => None,
         };
         if let Screen::Settings(page) = screen {
-            let motion_now = std::time::Instant::now();
+            let motion_now = core.clock().now();
             self.settings_motion.sync(*page, motion_now);
             self.motion_live |= self.settings_motion.animating(motion_now);
         }
@@ -675,7 +675,7 @@ impl Sidebar {
     }
 
     pub fn toggle_history(&mut self, core: &mut Core) {
-        self.history_motion = Some((std::time::Instant::now(), self.history_fraction));
+        self.history_motion = Some((core.clock().now(), self.history_fraction));
         self.history_open = !self.history_open;
         if !self.history_open {
             self.thread_viewports.forget(ThreadPane::History);
