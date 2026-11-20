@@ -1157,6 +1157,7 @@ impl Hub {
         self.inner.tasks.spawn(async move {
             let mut unclaimed_at = None;
             let mut failures = 0_u32;
+            let mut passed_at = tokio::time::Instant::now();
             loop {
                 let (parked, readable) = park::until_next(&hub, unclaimed_at).await;
                 let retry = async {
@@ -1166,7 +1167,7 @@ impl Hub {
                         tokio::time::sleep(retry_delay(failures)).await;
                     }
                 };
-                let next_due = hub.lock().next_due(tokio::time::Instant::now());
+                let next_due = hub.lock().next_due(passed_at);
                 let undeferred = async {
                     match next_due {
                         Some(until) => tokio::time::sleep_until(until).await,
@@ -1184,6 +1185,7 @@ impl Hub {
                 let mut failed = !readable;
                 failed |= !hub.settle_unsettled().await;
                 unclaimed_at = Some(hub.store().now());
+                passed_at = tokio::time::Instant::now();
                 loop {
                     let _admission = hub.inner.admission.lock().await;
                     if hub.inner.shutdown.is_cancelled() {
@@ -1202,7 +1204,7 @@ impl Hub {
                     if hub.inner.harness_slots.available_permits() <= foreign {
                         break;
                     }
-                    excluded.extend(hub.lock().waiting(tokio::time::Instant::now()).cloned());
+                    excluded.extend(hub.lock().waiting(passed_at).cloned());
                     let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
                     else {
                         break;

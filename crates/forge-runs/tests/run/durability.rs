@@ -205,23 +205,19 @@ async fn a_run_that_cannot_start_fails_its_message_where_the_user_sees_it() {
     working(&fixture, false).await;
 }
 
-async fn until_the_store_is_idle(fixture: &Fixture) {
-    let store = fixture.hub.store();
-    let activity = || (store.reads(), store.commits());
+async fn deferred_wait(fixture: &Fixture) -> Duration {
     let give_up = std::time::Instant::now() + test_support::wait::LIVENESS;
-    let mut seen = activity();
-    let mut idle_since = std::time::Instant::now();
-    while idle_since.elapsed() < Duration::from_millis(100) {
+    loop {
+        let now = tokio::time::Instant::now();
+        let due = fixture.hub.lock().next_due(now);
+        if let Some(due) = due {
+            return due - now;
+        }
         assert!(
             std::time::Instant::now() < give_up,
-            "the store to go idle once the failed start is deferred"
+            "the failed start to wait before its retry"
         );
         tokio::task::yield_now().await;
-        let now = activity();
-        if now != seen {
-            seen = now;
-            idle_since = std::time::Instant::now();
-        }
     }
 }
 
@@ -238,21 +234,8 @@ async fn a_thread_whose_run_cannot_start_is_retried_less_and_less_often() {
 
     let mut waits = Vec::new();
     for _ in 0..5 {
-        let give_up = std::time::Instant::now() + test_support::wait::LIVENESS;
-        let wait = loop {
-            let now = tokio::time::Instant::now();
-            let due = fixture.hub.lock().next_due(now);
-            if let Some(due) = due {
-                break due - now;
-            }
-            assert!(
-                std::time::Instant::now() < give_up,
-                "the failed start to wait before its retry"
-            );
-            tokio::task::yield_now().await;
-        };
+        let wait = deferred_wait(&fixture).await;
         waits.push(wait.as_secs());
-        until_the_store_is_idle(&fixture).await;
         tokio::time::advance(wait).await;
     }
 
