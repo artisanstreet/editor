@@ -307,10 +307,16 @@ async fn one<T: ToolSet>(set: &T, caller: &GatewayCaller, message: &Value) -> Op
             return Some(error_reply(id.as_ref(), -32600, reason.message()));
         }
     };
-    let result = tokio::select! {
-        biased;
-        () = caller.finished() => Err((ENDED_CODE, ENDED.to_owned())),
-        result = dispatch(set, &caller.thread, &method, &params) => result,
+    let result = if method == "tools/call"
+        && let Err(refusal) = caller.may_call_tools()
+    {
+        Err((ENDED_CODE, format!("Artisan refused this call: {refusal}.")))
+    } else {
+        tokio::select! {
+            biased;
+            () = caller.finished() => Err((ENDED_CODE, ENDED.to_owned())),
+            result = dispatch(set, &caller.thread, &method, &params) => result,
+        }
     };
     Some(match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id.to_json(), "result": result }),

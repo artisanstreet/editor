@@ -82,7 +82,7 @@ async fn listing_mcp_servers_keeps_their_credentials_from_the_model() {
     let mcp = ArtisanMcp::new(hub.clone());
     let reply = server::handle(
         &mcp,
-        &forge_runs::GatewayCaller { thread: thread.clone(), ended: tokio_util::sync::CancellationToken::new(), run_stopped: None },
+        &forge_runs::GatewayCaller { thread: thread.clone(), ended: tokio_util::sync::CancellationToken::new(), acting: forge_runs::Acting::Run { stopped: tokio_util::sync::CancellationToken::new() } },
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_mcp_servers","arguments":{}}}),
     )
     .await
@@ -153,7 +153,7 @@ async fn a_sign_in_the_editor_started_without_a_link_fails_instead_of_offering_a
     let calling = tokio::spawn(async move {
         server::handle(
             &mcp,
-            &forge_runs::GatewayCaller { thread: thread.clone(), ended: tokio_util::sync::CancellationToken::new(), run_stopped: None },
+            &forge_runs::GatewayCaller { thread: thread.clone(), ended: tokio_util::sync::CancellationToken::new(), acting: forge_runs::Acting::Run { stopped: tokio_util::sync::CancellationToken::new() } },
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sign_in_mcp_server","arguments":{"name":"notion"}}}),
         )
         .await

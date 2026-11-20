@@ -36,7 +36,7 @@ pub use extensions::{
     UndoSkillsError,
 };
 pub use gateway::COMPUTER_USE_KEY;
-pub use gateway::{CallEditorError, GatewayCaller, GatewayRefusal};
+pub use gateway::{Acting, CallEditorError, GatewayCaller, GatewayRefusal};
 pub use mcp_auth::{
     Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
     ReadMcpServersError,
@@ -1181,6 +1181,7 @@ impl Hub {
                 stop,
             ))
             .await;
+            cancel.cancel();
             let status = match drove {
                 Ok(run::Drove::Concluded(status)) => Some(status),
                 Ok(run::Drove::Nothing) => {

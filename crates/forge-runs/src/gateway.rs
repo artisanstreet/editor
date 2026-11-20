@@ -85,20 +85,35 @@ impl Drop for CallGuard {
 }
 
 #[derive(Clone, Debug)]
+pub enum Acting {
+    Run { stopped: CancellationToken },
+    Between,
+}
+
+#[derive(Clone, Debug)]
 pub struct GatewayCaller {
     pub thread: ThreadId,
     pub ended: CancellationToken,
-    pub run_stopped: Option<CancellationToken>,
+    pub acting: Acting,
 }
 
 impl GatewayCaller {
     pub async fn finished(&self) {
-        match &self.run_stopped {
-            Some(stopped) => tokio::select! {
+        match &self.acting {
+            Acting::Run { stopped } => tokio::select! {
                 () = self.ended.cancelled() => {}
                 () = stopped.cancelled() => {}
             },
-            None => self.ended.cancelled().await,
+            Acting::Between => self.ended.cancelled().await,
+        }
+    }
+
+    pub fn may_call_tools(&self) -> Result<(), GatewayRefusal> {
+        match self.acting {
+            Acting::Run { .. } => Ok(()),
+            Acting::Between => Err(GatewayRefusal::Idle {
+                thread: self.thread.clone(),
+            }),
         }
     }
 }
@@ -296,11 +311,13 @@ impl Hub {
 
     pub fn gateway_caller(&self, token: &str) -> Result<GatewayCaller, GatewayRefusal> {
         let (thread, ended) = self.inner.gateway.caller(token)?;
-        let run_stopped = self.run_cancellation(&thread);
+        let acting = self
+            .run_cancellation(&thread)
+            .map_or(Acting::Between, |stopped| Acting::Run { stopped });
         Ok(GatewayCaller {
             thread,
             ended,
-            run_stopped,
+            acting,
         })
     }
 

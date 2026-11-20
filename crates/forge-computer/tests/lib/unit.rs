@@ -574,6 +574,8 @@ fn gateway(thread: &artisan_api::ThreadId) -> forge_runs::GatewayCaller {
     forge_runs::GatewayCaller {
         thread: thread.clone(),
         ended: tokio_util::sync::CancellationToken::new(),
-        run_stopped: None,
+        acting: forge_runs::Acting::Run {
+            stopped: tokio_util::sync::CancellationToken::new(),
+        },
     }
 }

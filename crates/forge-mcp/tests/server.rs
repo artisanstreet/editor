@@ -1,7 +1,7 @@
 use artisan_api::ThreadId;
 use forge_engines::Engines;
 use forge_mcp::{ArtisanMcp, Content, Tool, ToolSet, server};
-use forge_runs::{GatewayCaller, Hub};
+use forge_runs::{Acting, GatewayCaller, Hub};
 use forge_store::Store;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -22,7 +22,9 @@ async fn replies(messages: Value) -> Option<Value> {
         &GatewayCaller {
             thread: ThreadId::new(),
             ended: CancellationToken::new(),
-            run_stopped: None,
+            acting: Acting::Run {
+                stopped: CancellationToken::new(),
+            },
         },
         messages,
     )
@@ -160,7 +162,9 @@ async fn a_batch_admitted_before_its_run_ended_does_nothing_once_the_run_ends() 
         let caller = GatewayCaller {
             thread: ThreadId::new(),
             ended: CancellationToken::new(),
-            run_stopped: Some(CancellationToken::new()),
+            acting: Acting::Run {
+                stopped: CancellationToken::new(),
+            },
         };
         let handled = tokio::spawn({
             let (set, caller) = (set.clone(), caller.clone());
@@ -178,9 +182,9 @@ async fn a_batch_admitted_before_its_run_ended_does_nothing_once_the_run_ends() 
         });
         set.waiting.notified().await;
 
-        match (stopping_the_run, &caller.run_stopped) {
-            (true, Some(stopped)) => stopped.cancel(),
-            (false, _) | (true, None) => caller.ended.cancel(),
+        match (stopping_the_run, &caller.acting) {
+            (true, Acting::Run { stopped }) => stopped.cancel(),
+            (false, _) | (true, Acting::Between) => caller.ended.cancel(),
         }
         set.run_ended.notify_one();
         let reply = tokio::time::timeout(Duration::from_secs(10), handled)
@@ -209,7 +213,9 @@ async fn a_batch_runs_every_call_while_its_run_lasts() {
     let caller = GatewayCaller {
         thread: ThreadId::new(),
         ended: CancellationToken::new(),
-        run_stopped: None,
+        acting: Acting::Run {
+            stopped: CancellationToken::new(),
+        },
     };
 
     let reply = server::handle(
@@ -221,4 +227,37 @@ async fn a_batch_runs_every_call_while_its_run_lasts() {
     .unwrap();
 
     assert_eq!(set.created.load(Ordering::SeqCst), 2, "{reply}");
+}
+
+#[tokio::test]
+async fn between_runs_the_address_lists_its_tools_but_refuses_to_call_them() {
+    let set = Gated::default();
+    let thread = ThreadId::new();
+    let caller = GatewayCaller {
+        thread: thread.clone(),
+        ended: CancellationToken::new(),
+        acting: Acting::Between,
+    };
+
+    let reply = server::handle(
+        &set,
+        &caller,
+        json!([
+            {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},
+            {"jsonrpc":"2.0","id":2,"method":"tools/list"},
+            {"jsonrpc":"2.0","id":3,"method":"ping"},
+            tool_call(4, "create_thread"),
+        ]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(set.created.load(Ordering::SeqCst), 0, "{reply}");
+    for answered in 0..3 {
+        assert!(reply[answered].get("result").is_some(), "{reply}");
+    }
+    assert_eq!(
+        reply[3],
+        json!({"jsonrpc":"2.0","id":4,"error":{"code":-32001,"message":format!("Artisan refused this call: thread {thread} has no live run, so its Artisan tools are unavailable until its next turn.")}})
+    );
 }

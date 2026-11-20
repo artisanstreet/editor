@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 async fn call(mcp: &ArtisanMcp, caller: &ThreadId, name: &str, arguments: Value) -> Value {
     let reply = handle(
         mcp,
-        &forge_runs::GatewayCaller { thread: caller.clone(), ended: tokio_util::sync::CancellationToken::new(), run_stopped: None },
+        &forge_runs::GatewayCaller { thread: caller.clone(), ended: tokio_util::sync::CancellationToken::new(), acting: forge_runs::Acting::Run { stopped: tokio_util::sync::CancellationToken::new() } },
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
     )
     .await
@@ -104,7 +104,9 @@ async fn discovery_and_coordination_results_keep_the_contract_they_advertise() {
         &forge_runs::GatewayCaller {
             thread: threads[0].clone(),
             ended: tokio_util::sync::CancellationToken::new(),
-            run_stopped: None,
+            acting: forge_runs::Acting::Run {
+                stopped: tokio_util::sync::CancellationToken::new(),
+            },
         },
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
     )

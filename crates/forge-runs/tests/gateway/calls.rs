@@ -152,21 +152,42 @@ async fn a_threads_gateway_address_acts_only_while_one_of_its_runs_is_live() {
         .await
         .unwrap();
     fixture.settled().await;
-    fixture.quiescent().await;
+    let run_over = |caller: &GatewayCaller| matches!(&caller.acting, Acting::Run { stopped } if stopped.is_cancelled());
+    let refuses_calls = |token: &str| {
+        matches!(
+            fixture.hub.gateway_caller(token).and_then(|caller| caller.may_call_tools()),
+            Err(GatewayRefusal::Idle { thread }) if thread == fixture.thread_id
+        )
+    };
     let (token, first) = during.lock().unwrap()[0].clone();
     let first = first.expect("the address acts for its thread while the run is live");
     assert_eq!(first.thread, fixture.thread_id);
     assert!(
-        first.ended.is_cancelled(),
+        run_over(&first),
         "calls admitted during the run stop acting once it ended"
     );
     assert!(
-        matches!(
-            fixture.hub.gateway_caller(&token),
-            Err(GatewayRefusal::Idle { thread }) if thread == fixture.thread_id
-        ),
+        refuses_calls(&token),
         "the address refuses calls between runs"
     );
+    let side_query = fixture
+        .hub
+        .gateway_pass(&fixture.thread_id)
+        .await
+        .expect("a side query of the thread gets the gateway");
+    let listing = fixture
+        .hub
+        .gateway_caller(&token)
+        .expect("a side query's engine may still list the thread's tools");
+    assert!(
+        matches!(listing.acting, Acting::Between),
+        "a side query is not a run"
+    );
+    assert!(
+        refuses_calls(&token),
+        "a live side query does not let the address act between runs"
+    );
+    drop(side_query);
 
     fixture
         .hub
@@ -181,7 +202,7 @@ async fn a_threads_gateway_address_acts_only_while_one_of_its_runs_is_live() {
     );
     let second = second.expect("the address acts for the next run");
     assert_eq!(second.thread, fixture.thread_id);
-    assert!(second.ended.is_cancelled());
+    assert!(run_over(&second));
     fixture.hub.shutdown();
 }
 
