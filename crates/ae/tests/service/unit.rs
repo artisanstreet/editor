@@ -18,6 +18,7 @@ fn only_a_unit_running_this_forge_is_ours() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_service_keeps_lasting_tools_and_drops_a_shells_temporary_ones() {
     let installer = "/nix/store/abc-git/bin:/home/a/.nix-profile/bin:/tmp/nix-shell.x/bin::/usr/bin:/home/a/.nix-profile/bin:/bin";

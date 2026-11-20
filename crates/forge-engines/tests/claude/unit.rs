@@ -155,12 +155,10 @@ async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
         },
     )
     .await;
-    tokio::time::pause();
     tokio::time::sleep(super::SETTLED_INPUT_GRACE * 4).await;
-    tokio::time::resume();
     gate.unlock().unwrap();
     let outcome = running
-        .outcome(std::time::Duration::from_secs(20))
+        .outcome(test_support::wait::LIVENESS)
         .await
         .expect("the run ends once the second agent reported");
     assert_eq!(
