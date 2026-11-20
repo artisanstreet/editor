@@ -92,10 +92,10 @@ pub use schema::{
 };
 pub use settings::{
     ApplyConfigBundleError, BumpRevisionError, BundleCommit, CONFIG_SYNC_KEY, ConfigBundle,
-    McpSecret, MutateMcpError, PromptEdit, PromptVersionError, ReadDraftError, ReadSecretError,
-    ReadSettingError, SavePromptError, SetDefaultModelError, SetDraftError, SetMcpSecretError,
-    SetModelConfigError, SetModelGroupError, SetSecretError, SetSettingError, SetSkillEnabledError,
-    SettingFailure,
+    ForgottenMcpServers, McpChange, McpSecret, MutateMcpError, PromptEdit, PromptVersionError,
+    ReadDraftError, ReadSecretError, ReadSettingError, SavePromptError, SetDefaultModelError,
+    SetDraftError, SetMcpSecretError, SetModelConfigError, SetModelGroupError, SetSecretError,
+    SetSettingError, SetSkillEnabledError, SettingFailure,
 };
 pub use source_index::{MAX_INDEX_BYTES, SourceIndexError};
 pub use sources::{

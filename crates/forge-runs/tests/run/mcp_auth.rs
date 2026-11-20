@@ -532,3 +532,36 @@ async fn concurrent_sign_in_starts_share_one_flow() {
     assert_eq!(first.unwrap().state, second.unwrap().state);
     assert_eq!(provider.registrations.lock().unwrap().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_server_ends_its_waiting_sign_in_before_it_is_added_again() {
+    let (provider, _stub) = provider().await;
+    let fixture = mcp_fixture(&provider).await;
+    let mcp = fixture.hub.mcp();
+    let started = mcp.sign_in_start("linear", REDIRECT).await.unwrap();
+    let server: McpServer = serde_json::from_value(serde_json::json!({
+        "name": "linear",
+        "url": provider.url("/mcp"),
+    }))
+    .unwrap();
+    mcp.mutate(artisan_api::McpMutation::Remove {
+        previous: server.clone(),
+    })
+    .await
+    .unwrap();
+    mcp.mutate(artisan_api::McpMutation::Upsert {
+        previous: None,
+        server,
+    })
+    .await
+    .unwrap();
+    let finished = mcp.sign_in_finish(&started.state, "code").await;
+    assert!(
+        matches!(finished, Err(McpSignInFinishError::Expired)),
+        "a sign-in started before the server was removed signed the new one in: {finished:?}"
+    );
+    assert_eq!(launch_token(&fixture).await, None);
+    let again = mcp.sign_in_start("linear", REDIRECT).await.unwrap();
+    assert_ne!(again.state, started.state);
+    assert_eq!(provider.registrations.lock().unwrap().len(), 2);
+}

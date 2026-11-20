@@ -79,8 +79,8 @@ async fn a_state_file_from_before_pending_reports_keeps_its_synced_servers() {
     )
     .unwrap();
     let hub = test_hub(dir.path());
-    hub.store()
-        .mutate_mcp(artisan_api::McpMutation::Upsert {
+    hub.mcp()
+        .mutate(artisan_api::McpMutation::Upsert {
             previous: None,
             server: artisan_api::McpServer {
                 name: "s".into(),

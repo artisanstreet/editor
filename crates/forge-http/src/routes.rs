@@ -1214,7 +1214,7 @@ async fn mutate_mcp(
     AppState(app): AppState<App>,
     Json(mutation): Json<artisan_api::McpMutation>,
 ) -> Result<Json<Vec<artisan_api::McpServer>>> {
-    let servers = app.hub.store().mutate_mcp(mutation).await?;
+    let servers = app.hub.mcp().mutate(mutation).await?;
     let hub = app.hub.clone();
     app.tasks.spawn(async move { hub.mcp().check_auth().await });
     Ok(Json(servers))

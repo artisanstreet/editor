@@ -1064,8 +1064,8 @@ async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
             server: right.clone()
         })
     );
-    a.unwrap();
-    b.unwrap();
+    assert!(a.unwrap().forgotten.into_names().is_empty());
+    assert!(b.unwrap().forgotten.into_names().is_empty());
     let mut edited = left.clone();
     edited.command = "new-left-server".into();
     let servers = store
@@ -1075,11 +1075,54 @@ async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
         })
         .await
         .unwrap();
-    assert_eq!(servers, vec![edited, right]);
+    assert!(servers.forgotten.into_names().is_empty());
+    assert_eq!(servers.servers, vec![edited, right]);
     store
         .mutate_mcp(artisan_api::McpMutation::Remove { previous: left })
         .await
         .expect_err("stale deletion must not remove a newer edit");
+}
+
+#[tokio::test]
+async fn a_config_bundle_that_removes_a_server_names_it_so_its_sign_ins_end() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let server = artisan_api::McpServer {
+        name: "linear".into(),
+        url: Some("https://mcp.linear.app/mcp".into()),
+        ..Default::default()
+    };
+    let bundle = |mcp| forge_store::ConfigBundle {
+        enable_skills: Vec::new(),
+        prompt: None,
+        mcp,
+        record: serde_json::json!({}),
+    };
+    let forgotten = |commit| match commit {
+        forge_store::BundleCommit::Applied { forgotten } => forgotten.into_names(),
+        forge_store::BundleCommit::PromptChanged { latest } => {
+            panic!("a bundle without a prompt hit prompt version {latest}")
+        }
+    };
+    let added = store
+        .apply_config_bundle(bundle(vec![artisan_api::McpMutation::Upsert {
+            previous: None,
+            server: server.clone(),
+        }]))
+        .await
+        .unwrap();
+    assert!(forgotten(added).is_empty());
+    let removed = store
+        .apply_config_bundle(bundle(vec![artisan_api::McpMutation::Remove {
+            previous: server,
+        }]))
+        .await
+        .unwrap();
+    assert_eq!(
+        forgotten(removed),
+        ["linear"],
+        "a synced removal has to end the server's pending sign-ins"
+    );
 }
 
 #[tokio::test]
@@ -1093,13 +1136,14 @@ async fn removing_an_mcp_server_forgets_its_sign_in() {
         ..Default::default()
     };
     let url = server.url.clone().unwrap();
-    store
+    let added = store
         .mutate_mcp(artisan_api::McpMutation::Upsert {
             previous: None,
             server: server.clone(),
         })
         .await
         .unwrap();
+    assert!(added.forgotten.into_names().is_empty());
     for secret in [McpSecret::Tokens, McpSecret::Client] {
         assert!(
             store
@@ -1109,19 +1153,21 @@ async fn removing_an_mcp_server_forgets_its_sign_in() {
         );
     }
 
-    store
+    let removed = store
         .mutate_mcp(artisan_api::McpMutation::Remove {
             previous: server.clone(),
         })
         .await
         .unwrap();
-    store
+    assert_eq!(removed.forgotten.into_names(), ["linear"]);
+    let added = store
         .mutate_mcp(artisan_api::McpMutation::Upsert {
             previous: None,
             server,
         })
         .await
         .unwrap();
+    assert!(added.forgotten.into_names().is_empty());
 
     for secret in [McpSecret::Tokens, McpSecret::Client] {
         assert_eq!(store.secret(&secret.key("linear")).await.unwrap(), None);

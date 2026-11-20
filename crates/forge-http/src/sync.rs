@@ -904,7 +904,10 @@ async fn commit(
         .await
         .map_err(ApplyManifestError::Commit)?;
     match commit {
-        forge_store::BundleCommit::Applied => Ok((Committed { file, kept_local }, prompt_changed)),
+        forge_store::BundleCommit::Applied { forgotten } => {
+            hub.mcp().forget_flows(forgotten).await;
+            Ok((Committed { file, kept_local }, prompt_changed))
+        }
         forge_store::BundleCommit::PromptChanged { latest } => {
             Err(ApplyManifestError::PromptChanged { latest })
         }

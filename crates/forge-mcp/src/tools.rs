@@ -1723,8 +1723,9 @@ pub(crate) async fn call(
                 .await?
                 .into_iter()
                 .find(|server| server.name == add.name);
-            let servers = store
-                .mutate_mcp(McpMutation::Upsert {
+            let servers = hub
+                .mcp()
+                .mutate(McpMutation::Upsert {
                     previous,
                     server: McpServer {
                         name: add.name,
@@ -1777,8 +1778,8 @@ pub(crate) async fn call(
                 format!("Remove the MCP server {} from every harness", remove.name),
             )
             .await?;
-            store
-                .mutate_mcp(McpMutation::Remove { previous })
+            hub.mcp()
+                .mutate(McpMutation::Remove { previous })
                 .await
                 .map_err(forge("save the MCP servers"))?;
             hub.mcp().check_auth().await;

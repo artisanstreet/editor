@@ -65,9 +65,9 @@ pub struct ConfigBundle {
     pub record: serde_json::Value,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum BundleCommit {
-    Applied,
+    Applied { forgotten: ForgottenMcpServers },
     PromptChanged { latest: u64 },
 }
 operation_error!(
@@ -155,26 +155,30 @@ impl Store {
     pub async fn mutate_mcp(
         &self,
         mutation: artisan_api::McpMutation,
-    ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
+    ) -> Result<McpChange, MutateMcpError> {
         self.mutate_mcp_together(vec![mutation]).await
     }
 
     async fn mutate_mcp_together(
         &self,
         mutations: Vec<artisan_api::McpMutation>,
-    ) -> Result<Vec<artisan_api::McpServer>, MutateMcpError> {
+    ) -> Result<McpChange, MutateMcpError> {
         let bytes = crate::encoded::len(&mutations);
         self.write_acknowledged_carrying(bytes, move |tx| {
             let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(read::from_value)
                 .transpose()?
                 .unwrap_or_default();
+            let mut forgotten = Vec::new();
             for mutation in mutations {
-                apply_mcp_mutation(tx, &mut servers, mutation)?;
+                forgotten.extend(apply_mcp_mutation(tx, &mut servers, mutation)?);
             }
             servers.sort_by(|a, b| a.name.cmp(&b.name));
             tx.save_setting("mcp_servers".into(), read::to_value(&servers)?)?;
-            Ok(servers)
+            Ok(McpChange {
+                servers,
+                forgotten: ForgottenMcpServers(forgotten),
+            })
         })
         .await
         .map_err(|cause| MutateMcpError {
@@ -356,19 +360,22 @@ impl Store {
             if let Some(PromptEdit { base, text }) = prompt {
                 save_prompt(tx, base, text)?;
             }
+            let mut forgotten = Vec::new();
             if !mcp.is_empty() {
                 let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                     .map(read::from_value)
                     .transpose()?
                     .unwrap_or_default();
                 for mutation in mcp {
-                    apply_mcp_mutation(tx, &mut servers, mutation)?;
+                    forgotten.extend(apply_mcp_mutation(tx, &mut servers, mutation)?);
                 }
                 servers.sort_by(|a, b| a.name.cmp(&b.name));
                 tx.save_setting("mcp_servers".into(), read::to_value(&servers)?)?;
             }
             tx.save_setting(CONFIG_SYNC_KEY.to_owned(), record)?;
-            Ok(BundleCommit::Applied)
+            Ok(BundleCommit::Applied {
+                forgotten: ForgottenMcpServers(forgotten),
+            })
         })
         .await
         .map_err(|cause| ApplyConfigBundleError {
@@ -522,6 +529,23 @@ impl Store {
 #[path = "../tests/settings/context_window.rs"]
 mod context_window_tests;
 
+#[derive(Debug)]
+#[must_use = "servers whose sign-in was forgotten must have their pending sign-ins ended"]
+pub struct McpChange {
+    pub servers: Vec<artisan_api::McpServer>,
+    pub forgotten: ForgottenMcpServers,
+}
+
+#[derive(Debug)]
+#[must_use = "servers whose sign-in was forgotten must have their pending sign-ins ended"]
+pub struct ForgottenMcpServers(pub(crate) Vec<String>);
+
+impl ForgottenMcpServers {
+    pub fn into_names(self) -> Vec<String> {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpSecret {
     Tokens,
@@ -585,7 +609,7 @@ fn apply_mcp_mutation(
     tx: &crate::writer::Tx<'_>,
     servers: &mut Vec<artisan_api::McpServer>,
     mutation: artisan_api::McpMutation,
-) -> Result<(), SettingFailure> {
+) -> Result<Option<String>, SettingFailure> {
     use artisan_api::McpMutation;
     let previous = match &mutation {
         McpMutation::Upsert { previous, .. } => previous.as_ref(),
@@ -617,20 +641,26 @@ fn apply_mcp_mutation(
             });
         }
     }
-    if let Some(previous) = previous {
-        servers.retain(|server| server.name != previous.name);
-        let kept = match &mutation {
-            McpMutation::Upsert { server, .. } => {
-                server.name == previous.name && server.url == previous.url
+    let forgotten = match previous {
+        Some(previous) => {
+            servers.retain(|server| server.name != previous.name);
+            let kept = match &mutation {
+                McpMutation::Upsert { server, .. } => {
+                    server.name == previous.name && server.url == previous.url
+                }
+                McpMutation::Remove { .. } => false,
+            };
+            if kept {
+                None
+            } else {
+                forget_mcp_secrets(tx, &previous.name)?;
+                Some(previous.name.clone())
             }
-            McpMutation::Remove { .. } => false,
-        };
-        if !kept {
-            forget_mcp_secrets(tx, &previous.name)?;
         }
-    }
+        None => None,
+    };
     if let McpMutation::Upsert { server, .. } = mutation {
         servers.push(server);
     }
-    Ok(())
+    Ok(forgotten)
 }

@@ -405,13 +405,13 @@ pub(super) async fn mcp_servers(store: &forge_store::Store) -> Vec<artisan_api::
         .unwrap_or_default()
 }
 
-async fn add_local(store: &forge_store::Store, server: artisan_api::McpServer) {
-    let previous = mcp_servers(store)
+async fn add_local(hub: &forge_runs::Hub, server: artisan_api::McpServer) {
+    let previous = mcp_servers(hub.store())
         .await
         .into_iter()
         .find(|existing| existing.name == server.name);
-    store
-        .mutate_mcp(artisan_api::McpMutation::Upsert { previous, server })
+    hub.mcp()
+        .mutate(artisan_api::McpMutation::Upsert { previous, server })
         .await
         .unwrap();
 }
@@ -442,9 +442,9 @@ async fn a_server_created_on_this_machine_survives_an_account_server_of_the_same
         headers: [("Authorization".to_owned(), "Bearer local".to_owned())].into(),
         ..Default::default()
     };
-    add_local(store, local.clone()).await;
+    add_local(&hub, local.clone()).await;
     add_local(
-        store,
+        &hub,
         artisan_api::McpServer {
             name: "mine".into(),
             command: "local".into(),
@@ -492,7 +492,7 @@ async fn synced_servers_keep_credentials_only_while_their_destination_is_unchang
     placed
         .headers
         .insert("Authorization".into(), "Bearer local".into());
-    add_local(store, placed).await;
+    add_local(&hub, placed).await;
 
     sync_with(bundle(&first("/v2")), &hub, dir.path()).await;
     let same_origin = mcp_servers(store).await.pop().unwrap();
@@ -536,7 +536,7 @@ async fn synced_servers_keep_credentials_only_while_their_destination_is_unchang
     let with_key = async || {
         let mut placed = stdio().await;
         placed.env.insert("API_KEY".into(), "secret".into());
-        add_local(store, placed).await;
+        add_local(&hub, placed).await;
     };
     sync_with(launched("npx", &["search-server"], &[]), &hub, dir.path()).await;
     with_key().await;

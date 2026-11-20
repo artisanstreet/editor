@@ -1,12 +1,12 @@
 use crate::error::ErrorClass;
-use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
+use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpMutation, McpServer, McpSignInStarted};
 use forge_engines::mcp_oauth::{
     self, Client, Discovery, Pkce, Probe, ProbeError, RegistrationError, Revocation, TokenError,
     Tokens,
 };
 use forge_store::{
-    McpSecret, ReadSecretError, ReadSettingError, SetMcpSecretError, SetSecretError,
-    SetSettingError, Store,
+    ForgottenMcpServers, McpChange, McpSecret, MutateMcpError, ReadSecretError, ReadSettingError,
+    SetMcpSecretError, SetSecretError, SetSettingError, Store,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -518,16 +518,32 @@ impl Mcp {
     }
 
     pub async fn sign_out(&self, name: &str) -> Result<(), McpStoreError> {
+        let _lifetime = self.end_sign_ins(name).await;
+        self.forget_tokens(name).await
+    }
+
+    pub async fn mutate(&self, mutation: McpMutation) -> Result<Vec<McpServer>, MutateMcpError> {
+        let McpChange { servers, forgotten } = self.store().mutate_mcp(mutation).await?;
+        self.forget_flows(forgotten).await;
+        Ok(servers)
+    }
+
+    pub async fn forget_flows(&self, forgotten: ForgottenMcpServers) {
+        for name in forgotten.into_names() {
+            drop(self.end_sign_ins(&name).await);
+        }
+    }
+
+    async fn end_sign_ins(&self, name: &str) -> tokio::sync::OwnedMutexGuard<Lifetime> {
         self.flows_lock()
             .by_state
             .retain(|_, flow| flow.server != name);
-        let lifetime = self.lifetime(name);
-        let mut lifetime = lifetime.lock().await;
+        let mut lifetime = self.lifetime(name).lock_owned().await;
         lifetime.signed_out += 1;
         self.flows_lock()
             .by_state
             .retain(|_, flow| flow.server != name);
-        self.forget_tokens(name).await
+        lifetime
     }
 
     async fn forget_tokens(&self, name: &str) -> Result<(), McpStoreError> {
