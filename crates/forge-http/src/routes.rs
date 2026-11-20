@@ -492,7 +492,9 @@ fn claude_ai_sign_in(error: &forge_engines::ClaudeAiSignInError) -> artisan_api:
     use artisan_api::{EngineFailure, Failure};
     use forge_engines::ClaudeAiSignInError as SignIn;
     match error {
-        SignIn::NotSignedIn => Failure::Engine(EngineFailure::ClaudeAiSignedOut),
+        SignIn::NotSignedIn | SignIn::SignedOutMeanwhile => {
+            Failure::Engine(EngineFailure::ClaudeAiSignedOut)
+        }
         SignIn::NoUserAgent => Failure::Engine(EngineFailure::ClaudeAiNoUserAgent),
         SignIn::Bootstrap(source) => Failure::Engine(EngineFailure::ClaudeAiRefused {
             detail: diagnostics::chain(source),

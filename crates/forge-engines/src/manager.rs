@@ -38,6 +38,7 @@ struct Inner {
     statuses: broadcast::Sender<EngineChange>,
     slots: [Slot; EngineId::ALL.len()],
     usage: crate::UsageCache,
+    claude_ai_sign_outs: crate::claudeai::SignOuts,
 }
 
 #[derive(Debug)]
@@ -221,6 +222,8 @@ pub enum ClaudeAiSignInError {
     NoOrganization,
     #[error("keeping the claude.ai session")]
     Save(#[source] crate::claudeai::SaveSessionError),
+    #[error("claude.ai was signed out while this sign-in was being checked")]
+    SignedOutMeanwhile,
 }
 
 fn loaded(layout: &Layout, engine: EngineId) -> (Event, Option<String>) {
@@ -281,6 +284,7 @@ impl Engines {
                 statuses: broadcast::channel(64).0,
                 slots,
                 usage: crate::UsageCache::new(accounts::USAGE_TTL),
+                claude_ai_sign_outs: crate::claudeai::SignOuts::default(),
             }),
         }
     }
@@ -329,6 +333,7 @@ impl Engines {
         if captured.user_agent.trim().is_empty() {
             return Err(ClaudeAiSignInError::NoUserAgent);
         }
+        let ticket = self.inner.claude_ai_sign_outs.ticket();
         let home = self.home(EngineId::Claude);
         let org = captured
             .cookie("lastActiveOrg")
@@ -364,13 +369,20 @@ impl Engines {
                 .ok_or(ClaudeAiSignInError::NoOrganization)?
                 .clone_into(&mut session.org_uuid);
         }
-        session.save(&home).map_err(ClaudeAiSignInError::Save)?;
+        self.inner
+            .claude_ai_sign_outs
+            .keep(ticket, || session.save(&home))
+            .ok_or(ClaudeAiSignInError::SignedOutMeanwhile)?
+            .map_err(ClaudeAiSignInError::Save)?;
         self.publish(EngineId::Claude);
         Ok(session.status())
     }
 
     pub fn claude_ai_sign_out(&self) -> Result<(), crate::claudeai::RemoveSessionError> {
-        crate::claudeai::Session::remove(&self.home(EngineId::Claude))?;
+        let home = self.home(EngineId::Claude);
+        self.inner
+            .claude_ai_sign_outs
+            .sign_out(|| crate::claudeai::Session::remove(&home))?;
         self.publish(EngineId::Claude);
         Ok(())
     }
