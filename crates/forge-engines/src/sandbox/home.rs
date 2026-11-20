@@ -401,3 +401,10 @@ pub(crate) fn make_folder(home: &Path, relative: &Path) -> io::Result<()> {
     let opened = home_folder(home)?;
     opened.reach(relative, Create::Missing).map(drop)
 }
+
+pub(crate) fn make_own_folder(root: &Path, relative: &Path) -> io::Result<()> {
+    let opened = home_folder(root)?;
+    opened
+        .reach(relative, Create::Replacing(&forge_owned))
+        .map(drop)
+}

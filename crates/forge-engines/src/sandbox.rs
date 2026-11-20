@@ -195,6 +195,10 @@ pub(crate) mod home {
     pub(crate) fn make_folder(home: &Path, relative: &Path) -> io::Result<()> {
         fs::create_dir_all(home.join(relative))
     }
+
+    pub(crate) fn make_own_folder(root: &Path, relative: &Path) -> io::Result<()> {
+        fs::create_dir_all(root.join(relative))
+    }
 }
 
 #[must_use]
@@ -271,18 +275,17 @@ impl Sandbox {
                         source,
                     })?;
                 let caches = turn.launch.tool_caches.as_deref();
-                let folders = caches.into_iter().flat_map(|caches| {
-                    cache_folders(caches).chain(std::iter::once(caches.to_path_buf()))
-                });
-                for folder in folders {
-                    std::fs::create_dir_all(&folder).map_err(|source| {
-                        SandboxError::ToolCaches {
-                            engine: turn.engine,
-                            thread: turn.thread_id.clone(),
-                            path: folder.clone(),
-                            source,
-                        }
-                    })?;
+                if let Some(caches) = caches {
+                    for folder in cache_names() {
+                        home::make_own_folder(caches, Path::new(folder)).map_err(|source| {
+                            SandboxError::ToolCaches {
+                                engine: turn.engine,
+                                thread: turn.thread_id.clone(),
+                                path: caches.join(folder),
+                                source,
+                            }
+                        })?;
+                    }
                 }
                 let redirects = caches.map_or_else(Vec::new, |caches| redirects(turn, caches));
                 let roots = writable_roots(turn);
@@ -391,12 +394,11 @@ fn redirects(turn: &Turn, caches: &Path) -> Vec<(String, OsString)> {
         .collect()
 }
 
-fn cache_folders(caches: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+fn cache_names() -> impl Iterator<Item = &'static str> {
     TOOL_CACHES
         .into_iter()
         .map(|(_, folder)| folder)
         .chain(std::iter::once(MAVEN_REPOSITORY))
-        .map(|folder| caches.join(folder))
 }
 
 fn maven_options(inherited: Option<OsString>, repository: &Path) -> OsString {

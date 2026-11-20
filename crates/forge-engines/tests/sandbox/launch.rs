@@ -427,3 +427,28 @@ async fn a_writable_folder_the_engine_replaced_with_a_link_does_not_make_its_tar
         "a `.codex` link the engine planted let the next Auto launch write the user's home: {lines:?}"
     );
 }
+
+#[test]
+fn a_tool_cache_an_earlier_run_replaced_with_a_link_is_not_followed() {
+    if !sandboxed() {
+        return;
+    }
+    let folders = folders();
+    std::fs::create_dir_all(&folders.caches).unwrap();
+    std::os::unix::fs::symlink(&folders.outside, folders.caches.join("cargo")).unwrap();
+
+    let sandbox = crate::sandbox::Sandbox::build(&turn(Permissions::Auto, &folders));
+
+    assert!(sandbox.is_ok(), "{:?}", sandbox.err());
+    assert_eq!(
+        std::fs::read_dir(&folders.outside).unwrap().count(),
+        0,
+        "Forge made folders where a link planted in the tool caches points"
+    );
+    assert!(
+        std::fs::symlink_metadata(folders.caches.join("cargo"))
+            .unwrap()
+            .is_dir(),
+        "the planted link is still the run's Cargo home"
+    );
+}
