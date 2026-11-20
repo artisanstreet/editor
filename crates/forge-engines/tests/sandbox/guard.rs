@@ -717,3 +717,38 @@ async fn a_process_a_full_access_run_detached_outlives_the_run() {
         "a dev server a Full-access run started with setsid died when the run ended"
     );
 }
+
+#[test]
+fn a_record_that_could_not_be_saved_leaves_the_trusted_copy_usable() {
+    let (_base, home) = engine_home();
+    let config = home.join(".codex/config.toml");
+    std::fs::write(&config, "model = \"gpt\"\n").unwrap();
+    let exposure = super::expose(EngineId::Codex, &home).unwrap();
+    let snapshot = super::snapshot_folder(&home);
+    std::fs::create_dir(snapshot.join("manifest.json.partial")).unwrap();
+
+    let written = super::write(
+        EngineId::Codex,
+        &home,
+        Path::new(".codex/config.toml"),
+        b"model = \"other\"\n",
+        0o600,
+    );
+    std::fs::remove_dir(snapshot.join("manifest.json.partial")).unwrap();
+    let restored = super::restore(EngineId::Codex, &home);
+    let edited = super::edit(EngineId::Codex, &home, Path::new(".codex/config.toml"))
+        .map(|editing| editing.base().map(<[u8]>::to_vec));
+    drop(exposure);
+
+    assert!(written.is_err(), "the record's save was meant to fail");
+    assert!(
+        restored.is_ok() && edited.is_ok(),
+        "one failed save of the record wedged every later launch: {restored:?} {:?}",
+        edited.err()
+    );
+    assert_eq!(
+        edited.unwrap().as_deref(),
+        Some(&b"model = \"gpt\"\n"[..]),
+        "the trusted copy changed although its record didn't"
+    );
+}

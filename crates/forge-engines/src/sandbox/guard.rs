@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 const SNAPSHOT_FOLDER: &str = "guarded-config";
 const COPIES: &str = "files";
 const MANIFEST: &str = "manifest.json";
+const PARTIAL: &str = "partial";
 const CLAUDE_FOLDER: &str = ".claude";
 const CLAUDE_STATE: &str = ".claude.json";
 const CLAUDE_STATE_COPY: &str = "claude-mcp-servers.json";
@@ -178,6 +179,52 @@ fn contained_names(engine: EngineId, relative: &Path) -> BTreeSet<OsString> {
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn durably(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let partial = folder.join(format!("{name}.{PARTIAL}"));
+    let mut file = fs::File::create(&partial)?;
+    io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&partial, folder.join(name))?;
+    fs::File::open(folder)?.sync_all()
+}
+
+fn keep_copy(copies: &Path, bytes: &[u8]) -> io::Result<String> {
+    let named = digest(bytes);
+    durably(copies, &named, bytes)?;
+    Ok(named)
+}
+
+fn kept_copy(copies: &Path, digest: &str, relative: &Path) -> io::Result<Vec<u8>> {
+    match fs::read(copies.join(digest)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::read(copies.join(relative)),
+        read => read,
+    }
+}
+
+fn unreferenced_copies(copies: &Path, manifest: &Manifest) -> io::Result<()> {
+    let referenced: BTreeSet<&str> = manifest
+        .values()
+        .filter_map(|entry| match entry {
+            Entry::File { digest, .. } => Some(digest.as_str()),
+            Entry::Folder | Entry::Link(_) => None,
+        })
+        .collect();
+    for entry in fs::read_dir(copies)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let unreferenced = name.to_str().is_none_or(|name| !referenced.contains(name));
+        if unreferenced && !entry.file_type()?.is_dir() {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn holds(folder: &Folder, name: &OsStr, length: u64, wanted: &str) -> io::Result<bool> {
@@ -382,14 +429,11 @@ fn write_manifest(
         path: path.clone(),
         source,
     })?;
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)
-        .and_then(|()| fs::rename(&temporary, &path))
-        .map_err(|source| GuardError::Snapshot {
-            engine,
-            path,
-            source,
-        })
+    durably(snapshot, MANIFEST, &bytes).map_err(|source| GuardError::Snapshot {
+        engine,
+        path,
+        source,
+    })
 }
 
 pub(crate) fn expose(engine: EngineId, home: &Path) -> Result<Exposure, GuardError> {
@@ -553,19 +597,16 @@ impl Walk<'_> {
                 let bytes = folder
                     .read(name, length)
                     .map_err(self.snapshotting(child))?;
-                let copy = self.copies.join(child);
-                copy.parent()
-                    .map_or(Ok(()), fs::create_dir_all)
-                    .and_then(|()| fs::write(&copy, &bytes))
-                    .map_err(|source| GuardError::Snapshot {
+                let digest =
+                    keep_copy(self.copies, &bytes).map_err(|source| GuardError::Snapshot {
                         engine: self.engine,
-                        path: copy.clone(),
+                        path: self.copies.to_path_buf(),
                         source,
                     })?;
                 manifest.insert(
                     child.to_path_buf(),
                     Entry::File {
-                        digest: digest(&bytes),
+                        digest,
                         length: bytes.len() as u64,
                         mode,
                     },
@@ -662,11 +703,13 @@ impl Walk<'_> {
                 mode,
                 ..
             }) => {
-                let copy = self.copies.join(child);
-                let bytes = fs::read(&copy).map_err(|source| GuardError::Restore {
-                    engine: self.engine,
-                    path: copy.clone(),
-                    source,
+                let copy = self.copies.join(wanted);
+                let bytes = kept_copy(self.copies, wanted, child).map_err(|source| {
+                    GuardError::Restore {
+                        engine: self.engine,
+                        path: copy.clone(),
+                        source,
+                    }
                 })?;
                 if digest(&bytes) != *wanted {
                     return Err(GuardError::CopyChanged {
@@ -734,6 +777,7 @@ fn guarded_only(engine: EngineId, relative: &Path) {
 struct Held {
     _busy: fs::File,
     opened: Home,
+    manifest: Option<Manifest>,
 }
 
 fn held(engine: EngineId, home: &Path, relative: &Path) -> Result<Held, GuardError> {
@@ -745,22 +789,32 @@ fn held(engine: EngineId, home: &Path, relative: &Path) -> Result<Held, GuardErr
     };
     fs::create_dir_all(home).map_err(writing)?;
     let opened = Home::open(home).map_err(writing)?;
+    let manifest = read_manifest(engine, &snapshot_folder(home))?;
     Ok(Held {
         _busy: busy,
         opened,
+        manifest,
     })
 }
 
 fn record_change(
     engine: EngineId,
     home: &Path,
+    held: &Held,
     change: impl FnOnce(&mut Manifest, &Path) -> Result<(), GuardError>,
 ) -> Result<(), GuardError> {
-    let snapshot = snapshot_folder(home);
-    let Some(mut manifest) = read_manifest(engine, &snapshot)? else {
+    let Some(manifest) = &held.manifest else {
         return Ok(());
     };
-    change(&mut manifest, &snapshot.join(COPIES))?;
+    let snapshot = snapshot_folder(home);
+    let copies = snapshot.join(COPIES);
+    unreferenced_copies(&copies, manifest).map_err(|source| GuardError::Snapshot {
+        engine,
+        path: copies.clone(),
+        source,
+    })?;
+    let mut manifest = manifest.clone();
+    change(&mut manifest, &copies)?;
     write_manifest(engine, &snapshot, &manifest)
 }
 
@@ -788,8 +842,8 @@ pub(crate) fn edit(engine: EngineId, home: &Path, relative: &Path) -> Result<Edi
     guarded_only(engine, relative);
     let held = held(engine, home, relative)?;
     let snapshot = snapshot_folder(home);
-    let base = match read_manifest(engine, &snapshot)? {
-        Some(manifest) => trusted_copy(engine, &snapshot, &manifest, relative)?,
+    let base = match &held.manifest {
+        Some(manifest) => trusted_copy(engine, &snapshot, manifest, relative)?,
         None => live_file(engine, &held.opened, relative)?,
     };
     Ok(Editing {
@@ -810,8 +864,9 @@ fn trusted_copy(
     let Some(Entry::File { digest: wanted, .. }) = manifest.get(relative) else {
         return Ok(None);
     };
-    let copy = snapshot.join(COPIES).join(relative);
-    let bytes = fs::read(&copy).map_err(|source| GuardError::Read {
+    let copies = snapshot.join(COPIES);
+    let copy = copies.join(wanted);
+    let bytes = kept_copy(&copies, wanted, relative).map_err(|source| GuardError::Read {
         engine,
         path: copy.clone(),
         source,
@@ -910,16 +965,12 @@ fn put(
         }
         folder.put_file(name, bytes, mode).map_err(writing)?;
     }
-    record_change(engine, home, |manifest, copies| {
-        let copy = copies.join(relative);
-        copy.parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| fs::write(&copy, bytes))
-            .map_err(|source| GuardError::Snapshot {
-                engine,
-                path: copy.clone(),
-                source,
-            })?;
+    record_change(engine, home, held, |manifest, copies| {
+        keep_copy(copies, bytes).map_err(|source| GuardError::Snapshot {
+            engine,
+            path: copies.to_path_buf(),
+            source,
+        })?;
         record_ancestors(manifest, relative);
         manifest.insert(
             relative.to_path_buf(),
@@ -956,7 +1007,7 @@ pub(crate) fn link(
         folder.remove(name).map_err(writing)?;
     }
     folder.put_link(name, target).map_err(writing)?;
-    record_change(engine, home, |manifest, _| {
+    record_change(engine, home, &held, |manifest, _| {
         record_ancestors(manifest, relative);
         manifest.insert(relative.to_path_buf(), Entry::Link(target.to_path_buf()));
         Ok(())
@@ -975,7 +1026,7 @@ pub(crate) fn remove(engine: EngineId, home: &Path, relative: &Path) -> Result<(
     if let Some(folder) = held.opened.reach(parent, Create::No).map_err(removing)? {
         folder.remove(name).map_err(removing)?;
     }
-    record_change(engine, home, |manifest, _| {
+    record_change(engine, home, &held, |manifest, _| {
         forget(manifest, relative);
         Ok(())
     })
@@ -1007,7 +1058,7 @@ pub(crate) fn give(
         .folder
         .move_into_new(source_name, &folder, name)
         .map_err(moving)?;
-    record_change(engine, home, |manifest, copies| {
+    record_change(engine, home, &held, |manifest, copies| {
         record_ancestors(manifest, relative);
         let walk = Walk {
             engine,
@@ -1080,7 +1131,7 @@ pub(crate) fn take(
         }
         Err(error) => return Err(moving(error)),
     }
-    record_change(engine, home, |manifest, _| {
+    record_change(engine, home, &held, |manifest, _| {
         forget(manifest, relative);
         Ok(())
     })
