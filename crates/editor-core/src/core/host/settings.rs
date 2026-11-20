@@ -36,6 +36,54 @@ pub enum HostSettingError {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostSwitch {
+    RetryWhenOverloaded,
+    ContinueAfterUsageLimit,
+    ContinueAfterRestart,
+    Suggestions,
+    YouShouldKnow,
+    SummaryTitles,
+}
+
+impl HostSwitch {
+    const ALL: [Self; 6] = [
+        Self::RetryWhenOverloaded,
+        Self::ContinueAfterUsageLimit,
+        Self::ContinueAfterRestart,
+        Self::Suggestions,
+        Self::YouShouldKnow,
+        Self::SummaryTitles,
+    ];
+
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::RetryWhenOverloaded => "retry_when_overloaded",
+            Self::ContinueAfterUsageLimit => "continue_after_usage_limit",
+            Self::ContinueAfterRestart => "continue_after_restart",
+            Self::Suggestions => "suggestions",
+            Self::YouShouldKnow => "you_should_know",
+            Self::SummaryTitles => "summary_titles",
+        }
+    }
+
+    fn of_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|switch| switch.key() == key)
+    }
+
+    fn declared(self) -> bool {
+        artisan_api::setting_decl(self.key())
+            .and_then(|decl| decl.default_value().as_bool())
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "invariant: host switch {} is a declared boolean setting",
+                    self.key()
+                )
+            })
+    }
+}
+
 #[derive(Debug)]
 pub struct HostSettings {
     host: HostId,
@@ -46,6 +94,7 @@ pub struct HostSettings {
     model_configs: Vec<(String, EngineConfig)>,
     model_customizations: Vec<ModelCustomization>,
     model_groups: BTreeMap<String, BTreeMap<String, bool>>,
+    switches: BTreeMap<HostSwitch, bool>,
 }
 
 impl HostSettings {
@@ -65,7 +114,11 @@ impl HostSettings {
             model_configs: Vec::new(),
             model_customizations: Vec::new(),
             model_groups: BTreeMap::new(),
+            switches: BTreeMap::new(),
         };
+        for switch in HostSwitch::ALL {
+            settings.decode(switch.key());
+        }
         for key in [
             MCP_SERVERS_KEY,
             MCP_AUTH_KEY,
@@ -144,7 +197,26 @@ impl HostSettings {
         self.model_groups.get(engine.as_str())?.get(group).copied()
     }
 
+    #[must_use]
+    pub fn switch(&self, switch: HostSwitch) -> bool {
+        self.switches
+            .get(&switch)
+            .copied()
+            .unwrap_or_else(|| switch.declared())
+    }
+
     fn decode(&mut self, key: &str) {
+        if let Some(switch) = HostSwitch::of_key(key) {
+            let on = self
+                .decoded::<bool>(switch.key())
+                .unwrap_or_else(|error| {
+                    self.damaged(&error);
+                    None
+                })
+                .unwrap_or_else(|| switch.declared());
+            self.switches.insert(switch, on);
+            return;
+        }
         let value = self.values.get(key);
         match key {
             MCP_SERVERS_KEY => {

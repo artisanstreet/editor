@@ -1,4 +1,4 @@
-use crate::core::HostId;
+use crate::core::{HostId, HostSwitch};
 use aqua::prelude::Notification;
 use artisan_api::{Run, RunStatus, Thread, ThreadId};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,7 @@ pub trait NotificationHost {
     fn is_working(&self, thread: &ThreadId) -> bool;
     fn is_waiting(&self, thread: &ThreadId) -> bool;
     fn is_deleted(&self, thread: &ThreadId) -> bool;
-    fn setting(&self, key: &str) -> Option<&serde_json::Value>;
+    fn switch(&self, switch: HostSwitch) -> bool;
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -128,12 +128,7 @@ impl Notifications {
                 Some(RunStatus::Done) => "Finished.".to_owned(),
                 Some(RunStatus::Failed) if info.parked_until.is_some() => return None,
                 Some(RunStatus::Failed) => format!("{engine} ran into an error."),
-                Some(RunStatus::Interrupted)
-                    if host
-                        .setting("continue_after_restart")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true) =>
-                {
+                Some(RunStatus::Interrupted) if host.switch(HostSwitch::ContinueAfterRestart) => {
                     return None;
                 }
                 Some(RunStatus::Interrupted) => "Stopped because Forge shut down.".to_owned(),
@@ -234,7 +229,7 @@ impl NotificationHost for crate::core::HostData {
             Some(crate::core::ThreadUnavailable::Deleted)
         )
     }
-    fn setting(&self, key: &str) -> Option<&serde_json::Value> {
-        self.setting(key)
+    fn switch(&self, switch: HostSwitch) -> bool {
+        self.switch(switch)
     }
 }

@@ -14,7 +14,7 @@ use super::{
     ui::{self, Ink},
 };
 use editor_core::{
-    ConnectionStatus, Core, HostData, Problem, Screen, SettingsPage, SettingsSection,
+    ConnectionStatus, Core, HostData, HostSwitch, Problem, Screen, SettingsPage, SettingsSection,
 };
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole, Tone},
@@ -720,26 +720,26 @@ fn thread_section(
 ) -> Element {
     let (title, entries): (
         &str,
-        &[(&'static str, &'static str, &'static str, &'static str)],
+        &[(&'static str, HostSwitch, &'static str, &'static str)],
     ) = match section {
         ThreadSection::Automation => (
             "Recovery & continuation",
             &[
                 (
                     "settings-switch-retry-overloaded",
-                    "retry_when_overloaded",
+                    HostSwitch::RetryWhenOverloaded,
                     "Keep retrying when the provider is overloaded",
                     "When the model is overloaded, Artisan keeps rescheduling the thread until the turn finishes.",
                 ),
                 (
                     "settings-switch-continue-usage-limit",
-                    "continue_after_usage_limit",
+                    HostSwitch::ContinueAfterUsageLimit,
                     "Continue when my usage limit resets",
                     "A thread that stopped at the usage limit continues once the limit resets.",
                 ),
                 (
                     "settings-switch-continue-restart",
-                    "continue_after_restart",
+                    HostSwitch::ContinueAfterRestart,
                     "Continue after a restart",
                     "Threads stopped by a shutdown or restart continue automatically afterwards.",
                 ),
@@ -750,19 +750,19 @@ fn thread_section(
             &[
                 (
                     "settings-switch-suggestions",
-                    "suggestions",
+                    HostSwitch::Suggestions,
                     "Suggest my next message",
                     "After each turn, the composer offers what you would most likely send next. It is asked of the thread's own engine and reuses its cached conversation, so each one costs a little of that engine's usage.",
                 ),
                 (
                     "settings-switch-you-should-know",
-                    "you_should_know",
+                    HostSwitch::YouShouldKnow,
                     "You should know",
                     "After a turn that changed things — edits, migrations, installs, decisions — the engine is asked whether there is something you should know but might miss, and the thread shows it as a note. Turns that only looked around are not checked, and checks that find nothing make the next one rarer.",
                 ),
                 (
                     "settings-switch-titles",
-                    "summary_titles",
+                    HostSwitch::SummaryTitles,
                     "Summary titles",
                     "A thread takes the title its engine writes as it works. Off, it keeps the first line of its first message.",
                 ),
@@ -771,19 +771,9 @@ fn thread_section(
     };
     let rows = entries
         .iter()
-        .map(|&(id, key, label, description)| {
-            let enabled = host
-                .setting(key)
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or_else(|| {
-                    if section == ThreadSection::Automation {
-                        artisan_api::setting_decl(key)
-                            .and_then(|decl| decl.default_value().as_bool())
-                            .unwrap_or(true)
-                    } else {
-                        true
-                    }
-                });
+        .map(|&(id, switch, label, description)| {
+            let enabled = host.switch(switch);
+            let key = switch.key();
             let send = Rc::clone(emit);
             let host_id = host.id.clone();
             let instance = host.instance();

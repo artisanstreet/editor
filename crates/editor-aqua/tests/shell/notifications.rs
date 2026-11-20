@@ -171,7 +171,7 @@ mod withdrawal {
         EngineConfig, EngineId, ProjectId, Run, RunId, RunOutcome, RunState, Thread, ThreadId,
         Usage,
     };
-    use editor_aqua::core::HostId;
+    use editor_aqua::core::{HostId, HostSwitch};
     use editor_aqua::shell::notifications::{NotificationHost, Notifications, tag};
     use std::collections::{HashMap, HashSet};
 
@@ -181,6 +181,7 @@ mod withdrawal {
         runs: HashMap<ThreadId, Run>,
         working: HashSet<ThreadId>,
         deleted: HashSet<ThreadId>,
+        continue_after_restart: bool,
     }
 
     impl NotificationHost for FakeHost {
@@ -205,8 +206,8 @@ mod withdrawal {
         fn is_deleted(&self, thread: &ThreadId) -> bool {
             self.deleted.contains(thread)
         }
-        fn setting(&self, _: &str) -> Option<&serde_json::Value> {
-            None
+        fn switch(&self, switch: HostSwitch) -> bool {
+            switch != HostSwitch::ContinueAfterRestart || self.continue_after_restart
         }
     }
 
@@ -232,6 +233,10 @@ mod withdrawal {
     }
 
     fn finished(thread: &ThreadId) -> Run {
+        ended(thread, RunOutcome::Done)
+    }
+
+    fn ended(thread: &ThreadId, outcome: RunOutcome) -> Run {
         Run {
             config: None,
             id: RunId("run".into()),
@@ -240,7 +245,7 @@ mod withdrawal {
             model: None,
             input_cutoff: 0,
             state: RunState::Finished {
-                outcome: RunOutcome::Done,
+                outcome,
                 error: None,
                 ended_at: 0,
             },
@@ -261,6 +266,7 @@ mod withdrawal {
             runs: HashMap::new(),
             working: HashSet::from([id.clone()]),
             deleted: HashSet::new(),
+            continue_after_restart: true,
         };
         let mut notifications = Notifications::default();
         notifications.reset(&host);
@@ -278,5 +284,35 @@ mod withdrawal {
         let changes = notifications.thread_changed(&host, &id, None, true);
         assert_eq!(changes.withdraw, vec![tag(&host.id, &id)]);
         assert!(notifications.host_reset(&host).is_empty());
+    }
+
+    fn shut_down(continue_after_restart: bool) -> Option<String> {
+        let id = ThreadId("thread".into());
+        let mut host = FakeHost {
+            id: HostId("host".into()),
+            threads: HashMap::from([(id.clone(), thread(&id))]),
+            runs: HashMap::new(),
+            working: HashSet::from([id.clone()]),
+            deleted: HashSet::new(),
+            continue_after_restart,
+        };
+        let mut notifications = Notifications::default();
+        notifications.reset(&host);
+        host.working.clear();
+        host.runs
+            .insert(id.clone(), ended(&id, RunOutcome::Interrupted));
+        notifications
+            .thread_changed(&host, &id, None, true)
+            .show
+            .map(|shown| shown.body)
+    }
+
+    #[test]
+    fn a_turn_stopped_by_a_shutdown_is_announced_only_when_it_will_not_continue() {
+        assert_eq!(shut_down(true), None);
+        assert_eq!(
+            shut_down(false).as_deref(),
+            Some("Stopped because Forge shut down.")
+        );
     }
 }

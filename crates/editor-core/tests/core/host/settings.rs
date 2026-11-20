@@ -1,6 +1,6 @@
 use artisan_api::{EngineId, MCP_AUTH_KEY, MODEL_CONFIGS_KEY, McpAuthStatus};
 use editor_core::{
-    DEFAULT_ENGINE_CONFIG_KEY, HostId, HostSettingError, HostSettings, MCP_SERVERS_KEY,
+    DEFAULT_ENGINE_CONFIG_KEY, HostId, HostSettingError, HostSettings, HostSwitch, MCP_SERVERS_KEY,
 };
 use serde_json::json;
 
@@ -96,4 +96,27 @@ fn the_remembered_default_config_follows_its_setting() {
     );
     settings.insert(DEFAULT_ENGINE_CONFIG_KEY, json!("opus"));
     assert!(settings.default_engine_config().is_none());
+}
+
+#[test]
+fn a_host_switch_reads_its_value_its_declared_default_and_never_a_damaged_value() {
+    let host = HostId("forge".into());
+    let mut settings = HostSettings::from_values(
+        host,
+        serde_json::Map::from_iter([
+            (
+                HostSwitch::ContinueAfterRestart.key().to_owned(),
+                json!(false),
+            ),
+            (HostSwitch::Suggestions.key().to_owned(), json!("false")),
+        ]),
+    );
+    assert!(!settings.switch(HostSwitch::ContinueAfterRestart));
+    assert!(settings.switch(HostSwitch::Suggestions));
+    assert!(settings.switch(HostSwitch::SummaryTitles));
+
+    settings.insert(HostSwitch::SummaryTitles.key(), json!(false));
+    assert!(!settings.switch(HostSwitch::SummaryTitles));
+    settings.remove(HostSwitch::ContinueAfterRestart.key());
+    assert!(settings.switch(HostSwitch::ContinueAfterRestart));
 }

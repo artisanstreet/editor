@@ -7,7 +7,8 @@ mod preferences;
 mod project_icons;
 mod settings;
 pub use settings::{
-    DEFAULT_ENGINE_CONFIG_KEY, HostSettingError, HostSettings, MCP_SERVERS_KEY, McpServersError,
+    DEFAULT_ENGINE_CONFIG_KEY, HostSettingError, HostSettings, HostSwitch, MCP_SERVERS_KEY,
+    McpServersError,
 };
 pub mod stopping;
 mod wsl;
@@ -486,6 +487,9 @@ impl HostData {
     }
     pub fn setting(&self, key: &str) -> Option<&serde_json::Value> {
         self.settings.get(key)
+    }
+    pub fn switch(&self, switch: HostSwitch) -> bool {
+        self.settings.switch(switch)
     }
     pub fn mcp_servers(&self) -> Result<&[artisan_api::McpServer], &McpServersError> {
         self.settings.mcp_servers()

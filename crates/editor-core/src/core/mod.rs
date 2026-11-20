@@ -33,7 +33,7 @@ pub use completion::{CompletionKey, CompletionScope, CompletionSlot};
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, HostData, HostEvent, HostInstance,
-    HostSettingError, HostSettings, LiveSnapshot, LoadThreadError, MCP_SERVERS_KEY,
+    HostSettingError, HostSettings, HostSwitch, LiveSnapshot, LoadThreadError, MCP_SERVERS_KEY,
     McpServersError, ProjectionLoad, ThreadPage, ThreadPageDirection, ThreadSummary,
     ThreadUnavailable, WslStatus,
 };
