@@ -2432,22 +2432,52 @@ fn remove_app(app: App, purge: bool) -> Result<bool, RemoveAppError> {
     Ok(false)
 }
 
+struct SelfRemoval {
+    ae: PathBuf,
+    dir: PathBuf,
+    lock: PathBuf,
+    root: PathBuf,
+    pointer: PathBuf,
+    default: PathBuf,
+}
+
+fn self_removal_script(waiting_for: u32, removal: &SelfRemoval) -> String {
+    format!(
+        "$ErrorActionPreference = 'SilentlyContinue'; \
+         Wait-Process -Id {waiting_for}; \
+         function Remove-Empty($path) {{ \
+           if ((Test-Path -LiteralPath $path -PathType Container) -and -not (Get-ChildItem -LiteralPath $path -Force)) {{ \
+             Remove-Item -LiteralPath $path -Force; -not (Test-Path -LiteralPath $path) \
+           }} else {{ $false }} \
+         }}; \
+         Remove-Item -LiteralPath {ae} -Force; \
+         Remove-Empty {dir} | Out-Null; \
+         Remove-Item -LiteralPath {lock} -Force; \
+         if (Remove-Empty {root}) {{ Remove-Item -LiteralPath {pointer} -Force; Remove-Empty {default} | Out-Null }}",
+        ae = sys::ps_quote(&removal.ae),
+        dir = sys::ps_quote(&removal.dir),
+        lock = sys::ps_quote(&removal.lock),
+        root = sys::ps_quote(&removal.root),
+        pointer = sys::ps_quote(&removal.pointer),
+        default = sys::ps_quote(&removal.default),
+    )
+}
+
 fn remove_self_later(ae: &Path, dir: &Path) -> Result<(), RemoveSelfLaterError> {
     let root = artisan_paths::root().map_err(RemoveSelfLaterError::Root)?;
-    let script = format!(
-        "ping -n 3 127.0.0.1 >nul & del /f /q \"{ae}\" & rmdir \"{dir}\" & del /f /q \"{lock}\" & rmdir \"{root}\" && (del /f /q \"{pointer}\" & rmdir \"{default}\")",
-        ae = ae.display(),
-        dir = dir.display(),
-        lock = root.join(INSTALL_LOCK).display(),
-        root = root.display(),
-        pointer = artisan_paths::root_pointer()
-            .map_err(RemoveSelfLaterError::Default)?
-            .display(),
-        default = artisan_paths::default_root()
-            .map_err(RemoveSelfLaterError::Default)?
-            .display(),
-    );
-    sys::spawn_detached(std::process::Command::new("cmd.exe").args(["/d", "/c", &script]))?;
+    let lock = root.join(INSTALL_LOCK);
+    let removal = SelfRemoval {
+        ae: ae.to_owned(),
+        dir: dir.to_owned(),
+        lock,
+        root,
+        pointer: artisan_paths::root_pointer().map_err(RemoveSelfLaterError::Default)?,
+        default: artisan_paths::default_root().map_err(RemoveSelfLaterError::Default)?,
+    };
+    sys::spawn_detached(&mut sys::powershell_command(&self_removal_script(
+        std::process::id(),
+        &removal,
+    )))?;
     Ok(())
 }
 

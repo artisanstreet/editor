@@ -137,3 +137,69 @@ fn kept_data_is_purged_later_only_while_ae_stays_to_do_it() {
     );
     assert_eq!(kept_data(&[App::Ae], &with_data, false), KeptData::Nothing);
 }
+
+#[cfg(windows)]
+#[test]
+fn ae_removes_itself_after_it_exits_even_from_folders_with_quotes_and_percent_signs() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let base = sandbox.path().join("it's 100% & done");
+    let default = base.join("Artisan Street");
+    let root = default.join("chosen");
+    let dir = root.join("ae");
+    std::fs::create_dir_all(&dir).unwrap();
+    let removal = SelfRemoval {
+        ae: dir.join("ae.exe"),
+        dir: dir.clone(),
+        lock: root.join(INSTALL_LOCK),
+        root: root.clone(),
+        pointer: base.join("root.txt"),
+        default: default.clone(),
+    };
+    for file in [&removal.ae, &removal.lock, &removal.pointer] {
+        std::fs::write(file, "kept until ae exits").unwrap();
+    }
+    let mut exited = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "exit"])
+        .spawn()
+        .unwrap();
+    exited.wait().unwrap();
+
+    sys::powershell(&self_removal_script(exited.id(), &removal)).unwrap();
+
+    assert!(!default.exists(), "every emptied folder is gone");
+    assert!(!removal.pointer.exists(), "the root pointer is forgotten");
+    assert!(base.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn ae_removing_itself_keeps_an_install_folder_that_still_holds_data() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let root = sandbox.path().join("Artisan Street");
+    let dir = root.join("ae");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::create_dir_all(root.join("forge")).unwrap();
+    let removal = SelfRemoval {
+        ae: dir.join("ae.exe"),
+        dir: dir.clone(),
+        lock: root.join(INSTALL_LOCK),
+        root: root.clone(),
+        pointer: sandbox.path().join("root.txt"),
+        default: root.clone(),
+    };
+    for file in [&removal.ae, &removal.lock, &removal.pointer] {
+        std::fs::write(file, "kept until ae exits").unwrap();
+    }
+    let mut exited = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "exit"])
+        .spawn()
+        .unwrap();
+    exited.wait().unwrap();
+
+    sys::powershell(&self_removal_script(exited.id(), &removal)).unwrap();
+
+    assert!(!removal.ae.exists());
+    assert!(!removal.lock.exists());
+    assert!(dir.join("data").exists(), "the kept data stays");
+    assert!(removal.pointer.exists(), "a root still in use stays chosen");
+}
