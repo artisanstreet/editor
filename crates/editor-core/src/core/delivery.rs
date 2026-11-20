@@ -213,7 +213,7 @@ impl<T> DeliverySender<T> {
             let current = *sequence;
             *sequence = sequence
                 .checked_add(1)
-                .expect("transition sequence exhausted");
+                .expect("invariant: transition sequences never exhaust u64");
             permit.send(Admitted {
                 sequence: current,
                 message,

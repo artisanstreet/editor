@@ -421,7 +421,10 @@ impl Default for StoredOwner {
             prepared_capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
             worker: preparation_worker(),
             delivery: Delivery::new(
-                const { NonZeroUsize::new(MAX_PENDING_JOBS).expect("MAX_PENDING_JOBS is not zero") },
+                const {
+                    NonZeroUsize::new(MAX_PENDING_JOBS)
+                        .expect("invariant: MAX_PENDING_JOBS is nonzero")
+                },
             ),
         }
     }

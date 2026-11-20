@@ -94,7 +94,7 @@ impl EngineLightImage {
         let image = self
             .cached
             .as_ref()
-            .expect("light image just loaded")
+            .expect("invariant: the engine light image is cached just above")
             .1
             .clone();
         Ok(Media::new(image)
@@ -139,7 +139,7 @@ fn bake(theme: &ArtisanTheme) -> aqua::images::DecodedImage {
         image::Rgba([red, green, blue, byte(alpha * mask)])
     });
     aqua::images::DecodedImage::from_rgba(128, 96, buffer.into_raw())
-        .expect("engine light dimensions are valid")
+        .expect("invariant: the engine light buffer holds 128 by 96 RGBA pixels")
 }
 
 fn interpolate(value: f32, stops: &[(f32, f32)]) -> f32 {

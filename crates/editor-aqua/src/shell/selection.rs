@@ -10,7 +10,7 @@ impl SelectionAllocator {
             .0
             .get()
             .checked_add(1)
-            .expect("selection identity exhausted");
+            .expect("invariant: selection ids never exhaust u64");
         self.0.set(id);
         id
     }

@@ -231,7 +231,9 @@ impl Conversation {
             agent_task: None,
             answer_tasks: HashMap::new(),
             next_answer: 0,
-            delivery: Delivery::new(const { NonZeroUsize::new(64).expect("64 is not zero") }),
+            delivery: Delivery::new(
+                const { NonZeroUsize::new(64).expect("invariant: the delivery capacity 64 is nonzero") },
+            ),
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,

@@ -268,7 +268,10 @@ impl ContentText {
         let sender = self.delivery.sender();
         self.action
             .spawn(&self.host, self.instance, move |key| async move {
-                let permit = COPIES.acquire().await.expect("copy semaphore stays open");
+                let permit = COPIES
+                    .acquire()
+                    .await
+                    .expect("invariant: the static copy semaphore is never closed");
                 let result = client.copy_content(&source, 32 * 1024 * 1024).await;
                 sender.offer(Completion::Copy(key, result, permit)).await;
             });

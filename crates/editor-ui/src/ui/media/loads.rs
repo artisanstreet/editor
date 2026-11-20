@@ -51,7 +51,10 @@ impl<L: ResourceLoader, T: Send + 'static> Loads<L, T> {
                 next: 0,
                 jobs: BTreeMap::new(),
                 delivery: Delivery::with_wake(
-                    const { NonZeroUsize::new(16).expect("16 is not zero") },
+                    const {
+                        NonZeroUsize::new(16)
+                            .expect("invariant: the delivery capacity 16 is nonzero")
+                    },
                     sender,
                 ),
             })),

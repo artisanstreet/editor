@@ -163,7 +163,9 @@ impl RootViews {
                     )?
                 }
             }
-            Screen::Settings(_) => unreachable!(),
+            Screen::Settings(_) => {
+                unreachable!("invariant: the Settings screen is drawn as Home behind its sheet")
+            }
         };
         let center = match &screen {
             Screen::Thread { .. } => view::under_setting_sky(

@@ -106,7 +106,7 @@ impl Default for ModelState {
     fn default() -> Self {
         let mailbox = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
         let delivery = Delivery::with_wake(
-            const { NonZeroUsize::new(16).expect("16 is not zero") },
+            const { NonZeroUsize::new(16).expect("invariant: the delivery capacity 16 is nonzero") },
             mailbox.sender(),
         );
         Self(Rc::new(RefCell::new(State {

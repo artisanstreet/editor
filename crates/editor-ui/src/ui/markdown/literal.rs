@@ -184,7 +184,7 @@ impl Default for LiteralOwner {
             epoch: Arc::new(AtomicU64::new(0)),
             capacity: Arc::new(Semaphore::new(MAX_BYTES)),
             delivery: Delivery::new(
-                const { NonZeroUsize::new(MAX_FETCHES).expect("MAX_FETCHES is not zero") },
+                const { NonZeroUsize::new(MAX_FETCHES).expect("invariant: MAX_FETCHES is nonzero") },
             ),
         }
     }

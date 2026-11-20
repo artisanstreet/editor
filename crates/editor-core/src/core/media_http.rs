@@ -131,7 +131,7 @@ fn public_client() -> reqwest::Client {
         .no_proxy()
         .dns_resolver(Arc::new(PublicAddresses))
         .build()
-        .expect("build public media HTTP client")
+        .expect("invariant: a rustls client with fixed settings and bundled roots always builds")
 }
 
 static SHARED: LazyLock<Arc<MediaHttpClient>> =

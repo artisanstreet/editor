@@ -1499,7 +1499,7 @@ fn error_item(
             "error:{}",
             event["id"]
                 .as_str()
-                .expect("validated native event identity")
+                .expect("invariant: OpenCode event ids are validated on arrival")
         ),
         parent,
         status: Status::Done,
@@ -1535,10 +1535,12 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         ));
     }
     let text = |key: &str| str_at(input, key).filter(|value| !value.trim().is_empty());
-    let path = || text("path").expect("validated path");
+    let path = || text("path").expect("invariant: tool_kind checked the path above");
     Ok(match name {
         "shell" => ToolKind::Shell {
-            command: (text("command").expect("validated command")).into(),
+            command: (text("command")
+                .expect("invariant: tool_kind checked the shell command above"))
+            .into(),
             cwd: text("workdir"),
             background: input["background"].as_bool() == Some(true),
             watch: false,
@@ -1575,20 +1577,22 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             .into(),
         },
         "grep" => ToolKind::Search {
-            pattern: text("pattern").expect("validated pattern"),
+            pattern: text("pattern")
+                .expect("invariant: tool_kind checked the search pattern above"),
             path: text("path"),
             mode: SearchMode::Grep,
         },
         "glob" => ToolKind::Search {
-            pattern: text("pattern").expect("validated pattern"),
+            pattern: text("pattern")
+                .expect("invariant: tool_kind checked the search pattern above"),
             path: text("path"),
             mode: SearchMode::Glob,
         },
         "webfetch" => ToolKind::WebFetch {
-            url: text("url").expect("validated URL"),
+            url: text("url").expect("invariant: tool_kind checked the webfetch URL above"),
         },
         "websearch" => ToolKind::WebSearch {
-            query: text("query").expect("validated query"),
+            query: text("query").expect("invariant: tool_kind checked the websearch query above"),
         },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());

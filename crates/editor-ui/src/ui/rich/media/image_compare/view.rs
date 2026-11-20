@@ -453,7 +453,9 @@ impl CompareState {
                             .build(),
                     );
                 }
-                Mode::SideBySide => unreachable!(),
+                Mode::SideBySide => {
+                    unreachable!("invariant: side-by-side mode is drawn by its own branch")
+                }
             }
             let frame = frame(
                 theme,

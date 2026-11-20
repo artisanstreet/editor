@@ -45,7 +45,7 @@ impl Citations {
                     } => {
                         let canonical = text
                             .inline()
-                            .expect("adapter text is inline before storage");
+                            .expect("invariant: adapter assistant text is inline before storage");
                         *text = Stream::default().push(canonical).into();
                         if status.is_terminal() {
                             self.streams.remove(key);

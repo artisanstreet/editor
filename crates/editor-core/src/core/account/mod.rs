@@ -245,7 +245,9 @@ impl Account {
             .or_else(core_url_override)
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| "https://api.artisan.st".to_owned());
-        let http = CoreSessionClient::new(&base_url).expect("Core HTTP client builds");
+        let http = CoreSessionClient::new(&base_url).expect(
+            "invariant: a rustls client with fixed settings and bundled roots always builds",
+        );
         let session = stored.session_token.map(SessionToken::new);
         let phase = match (unreadable, &session, stored.profile) {
             (Some(error), _, _) => AccountPhase::Error {

@@ -14,7 +14,7 @@ pub(crate) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     validate_input(name, input)?;
     let text = |field: &str| {
         str_at(input, field)
-            .expect("validated native tool field")
+            .expect("invariant: validate_input checked this tool field")
             .to_owned()
     };
     let optional = |field: &str| str_at(input, field).map(str::to_owned);
@@ -53,8 +53,10 @@ pub(crate) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             let diff = edits
                 .map(|edit| {
                     diff(
-                        str_at(edit, "old_string").expect("validated old_string"),
-                        str_at(edit, "new_string").expect("validated new_string"),
+                        str_at(edit, "old_string")
+                            .expect("invariant: validate_input checked every MultiEdit old_string"),
+                        str_at(edit, "new_string")
+                            .expect("invariant: validate_input checked every MultiEdit new_string"),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -246,7 +248,7 @@ pub(crate) fn todo_steps(input: &Value) -> Vec<PlanStep> {
         .flatten()
         .map(|todo| PlanStep {
             text: (str_at(todo, "content")
-                .expect("validated todo content")
+                .expect("invariant: validate_input checked every TodoWrite content")
                 .to_owned())
             .into(),
             status: match str_at(todo, "status") {
@@ -273,7 +275,7 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
             id: index.to_string(),
             header: str_at(question, "header").map(str::to_owned),
             text: (str_at(question, "question")
-                .expect("validated question prompt")
+                .expect("invariant: validate_input checked every AskUserQuestion prompt")
                 .to_owned())
             .into(),
             multi_select: question["multiSelect"].as_bool() == Some(true),
@@ -285,7 +287,9 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
                 .map(|(index, option)| QuestionOption {
                     id: format!("option-{index}"),
                     label: str_at(option, "label")
-                        .expect("validated option label")
+                        .expect(
+                            "invariant: validate_input checked every AskUserQuestion option label",
+                        )
                         .to_owned(),
                     description: (str_at(option, "description").map(str::to_owned)).map(Into::into),
                 })

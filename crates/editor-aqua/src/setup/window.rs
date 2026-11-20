@@ -16,7 +16,8 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
-const MAILBOX: NonZeroUsize = NonZeroUsize::new(256).expect("a nonzero capacity");
+const MAILBOX: NonZeroUsize =
+    NonZeroUsize::new(256).expect("invariant: the setup mailbox capacity 256 is nonzero");
 
 struct SetupApplication {
     ui: ManagedUiApp,

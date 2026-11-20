@@ -1523,7 +1523,7 @@ fn answer_map(
     let mut map = Map::new();
     for (question, answer) in questions
         .inline()
-        .expect("native question validated before mutation")
+        .expect("invariant: native_collection_answers proved the questions inline")
         .iter()
         .zip(native)
     {
@@ -1532,7 +1532,7 @@ fn answer_map(
                 question
                     .text
                     .inline()
-                    .expect("adapter question is inline before storage")
+                    .expect("invariant: adapter question text is inline before storage")
                     .to_owned(),
                 Value::String(labels.join(", ")),
             );

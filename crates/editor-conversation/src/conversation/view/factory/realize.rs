@@ -970,7 +970,7 @@ impl RowFactory {
                             &self
                                 .stored
                                 .as_ref()
-                                .expect("stored proof has an owner")
+                                .expect("invariant: stored proofs exist only with stored services")
                                 .owner,
                         ),
                         proof,

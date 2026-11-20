@@ -13,7 +13,9 @@ pub fn runtime() -> &'static Runtime {
             .thread_name("forge-net")
             .enable_all()
             .build()
-            .expect("start the network runtime")
+            .expect(
+                "invariant: the OS starts the two network threads, as std::thread::spawn assumes",
+            )
     })
 }
 
